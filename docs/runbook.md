@@ -2710,7 +2710,7 @@ machine-readable disposition registry for sources that participate in fault clas
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
-| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair |
+| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
 | `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals, and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
 | `reply-guarantee-observer` | `deploy/scripts/reply-guarantee-observer.py` | Probe authority, target-user/GUI context, canonical data root, schema compatibility, and read-only SQLite access |
 | `release-drift` | `scripts/live-release-drift-alert.ts` through `scripts/live-release-observers.ts` | Release manifest, artifact tree, and running service provenance |
@@ -2718,6 +2718,70 @@ machine-readable disposition registry for sources that participate in fault clas
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
 | `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |
+
+### Who owns a stale `processing` inbound
+
+`scripts/inbound-ownership-snapshot.ts` (#3560) answers, per row, who owns every inbound that has sat
+in `processing` longer than `--min-age-minutes` (default 15, the observer's stale threshold). It opens
+the database read-only (`query_only`, never `immutable=1`), writes nothing, and prints one
+content-free JSON line: sequences, states, epochs, ages, turn ids and 12-hex chat scope hashes only.
+Capture the provider-execution gate first and pass it in, because the database alone cannot show a
+turn that is executing in the process:
+
+```bash
+HEALTH_JSON=$(mktemp)
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health > "$HEALTH_JSON"
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$HEALTH_JSON"
+# shared/single instances serialize every chat on one queue:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --queue-scope global --provider-execution-json "$HEALTH_JSON"
+# a bare providerExecution object carries no generated_at; date it explicitly:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$PE_JSON" \
+  --provider-captured-at 2026-09-28T07:20:00Z
+```
+
+The full `/health` body carries its own `generated_at`, which dates the capture. Use
+`--provider-captured-at <ISO-8601 instant with zone>` only for a capture without one, such as a
+bare `runtime.agent.providerExecution` object.
+
+Each row is classified:
+
+| Class | Meaning |
+|---|---|
+| `deferred` | A non-terminal `deferred_turn_obligations` row owns it (an exhausted one is `no_owner`). |
+| `queued` | A pending recovery job, the chat's persisted FIFO head (`queued_behind_fifo_head`), another outstanding recovery job for the scope, or the oldest provider-lane waiter owns it. A row queued behind an unowned head reports `healthy: false`. |
+| `executing` | A live recovery claim, or the provider lane is held by a `turn` whose scope hash equals this chat's (FIFO head only; a `probe` hold never counts), according to a fresh capture that no completed checkpoint contradicts. |
+| `no_owner` | Nothing attributable, including a terminal record or finished recovery job left beside an open row. Never healthy. |
+
+Exit `0` means every reported row has a healthy owner, `3` means at least one does not, and `2` is a
+usage, capture or open error. Record the output as evidence. Do not replay, reset a checkpoint or
+restart on its basis alone.
+
+Evidence limits. Read every classification against these:
+
+- **Persisted FIFO proxy, not the TurnQueue.** `queue` is derived from open inbounds per conversation
+  (or globally with `--queue-scope global`) in seq order. The runtime's in-process per-chat TurnQueue
+  (depth, position, active turn) is not readable from outside the process and is not reported.
+- **No lease generation.** The provider gate does not publish its lease generation, so a capture cannot
+  say which hold it saw. Only recovery jobs, terminal records and the checkpoint's completed identity
+  carry a turn id and generation.
+- **`active_turn_id` is dead telemetry.** `checkpoint.activeTurnId` is reported as stored, but current
+  writers only ever store null, so it never names an owner.
+- **The capture is a separate observation.** The health capture and the database read are not
+  simultaneous. The capture time comes from, in order: the body's own top-level `generated_at`;
+  else `--provider-captured-at`; else it is unknown, which counts as stale. `providerCaptureTimeSource`
+  reports which (`payload_generated_at`, `operator_flag`, `unknown`). The file's modification time is
+  never used, because a copied, touched or re-saved file would make an old body look fresh. A
+  `generated_at` that is present but unparseable is unknown; the flag does not override it. If the
+  capture is older than 60 seconds (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the
+  future, or undated, every row reads `providerExecution.evidence: stale` and it attributes nothing
+  (`provider_capture_stale`). Re-capture immediately before running the script.
+- **Unmatched scope reads unowned.** A turn held for a different scope hash (another chat, or the same
+  chat under its `@lid`/`@s.whatsapp.net` alias) is `active_other_scope`: the row is `no_owner`, never
+  `executing`.
+- **Contradiction reads unowned.** If the capture shows a turn for this chat but the chat's
+  `session_checkpoints.completed_inbound_seq` is at or past the row, the held turn cannot be this row's:
+  the row is `no_owner` with `provider_active_contradicts_completed_checkpoint`, never healthy. A
+  terminal record on the row itself takes precedence over any capture (`terminal_record_inbound_open`).
 
 Machine-local probes not present in this repository are an ownership gap, not an implicit
 WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner

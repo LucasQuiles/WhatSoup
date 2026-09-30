@@ -81,6 +81,12 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    `failedTerminalWithEchoEvidence` is a subset of failed-terminal debt, not an
    additional replay count; it exposes contradictory delivery evidence that
    must be reconciled before any targeted repair.
+   An `active-breach` names no owner. To attribute each stale `processing` row,
+   run the operator script `scripts/inbound-ownership-snapshot.ts` (#3560). It
+   reads through the same normal read-only mode and classifies each row as
+   `deferred`, `queued`, `executing` or `no_owner` (never healthy), optionally
+   joined with a captured provider-execution gate state. See runbook §8, "Who
+   owns a stale `processing` inbound".
 
 5. Runtime watchdog (shipped).
    The runtime-owned manager (`ReplyGuaranteeManager` in
