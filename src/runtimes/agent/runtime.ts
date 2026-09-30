@@ -2,7 +2,7 @@ import { admitHomeConfinedPath, ensureHomeConfinedDirectory } from '../../lib/ho
 // src/runtimes/agent/runtime.ts
 // AgentRuntime implements the Runtime interface, tying all agent components together.
 
-import type { AgentCommandRequest, AgentCommandResult, Runtime, RuntimeTurnCapabilityHealth } from '../types.ts';
+import type { AgentCommandRequest, AgentCommandResult, Runtime } from '../types.ts';
 import type { ContentType, IncomingMessage, Messenger, RuntimeHealth } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import type {
@@ -18,7 +18,7 @@ import type {
   TurnRecoveryReplayDispatchResult,
 } from './turn-recovery-supervisor.ts';
 import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
-import { resolveCatchupReconcileDep, type TurnRecoveryCatchupReconcileOptions } from '../../core/turn-recovery-catchup-config.ts';
+import { resolveCatchupReconcileDep } from '../../core/turn-recovery-catchup-config.ts';
 import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
@@ -342,12 +342,27 @@ import {
   providerUsesWhatSoupMcp,
   requiresPerChatActorSocket,
 } from './providers/index.ts';
+import {
+  AUTO_RESPAWN_BASE_MS,
+  AUTO_RESPAWN_MAX_CRASHES,
+  AUTO_RESPAWN_MAX_DELAY_MS,
+  AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS,
+  type OwnedPerChatRespawnArgs,
+} from './auto-respawn-policy.ts';
+import type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
+export type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
+import {
+  deriveModelUsable,
+  MODEL_USABILITY_FRESHNESS_MS,
+  type RuntimePrimaryModelUsability,
+  type RuntimeTurnCapability,
+} from './model-usability.ts';
+export { deriveModelUsable } from './model-usability.ts';
+export type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './model-usability.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
 import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
   probePrimaryModelUsability,
-  primaryModelUsabilityRequiresAlert,
-  type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
 import {
@@ -365,7 +380,6 @@ import {
   AccountIdentityVerifier,
   type AccountIdentityProbeTrigger,
   type AccountIdentityVerifierHost,
-  type AccountIdentityVerifyFn,
 } from './account-identity-verifier.ts';
 import {
   accountIdentityDegradedReasons,
@@ -405,36 +419,6 @@ interface LegacyProviderTurnOwner {
 /** Maximum duration (ms) a control session is allowed to run before force-shutdown. */
 const CONTROL_SESSION_TIMEOUT_MS = 15 * MS_PER_MINUTE;
 
-/** Max consecutive crashes before auto-respawn gives up and waits for user action. */
-const AUTO_RESPAWN_MAX_CRASHES = 3;
-/** Base delay (ms) before attempting auto-respawn after a crash. Actual delay uses exponential backoff. */
-const AUTO_RESPAWN_BASE_MS = 2 * MS_PER_SECOND;
-/** Maximum respawn delay (ms) — caps the exponential backoff. */
-const AUTO_RESPAWN_MAX_DELAY_MS = 15 * MS_PER_SECOND;
-/**
- * Max times a scheduled respawn may re-arm itself because provider termination
- * is not yet proven. Bounds the one case that is genuinely transient — a tool
- * loop still inside an already-entered call, which settles in its own `finally`
- * — without letting a session that can never prove termination re-arm forever.
- * At the respawn backoff this spans roughly 45 seconds before the respawn is
- * abandoned and the conversation waits for the user's next message.
- */
-const AUTO_RESPAWN_MAX_TERMINATION_DEFERRALS = 5;
-
-/** One scheduled auto-respawn attempt for an owned per-chat session. */
-interface OwnedPerChatRespawnArgs {
-  initialMapKey: string;
-  chatJid?: string;
-  session: SessionManager;
-  managerId: string;
-  recoveryGeneration: number;
-  sessionId: string;
-  dbRowId: number | null;
-  crashedAtSec: number;
-  timer: ReturnType<typeof setTimeout>;
-  /** How many times this attempt already re-armed for unproven termination. */
-  terminationDeferrals?: number;
-}
 /** Periodic runtime health stats emission interval. */
 const HEALTH_STATS_INTERVAL_MS = MS_PER_MINUTE;
 const SHARED_QUEUE_IDLE_MS = MS_PER_HOUR;
@@ -444,19 +428,6 @@ const SHARED_QUEUE_SWEEP_INTERVAL_MS = 10 * MS_PER_MINUTE;
 const GLOBAL_TOOL_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 const GLOBAL_CRASH_SCOPE_KEY = GLOBAL_CONVERSATION_KEY;
 // (TOOL_FAILURE_ALERT_EXCERPT_CHARS moved to ./tool-update.ts with alertExcerpt.)
-/**
- * `modelUsable` reports `true` only when the primary-model usability probe behind
- * it is no older than this window. A stale `usable` probe (e.g. after reverting to
- * primary and then sitting idle, or if an external process strips creds) is
- * downgraded to `null` (unknown) so /health and monitors cannot read a green that
- * is hours out of date. See RCA 2026-06-24 (rb-bot stale-`modelUsable` gap).
- */
-const MODEL_USABILITY_FRESHNESS_MS = 30 * MS_PER_MINUTE;
-
-export type RuntimeTurnCapability = RuntimeTurnCapabilityHealth & {
-  modelUsabilityStatus: PrimaryModelUsabilityResult['status'] | null;
-  lastTurnErrorClass: TurnCapabilityErrorClass | null;
-};
 
 // The success-cooldown, rapid-rearm window, and backoff tiers now live in
 // auto-compact-controller.ts alongside the state machine that uses them;
@@ -477,133 +448,6 @@ class AgentCommandRuntimeError extends Error {
     this.code = code;
     this.statusCode = statusCode;
   }
-}
-
-export interface SandboxPolicy {
-  allowedPaths: string[];
-  allowedTools: string[];
-  allowedMcpTools?: string[];
-  bash: { enabled: boolean };
-  /**
-   * Opt-in egress allowlist (#1607 / QR-008). A non-empty list makes
-   * `start()` boot a loopback `EgressProxy` bound to this policy and inject
-   * its port into the child process env (see `egressProxyPort` on
-   * `SessionManager`/`buildBaseChildEnv`). Absent or empty: no proxy, no env
-   * injection — unchanged pre-#1607 behavior.
-   */
-  allowedEgress?: string[];
-}
-
-export type SessionScope = 'single' | 'shared' | 'per_chat';
-
-export interface AgentRuntimeOptions {
-  shared?: boolean;
-  /** Session scope: 'single' (one chat), 'shared' (one session, many chats), 'per_chat' (one session per chat). */
-  sessionScope?: SessionScope;
-  cwd?: string;
-  configSystemPrompt?: string;
-  instructionsPath?: string;
-  sandbox?: SandboxPolicy;
-  /** Claude model identifier to pass via --model flag (e.g. 'claude-opus-4-6[1m]'). */
-  model?: string;
-  /** When true, each chat gets an isolated workspace directory with its own Claude config. Requires sessionScope 'per_chat'. */
-  sandboxPerChat?: boolean;
-  /**
-   * When true, the per-chat actor socket carries a conversation-bound
-   * SessionContext (see per-chat-actor-session.ts and docs/configuration.md).
-   * Default false — the #1785 rec-3 behavior (send confinement only) is
-   * unchanged. Requires sessionScope 'per_chat'; incompatible with sandboxPerChat.
-   */
-  perChatConversationBound?: boolean;
-  /** Plugin directories to pass via --plugin-dir to the claude subprocess. */
-  pluginDirs?: string[];
-  /** Per-instance plugin enablement. Written to project settings.json to override global. */
-  enabledPlugins?: Record<string, boolean>;
-  /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
-  allowM365Mutations?: boolean;
-  /** Automatically run a silent /compact after this many input tokens since the last compact. */
-  autoCompactInputTokens?: number;
-  /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
-  replyGuaranteeTimeoutMs?: number;
-  /**
-   * #3295 S2 (default OFF): defer replay-safe per_chat followers blocked
-   * solely by outstanding turn recovery into durable obligations instead of
-   * terminally rejecting them. Evaluated PER ADMISSION (kill-switch
-   * semantics): flipping `enabled` off stops deferral immediately. Drain is
-   * S3; until it lands an obligation only accumulates.
-   */
-  deferredTurnAdmission?: { enabled: boolean };
-  /** Catch-up reconciler gate (default OFF); see turn-recovery-catchup-config.ts. */
-  turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
-  /**
-   * Systemd restart capability, injected from the composition root. The runtimes
-   * layer cannot import the fleet layer, so main.ts constructs the concrete
-   * ServiceManager and passes it here. When absent, the restart_self tool is not
-   * registered (the agent cannot restart itself without it).
-   */
-  serviceRestarter?: ServiceRestarter;
-  /**
-   * Test-injectable catalogue probes for the `/model N` pin-time verify
-   * (Task H — resolveModelCatalogue's own listFn/anthropicFn seam, threaded
-   * one level further out so a test constructing the runtime can supply a
-   * fake catalogue without spawning a real binary or hitting a real
-   * keychain). Undefined in production — resolveModelCatalogue falls back
-   * to the real probes.
-   */
-  modelCatalogueListFn?: typeof listModelCatalog;
-  modelCatalogueAnthropicFn?: typeof fetchAnthropicModelIdsWithStatus;
-  /**
-   * Ratified account-identity digest (`service.expectedAccountDigest`,
-   * task-21). When set, the runtime verifies the claude CLI's serving
-   * identity against it on startup and on every primary-usability probe and
-   * alerts on mismatch; it never writes a credential. null/undefined =
-   * verification disabled (one info note at the first probe).
-   */
-  expectedAccountDigest?: string | null;
-  /** Test seam for the identity verification (defaults to the real CLI probe). */
-  accountIdentityVerify?: AccountIdentityVerifyFn;
-}
-
-export type RuntimePrimaryModelUsability = PrimaryModelUsabilityResult & {
-  checkedAt: number | null;
-  probeInFlight: boolean;
-};
-
-/**
- * Pure derivation of the `modelUsable` health verdict from the last usability
- * probe, gated on freshness. Either verdict — a `usable` green OR a
- * requires-alert red — older than `freshnessMs` is reported as `null` (unknown)
- * with `modelUsableStale=true` rather than a stale green or a stale red (#1884).
- * Pure + exported for direct unit testing (the probe state itself is private).
- */
-export function deriveModelUsable(
-  usability: RuntimePrimaryModelUsability | null,
-  nowMs: number,
-  freshnessMs: number = MODEL_USABILITY_FRESHNESS_MS,
-): { modelUsable: boolean | null; modelUsableStale: boolean; modelUsableCheckedAt: number | null } {
-  const modelUsableCheckedAt = usability?.checkedAt ?? null;
-  if (!usability || usability.probeInFlight) {
-    return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
-  }
-  // A future-dated or non-finite proof time, clock or window is not current evidence.
-  const ageMs = typeof modelUsableCheckedAt === 'number' ? nowMs - modelUsableCheckedAt : NaN;
-  const fresh = Number.isFinite(ageMs) && Number.isFinite(freshnessMs)
-    && ageMs >= 0 && ageMs <= freshnessMs;
-  if (usability.status === 'usable') {
-    return fresh
-      ? { modelUsable: true, modelUsableStale: false, modelUsableCheckedAt }
-      : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
-  }
-  if (primaryModelUsabilityRequiresAlert(usability)) {
-    // Symmetric with the `usable` branch (#1884): a "not usable" verdict older
-    // than freshnessMs (e.g. a credential-unavailable cached at startup) is
-    // stale evidence, not an authoritative red — report null (unknown) +
-    // modelUsableStale=true so it re-probes rather than caching a stale false.
-    return fresh
-      ? { modelUsable: false, modelUsableStale: false, modelUsableCheckedAt }
-      : { modelUsable: null, modelUsableStale: true, modelUsableCheckedAt };
-  }
-  return { modelUsable: null, modelUsableStale: false, modelUsableCheckedAt };
 }
 
 /**
