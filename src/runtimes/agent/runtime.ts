@@ -23,11 +23,8 @@ import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
-  classifyStreamedProviderFailure,
   detectAutoSwitchNotice,
   isProviderAuthRequiredMessage,
-  MAX_STREAMED_BANNER_LENGTH,
-  type ProviderFailureKind,
 } from './failure-taxonomy.ts';
 import {
   workflowForProviderText,
@@ -337,8 +334,6 @@ import {
   writeProviderMcpConfigTarget,
 } from './providers/mcp-bridge.ts';
 import {
-  executionModeForProvider,
-  isProviderId,
   providerUsesWhatSoupMcp,
   requiresPerChatActorSocket,
 } from './providers/index.ts';
@@ -359,6 +354,11 @@ import {
 } from './model-usability.ts';
 export { deriveModelUsable } from './model-usability.ts';
 export type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './model-usability.ts';
+import {
+  logAmbientProviderFailureOutcome,
+  suppressStreamedProviderFailure as gateStreamedProviderFailure,
+} from './streamed-provider-failure.ts';
+import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
 import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
@@ -2607,74 +2607,11 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /**
-   * Two-tier gate for provider-failure text that streamed as assistant_text (QR-209).
-   * The permissive `classifyProviderFailure` suppression used to drop ANY match,
-   * silently discarding genuine replies that merely discussed an auth/limit error
-   * (observed live: replies about an expired OAuth token dropped to silence). Now
-   * only BANNER-confident matches (the text IS the error — short + error-opener /
-   * usage-limit) are suppressed; AMBIENT matches (prose about an error) are let
-   * through to the egress gate. Fallback is still armed only on the terminal
-   * 'result' event, never here. Shared by both assistant_text handlers so their
-   * suppression policy can't drift.
-   *
-   * Returns `{ suppress: true }` when THIS gate drops the chunk (caller must
-   * `break`). Otherwise returns `{ suppress: false, ambient }`, where `ambient`
-   * is non-null when the text matched a provider-failure token but was let
-   * through as prose about an error, not the error itself — the caller must run
-   * this result through the egress gate and log the ambient tripwire with that
-   * gate's REAL outcome (#1758: logging "delivered" here fired one gate before
-   * `gateAssistantTextForOutbound`, which can still suppress the same chunk for
-   * an unrelated reason — a suppressed chunk logged as "delivered" is worse than
-   * useless in incident forensics).
-   */
   private suppressStreamedProviderFailure(
     normalizedText: string,
     chatJid: string | null,
-  ): { suppress: boolean; ambient: { kind: ProviderFailureKind } | null } {
-    const classification = classifyStreamedProviderFailure(normalizedText);
-    if (classification === null) return { suppress: false, ambient: null };
-    if (classification.confidence === 'banner') {
-      log.warn(
-        { chatJid, kind: classification.kind, textPreview: providerPreview(normalizedText, MAX_STREAMED_BANNER_LENGTH) },
-        'suppressed provider-failure message from assistant_text',
-      );
-      return { suppress: true, ambient: null };
-    }
-    // Ambient: matched a provider-failure token but is prose about an error, not the
-    // error itself. Dropping it is the QR-209 silent-reply defect, so this gate lets
-    // it through — but the egress gate downstream can still suppress it for an
-    // unrelated reason. The tripwire log therefore fires at the call site, after
-    // that gate has run, tagged with its actual outcome.
-    return { suppress: false, ambient: { kind: classification.kind } };
-  }
-
-  /**
-   * Logs the QR-209 ambient-provider-failure tripwire with the REAL post-egress-gate
-   * outcome (#1758). `delivered` when the fleet should see a novel banner shape that
-   * ought to become a suppressible opener instead; `suppressed` when an unrelated
-   * egress-gate reason (ack_filler, internal_narration, ...) already handled it, so
-   * forensics must not read this line as evidence of delivery.
-   */
-  private logAmbientProviderFailureOutcome(
-    ambient: { kind: ProviderFailureKind } | null,
-    normalizedText: string,
-    chatJid: string | null,
-    delivered: boolean,
-  ): void {
-    if (!ambient) return;
-    log.warn(
-      {
-        chatJid,
-        kind: ambient.kind,
-        textLength: normalizedText.length,
-        textPreview: providerPreview(normalizedText, MAX_STREAMED_BANNER_LENGTH),
-        outcome: delivered ? 'delivered' : 'suppressed',
-      },
-      delivered
-        ? 'delivered assistant_text despite provider-failure classification'
-        : 'suppressed assistant_text despite provider-failure classification (egress gate)',
-    );
+  ): ReturnType<typeof gateStreamedProviderFailure> {
+    return gateStreamedProviderFailure(normalizedText, chatJid);
   }
 
   // ─── Control session (self-healing repair) ────────────────────────────────
@@ -5945,7 +5882,7 @@ export class AgentRuntime implements Runtime {
       const usesPerChatActorRegister =
         this.sandboxPerChat
         || this.sessionUsesPerChatActorSocket(session)
-        || (this.sessionScope === 'per_chat' && this.sessionUsesInProcessBridge(session));
+        || (this.sessionScope === 'per_chat' && sessionUsesInProcessBridge(session));
       const execScopeKey = usesPerChatActorRegister && effectiveMapKey !== undefined
         ? effectiveMapKey
         : (this.sessionScope !== 'per_chat' ? GLOBAL_TOOL_SCOPE_KEY : undefined);
@@ -7307,7 +7244,7 @@ export class AgentRuntime implements Runtime {
           const gatedText = this.gateAssistantTextForOutbound(
             normalizedText, queue, inboundSeq, mapKey, sessionProviderId(session), scheduledScopeKey,
           );
-          this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
+          logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, queue.targetChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
           const markReplayUnsafe = mapKey !== undefined
@@ -8986,20 +8923,10 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private isProcessAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
-      throw err;
-    }
-  }
-
   private async awaitProcessExit(pid: number | null, timeoutMs = 6_000): Promise<void> {
     if (pid === null) return;
     const deadline = Date.now() + timeoutMs;
-    while (this.isProcessAlive(pid)) {
+    while (isProcessAlive(pid)) {
       if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for prior session process ${pid} to exit`);
       }
@@ -9017,7 +8944,7 @@ export class AgentRuntime implements Runtime {
     const failures: unknown[] = [];
     for (const pid of new Set(pids.filter((value): value is number => value !== null))) {
       try {
-        if (!this.isProcessAlive(pid)) continue;
+        if (!isProcessAlive(pid)) continue;
         await this.terminateKnownProcess(pid);
       } catch (err) {
         failures.push(err);
@@ -9093,7 +9020,7 @@ export class AgentRuntime implements Runtime {
       let allKnownProcessesDead = cleanupError === null;
       if (allKnownProcessesDead) {
         try {
-          allKnownProcessesDead = knownPids.every((pid) => pid === null || !this.isProcessAlive(pid));
+          allKnownProcessesDead = knownPids.every((pid) => pid === null || !isProcessAlive(pid));
         } catch (probeErr) {
           cleanupError = probeErr;
           allKnownProcessesDead = false;
@@ -9206,21 +9133,6 @@ export class AgentRuntime implements Runtime {
     if (this.sessionScope !== 'per_chat' || this.sandboxPerChat) return false;
     const provider = session.getProviderId();
     return providerUsesWhatSoupMcp(provider);
-  }
-
-  /**
-   * #2976 residual: managed-loop (API) providers advertise/execute WhatSoup
-   * tools through the in-process provider MCP bridge (createProviderMcpBridge),
-   * never a stdio-proxy socket. They therefore never wire a per-chat actor
-   * socket, so in per_chat scope their executing turn's actor was NOT published
-   * to the actor register — the bridge fell back to the stored session's stale
-   * actorJid. Detect the bridge sessions so the provider boundary publishes
-   * their actor into the same per-chat register (retired by the coordinator
-   * post-effects seam) and the bridge resolver can read it at request time.
-   */
-  private sessionUsesInProcessBridge(session: SessionManager): boolean {
-    const provider = session.getProviderId();
-    return isProviderId(provider) && executionModeForProvider(provider) === 'managed_loop';
   }
 
   private wirePerChatActorSocket(chatJid: string, provider: string, mapKeyOverride?: string):
@@ -12153,7 +12065,7 @@ export class AgentRuntime implements Runtime {
           const gatedText = this.gateAssistantTextForOutbound(
             normalizedText, queue, this.currentInboundSeq, undefined, sessionProviderId(this.session), scheduledScopeKey,
           );
-          this.logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
+          logAmbientProviderFailureOutcome(providerFailureCheck.ambient, normalizedText, sharedChatJid, gatedText !== null);
           normalizedText = gatedText;
           if (!normalizedText) break;
           const markReplayUnsafe = this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0;
