@@ -309,6 +309,7 @@ import { RESPONSE_WORKFLOWS } from '../../../src/runtimes/agent/response-registr
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { getRecentMessages, type StoredMessage } from '../../../src/core/messages.ts';
 import { getSessionTokenSnapshot } from '../../../src/runtimes/agent/session-db.ts';
+import { noteScheduledTurnSession } from '../../../src/runtimes/agent/scheduled-agent-job-delivery.ts';
 
 type QueueMock = IOutboundQueue & {
   enqueueText: ReturnType<typeof vi.fn>;
@@ -1469,6 +1470,12 @@ describe('AgentRuntime edge coverage', () => {
 
     created.opts.notifyUser?.('fallback session crashed');
     expect(state.handleCrashNotify).toHaveBeenCalledWith('fallback session crashed', 'group-edge@g.us');
+    // #3497 H2 regression guard: while the session's latest user turn is a
+    // scheduled job, the crash notice never reaches handleCrashNotify.
+    state.handleCrashNotify.mockClear();
+    noteScheduledTurnSession(created.session, true);
+    created.opts.notifyUser?.('fallback session crashed');
+    expect(state.handleCrashNotify).not.toHaveBeenCalled();
 
     created.opts.onResumeFailed?.();
     // X1: the replacement names its exact manager (sandbox mode ignores the target).
@@ -1834,6 +1841,12 @@ describe('AgentRuntime edge coverage', () => {
 
     created.opts.notifyUser?.('singleton fallback crashed');
     expect(state.handleCrashNotify).toHaveBeenCalledWith('singleton fallback crashed');
+    // #3497 H2 regression guard: while the session's latest user turn is a
+    // scheduled job, the crash notice never reaches handleCrashNotify.
+    state.handleCrashNotify.mockClear();
+    noteScheduledTurnSession(created.session, true);
+    created.opts.notifyUser?.('singleton fallback crashed');
+    expect(state.handleCrashNotify).not.toHaveBeenCalled();
 
     created.opts.onResumeFailed?.();
     expect(state.handleResumeFailed).toHaveBeenCalledWith('direct-edge@s.whatsapp.net');
