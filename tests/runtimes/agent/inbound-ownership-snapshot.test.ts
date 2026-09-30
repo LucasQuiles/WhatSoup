@@ -15,6 +15,7 @@ import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
 import {
+  parseProviderExecutionObservation,
   readInboundOwnershipSnapshot,
   type InboundOwnershipRow,
   type InboundOwnershipSnapshot,
@@ -446,5 +447,77 @@ describe('inbound ownership snapshot (#3560)', () => {
     expect(
       fixture.db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(head),
     ).toEqual({ processing_status: 'processing' });
+  });
+});
+
+describe('parseProviderExecutionObservation (#3560)', () => {
+  const VALID = {
+    active: true,
+    activeWorkKind: 'turn',
+    activeScopeHash: '0123456789ab',
+    activeAgeMs: 1_200,
+    activePhase: 'executing',
+    progressAgeMs: 300,
+    pending: 2,
+    oldestPendingWorkKind: 'probe',
+    oldestPendingScopeHash: 'ba9876543210',
+    oldestWaitMs: 0,
+  } as const;
+
+  it('returns a valid capture field for field', () => {
+    expect(parseProviderExecutionObservation({ ...VALID })).toEqual(VALID);
+  });
+
+  it('strips fields outside the observation instead of rejecting them', () => {
+    const parsed = parseProviderExecutionObservation({ ...VALID, pressure: { spawned: 3 }, generatedAt: 'x' });
+    expect(parsed).toEqual(VALID);
+    expect(parsed).not.toHaveProperty('pressure');
+    expect(parsed).not.toHaveProperty('generatedAt');
+  });
+
+  it('accepts null work kinds and scope hashes (an idle lane)', () => {
+    const idle = {
+      ...VALID,
+      active: false,
+      activeWorkKind: null,
+      activeScopeHash: null,
+      pending: 0,
+      oldestPendingWorkKind: null,
+      oldestPendingScopeHash: null,
+    };
+    expect(parseProviderExecutionObservation(idle)).toEqual(idle);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a JSON string that was never parsed', JSON.stringify(VALID)],
+    ['a number', 7],
+    ['an array', [VALID]],
+    ['an empty object', {}],
+  ])('returns null for %s', (_label, value) => {
+    expect(parseProviderExecutionObservation(value)).toBeNull();
+  });
+
+  it.each(Object.keys(VALID))('returns null when %s is missing', (key) => {
+    const partial: Record<string, unknown> = { ...VALID };
+    delete partial[key];
+    expect(parseProviderExecutionObservation(partial)).toBeNull();
+  });
+
+  it.each([
+    ['active as a string', { active: 'true' }],
+    ['an unknown work kind', { activeWorkKind: 'batch' }],
+    ['an uppercase scope hash', { activeScopeHash: '0123456789AB' }],
+    ['a short scope hash', { oldestPendingScopeHash: 'abc123' }],
+    ['a negative duration', { activeAgeMs: -1 }],
+    ['an infinite duration', { progressAgeMs: Number.POSITIVE_INFINITY }],
+    ['a duration as a string', { oldestWaitMs: '5' }],
+    ['an unknown phase', { activePhase: 'idle' }],
+    ['a null phase', { activePhase: null }],
+    ['a fractional pending count', { pending: 1.5 }],
+    ['a negative pending count', { pending: -1 }],
+  ])('returns null for %s', (_label, override) => {
+    expect(parseProviderExecutionObservation({ ...VALID, ...override })).toBeNull();
   });
 });

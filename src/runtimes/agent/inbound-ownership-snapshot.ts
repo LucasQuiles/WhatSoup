@@ -38,6 +38,8 @@ import {
 import { validDeliveryCorroborationForJobSql } from '../../core/delivery-corroboration-sql.ts';
 import { OPEN_INBOUND_STATUSES } from '../../core/inbound-status.ts';
 import { TerminalRecordInboundCloser } from '../../core/terminal-record-inbound-close.ts';
+import { systemClock } from '../../lib/clock.ts';
+import { allFromStatement } from '../../lib/db-query.ts';
 import { shortHash } from '../../lib/short-hash.ts';
 import type { ProviderExecutionGateSnapshot } from './provider-execution-gate.ts';
 
@@ -472,7 +474,7 @@ export function readInboundOwnershipSnapshot(
     throw new RangeError('minAgeMinutes must be a finite number >= 0');
   }
   const queueScope = options.queueScope ?? 'per_chat';
-  const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1000);
+  const nowSeconds = Math.floor((options.nowMs ?? systemClock.now()) / 1000);
   const supplied = options.providerExecution ?? null;
   const capturedAtMs = options.providerExecutionCapturedAtMs ?? null;
   const captureAgeSeconds = supplied !== null && capturedAtMs !== null && Number.isFinite(capturedAtMs)
@@ -488,7 +490,7 @@ export function readInboundOwnershipSnapshot(
   const statements = prepareStatements(raw);
   const closer = new TerminalRecordInboundCloser(raw);
 
-  const open = statements.openInbounds.all() as unknown as OpenInboundRow[];
+  const open = allFromStatement<OpenInboundRow>(statements.openInbounds);
   const openBySeq = new Map(open.map((row) => [row.seq, row]));
 
   const deferredOf = (seq: number): DeferredRow | undefined =>
