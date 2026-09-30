@@ -148,6 +148,22 @@ export function runDatabaseRetention(
            FROM operator_catchup_closure_witnesses witness
            WHERE witness.recovery_job_id = turn_recovery_jobs.id
          )
+         -- Keep the job whenever its terminal must be kept (the same guards
+         -- as the terminal delete below); otherwise the transferred terminal
+         -- survives alone as an orphan transfer, which blocks
+         -- turn_recovery_integrity.
+         AND NOT EXISTS (
+           SELECT 1
+           FROM turn_delivery_corroboration corroboration
+           WHERE corroboration.terminal_record_id = turn_recovery_jobs.terminal_record_id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM turn_terminal_records guarded
+           JOIN inbound_disposition_links link
+             ON link.superseded_by_seq = guarded.inbound_seq
+           WHERE guarded.id = turn_recovery_jobs.terminal_record_id
+         )
          AND EXISTS (
            SELECT 1
            FROM inbound_events i

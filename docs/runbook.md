@@ -253,6 +253,11 @@ rendered from `deploy/com.whatsoup.*.plist` templates:
 Both plists pin `RunAtLoad=false`, so installing or re-loading them never fires
 the job immediately. Logs land in `~/Library/Logs/whatsoup/`.
 
+What the harness-maintenance job changes, its exit codes, the side-effect
+boundary of `--check`, and the agent CLI update and self-update observation
+events are described in
+[docs/runbooks/host-maintenance.md](runbooks/host-maintenance.md).
+
 **Install / update** — `deploy/setup.sh` step 4 renders both plists into
 `~/Library/LaunchAgents` (idempotent; a differing pre-existing plist is backed
 up first; an already-loaded label or a cron twin triggers a duplicate-timer
@@ -451,6 +456,19 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/
 ```
 
 The diagnostic examples in this runbook pass that header.
+
+### Health invariants block
+
+The diagnostic body (never the public envelope) carries
+`health_invariants: { "schema": "whatsoup.health-invariants.v1", "ids": [...] }`.
+The ids are compile-time constants from `src/core/health-invariants.ts` naming
+the invariants the loaded code implements, for example
+`turn_capability.stale_evidence_degrades` (#2446). They are not runtime state.
+A release that predates the block does not emit it. `release:activate --apply`
+classifies the block against its own floor and records a report-only verdict;
+see [release-deployment.md](runbooks/release-deployment.md#health-invariants-verdict-report-only-2481).
+The top-level `schema_version` is unchanged and still appears only on the
+public envelope.
 
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
@@ -1478,7 +1496,7 @@ systemctl --user start whatsoup@$INSTANCE
 
 ### 7.1 Approve or Block Users
 
-Admins receive approval requests as WhatsApp messages when an unknown sender contacts the bot. Reply directly in WhatsApp:
+Admins receive approval requests as WhatsApp messages in their direct chat when an unknown sender contacts the bot in a direct chat. In a group under strict group-sender mode (`groupSenderPolicy: allowlisted_only`), an unknown sender only produces an approval request when they @mention the bot; ordinary group chatter and status broadcasts never do. Reply directly in WhatsApp:
 
 ```
 ALLOW 15551234567       # approve a phone number
@@ -2241,10 +2259,19 @@ different status (`closed_differently`). A rerun on a row already closed as its 
 When a close applies to a record with a selected delivery op, the same transaction also marks that op
 `is_terminal = 1`, as live finalization does.
 
-Every invocation, including a dry run and a refusal, appends one line to the audit receipt
-`turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that file is the only
-thing a dry run writes. Output and receipts carry only the inbound seq, record id, disposition, statuses
-and reason codes, never chat JIDs, conversation keys or message ids.
+Every evaluated dry run and apply, including a refusal and an already-closed rerun, appends one line to
+the audit receipt `turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that
+file is the only thing a dry run writes. An invocation that stops before the row is evaluated (an argument
+error, or a database that is missing or cannot be opened or preflighted) exits `1` without a receipt. An
+`--apply` that throws while opening, writing or committing its transaction rolls back and appends an
+apply-mode receipt with outcome `failed` and reason `write_transaction_error`, then exits `1` with the
+original error. If that append also fails, stderr reports both errors. A failure to close the database
+connection after the commit is reported on stderr and does not turn the committed close into a failure. If
+the audit file itself cannot be appended, a dry run, refusal or already-closed rerun exits `1` with that
+error and leaves no receipt (nothing was written to the database); after a committed close it exits `3`,
+below. Output and
+receipts carry only the inbound seq, record id, disposition, statuses and reason codes, never chat JIDs,
+conversation keys or message ids.
 
 Exit codes: `0` closed, previewed, or already closed as the record implies; `1` refused or failed with
 nothing applied; `3` the close WAS applied and committed (stdout carries `applied: true` and the closed
@@ -2254,6 +2281,140 @@ Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are a
 parked behind `recovery_pending_operator_catchup` disposition links (for example synthetic scheduled-job
 inbounds reclaimed by crash recovery). Some such links have no catch-up target and currently cannot be
 closed by any tool.
+
+#### Settle an orphan recovery transfer
+
+An orphan transfer is a `turn_terminal_records` row with disposition `transferred_to_recovery_owner` and
+no `turn_recovery_jobs` row. Live finalization writes both in one transaction, so current finalization
+cannot produce one. Where a given orphan came from is not established in general. Retention is one known
+generator of a different shape: it deletes an aged `completed` job whose selected op is `echoed`,
+`failed_permanent` or `quarantined`, then keeps the terminal record when a delivery corroboration or
+disposition link still references it. Preventing that is tracked separately, and this command does not
+admit that shape. Nothing repairs an orphan. Health counts it in `runtime.agent.turnRecoveryOrphanTransfers`,
+`turnRecoveryCorruptLinks` and `turnRecoveryOutstanding`, so `recovery_debt.service_blocking` stays `true`
+with blocking reason `turn_recovery_integrity`, and a new integrity fault cannot be told apart from it. An
+orphan blocks admission for its scope only when it is uncorroborated. A corroborated orphan counts in
+`turnRecoveryCorroboratedRetained` instead of `turnRecoveryBlockingOutstanding`.
+
+`turn-recovery-operator settle-orphan-transfer` settles ONE record of the shape it was reviewed for. It
+writes the missing job directly in the settled `exhausted` state, with no replayable content, plus an
+append-only `recovery_plans` row (`origin = 'operator'`, plan ID `turn-recovery-orphan-settle:v1:<terminal
+id>`, your evidence reference in `evidence_ref`). The job's `replay_safety_proof_id` is that plan ID. The
+terminal record is never modified or deleted. The new job's foreign key keeps it, its source inbound and its
+selected delivery op as evidence.
+
+Admission is an allowlist. The record is admitted only when all of these hold:
+
+- no recovery job is linked to it;
+- its selected delivery op carries the record's own conversation, destination and source seq, and its
+  source inbound (found by that seq) carries the record's conversation and destination, so the written
+  job links to them validly;
+- its selected delivery op is `maybe_sent`, has `is_terminal = 1` and has a NULL `wa_message_id`, so no echo
+  can ever be matched to it. An empty-string `wa_message_id` counts as a message id, because echo matching
+  compares the exact value;
+- the record passes the valid delivery-corroboration predicate that health uses. The database then keeps
+  the selected op immutable, so its status cannot change after the settle;
+- its source inbound exists and is `complete` or `failed`, and is not `complete` with `terminal_reason =
+  'response_echoed'`. That is the only source state from which echo settlement could complete the job;
+- no open `inbound_disposition_links` row references its source inbound seq. Open means a
+  `recovery_pending_operator_catchup` row with no `superseded_by_operator_catchup` row for the same inbound
+  seq and recovery plan, the predicate of the supervisor's `open_recoveries` count. An open link is a catch-up
+  obligation, and a settle forbids replay.
+
+```bash
+# 1. List orphan transfers (read-only; prints terminal record ids).
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB"
+
+# 2. Dry run for one record (read-only, never migrates). Prints the delivery kind, the op's status,
+#    terminal flag and message-id presence, the source inbound's status and terminal reason, whether a
+#    later echo corroborates delivery, the recovery owner the job will name (logical turn id, manager
+#    id, generation), and a digest.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF
+
+# 3. Back up the database, then apply with the digest the dry run printed.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF --apply --expect-digest DIGEST
+```
+
+The command does not take the backup itself. Take one before step 3.
+
+`--evidence-ref` is required and names the operator investigation record (8-120 characters of
+`A-Z a-z 0-9 _ . : / -`, e.g. a ticket or incident ref) that establishes the transfer will never be
+replayed. The digest (version 3) binds the apply to the dry run in the same way as `close-inbound`. It
+covers the database file identity; every value the settled job copies from the terminal record and its
+source inbound (record id, scope, conversation key, delivery JID, source seq, source logical turn id,
+manager id and generation, source message id, the recovery owner's logical turn id, manager id and
+generation, and the group flag derived from the delivery JID); every admission input printed in step 2;
+and the evidence reference. Step 2 prints the recovery owner but not the conversation key, JID or message
+id; those are hashed into the digest only. For an admitted record the database already freezes every
+copied terminal-record value, because trigger `corroborated_terminal_proof_immutable` blocks changes to a
+record that has a corroboration row. Nothing freezes the source inbound's message id while no job exists,
+so the digest is what stops an apply from writing a job whose values differ from the dry run's.
+`--apply` refuses `digest_mismatch` or `schema_not_current`, and re-proves eligibility and recomputes the
+digest inside its write transaction.
+
+The command refuses and exits `1`, writing nothing, with one of these reasons:
+
+| Reason | Meaning |
+|---|---|
+| `terminal_not_found` | No such record. |
+| `not_transferred` | The record is not a recovery transfer. |
+| `recovery_job_exists` | A job is linked: it is not an orphan. |
+| `owner_identity_conflict` | The record names its own source as recovery owner. |
+| `settlement_conflict` | A settle plan exists without its job. |
+| `delivery_op_missing` | The selected op row is gone. |
+| `delivery_identity_mismatch` | The op's conversation, chat or source inbound seq differs from the record's. |
+| `delivery_status_not_admitted` | The op is not `maybe_sent`. `pending`, `sending` and `submitted` are live queue work; `echoed` and the terminal failures are outside the reviewed shape. |
+| `delivery_not_terminal` | The op is `maybe_sent` with `is_terminal = 0`. |
+| `delivery_has_wa_message_id` | The op carries a provider message id (an empty string counts), so a late echo could still match it. |
+| `uncorroborated` | The record fails the valid delivery-corroboration predicate. |
+| `source_inbound_missing` | The source inbound row is gone. |
+| `source_inbound_identity_mismatch` | The source inbound's conversation or chat differs from the record's conversation or delivery JID. The settled job would be a broken link. |
+| `source_inbound_open` | The source inbound is still `pending`, `processing` or `turn_done`. |
+| `source_inbound_echo_settled` | The source inbound is `complete` with `response_echoed`. |
+| `open_disposition_link` | An open `recovery_pending_operator_catchup` link references the source inbound seq. |
+| `digest_mismatch` | `--apply` only: the digest differs from `--expect-digest`, before or inside the write transaction. |
+| `schema_not_current` | `--apply` only: the database is not at the current schema. |
+| `state_changed` | `--apply` only, inside the write transaction: the recheck returned a verdict the command does not handle. The current evaluator never returns one; this is a fail-closed default. |
+
+A refusal means the record needs investigation, not a different command. A rerun on a record it already
+settled prints `alreadySettled: true` and exits `0`. So does an `--apply` whose recheck inside the write
+transaction finds the record already settled by this command, which happens when a concurrent apply
+committed first; it writes nothing. Receipts and exit codes (`0`, `1`, `3`) follow `close-inbound`,
+including the `failed` receipt for an apply that throws inside its write transaction. The list mode (no
+`--terminal`) evaluates no record and appends no receipt. Output carries ids,
+kinds, statuses and reason codes only.
+
+After the settle, `turn-recovery-operator show --job <job id>` prints an `operatorSettlement` block (plan ID,
+origin, actor, plan creation time) found by joining `recovery_plans` on the job's proof ID. It prints that
+block only when the plan exists with origin `operator` and the CLI actor, and the job is `exhausted` and
+assigned to the CLI actor. A job whose proof ID carries the settle prefix without that full shape gets a
+`settlePlan` block with the same facts and no settlement label. The block is the only thing that tells this
+row apart from real attempt exhaustion. `list` still shows `blocked_unsafe` jobs only.
+
+The reply-guarantee observer (`deploy/scripts/reply-guarantee-observer.py`) counts every `blocked_unsafe`
+or `exhausted` job in `blockedOrExhaustedRecoveryJobs`. Retention never prunes `exhausted` jobs, so a settle
+raises that count by one permanently, and the observer cannot tell the row from real exhaustion. Even once
+every other debt is resolved, that row alone keeps the observer's recovery-debt warning latch open. The observer alerts on latch flips, not on
+count changes, so no new alert fires when the latch is already open. The critical active-breach latch is not
+affected: the observer counts a recovery job there only while its source inbound is open, and the admission
+rule requires a terminal source inbound.
+
+Verify after apply:
+
+- Authenticated `GET /health` (`runtime.agent` gauges):
+  - `turnRecoveryOrphanTransfers` drops by one; `turnRecoveryCorruptLinks`, `turnRecoveryOutstanding` and
+    `turnRecoveryCorroboratedRetained` stop counting it.
+  - `turnRecoveryExhausted` and `turnRecoveryRetainedTerminal` rise by one (retained reason
+    `turn_recovery_terminal`, not blocking).
+  - `recovery_debt.service_blocking` is `false` unless another blocking reason remains. If
+    `turn_recovery_integrity` is still listed, another orphan, corrupt link or echo conflict exists:
+    re-run step 1.
+- `show --job <job id>` reports `operatorSettlement` with `planFound: true` and state `exhausted`.
+- The reply-guarantee observer's `blockedOrExhaustedRecoveryJobs` is one higher than before the apply,
+  and its state is not `active-breach` because of this record.
+- After the next restart, `show` still reports state `exhausted`.
 
 ### 7.7 Useful SQL Queries
 
