@@ -146,6 +146,11 @@ export interface ConnectionStateSnapshot {
    * conservative status-code reading.
    */
   disconnectDecision?: DisconnectDecisionRecord | null;
+  /**
+   * #3722: the last reconnect-state reset (an exhaustion cycle or a graceful
+   * reconnect). Null after an open. A fixed reason token and a time only.
+   */
+  reconnectReset?: { reason: string; at: string | null } | null;
   recentDisconnects: ConnectionRecentDisconnects;
   outboundFlood?: ConnectionOutboundFlood;
   authBond?: AuthBondSnapshot;
@@ -609,6 +614,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   // Process-local by design: a restart begins with no decision and a fresh
   // bounded retry. Persisting it would let a stale park outlive a relink.
   private lastDisconnectDecision: DisconnectDecisionRecord | null = null;
+  /** #3722: the last reconnect-state reset; cleared by a successful open. */
+  private lastReconnectReset: { reason: string; at: number } | null = null;
   private localAuthAlertEmitted = false;
   // #2394 (connection_exhausted): restart-safe incident ownership + the
   // stability timer that converts a fresh socket into recovery proof.
@@ -1719,6 +1726,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastDisconnectReason: this.lastDisconnectReason,
       lastStatusCode: this.lastStatusCode,
       disconnectDecision: this.lastDisconnectDecision,
+      reconnectReset: this.lastReconnectReset === null
+        ? null
+        : { reason: this.lastReconnectReset.reason, at: toIso(this.lastReconnectReset.at) },
       recentDisconnects: this.getRecentDisconnectStats(),
       outboundFlood: this.getOutboundFloodStats(),
       authBond,
@@ -2327,6 +2337,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.loggedOutAlertEmitted = false;
       this.unclassified401ReconnectSpent = false;
       this.lastDisconnectDecision = null;
+      this.lastReconnectReset = null;
       // #2394 (auth-bond): localAuthAlertEmitted deliberately NOT reset here.
       // Socket open is an observation, not recovery proof — resetting on every
       // reconnect stranded an accepted incident (the proof-gated clear path
@@ -3471,6 +3482,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectAttempts = 0;
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
+    this.lastReconnectReset = { reason: 'exhaustion_cycle_retry', at: Date.now() };
     this.setConnectionState('reconnecting');
     this.persistConnectionRuntimeState('exhaustion_cycle_retry');
 
@@ -3496,6 +3508,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectAttempts = 0;
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
+    this.lastReconnectReset = { reason: `graceful_reconnect_${reason}`, at: Date.now() };
     this.setConnectionState('reconnecting');
     this.persistConnectionRuntimeState(`graceful_reconnect_${reason}`);
 

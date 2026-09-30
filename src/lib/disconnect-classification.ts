@@ -130,3 +130,14 @@ export function readHealthDisconnectDecision(connection: unknown): HealthDisconn
   }
   return { kind: 'classified', classification: classification as DisconnectClassification };
 }
+
+/**
+ * #3722: close codes the transport treats as transient (it reconnects). Numeric,
+ * so lib stays free of the WhatsApp library; the transport builds its set from
+ * this, and a test pins it to the library's DisconnectReason members.
+ */
+export const TRANSIENT_RECONNECT_STATUS_CODES: ReadonlySet<number> = new Set([428, 408, 500, 503]);
+
+export function isTransientReconnectStatusCode(code: unknown): boolean {
+  return typeof code === 'number' && TRANSIENT_RECONNECT_STATUS_CODES.has(code);
+}
