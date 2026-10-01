@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
 import { COMPLETED_IDENTITY_IS_ADMISSION_REJECTED_SQL } from './admission-rejected-checkpoint.ts';
 
@@ -397,7 +398,7 @@ export function endAbandonedActiveSession(
   rowId: number,
   providerSessionId: string | null,
 ): number {
-  const endedAt = new Date().toISOString();
+  const endedAt = systemClock.nowIso();
   const result = db.raw.prepare(
     `UPDATE agent_sessions SET status = 'ended', ended_at = ?
      WHERE id = ? AND status IN ('active', 'orphaned') AND session_id IS ?`,

@@ -94,7 +94,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "193e8812fbe41539ef99bae3a062db90525fc292b9fbb8d628be1a18853d34c3",
+      "sha256": "af736b3fbfb310e06af01a05c6e88308ff94a64368ec0d7d62b503319e135f66",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],
