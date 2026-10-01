@@ -234,15 +234,23 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
     await runtime.start();
   });
   afterEach(async () => {
-    // Cleanup runs even when the shutdown or a leak check throws, so one
-    // failed case cannot leak timers, stubs or spies into the next.
-    try {
-      if (runtime) await runtime.shutdown();
+    // Every cleanup step runs and every failure is reported, so one failed
+    // case cannot leak timers, stubs or spies into the next, and a later
+    // cleanup error cannot hide an earlier one.
+    const failures: unknown[] = [];
+    const step = async (run: () => unknown): Promise<void> => {
+      try { await run(); } catch (err) { failures.push(err); }
+    };
+    await step(async () => { if (runtime) await runtime.shutdown(); });
+    await step(() => {
       expect(spawn).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
       expect(messenger.sendMessage).not.toHaveBeenCalled(); expect(messenger.sendMedia).not.toHaveBeenCalled();
-    } finally {
-      try { db.close(); } finally { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); }
+    });
+    for (const cleanup of [() => db.close(), () => vi.useRealTimers(), () => vi.unstubAllGlobals(), () => vi.restoreAllMocks()]) {
+      await step(cleanup);
     }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'lazy-checkpoint-adoption cleanup failed in several steps');
   });
 
   describe('decision 15 part 2: own session vs another session', () => {
@@ -540,6 +548,28 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         { status: string }).status).toBe(expectedStatus);
     });
 
+    it('the fallback ends its own abandoned row that the stale-session sweep already orphaned', async () => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const rowId = session.getDbRowId();
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      try {
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        // The interval sweep's markOrphaned on a dead provider; 'orphaned' reads as resumable.
+        db.raw.prepare(`UPDATE agent_sessions SET status = 'orphaned' WHERE id = ?`).run(rowId);
+
+        await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+      } finally {
+        closeSpy.mockRestore();
+      }
+
+      expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
+        { status: string }).status).toBe('ended');
+    });
+
     it('a refused fallback on a started manager keeps its row and provider session', async () => {
       view.ensureSessionAndQueueSync(JID, JID);
       const session = view.chatSessions.get(JID)!;
@@ -586,8 +616,10 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       });
       // Only the abandoned-row close fails; every other statement runs for real.
       const realPrepare = db.raw.prepare.bind(db.raw);
+      let injectedFaults = 0;
       const prepareSpy = vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
-        if (sql.includes(`WHERE id = ? AND status = 'active' AND session_id IS ?`)) {
+        if (sql.includes(`UPDATE agent_sessions SET status = 'ended', ended_at = ?`)) {
+          injectedFaults += 1;
           throw new Error('fixture abandoned-row close failed');
         }
         return realPrepare(sql);
@@ -600,6 +632,8 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
           .rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
 
+        // The refusal came from the failed retirement, not from a fallback refused earlier.
+        expect(injectedFaults).toBe(1);
         expect(spawnSpy).not.toHaveBeenCalled();
         expect(providerSend).not.toHaveBeenCalled();
         expect(notices).not.toHaveBeenCalled();
@@ -628,18 +662,24 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
     // Host admission is opt-in (Linux only) and this suite stubs the provider
     // boundary, so a deferred start is simulated at the session contract: the
     // fresh spawnSession only records the start, and the boundary performs it.
-    function managerWithDeferredFreshStart(boundary: (onReady?: () => void) => Promise<void>) {
+    // One boundary per turn; the record survives a refusal, as in session.ts.
+    function managerWithDeferredFreshStart(...boundaries: Array<(onReady?: () => void) => Promise<void>>) {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       let deferred = false;
       spawnSpy.mockImplementationOnce(async () => { deferred = true; });
       vi.spyOn(session, 'isHostWorkAdmissionStartDeferred').mockImplementation(() => deferred);
       const noticesAtBoundary: number[] = [];
-      vi.spyOn(session, 'sendTurnAtProviderBoundary').mockImplementationOnce(async (_input, onReady) => {
-        noticesAtBoundary.push(notices.mock.calls.length);
-        await boundary(onReady);
-      });
+      const boundarySpy = vi.spyOn(session, 'sendTurnAtProviderBoundary');
+      for (const boundary of boundaries) {
+        boundarySpy.mockImplementationOnce(async (_input, onReady) => {
+          noticesAtBoundary.push(notices.mock.calls.length);
+          await boundary(onReady);
+        });
+      }
       return { session, spawnSpy, noticesAtBoundary };
     }
+    const refuseDeferredStart = async (): Promise<void> => { throw new Error('fixture deferred start refused'); };
+    const admitDeferredStart = async (onReady?: () => void): Promise<void> => { onReady?.(); };
 
     it('a deferred fresh start the provider boundary refuses sends no notice', async () => {
       const { session, spawnSpy, noticesAtBoundary } = managerWithDeferredFreshStart(async () => {
@@ -669,6 +709,93 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { session, noticesAtBoundary } = managerWithDeferredFreshStart(async (onReady) => { onReady?.(); });
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(noticesAtBoundary).toEqual([0]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    it('a deferred fresh start\'s notice goes out before the turn opens its answer evidence', async () => {
+      // In production beforeUserSend is beginDispatchedTurn, which opens the
+      // turn's evidence; a notice sent after it would count as the answer.
+      const order: string[] = [];
+      notices.mockImplementation(() => { order.push('notice'); });
+      const { session } = managerWithDeferredFreshStart(admitDeferredStart);
+      await expect(view.sendTurnToSession(
+        session, JID, 'fixture user turn', JID, undefined, () => { order.push('turn evidence opens'); },
+      )).resolves.toBeUndefined();
+      expect(order).toEqual(['notice', 'turn evidence opens']);
+    });
+
+    it('a deferred fresh start refused at one boundary sends its notice once, at the next turn\'s boundary', async () => {
+      const { session, noticesAtBoundary } = managerWithDeferredFreshStart(refuseDeferredStart, admitDeferredStart);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture deferred start refused');
+      await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
+      expect(noticesAtBoundary).toEqual([0, 0]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    it('a deferred fresh start superseded at one boundary sends its notice once, at the next turn\'s boundary', async () => {
+      let allowed = true;
+      const { session, noticesAtBoundary } = managerWithDeferredFreshStart(async (onReady) => {
+        allowed = false;
+        onReady?.();
+      }, admitDeferredStart);
+      await expect(view.sendTurnToSession(
+        session, JID, 'fixture user turn', JID, undefined, undefined, undefined, () => allowed,
+      )).rejects.toThrow('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+      await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
+      expect(noticesAtBoundary).toEqual([0, 0]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    it('a deferred fresh start cancelled right after its spawn sends its notice once, at the next turn\'s boundary', async () => {
+      const { session, noticesAtBoundary } = managerWithDeferredFreshStart(admitDeferredStart);
+      // The dispatch is superseded as soon as its deferred start is recorded.
+      await expect(view.sendTurnToSession(
+        session, JID, 'fixture user turn', JID, undefined, undefined, undefined,
+        () => !session.isHostWorkAdmissionStartDeferred(),
+      )).resolves.toBeUndefined();
+      expect(notices).not.toHaveBeenCalled();
+      await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
+      expect(noticesAtBoundary).toEqual([0]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    it('a deferred fresh start announced at its boundary is not announced again at the next one', async () => {
+      const { session, noticesAtBoundary } = managerWithDeferredFreshStart(admitDeferredStart, admitDeferredStart);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+      await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
+      expect(noticesAtBoundary).toEqual([0, 1]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    it('a held notice waits past a scheduled turn for the next user turn', async () => {
+      const { session } = managerWithDeferredFreshStart(refuseDeferredStart, admitDeferredStart, admitDeferredStart);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture deferred start refused');
+      await expect(view.sendTurnToSession(
+        session, JID, 'fixture scheduled turn', JID, undefined, undefined, undefined, undefined, undefined, undefined,
+        'scheduled-agent-job',
+      )).resolves.toBeUndefined();
+      expect(notices).not.toHaveBeenCalled();
+      await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    it('a generation reset, as /new does, drops a held notice', async () => {
+      const { session } = managerWithDeferredFreshStart(refuseDeferredStart, admitDeferredStart);
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture deferred start refused');
+      await (runtime as unknown as {
+        resetOwnedPerChatSession(mapKey: string, chatJid: string, s: SessionManager): Promise<void>;
+      }).resetOwnedPerChatSession(JID, JID, session);
+      await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
+      expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('an immediate fresh start announces once even when its provider boundary runs', async () => {
+      const { session } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
+      vi.spyOn(session, 'sendTurnAtProviderBoundary').mockImplementationOnce(async (_input, onReady) => { onReady?.(); });
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
     });
 
