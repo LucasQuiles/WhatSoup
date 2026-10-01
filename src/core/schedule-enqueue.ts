@@ -5,6 +5,7 @@ import type { OutboundMedia } from './types.ts';
 import { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 import { parseCron } from './cron.ts';
 import { EXTENSION_MEDIA_MAP } from './media-mime.ts';
+import { assertScheduledPayloadWritable } from './scheduled-payload.ts';
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 
@@ -151,11 +152,14 @@ export function enqueueScheduledMessage(
   }
 
   const { contentType, payload, mediaBlob } = buildScheduledPayload(params, opts.allowedRoot);
+  const payloadJson = JSON.stringify(payload);
+  // A10: refuse anything the scheduler could never send before a due row exists.
+  assertScheduledPayloadWritable(contentType, payloadJson, mediaBlob);
   const nextRunAt = params.recurrence ? params.scheduled_at : null;
   const result = db.raw.prepare(
     `INSERT INTO scheduled_messages (chat_jid, chat_name, content_type, payload, scheduled_at, recurrence, timezone, next_run_at, status, media_blob)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-  ).run(params.chatJid, params.chatName ?? null, contentType, JSON.stringify(payload), params.scheduled_at, params.recurrence ?? null, params.timezone ?? null, nextRunAt, mediaBlob);
+  ).run(params.chatJid, params.chatName ?? null, contentType, payloadJson, params.scheduled_at, params.recurrence ?? null, params.timezone ?? null, nextRunAt, mediaBlob);
 
   return {
     id: Number(result.lastInsertRowid),
