@@ -83,21 +83,21 @@ describe('Vitest credential isolation', () => {
         "expect({ credential, fallback }).toEqual({ credential: null, fallback: 'explicit-environment-fixture' });",
         "const command = platform === 'darwin' ? 'security' : 'secret-tool';",
         "const read = platform === 'darwin' ? 'find-generic-password' : 'lookup';",
-        // The last stderr line is the message: a shell start-up warning before it
-        // is outside the contract.
-        "const message = result => (result.stderr ?? '').split('\\n').at(-2);",
+        // The last stderr line is the message, terminated or not: a shell start-up
+        // warning before it is outside the contract. Empty stderr is no message.
+        "const message = result => { const text = result.stderr ?? ''; return text === '' ? undefined : text.replace(/\\n$/, '').split('\\n').at(-1); };",
         // A grandchild that inherits PATH reads through the shim. On macOS it sees
         // a missing item, as the real tool reports one; on Linux an empty read.
         `const inherited = spawnSync(process.execPath, ['-e', 'const read = require("node:child_process").spawnSync(process.argv[1], process.argv.slice(2), { encoding: "utf8" }); process.stdout.write(JSON.stringify({ status: read.status, stdout: read.stdout, stderr: read.stderr }))', command, read], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'expect({ error: inherited.error, status: inherited.status }, inherited.stderr).toEqual({ error: undefined, status: 0 });',
         'const inheritedRead = JSON.parse(inherited.stdout);',
         `expect({ status: inheritedRead.status, stdout: inheritedRead.stdout, message: message(inheritedRead) }).toEqual(platform === 'darwin' ? { status: 44, stdout: '', message: ${JSON.stringify(NOT_FOUND)} } : { status: 0, stdout: '', message: undefined });`,
-        // The discarded-byte count witnesses the drain, so it is asserted first.
+        // The count witnesses the drain, so it comes first; neither output may carry the input.
         "const write = platform === 'darwin' ? 'add-generic-password' : 'store';",
         `const written = spawnSync(command, [write], { input: ${JSON.stringify(WRITE_FIXTURE)}, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'const outcome = JSON.stringify({ write, status: written.status, signal: written.signal, error: written.error?.code ?? null });',
         `expect(message(written), outcome).toBe(${JSON.stringify(`${REJECTION} (discarded ${Buffer.byteLength(WRITE_FIXTURE)} bytes of stdin)`)});`,
-        'expect({ error: written.error, status: written.status }, outcome).toEqual({ error: undefined, status: 1 });',
+        `expect({ error: written.error, status: written.status, stdout: written.stdout, echoed: (written.stderr ?? '').includes(${JSON.stringify(WRITE_FIXTURE.split('\n')[0])}) }, outcome).toEqual({ error: undefined, status: 1, stdout: '', echoed: false });`,
         // A regular file as stdin shares its offset with the parent, so what the
         // parent can still read afterwards is what the command left unread.
         'const withFileStdin = operation => {',
@@ -107,24 +107,24 @@ describe('Vitest credential isolation', () => {
         'const chunk = Buffer.alloc(65_536);',
         'let unread = 0;',
         'for (let bytes = readSync(fd, chunk, 0, chunk.length, null); bytes > 0; bytes = readSync(fd, chunk, 0, chunk.length, null)) unread += bytes;',
-        'return { operation, error: result.error?.code ?? null, status: result.status, signal: result.signal, message: message(result), unread };',
+        "return { operation, error: result.error?.code ?? null, status: result.status, signal: result.signal, stdout: result.stdout, echoed: /x{64}/.test(result.stderr ?? ''), message: message(result), unread };",
         '} finally { closeSync(fd); }',
         '};',
         // A write reads all of a large input.
-        `expect(withFileStdin(write)).toEqual({ operation: write, error: null, status: 1, signal: null, message: ${JSON.stringify(`${REJECTION} (discarded ${STDIN_FILE_BYTES} bytes of stdin)`)}, unread: 0 });`,
+        `expect(withFileStdin(write)).toEqual({ operation: write, error: null, status: 1, signal: null, stdout: '', echoed: false, message: ${JSON.stringify(`${REJECTION} (discarded ${STDIN_FILE_BYTES} bytes of stdin)`)}, unread: 0 });`,
         // The other operations take no stdin from real callers and read none of it.
         "for (const operation of platform === 'darwin' ? ['delete-generic-password', 'synthetic-unsupported-operation'] : ['clear', 'synthetic-unsupported-operation']) {",
-        `expect(withFileStdin(operation)).toEqual({ operation, error: null, status: 1, signal: null, message: ${JSON.stringify(REJECTION)}, unread: ${STDIN_FILE_BYTES} });`,
+        `expect(withFileStdin(operation)).toEqual({ operation, error: null, status: 1, signal: null, stdout: '', echoed: false, message: ${JSON.stringify(REJECTION)}, unread: ${STDIN_FILE_BYTES} });`,
         '}',
-        // A write whose stdin is closed has nothing to read and must not try: in
-        // macOS sh the pipe of a command substitution then takes descriptor 0, so
-        // a reader waits on its own pipeline forever. The spawn timeout ends only
-        // the direct child, so the write runs in its own process group, which is
-        // killed here; a group still alive at that point is the failure.
+        // A write whose stdin is closed must not try to read: in macOS sh the pipe
+        // of a command substitution then takes descriptor 0, so a reader waits on
+        // its own pipeline forever. The spawn timeout ends only the direct child,
+        // so `detached` (which spawnSync honours, though its options do not list it)
+        // gives the write its own group, killed here; a group still alive fails.
         `const closed = spawnSync('/bin/sh', ['-c', 'exec "$0" "$1" <&-', command, write], { detached: true, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'let groupAlive = false;',
         "if (closed.pid > 0) { try { process.kill(-closed.pid, 'SIGKILL'); groupAlive = true; } catch (error) { groupAlive = error.code !== 'ESRCH'; } }",
-        `expect({ error: closed.error?.code ?? null, status: closed.status, signal: closed.signal, message: message(closed), groupAlive }).toEqual({ error: null, status: 1, signal: null, message: ${JSON.stringify(`${REJECTION} (discarded 0 bytes of stdin)`)}, groupAlive: false });`,
+        `expect({ error: closed.error?.code ?? null, status: closed.status, signal: closed.signal, stdout: closed.stdout, message: message(closed), groupAlive }).toEqual({ error: null, status: 1, signal: null, stdout: '', message: ${JSON.stringify(`${REJECTION} (discarded 0 bytes of stdin)`)}, groupAlive: false });`,
         '});',
       ].join('\n'));
       const child = spawnSync(process.execPath, [
