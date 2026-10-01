@@ -68,15 +68,23 @@ exit status sees a missing credential as present but empty. `command -v
 secret-tool` succeeds although the probe reports the tool absent. Absolute
 executable paths and tests that replace `PATH` require their own controlled
 fixtures: changing HOME alone does not isolate the OS credential store. The
-`portability.no-hardcoded-platform-binaries` guard rejects a quoted string
-that begins with `/usr/bin/security` or `/usr/bin/secret-tool` (single quotes,
-double quotes or backticks), in `.ts`, `.py` and `.sh` files under `src`,
-`scripts`, `deploy/scripts` and `tools/agent-runtime-probes`, outside its
-allowlisted paths. Nothing outside those four roots is scanned: under `deploy`
-only `deploy/scripts` is, so top-level `deploy/`, `deploy/lib`, `deploy/hooks`
-and `tests/` are not. It also skips `.mjs` and extensionless files, and it
-does not match a path that is not at the start of a quoted string, an unquoted
-path in a shell script, or a path outside `/usr/bin`. The credential-isolation
+`portability.no-hardcoded-platform-binaries` guard matches a line that holds
+a quote character (single, double or backtick) directly followed by
+`/usr/bin/security` or `/usr/bin/secret-tool`. The match is a substring test
+on each line and does not parse strings: a comment matches, a quote character
+inside another string matches, and so does a longer path that begins with
+either one. It reads `.ts`, `.py` and `.sh` files under `src`, `scripts`,
+`deploy/scripts` and `tools/agent-runtime-probes`, outside its allowlisted
+paths and outside any `node_modules`, `.git` or `dist` directory. A new match
+fails the guard; a match whose file and pattern are already in the ratchet
+baseline (`.claude/fitness/platform-baseline.json`) passes, and so does a
+further occurrence of that pattern in that file. On 2026-10-01 the baseline
+held no entry for either credential command. Nothing outside those four roots
+is scanned: under `deploy` only `deploy/scripts` is, so top-level `deploy/`,
+`deploy/lib`, `deploy/hooks` and `tests/` are not. It also skips `.mjs` and
+extensionless files, and it does not match a path with no quote character
+directly before it (an unquoted path in a shell script, or a path later in a
+string) or a path outside `/usr/bin`. The credential-isolation
 regression runs real Vitest against decoy stores, checks the selected backend,
 resolver fallback and child-process reads, and verifies write and delete
 rejection; a sibling test pins the `PATH` order and the cleared
