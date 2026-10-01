@@ -10296,8 +10296,8 @@ export class AgentRuntime implements Runtime {
     error: unknown,
   ): Promise<void> {
     if (!await this.runtimeTurnCoordinator.claimFailedRuntimeTurnContinuation(context)) return;
-    // The claim can wait for the primary result handler, and a rekey can land
-    // in that wait: read the live key only after it.
+    // The claim may wait for the result handler's consume (immediate in
+    // production today); read the live key only after it.
     const mapKey = args.scopeRef?.value ?? args.mapKey;
     const queue = mapKey === undefined
       ? this.getActiveQueue()
