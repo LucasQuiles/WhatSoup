@@ -244,7 +244,7 @@ whatsoup_run_bounded() {
         rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog"
         rmdir "$control_directory" 2>/dev/null
       fi
-      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file" "$outcome_file"
+      rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file" "$deadline_file.pending" "$outcome_file"
       rm -f "$outcome_file.result" "$outcome_file.deadline-outer"
     }
 
@@ -345,7 +345,11 @@ whatsoup_run_bounded() {
         IFS= read -r start < "$directory/watchdog" || exit 2
         [ "$start" = run ] || exit 2
         sleep "$budget" || exit 2
-        ( umask 077; set -C; builtin printf '%s\n' "$control_token" > "$deadline_file" ) || exit 2
+        # Publish a complete token by exclusive link, so a watchdog killed mid-write
+        # never leaves a torn marker. Unlike rename, link never replaces a path.
+        ( umask 077; set -C; builtin printf '%s\n' "$control_token" > "$deadline_file.pending" ) || exit 2
+        command -p link "$deadline_file.pending" "$deadline_file" 2>/dev/null || exit 2
+        rm -f "$deadline_file.pending"
         kill -TERM -- "-$cmd_group" 2>/dev/null
         sleep "$grace" || exit 2
         kill -9 -- "-$cmd_group" 2>/dev/null
@@ -417,6 +421,9 @@ whatsoup_run_bounded() {
         [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null
       }
       _bounded_guard_exit() {
+        # Derive the report from the durable claim, not the status set after
+        # it, so a TERM between a won claim and that status still reports 124.
+        if [ "$guard_status" -eq 0 ] && _bounded_read_outcome && [ "$outcome_event" = deadline ]; then guard_status=124; fi
         _bounded_guard_cleanup
         trap - EXIT
         exit "$guard_status"
@@ -461,16 +468,17 @@ whatsoup_run_bounded() {
         _bounded_guard_protocol_failure
       fi
       local protocol_failure=0 authorization_state=1 command_authorized=0 watchdog_authorized=0 outcome_claim_rc=0
-      guard_status=124
+      # Report the deadline only once it owns the outcome. A TERM before the
+      # claim follows a worker that already returned its own authenticated view.
       _bounded_claim_outcome deadline-outer
       outcome_claim_rc=$?
       case "$outcome_claim_rc" in
-        0) ;;
+        0) guard_status=124 ;;
         1)
           _bounded_read_outcome || _bounded_guard_protocol_failure
           case "$outcome_event" in
             result) guard_status=0 ;;
-            deadline) ;;
+            deadline) guard_status=124 ;;
             *) _bounded_guard_protocol_failure ;;
           esac
           ;;

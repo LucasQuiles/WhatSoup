@@ -196,6 +196,8 @@ describe('HealthPoller — branch coverage supplement #2', () => {
         'weak_signal_inside_settle_grace',
         'weak_signal_waiting_for_persistence',
         'weak_signal_persisted',
+        'weak_signal_transient_disconnect',
+        'weak_signal_correlated_hold',
       ]);
       expect(LOGGED_OUT_CONFIRMATION_CONTRACT.failureCodes).toEqual([
         'WA_AUTH_BOND_SERVER_REVOKED',

@@ -457,6 +457,19 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/
 
 The diagnostic examples in this runbook pass that header.
 
+### Health invariants block
+
+The diagnostic body (never the public envelope) carries
+`health_invariants: { "schema": "whatsoup.health-invariants.v1", "ids": [...] }`.
+The ids are compile-time constants from `src/core/health-invariants.ts` naming
+the invariants the loaded code implements, for example
+`turn_capability.stale_evidence_degrades` (#2446). They are not runtime state.
+A release that predates the block does not emit it. `release:activate --apply`
+classifies the block against its own floor and records a report-only verdict;
+see [release-deployment.md](runbooks/release-deployment.md#health-invariants-verdict-report-only-2481).
+The top-level `schema_version` is unchanged and still appears only on the
+public envelope.
+
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
 - `POST /send` — send a text message to a chat
@@ -1055,6 +1068,22 @@ non-Baileys transport; consumers keep the old conservative rule for it (any
 in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
 `conflict_inspected:`), whose title and `confidence` say whether removal was
 confirmed.
+
+**Reconnecting, not logged out (#3722).** Beside `disconnect_decision`, the same
+connection block carries `reconnect_reset`: `{ reason, at }` when the transport
+last reset its reconnect state, with `reason` one of the following:
+
+| `reconnect_reset.reason` | Written when |
+|---|---|
+| `exhaustion_cycle_retry` | The transport forced a fresh connect after an exhausted reconnect cycle. |
+| `graceful_reconnect_keepalive_failed` | A keepalive failure triggered a graceful reconnect. |
+| `graceful_reconnect_connection_exhausted` | Recognised by the poller, but no current transport path writes it: only the keepalive path calls the graceful reconnect. |
+
+It is `null` at process start, after every successful open, and while connected;
+the key is absent on transports that do not report it. With a reason set,
+`reconnect_phase: backoff` and zero `reconnect_attempts` mean a fresh reconnect,
+not a logout. The fleet poller holds its weak logged-out signal on that basis
+for at most one reconnect cycle (6 minutes), then pages as before.
 
 **If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
@@ -2246,10 +2275,19 @@ different status (`closed_differently`). A rerun on a row already closed as its 
 When a close applies to a record with a selected delivery op, the same transaction also marks that op
 `is_terminal = 1`, as live finalization does.
 
-Every invocation, including a dry run and a refusal, appends one line to the audit receipt
-`turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that file is the only
-thing a dry run writes. Output and receipts carry only the inbound seq, record id, disposition, statuses
-and reason codes, never chat JIDs, conversation keys or message ids.
+Every evaluated dry run and apply, including a refusal and an already-closed rerun, appends one line to
+the audit receipt `turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that
+file is the only thing a dry run writes. An invocation that stops before the row is evaluated (an argument
+error, or a database that is missing or cannot be opened or preflighted) exits `1` without a receipt. An
+`--apply` that throws while opening, writing or committing its transaction rolls back and appends an
+apply-mode receipt with outcome `failed` and reason `write_transaction_error`, then exits `1` with the
+original error. If that append also fails, stderr reports both errors. A failure to close the database
+connection after the commit is reported on stderr and does not turn the committed close into a failure. If
+the audit file itself cannot be appended, a dry run, refusal or already-closed rerun exits `1` with that
+error and leaves no receipt (nothing was written to the database); after a committed close it exits `3`,
+below. Output and
+receipts carry only the inbound seq, record id, disposition, statuses and reason codes, never chat JIDs,
+conversation keys or message ids.
 
 Exit codes: `0` closed, previewed, or already closed as the record implies; `1` refused or failed with
 nothing applied; `3` the close WAS applied and committed (stdout carries `applied: true` and the closed
@@ -2259,6 +2297,140 @@ Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are a
 parked behind `recovery_pending_operator_catchup` disposition links (for example synthetic scheduled-job
 inbounds reclaimed by crash recovery). Some such links have no catch-up target and currently cannot be
 closed by any tool.
+
+#### Settle an orphan recovery transfer
+
+An orphan transfer is a `turn_terminal_records` row with disposition `transferred_to_recovery_owner` and
+no `turn_recovery_jobs` row. Live finalization writes both in one transaction, so current finalization
+cannot produce one. Where a given orphan came from is not established in general. Retention is one known
+generator of a different shape: it deletes an aged `completed` job whose selected op is `echoed`,
+`failed_permanent` or `quarantined`, then keeps the terminal record when a delivery corroboration or
+disposition link still references it. Preventing that is tracked separately, and this command does not
+admit that shape. Nothing repairs an orphan. Health counts it in `runtime.agent.turnRecoveryOrphanTransfers`,
+`turnRecoveryCorruptLinks` and `turnRecoveryOutstanding`, so `recovery_debt.service_blocking` stays `true`
+with blocking reason `turn_recovery_integrity`, and a new integrity fault cannot be told apart from it. An
+orphan blocks admission for its scope only when it is uncorroborated. A corroborated orphan counts in
+`turnRecoveryCorroboratedRetained` instead of `turnRecoveryBlockingOutstanding`.
+
+`turn-recovery-operator settle-orphan-transfer` settles ONE record of the shape it was reviewed for. It
+writes the missing job directly in the settled `exhausted` state, with no replayable content, plus an
+append-only `recovery_plans` row (`origin = 'operator'`, plan ID `turn-recovery-orphan-settle:v1:<terminal
+id>`, your evidence reference in `evidence_ref`). The job's `replay_safety_proof_id` is that plan ID. The
+terminal record is never modified or deleted. The new job's foreign key keeps it, its source inbound and its
+selected delivery op as evidence.
+
+Admission is an allowlist. The record is admitted only when all of these hold:
+
+- no recovery job is linked to it;
+- its selected delivery op carries the record's own conversation, destination and source seq, and its
+  source inbound (found by that seq) carries the record's conversation and destination, so the written
+  job links to them validly;
+- its selected delivery op is `maybe_sent`, has `is_terminal = 1` and has a NULL `wa_message_id`, so no echo
+  can ever be matched to it. An empty-string `wa_message_id` counts as a message id, because echo matching
+  compares the exact value;
+- the record passes the valid delivery-corroboration predicate that health uses. The database then keeps
+  the selected op immutable, so its status cannot change after the settle;
+- its source inbound exists and is `complete` or `failed`, and is not `complete` with `terminal_reason =
+  'response_echoed'`. That is the only source state from which echo settlement could complete the job;
+- no open `inbound_disposition_links` row references its source inbound seq. Open means a
+  `recovery_pending_operator_catchup` row with no `superseded_by_operator_catchup` row for the same inbound
+  seq and recovery plan, the predicate of the supervisor's `open_recoveries` count. An open link is a catch-up
+  obligation, and a settle forbids replay.
+
+```bash
+# 1. List orphan transfers (read-only; prints terminal record ids).
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB"
+
+# 2. Dry run for one record (read-only, never migrates). Prints the delivery kind, the op's status,
+#    terminal flag and message-id presence, the source inbound's status and terminal reason, whether a
+#    later echo corroborates delivery, the recovery owner the job will name (logical turn id, manager
+#    id, generation), and a digest.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF
+
+# 3. Back up the database, then apply with the digest the dry run printed.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF --apply --expect-digest DIGEST
+```
+
+The command does not take the backup itself. Take one before step 3.
+
+`--evidence-ref` is required and names the operator investigation record (8-120 characters of
+`A-Z a-z 0-9 _ . : / -`, e.g. a ticket or incident ref) that establishes the transfer will never be
+replayed. The digest (version 3) binds the apply to the dry run in the same way as `close-inbound`. It
+covers the database file identity; every value the settled job copies from the terminal record and its
+source inbound (record id, scope, conversation key, delivery JID, source seq, source logical turn id,
+manager id and generation, source message id, the recovery owner's logical turn id, manager id and
+generation, and the group flag derived from the delivery JID); every admission input printed in step 2;
+and the evidence reference. Step 2 prints the recovery owner but not the conversation key, JID or message
+id; those are hashed into the digest only. For an admitted record the database already freezes every
+copied terminal-record value, because trigger `corroborated_terminal_proof_immutable` blocks changes to a
+record that has a corroboration row. Nothing freezes the source inbound's message id while no job exists,
+so the digest is what stops an apply from writing a job whose values differ from the dry run's.
+`--apply` refuses `digest_mismatch` or `schema_not_current`, and re-proves eligibility and recomputes the
+digest inside its write transaction.
+
+The command refuses and exits `1`, writing nothing, with one of these reasons:
+
+| Reason | Meaning |
+|---|---|
+| `terminal_not_found` | No such record. |
+| `not_transferred` | The record is not a recovery transfer. |
+| `recovery_job_exists` | A job is linked: it is not an orphan. |
+| `owner_identity_conflict` | The record names its own source as recovery owner. |
+| `settlement_conflict` | A settle plan exists without its job. |
+| `delivery_op_missing` | The selected op row is gone. |
+| `delivery_identity_mismatch` | The op's conversation, chat or source inbound seq differs from the record's. |
+| `delivery_status_not_admitted` | The op is not `maybe_sent`. `pending`, `sending` and `submitted` are live queue work; `echoed` and the terminal failures are outside the reviewed shape. |
+| `delivery_not_terminal` | The op is `maybe_sent` with `is_terminal = 0`. |
+| `delivery_has_wa_message_id` | The op carries a provider message id (an empty string counts), so a late echo could still match it. |
+| `uncorroborated` | The record fails the valid delivery-corroboration predicate. |
+| `source_inbound_missing` | The source inbound row is gone. |
+| `source_inbound_identity_mismatch` | The source inbound's conversation or chat differs from the record's conversation or delivery JID. The settled job would be a broken link. |
+| `source_inbound_open` | The source inbound is still `pending`, `processing` or `turn_done`. |
+| `source_inbound_echo_settled` | The source inbound is `complete` with `response_echoed`. |
+| `open_disposition_link` | An open `recovery_pending_operator_catchup` link references the source inbound seq. |
+| `digest_mismatch` | `--apply` only: the digest differs from `--expect-digest`, before or inside the write transaction. |
+| `schema_not_current` | `--apply` only: the database is not at the current schema. |
+| `state_changed` | `--apply` only, inside the write transaction: the recheck returned a verdict the command does not handle. The current evaluator never returns one; this is a fail-closed default. |
+
+A refusal means the record needs investigation, not a different command. A rerun on a record it already
+settled prints `alreadySettled: true` and exits `0`. So does an `--apply` whose recheck inside the write
+transaction finds the record already settled by this command, which happens when a concurrent apply
+committed first; it writes nothing. Receipts and exit codes (`0`, `1`, `3`) follow `close-inbound`,
+including the `failed` receipt for an apply that throws inside its write transaction. The list mode (no
+`--terminal`) evaluates no record and appends no receipt. Output carries ids,
+kinds, statuses and reason codes only.
+
+After the settle, `turn-recovery-operator show --job <job id>` prints an `operatorSettlement` block (plan ID,
+origin, actor, plan creation time) found by joining `recovery_plans` on the job's proof ID. It prints that
+block only when the plan exists with origin `operator` and the CLI actor, and the job is `exhausted` and
+assigned to the CLI actor. A job whose proof ID carries the settle prefix without that full shape gets a
+`settlePlan` block with the same facts and no settlement label. The block is the only thing that tells this
+row apart from real attempt exhaustion. `list` still shows `blocked_unsafe` jobs only.
+
+The reply-guarantee observer (`deploy/scripts/reply-guarantee-observer.py`) counts every `blocked_unsafe`
+or `exhausted` job in `blockedOrExhaustedRecoveryJobs`. Retention never prunes `exhausted` jobs, so a settle
+raises that count by one permanently, and the observer cannot tell the row from real exhaustion. Even once
+every other debt is resolved, that row alone keeps the observer's recovery-debt warning latch open. The observer alerts on latch flips, not on
+count changes, so no new alert fires when the latch is already open. The critical active-breach latch is not
+affected: the observer counts a recovery job there only while its source inbound is open, and the admission
+rule requires a terminal source inbound.
+
+Verify after apply:
+
+- Authenticated `GET /health` (`runtime.agent` gauges):
+  - `turnRecoveryOrphanTransfers` drops by one; `turnRecoveryCorruptLinks`, `turnRecoveryOutstanding` and
+    `turnRecoveryCorroboratedRetained` stop counting it.
+  - `turnRecoveryExhausted` and `turnRecoveryRetainedTerminal` rise by one (retained reason
+    `turn_recovery_terminal`, not blocking).
+  - `recovery_debt.service_blocking` is `false` unless another blocking reason remains. If
+    `turn_recovery_integrity` is still listed, another orphan, corrupt link or echo conflict exists:
+    re-run step 1.
+- `show --job <job id>` reports `operatorSettlement` with `planFound: true` and state `exhausted`.
+- The reply-guarantee observer's `blockedOrExhaustedRecoveryJobs` is one higher than before the apply,
+  and its state is not `active-breach` because of this record.
+- After the next restart, `show` still reports state `exhausted`.
 
 ### 7.7 Useful SQL Queries
 
@@ -2554,14 +2726,78 @@ machine-readable disposition registry for sources that participate in fault clas
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
-| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair |
-| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals, and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
+| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
+| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals other than operator `/stop` cancellations (`operator_cancelled`), and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
 | `reply-guarantee-observer` | `deploy/scripts/reply-guarantee-observer.py` | Probe authority, target-user/GUI context, canonical data root, schema compatibility, and read-only SQLite access |
 | `release-drift` | `scripts/live-release-drift-alert.ts` through `scripts/live-release-observers.ts` | Release manifest, artifact tree, and running service provenance |
 | `release-currency` | `scripts/live-release-currency-alert.ts` through `scripts/live-release-observers.ts` | Exact deployed manifest commit and explicitly configured remote ref; differing commits are advisory and never alter runtime health |
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
 | `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |
+
+### Who owns a stale `processing` inbound
+
+`scripts/inbound-ownership-snapshot.ts` (#3560) answers, per row, who owns every inbound that has sat
+in `processing` longer than `--min-age-minutes` (default 15, the observer's stale threshold). It opens
+the database read-only (`query_only`, never `immutable=1`), writes nothing, and prints one
+content-free JSON line: sequences, states, epochs, ages, turn ids and 12-hex chat scope hashes only.
+Capture the provider-execution gate first and pass it in, because the database alone cannot show a
+turn that is executing in the process:
+
+```bash
+HEALTH_JSON=$(mktemp)
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health > "$HEALTH_JSON"
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$HEALTH_JSON"
+# shared/single instances serialize every chat on one queue:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --queue-scope global --provider-execution-json "$HEALTH_JSON"
+# a bare providerExecution object carries no generated_at; date it explicitly:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$PE_JSON" \
+  --provider-captured-at 2026-09-28T07:20:00Z
+```
+
+The full `/health` body carries its own `generated_at`, which dates the capture. Use
+`--provider-captured-at <ISO-8601 instant with zone>` only for a capture without one, such as a
+bare `runtime.agent.providerExecution` object.
+
+Each row is classified:
+
+| Class | Meaning |
+|---|---|
+| `deferred` | A non-terminal `deferred_turn_obligations` row owns it (an exhausted one is `no_owner`). |
+| `queued` | A pending recovery job, the chat's persisted FIFO head (`queued_behind_fifo_head`), another outstanding recovery job for the scope, or the oldest provider-lane waiter owns it. A row queued behind an unowned head reports `healthy: false`. |
+| `executing` | A live recovery claim, or the provider lane is held by a `turn` whose scope hash equals this chat's (FIFO head only; a `probe` hold never counts), according to a fresh capture that no completed checkpoint contradicts. |
+| `no_owner` | Nothing attributable, including a terminal record or finished recovery job left beside an open row. Never healthy. |
+
+Exit `0` means every reported row has a healthy owner, `3` means at least one does not, and `2` is a
+usage, capture or open error. Record the output as evidence. Do not replay, reset a checkpoint or
+restart on its basis alone.
+
+Evidence limits. Read every classification against these:
+
+- **Persisted FIFO proxy, not the TurnQueue.** `queue` is derived from open inbounds per conversation
+  (or globally with `--queue-scope global`) in seq order. The runtime's in-process per-chat TurnQueue
+  (depth, position, active turn) is not readable from outside the process and is not reported.
+- **No lease generation.** The provider gate does not publish its lease generation, so a capture cannot
+  say which hold it saw. Only recovery jobs, terminal records and the checkpoint's completed identity
+  carry a turn id and generation.
+- **`active_turn_id` is dead telemetry.** `checkpoint.activeTurnId` is reported as stored, but current
+  writers only ever store null, so it never names an owner.
+- **The capture is a separate observation.** The health capture and the database read are not
+  simultaneous. The capture time comes from, in order: the body's own top-level `generated_at`;
+  else `--provider-captured-at`; else it is unknown, which counts as stale. `providerCaptureTimeSource`
+  reports which (`payload_generated_at`, `operator_flag`, `unknown`). The file's modification time is
+  never used, because a copied, touched or re-saved file would make an old body look fresh. A
+  `generated_at` that is present but unparseable is unknown; the flag does not override it. If the
+  capture is older than 60 seconds (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the
+  future, or undated, every row reads `providerExecution.evidence: stale` and it attributes nothing
+  (`provider_capture_stale`). Re-capture immediately before running the script.
+- **Unmatched scope reads unowned.** A turn held for a different scope hash (another chat, or the same
+  chat under its `@lid`/`@s.whatsapp.net` alias) is `active_other_scope`: the row is `no_owner`, never
+  `executing`.
+- **Contradiction reads unowned.** If the capture shows a turn for this chat but the chat's
+  `session_checkpoints.completed_inbound_seq` is at or past the row, the held turn cannot be this row's:
+  the row is `no_owner` with `provider_active_contradicts_completed_checkpoint`, never healthy. A
+  terminal record on the row itself takes precedence over any capture (`terminal_record_inbound_open`).
 
 Machine-local probes not present in this repository are an ownership gap, not an implicit
 WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner

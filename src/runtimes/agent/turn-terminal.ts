@@ -27,7 +27,9 @@ export type NonProviderTerminalFailureClass =
   | 'operator_cancelled'
   | 'processor_throw'
   | 'unknown_terminal'
-  | 'provider_stream_corrupt';
+  | 'provider_stream_corrupt'
+  /** #3497: a final-text scheduled turn completed with no answer and no explicit NO_REPLY. */
+  | 'scheduled_answer_missing';
 
 const NON_PROVIDER_TERMINAL_FAILURE_CLASS_PRESENCE: Readonly<
   Record<NonProviderTerminalFailureClass, true>
@@ -37,6 +39,7 @@ const NON_PROVIDER_TERMINAL_FAILURE_CLASS_PRESENCE: Readonly<
   processor_throw: true,
   unknown_terminal: true,
   provider_stream_corrupt: true,
+  scheduled_answer_missing: true,
 };
 
 export const NON_PROVIDER_TERMINAL_FAILURE_CLASSES = Object.freeze(

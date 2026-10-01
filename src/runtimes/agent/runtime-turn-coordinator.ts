@@ -139,6 +139,8 @@ export interface RuntimeTurnQueueTeardown {
   readonly queue: TurnQueue | null;
   readonly receipt: TurnQueueTeardownReceipt | null;
   disposition: 'interruption' | 'kill' | null;
+  /** Set when an operator-cancellation teardown succeeded (#3716). */
+  operatorCancelled?: OperatorCancelledTurnCounts;
 }
 
 interface RuntimeTurnQueueTeardownState {
@@ -149,6 +151,33 @@ interface RuntimeTurnQueueTeardownState {
   readonly lifecycle: Promise<void>;
   readonly resolveLifecycle: () => void;
   retirement: Promise<void> | null;
+}
+
+/** Turns one teardown durably finalized as an operator cancellation (#3716). */
+export interface OperatorCancelledTurnCounts {
+  readonly active: number;
+  readonly queued: number;
+}
+
+/**
+ * Counts only fulfilled terminal results whose durable attempt is
+ * operator_cancelled. A sweep reclaim or any other non-terminal result was not
+ * cancelled by this teardown, so it is not reported as dropped.
+ */
+export function countOperatorCancelledTurns(
+  settled: readonly PromiseSettledResult<FinalizeRuntimeTurnResult>[],
+  queuedIndexes: ReadonlySet<number>,
+): OperatorCancelledTurnCounts {
+  let active = 0;
+  let queued = 0;
+  settled.forEach((item, index) => {
+    if (item.status !== 'fulfilled' || item.value.kind !== 'terminal') return;
+    const outcome = item.value.terminal.attemptOutcome;
+    if (outcome.kind !== 'failed' || outcome.class !== 'operator_cancelled') return;
+    if (queuedIndexes.has(index)) queued += 1;
+    else active += 1;
+  });
+  return { active, queued };
 }
 
 // #2398: scopes whose finalization escaped without a durable retry owner.
@@ -1504,6 +1533,14 @@ async terminalizeGlobalTurnForReset(
     state.rejectTerminalization(failure);
     throw failure;
   }
+  if (operatorCancellation) {
+    transaction.operatorCancelled = countOperatorCancelledTurns(
+      settled,
+      new Set(detachedFinalizations.flatMap((detached) => (
+        detached.settledIndex === null ? [] : [detached.settledIndex]
+      ))),
+    );
+  }
   state.resolveTerminalization(transaction);
   return transaction;
 }
@@ -1705,6 +1742,14 @@ async terminalizePerChatTurnQueueForKill(
     }
     state.rejectTerminalization(failure);
     throw failure;
+  }
+  if (operatorCancellation) {
+    transaction.operatorCancelled = countOperatorCancelledTurns(
+      settled,
+      new Set(detachedFinalizations.flatMap((detached) => (
+        detached.settledIndex === null ? [] : [detached.settledIndex]
+      ))),
+    );
   }
   state.resolveTerminalization(transaction);
   return transaction;

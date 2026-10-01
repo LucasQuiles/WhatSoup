@@ -25,9 +25,11 @@ def _load_module():
     return module
 
 
-def _create_schema(db: sqlite3.Connection) -> None:
+def _create_schema(db: sqlite3.Connection, *, attempt_failure_class: bool = True) -> None:
+    # A NULL class is the fixture default; the existing debt rows rely on it.
+    failure_class_column = "attempt_failure_class TEXT," if attempt_failure_class else ""
     db.executescript(
-        """
+        f"""
         CREATE TABLE inbound_events (
           seq INTEGER PRIMARY KEY,
           message_id TEXT NOT NULL,
@@ -49,6 +51,7 @@ def _create_schema(db: sqlite3.Connection) -> None:
           inbound_disposition TEXT NOT NULL,
           delivery_kind TEXT NOT NULL,
           delivery_op_id INTEGER,
+          {failure_class_column}
           reply_guarantee_disarmed INTEGER NOT NULL
         );
         CREATE TABLE outbound_ops (
@@ -272,6 +275,86 @@ def test_missing_schema_is_inconclusive_not_clear(tmp_path: Path) -> None:
     assert result["state"] == "inconclusive"
     assert result["healthImpact"] == "unknown"
     assert "schema" in result["reason"]
+
+
+def test_missing_attempt_failure_class_is_named_inconclusive(tmp_path: Path) -> None:
+    mod = _load_module()
+    path = tmp_path / "bot.db"
+    with sqlite3.connect(path) as db:
+        _create_schema(db, attempt_failure_class=False)
+
+    result = mod.observe_database(
+        path,
+        instance="agent-a",
+        now=datetime(2026, 8, 15, 22, 0, tzinfo=UTC),
+        stale_seconds=900,
+    )
+
+    assert result["state"] == "inconclusive"
+    assert "turn_terminal_records(attempt_failure_class)" in result["reason"]
+
+
+def _insert_failed_terminal(
+    db: sqlite3.Connection,
+    *,
+    seq: int,
+    failure_class: str,
+    echoed_op: bool,
+) -> None:
+    _insert_inbound(db, seq=seq, received_at="2026-08-01 00:00:00", status="failed", failure_class=failure_class)
+    db.execute(
+        """
+        INSERT INTO turn_terminal_records (
+          id, inbound_seq, inbound_seq_key, inbound_disposition,
+          delivery_kind, delivery_op_id, reply_guarantee_disarmed, attempt_failure_class
+        ) VALUES (?, ?, ?, 'failed_terminal', 'none', NULL, 0, ?)
+        """,
+        (100 + seq, seq, seq, failure_class),
+    )
+    if echoed_op:
+        db.execute(
+            """
+            INSERT INTO outbound_ops (
+              id, source_inbound_seq, status, is_terminal, replay_policy
+            ) VALUES (?, ?, 'echoed', 0, 'unsafe')
+            """,
+            (200 + seq, seq),
+        )
+
+
+def test_operator_stop_is_not_recovery_debt(db_path: Path) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_failed_terminal(db, seq=1, failure_class="operator_cancelled", echoed_op=True)
+
+    result = mod.observe_database(
+        db_path,
+        instance="agent-a",
+        now=datetime(2026, 8, 15, 22, 0, tzinfo=UTC),
+        stale_seconds=900,
+    )
+
+    assert result["counts"]["failedTerminalDebt"] == 0
+    assert result["counts"]["failedTerminalWithEchoEvidence"] == 0
+    assert result["state"] == "clear"
+
+
+def test_operator_stop_exclusion_keeps_a_runtime_fault_as_debt(db_path: Path) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_failed_terminal(db, seq=1, failure_class="operator_cancelled", echoed_op=True)
+        _insert_failed_terminal(db, seq=2, failure_class="crash", echoed_op=True)
+
+    result = mod.observe_database(
+        db_path,
+        instance="agent-a",
+        now=datetime(2026, 8, 15, 22, 0, tzinfo=UTC),
+        stale_seconds=900,
+    )
+
+    assert result["counts"]["failedTerminalDebt"] == 1
+    assert result["counts"]["failedTerminalWithEchoEvidence"] == 1
+    assert result["state"] == "recovery-debt"
 
 
 def test_missing_instance_root_warns_about_user_and_gui_context(tmp_path: Path) -> None:

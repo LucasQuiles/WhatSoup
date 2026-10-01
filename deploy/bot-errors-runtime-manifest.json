@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "d5dd41930375252348a5e1c0329df6848ec24926cc10f00f22b3a2c07f3cd41e",
+      "sha256": "01d650a03f22300f80c1f5c2fefcace989c47864f960c4a9f2b60f283e8f1ad0",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -763,7 +763,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "679c3c23e5ac3f3975b9639512e440a0f00f8c5c19de7b2b13d3acd9b3d5cbda",
+      "sha256": "cdd222ff548d865352c46ea9cef5039e24f40c3609100ece385d8ff48e56f0ca",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -816,7 +816,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "201a9966b342f61a62a586e6954e0ef78a1a67f336954eb8223fe1a61a3f11fd",
+      "sha256": "a64179e47e9199038a086d4ce92b3d578721c04551eed2aaaea34b45428b520e",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
@@ -850,7 +850,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "b18b9f0ee8103553cea3f6e926f1af4ce6764cbb821e352cd6f57f5a9c62db2b",
+      "sha256": "b0c0d2ce6068887cbbc4c09e4b90ee6e540648c21599ec6fadb46bc5aab9d21e",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

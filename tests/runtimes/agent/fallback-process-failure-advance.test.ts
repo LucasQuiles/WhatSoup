@@ -526,6 +526,86 @@ describe('unjournaled fallback replay failure', () => {
   });
 });
 
+// ─── #3497: scheduled turns post no fallback chat text ────────────────────────
+//
+// The failure is still acted on and alerted; only the report chat's text is
+// dropped. The scheduled purpose is what the runtime records at dispatch.
+
+function markScheduled(runtime: AgentRuntime, mapKey: string): void {
+  (runtime as unknown as { pendingTurnPurpose: Map<string, string> })
+    .pendingTurnPurpose.set(mapKey, 'scheduled-agent-job');
+}
+
+describe('scheduled turn fallback notices (#3497)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T20:00:00Z'));
+    vi.mocked(emitAlert).mockClear();
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a failed unjournaled replay of a scheduled turn posts nothing and still alerts', async () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+    ]);
+    const rv = v(runtime);
+    const activation = rv.activateProviderFallback(null, 'usage-limit');
+    expect(activation).not.toBeNull();
+    const queue = makeFakeQueue(CHAT);
+    rv.chatQueues.set(CHAT, queue);
+    rv.pendingTurnText.set(CHAT, 'scheduled job prompt');
+    markScheduled(runtime, CHAT);
+    vi.spyOn(
+      rv as unknown as { replayTurnOnFallback(args: unknown): Promise<void> },
+      'replayTurnOnFallback',
+    ).mockRejectedValue(new Error('admission record incomplete — refusing spawn'));
+    vi.mocked(emitAlert).mockClear();
+
+    expect(rv.scheduleFallbackReplay({
+      activation,
+      chatJid: CHAT,
+      mapKey: CHAT,
+      oldSession: makeFallbackSession(),
+    })).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertsFor('runtime_provider_fallback_replay_failed')).toHaveLength(1);
+    expect(queue.enqueueText).not.toHaveBeenCalled();
+  });
+
+  it('a managed crash that advances the chain on a scheduled turn posts no advance notice and still alerts', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+      { provider: 'opencode-cli', model: 'glm/glm-5.2' },
+    ]);
+    const { rv, owner, queue } = armIncidentShape(runtime);
+    markScheduled(runtime, CHAT);
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+    expect(alertsFor('fallback_provider_failed')).toHaveLength(1);
+    expect(queue.enqueueText).not.toHaveBeenCalled();
+  });
+
+  it('a managed crash with no alternate entry on a scheduled turn posts no notice and still alerts', () => {
+    const runtime = makeRuntime([
+      { provider: 'opencode-cli', model: 'kimi/kimi-k3' },
+    ]);
+    const { rv, owner, queue } = armIncidentShape(runtime);
+    markScheduled(runtime, CHAT);
+
+    rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+    expect(rv.fallbackWindow.activeEntry?.model).toBe('kimi/kimi-k3');
+    expect(alertsFor('fallback_provider_failed')).toHaveLength(1);
+    expect(queue.enqueueText).not.toHaveBeenCalled();
+  });
+});
+
 // ─── Stale-route crash attribution (live 2026-08-15 round 2) ──────────────────
 //
 // Chain entries can share one provider and differ only by model. A session
