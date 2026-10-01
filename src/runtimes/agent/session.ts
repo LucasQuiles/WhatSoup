@@ -4842,13 +4842,16 @@ export class SessionManager {
   /**
    * #3658: forget a generation whose provider stopped but whose durable close
    * failed, before the runtime starts a fresh one in its place. Nothing later
-   * may pair this row or provider session with the new generation. The row
-   * gets one best-effort close to 'ended' while it is still this generation's
-   * active row: the zombie sweep reconciles only 'active' rows, and 'orphaned'
-   * would still read as resumable. The lane and the cleanup-unproven flag are
-   * left alone, since only a fully successful teardown may reset them.
+   * may pair this row or provider session with the new generation. The row is
+   * ended while it is still this generation's active row: the zombie sweep
+   * reconciles only 'active' rows, and the startup sweep's 'orphaned' would
+   * still read as resumable. A row already reconciled or reowned is left as
+   * is. Returns false, keeping the whole identity, when the row could not be
+   * ended: the caller must not start fresh, and the next close retries it.
+   * The lane and the cleanup-unproven flag are left alone, since only a fully
+   * successful teardown may reset them.
    */
-  retireUnclosedGeneration(): void {
+  retireUnclosedGeneration(): boolean {
     const rowId = this.dbRowId;
     const sessionId = this.sessionId ?? this.resumeAttemptId;
     log.warn({
@@ -4862,10 +4865,12 @@ export class SessionManager {
           log.info({ chatJid: this.chatJid, rowId }, 'session: abandoned row already reconciled or reowned — left as is');
         }
       } catch (err) {
-        log.warn({ err, chatJid: this.chatJid, rowId }, 'session: abandoned row could not be ended — left for the startup sweep');
+        log.warn({ err, chatJid: this.chatJid, rowId }, 'session: abandoned row could not be ended — generation kept, turn refused');
+        return false;
       }
     }
     this.clearGenerationIdentity();
+    return true;
   }
 
   private clearGenerationIdentity(): void {

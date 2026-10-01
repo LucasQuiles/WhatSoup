@@ -5747,6 +5747,11 @@ export class AgentRuntime implements Runtime {
 
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
+    // #3658: the close-failure notice, held until its fresh start is admitted.
+    let closeFailedNotice: CheckpointAdoption | null = null;
+    // Read when needed, not here: a spawn can rekey the lane.
+    const isScheduledDispatch = (): boolean => purpose === 'scheduled-agent-job'
+      || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey));
     const wasInactive = !session.getStatus().active;
     if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
       // #3530 successor: a never-started non-sandbox per_chat manager decides
@@ -5777,20 +5782,20 @@ export class AgentRuntime implements Runtime {
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
-      let closeFailedNotice: CheckpointAdoption | null = null;
       try {
         await session.shutdown();
       } catch (err) {
         // #3658: a close that failed only at its durable lifecycle step leaves
         // no provider behind, so the turn takes the #3530 fresh-with-notice
-        // path instead of a silent pre-dispatch rejection. A lazy resume
-        // chosen above is dropped for a fresh spawn: conservative, since the
-        // manager's own close just failed, and the notice says so.
+        // path instead of a silent pre-dispatch rejection, but only once the
+        // abandoned generation is durably retired; otherwise it stays refused.
+        // A lazy resume chosen above is dropped for a fresh spawn:
+        // conservative, since the manager's own close just failed, and the
+        // notice says so. A scheduled turn starts fresh without the notice.
         const fallback = adoptionAfterFailedClose(err, session.getStatus());
-        if (fallback === null) throw err;
-        log.warn({ err, chatJid }, 'previous session close failed — starting fresh with a notice');
-        session.retireUnclosedGeneration();
-        if (adoption.kind !== 'fresh_with_notice') closeFailedNotice = fallback;
+        if (fallback === null || !session.retireUnclosedGeneration()) throw err;
+        log.warn({ err, chatJid }, 'previous session close failed — starting fresh');
+        if (adoption.kind !== 'fresh_with_notice' && !isScheduledDispatch()) closeFailedNotice = fallback;
         adoption = fallback;
       }
       if (dispatchCancelled()) return;
@@ -5803,10 +5808,12 @@ export class AgentRuntime implements Runtime {
         await stopCancelledSpawn();
         return;
       }
-      // Announced only once the fresh spawn is admitted, so a refused spawn
-      // never promises a continuation it cannot deliver.
-      if (closeFailedNotice !== null) {
+      // Announced only once the fresh start is admitted, so a refused start
+      // never promises a continuation it cannot deliver. A deferred
+      // host-admission start is admitted only at the provider boundary.
+      if (closeFailedNotice !== null && !this.hasDeferredHostWorkAdmissionStart(session)) {
         announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
+        closeFailedNotice = null;
       }
       if (effectiveMapKey !== undefined && spawnOwnership !== null) {
         effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
@@ -5941,12 +5948,14 @@ export class AgentRuntime implements Runtime {
       ) {
         this.settleAbandonedRespawn(effectiveMapKey);
       }
+      // #3658: a deferred fresh start is admitted here, past every check above.
+      if (closeFailedNotice !== null) announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
+      closeFailedNotice = null;
     };
     try {
       // #3497: the delivery instructions follow the provider this session runs,
       // and a dispatch never inherits held text from an earlier scheduled turn.
-      const scheduledDispatch = purpose === 'scheduled-agent-job'
-        || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey));
+      const scheduledDispatch = isScheduledDispatch();
       if (systemTurnLease === undefined) this.noteScheduledDispatch(session, effectiveMapKey, scheduledDispatch);
       const providerTurnText = scheduledDispatch
         ? scheduledAgentJobTurnForProvider(text, sessionProviderId(session))
