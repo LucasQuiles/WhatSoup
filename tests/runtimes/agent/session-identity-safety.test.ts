@@ -153,6 +153,121 @@ describe('SessionManager immutable checkpoint identity', () => {
     expect(durability.getSessionCheckpoint('15550142')?.session_status).toBe('active');
   });
 
+  it('retires the attempted resume identity so a resident manager can shut down again (#3658)', async () => {
+    durability.upsertSessionCheckpoint('15550143', {
+      sessionId: 'resume-provider-session',
+      sessionStatus: 'active',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550143@s.whatsapp.net',
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    const state = sm as unknown as MutableSessionState;
+    state.resumeAttemptId = 'resume-provider-session';
+
+    await sm.shutdown(false);
+
+    expect(durability.getSessionCheckpoint('15550143')?.session_status).toBe('ended');
+    expect(state.resumeAttemptId).toBeNull();
+    // The manager stays resident after an intentional end; its next pre-spawn
+    // shutdown must not target the ended checkpoint by the stale identity.
+    await expect(sm.shutdown()).resolves.toBeUndefined();
+    // It owns nothing to close any more, so it must not repaint the ended
+    // checkpoint as resumable either.
+    expect(durability.getSessionCheckpoint('15550143')?.session_status).toBe('ended');
+  });
+
+  it.each([
+    ['an unknown identity leaves a row reowned by another session', null, 'other-generation-session', 'active'],
+    ['a known identity leaves a row reowned by another session', 'abandoned-provider-session', 'other-generation-session', 'active'],
+    ['an unknown identity ends a still session-less row', null, null, 'ended'],
+    ['a known identity ends its own row', 'abandoned-provider-session', 'abandoned-provider-session', 'ended'],
+  ])('retiring an unclosed generation: %s (#3658)', (_label, managerSessionId, rowSessionId, expectedStatus) => {
+    const insert = db.raw.prepare(
+      `INSERT INTO agent_sessions (
+         session_id, claude_pid, started_in_directory, chat_jid, workspace_key,
+         started_at, status, provider
+       ) VALUES (?, 0, '/tmp', '15550146@s.whatsapp.net', '15550146',
+         datetime('now'), 'active', 'claude-cli')`,
+    ).run(rowSessionId);
+    const rowId = Number(insert.lastInsertRowid);
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550146@s.whatsapp.net',
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    const state = sm as unknown as MutableSessionState;
+    state.dbRowId = rowId;
+    state.sessionId = managerSessionId;
+
+    sm.retireUnclosedGeneration();
+    expect(sm.getStatus().sessionId).toBeNull();
+    expect(sm.getDbRowId()).toBeNull();
+
+    expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
+      { status: string }).status).toBe(expectedStatus);
+  });
+
+  it('/new on a never-started manager still ends the chat checkpoint (#3658)', async () => {
+    durability.upsertSessionCheckpoint('15550145', {
+      sessionId: 'previous-process-session',
+      sessionStatus: 'suspended',
+    });
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550145@s.whatsapp.net',
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+
+    await sm.shutdown(false);
+
+    expect(durability.getSessionCheckpoint('15550145')?.session_status).toBe('ended');
+  });
+
+  it('a fresh generation after a failed close closes pre-init without looping (#3658)', async () => {
+    // No init: the managed provider never names its session in this window.
+    vi.spyOn(OpenAIApiProvider.prototype, 'initialize').mockResolvedValue(undefined);
+    vi.spyOn(OpenAIApiProvider.prototype, 'shutdown').mockResolvedValue(undefined);
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: '15550144@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'openai-api',
+    });
+    sm.setDurability(durability);
+    const rowStatus = (rowId: number | null) => (db.raw.prepare(
+      'SELECT status FROM agent_sessions WHERE id = ?',
+    ).get(rowId) as { status: string } | undefined)?.status;
+
+    await sm.spawnSession();
+    // A provider session the stored row does not hold, so the real close fails.
+    (sm as unknown as MutableSessionState).sessionId = 'unmatched-provider-session';
+    await expect(sm.shutdown()).rejects.toThrow('Exact active agent session row could not be closed');
+
+    // The runtime fallback spawns fresh; an eviction or /new lands before init.
+    await sm.spawnSession();
+    const freshRowId = sm.getDbRowId();
+    await expect(sm.shutdown(false)).resolves.toBeUndefined();
+    expect(rowStatus(freshRowId)).toBe('ended');
+    expect(durability.getSessionCheckpoint('15550144')?.session_status).toBe('ended');
+
+    // The next turn's pre-spawn shutdown owns nothing and writes nothing.
+    const version = durability.getSessionCheckpoint('15550144')?.checkpoint_version;
+    await expect(sm.shutdown()).resolves.toBeUndefined();
+    expect(durability.getSessionCheckpoint('15550144')).toMatchObject({
+      session_status: 'ended',
+      checkpoint_version: version,
+    });
+  });
+
   it('orphans only the current conversation checkpoint when a managed provider reports a crash', async () => {
     const providerSessionId = 'managed-provider-session';
     durability.upsertSessionCheckpoint('15550151', {

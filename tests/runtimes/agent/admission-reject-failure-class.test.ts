@@ -104,6 +104,37 @@ describe('admission_rejected failure-class subclassing (#1750)', () => {
     expect(shed).not.toBe('unknown');
   });
 
+  it('leaves an ended checkpoint ended when an undispatched turn finalizes without a session (#3658)', () => {
+    durability.upsertSessionCheckpoint(IDENTITY.conversationKey, {
+      sessionId: 'ended-provider-session',
+      sessionStatus: 'ended',
+    });
+    const inboundSeq = durability.journalInbound(
+      'message-ended-checkpoint',
+      IDENTITY.conversationKey,
+      IDENTITY.deliveryJid,
+      'agent',
+    );
+
+    // The undispatched finalization has no SessionManager, so its checkpoint
+    // bookkeeping carries no session status: only the cleared turn and seq.
+    durability.finalizeTurnTerminal({
+      ...toTurnFinalizationPersistence(rejected(inboundSeq, 'pre_dispatch_error')),
+      bookkeeping: {
+        checkpoint: {
+          conversationKey: IDENTITY.conversationKey,
+          fields: { activeTurnId: null, lastInboundSeq: inboundSeq },
+        },
+      },
+    });
+
+    expect(durability.getSessionCheckpoint(IDENTITY.conversationKey)).toMatchObject({
+      session_id: 'ended-provider-session',
+      session_status: 'ended',
+      last_inbound_seq: inboundSeq,
+    });
+  });
+
   it('keeps a class-less admission rejection backward-compatible as unknown', () => {
     const { inboundFailureClass, attemptFailureClass } = finalizeRejection(undefined);
     // Legacy/undifferentiated rejections preserve the null attempt_failure_class

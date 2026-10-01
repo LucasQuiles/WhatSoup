@@ -20,6 +20,7 @@ import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import type { ExecutingSessionContext } from '../../mcp/types.ts';
 import { isProviderId, providerUsesWhatSoupMcp } from './providers/index.ts';
 import { isScheduledAgentJobMapKey } from './scheduled-agent-job-isolation.ts';
+import { isScheduledTurnSession } from './scheduled-agent-job-delivery.ts';
 
 /**
  * Structurally derived from OperationTracker's own constructor rather than
@@ -157,6 +158,8 @@ export function createOperationTracker(
     port.operationTrackerConfig,
     {
       onProgress: (event: ProgressEvent) => {
+        // #3497: a scheduled job's progress is not the report chat's to read.
+        if (isScheduledTurnSession(session)) return;
         const q = resolveQueue();
         if (q) q.enqueueProgressUpdate(event, port.instanceName);
       },

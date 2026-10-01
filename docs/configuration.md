@@ -190,7 +190,7 @@ fails visibly instead of clearing the evidence needed for diagnosis or retry.
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 | `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
-| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
+| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin, and an unknown group sender produces a contact-approval request only when they @mention the bot; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
 | `WHATSOUP_INTERNAL_JIDS` | string (comma-separated JIDs) | (empty) | Group-JID allowlist read at outbound-safety-gate time (`src/core/outbound-message-safety.ts:363`); messages to a listed group are treated as internal operator coordination and skip the client-facing redaction scrub. Re-read per send (no restart needed). Admin 1:1 DM elevation is now handled separately by `internalPeerJids` in instance config — this var stays group-oriented. |
 
 #### Enabling enforce mode
@@ -627,6 +627,17 @@ instance type) and again by the render-time resolver
 unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
+
+Every plist write replaces the installed file through a same-directory rename,
+and the replacement keeps the installed file's permission bits, capped at
+`0644` because launchd refuses group- or world-writable job definitions
+(`installedLaunchdPlistMode` in `src/fleet/platform.ts`). This covers
+reconcile, its rollback, and `release:activate`. So an owner-only (`0600`)
+instance plist, for example one carrying credentials in
+`EnvironmentVariables`, stays `0600`. When the installed plist is a symlink,
+the mode comes from the file it points to; the rename replaces the link itself
+and leaves that file untouched. A first install with no plist present creates
+the file at `0644` under the user's umask.
 
 Home-confinement of the two filesystem fields is enforced at two call sites. At
 API admission (`POST /api/lines` and `PATCH /api/lines/:name/config` in
@@ -1523,7 +1534,7 @@ merge ensures that `opencode.json` contains a `whatsoup-headless` agent entry
 with `whatsoup_send_message: "deny"`, creating the entry when absent and
 preserving its other fields when present. The same deny is written at the
 global permission level, so both selected-agent and inherited permission
-resolution keep live-turn text as the only reply owner. These rules are
+resolution keep turn text as the only reply owner. These rules are
 dispatcher policy, not an operating-system sandbox.
 
 OpenCode children use a fresh positive environment allowlist. The non-secret
@@ -1590,7 +1601,30 @@ generated MCP block, the optional custom-endpoint block, and one exact
 `whatsoup_send_message: "deny"` permission. Live-turn assistant text is the
 single delivery owner for an OpenCode reply; denying that current-chat text
 tool prevents an auto-approved fallback from sending a second copy before the
-runtime echoes its normal answer. Other existing permission rules and unrelated
+runtime echoes its normal answer. The deny also covers scheduled agent jobs,
+which share the working directory. A scheduled job on OpenCode therefore
+reports through its final answer instead of `send_message` (#3497): its turn
+is told to write the one verified update after its last tool call, or exactly
+`NO_REPLY` when there is none. The runtime holds that text, drops text written
+before or between tool calls, and delivers the final answer once to the job's
+report chat. An explicit `NO_REPLY` finalizes as `no_reply_policy`. A completed
+job turn with neither fails with attempt class `scheduled_answer_missing`
+(inbound failure class `unknown`) and raises the reply-guarantee breach alert.
+Scheduled turns on every provider send the report chat no tool-progress
+updates, no operation-tracker progress (thinking or long-tool notices), no
+provider-failure, reauthentication, fallback, fallback-replay-failure or
+provider auto-switch notices, and no crash or processing-failure notices. It
+neither stashes a one-message handoff notice nor consumes one already pending
+for the chat, and it never records the chat's notice dedupe, so the next user
+turn in that chat still gets its own notices. The failure is still recorded,
+alerted, and acted on (session shutdown, fallback arming and replay); only the
+chat text is dropped. Its operator alerts (reauthentication, empty fallback
+turn) dedupe under a separate scheduled key. A scheduled turn is recognised by its declared purpose, so these rules
+hold in every session scope, including sandbox per_chat, shared and single,
+where it has no separate lane. A session counts as scheduled from the dispatch
+of a scheduled turn until its next user dispatch, so a crash notice raised in
+the window between a scheduled turn's result and the next dispatch is also
+suppressed. Other existing permission rules and unrelated
 `agent` entries are preserved. The merge creates the reserved
 `whatsoup-headless` entry when absent, or preserves its existing fields while
 enforcing the one delivery deny when present. A route with

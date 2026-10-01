@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { DisconnectReason } from '@whiskeysockets/baileys';
+import * as disconnectClassification from '../../src/lib/disconnect-classification.ts';
 import {
   buildDisconnectDecisionRecord,
   classifyDisconnectAction,
@@ -239,5 +240,34 @@ describe('buildDisconnectDecisionRecord', () => {
     expect(record.observedAt).toBeNull();
     expect(record.classification).toBe('other');
     expect(record.conflictInspected).toBe(false);
+  });
+});
+
+describe('#3722: one definition of the transient reconnect codes', () => {
+  it('the lib transient set equals the library members the transport reconnects on', () => {
+    // Namespace access, so a missing export fails by assertion, not at import.
+    expect(disconnectClassification.TRANSIENT_RECONNECT_STATUS_CODES).toBeDefined();
+    expect(new Set(disconnectClassification.TRANSIENT_RECONNECT_STATUS_CODES)).toEqual(new Set([
+      DisconnectReason.connectionClosed,
+      DisconnectReason.timedOut,
+      DisconnectReason.badSession,
+      DisconnectReason.unavailableService,
+    ]));
+  });
+
+  it('the transport policy treats every code in the lib export as transient, and no other code', () => {
+    const codes = [...disconnectClassification.TRANSIENT_RECONNECT_STATUS_CODES];
+    expect(codes).toHaveLength(4);
+    for (const code of codes) {
+      expect(decideDisconnectAction(code)).toEqual({ type: 'reconnect', reason: 'transient', statusCode: code });
+    }
+    expect(decideDisconnectAction(DisconnectReason.loggedOut)).not.toMatchObject({ reason: 'transient' });
+    expect(decideDisconnectAction(499)).toEqual({ type: 'reconnect', reason: 'unknown', statusCode: 499 });
+  });
+
+  it('the policy treats each lib code as a transient reconnect', () => {
+    for (const code of [428, 408, 500, 503]) {
+      expect(decideDisconnectAction(code)).toEqual({ type: 'reconnect', reason: 'transient', statusCode: code });
+    }
   });
 });
