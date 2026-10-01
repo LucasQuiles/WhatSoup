@@ -61,6 +61,7 @@ import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
+import { HEALTH_INVARIANTS, HEALTH_INVARIANTS_SCHEMA } from './health-invariants.ts';
 import {
   LoopLagSampler,
   LOOP_LAG_SAMPLE_INTERVAL_MS,
@@ -2911,6 +2912,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         arc: readArcBindingHealth(resolveArcRepoRoot()),
+        // #2481: the invariants this loaded code implements, as a compile-time
+        // constant. Diagnostic body only (the #2515 public envelope never
+        // carries it); release:activate classifies it against its own floor.
+        health_invariants: { schema: HEALTH_INVARIANTS_SCHEMA, ids: [...HEALTH_INVARIANTS] },
         instance: {
           name: deps.instanceName,
           mode: deps.instanceType,
@@ -2991,6 +2996,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             // consumers to use their legacy status-code reading.
             ...(connectionState.disconnectDecision !== undefined
               ? { disconnect_decision: formatDisconnectDecisionForHealth(connectionState.disconnectDecision) }
+              : {}),
+            // #3722: the last reconnect-state reset (a fixed reason token and a
+            // time), so the fleet poller can tell a fresh reconnect from a
+            // silent logout. Omitted for transports that do not report it.
+            ...(connectionState.reconnectReset !== undefined
+              ? { reconnect_reset: exposeDisconnectMetadata ? connectionState.reconnectReset : null }
               : {}),
           },
           auth_bond: authBond,

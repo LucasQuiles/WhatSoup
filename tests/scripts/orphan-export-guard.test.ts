@@ -71,6 +71,9 @@ const PUBLIC_API_ALLOWLIST = new Set<string>([
   // chain + tests/core/jid-constants.test.ts there). Zero references on THIS
   // branch by design — it lands one layer before its consumer.
   'src/core/jid-constants.ts:isImessageJid',
+  // #3560 operator CLI default: consumed only by scripts/inbound-ownership-snapshot.ts
+  // (out of corpus). It lives beside the snapshot reader it configures.
+  'src/runtimes/agent/inbound-ownership-snapshot.ts:DEFAULT_OWNERSHIP_MIN_AGE_MINUTES',
 ]);
 
 function repoRelative(absPath: string): string {

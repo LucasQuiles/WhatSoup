@@ -3105,6 +3105,14 @@ def instance_db_inventory() -> list[str]:
     EXCLUDES recovery-backups/ subtrees and *-wal/*-shm sidecars (benign
     snapshot artifacts). Alert text names the found path and points at
     docs/configuration.md's XDG table.
+
+    Fail-closed: every 0-byte .db directly in the instance dir FAILs unless
+    its name is in KNOWN_PLACEHOLDER_DB_NAMES, so an unknown or newly added
+    live DB is never hidden. The cost: a new placeholder name FAILs until it
+    is listed there. A 0-byte .db in a subfolder is evidence only — the
+    loader opens only top-level paths of the instance data root, so a
+    nested file cannot be live. The .db suffix and names match
+    case-insensitively because APFS is case-insensitive.
     """
     instances_root = Path.home() / ".local/share/whatsoup/instances"
     lines: list[str] = []
@@ -3114,12 +3122,25 @@ def instance_db_inventory() -> list[str]:
         if not entry.is_dir():
             continue
         instance_name = entry.name
-        _scan_instance_db_dir(entry, instance_name, lines)
+        _scan_instance_db_dir(entry, instance_name, lines, entry)
     return lines
 
 
-def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str]) -> None:
-    """Recurse into root, appending FAIL lines for 0-byte .db files.
+# Top-level instance-dir .db names that are known placeholders, lowercased.
+# The live DBs there are bot.db (src/fleet/paths.ts) and lifecycle-events.db
+# (src/runtimes/agent/runtime.ts); neither may be listed here.
+KNOWN_PLACEHOLDER_DB_NAMES = frozenset({
+    # No src/ code opens it.
+    "store.db",
+    # No src/ code opens it.
+    "whatsoup.db",
+})
+
+
+def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str], instance_root: Path) -> None:
+    """Recurse into root, appending a FAIL line for a 0-byte top-level .db
+    that is not a known placeholder and an evidence-only line for any other
+    0-byte .db file.
 
     Skips recovery-backups/ subtrees and *-wal/*-shm sidecars.
     """
@@ -3133,12 +3154,25 @@ def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str]) -> N
         if child.is_dir():
             if child.name == "recovery-backups":
                 continue
-            _scan_instance_db_dir(child, instance_name, lines)
+            _scan_instance_db_dir(child, instance_name, lines, instance_root)
             continue
         name = child.name
         if name.endswith("-wal") or name.endswith("-shm"):
             continue
-        if name.endswith(".db") and child.stat().st_size == 0:
+        if not name.lower().endswith(".db"):
+            continue
+        try:
+            size = child.stat().st_size
+        except OSError as exc:
+            # A dangling symlink must not crash the whole daily run.
+            lines.append(
+                f"WARN instance_db {instance_name}: unreadable_db path={child} error={type(exc).__name__}"
+            )
+            continue
+        if size == 0:
+            if root != instance_root or name.lower() in KNOWN_PLACEHOLDER_DB_NAMES:
+                lines.append(f"instance_db {instance_name}: zero_byte_placeholder_db path={child}")
+                continue
             lines.append(
                 f"FAIL instance_db {instance_name}: zero_byte_db path={child} — "
                 "see docs/configuration.md XDG table for expected layout"

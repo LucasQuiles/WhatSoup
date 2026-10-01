@@ -2,6 +2,7 @@ import { DisconnectReason } from '@whiskeysockets/baileys';
 
 import {
   DISCONNECT_DECISION_RECORD_VERSION,
+  TRANSIENT_RECONNECT_STATUS_CODES,
   type DisconnectClassification,
   type DisconnectDecisionRecord,
   type LoggedOutExitBasis,
@@ -33,12 +34,9 @@ export interface DisconnectContext {
 
 const RESTART_REQUIRED_FLAP_THRESHOLD = 10;
 
-const TRANSIENT_RECONNECT_CODES = new Set<number>([
-  DisconnectReason.connectionClosed,
-  DisconnectReason.timedOut,
-  DisconnectReason.badSession,
-  DisconnectReason.unavailableService,
-]);
+// #3722: the one definition lives in lib, so the fleet poller shares it without
+// importing the WhatsApp library. A test pins it to the library's members.
+const TRANSIENT_RECONNECT_CODES: ReadonlySet<number> = TRANSIENT_RECONNECT_STATUS_CODES;
 
 export function decideDisconnectAction(
   statusCode: number | undefined,

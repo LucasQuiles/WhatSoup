@@ -8,6 +8,13 @@ export function isScheduledAgentJobMapKey(mapKey: string): boolean {
   return mapKey.endsWith(SCHEDULED_AGENT_JOB_SCOPE_SUFFIX);
 }
 
+/** The chat map key a scheduled isolation key was derived from; other keys are returned unchanged. */
+export function scheduledAgentJobBaseMapKey(mapKey: string): string {
+  return isScheduledAgentJobMapKey(mapKey)
+    ? mapKey.slice(0, -SCHEDULED_AGENT_JOB_SCOPE_SUFFIX.length)
+    : mapKey;
+}
+
 export function isolateScheduledAgentJobPrompt(prompt: string): string {
   return [
     '[isolated scheduled background turn]',
