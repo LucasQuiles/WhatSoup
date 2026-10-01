@@ -1818,6 +1818,22 @@ private detachDisplacedPerChatTurn(mapKey: string, context: RuntimeTurnContext):
   }
 }
 
+/**
+ * Settle the per-chat completion this turn owns, under whichever key now holds
+ * it. The map is keyed by scope, and an after-terminal action (a deferred alias
+ * change) can rekey it while post-effects await, so match by logical turn id.
+ * Returns false when no published completion belongs to this turn.
+ */
+private resolveOwnedPerChatCompletion(context: RuntimeTurnContext): boolean {
+  for (const [key, completion] of this.host.perChatRuntimeTurnCompletions) {
+    if (completion.context.identity.logicalTurnId !== context.identity.logicalTurnId) continue;
+    this.host.perChatRuntimeTurnCompletions.delete(key);
+    completion.resolve();
+    return true;
+  }
+  return false;
+}
+
 async applyRuntimeTurnPostEffects(
   result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }> | DeferredToObligationRetirement,
   context: RuntimeTurnContext,
@@ -1916,13 +1932,10 @@ async applyRuntimeTurnPostEffects(
       if (action) await action;
     }
     if (!ledger.completionSettled) {
-      const completion = this.host.perChatRuntimeTurnCompletions.get(mapKey);
-      if (completion?.context.identity.logicalTurnId === context.identity.logicalTurnId) {
-        this.host.perChatRuntimeTurnCompletions.delete(mapKey);
-        completion.resolve();
-      } else {
-        // The key's single completion slot belongs to another turn, so this
-        // turn's awaiter cannot be reached from here. Keep that visible.
+      if (!this.resolveOwnedPerChatCompletion(context)) {
+        // No published completion belongs to this turn: the key's single
+        // completion slot belongs to another turn, so this turn's awaiter
+        // cannot be reached from here. Keep that visible.
         log.warn({ mapKey, scopeKey, logicalTurnId: context.identity.logicalTurnId },
           'displaced runtime turn retired without an owned completion');
         emitAlertChecked(
@@ -1980,11 +1993,9 @@ async applyRuntimeTurnPostEffects(
       if (action) await action;
     }
     if (!ledger.completionSettled) {
-      const completion = this.host.perChatRuntimeTurnCompletions.get(mapKey);
-      if (completion?.context.identity.logicalTurnId === context.identity.logicalTurnId) {
-        this.host.perChatRuntimeTurnCompletions.delete(mapKey);
-        completion.resolve();
-      }
+      // Settled after the after-terminal action so the next turn sees any
+      // rekey it made; that rekey may have moved the completion off mapKey.
+      this.resolveOwnedPerChatCompletion(context);
       ledger.completionSettled = true;
     }
   } else {

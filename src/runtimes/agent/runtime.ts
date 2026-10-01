@@ -10164,9 +10164,10 @@ export class AgentRuntime implements Runtime {
       )).catch((err: unknown) => {
         // A rejection escaping here is a process-fatal unhandledRejection
         // (main.ts). Contain it the way the result handler contains an escaped
-        // finalization: degrade, release this turn's awaiter, alert, and mark
-        // the scope stuck. The mark is only an in-memory set; no sweep or
-        // other production path consumes it yet.
+        // finalization: degrade, reject the published completion only while
+        // this turn still owns it, alert, and mark the scope stuck. The mark is
+        // only an in-memory set; no sweep or other production path consumes it
+        // yet.
         const mapKey = scopeRef?.value;
         const scopeKey = this.runtimeTurnCoordinator.runtimeTurnScopeKey(runtimeContext);
         this.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
