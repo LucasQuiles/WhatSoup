@@ -10242,7 +10242,8 @@ export class AgentRuntime implements Runtime {
         'fallback continuation failed without an outbound queue');
       return;
     }
-    this.notifyFailedFallbackReplay(queue, args.chatJid, args.mapKey);
+    // The live key: the scheduled-turn check must see the queue just looked up.
+    this.notifyFailedFallbackReplay(queue, args.chatJid, mapKey);
     // errorMessage() explicitly: the log serializer reduces unknown Error
     // subclasses to {errorClass} and drops the message — the 2026-08-15
     // incident journal recorded only {"errorClass":"Error"} here, leaving the
