@@ -74,17 +74,18 @@ a quote character (single, double or backtick) directly followed by
 on each line and does not parse strings: a comment matches, a quote character
 inside another string matches, and so does a longer path that begins with
 either one. It reads `.ts`, `.py` and `.sh` files under `src`, `scripts`,
-`deploy/scripts` and `tools/agent-runtime-probes`, outside its allowlisted
-paths and outside any `node_modules`, `.git` or `dist` directory. A new match
+`deploy/scripts` and `tools/agent-runtime-probes`, outside any `node_modules`,
+`.git` or `dist` directory. It skips every file whose path starts with an
+entry of the rule's `allowlistPaths`, file entries included. A new match
 fails the guard; a match whose file and pattern are already in the ratchet
 baseline (`.claude/fitness/platform-baseline.json`) passes, and so does a
 further occurrence of that pattern in that file. On 2026-10-01 the baseline
 held no entry for either credential command. Nothing outside those four roots
 is scanned: under `deploy` only `deploy/scripts` is, so top-level `deploy/`,
 `deploy/lib`, `deploy/hooks` and `tests/` are not. It also skips `.mjs` and
-extensionless files, and it does not match a path with no quote character
-directly before it (an unquoted path in a shell script, or a path later in a
-string) or a path outside `/usr/bin`. The credential-isolation
+extensionless files, and it matches neither path unless a quote character
+stands directly before it in the source text, and no path outside
+`/usr/bin`. The credential-isolation
 regression runs real Vitest against decoy stores, checks the selected backend,
 resolver fallback and child-process reads, and verifies write and delete
 rejection; a sibling test pins the `PATH` order and the cleared
