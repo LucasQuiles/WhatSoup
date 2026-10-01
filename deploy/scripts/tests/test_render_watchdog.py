@@ -96,7 +96,7 @@ def test_render_real_template_no_placeholders():
                 "--bot-port", "9095", "--fleet-port", "9099",
                 "--home", "/Users/rachel", "--username", "rachel").stdout
     assert 'BOT_HEALTH="http://127.0.0.1:9095/health"' in body
-    assert 'FLEET_HEALTH="http://127.0.0.1:9099/"' in body
+    assert 'FLEET_HEALTH="http://127.0.0.1:9099/livez"' in body
     assert 'BOT_LABEL="com.whatsoup.rb-bot"' in body
 
 
@@ -104,8 +104,22 @@ def test_render_non_default_fleet_port_respected():
     body = _run("render", "--template", str(_TEMPLATE), "--bot-name", "ew-bot",
                 "--bot-port", "9098", "--fleet-port", "9190",
                 "--home", "/Users/eweintraub", "--username", "eweintraub").stdout
-    assert 'FLEET_HEALTH="http://127.0.0.1:9190/"' in body
+    assert 'FLEET_HEALTH="http://127.0.0.1:9190/livez"' in body
     assert "FLEET_PORT" not in body and "BOT_PORT" not in body
+
+
+def test_render_fleet_probe_uses_liveness_route_not_console_root():
+    # The console root depends on built static assets; a release without them
+    # answers 404 there while the fleet process is healthy. Restart decisions
+    # must read the asset-independent liveness route instead.
+    body = _run("render", "--template", str(_TEMPLATE), "--bot-name", "zz-bot",
+                "--bot-port", "9001", "--fleet-port", "9002",
+                "--home", "/opt/zz-home", "--username", "tester").stdout
+    assert 'fleet_resp="$(read_health_response 9002 /livez ' in body
+    assert "read_health_response 9002 / " not in body
+    assert 'FLEET_HEALTH="http://127.0.0.1:9002/"' not in body
+    assert 'request_path == "/livez" and not token' in body
+    assert 'request_path == "/" and not token' not in body
 
 
 def test_render_bad_port_exits_3():

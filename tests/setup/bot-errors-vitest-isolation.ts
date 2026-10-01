@@ -1,6 +1,6 @@
 import { afterAll, beforeEach } from 'vitest';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { delimiter, isAbsolute, join, relative, sep } from 'node:path';
 import {
   chmodSync,
   lstatSync,
@@ -89,6 +89,65 @@ process.env['XDG_DATA_HOME'] = join(isolatedHome, '.local', 'share');
 process.env['XDG_STATE_HOME'] = join(isolatedHome, '.local', 'state');
 process.env['XDG_CACHE_HOME'] = join(isolatedHome, '.cache');
 delete process.env['CLAUDE_CONFIG_DIR'];
+// The synthetic secret-tool reports itself absent (exit 127), which keyring
+// classifies as an errored probe; an inherited REQUIRE_OS_KEYRING would then
+// make unmocked backend detection throw instead of using env-only.
+delete process.env['REQUIRE_OS_KEYRING'];
+
+// OS credential stores are not HOME-scoped. Inherited test commands see a
+// missing item on macOS, an empty read on Linux, and rejected writes; dedicated
+// keyring tests retain their explicit process mocks. The Linux read stays empty
+// because `secret-tool lookup` exits 1 for a missing item and for a failure
+// alike, and keyring records such an exit as a failure. Each shim must stay
+// runnable: a missing interpreter would make PATH lookup continue to the real
+// binary.
+const credentialBin = join(isolatedHome, 'credential-bin');
+mkdirSync(credentialBin, { mode: 0o700 });
+const rejection = 'synthetic credential backend rejects writes and unsupported operations';
+// The two write operations take the secret on stdin, so their arm reads it to
+// the end before rejecting: a shim that exits first makes the caller's write
+// fail with EPIPE. `cat` does the reading because on macOS `wc -c` alone only
+// stats a regular file. The message reports the discarded byte count, which
+// lets a test witness the drain. A terminal stdin is left unread, so an
+// interactive caller cannot block. A closed stdin is not read either: in macOS
+// sh the pipe of the command substitution would take descriptor 0, and `cat`
+// would wait on its own pipeline forever. The check duplicates descriptor 0
+// onto another one, because macOS sh skips a duplication onto itself, and runs
+// in a subshell, where a failed redirection cannot end the shim. Every other
+// rejected operation leaves stdin unread.
+const rejectWrite =
+  `if ! ( true 3<&0 ) 2>/dev/null || [ -t 0 ]; then n=0; else n=$(( $(cat | wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
+const rejectOther = `  *) printf '%s\\n' '${rejection}' >&2; exit 1 ;;`;
+const syntheticCredentialBackends: Record<string, string> = {
+  security: [
+    '#!/bin/sh',
+    'case "$1" in',
+    // A missing item, as the real tool reports one: keyring treats a clean exit
+    // 44 as a miss, and a shell caller that tests the status sees "not found".
+    "  find-generic-password) printf '%s\\n' 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2; exit 44 ;;",
+    "  --help) printf '%s\\n' 'Usage: synthetic credential backend'; exit 0 ;;",
+    `  add-generic-password) ${rejectWrite}`,
+    rejectOther,
+    'esac',
+    '',
+  ].join('\n'),
+  // Exit 127 on the backend probe: Linux runs select env-only, as on a host
+  // without libsecret.
+  'secret-tool': [
+    '#!/bin/sh',
+    'case "$1" in',
+    "  --help) printf '%s\\n' 'secret-tool: not found (synthetic credential backend)' >&2; exit 127 ;;",
+    '  lookup) exit 0 ;;',
+    `  store) ${rejectWrite}`,
+    rejectOther,
+    'esac',
+    '',
+  ].join('\n'),
+};
+for (const [executable, body] of Object.entries(syntheticCredentialBackends)) {
+  writeFileSync(join(credentialBin, executable), body, { mode: 0o700 });
+}
+process.env['PATH'] = `${credentialBin}${delimiter}${process.env['PATH'] ?? ''}`;
 
 process.env['BOT_ERRORS_TEST_ISOLATED'] = '1';
 process.env['BOT_ERRORS_STATE_DIR'] = join(

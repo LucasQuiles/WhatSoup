@@ -3,7 +3,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import { insertPending, updateAccess } from './access-list.ts';
 import type { SubjectType } from './access-list.ts';
-import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSmsJid, toSignalJid, isGroupJid } from './jid-constants.ts';
+import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSmsJid, toSignalJid, isGroupJid, isStatusBroadcastJid } from './jid-constants.ts';
 import { getAllLidMappings } from './lid-resolver.ts';
 import { getMessagesBySender, type StoredMessage } from './messages.ts';
 import { isAdminPhone, isE164Wire, normalizePhoneE164 } from '../lib/phone.ts';
@@ -85,7 +85,8 @@ export function __hasReplayedIdForTests(messageId: string): boolean {
  * Filters out:
  *   - group-chat messages (chatJid ending in @g.us): group mentions are
  *     dispatched at ingest; unmentioned group messages must not re-enter
- *     dispatch as pseudo-DMs.
+ *     dispatch as pseudo-DMs. Status-broadcast posts (status@broadcast) are
+ *     not DMs either and are dropped the same way (#3566).
  *   - already-replayed message IDs (module-level replayedIds set).
  *
  * Then sorts ascending by timestamp and applies the cap (.slice(-cap)).
@@ -97,7 +98,7 @@ export function selectReplayableDms(
   stored: StoredMessage[],
   cap: number,
 ): { toReplay: StoredMessage[]; groupSkipped: number } {
-  const dmStored = stored.filter(m => !isGroupJid(m.chatJid));
+  const dmStored = stored.filter(m => !isGroupJid(m.chatJid) && !isStatusBroadcastJid(m.chatJid));
   const groupSkipped = stored.length - dmStored.length;
   const toReplay = dmStored
     .filter(m => !replayedIds.has(m.messageId))
@@ -155,18 +156,19 @@ export async function handleAdminCommand(
         allStored.push(...getMessagesBySender(db, senderJid));
       }
 
-      // Select replayable DMs: excludes group messages and already-replayed IDs, applies cap.
+      // Select replayable DMs: excludes group and status-broadcast messages and
+      // already-replayed IDs, applies cap. groupSkipped counts both non-direct kinds.
       const { toReplay, groupSkipped } = selectReplayableDms(allStored, config.adminReplayMax);
       if (groupSkipped > 0) {
-        log.info({ subjectId, groupSkipped }, 'replay: skipped group messages');
+        log.info({ subjectId, groupSkipped }, 'replay: skipped non-direct (group/status) messages');
       }
 
       const replayCount = toReplay.length;
-      // totalQueued is the DM-only count; group rows are excluded from the denominator
+      // totalQueued is the DM-only count; non-direct rows are excluded from the denominator
       // so the admin sees an accurate N of M without an unexplained gap.
       const totalQueued = allStored.length - groupSkipped;
       const noticeText = groupSkipped > 0
-        ? `Allowed ${formatAccessPhoneSubject(subjectId)} — replaying ${replayCount} of ${totalQueued} queued DM messages (${groupSkipped} group message${groupSkipped === 1 ? '' : 's'} skipped)`
+        ? `Allowed ${formatAccessPhoneSubject(subjectId)} — replaying ${replayCount} of ${totalQueued} queued DM messages (${groupSkipped} non-direct message${groupSkipped === 1 ? '' : 's'} skipped)`
         : `Allowed ${formatAccessPhoneSubject(subjectId)} — replaying ${replayCount} of ${totalQueued} queued messages`;
       await sendTracked(messenger, adminChatJid, noticeText, durability, { replayPolicy: 'safe', isTerminal: true });
 
@@ -234,12 +236,13 @@ function resolveAdminChatJid(db: Database): string | null {
   const msgStmt = db.raw.prepare(
     'SELECT chat_jid FROM messages WHERE sender_jid = ? AND is_from_me = 0 ORDER BY timestamp DESC',
   );
-  // #3566: an admin-authored GROUP row is never a direct chat, so it can never
-  // be the approval destination. Walk the same newest-first order and take the
-  // first non-group chat; isGroupJid covers WhatsApp and Signal groups.
+  // #3566: an admin-authored GROUP or status-broadcast row is never a direct
+  // chat, so it can never be the approval destination. Walk the same
+  // newest-first order and take the first direct chat; isGroupJid covers
+  // WhatsApp and Signal groups, isStatusBroadcastJid the status pseudo-chat.
   const latestDirectChat = (senderJid: string): string | null => {
     for (const row of msgStmt.iterate(senderJid) as Iterable<{ chat_jid: string }>) {
-      if (!isGroupJid(row.chat_jid)) return row.chat_jid;
+      if (!isGroupJid(row.chat_jid) && !isStatusBroadcastJid(row.chat_jid)) return row.chat_jid;
     }
     return null;
   };

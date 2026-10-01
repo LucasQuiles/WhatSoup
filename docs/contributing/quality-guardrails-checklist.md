@@ -46,6 +46,51 @@ toolchains and Docker images, report every action, and re-measure. Malformed
 disk observations are inconclusive (exit 2); a measured post-reclaim shortfall
 is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
+Vitest's shared setup creates an owned temporary HOME and prepends synthetic
+`security` and `secret-tool` commands to `PATH`. Reads find nothing: `security
+find-generic-password` exits 44 with the real tool's not-found message, and
+`secret-tool lookup` returns empty. Writes, deletes and unsupported operations
+are rejected. The two write operations (`add-generic-password` and `store`)
+first read stdin to the end, unless stdin is closed or a terminal, and report
+the discarded byte count; every other rejected operation leaves stdin unread.
+The synthetic `secret-tool` reports a probe failure (exit 127), so Linux runs
+use the env-only backend and backend selection matches a host without
+libsecret. The keyring module classifies that failure as an errored probe: a
+Linux test file that reaches unmocked backend detection logs an error-level
+downgrade line, which is expected. The setup also clears `REQUIRE_OS_KEYRING`
+so that failure cannot throw. The production resolver and its precedence still
+run; dedicated keyring tests keep their own explicit process mocks. This also
+covers child processes that inherit `PATH`.
+
+The synthetic commands have limits. `secret-tool lookup` exits 0 with empty
+output, where the real tool exits 1, so on Linux a shell caller that tests the
+exit status sees a missing credential as present but empty. `command -v
+secret-tool` succeeds although the probe reports the tool absent. Absolute
+executable paths and tests that replace `PATH` require their own controlled
+fixtures: changing HOME alone does not isolate the OS credential store. The
+`portability.no-hardcoded-platform-binaries` guard matches a line that holds
+a quote character (single, double or backtick) directly followed by
+`/usr/bin/security` or `/usr/bin/secret-tool`. The match is a substring test
+on each line and does not parse strings: a comment matches, a quote character
+inside another string matches, and so does a longer path that begins with
+either one. It reads `.ts`, `.py` and `.sh` files under `src`, `scripts`,
+`deploy/scripts` and `tools/agent-runtime-probes`, outside any `node_modules`,
+`.git` or `dist` directory. It skips every file whose path starts with an
+entry of the rule's `allowlistPaths`, file entries included. A new match
+fails the guard; a match whose file and pattern are already in the ratchet
+baseline (`.claude/fitness/platform-baseline.json`) passes, and so does a
+further occurrence of that pattern in that file. On 2026-10-01 the baseline
+held no entry for either credential command. Nothing outside those four roots
+is scanned: under `deploy` only `deploy/scripts` is, so top-level `deploy/`,
+`deploy/lib`, `deploy/hooks` and `tests/` are not. It also skips `.mjs` and
+extensionless files, and it matches neither path unless a quote character
+stands directly before it in the source text, and no path outside
+`/usr/bin`. The credential-isolation
+regression runs real Vitest against decoy stores, checks the selected backend,
+resolver fallback and child-process reads, and verifies write and delete
+rejection; a sibling test pins the `PATH` order and the cleared
+`REQUIRE_OS_KEYRING` under the real configuration.
+
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
 The `.husky/pre-commit` hook first runs the deterministic

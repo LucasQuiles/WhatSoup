@@ -43,7 +43,12 @@ export interface DiagnosticProbeBuilderDeps {
 }
 
 function mapPrimaryModelUsability(r: PrimaryModelUsabilityResult): DiagnosticProbeResult {
-  const data = { status: r.status, provider: r.provider, ...(r.model ? { model: r.model } : {}) };
+  const data = {
+    status: r.status,
+    provider: r.provider,
+    ...(r.model ? { model: r.model } : {}),
+    ...(r.reason ? { reason: r.reason } : {}),
+  };
   switch (r.status) {
     case 'usable':
       return { ok: true, confidence: 'confirmed', summary: `primary model usable (${r.provider})`, data };

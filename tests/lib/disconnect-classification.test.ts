@@ -4,6 +4,7 @@ import {
   AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION,
   DISCONNECT_CLASSIFICATIONS,
   NO_RESTART_UNCONFIRMED_401_CLASSES,
+  RECONNECT_RESET_REASONS,
   readHealthDisconnectDecision,
 } from '../../src/lib/disconnect-classification.ts';
 import registry from '../../src/lib/fault-taxonomy-registry.json' with { type: 'json' };
@@ -90,5 +91,15 @@ describe('auth-failure classes carried from the transport decision', () => {
         if (a !== b) expect(b.includes(a), `${a} is a substring of ${b}`).toBe(false);
       }
     }
+  });
+});
+
+describe('#3722: reconnect-reset reason tokens', () => {
+  it('pins the one token set the transport records and the fleet poller reads', () => {
+    expect(RECONNECT_RESET_REASONS).toEqual({
+      exhaustion_cycle_retry: 'exhaustion_cycle_retry',
+      keepalive_failed: 'graceful_reconnect_keepalive_failed',
+      connection_exhausted: 'graceful_reconnect_connection_exhausted',
+    });
   });
 });

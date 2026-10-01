@@ -5,6 +5,7 @@ import { createChildLogger } from '../logger.ts';
 import type { Database } from './database.ts';
 import type { SubmissionReceipt, OutboundMedia } from './types.ts';
 import { nextCronRun } from './cron.ts';
+import { decodeScheduledPayload, payloadUndecodableReason } from './scheduled-payload.ts';
 import { type Clock, systemClock } from '../lib/clock.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import { confineAlertContent } from '../lib/alert-evidence.ts';
@@ -140,6 +141,15 @@ type TerminalSendFailure =
  * unchanged from the two inline emissions this replaced; #2386 owns the
  * evidence-redaction boundary, deliberately not this seam.
  */
+/**
+ * A10: true when a dead-letter reason names a JSON-but-wrong-shape class. The
+ * shape token is unquoted, so it survives marker redaction; a marker written by
+ * an older release has no token and keeps the not-valid-JSON wording.
+ */
+function isShapeFailure(error: string): boolean {
+  return /payload_undecodable shape=(?!not_json\b)\w+/.test(error);
+}
+
 function terminalSendAlertText(
   instance: string,
   failure: TerminalSendFailure,
@@ -153,7 +163,10 @@ function terminalSendAlertText(
         `scheduledId=${failure.scheduledId}`,
         `recurring=${failure.recurring}`,
         `error=${failure.error}`,
-        'ref: #2359 — an undecodable payload is permanent, so it is dead-lettered on the first occurrence rather than consuming the retry budget. Inspect the scheduled_messages row; the payload column is not valid JSON.',
+        'ref: #2359 — an undecodable payload is permanent, so it is dead-lettered on the first occurrence rather than consuming the retry budget. '
+        + (isShapeFailure(failure.error)
+          ? 'Inspect the scheduled_messages row; the payload column is JSON but does not match the scheduled-message payload contract (see the shape class in the error).'
+          : 'Inspect the scheduled_messages row; the payload column is not valid JSON.'),
       ].join('\n'),
     };
   }
@@ -1121,42 +1134,20 @@ export class MessageScheduler {
   }
 
   private async executeSend(row: ScheduledRow): Promise<void> {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(row.payload) as Record<string, unknown>;
-    } catch (err) {
-      // Tagged so handleSendFailure can tell "this row can never send" from
-      // "the transport is having a bad minute".
-      throw new ScheduledPayloadError(errorMessage(err));
+    // A10: the same contract every writer applies. A row that bypassed the
+    // writers (raw SQL, restored backup, older release) is tagged so
+    // handleSendFailure dead-letters it instead of burning the retry ladder, and
+    // the send is BUILT from validated fields, so no stray key reaches the transport.
+    const verdict = decodeScheduledPayload(row);
+    if (!verdict.ok) {
+      const reason = payloadUndecodableReason(verdict.shape);
+      throw new ScheduledPayloadError(verdict.parseError === undefined ? reason : `${reason}: ${verdict.parseError}`);
     }
 
-    if (row.content_type === 'text') {
-      await this.connection.sendRaw(row.chat_jid, payload);
+    if (verdict.send.kind === 'text') {
+      await this.connection.sendRaw(row.chat_jid, verdict.send.content);
     } else {
-      // media types: image, video, audio, document, sticker
-      const { type, ...rest } = payload as { type: string; [key: string]: unknown };
-
-      // SP9: media is stored as a BLOB column, not in the JSON payload
-      let buf: Buffer;
-      if (row.media_blob) {
-        buf = Buffer.from(row.media_blob);
-      } else {
-        // Legacy fallback: deserialize Buffer from JSON payload
-        const { buffer: bufferData, ...legacyRest } = rest as {
-          buffer?: { type: 'Buffer'; data: number[] } | number[];
-          [key: string]: unknown;
-        };
-        if (bufferData && typeof bufferData === 'object' && 'data' in bufferData) {
-          buf = Buffer.from((bufferData as { type: 'Buffer'; data: number[] }).data);
-        } else if (Array.isArray(bufferData)) {
-          buf = Buffer.from(bufferData as number[]);
-        } else {
-          throw new Error(`scheduler: no media_blob and no buffer in payload for id=${row.id}`);
-        }
-        Object.assign(rest, legacyRest);
-      }
-
-      await this.connection.sendMedia(row.chat_jid, { type, buffer: buf, ...rest } as OutboundMedia);
+      await this.connection.sendMedia(row.chat_jid, verdict.send.media);
     }
   }
 }

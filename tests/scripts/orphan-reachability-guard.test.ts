@@ -189,6 +189,14 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // scripts/close-continuity-gap.ts. The runtime reads closures through
   // continuity-gap-closure-schema.ts (health), which IS production-reachable.
   { path: 'src/core/continuity-gap-closure.ts', issue: 'continuity-gap-closure/stage-2', reason: 'closure writer is operator-CLI-only (scripts/close-continuity-gap.ts); runtime health only reads closures via continuity-gap-closure-schema.ts — no production importer by design' },
+  // Settling an orphan recovery transfer is an operator action; its only caller is
+  // `scripts/turn-recovery-operator.ts settle-orphan-transfer`. The runtime sees the
+  // result only through the generic recovery job and plan rows it already reads.
+  { path: 'src/core/turn-recovery-orphan-settle.ts', issue: 'orphan-transfer-settle/operator-cli', reason: 'settle writer is operator-CLI-only (scripts/turn-recovery-operator.ts settle-orphan-transfer); the runtime reads the settled job through the generic recovery tables — no production importer by design' },
+  // The inbound ownership snapshot is an operator read; its only caller is
+  // scripts/inbound-ownership-snapshot.ts (docs/runbook.md). The runtime never
+  // imports it: it reports on inbound ownership, it does not decide it.
+  { path: 'src/runtimes/agent/inbound-ownership-snapshot.ts', issue: '#3560', reason: 'ownership snapshot reader is operator-CLI-only (scripts/inbound-ownership-snapshot.ts); read-only report, no runtime importer by design' },
 ];
 
 // ---------------------------------------------------------------------------

@@ -1146,7 +1146,10 @@ which have no job row, always count as corrupt links.
 Database triggers keep every linked source inbound and selected outbound proof immutable and
 retained while its job exists, including completed jobs. Retention selects only an old
 `completed` job whose exact source inbound is still terminal (`complete`/`failed`) and whose
-selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). The job deletion
+selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). It also keeps the
+job whenever its terminal record must be kept: while a `turn_delivery_corroboration` row names that
+terminal, or an `inbound_disposition_links` closure supersedes to the terminal's inbound. Deleting
+the job there would leave the transferred terminal as an orphan transfer. The job deletion
 uses `RETURNING terminal_record_id`; only those returned records can drive terminal and then
 unreferenced proof deletion in the same transaction. State or age alone is never sufficient.
 Migration 40 also refuses an upgrade when a legacy completed job lacks terminal source or
@@ -1188,7 +1191,12 @@ per-chat or global scope. When the selected delivery is provably dead (`failed_p
 Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
 and historical catch-ups remain visible as retained recovery debt without making health degraded.
 Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
-uncorroborated delivery ambiguity are blocking. Appending the
+uncorroborated delivery ambiguity are blocking. An orphan transfer has no job to settle. For one
+admitted shape only (a corroborated `maybe_sent` terminal op with a NULL `wa_message_id`, and a terminal
+source inbound that is not echo-settled and has no open disposition link), `turn-recovery-operator settle-orphan-transfer`
+(`docs/runbook.md`) writes its missing job directly in `exhausted`, with no replayable content, plus an
+append-only operator `recovery_plans` row. The terminal record is kept as evidence. Every other orphan
+is refused with a reason. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
