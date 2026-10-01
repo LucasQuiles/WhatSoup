@@ -109,11 +109,13 @@ import {
   markSessionCompacted,
 } from './session-db.ts';
 import {
+  adoptionAfterFailedClose,
   announceAdoption,
   lazyCheckpointAdoption,
   LazyRestoreScopes,
   NO_CHECKPOINT_ADOPTION,
   spawnForAdoption,
+  type CheckpointAdoption,
 } from './checkpoint-adoption.ts';
 import { checkpointCompletedIdentityIsAdmissionRejected } from './admission-rejected-checkpoint.ts';
 import { reconcileResidentSessionStatuses } from './resident-session-reconciler.ts';
@@ -5071,6 +5073,7 @@ export class AgentRuntime implements Runtime {
                 }
               },
               resetSingleSession: async (session) => {
+                this.heldCloseFailedNotices.delete(session);
                 await this.waitForRejectedTerminalTeardown(session);
                 await session.handleNew();
                 this.rejectedTerminalTeardowns.delete(session);
@@ -5745,11 +5748,14 @@ export class AgentRuntime implements Runtime {
 
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
+    // Read when needed, not here: a spawn can rekey the lane.
+    const isScheduledDispatch = (): boolean => purpose === 'scheduled-agent-job'
+      || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey));
     const wasInactive = !session.getStatus().active;
     if (wasInactive && !this.hasDeferredHostWorkAdmissionStart(session)) {
       // #3530 successor: a never-started non-sandbox per_chat manager decides
       // from its checkpoint what it may adopt (checkpoint-adoption.ts).
-      const adoption = this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability
+      let adoption = this.sessionScope === 'per_chat' && !this.sandboxPerChat && this.durability
         && effectiveMapKey !== undefined && !isScheduledAgentJobMapKey(effectiveMapKey)
         && this.lazyRestoreScopes.isEligible(session)
         ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
@@ -5775,16 +5781,43 @@ export class AgentRuntime implements Runtime {
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
-      await session.shutdown();
+      let closeFailedNotice: CheckpointAdoption | null = null;
+      try {
+        await session.shutdown();
+      } catch (err) {
+        // #3658: a close that failed only at its durable lifecycle step leaves
+        // no provider behind, so the turn takes the #3530 fresh-with-notice
+        // path instead of a silent pre-dispatch rejection, but only once the
+        // abandoned generation is durably retired; otherwise it stays refused.
+        // A lazy resume chosen above is dropped for a fresh spawn:
+        // conservative, since the manager's own close just failed, and the
+        // notice says so. A scheduled turn starts fresh without the notice.
+        const fallback = adoptionAfterFailedClose(err, session.getStatus());
+        if (fallback === null || !session.retireUnclosedGeneration()) throw err;
+        log.warn({ err, chatJid }, 'previous session close failed — starting fresh');
+        if (adoption.kind !== 'fresh_with_notice' && !isScheduledDispatch()) closeFailedNotice = fallback;
+        adoption = fallback;
+      }
       if (dispatchCancelled()) return;
       const spawned = await spawnForAdoption(session, adoption, (err, notice) => {
         log.warn({ err, chatJid }, 'lazy resume refused — starting fresh with a notice');
         this.sendDirect(chatJid, notice);
       });
       spawnedForTurn = true;
+      // #3658: a deferred host-admission start is admitted only at a provider
+      // boundary, maybe a later turn's, so its notice is held for the session.
+      if (closeFailedNotice !== null && this.hasDeferredHostWorkAdmissionStart(session)) {
+        this.heldCloseFailedNotices.set(session, { adoption: closeFailedNotice, chatJid });
+        closeFailedNotice = null;
+      }
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
         return;
+      }
+      // Announced only once the fresh start is admitted, so a refused start
+      // never promises a continuation it cannot deliver.
+      if (closeFailedNotice !== null) {
+        announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
       }
       if (effectiveMapKey !== undefined && spawnOwnership !== null) {
         effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
@@ -5870,6 +5903,14 @@ export class AgentRuntime implements Runtime {
         throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
       }
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
+      // #3658: a held notice goes out at the first boundary that admits its
+      // deferred start, before beforeUserSend opens this turn's answer
+      // evidence. A scheduled turn leaves it held for the next user turn.
+      const heldNotice = isScheduledDispatch() ? undefined : this.heldCloseFailedNotices.get(session);
+      if (heldNotice !== undefined) {
+        this.heldCloseFailedNotices.delete(session);
+        announceAdoption(heldNotice.adoption, (notice) => this.sendDirect(heldNotice.chatJid, notice));
+      }
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
       // #2976: single/shared turns publish into the SAME executing-actor
@@ -5923,8 +5964,7 @@ export class AgentRuntime implements Runtime {
     try {
       // #3497: the delivery instructions follow the provider this session runs,
       // and a dispatch never inherits held text from an earlier scheduled turn.
-      const scheduledDispatch = purpose === 'scheduled-agent-job'
-        || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey));
+      const scheduledDispatch = isScheduledDispatch();
       if (systemTurnLease === undefined) this.noteScheduledDispatch(session, effectiveMapKey, scheduledDispatch);
       const providerTurnText = scheduledDispatch
         ? scheduledAgentJobTurnForProvider(text, sessionProviderId(session))
@@ -8994,6 +9034,7 @@ export class AgentRuntime implements Runtime {
     this.getQueueForChat(chatJid, mapKey)?.abortTurn();
     const oldPid = session.getStatus().pid;
     const generation = this.sessionOwnership.advanceGeneration(mapKey, managerId);
+    this.heldCloseFailedNotices.delete(session);
     let replacementPid: number | null = null;
     let oldTreeProvedEmpty = false;
 
@@ -11662,6 +11703,13 @@ export class AgentRuntime implements Runtime {
    * would re-introduce itself on every message.
    */
   private readonly introducedStandIns = new WeakSet<SessionManager>();
+
+  /**
+   * #3658: restore notices held for a manager whose deferred fresh start no
+   * provider boundary has admitted yet. A generation reset (/new) drops one;
+   * a discarded manager's entry vanishes with it.
+   */
+  private readonly heldCloseFailedNotices = new WeakMap<SessionManager, { adoption: CheckpointAdoption; chatJid: string }>();
 
   /** Whether `session` is inside its managed-crash suppression window. */
   private managedCrashNoticeActive(session: SessionManager | undefined): boolean {

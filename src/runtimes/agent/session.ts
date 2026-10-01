@@ -21,6 +21,7 @@ import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import {
   createSession,
+  endAbandonedActiveSession,
   incrementMessageCount,
   resolveResumableAgentSession,
   updateResumedSessionStatus,
@@ -2643,6 +2644,8 @@ export class SessionManager {
       this.lastMessageAt = null;
       this.systemPrompt = systemPrompt;
       if (this.configuredCwd !== undefined) this.configuredCwd = cwd;
+      // #3658: never carry an unretired provider session into this generation.
+      this.sessionId = null;
       this.resumeAttemptId = null;
 
       try {
@@ -2841,6 +2844,9 @@ export class SessionManager {
     this.startedAt = new Date().toISOString();
     this.messageCount = 0;
     this.lastMessageAt = null;
+    // #3658: a close that failed skipped the shutdown tail; the new
+    // generation learns its provider session from its own init.
+    this.sessionId = null;
     this.resumeAttemptId = resumeSessionId ?? null;
 
     // Persist the exact row/checkpoint lifecycle after spawn. If this fails the
@@ -3111,10 +3117,11 @@ export class SessionManager {
         this.completeProviderTurn();
         this.active = false;
         this.child = null;
-        // sessionId is deliberately retained here, matching the clean path
-        // below: shutdown() owns its retirement at the tail (durable closure
-        // uses the id it captured before the kill), and no exit-handler
-        // consumer needs it cleared — resume derivation is caller/DB-supplied.
+        // sessionId and resumeAttemptId are deliberately retained here,
+        // matching the clean path below: shutdown() owns their retirement at
+        // the tail (durable closure uses the id it captured before the kill),
+        // and a retried closure still needs the attempted resume id when no
+        // init arrived (#3658).
         return;
       }
 
@@ -4802,7 +4809,13 @@ export class SessionManager {
             );
           }
         }
-        this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
+        // #3658: with no row and no provider session this manager owns no
+        // lifecycle. A key-only 'suspended' would repaint whatever the chat's
+        // checkpoint holds, an ended one included, as resumable; only an
+        // explicit end (/new) still retires the chat's checkpoint by key.
+        if (closingRowId !== null || closingSessionId !== null || lifecycleStatus === 'ended') {
+          this.updateCheckpointStatus(lifecycleStatus, closingSessionId);
+        }
       }
       log.info({
         rowId: closingRowId,
@@ -4819,8 +4832,53 @@ export class SessionManager {
       }
     }
 
+    this.clearGenerationIdentity();
+    this.hostWorkAdmissionCleanupUnproven = false;
+    // Only a fully successful teardown (process proof plus lifecycle closure)
+    // may reopen a lane closed by an ambiguous provider write.
+    this.completeProviderTurn();
+  }
+
+  /**
+   * #3658: forget a generation whose provider stopped but whose durable close
+   * failed, before the runtime starts a fresh one in its place. Nothing later
+   * may pair this row or provider session with the new generation. The row is
+   * ended while it is still this generation's row, 'active' or already
+   * 'orphaned' by the stale-session sweep, which would still read as
+   * resumable. A row reconciled otherwise, or reowned, is left as is.
+   * Returns false, keeping the whole identity, when the row could not be
+   * ended: the caller must not start fresh, and the next close retries it.
+   * The lane and the cleanup-unproven flag are left alone, since only a fully
+   * successful teardown may reset them.
+   */
+  retireUnclosedGeneration(): boolean {
+    const rowId = this.dbRowId;
+    const sessionId = this.sessionId ?? this.resumeAttemptId;
+    log.warn({
+      chatJid: this.chatJid,
+      rowId,
+      sessionId,
+    }, 'session: abandoning a generation whose lifecycle close failed');
+    if (rowId !== null) {
+      try {
+        if (endAbandonedActiveSession(this.db, rowId, sessionId) === 0) {
+          log.info({ chatJid: this.chatJid, rowId }, 'session: abandoned row already reconciled or reowned — left as is');
+        }
+      } catch (err) {
+        log.warn({ err, chatJid: this.chatJid, rowId }, 'session: abandoned row could not be ended — generation kept, turn refused');
+        return false;
+      }
+    }
+    this.clearGenerationIdentity();
+    return true;
+  }
+
+  private clearGenerationIdentity(): void {
     this.sessionId = null;
     this.dbRowId = null;
+    // #3658: the manager can stay resident after this closure. Its next
+    // shutdown must not target the now-closed checkpoint by this identity.
+    this.resumeAttemptId = null;
     this.startedAt = null;
     this.messageCount = 0;
     this.lastMessageAt = null;
@@ -4828,10 +4886,6 @@ export class SessionManager {
     this.codexResumeThreadStartReqId = null;
     this.providerReadyPromise = null;
     this.providerReadyResolve = null;
-    this.hostWorkAdmissionCleanupUnproven = false;
-    // Only a fully successful teardown (process proof plus lifecycle closure)
-    // may reopen a lane closed by an ambiguous provider write.
-    this.completeProviderTurn();
   }
 }
 
