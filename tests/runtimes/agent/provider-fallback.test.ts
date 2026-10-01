@@ -534,6 +534,9 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(v.replayTurnOnFallback).toHaveBeenCalledWith({
       chatJid: 'chat@s.whatsapp.net',
       mapKey: 'chat-key',
+      // The replay carries the held turn's registered scope ref so a rekey
+      // before admission is followed, not the key captured here.
+      scopeRef: { value: 'chat-key' },
       replayText: 'please continue the task',
       actorJid: 'sender@s.whatsapp.net',
       oldSession: null,

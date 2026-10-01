@@ -115,8 +115,17 @@ export interface RuntimeTurnPostEffects {
   readonly clearReplayOnSuccess?: boolean;
   readonly admissionRejected?: boolean;
   readonly advancePerChatInboundSeq?: boolean;
+  /**
+   * Per-chat only: when a different turn heads the FIFO, retire this turn by
+   * its own identity instead of treating the foreign head as FIFO drift. Set by
+   * failure paths that finalize a turn which may already have been displaced
+   * (a refused fallback replay); the head's slot and state are never touched.
+   */
+  readonly detachIfDisplaced?: boolean;
   readonly voice?: { chatJid: string; responseText: string; inboundContentType: string | null };
   readonly ledger: {
+    /** The turn was not the FIFO head at validation; see detachIfDisplaced. */
+    displaced: boolean;
     fifoValidated: boolean;
     guaranteeDisarmed: boolean;
     queueCleared: boolean;
@@ -721,6 +730,7 @@ createRuntimeTurnPostEffects(
   return {
     ...effects,
     ledger: {
+      displaced: false,
       fifoValidated: false,
       guaranteeDisarmed: false,
       queueCleared: false,
@@ -1053,6 +1063,7 @@ finalizeRuntimeTurnContext(args: {
   event?: Extract<AgentEvent, { type: 'result' }>;
   mapKey?: string;
   clearReplayOnSuccess?: boolean;
+  detachIfDisplaced?: boolean;
   voice?: { chatJid: string; responseText: string; inboundContentType: string | null };
 }): Promise<FinalizeRuntimeTurnResult> {
   const turnId = args.context.identity.logicalTurnId;
@@ -1089,6 +1100,7 @@ private async performRuntimeTurnFinalization(args: {
   event?: Extract<AgentEvent, { type: 'result' }>;
   mapKey?: string;
   clearReplayOnSuccess?: boolean;
+  detachIfDisplaced?: boolean;
   voice?: { chatJid: string; responseText: string; inboundContentType: string | null };
 }): Promise<FinalizeRuntimeTurnResult> {
   if (!this.host.durability) {
@@ -1117,6 +1129,7 @@ private async performRuntimeTurnFinalization(args: {
     ...(args.clearReplayOnSuccess === undefined
       ? {}
       : { clearReplayOnSuccess: args.clearReplayOnSuccess }),
+    ...(args.detachIfDisplaced === true && scopeRef !== undefined ? { detachIfDisplaced: true } : {}),
     ...(args.voice === undefined ? {} : { voice: args.voice }),
   });
   let capabilityDecision: CapabilityDecisionParams | undefined;
@@ -1835,6 +1848,40 @@ retireIdlePerChatTurnQueueForRecycle(
   this.host.perChatTurnQueues.delete(mapKey);
 }
 
+/**
+ * Remove a displaced (non-head) turn's own FIFO entry. The context is found by
+ * logical turn id; its inbound seq is removed only when it sits in the parallel
+ * slot, so a head or neighbour that shares no identity with it is never moved.
+ */
+private detachDisplacedPerChatTurn(mapKey: string, context: RuntimeTurnContext): void {
+  const contexts = this.host.perChatRuntimeTurnContexts.get(mapKey);
+  const index = contexts?.findIndex(
+    (candidate) => candidate.identity.logicalTurnId === context.identity.logicalTurnId,
+  ) ?? -1;
+  if (index <= 0) return;
+  contexts!.splice(index, 1);
+  const seqs = this.host.perChatInboundSeqQueue.get(mapKey);
+  if (context.identity.inboundSeq !== null && seqs?.[index] === context.identity.inboundSeq) {
+    seqs.splice(index, 1);
+  }
+}
+
+/**
+ * Settle the per-chat completion this turn owns, under whichever key now holds
+ * it. The map is keyed by scope, and an after-terminal action (a deferred alias
+ * change) can rekey it while post-effects await, so match by logical turn id.
+ * Returns false when no published completion belongs to this turn.
+ */
+private resolveOwnedPerChatCompletion(context: RuntimeTurnContext): boolean {
+  for (const [key, completion] of this.host.perChatRuntimeTurnCompletions) {
+    if (completion.context.identity.logicalTurnId !== context.identity.logicalTurnId) continue;
+    this.host.perChatRuntimeTurnCompletions.delete(key);
+    completion.resolve();
+    return true;
+  }
+  return false;
+}
+
 async applyRuntimeTurnPostEffects(
   result: Exclude<FinalizeRuntimeTurnResult, { kind: 'dual_sink_failure' }> | DeferredToObligationRetirement,
   context: RuntimeTurnContext,
@@ -1848,14 +1895,21 @@ async applyRuntimeTurnPostEffects(
       const contexts = this.host.perChatRuntimeTurnContexts.get(mapKey);
       const seqs = this.host.perChatInboundSeqQueue.get(mapKey);
       const completion = this.host.perChatRuntimeTurnCompletions.get(mapKey);
-      if (
-        !postEffects.admissionRejected &&
-        contexts?.[0]?.identity.logicalTurnId !== context.identity.logicalTurnId
-      ) {
+      const notHead = contexts?.[0]?.identity.logicalTurnId !== context.identity.logicalTurnId;
+      // Displaced means a DIFFERENT turn really heads the FIFO. An empty or
+      // missing FIFO is drift, not displacement, and keeps failing loudly.
+      const otherHeads = contexts?.[0] !== undefined && notHead;
+      if (!postEffects.admissionRejected && otherHeads && postEffects.detachIfDisplaced === true) {
+        // Another turn owns the head. Its slot, seq, and presentation state are
+        // not ours to validate or advance; retire this turn by identity below.
+        ledger.displaced = true;
+      } else if (!postEffects.admissionRejected && notHead) {
         this.host.runtimeTurnSupervisor.markDegraded(context);
         throw new Error(`Per-chat runtime turn FIFO drift for ${scopeKey}`);
       }
-      if (
+      if (ledger.displaced) {
+        // Head-relative seq and completion checks describe the head, not this turn.
+      } else if (
         (!postEffects.admissionRejected || postEffects.advancePerChatInboundSeq) &&
         context.identity.inboundSeq !== null &&
         seqs?.[0] !== context.identity.inboundSeq
@@ -1864,6 +1918,7 @@ async applyRuntimeTurnPostEffects(
         throw new Error(`Per-chat inbound sequence FIFO drift for ${scopeKey}`);
       }
       if (
+        !ledger.displaced &&
         !postEffects.admissionRejected &&
         completion !== undefined
         && completion.context.identity.logicalTurnId !== context.identity.logicalTurnId
@@ -1906,10 +1961,43 @@ async applyRuntimeTurnPostEffects(
     ledger.guaranteeDisarmed = true;
   }
   if (!ledger.queueCleared) {
-    postEffects.queue?.clearLastOpId();
+    // The queue's last-op attribution belongs to whichever turn heads the scope.
+    if (!ledger.displaced) postEffects.queue?.clearLastOpId();
     ledger.queueCleared = true;
   }
-  if (mapKey !== undefined) {
+  if (mapKey !== undefined && ledger.displaced) {
+    if (!ledger.fifoAdvanced) {
+      this.detachDisplacedPerChatTurn(mapKey, context);
+      this.host.perChatRuntimeTurnScopeRefs.delete(context.identity.logicalTurnId);
+      ledger.fifoAdvanced = true;
+    }
+    // Replay and presentation state track the head's turn; leave them to it.
+    ledger.replayCleared = true;
+    ledger.presentationCleared = true;
+    if (result.kind === 'terminal' && !ledger.afterTerminalActionRun) {
+      ledger.afterTerminalActionRun = true;
+      const action = this.runRuntimeTurnAfterTerminalAction(context, result);
+      if (action) await action;
+    }
+    if (!ledger.completionSettled) {
+      if (!this.resolveOwnedPerChatCompletion(context)) {
+        // No published completion belongs to this turn: the key's single
+        // completion slot belongs to another turn, so this turn's awaiter
+        // cannot be reached from here. Keep that visible.
+        log.warn({ mapKey, scopeKey, logicalTurnId: context.identity.logicalTurnId },
+          'displaced runtime turn retired without an owned completion');
+        emitAlertChecked(
+          this.host.instanceName,
+          'agent_turn_finalization_escaped',
+          'Displaced runtime turn has no owned completion',
+          `mapKey=${mapKey} scope=${scopeKey} turn=${context.identity.logicalTurnId}`,
+          'warning',
+        );
+        this.registerStuckScope(scopeKey);
+      }
+      ledger.completionSettled = true;
+    }
+  } else if (mapKey !== undefined) {
     if (!ledger.fifoAdvanced) {
       const contexts = this.host.perChatRuntimeTurnContexts.get(mapKey);
       if (!postEffects.admissionRejected) {
@@ -1953,11 +2041,9 @@ async applyRuntimeTurnPostEffects(
       if (action) await action;
     }
     if (!ledger.completionSettled) {
-      const completion = this.host.perChatRuntimeTurnCompletions.get(mapKey);
-      if (completion?.context.identity.logicalTurnId === context.identity.logicalTurnId) {
-        this.host.perChatRuntimeTurnCompletions.delete(mapKey);
-        completion.resolve();
-      }
+      // Settled after the after-terminal action so the next turn sees any
+      // rekey it made; that rekey may have moved the completion off mapKey.
+      this.resolveOwnedPerChatCompletion(context);
       ledger.completionSettled = true;
     }
   } else {
