@@ -155,9 +155,17 @@ function makeOperationalFallbackHealth(overrides: {
   recoveryOutstanding?: number;
   recoveryBlockedUnsafe?: number;
   recoveryQuarantinedDelivery?: number;
+  // #3694: omitted from the body unless set, so every other case keeps its shape.
+  recoveryBlockingReasons?: readonly unknown[];
+  recoveryCorruptLinks?: number;
+  recoveryEchoConflicts?: number;
+  recoveryOrphanTransfers?: number;
+  recoveryDebt?: Record<string, unknown>;
+  // unknown, not boolean: #3694 feeds non-boolean body values through these.
+  modelUsable?: unknown;
   controlPeerConfigured?: boolean;
   controlPeerSuppressedUnavailableAlerts?: number;
-  whatsappConnected?: boolean;
+  whatsappConnected?: unknown;
   connectionState?: string;
   fallbackChainExhausted?: boolean;
   failedEntryCount?: number;
@@ -183,7 +191,9 @@ function makeOperationalFallbackHealth(overrides: {
     turn_capability: {
       last_successful_turn_at: Date.now() - 1_000,
       last_turn_error_class: overrides.lastTurnErrorClass ?? null,
+      ...(overrides.modelUsable !== undefined ? { model_usable: overrides.modelUsable } : {}),
     },
+    ...(overrides.recoveryDebt !== undefined ? { recovery_debt: overrides.recoveryDebt } : {}),
     runtime: {
       agent: {
         providerExecution: {
@@ -198,6 +208,18 @@ function makeOperationalFallbackHealth(overrides: {
         turnRecoveryOutstanding: overrides.recoveryOutstanding ?? 0,
         turnRecoveryBlockedUnsafe: overrides.recoveryBlockedUnsafe ?? 0,
         turnRecoveryQuarantinedDelivery: overrides.recoveryQuarantinedDelivery ?? 0,
+        ...(overrides.recoveryBlockingReasons !== undefined
+          ? { recoveryBlockingReasons: overrides.recoveryBlockingReasons }
+          : {}),
+        ...(overrides.recoveryCorruptLinks !== undefined
+          ? { turnRecoveryCorruptLinks: overrides.recoveryCorruptLinks }
+          : {}),
+        ...(overrides.recoveryEchoConflicts !== undefined
+          ? { turnRecoveryEchoConflicts: overrides.recoveryEchoConflicts }
+          : {}),
+        ...(overrides.recoveryOrphanTransfers !== undefined
+          ? { turnRecoveryOrphanTransfers: overrides.recoveryOrphanTransfers }
+          : {}),
       },
     },
     control_peer: {
@@ -1273,6 +1295,270 @@ describe('HealthPoller', () => {
     expect(alertEvidence).toContain('control_peer_suppressed_unavailable_alerts=11');
 
     poller.stop();
+  });
+
+  describe('#3694 turn-recovery degradation reasons', () => {
+    async function pollDegradedThreeTimes(health: Record<string, unknown>): Promise<{
+      poller: HealthPoller;
+      evidence: () => string;
+    }> {
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(health) });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const evidence = (): string => ((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+        (call) => call[1] === 'health_body_degraded',
+      )?.[3] ?? '') as string;
+      return { poller, evidence };
+    }
+
+    function causeJournalCalls(): unknown[][] {
+      return logger.info.mock.calls.filter((call) => call[1] === 'health body degraded causes');
+    }
+
+    it('names the blocking reason and the integrity counters in the alert evidence', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_integrity'],
+        recoveryCorruptLinks: 1,
+        recoveryEchoConflicts: 0,
+        recoveryOrphanTransfers: 0,
+      }));
+
+      expect(evidence()).toContain('degradation_causes=turn_recovery_degraded');
+      expect(evidence()).toContain('recovery_blocking_reasons=turn_recovery_integrity');
+      expect(evidence()).toContain('turn_recovery_corrupt_links=1');
+      expect(evidence()).toContain('turn_recovery_echo_conflicts=0');
+      expect(evidence()).toContain('turn_recovery_orphan_transfers=0');
+      expect(poller.getStatus('remote-1')?.statusEvidence).toEqual(expect.arrayContaining([
+        'recovery_blocking_reasons=turn_recovery_integrity',
+        'turn_recovery_corrupt_links=1',
+      ]));
+
+      poller.stop();
+    });
+
+    it('reports an absent reason list as unreported, never by omission', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+      }));
+
+      expect(evidence()).toContain('recovery_blocking_reasons=unreported');
+      expect(evidence()).toContain('turn_recovery_corrupt_links=unknown');
+      expect(evidence()).toContain('turn_recovery_echo_conflicts=unknown');
+      expect(evidence()).toContain('turn_recovery_orphan_transfers=unknown');
+
+      poller.stop();
+    });
+
+    it('renders an empty reason list as none', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: [],
+      }));
+
+      expect(evidence()).toContain('recovery_blocking_reasons=none');
+
+      poller.stop();
+    });
+
+    it('collapses unregistered reasons to one code and never echoes them', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_actionable', 'private free text', 7],
+      }));
+
+      expect(evidence()).toContain(
+        'recovery_blocking_reasons=turn_recovery_actionable,unrecognized',
+      );
+      expect(evidence()).not.toContain('private free text');
+
+      poller.stop();
+    });
+
+    // Standing recovery debt on a connected, model-usable bot: a continuity gap
+    // plus finalization debt, the shape seen live. The evidence must carry
+    // both sides so the reader can tell debt from a live fault.
+    const standingDebt = makeRecoveryDebt({
+      open: true,
+      service_blocking: true,
+      attention: 'urgent',
+      reason: 'continuity_gap_open',
+      reasons: ['continuity_gap_open', 'turn_finalization_active'],
+      continuity: { readable: true, open: 5, unresolved: 5, ambiguous: 0 },
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+    });
+
+    it('carries the debt contract and the live-fault signals side by side', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['continuity_gap_open', 'turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_finalization_active'],
+        recoveryDebt: standingDebt,
+        modelUsable: true,
+      }));
+
+      expect(evidence()).toContain('whatsapp_connected=true');
+      expect(evidence()).toContain('model_usable=true');
+      expect(evidence()).toContain('recovery_blocking_reasons=turn_finalization_active');
+      expect(evidence()).toContain('recovery_debt=valid');
+      expect(evidence()).toContain('recovery_debt_attention=urgent');
+      expect(evidence()).toContain('recovery_debt_service_blocking=true');
+      expect(evidence()).toContain('recovery_debt_reasons=continuity_gap_open,turn_finalization_active');
+      expect(evidence()).toContain('recovery_debt_gauge=several');
+      expect(evidence()).toContain('recovery_debt_continuity_open=5');
+      expect(evidence()).toContain('recovery_debt_blocking_outstanding=0');
+      expect(evidence()).toContain('recovery_debt_retained_terminal=0');
+      expect(causeJournalCalls()[0]?.[0]).toMatchObject({
+        recoveryDebt: 'valid',
+        recoveryDebtReasons: 'continuity_gap_open,turn_finalization_active',
+        recoveryDebtGauge: 'several',
+        whatsappConnected: 'true',
+        modelUsable: 'true',
+      });
+
+      poller.stop();
+    });
+
+    it('names an absent debt block instead of reading it as no debt', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+      }));
+
+      expect(evidence()).toContain('recovery_debt=absent');
+      expect(evidence()).toContain('recovery_debt_reasons=unknown');
+      expect(evidence()).toContain('recovery_debt_continuity_open=unknown');
+      expect(evidence()).toContain('model_usable=unknown');
+
+      poller.stop();
+    });
+
+    it('names a contradictory debt block invalid and publishes none of its counts', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['continuity_gap_open'],
+        // service_blocking=false contradicts the blocking reason: the parser rejects it.
+        recoveryDebt: { ...standingDebt, service_blocking: false },
+      }));
+
+      expect(evidence()).toContain('recovery_debt=invalid');
+      expect(evidence()).toContain('recovery_debt_attention=unknown');
+      expect(evidence()).toContain('recovery_debt_continuity_open=unknown');
+
+      poller.stop();
+    });
+
+    it('never journals a raw body value: free text in the flags and the causes', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded', 'private free text cause'],
+        whatsappConnected: 'private free text flag',
+        modelUsable: 'private free text model',
+      }));
+
+      expect(causeJournalCalls()).toHaveLength(1);
+      expect(causeJournalCalls()[0]?.[0]).toMatchObject({
+        degradationCauses: 'turn_recovery_degraded,unrecognized',
+        whatsappConnected: 'invalid',
+        modelUsable: 'invalid',
+      });
+      expect(JSON.stringify(causeJournalCalls())).not.toContain('private free text');
+      // model_usable= is a new evidence line and is coded too. The existing
+      // whatsapp_connected= and degradation_causes= lines are unchanged; the
+      // evidence is confined to a digest before the durable outbox (#2386).
+      expect(evidence()).toContain('model_usable=invalid');
+      expect(evidence()).not.toContain('private free text model');
+
+      poller.stop();
+    });
+
+    it('journals the cause vector once per degraded episode and again only when it changes', async () => {
+      const { poller } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_integrity'],
+        recoveryCorruptLinks: 1,
+        recoveryEchoConflicts: 0,
+        recoveryOrphanTransfers: 0,
+      }));
+
+      expect(causeJournalCalls()).toEqual([[
+        {
+          name: 'remote-1',
+          degradationCauses: 'turn_recovery_degraded',
+          recoveryBlockingReasons: 'turn_recovery_integrity',
+          turnRecoveryCorruptLinks: '1',
+          turnRecoveryEchoConflicts: '0',
+          turnRecoveryOrphanTransfers: '0',
+          recoveryDebt: 'absent',
+          recoveryDebtAttention: 'unknown',
+          recoveryDebtServiceBlocking: 'unknown',
+          recoveryDebtReasons: 'unknown',
+          recoveryDebtGauge: 'unknown',
+          whatsappConnected: 'true',
+          modelUsable: 'unknown',
+        },
+        'health body degraded causes',
+      ]]);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(causeJournalCalls()).toHaveLength(1);
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOperationalFallbackHealth({
+          degradationCauses: ['turn_recovery_degraded'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          recoveryCorruptLinks: 0,
+          recoveryEchoConflicts: 0,
+          recoveryOrphanTransfers: 0,
+        })),
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(causeJournalCalls()).toHaveLength(2);
+      expect(causeJournalCalls()[1]?.[0]).toMatchObject({
+        recoveryBlockingReasons: 'turn_recovery_actionable',
+        turnRecoveryCorruptLinks: '0',
+      });
+
+      poller.stop();
+    });
+
+    it('journals the same cause vector again for a new degraded episode after recovery', async () => {
+      const degraded = makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_integrity'],
+        recoveryCorruptLinks: 1,
+      });
+      const { poller } = await pollDegradedThreeTimes(degraded);
+      expect(causeJournalCalls()).toHaveLength(1);
+
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(makeOnlineHealth()) });
+      await vi.advanceTimersByTimeAsync(5_000);
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(degraded) });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(causeJournalCalls()).toHaveLength(2);
+
+      poller.stop();
+    });
+
+    it('does not journal causes for an exactly proven operational fallback', async () => {
+      const { poller } = await pollDegradedThreeTimes(makeOperationalFallbackHealth());
+
+      expect(causeJournalCalls()).toEqual([]);
+
+      poller.stop();
+    });
   });
 
   it.each([

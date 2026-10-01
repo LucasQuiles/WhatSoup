@@ -38,6 +38,8 @@ function input(
       turnRecoveryCorruptLinks: 0,
       turnRecoveryOrphanTransfers: 0,
       turnRecoveryEchoConflicts: 0,
+      turnRecoveryCorruptLinksSettled: 0,
+      turnRecoveryEchoConflictsSettled: 0,
       turnRecoveryCorroboratedRetained: 0,
       turnRecoveryBlockedUnsafeSynthetic: 0,
       turnRecoveryBlockedUnsafeSuperseded: 0,

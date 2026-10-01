@@ -85,6 +85,7 @@ import {
 } from './runtime-tunables.ts';
 import type { ProviderFallbackActivation, ProviderFallbackReason } from './runtime-turn-result-handler.ts';
 import type { ModelRouteEvent } from './route-events.ts';
+import { scheduledDedupeKey } from './scheduled-agent-job-delivery.ts';
 import { SessionManager, buildChildEnv, getProviderBinary } from './session.ts';
 import { alertEvidenceValue } from './tool-update.ts';
 import type { FallbackWindowState } from './fallback-window-state.ts';
@@ -528,6 +529,7 @@ export class RuntimeFallbackCoordinator {
     session: SessionManager | null,
     turnHadToolWork: boolean,
     mapKey: string | undefined,
+    scheduled = false,
   ): boolean {
     if (this.host.isFallbackWindowActive) return false;
     if (this.host.agentFallbacks.length === 0) return false;
@@ -622,10 +624,12 @@ export class RuntimeFallbackCoordinator {
       oldSession: session,
       hadToolActivity: turnHadToolWork,
     });
-    this.host.notifyProviderFallbackActivated(queue, activation, {
-      replayScheduled,
-      blockedByToolActivity: turnHadToolWork,
-    });
+    if (!scheduled) {
+      this.host.notifyProviderFallbackActivated(queue, activation, {
+        replayScheduled,
+        blockedByToolActivity: turnHadToolWork,
+      });
+    }
     this.host.consecutivePrimaryEmptyTurns = 0;
     return true;
   }
@@ -663,6 +667,7 @@ export class RuntimeFallbackCoordinator {
     mapKey: string | undefined,
     isUserTurnResult: boolean,
     evidenceText: string,
+    scheduled = false,
   ): boolean {
     // System/heal/synthetic turns must never advance or trip the consecutive
     // threshold. Unlike the empty-output arming call-site (already inside the
@@ -706,10 +711,12 @@ export class RuntimeFallbackCoordinator {
       oldSession: session,
       hadToolActivity: turnHadToolWork,
     });
-    this.host.notifyProviderFallbackActivated(queue, activation, {
-      replayScheduled,
-      blockedByToolActivity: turnHadToolWork,
-    });
+    if (!scheduled) {
+      this.host.notifyProviderFallbackActivated(queue, activation, {
+        replayScheduled,
+        blockedByToolActivity: turnHadToolWork,
+      });
+    }
     // No replay took over (tool activity already started, or nothing to replay):
     // the primary session actually errored, so tear it down like the sibling
     // terminal branches — the active window routes the next turn to the fallback.
@@ -996,16 +1003,18 @@ export class RuntimeFallbackCoordinator {
    * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
    * prune→check→set→capDedupeMap idiom, reusing this.host.fallbackTunables.noticeDedupMs.
    */
-  emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
+  emitNoFallbackReauthNotice(queue: IOutboundQueue, scheduled = false): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.host.recentNoFallbackReauthNotices) {
       if (now - recordedAt > this.host.fallbackTunables.noticeDedupMs) {
         this.host.recentNoFallbackReauthNotices.delete(key);
       }
     }
-    const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
+    // #3497: a scheduled turn posts no notice and dedupes its alert under its
+    // own key, so a later user turn in the same chat still gets both.
+    const noticeKey = scheduledDedupeKey([queue.targetChatJid, 'auth-required'].join(':'), scheduled);
     if (this.host.recentNoFallbackReauthNotices.has(noticeKey)) return;
-    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    if (!scheduled) queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
     // Dedup is recorded only AFTER a successful enqueue: recording first meant a
     // teardown-race throw suppressed both the notice and the alert for the full
     // dedup window with no retry.
@@ -1038,6 +1047,7 @@ export class RuntimeFallbackCoordinator {
     hadToolWork: boolean = false,
     session: SessionManager | null = null,
     wasUnclassifiedError: boolean = false,
+    scheduled: boolean = false,
   ): void {
     if (!this.host.isFallbackWindowActive) return;
     this.host.fallbackMetrics.recordServedTurn();
@@ -1069,8 +1079,9 @@ export class RuntimeFallbackCoordinator {
     for (const [k, ts] of this.host.recentFallbackEmptyTurnAlerts) {
       if (emptyAlertNow - ts > this.host.fallbackTunables.noticeDedupMs) this.host.recentFallbackEmptyTurnAlerts.delete(k);
     }
-    if (!this.host.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
-      this.host.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
+    const emptyAlertKey = scheduledDedupeKey(queue.targetChatJid, scheduled);
+    if (!this.host.recentFallbackEmptyTurnAlerts.has(emptyAlertKey)) {
+      this.host.recentFallbackEmptyTurnAlerts.set(emptyAlertKey, emptyAlertNow);
       this.host.capDedupeMap(this.host.recentFallbackEmptyTurnAlerts);
       emitAlertChecked(
         this.host.instanceName,

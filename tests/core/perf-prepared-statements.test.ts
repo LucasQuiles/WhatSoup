@@ -93,9 +93,18 @@ describe('prepared statement caching', () => {
     // answer's delivery echo from one truly blocked by outstanding recovery. It
     // shares its FROM/WHERE text with hasOutstandingTurnRecoveryForScope, which
     // stays a distinct statement, so the store prepares one more, not two.)
-    // (+1 vs 154: the corroboration-aware delivery ambiguity health aggregate
-    // is prepared once and reused with the rest of the durability statements.)
-    expect(prepareSpy).toHaveBeenCalledTimes(155);
+    // (+9 vs 154, report-only sweep bucket 5: TerminalRecordInboundCloser —
+    // inbound, terminal-record, disposition-link, recovery-job and delivery-op
+    // probes, the bounded candidate scan, and the two guarded close updates plus
+    // the delivery-op terminal mark the operator CLI uses — prepared once in the
+    // constructor and reused by every sweep report.)
+    // (+1: the corroboration-aware delivery ambiguity health aggregate is
+    // prepared once and reused with the rest of the durability statements.)
+    // (+1 vs 164, bucket-5 scan cycle: TerminalRecordInboundCloser's
+    // MAX(inbound_events.seq) probe that fixes each scan cycle's upper bound so
+    // arrivals cannot postpone the wrap; the candidate scan itself stays one
+    // statement, now keyset-paged.)
+    expect(prepareSpy).toHaveBeenCalledTimes(165);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');

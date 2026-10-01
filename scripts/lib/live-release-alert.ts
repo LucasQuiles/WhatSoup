@@ -8,6 +8,14 @@ export interface ReleaseAlertEmitOptions {
   python: string;
   /** Pre-generated event id; when omitted the helper mints a uuid4 itself. */
   eventId?: string;
+  /**
+   * Variables set for this call only, on top of the allowlisted environment.
+   * Only the keys in `EMIT_OVERRIDE_KEYS` (today `BOT_ERRORS_INLINE_LOG_TAIL`)
+   * are accepted; any other key is dropped, so a caller cannot redirect the
+   * helper's interpreter paths or PATH. Callers that omit it get exactly the
+   * allowlisted environment, as before.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 export interface ReleaseAlertEmitPayload {
   summary: string;
@@ -48,11 +56,17 @@ const EMIT_ENV_KEYS = [
   'WSL_DISTRO_NAME',
 ] as const;
 
-function emitEnvironment(): NodeJS.ProcessEnv {
+/** Keys a caller may set per call (#2481: the release-invariants alert turns the inline log tail off). */
+const EMIT_OVERRIDE_KEYS: ReadonlySet<string> = new Set(['BOT_ERRORS_INLINE_LOG_TAIL']);
+
+function emitEnvironment(overrides: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of EMIT_ENV_KEYS) {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (EMIT_OVERRIDE_KEYS.has(key)) env[key] = value;
   }
   return env;
 }
@@ -77,7 +91,7 @@ export function emitReleaseAlert(
   const proc = spawnSync(options.python, args, {
     cwd: options.repoRoot,
     encoding: 'utf8',
-    env: emitEnvironment(),
+    env: emitEnvironment(options.env),
     maxBuffer: 1024 * 1024,
     timeout: 60_000,
   });

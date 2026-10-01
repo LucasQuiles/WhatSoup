@@ -33,7 +33,7 @@ export type CheckpointAdoption =
   | { kind: 'resume'; rowId: number; sessionId: string; recoveredOwn: boolean }
   | {
     kind: 'fresh_with_notice';
-    reason: 'foreign_checkpoint' | 'own_row_not_resumable' | 'resume_refused';
+    reason: 'foreign_checkpoint' | 'own_row_not_resumable' | 'resume_refused' | 'previous_close_failed';
     notice: string;
   }
   | {
@@ -170,6 +170,26 @@ export async function spawnForAdoption(
     await session.spawnSession();
     return { kind: 'fresh_with_notice', reason: 'resume_refused', notice: CHECKPOINT_NOT_RESTORED_NOTICE };
   }
+}
+
+/**
+ * #3658: the adoption for a turn whose pre-spawn shutdown failed. Only a close
+ * that failed at the durable lifecycle step may start fresh with the notice:
+ * every termination failure records a durable failure closure or reports an
+ * aggregate error, and an unproven stop could leave a second live provider.
+ * Returns null when the turn must stay refused.
+ */
+export function adoptionAfterFailedClose(
+  err: unknown,
+  status: { providerTerminated: boolean; durableFailureClosed: boolean; durableFailureInconclusive: boolean },
+): CheckpointAdoption | null {
+  if (
+    err instanceof AggregateError
+    || !status.providerTerminated
+    || status.durableFailureClosed
+    || status.durableFailureInconclusive
+  ) return null;
+  return { kind: 'fresh_with_notice', reason: 'previous_close_failed', notice: CHECKPOINT_NOT_RESTORED_NOTICE };
 }
 
 /**

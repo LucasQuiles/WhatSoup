@@ -81,6 +81,9 @@ FILES=(
   "deploy/scripts/lib/classify_health.py"
   "deploy/scripts/lib/dm_roundtrip.py"
   "deploy/scripts/lib/durable_json.py"
+  # fleet_config.py: the health-check and watchdog profile loaders and the
+  # bot_errors_roster roster loader resolve their files through it.
+  "deploy/scripts/lib/fleet_config.py"
   "deploy/scripts/lib/health_reader.py"
   "deploy/scripts/lib/owner_route.py"
   "deploy/scripts/lib/producer_cadence_receipt.py"

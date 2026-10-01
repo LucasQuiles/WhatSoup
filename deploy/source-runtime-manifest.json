@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "e388709c3f700d35946fc56266e67e2d744f4e095a7d332101d212f6a1b677da",
+      "sha256": "9b49b4c1e0660352828b07843e6608eff899327c79b935366e251e746d9771a3",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -53,12 +53,13 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "c745aa37a3d78ba7e3ab6d3b4fb4cd5f766e3ae0947a1bf32cb32f6beb98ed07",
+      "sha256": "7ec827ea81a91f965623679addda827a1278f81b3970b4f962cd23abf8f6e20a",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
         "Logged out",
-        "scheduleSettledAuthBondSnapshot"
+        "scheduleSettledAuthBondSnapshot",
+        "lastReconnectReset"
       ],
       "importGraph": true
     },
@@ -73,7 +74,7 @@
     },
     {
       "path": "src/transport/auth-disconnect-policy.ts",
-      "sha256": "12918cb9943d62b5df6b8138934dbddced4d54a9670973070a5b4dba206d296a",
+      "sha256": "af3bbbef3d22ed27f474eeb3095fd1b0756cc7e21f9cfa3a44f76d132f909036",
       "mustContain": [
         "decideDisconnectAction",
         "logged-out",
@@ -83,7 +84,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "99194b4813fa6750ba82fc1fa564ceed77c9a461c8a75d429acc1fb38b3be015",
+      "sha256": "ca0203a034f857475b6601186e3a472ef146df5e8b7785f2769d83f550a00736",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",
@@ -93,7 +94,7 @@
     },
     {
       "path": "src/runtimes/agent/session-db.ts",
-      "sha256": "60e7535d6a84b3e57a8d005d7de882743a16fdbb986c7114bd72ec16a1b12350",
+      "sha256": "af736b3fbfb310e06af01a05c6e88308ff94a64368ec0d7d62b503319e135f66",
       "mustContain": [
         "getSessionTokenSnapshot"
       ],

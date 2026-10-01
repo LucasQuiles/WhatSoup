@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "7f485693259cf6a4d1dad7c9aafed20925b3e9dfcecfe642fb43171190f5836c",
+      "sha256": "8047690399ae3d1761f6916be193414d44168ce8819de21a81e49c6a313eda75",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -144,7 +144,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "128be8911202f03acb7806bfff95072e1134d19cb2d497662a7f70afda2065b5",
+      "sha256": "9b94b2e5056afc9d8a1a81b9b6e4cb865c5d65e42409beb6945ad4b686ce3be8",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c93cb1009abb12e389c8b98193cb0a9fe3e465be4257925067d48823292016fb",
+      "sha256": "01d650a03f22300f80c1f5c2fefcace989c47864f960c4a9f2b60f283e8f1ad0",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -285,7 +285,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "f660de79c7a031f044c17a40785b76f98c36fe1245b5651057368e7e3ffc62d1",
+      "sha256": "1ee565f07efbe45f405e95dbe125b548bb164fa305133f87a3ffd362d16198f7",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -362,7 +362,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "dd3666fcc979685aacc926f5cd4e62a38268fe0fc8665a37cbcd927ccb853c52",
+      "sha256": "10f37562cc0d87ab6164558e588f43dea706a429537b8d8d0f4de0d23aaaf854",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES",
@@ -533,7 +533,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_roster.py",
-      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
+      "sha256": "882b41b4e1eb2cccea2717f1a054651d9c705d249f9ddd791578094b3e668431",
       "mustContain": [
         "roster_digest",
         "roster_inventory",
@@ -625,8 +625,18 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/fleet_config.py",
+      "sha256": "30a67aa96ea4c47c2d262eccbffedd4b81bfecaa51ead0e9a631b3ec3c58136e",
+      "mustContain": [
+        "resolve_health_profile",
+        "resolve_roster",
+        "FleetConfigError",
+        "resolver order"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "5f51bcb3cfa473d9a9058dc835502125e55385e9254e1ebe7f3f267f66789871",
+      "sha256": "e56636f191dae587ccbe9cfd22c2e52b60fdc015829930d0b24bf0ea234cd240",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
@@ -686,7 +696,7 @@
     },
     {
       "path": "deploy/scripts/lib/state_files.py",
-      "sha256": "30d6857e8344b3099ad0f01a9c91fde61600dba4811494ab5d099c99846bac7d",
+      "sha256": "f41967828a69dbbfa370282b660a3077ef5fd1d3c916aed58f7da766d239b2fc",
       "mustContain": [
         "Single source of truth for bot-errors state filenames",
         "REPLY_GUARANTEE_OBSERVER_STATE"
@@ -753,7 +763,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "679c3c23e5ac3f3975b9639512e440a0f00f8c5c19de7b2b13d3acd9b3d5cbda",
+      "sha256": "cdd222ff548d865352c46ea9cef5039e24f40c3609100ece385d8ff48e56f0ca",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -806,7 +816,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "201a9966b342f61a62a586e6954e0ef78a1a67f336954eb8223fe1a61a3f11fd",
+      "sha256": "a64179e47e9199038a086d4ce92b3d578721c04551eed2aaaea34b45428b520e",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
@@ -840,7 +850,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "fc1000f6abef4780bc6acfb1b10dd4a831b3446bfd193146fa19f2104dd349c6",
+      "sha256": "b0c0d2ce6068887cbbc4c09e4b90ee6e540648c21599ec6fadb46bc5aab9d21e",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",

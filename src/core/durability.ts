@@ -37,6 +37,7 @@ import {
   type RecoveryStats,
 } from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
+import { TerminalRecordInboundCloser } from './terminal-record-inbound-close.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
 import {
@@ -571,6 +572,12 @@ export interface StuckInboundSweepResult {
    * claimed owning job driven to `exhausted` so the scope becomes admissible.
    */
   reclaimedRecoveryOwned: number;
+  /**
+   * Report-only: open inbound rows behind their own FINAL terminal record
+   * that `turn-recovery-operator close-inbound` could close (see
+   * terminal-record-inbound-close.ts). The sweep never closes them.
+   */
+  terminalRecordCloseCandidates: number;
 }
 
 export interface OutboundOpParams {
@@ -695,6 +702,7 @@ export class DurabilityEngine {
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
   private readonly turnRecovery: TurnRecoveryStore;
+  private readonly terminalRecordInboundCloser: TerminalRecordInboundCloser;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
   /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
@@ -961,7 +969,7 @@ export class DurabilityEngine {
           session_status, completed_inbound_seq, completed_delivery_jid,
           completed_delivery_namespace, completed_scope,
           completed_logical_turn_id, completed_manager_id, completed_generation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'active'), ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(conversation_key) DO UPDATE SET
           session_id = COALESCE(excluded.session_id, session_checkpoints.session_id),
           transcript_path = COALESCE(excluded.transcript_path, session_checkpoints.transcript_path),
@@ -976,7 +984,19 @@ export class DurabilityEngine {
           watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
           workspace_path = COALESCE(excluded.workspace_path, workspace_path),
           claude_pid = COALESCE(excluded.claude_pid, claude_pid),
-          session_status = COALESCE(excluded.session_status, session_status),
+          -- #3658: excluded.session_status carries the insert default, so
+          -- the update reads the caller's own, possibly absent, status. A
+          -- write that keeps the same provider session never reopens an
+          -- ended checkpoint as suspended or orphaned; only a lifecycle method
+          -- or a new session does that.
+          session_status = CASE
+            WHEN session_checkpoints.session_status = 'ended'
+              AND (excluded.session_id IS NULL
+                OR excluded.session_id IS session_checkpoints.session_id)
+              AND ? IN ('suspended', 'orphaned')
+              THEN session_checkpoints.session_status
+            ELSE COALESCE(?, session_checkpoints.session_status)
+          END,
           completed_inbound_seq = CASE
             WHEN excluded.session_id IS NOT NULL
               AND excluded.session_id IS NOT session_checkpoints.session_id
@@ -1394,6 +1414,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.terminalRecordInboundCloser = new TerminalRecordInboundCloser(db.raw);
     this.capabilityObligations = new CapabilityObligationStore(db);
     this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
@@ -1411,7 +1432,9 @@ export class DurabilityEngine {
       fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
       fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
       fields.workspacePath ?? null, fields.claudePid ?? null,
-      fields.sessionStatus ?? 'active',
+      // #3658: only lifecycle writers change the status. A new row still gets
+      // 'active' in SQL; an update that omits the status keeps the stored one.
+      fields.sessionStatus ?? null,
       fields.completedInboundSeq ?? null,
       fields.completedDeliveryJid ?? null,
       fields.completedDeliveryNamespace ?? null,
@@ -1419,6 +1442,9 @@ export class DurabilityEngine {
       fields.completedLogicalTurnId ?? null,
       fields.completedManagerId ?? null,
       fields.completedGeneration ?? null,
+      // The conflict clause reads the status twice: the ended guard, then the write.
+      fields.sessionStatus ?? null,
+      fields.sessionStatus ?? null,
     );
   }
 
@@ -3276,7 +3302,16 @@ export class DurabilityEngine {
   /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
     const reclaimedStaleRows: StaleReclaimedInbound[] = [];
-    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows);
+    // Bucket 5 is advisory and writes nothing, so it reads in its own snapshot
+    // before the mutating sweep instead of lengthening that transaction; the
+    // operator close path re-evaluates every row before it writes. The buckets
+    // are disjoint: buckets 1-3 require no terminal record, bucket 4 requires a
+    // `transferred_to_recovery_owner` record, and bucket 5 requires a final one.
+    const terminalRecordCloseCandidates = withTransaction(
+      this.db,
+      () => this.reportTerminalRecordCloseCandidates(),
+    );
+    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows, terminalRecordCloseCandidates);
     if (reclaimedStaleRows.length > 0 && this.staleInboundReclaimListener) {
       try {
         this.staleInboundReclaimListener(reclaimedStaleRows);
@@ -3289,6 +3324,7 @@ export class DurabilityEngine {
 
   private runSweepStuckInboundTransaction(
     reclaimedStaleRows: StaleReclaimedInbound[],
+    terminalRecordCloseCandidates: number,
   ): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
@@ -3314,7 +3350,9 @@ export class DurabilityEngine {
         staleOpen.length === 0 &&
         recoveryOwned.length === 0
       ) {
-        return { completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned };
+        return {
+          completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned, terminalRecordCloseCandidates,
+        };
       }
 
       const recovery = this.recoveryEvidence.startWithinTransaction(
@@ -3379,6 +3417,7 @@ export class DurabilityEngine {
         completedTurnDone,
         failedStale,
         reclaimedRecoveryOwned,
+        terminalRecordCloseCandidates,
       };
       const recoveryStats = createRecoveryStats(recovery);
       recoveryStats.openRecoveries = this.recoveryEvidence.countOpen();
@@ -3397,6 +3436,45 @@ export class DurabilityEngine {
       }
       return result;
     });
+  }
+
+  /**
+   * Report-only: open inbound rows behind a final terminal record that an
+   * operator could close with `turn-recovery-operator close-inbound`. Each
+   * close is an operator decision, so the sweep writes nothing here — not the
+   * row, and no recovery evidence. Each call evaluates one bounded window of
+   * the scan cycle; a window whose rows were all refused is logged too, so a
+   * backlog of refused rows stays visible instead of reading as zero.
+   */
+  private reportTerminalRecordCloseCandidates(): number {
+    const startedAt = systemClock.now();
+    const scan = this.terminalRecordInboundCloser.scan();
+    if (scan.scanned > 0) {
+      const fields = {
+        count: scan.eligible.length,
+        // Bounded by scanCap; the old fixed window logged up to 200, so keep
+        // that and flag truncation instead of silently hiding later seqs.
+        inboundSeqs: scan.eligible.slice(0, 200),
+        inboundSeqsTruncated: scan.eligible.length > 200,
+        scanned: scan.scanned,
+        complete: scan.complete,
+        refusedByReason: scan.refusedByReason,
+        cycleUpperSeq: scan.cycleUpperSeq,
+        elapsedMs: systemClock.now() - startedAt,
+      };
+      if (scan.eligible.length > 0) {
+        log.warn(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record await operator close-inbound',
+        );
+      } else {
+        log.info(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record were all refused in this scan window',
+        );
+      }
+    }
+    return scan.eligible.length;
   }
 
   getHealthStats(): {

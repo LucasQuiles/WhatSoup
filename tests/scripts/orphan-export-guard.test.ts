@@ -71,6 +71,9 @@ const PUBLIC_API_ALLOWLIST = new Set<string>([
   // chain + tests/core/jid-constants.test.ts there). Zero references on THIS
   // branch by design — it lands one layer before its consumer.
   'src/core/jid-constants.ts:isImessageJid',
+  // #3560 operator CLI default: consumed only by scripts/inbound-ownership-snapshot.ts
+  // (out of corpus). It lives beside the snapshot reader it configures.
+  'src/runtimes/agent/inbound-ownership-snapshot.ts:DEFAULT_OWNERSHIP_MIN_AGE_MINUTES',
 ]);
 
 function repoRelative(absPath: string): string {
@@ -103,9 +106,51 @@ function countOccurrences(name: string, text: string): number {
   return matches ? matches.length : 0;
 }
 
+const WORD_RUN_RE = /\w+/g;
+const WORD_ONLY_RE = /^\w+$/;
+
+/**
+ * Count every maximal `\w+` run in the corpus once. For a name made only of
+ * `\w` characters, the `\bname\b` matches are exactly the maximal runs equal to
+ * the name, so a lookup gives the same total as `countOccurrences` summed over
+ * the corpus. Re-scanning the ~30 MB corpus with a fresh regex for each of
+ * ~2,300 exports took ~50 s per test on CI.
+ */
+function buildWordRunIndex(corpus: Map<string, string>): Map<string, number> {
+  const index = new Map<string, number>();
+  for (const text of corpus.values()) {
+    for (const word of text.match(WORD_RUN_RE) ?? []) {
+      index.set(word, (index.get(word) ?? 0) + 1);
+    }
+  }
+  return index;
+}
+
+function countCorpusOccurrences(
+  name: string,
+  corpus: Map<string, string>,
+  wordRuns: Map<string, number>,
+): number {
+  if (WORD_ONLY_RE.test(name)) return wordRuns.get(name) ?? 0;
+  // Names containing `$` keep the original per-file regex semantics.
+  let total = 0;
+  for (const text of corpus.values()) {
+    total += countOccurrences(name, text);
+  }
+  return total;
+}
+
 interface ScanResult {
   orphans: string[];
   allExportKeys: Set<string>;
+}
+
+// Both tests read the same scan; computing it lazily lets `-t` run either alone.
+let cachedScan: ScanResult | undefined;
+
+function getScan(): ScanResult {
+  cachedScan ??= scanForOrphans();
+  return cachedScan;
 }
 
 function scanForOrphans(): ScanResult {
@@ -117,6 +162,8 @@ function scanForOrphans(): ScanResult {
       corpus.set(repoRelative(file), readFileSync(file, 'utf8'));
     }
   }
+
+  const wordRuns = buildWordRunIndex(corpus);
 
   const scanAbs = resolve(REPO_ROOT, SCAN_DIR);
   const scanFiles = collectTsFiles(scanAbs).filter((f) => !f.endsWith('.test.ts'));
@@ -142,10 +189,7 @@ function scanForOrphans(): ScanResult {
       allExportKeys.add(key);
 
       // Total occurrences across the entire corpus.
-      let total = 0;
-      for (const text of corpus.values()) {
-        total += countOccurrences(name, text);
-      }
+      const total = countCorpusOccurrences(name, corpus, wordRuns);
 
       // Subtract the declaration occurrences in THIS file (one per `export …`
       // declaration line). Anything left is a genuine reference.
@@ -167,7 +211,7 @@ function scanForOrphans(): ScanResult {
 
 describe('Orphaned-export dead-code guard', () => {
   it('no exported function/const/class in src/ is unreferenced everywhere (#1507 class)', () => {
-    const { orphans } = scanForOrphans();
+    const { orphans } = getScan();
 
     expect(
       orphans,
@@ -176,7 +220,7 @@ describe('Orphaned-export dead-code guard', () => {
   }, 60_000);
 
   it('public-API allowlist contains only entries that still exist (no stale entries)', () => {
-    const { allExportKeys } = scanForOrphans();
+    const { allExportKeys } = getScan();
 
     const stale = [...PUBLIC_API_ALLOWLIST].filter((entry) => !allExportKeys.has(entry));
     expect(

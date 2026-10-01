@@ -168,6 +168,8 @@ describe('failure taxonomy cross-contract', () => {
       'turnRecoveryCorruptLinks',
       'turnRecoveryOrphanTransfers',
       'turnRecoveryEchoConflicts',
+      'turnRecoveryCorruptLinksSettled',
+      'turnRecoveryEchoConflictsSettled',
       'turnFinalizationRetainedRetries',
       'turnFinalizationRetryAttempts',
       'turnFinalizationRetryRecoveries',

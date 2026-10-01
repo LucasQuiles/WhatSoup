@@ -382,8 +382,10 @@ export function finalizeRuntimeTurn(
     // so it gets a durable continuity-candidate mark plus a breach alert below.
     // Admission-rejected sheds stay excluded; pre_dispatch_error is the typed
     // exception because it means an admitted queue processor failed before send.
+    // An operator /stop is a requested outcome, not a runtime fault (#3716): it
+    // keeps its durable operator_cancelled record but gets no mark and no alert.
     const replyGuaranteeBreachClass = attemptOutcome.kind === 'failed'
-      ? attemptOutcome.class ?? 'unknown'
+      ? (attemptOutcome.class === 'operator_cancelled' ? null : attemptOutcome.class ?? 'unknown')
       : attemptOutcome.kind === 'admission_rejected' && attemptOutcome.class === 'pre_dispatch_error'
         ? attemptOutcome.class
         : null;
@@ -430,6 +432,25 @@ export function finalizeRuntimeTurn(
           REPLY_GUARANTEE_BREACH_ALERT_SOURCE,
           REPLY_GUARANTEE_BREACH_ALERT_SUMMARY,
           boundedBreachEvidence(params, replyGuaranteeBreachClass, receipt, continuityMarked),
+        );
+      } catch {
+        // Swallowed by design — see comment above.
+      }
+    }
+    if (attemptOutcome.kind === 'failed' && attemptOutcome.class === 'operator_cancelled') {
+      // Best-effort visibility, as for the breach alert above: the terminal is
+      // already durable, so a logging failure must not become an incident.
+      try {
+        log.info(
+          {
+            event: 'operator_stop_cancelled',
+            scope: params.identity.scope,
+            inboundSeq: params.identity.inboundSeq,
+            turn: shortHash(params.identity.logicalTurnId),
+            disposition: terminal.inboundDisposition,
+            deliveryKind: terminal.deliveryEvidence.kind,
+          },
+          'operator stop cancelled a turn',
         );
       } catch {
         // Swallowed by design — see comment above.
