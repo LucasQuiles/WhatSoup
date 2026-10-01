@@ -49,13 +49,13 @@ is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 Vitest's shared setup creates an owned temporary HOME and prepends synthetic
 `security` and `secret-tool` commands to `PATH`. Reads return empty; writes,
 deletes and unsupported operations are rejected. The two write operations
-(`add-generic-password` and `store`) first read stdin to the end, as the real
-tools do, and report the discarded byte count; every other operation rejects
-without reading stdin. The synthetic `secret-tool` reports a probe failure
-(exit 127), so Linux runs use the env-only backend and backend selection
-matches a host without libsecret. The keyring module classifies that failure
-as an errored probe: each Linux test file that reaches unmocked backend
-detection logs one error-level downgrade line, which is expected. The setup
+(`add-generic-password` and `store`) first read stdin to the end, unless stdin
+is a terminal, and report the discarded byte count; every other rejected
+operation leaves stdin unread. The synthetic `secret-tool` reports a probe
+failure (exit 127), so Linux runs use the env-only backend and backend
+selection matches a host without libsecret. The keyring module classifies that
+failure as an errored probe: a Linux test file that reaches unmocked backend
+detection logs an error-level downgrade line, which is expected. The setup
 also clears `REQUIRE_OS_KEYRING` so that failure cannot throw. The production
 resolver and its precedence still run; dedicated keyring tests keep their own
 explicit process mocks. This also covers child processes that inherit `PATH`.

@@ -103,11 +103,12 @@ mkdirSync(credentialBin, { mode: 0o700 });
 const rejection = 'synthetic credential backend rejects writes and unsupported operations';
 // The two write operations take the secret on stdin, so their arm reads it to
 // the end before rejecting: a shim that exits first makes the caller's write
-// fail with EPIPE. The message reports the discarded byte count, which lets a
+// fail with EPIPE. `cat` does the reading because `wc -c` alone only stats a
+// regular file. The message reports the discarded byte count, which lets a
 // test witness the drain. A terminal stdin is left unread, so an interactive
-// caller cannot block. Every other operation rejects without reading stdin.
+// caller cannot block. Every other rejected operation leaves stdin unread.
 const rejectWrite =
-  `if [ -t 0 ]; then n=0; else n=$(( $(wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
+  `if [ -t 0 ]; then n=0; else n=$(( $(cat | wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
 const rejectOther = `  *) printf '%s\\n' '${rejection}' >&2; exit 1 ;;`;
 const syntheticCredentialBackends: Record<string, string> = {
   security: [
