@@ -58,7 +58,7 @@ describe('Vitest credential isolation', () => {
         `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, operation], { encoding: 'utf8', timeout: 2000 });`,
         'expect(inherited.error, inherited.stderr).toBeUndefined();',
         'expect({ status: inherited.status, output: inherited.stdout }).toEqual({ status: 0, output: \'\' });',
-        "for (const mutation of platform === 'darwin' ? ['add-generic-password', 'delete-generic-password'] : ['store', 'clear']) {",
+        "for (const mutation of platform === 'darwin' ? ['add-generic-password', 'delete-generic-password', 'synthetic-unsupported-operation'] : ['store', 'clear', 'synthetic-unsupported-operation']) {",
         "const rejected = spawnSync(command, [mutation], { input: 'synthetic-write-fixture'.repeat(12000) /* 276,000 bytes, more than a pipe buffer: a shim that exits without draining stdin fails with EPIPE */, encoding: 'utf8', timeout: 2000 });",
         'expect(rejected.error, `${mutation}: ${rejected.stderr}`).toBeUndefined();',
         'expect({ mutation, status: rejected.status }).toEqual({ mutation, status: 1 });',
