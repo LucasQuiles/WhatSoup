@@ -4,6 +4,8 @@ import { coordinatorPortDouble } from './lib/runtime-turn-coordinator-port-doubl
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { AttemptOutcome } from '../../../src/runtimes/agent/turn-terminal.ts';
+import { Database } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 
 const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 
@@ -213,5 +215,59 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
 
     expect(params.sessionTokens).toBeUndefined();
     expect(emitAlertChecked).not.toHaveBeenCalled();
+  });
+});
+
+describe('turnFinalizationBookkeeping — checkpoint status ownership (#3658)', () => {
+  it('a turn finalized while its session is live reports the checkpoint active', () => {
+    const params = makeCoordinator().turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+    );
+    expect(params.checkpoint?.fields).toMatchObject({ sessionStatus: 'active' });
+  });
+
+  it('a turn finalized after its session was torn down keeps an ended checkpoint ended', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      durability.upsertSessionCheckpoint('15550190099', {
+        sessionId: 'ended-provider-session',
+        sessionStatus: 'ended',
+      });
+      // The session's own shutdown already closed its lifecycle as ended.
+      const tornDown = {
+        getDbRowId: vi.fn(() => null),
+        getStatus: vi.fn(() => ({
+          active: false,
+          sessionId: null,
+          pid: null,
+          durableFailureClosed: false,
+          durableFailureInconclusive: false,
+        })),
+      } as unknown as Parameters<RuntimeTurnCoordinator['turnFinalizationBookkeeping']>[1];
+
+      const params = makeCoordinator().turnFinalizationBookkeeping(
+        context(),
+        tornDown,
+        undefined,
+        { kind: 'failed', class: 'unknown_terminal' },
+      );
+      const checkpoint = params.checkpoint;
+      if (checkpoint === undefined) throw new Error('bookkeeping wrote no checkpoint');
+      // The same upsert the terminal transaction applies for this bookkeeping.
+      durability.upsertSessionCheckpoint(checkpoint.conversationKey, checkpoint.fields);
+
+      expect(durability.getSessionCheckpoint('15550190099')).toMatchObject({
+        session_id: 'ended-provider-session',
+        session_status: 'ended',
+        last_inbound_seq: 41,
+      });
+    } finally {
+      db.close();
+    }
   });
 });

@@ -73,10 +73,10 @@ const warnedKeyringReadServices = new Set<string>();
  * reaches the typed surface without turning "not configured" into a throw on the
  * credential-presence hot path.
  *
- * Written only by {@link recordCredentialReadFailure}; read and cleared by
- * `lookupCredentialTyped`. Safe despite being module state: the whole lookup
- * chain is synchronous, so no other lookup can interleave between the clear and
- * the read.
+ * Written by {@link recordCredentialReadFailure} and `warnKeyringReadFailure`,
+ * before any warn dedup; read and cleared by `lookupCredentialTyped`. Safe as
+ * module state: the whole lookup chain is synchronous, so no other lookup can
+ * interleave between the clear and the read.
  */
 const credentialReadFailures = new Set<string>();
 
@@ -121,9 +121,16 @@ const keyringExecOptions = {
 };
 // Credential reads return the value on stdout; bound it to the same 4 KiB the
 // pinned-Node keychain helper enforces (deploy/lib/read-keychain-secret.mjs).
-// Detection, writes, and deletes keep the base options — backend detection's
-// `secret-tool --help` banner can legitimately exceed 4 KiB.
-const keyringReadExecOptions = { ...keyringExecOptions, maxBuffer: FILE_STORE_MAX_BYTES };
+// Reads also set an explicit piped stdio. Node attaches the captured stderr to
+// the thrown error either way; without a `stdio` option execFileSync also copies
+// it to our own stderr, so the explicit option only stops that echo. Detection,
+// writes, and deletes keep the base options — backend detection's `secret-tool
+// --help` banner can legitimately exceed 4 KiB, and writes feed the secret on stdin.
+const keyringReadExecOptions = {
+  ...keyringExecOptions,
+  maxBuffer: FILE_STORE_MAX_BYTES,
+  stdio: 'pipe' as const,
+};
 
 // Lazy logger — avoids any risk of a cycle during module initialisation while
 // still giving us structured log output once the module is fully loaded.
@@ -302,7 +309,11 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
         const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
         if (val) return val;
       } catch (err) {
-        // Warn on primary candidate failure; migration fallback misses are expected.
+        // secret-tool absence is NOT classified: `lookup` exits 1 with no output
+        // both when nothing matches and when a match stayed locked, so a throw
+        // cannot be told apart from absence. Any primary-candidate throw is a
+        // recorded failure (a genuine miss included); a migration candidate's
+        // throw is not recorded. Linux absence is tracked separately.
         if (index === 0) {
           warnKeyringReadFailure(service, backend, err);
         }
@@ -314,7 +325,7 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
   if (backend === 'macos-keychain') {
     try {
       const account = options.user ?? os.userInfo().username;
-      for (const [index, candidate] of services.entries()) {
+      for (const candidate of services) {
         try {
           const raw = execFileSync(
             'security',
@@ -324,14 +335,14 @@ export function lookupCredential(service: string, options: CredentialLookupOptio
           const val = (typeof raw === 'string' ? raw : raw.toString('utf-8')).trim();
           if (val) return val;
         } catch (err) {
-          // Warn on primary candidate failure; migration fallback misses are expected.
-          if (index === 0) {
+          // An absent item on any candidate is a silent miss; every other failure is recorded.
+          if (!isDarwinReadItemNotFound(err)) {
             warnKeyringReadFailure(service, backend, err);
           }
         }
       }
     } catch {
-      // Account discovery failures preserve the terminal env/OpenCode fallback.
+      // intentional: account discovery failures preserve the terminal env/OpenCode fallback.
     }
     return lookupEnvAfterKeyringMiss();
   }
@@ -345,9 +356,9 @@ function warnKeyringReadFailure(service: string, backend: KeyringBackend, err: u
   // platform-keyring warning suppressed the file-store/opencode warning for the
   // same service (and vice versa) even though they are independent faults.
   const dedupKey = `keyring:${service}`;
+  credentialReadFailures.add(service);
   if (warnedKeyringReadServices.has(dedupKey)) return;
   warnedKeyringReadServices.add(dedupKey);
-  credentialReadFailures.add(service);
   getLog().warn(
     { service, backend, err: errorMessage(err) },
     'keyring read failed — falling back to env lookup',
@@ -735,14 +746,39 @@ export interface CredentialDeleteResult {
 
 /**
  * `security delete-generic-password` exits non-zero for BOTH "no such item" and
- * real failures, so absence cannot be inferred from the throw alone. Status 44
- * is errSecItemNotFound; the message check covers locale-stable wording.
+ * real failures, so absence cannot be inferred from the throw alone. A signal
+ * or an error `code` (spawn failure, timeout, overflow) is always a failure,
+ * even if the interrupted child already printed the not-found text. Otherwise
+ * status 44 is errSecItemNotFound, and the errSecItemNotFound wording covers an
+ * unhelpful exit status — but not a bare "could not be found", which exit 37
+ * also prints for a missing default keychain.
  */
 function isDarwinItemNotFound(err: unknown): boolean {
-  const status = (err as { status?: number } | null)?.status;
-  if (status === 44) return true;
-  const stderr = String((err as { stderr?: Buffer | string } | null)?.stderr ?? '');
-  return /could not be found|SecKeychainSearchCopyNext/i.test(stderr);
+  const e = err as { status?: number | null; signal?: string | null; code?: string; stderr?: Buffer | string } | null;
+  if (e?.signal || e?.code) return false;
+  if (e?.status === 44) return true;
+  return /specified item could not be found/i.test(String(e?.stderr ?? ''));
+}
+
+/**
+ * Read-path absence for `security find-generic-password`. Stricter than
+ * {@link isDarwinItemNotFound}: only a clean exit with status 44
+ * (errSecItemNotFound) is absence — other statuses whose stderr also says
+ * "could not be found" (e.g. no default keychain) are real failures. There is
+ * no text fallback: execFileSync throws a null status only for a signal kill or
+ * a spawn/timeout error (which sets `code`), and neither is a clean miss even
+ * when the interrupted child already printed the not-found diagnostic.
+ *
+ * Accepted gap (owner decision): `security` itself can report errSecItemNotFound
+ * (exit 44) for some genuine Keychain search failures — its keychain_find.c
+ * turns a failed SecKeychainSearchCopyNext into not-found — so a small class of
+ * real failures reads as absence here. Linux secret-tool absence is not
+ * classified at all (see lookupCredential) and is tracked separately.
+ */
+function isDarwinReadItemNotFound(err: unknown): boolean {
+  const e = err as { status?: number | null; signal?: string | null; code?: string } | null;
+  if (e?.signal || e?.code) return false;
+  return e?.status === 44;
 }
 
 /**
@@ -810,8 +846,11 @@ export function deleteCredential(
       });
       return { deleted: true, backend, reason: 'deleted' };
     } catch (err) {
-      // `secret-tool clear` exits 0 when nothing matched, so a throw here is a
-      // genuine backend failure, not absence.
+      // `secret-tool clear` exits 1 with no output whenever it removed nothing —
+      // no match, or only locked matches, which it never removes — so a throw
+      // cannot be told apart from absence. Every clear throw is reported as
+      // backend_failed, a genuine no-match included. Linux absence is tracked
+      // separately.
       return {
         deleted: false,
         backend,
