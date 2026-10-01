@@ -28,6 +28,10 @@ GUI_SESSION_MONITOR_STATE = "gui-session-monitor-state.json"
 RUNTIME_STALENESS_STATE = "runtime-staleness-state.json"
 REPLY_GUARANTEE_OBSERVER_STATE = "reply-guarantee-observer-state.json"
 
+# Daily profile-missing alert markers, one per producer
+HEALTH_PROFILE_MISSING_MARKER = "health-check-profile-missing.json"
+WATCHDOG_PROFILE_MISSING_MARKER = "heartbeat-watchdog-profile-missing.json"
+
 # Sentinel component (written under fleet-sentinel root; read cross-component by watchdog)
 SENTINEL_HEARTBEAT = "sentinel-heartbeat.json"
 FLEET_SENTINEL_STATE = "fleet-sentinel-state.json"

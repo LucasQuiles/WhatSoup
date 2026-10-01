@@ -320,6 +320,9 @@ jobs:
       - name: Zero-byte tracked file guard
         run: npm run guard:zero-byte-tracked
 
+      - name: SQL literal schema guard
+        run: npm run guard:sql-schema
+
       - name: Hardcoded /tmp/ path guard
         run: npm run guard:hardcoded-tmpdir
 
@@ -371,7 +374,17 @@ jobs:
       # enforcing thresholds — a strict superset of a plain `vitest run`. The
       # previously-separate "Test suite" step re-ran all ~6651 tests with no
       # coverage, doubling test wall-time per matrix leg for zero added signal.
+      #
+      # The full-suite battery stops the run at a wall-clock bound (30 min by
+      # default, scripts/full-suite-battery.ts). On one head, hosted runs took
+      # 1376 s once and exceeded the 1800 s bound twice, with every test file
+      # reporting completion, so the default leaves no margin for hosted-runner
+      # speed variance. This step raises the bound to 45 min on the hosted
+      # runner only; local gates keep the default. 45 min plus the other steps
+      # (about 9 min) stays inside the job's 60-minute cap.
       - name: Test suite + coverage thresholds
+        env:
+          WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'
         run: npm run coverage:check -- --pool=forks
 
       # Early WARNING (non-blocking): logs when lines/branches/functions coverage is

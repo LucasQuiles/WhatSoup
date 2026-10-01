@@ -442,7 +442,11 @@ const BENIGN_CLOSURE_REJECTIONS: ReadonlySet<string> = new Set([
   'invalid operator catch-up closure',
 ]);
 
-function classifyReconcileSkip(error: unknown): ReconcileSkipReason {
+/**
+ * Classify a per-group closure failure into a bounded skip reason. Exported so
+ * the operator batch command reports rejections in the reconciler's own terms.
+ */
+export function classifyReconcileSkip(error: unknown): ReconcileSkipReason {
   const sqliteError = error as { code?: unknown; errcode?: unknown };
   if (
     sqliteError?.code === 'ERR_SQLITE_ERROR'
@@ -457,21 +461,31 @@ function classifyReconcileSkip(error: unknown): ReconcileSkipReason {
   return 'error';
 }
 
+/** One open pending (plan, conversation) group and the catch-up it would close against. */
+export interface OperatorCatchupCandidateGroup {
+  planId: string;
+  conversationKey: string;
+  chatJid: string;
+  /** Pending source sequences, ascending. */
+  sourceSeqs: number[];
+  /** Earliest same-chat delivery-proof target later than every source, or null. */
+  catchupSeq: number | null;
+}
+
 /**
- * Automatically close every open catch-up recovery whose conversation has
- * demonstrably caught up (a later completed inbound with a unique, echoed
- * delivery proof). Uses a raw, already-open SQLite handle with foreign-key
- * enforcement; each group's closure runs in its own single-writer transaction
- * inside closeOperatorCatchupRecoveryRaw. Never throws for a per-group closure
- * rejection — those are recorded as bounded skips — so one unprovable group
- * cannot stall the rest of the sweep.
+ * The reconciler's selection rule, without closing anything: enumerate open
+ * pending groups in stable order and pair each with its catch-up candidate,
+ * under the same two budgets reconcileOperatorCatchupRecoveries applies (a
+ * group with a candidate charges `groupLimit`; every examined group charges
+ * `groupLimit * RECONCILE_EXAMINATION_MULTIPLIER`). Read-only.
+ *
+ * Shared by the reconciler and the operator batch command so both select the
+ * same target for the same state; neither invents its own proof rule.
  */
-export function reconcileOperatorCatchupRecoveries(
+export function selectOperatorCatchupCandidates(
   raw: DatabaseSync,
-  params: ReconcileOperatorCatchupParams = {},
-): ReconcileOperatorCatchupReport {
-  const actor = requiredText(params.actor ?? RECONCILE_DEFAULT_ACTOR, 'Reconciler actor');
-  const groupLimit = params.groupLimit ?? RECONCILE_DEFAULT_GROUP_LIMIT;
+  groupLimit: number = RECONCILE_DEFAULT_GROUP_LIMIT,
+): OperatorCatchupCandidateGroup[] {
   if (!Number.isSafeInteger(groupLimit) || groupLimit <= 0) {
     throw new Error('Reconciler group limit must be a positive safe integer');
   }
@@ -536,9 +550,8 @@ export function reconcileOperatorCatchupRecoveries(
     WHERE conversation_key = ? AND chat_jid = ? AND target_seq > ?
   `);
 
-  const report: ReconcileOperatorCatchupReport = {
-    attempted: 0, closed: 0, linksClosed: 0, skipped: 0, skips: [],
-  };
+  const selected: OperatorCatchupCandidateGroup[] = [];
+  let withCandidate = 0;
 
   // Two budgets. groupLimit caps closure attempts. examinationLimit caps how
   // many groups the pass may look at, because a group with no candidate no
@@ -552,7 +565,7 @@ export function reconcileOperatorCatchupRecoveries(
   const examinationLimit = groupLimit * RECONCILE_EXAMINATION_MULTIPLIER;
   let examined = 0;
   for (const bucket of groups.values()) {
-    if (report.attempted >= groupLimit) break;
+    if (withCandidate >= groupLimit) break;
     if (examined >= examinationLimit) break;
     examined += 1;
     // seqs are ORDER BY inbound_seq ASC, so the last is the max.
@@ -561,12 +574,49 @@ export function reconcileOperatorCatchupRecoveries(
       | { catchup_seq: number | null }
       | undefined;
     const catchupSeq = candidateRow?.catchup_seq ?? null;
+    if (catchupSeq !== null) withCandidate += 1;
+    selected.push({
+      planId: bucket.planId,
+      conversationKey: bucket.conversationKey,
+      chatJid: bucket.chatJid,
+      sourceSeqs: bucket.seqs,
+      catchupSeq,
+    });
+  }
+  return selected;
+}
+
+/**
+ * Automatically close every open catch-up recovery whose conversation has
+ * demonstrably caught up (a later completed inbound with a unique, echoed
+ * delivery proof). Uses a raw, already-open SQLite handle with foreign-key
+ * enforcement; each group's closure runs in its own single-writer transaction
+ * inside closeOperatorCatchupRecoveryRaw. Never throws for a per-group closure
+ * rejection — those are recorded as bounded skips — so one unprovable group
+ * cannot stall the rest of the sweep.
+ */
+export function reconcileOperatorCatchupRecoveries(
+  raw: DatabaseSync,
+  params: ReconcileOperatorCatchupParams = {},
+): ReconcileOperatorCatchupReport {
+  const actor = requiredText(params.actor ?? RECONCILE_DEFAULT_ACTOR, 'Reconciler actor');
+  const groupLimit = params.groupLimit ?? RECONCILE_DEFAULT_GROUP_LIMIT;
+  // Candidates are read up front. A closure only appends disposition links, and
+  // the candidate query reads delivery proofs alone, so closing one group cannot
+  // change another group's candidate: this matches probing between closures.
+  const selected = selectOperatorCatchupCandidates(raw, groupLimit);
+
+  const report: ReconcileOperatorCatchupReport = {
+    attempted: 0, closed: 0, linksClosed: 0, skipped: 0, skips: [],
+  };
+  for (const group of selected) {
+    const { catchupSeq } = group;
     if (catchupSeq === null) {
       report.skipped += 1;
       report.skips.push({
-        planId: bucket.planId,
-        conversationKey: bucket.conversationKey,
-        nSourceSeqs: bucket.seqs.length,
+        planId: group.planId,
+        conversationKey: group.conversationKey,
+        nSourceSeqs: group.sourceSeqs.length,
         reason: 'no_catchup_candidate',
       });
       continue;
@@ -574,9 +624,9 @@ export function reconcileOperatorCatchupRecoveries(
     report.attempted += 1;
     try {
       const receipt = closeOperatorCatchupRecoveryRaw(raw, {
-        planId: bucket.planId,
-        conversationKey: bucket.conversationKey,
-        expectedSourceSeqs: bucket.seqs,
+        planId: group.planId,
+        conversationKey: group.conversationKey,
+        expectedSourceSeqs: group.sourceSeqs,
         catchupSeq,
         actor,
         evidenceRef: `auto://catchup-delivery-proof:seq=${catchupSeq}`,
@@ -586,9 +636,9 @@ export function reconcileOperatorCatchupRecoveries(
     } catch (error) {
       report.skipped += 1;
       report.skips.push({
-        planId: bucket.planId,
-        conversationKey: bucket.conversationKey,
-        nSourceSeqs: bucket.seqs.length,
+        planId: group.planId,
+        conversationKey: group.conversationKey,
+        nSourceSeqs: group.sourceSeqs.length,
         reason: classifyReconcileSkip(error),
       });
     }

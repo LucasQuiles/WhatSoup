@@ -85,6 +85,7 @@ import {
 } from './runtime-tunables.ts';
 import type { ProviderFallbackActivation, ProviderFallbackReason } from './runtime-turn-result-handler.ts';
 import type { ModelRouteEvent } from './route-events.ts';
+import { scheduledDedupeKey } from './scheduled-agent-job-delivery.ts';
 import { SessionManager, buildChildEnv, getProviderBinary } from './session.ts';
 import { alertEvidenceValue } from './tool-update.ts';
 import type { FallbackWindowState } from './fallback-window-state.ts';
@@ -528,6 +529,7 @@ export class RuntimeFallbackCoordinator {
     session: SessionManager | null,
     turnHadToolWork: boolean,
     mapKey: string | undefined,
+    scheduled = false,
   ): boolean {
     if (this.host.isFallbackWindowActive) return false;
     if (this.host.agentFallbacks.length === 0) return false;
@@ -622,10 +624,12 @@ export class RuntimeFallbackCoordinator {
       oldSession: session,
       hadToolActivity: turnHadToolWork,
     });
-    this.host.notifyProviderFallbackActivated(queue, activation, {
-      replayScheduled,
-      blockedByToolActivity: turnHadToolWork,
-    });
+    if (!scheduled) {
+      this.host.notifyProviderFallbackActivated(queue, activation, {
+        replayScheduled,
+        blockedByToolActivity: turnHadToolWork,
+      });
+    }
     this.host.consecutivePrimaryEmptyTurns = 0;
     return true;
   }
@@ -663,6 +667,7 @@ export class RuntimeFallbackCoordinator {
     mapKey: string | undefined,
     isUserTurnResult: boolean,
     evidenceText: string,
+    scheduled = false,
   ): boolean {
     // System/heal/synthetic turns must never advance or trip the consecutive
     // threshold. Unlike the empty-output arming call-site (already inside the
@@ -706,10 +711,12 @@ export class RuntimeFallbackCoordinator {
       oldSession: session,
       hadToolActivity: turnHadToolWork,
     });
-    this.host.notifyProviderFallbackActivated(queue, activation, {
-      replayScheduled,
-      blockedByToolActivity: turnHadToolWork,
-    });
+    if (!scheduled) {
+      this.host.notifyProviderFallbackActivated(queue, activation, {
+        replayScheduled,
+        blockedByToolActivity: turnHadToolWork,
+      });
+    }
     // No replay took over (tool activity already started, or nothing to replay):
     // the primary session actually errored, so tear it down like the sibling
     // terminal branches — the active window routes the next turn to the fallback.
@@ -996,16 +1003,18 @@ export class RuntimeFallbackCoordinator {
    * sustained auth-required episode. Mirrors the recentFallbackEmptyTurnAlerts
    * prune→check→set→capDedupeMap idiom, reusing this.host.fallbackTunables.noticeDedupMs.
    */
-  emitNoFallbackReauthNotice(queue: IOutboundQueue): void {
+  emitNoFallbackReauthNotice(queue: IOutboundQueue, scheduled = false): void {
     const now = Date.now();
     for (const [key, recordedAt] of this.host.recentNoFallbackReauthNotices) {
       if (now - recordedAt > this.host.fallbackTunables.noticeDedupMs) {
         this.host.recentNoFallbackReauthNotices.delete(key);
       }
     }
-    const noticeKey = [queue.targetChatJid, 'auth-required'].join(':');
+    // #3497: a scheduled turn posts no notice and dedupes its alert under its
+    // own key, so a later user turn in the same chat still gets both.
+    const noticeKey = scheduledDedupeKey([queue.targetChatJid, 'auth-required'].join(':'), scheduled);
     if (this.host.recentNoFallbackReauthNotices.has(noticeKey)) return;
-    queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    if (!scheduled) queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
     // Dedup is recorded only AFTER a successful enqueue: recording first meant a
     // teardown-race throw suppressed both the notice and the alert for the full
     // dedup window with no retry.
@@ -1038,6 +1047,7 @@ export class RuntimeFallbackCoordinator {
     hadToolWork: boolean = false,
     session: SessionManager | null = null,
     wasUnclassifiedError: boolean = false,
+    scheduled: boolean = false,
   ): void {
     if (!this.host.isFallbackWindowActive) return;
     this.host.fallbackMetrics.recordServedTurn();
@@ -1069,8 +1079,9 @@ export class RuntimeFallbackCoordinator {
     for (const [k, ts] of this.host.recentFallbackEmptyTurnAlerts) {
       if (emptyAlertNow - ts > this.host.fallbackTunables.noticeDedupMs) this.host.recentFallbackEmptyTurnAlerts.delete(k);
     }
-    if (!this.host.recentFallbackEmptyTurnAlerts.has(queue.targetChatJid)) {
-      this.host.recentFallbackEmptyTurnAlerts.set(queue.targetChatJid, emptyAlertNow);
+    const emptyAlertKey = scheduledDedupeKey(queue.targetChatJid, scheduled);
+    if (!this.host.recentFallbackEmptyTurnAlerts.has(emptyAlertKey)) {
+      this.host.recentFallbackEmptyTurnAlerts.set(emptyAlertKey, emptyAlertNow);
       this.host.capDedupeMap(this.host.recentFallbackEmptyTurnAlerts);
       emitAlertChecked(
         this.host.instanceName,
@@ -1209,6 +1220,15 @@ export class RuntimeFallbackCoordinator {
   private readonly chainCanary = new Map<string, ChainEntryCanaryResult & { checkedAt: number }>();
   private chainCanaryTimer: ReturnType<typeof setInterval> | null = null;
   private chainCanarySweepInFlight = false;
+  /**
+   * `fallback_chain_entry_unhealthy` incident state. The dispatcher keys the
+   * incident per instance+source, not per entry, so one field covers every
+   * entry. Starts 'unknown': a previous process may have left the incident
+   * open and nothing in-process can read the dispatcher's state, so the first
+   * sweep that finds no failing entry emits one reconciliation clear (the
+   * dispatcher drops a clear with no open incident as a stale recovery).
+   */
+  private chainCanaryAlert: 'unknown' | 'open' | 'closed' = 'unknown';
 
   /** Arm the periodic canary. No-op unless WHATSOUP_FALLBACK_CANARY_MS > 0. */
   startChainCanary(): void {
@@ -1234,6 +1254,8 @@ export class RuntimeFallbackCoordinator {
   async runChainCanarySweep(trigger: string): Promise<void> {
     if (this.chainCanarySweepInFlight) return;
     this.chainCanarySweepInFlight = true;
+    const newlyFailed: Array<{ entry: AgentFallbackEntry; result: ChainEntryCanaryResult }> = [];
+    let recovered: AgentFallbackEntry | null = null;
     try {
       for (const entry of this.chainCanarySweepEntries()) {
         const key = this.host.fallbackChain.entryKey(entry);
@@ -1266,6 +1288,9 @@ export class RuntimeFallbackCoordinator {
         }
         const args = buildOpenCodeRunArgs({ providerConfig, model: entry.model });
         const previous = this.chainCanary.get(key);
+        // Same freshness rule reconcile uses: an expired failure record must
+        // not suppress the alert for a fresh failure after the incident closed.
+        const wasHealthy = !this.chainCanaryDead(key);
         const result = await probeChainEntryCompletion(
           binary,
           args,
@@ -1274,34 +1299,81 @@ export class RuntimeFallbackCoordinator {
           this.chainCanaryConfig.timeoutMs,
         );
         this.chainCanary.set(key, { ...result, checkedAt: systemClock.now() });
-        const wasHealthy = previous === undefined || previous.status === 'ok' || previous.status === 'unknown';
-        if (result.status !== 'ok' && wasHealthy) {
-          emitAlertChecked(
-            this.host.instanceName,
-            'fallback_chain_entry_unhealthy',
-            'Fallback chain entry failed its real-completion canary',
-            `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
-              + ` trigger=${trigger}${result.failureClass ? ` failureClass=${result.failureClass}` : ''}`,
-          );
-          log.warn({ provider: entry.provider, model: entry.model, status: result.status, failureClass: result.failureClass }, 'fallback chain entry canary failed');
-          log.debug({ provider: entry.provider, model: entry.model, evidence: result.evidence }, 'fallback chain entry canary raw failure tail');
+        // A still-dead entry must re-open a closed incident: it can re-enter the
+        // sweep set after a "left the sweep set" clear with its record still fresh.
+        if (result.status !== 'ok' && (wasHealthy || this.chainCanaryAlert !== 'open')) {
+          newlyFailed.push({ entry, result });
         } else if (result.status === 'ok' && previous !== undefined && previous.status !== 'ok' && previous.status !== 'unknown') {
-          clearAlertSourceChecked(
-            this.host.instanceName,
-            'fallback_chain_entry_unhealthy',
-            `recoveryProof=canary_completion provider=${entry.provider} model=${entry.model ?? 'default'}`,
-          );
+          recovered = entry;
           log.info({ provider: entry.provider, model: entry.model }, 'fallback chain entry canary recovered');
         }
+      }
+      // Emitted after the loop so severity sees the whole sweep's evidence,
+      // not only the entries probed before the failing one.
+      for (const { entry, result } of newlyFailed) {
+        emitAlertChecked(
+          this.host.instanceName,
+          'fallback_chain_entry_unhealthy',
+          'Fallback chain entry failed its real-completion canary',
+          `provider=${entry.provider} model=${entry.model ?? 'default'} status=${result.status}`
+            + ` trigger=${trigger}${result.failureClass ? ` failureClass=${result.failureClass}` : ''}`,
+          this.chainCanaryAlertSeverity(this.host.fallbackChain.entryKey(entry)),
+        );
+        this.chainCanaryAlert = 'open';
+        log.warn({ provider: entry.provider, model: entry.model, status: result.status, failureClass: result.failureClass }, 'fallback chain entry canary failed');
+        log.debug({ provider: entry.provider, model: entry.model, evidence: result.evidence }, 'fallback chain entry canary raw failure tail');
       }
       // Discovery mode: sweep evidence just changed — re-rank the chain on it
       // (mid-window this re-orders only the not-yet-tried remainder).
       if (this.host.agentFallbackDiscovery) {
         await this.refreshDiscoveredFallbackChain('canary-sweep');
       }
+      this.reconcileChainCanaryAlert(recovered);
     } finally {
       this.chainCanarySweepInFlight = false;
     }
+  }
+
+  /**
+   * `warning` while the chain can still serve: another chain entry holds fresh
+   * canary-ok evidence, has not already failed a turn this window, and the
+   * window has not exhausted the chain. `critical` otherwise.
+   */
+  private chainCanaryAlertSeverity(failingKey: string): 'warning' | 'critical' {
+    const chain = this.host.fallbackChain;
+    if (chain.isExhausted(this.host.agentFallbacks)) return 'critical';
+    const healthyPeer = this.host.agentFallbacks.some((entry) => {
+      const key = chain.entryKey(entry);
+      return key !== failingKey && !chain.failedKeys.has(key) && this.chainCanaryEvidence(key) === 'ok';
+    });
+    return healthyPeer ? 'warning' : 'critical';
+  }
+
+  /**
+   * Close the incident once no entry in the CURRENT sweep set (read after the
+   * discovery refresh) has fresh failure evidence. Clearing only on the same
+   * entry's recovery strands the incident when discovery replaces a failed
+   * candidate: the replaced entry is never swept again. Fresh evidence (trust
+   * TTL) is used so an entry whose probe is always skipped cannot hold the
+   * incident open on a stale record. The chain in use is checked too: mid-window
+   * the active entry stays in agentFallbacks after discovery drops it from the
+   * basis, and it must not clear while it still serves turns dead.
+   */
+  private reconcileChainCanaryAlert(recovered: AgentFallbackEntry | null): void {
+    if (this.chainCanaryAlert === 'closed') return;
+    const sweepSet = this.chainCanarySweepEntries();
+    const inUse = [...sweepSet, ...this.host.agentFallbacks];
+    if (inUse.some((entry) => this.chainCanaryDead(this.host.fallbackChain.entryKey(entry)))) return;
+    let proof: string;
+    if (this.chainCanaryAlert === 'unknown') proof = 'boot_reconcile';
+    else if (recovered) proof = `canary_completion provider=${recovered.provider} model=${recovered.model ?? 'default'}`;
+    else proof = 'failing_entry_left_sweep_set';
+    clearAlertSourceChecked(
+      this.host.instanceName,
+      'fallback_chain_entry_unhealthy',
+      `recoveryProof=${proof} sweepSet=${sweepSet.length}`,
+    );
+    this.chainCanaryAlert = 'closed';
   }
 
   /**

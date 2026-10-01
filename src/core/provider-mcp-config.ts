@@ -209,7 +209,8 @@ export function buildProviderMcpConfigArgs(
     '-c', 'mcp_servers.whatsoup.command=' + tomlString(command),
     '-c', 'mcp_servers.whatsoup.args=' + tomlStringArray(args),
     '-c', 'mcp_servers.whatsoup.env={ WHATSOUP_SOCKET = ' + tomlString(socketPath) + ' }',
-    '-c', 'mcp_servers.whatsoup.env_vars=' + tomlStringArray(['WHATSOUP_MCP_SOCKET']),
+    // Forwarded from the child env, never written into config (#3421).
+    '-c', 'mcp_servers.whatsoup.env_vars=' + tomlStringArray(['WHATSOUP_MCP_SOCKET', 'WHATSOUP_MCP_SESSION_TOKEN']),
   ];
 }
 

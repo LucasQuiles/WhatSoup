@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 168 MCP tools (165 always-registered + 3 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer, and `memory_write` when a Pinecone key and index are configured). No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`). Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 169 MCP tools (166 always-registered + 3 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer, and `memory_write` when a Pinecone key and index are configured). No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`). Probably too many MCP tools.
 
 ## What It Does
 
@@ -28,7 +28,7 @@ KPI cards with sparklines, three fleet-wide charts (message volume, token usage 
 
 ### Line Detail — Metrics
 
-Per-instance metrics with stacked bar chart, active hours heatmap (7-day weekly pattern or 30-day per-date grid), and tabbed token/session detail views. Nine tabs: Summary, Mode, Pipeline, Access, History, Logs, Metrics, Scheduled, Groups.
+Per-instance metrics with stacked bar chart, active hours heatmap (7-day weekly pattern or 30-day per-date grid), and tabbed token/session detail views. Nine tabs: Summary, Mode, Pipeline, Access, History, Logs, Metrics, Checkpoints, Approvals; instances with a global MCP socket also get Scheduled and Groups.
 
 ![Line Detail Metrics](docs/screenshots/line-detail-metrics.png)
 
@@ -163,7 +163,7 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 src/
   core/           DB, access control, messages, durability engine, reply-guarantee, JID handling
   transport/      Baileys v7 (default) — auth, reconnection, parsing, event routing; optional Twilio SMS transport (webhook + voicemail)
-  mcp/            Tool registry (166 documented tools; 163 always registered + 3 conditional), Unix socket server, 21 tool modules
+  mcp/            Tool registry (169 documented tools; 166 always registered + 3 conditional), Unix socket server, 21 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
@@ -183,7 +183,7 @@ src/
 console/
   src/
     components/   30+ React components (modals, cards, badges, charts, forms, wizards)
-    pages/        6 lazy-loaded pages (SoupKitchen, LineDetail, Inbox, Metrics, Operator, Landing); `/ops` redirects to `/operator`
+    pages/        11 lazy-loaded pages (SoupKitchen, LineDetail, Inbox, Deployments, Settings, Hatch, Operator, Landing, Agents, SkillsHub, DreamLab); Operator renders at `/ops`, `/operator` redirects to `/ops`, and `/metrics` redirects to `/ops?tab=metrics`
     hooks/        React Query data hooks, WebSocket realtime, toast system
     lib/          API client with mock fallback, chart utils, formatting
     index.css     Design system — @theme tokens, @layer base/utilities, component classes
@@ -402,7 +402,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Current Program](docs/current-program.md) | Current generated-index synthesis and artifact-sweep status |
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 168 tools across 21 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 169 tools across 21 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |

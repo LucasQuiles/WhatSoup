@@ -14,6 +14,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -104,7 +105,15 @@ RECOVERED_BEFORE_DELIVERY_REASON = (
     "alert and clear retained as audit-only"
 )
 TEST_PROVENANCE_SUPPRESSION_REASON = "test-provenance event refused by dispatcher"
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json: logged out
+# with no transport retry left. The two auth_401_* classes are unconfirmed
+# removals that must still not be restarted or re-paged as recoverable.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 LOGGED_OUT_REASON_KEY = "loggedout"
 
 
@@ -264,6 +273,19 @@ FLAP_SEEN_EVENT_RETENTION_SECONDS = positive_env_int(
     "BOT_ERRORS_FLAP_SEEN_EVENT_RETENTION_SECONDS", 21600
 )
 FLAP_SEEN_EVENT_MAX_IDS = positive_env_int("BOT_ERRORS_FLAP_SEEN_EVENT_MAX_IDS", 512)
+# Retry policy for a failing storm-resolved notice. A failed send used to leave
+# the entry in place with no backoff, so the notice was retried every dispatcher
+# cycle forever and dispatch.jsonl gained one error line per storm per cycle
+# (~12.5k failed sends on one host). Attempt n waits
+# min(BASE * 2**(n-1), MAX) seconds; after MAX_ATTEMPTS failures the entry is
+# dropped with one flap_resolve_abandoned record. The backoff fields are cleared
+# whenever the storm is not resolvable, so the attempt budget is per resolve
+# phase. Keep FLAP_STABLE_SECONDS >= FLAP_RESOLVE_RETRY_MAX_SECONDS so one retry
+# wait never outlasts the stable period that gates the resolve.
+FLAP_RESOLVE_BACKOFF_FIELDS = ("resolveAttempts", "lastResolveErrorAt", "nextResolveAt")
+FLAP_RESOLVE_RETRY_BASE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_RETRY_BASE_SECONDS", 30)
+FLAP_RESOLVE_RETRY_MAX_SECONDS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_RETRY_MAX_SECONDS", 3600)
+FLAP_RESOLVE_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_MAX_ATTEMPTS", 10)
 FLAP_STORM_ACTION = "source unstable — investigate root cause (flap storm)"
 AWAITING_PHYSICAL_CONFIRMATIONS = positive_env_int("BOT_ERRORS_AWAITING_PHYSICAL_CONFIRMATIONS", 2)
 AWAITING_PHYSICAL_RENOTIFY_SECONDS = positive_env_int(
@@ -794,6 +816,75 @@ COMMA_TOKEN_LIST = re.compile(r"\b[A-Za-z0-9_.:-]+(?:\s*,\s*[A-Za-z0-9_.:-]+)+\b
 def event_text(event: dict[str, Any], key: str) -> str:
     """Render one alert-content field of a queue event as operator text."""
     return alert_text(event.get(key) or "")
+
+
+# Readable headlines for confined content (display only).
+#
+# A confined summary renders as "<class> - <n> chars - digest <8hex>", which names
+# neither the bot nor the failure. The event's `instance` and `source` are short
+# codes set in producer code, not alert content, so a headline built from them
+# crosses no confinement boundary. The digest stays in the headline (and the full
+# confined rendering stays in the body) so operators can still correlate. Identity
+# paths (event_fingerprint_text, storm_fingerprint, incident_key) never call this.
+_CONFINED_DISPLAY_RE = re.compile(
+    r"\b(?P<cls>[A-Za-z][A-Za-z0-9_]{0,63}) - (?P<length>\d{1,9}) chars - digest (?P<digest>[0-9a-f]{8})\b"
+)
+_SAFE_ALERT_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+_UNINFORMATIVE_FAILURE_CLASSES = frozenset({"unknown", "none"})
+
+# Fixed, reviewed wording per producer source. Constants, never event content.
+SOURCE_HEADLINES: dict[str, str] = {
+    "primary_model_unusable": "primary model unusable",
+    "provider_fallback_activated": "provider fallback activated",
+    "fallback_chain_entry_unhealthy": "fallback chain entry unhealthy",
+    "agent_turn_admission_rejected": "agent turn admission rejected",
+    "agent_reply_guarantee_breach": "reply guarantee breached",
+    "agent_turn_usage_unavailable": "turn usage data unavailable",
+    "credential_identity_unverifiable": "credential identity cannot be verified",
+    "bead_proposal_backlog": "bead proposal backlog",
+    "health_body_degraded": "health degraded",
+    "outbound_flood": "outbound flood threshold tripped",
+    "outbound_delivery_ambiguous": "outbound delivery ambiguous",
+    "inbound_message_dropped": "inbound message dropped",
+    "whatsapp_device_bond_lost": "WhatsApp linked-device bond lost",
+    "instance_logged_out": "WhatsApp session logged out",
+}
+
+
+def safe_alert_label(value: Any) -> str | None:
+    """Return value when it is a short code-shaped label, else None."""
+    if not isinstance(value, str) or not _SAFE_ALERT_LABEL_RE.match(value):
+        return None
+    return value
+
+
+def source_headline(source: Any) -> str:
+    label = safe_alert_label(source)
+    if label is None:
+        return "alert"
+    return SOURCE_HEADLINES.get(label) or re.sub(r"[_:.-]+", " ", label).strip()
+
+
+def readable_confined_text(text: str, instance: Any, source: Any) -> str:
+    """Replace each confined rendering in text with '<instance>: <cause> [digest x]'."""
+    if not text or " chars - digest " not in text:
+        return text
+    inst = safe_alert_label(instance)
+
+    def replace(match: re.Match[str]) -> str:
+        cls = match.group("cls")
+        head = f"{inst}: " if inst else ""
+        head += source_headline(source)
+        if cls.lower() not in _UNINFORMATIVE_FAILURE_CLASSES:
+            head += f" ({cls})"
+        return f"{head} [digest {match.group('digest')}]"
+
+    return _CONFINED_DISPLAY_RE.sub(replace, text)
+
+
+def event_display_summary(event: dict[str, Any]) -> str:
+    """Operator headline text for an event's summary (display only)."""
+    return readable_confined_text(event_text(event, "summary"), event.get("instance"), event.get("source"))
 
 
 def event_fingerprint_text(event: dict[str, Any], key: str) -> str:
@@ -3477,9 +3568,14 @@ def is_logged_out_physical_signal(event: dict[str, Any]) -> bool:
         return True
     source = str(event.get("source") or "")
     evidence = event_text(event, "evidence").lower()
+    # The raw 401 + loggedOut pair only decides for legacy evidence; evidence
+    # that names the transport's disconnect_classification is decided by the
+    # auth_failure_class it carries (an ambiguous 401 retry is not logged out).
     return source == "instance_logged_out" and (
         evidence_has_terminal_auth_failure_class(evidence) or (
-            "last_status_code=401" in evidence and evidence_has_logged_out_reason(evidence)
+            "disconnect_classification=" not in evidence
+            and "last_status_code=401" in evidence
+            and evidence_has_logged_out_reason(evidence)
         )
     )
 
@@ -3608,20 +3704,20 @@ def append_still_open_context(
     event["evidence"] = "\n".join(part for part in [evidence, *additions] if part)
     if awaiting_physical and digest:
         if "still-open digest" not in event_text(event, "summary").lower():
-            event["summary"] = f"Still-open digest, awaiting physical action: {event_text(event, 'summary') or key}"
+            event["summary"] = f"Still-open digest, awaiting physical action: {event_display_summary(event) or key}"
     elif awaiting_physical:
         event["severity"] = "critical"
         if "awaiting physical" not in event_text(event, "summary").lower():
-            event["summary"] = f"Awaiting physical action: {event_text(event, 'summary') or key}"
+            event["summary"] = f"Awaiting physical action: {event_display_summary(event) or key}"
     elif escalated:
         event["severity"] = "critical"
         if "escalated" not in event_text(event, "summary").lower():
-            event["summary"] = f"ESCALATED still open: {event_text(event, 'summary') or key}"
+            event["summary"] = f"ESCALATED still open: {event_display_summary(event) or key}"
     elif digest:
         if "still-open digest" not in event_text(event, "summary").lower():
-            event["summary"] = f"Still-open digest: {event_text(event, 'summary') or key}"
+            event["summary"] = f"Still-open digest: {event_display_summary(event) or key}"
     elif "still open" not in event_text(event, "summary").lower():
-        event["summary"] = f"Still open: {event_text(event, 'summary') or key}"
+        event["summary"] = f"Still open: {event_display_summary(event) or key}"
 
 
 def truncate(value: Any, limit: int) -> str:
@@ -4052,7 +4148,11 @@ def format_event(event: dict[str, Any]) -> str:
         title = "BOT WARNING"
     else:
         title = "BOT ERROR"
-    summary = truncate(redact(event_text(event, "summary") or "unspecified bot error").replace("@", " at "), 220)
+    raw_summary = event_text(event, "summary")
+    display_summary = event_display_summary(event)
+    summary = truncate(redact(display_summary or "unspecified bot error").replace("@", " at "), 220)
+    # Keep the confined rendering visible for correlation when the headline replaced it.
+    confined_summary = raw_summary if display_summary != raw_summary else None
     process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
     diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
@@ -4073,6 +4173,7 @@ def format_event(event: dict[str, Any]) -> str:
 
     identity_lines = [
         f"{title} - {summary}",
+        event_line("summary_confined", confined_summary),
         event_line("severity", event.get("severity")),
         event_line("machine", event.get("machine")),
         event_line("instance", event.get("instance")),
@@ -4178,6 +4279,12 @@ def next_backoff(attempts: int) -> int | None:
 # opposed to a permanent/content failure (unknown chat, malformed payload, target
 # mismatch). Transient failures are deferred and redelivered on transport
 # recovery; everything else still dead-letters at the permanent cap.
+#
+# The outbound governor's shed is included: it rejects a send locally, before
+# the provider call, as deliberate back-pressure. It must spend the transient
+# budget, not the permanent one. The text must equal OUTBOUND_GOVERNOR_SHED_LOG
+# in src/core/outbound-governor-shed.ts; a test asserts the two agree.
+OUTBOUND_GOVERNOR_SHED_SIGNATURE = "outbound governor ceiling exceeded"
 _TRANSIENT_TRANSPORT_SIGNATURES = (
     "temporarily disconnected",
     "try again in a moment",
@@ -4191,6 +4298,7 @@ _TRANSIENT_TRANSPORT_SIGNATURES = (
     "signal-cli connection closed",
     "signal-cli connection ended by peer",
     "signal-cli socket write failed",
+    OUTBOUND_GOVERNOR_SHED_SIGNATURE,
 )
 
 
@@ -5666,7 +5774,10 @@ def stale_incident_event(key: str, record: dict[str, Any], current: int) -> dict
     if last_stale_failed and current - last_stale_failed < INCIDENT_STALE_FAILURE_RETRY_SECONDS:
         return None
 
-    summary = alert_text(record.get("lastSummary")) or key
+    key_fields = incident_event_fields_from_key(key)
+    summary = readable_confined_text(
+        alert_text(record.get("lastSummary")), key_fields.get("instance"), key_fields.get("source")
+    ) or key
     if awaiting_physical:
         title = f"Stale incident digest, awaiting physical action: {summary}"
         action = physical_action_text()
@@ -6041,6 +6152,11 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int,
     }
 
 
+# The storm-lifecycle fields flap_evaluate writes. flap_scan_outbox restores
+# exactly these when a storm send raises; the trip fields are left advanced.
+FLAP_STORM_LIFECYCLE_FIELDS = ("stormAt", "stormSeverity", "lastStormEmitAt", "cadenceStep")
+
+
 def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> int:
     """Pre-collapse pass (§10 C1): record ONE flap trip per raw incident-alert
     event currently in the outbox, keyed by incident_key, and emit consolidated
@@ -6095,9 +6211,25 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
                 continue
             entry = record_flap_trip(flap_state, key, now)
             changed = True
+            # #3479: flap_evaluate advances the storm lifecycle before the
+            # send. If the send itself raises, undo that advance so the emit
+            # watermark never records an alert that did not go out (and no
+            # member event is suppressed on its behalf). The trip recorded
+            # above still counts. A send that succeeded keeps its lifecycle
+            # even if the dispatch-log append after it fails; rolling back
+            # then would re-emit a delivered alert.
+            storm_before = {field: entry[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in entry}
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
-                send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                try:
+                    send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                except Exception:
+                    for field in FLAP_STORM_LIFECYCLE_FIELDS:
+                        if field in storm_before:
+                            entry[field] = storm_before[field]
+                        else:
+                            entry.pop(field, None)
+                    raise
                 emitted += 1
                 append_dispatch_log(paths, {
                     "type": "flap_storm",
@@ -6156,6 +6288,16 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                     })
                 continue
             if flap_should_resolve(entry, now):
+                # A non-numeric or non-finite value reads as absent: raising here
+                # would restore the per-cycle error line, and Infinity would
+                # skip the resolve forever.
+                next_resolve_at = entry.get("nextResolveAt")
+                if (
+                    isinstance(next_resolve_at, (int, float))
+                    and math.isfinite(next_resolve_at)
+                    and now < next_resolve_at
+                ):
+                    continue
                 open_incidents = incident_state.get("openIncidents")
                 # A resolve may only claim 'stable' when the source actually went
                 # silent. Rate-based resolution closes storms whose source is
@@ -6167,7 +6309,45 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                     (isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict))
                     or not flap_source_went_quiet(entry, now)
                 )
-                send_whatsapp(format_event(flap_resolve_event(str(key), entry, now, underlying_open)))
+                try:
+                    send_whatsapp(format_event(flap_resolve_event(str(key), entry, now, underlying_open)))
+                except Exception as exc:  # noqa: BLE001 - back off, never retry every cycle
+                    errors += 1
+                    prior = entry.get("resolveAttempts")
+                    finite_prior = isinstance(prior, (int, float)) and math.isfinite(prior)
+                    attempts = (int(prior) if finite_prior else 0) + 1
+                    # State is updated before any log append so a failing append
+                    # cannot lose the backoff.
+                    changed = True
+                    abandoned = attempts >= FLAP_RESOLVE_MAX_ATTEMPTS
+                    error_record: dict[str, Any] = {
+                        "type": "flap_resolve_error",
+                        "incidentKey": key,
+                        "error": str(exc),
+                        "attempts": attempts,
+                    }
+                    if abandoned:
+                        flap_state.pop(key, None)
+                    else:
+                        entry["resolveAttempts"] = attempts
+                        entry["lastResolveErrorAt"] = now
+                        entry["nextResolveAt"] = now + min(
+                            FLAP_RESOLVE_RETRY_BASE_SECONDS * 2 ** (attempts - 1),
+                            FLAP_RESOLVE_RETRY_MAX_SECONDS,
+                        )
+                        error_record["nextResolveAt"] = entry["nextResolveAt"]
+                    # The abandoned record goes first: it is the only trace of a
+                    # dropped entry, so a failing error-line append must not lose it.
+                    if abandoned:
+                        append_dispatch_log(paths, {
+                            "type": "flap_resolve_abandoned",
+                            "incidentKey": key,
+                            "attempts": attempts,
+                            "cumulativeCount": entry.get("cumulativeCount"),
+                            "underlyingOpen": underlying_open,
+                        })
+                    append_dispatch_log(paths, error_record)
+                    continue
                 append_dispatch_log(paths, {
                     "type": "flap_storm_resolved",
                     "incidentKey": key,
@@ -6177,6 +6357,13 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                 flap_state.pop(key, None)
                 resolved += 1
                 changed = True
+            else:
+                # Not resolvable (the storm re-tripped): clear any backoff so the
+                # next resolve phase starts with a fresh attempt budget.
+                for field in FLAP_RESOLVE_BACKOFF_FIELDS:
+                    if field in entry:
+                        entry.pop(field)
+                        changed = True
         except Exception as exc:  # noqa: BLE001 - one bad entry must not block the sweep
             errors += 1
             append_dispatch_log(paths, {"type": "flap_resolve_error", "incidentKey": key, "error": str(exc)})

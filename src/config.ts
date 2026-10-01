@@ -1239,6 +1239,10 @@ export const config = {
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
   // /model,/why,/reset stay forwarded and no preference table is created.
   nlRouting: resolvedAgentOptions['nlRouting'] === true,
+  // #2949 queued receipt: a per_chat message that waits behind a running turn
+  // gets one "queued behind the current task" notice (per-chat cooldown).
+  // Default ON; `agentOptions.queuedTurnReceipt: false` turns it off.
+  queuedTurnReceipt: resolvedAgentOptions['queuedTurnReceipt'] !== false,
   // Intent→provider tier map for NL routing ('strongest'/'fastest'). Unset
   // tiers resolve to the default route honestly — never a hidden opinion.
   nlRoutingTiers: (resolvedAgentOptions['nlRoutingTiers'] ?? null) as { strongest?: string; fastest?: string } | null,

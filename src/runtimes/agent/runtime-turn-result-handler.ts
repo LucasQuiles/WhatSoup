@@ -148,7 +148,9 @@ type NoFallbackTerminalNoticeReason = 'rate-limit' | 'model-unavailable';
 function enqueueNoFallbackTerminalNotice(
   queue: IOutboundQueue,
   reason: NoFallbackTerminalNoticeReason,
+  scheduled = false,
 ): void {
+  if (scheduled) return;
   queue.enqueueText(renderUserMessage(reason, {
     hasContinuation: false,
     bundle: null,
@@ -195,6 +197,8 @@ export interface RuntimeResultHandlerPort {
   readonly perChatAssistantItemText: Map<string, Map<string, string>>;
   readonly perChatTurnContentType: Map<string, string>;
   readonly perChatTurnSuppressedReplySatisfaction: Set<string>;
+  /** #3497: scheduled scopes whose completed final-text turn held no answer. */
+  readonly scheduledAnswerMissing?: Set<string>;
   readonly currentTurnAssistantItemText: Map<string, string>;
   session: SessionManager | null;
   activeChatJid: string | null;
@@ -234,12 +238,14 @@ export interface RuntimeResultHandlerPort {
     hadToolWork?: boolean,
     session?: SessionManager | null,
     wasUnclassifiedError?: boolean,
+    scheduled?: boolean,
   ): void;
   maybeArmFallbackAfterEmptyPrimaryTurn(
     queue: IOutboundQueue,
     session: SessionManager | null,
     turnHadToolWork: boolean,
     mapKey: string | undefined,
+    scheduled?: boolean,
   ): boolean;
   maybeArmFallbackAfterUnknownTerminal(
     queue: IOutboundQueue,
@@ -248,12 +254,14 @@ export interface RuntimeResultHandlerPort {
     mapKey: string | undefined,
     isUserTurnResult: boolean,
     evidenceText: string,
+    scheduled?: boolean,
   ): boolean;
   enqueueAutoSwitchNotice(
     queue: IOutboundQueue,
     text: string,
     logChatJid: string | null | undefined,
     mode: 'streaming' | 'result',
+    scheduled?: boolean,
   ): boolean;
   withHandoffPrefix(chatJid: string, text: string): string;
   flushPendingHandoffNotice(queue: IOutboundQueue): void;
@@ -284,7 +292,7 @@ export interface RuntimeResultHandlerPort {
     activation: ProviderFallbackActivation,
     replay?: { replayScheduled: boolean; blockedByToolActivity?: boolean },
   ): void;
-  emitNoFallbackReauthNotice(queue: IOutboundQueue): void;
+  emitNoFallbackReauthNotice(queue: IOutboundQueue, scheduled?: boolean): void;
   usageLimitNotice(): string;
   kickDiagnosticBundle(workflow: ResponseWorkflow, providerText: string): void;
 }
@@ -298,6 +306,8 @@ export interface ScopedRuntimeResultArgs {
   mapKey?: string;
   toolScopeKey: string;
   isSystemResult: boolean;
+  /** #3497: the turn is a scheduled job; its user-facing notices are dropped. */
+  scheduledTurn?: boolean;
   systemTurnPurpose?: SystemTurnPurpose | null;
   tracker?: OperationTracker;
   extractUsageLimitResetTime(text: string): Date | null;
@@ -319,14 +329,21 @@ export function handleScopedRuntimeResult(
     tracker,
     extractUsageLimitResetTime,
   } = args;
+// #3497: a scheduled turn's failure, fallback and handoff notices never reach
+// the chat, and never touch the chat's notice dedupe or pending handoff notice.
+const scheduled = args.scheduledTurn === true;
+const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text); };
 const wasSilentCompact = host.isSilentCompact(mapKey);
 const runtimeContext = !isSystemResult && mapKey !== undefined
   ? host.runtimeTurnCoordinator.runtimeTurnContext(mapKey)
   : null;
 const classifiedOutcome = host.runtimeTurnCoordinator.attemptOutcomeForResult(event);
-const attemptOutcome = classifiedOutcome.kind === 'completed'
-  && mapKey !== undefined
-  && host.perChatTurnSuppressedReplySatisfaction.has(mapKey)
+const scheduledAnswerMissing = mapKey !== undefined && host.scheduledAnswerMissing?.delete(mapKey) === true;
+const attemptOutcome = classifiedOutcome.kind === 'completed' && scheduledAnswerMissing
+  ? { kind: 'failed' as const, class: 'scheduled_answer_missing' as const }
+  : classifiedOutcome.kind === 'completed'
+    && mapKey !== undefined
+    && host.perChatTurnSuppressedReplySatisfaction.has(mapKey)
     ? { kind: 'suppressed_by_policy' as const }
     : classifiedOutcome;
 const clearReplayOnSuccess = attemptOutcome.kind === 'completed'
@@ -404,12 +421,13 @@ const terminalFailureDuringPoll = hasPendingPoll
   && event.text !== null
   && classifyProviderFailure(event.text) !== null;
 if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
-  if (host.enqueueAutoSwitchNotice(queue, event.text, queue.targetChatJid, 'result')) {
+  if (host.enqueueAutoSwitchNotice(queue, event.text, queue.targetChatJid, 'result', scheduled)) {
     suspendHostWorkAdmissionQuietly(session);
     return;
   }
   if (responseRegistryDispatchEnabled() && dispatchProviderFailureResult(host, {
     queue,
+    scheduled,
     session,
     providerText: event.text,
     turnHadToolWork,
@@ -444,13 +462,13 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
     }
     if (!replayScheduled) {
-      if (!activation) queue.enqueueText(host.usageLimitNotice());
+      if (!activation) notify(host.usageLimitNotice());
       shutdownSessionQuietly(session);
     }
     return;
@@ -483,7 +501,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
@@ -491,7 +509,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
     if (!replayScheduled) {
       // QR-211: no fallback took over — without this, the turn ends in
       // permanent silence (session shuts down, nothing forwarded to chat).
-      if (!activation) host.emitNoFallbackReauthNotice(queue);
+      if (!activation) host.emitNoFallbackReauthNotice(queue, scheduled);
       shutdownSessionQuietly(session);
     }
     return;
@@ -515,15 +533,15 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
     }
     if (!replayScheduled) {
-      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerServerErrorNoFallbackNotice());
+      if (!activation && providerFailureKind === 'server-error') notify(providerServerErrorNoFallbackNotice());
       if (!activation && providerFailureKind === 'rate-limit') {
-        enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
+        enqueueNoFallbackTerminalNotice(queue, providerFailureKind, scheduled);
       }
       shutdownSessionQuietly(session);
     }
@@ -543,13 +561,13 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
     }
     if (!replayScheduled) {
-      if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
+      if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind, scheduled);
       shutdownSessionQuietly(session);
     }
     return;
@@ -564,7 +582,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
       'Context overflow killed the session (respawns on next message)',
       providerPreview(event.text, 300),
     );
-    queue.enqueueText(contextOverflowNotice());
+    notify(contextOverflowNotice());
     shutdownSessionQuietly(session);
     return;
   }
@@ -580,7 +598,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
       event.text.slice(0, 400),
       'warning',
     );
-    queue.enqueueText(providerTransientRetryNotice());
+    notify(providerTransientRetryNotice());
     suspendHostWorkAdmissionQuietly(session);
     return;
   }
@@ -603,13 +621,13 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
       // notify) — the activation notice supersedes the generic one, so return to
       // let the fallback replay own finalization. Below threshold / no eligible
       // fallback: keep today's generic notice.
-      if (host.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, event.text)) {
+      if (host.maybeArmFallbackAfterUnknownTerminal(queue, session, turnHadToolWork, mapKey, isUserTurnResult, event.text, scheduled)) {
         return;
       }
-      queue.enqueueText(providerUnknownTerminalNotice());
+      notify(providerUnknownTerminalNotice());
     } else {
       const accepted = queue.enqueueResultText(
-        host.withHandoffPrefix(queue.targetChatJid, event.text),
+        scheduled ? event.text : host.withHandoffPrefix(queue.targetChatJid, event.text),
       ) !== false;
       if (accepted) {
         host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
@@ -715,10 +733,11 @@ if (runtimeContext) {
       // streamed a genuine partial reply and THEN errored still delivered output,
       // so it must NOT count toward advancing past a working-but-flaky entry.
       event.isError === true && responseText.trim() === '',
+      scheduled,
     );
     // Empty/tool-only turn: surface any still-pending handoff notice
     // standalone rather than deferring it to the next reply.
-    host.flushPendingHandoffNotice(queue);
+    if (!scheduled) host.flushPendingHandoffNotice(queue);
     let armedFallbackNow = false;
     if (!turnCapabilityFailureRecorded) {
       if (hadVisible || turnHadToolWork || hadSuppressedReplySatisfaction) {
@@ -733,7 +752,7 @@ if (runtimeContext) {
           { reason: 'empty-output', chatJid: queue.targetChatJid, mapKey, rowId, turnHadToolWork },
           'recorded empty-output turn failure',
         );
-        armedFallbackNow = host.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey);
+        armedFallbackNow = host.maybeArmFallbackAfterEmptyPrimaryTurn(queue, session, turnHadToolWork, mapKey, scheduled);
       }
     }
     if (
@@ -748,10 +767,17 @@ if (runtimeContext) {
       // Suppressed when we JUST armed the provider fallback above: the
       // activation notice already told the user and the turn is being
       // replayed on the backup, so this would be a contradictory message.
-      queue.enqueueText('_The backup model returned no reply — please resend or rephrase your message._');
+      notify('_The backup model returned no reply — please resend or rephrase your message._');
     }
   }
-  voice = { chatJid: chatJidForVoice, responseText, inboundContentType };
+  // #3613: the turn text still includes answers the client output policy
+  // withheld, so a voice reply of it would send withheld text as audio.
+  const clientOutputWithheld = queue.consumeClientOutputWithheld?.() ?? false;
+  voice = {
+    chatJid: chatJidForVoice,
+    responseText: clientOutputWithheld ? '' : responseText,
+    inboundContentType,
+  };
 }
 // Mirror the chat runtime: persist model_used + token counts on the
 // inbound message row so the messages table has the effective model for
@@ -832,6 +858,8 @@ return;
 }
 export interface ProviderFailureResultContext {
   queue: IOutboundQueue;
+  /** #3497: a scheduled turn — no user-facing notice, no chat notice dedupe. */
+  scheduled?: boolean;
   session: SessionManager | null;
   providerText: string;
   turnHadToolWork: boolean;
@@ -875,7 +903,8 @@ export function handleProviderFailureResult(
   ctx: ProviderFailureResultContext,
   parseUsageLimitResetTime: (text: string) => Date | null,
 ): void {
-const { queue, session, providerText, turnHadToolWork, logChatJid } = ctx;
+const { queue, session, providerText, turnHadToolWork, logChatJid, scheduled = false } = ctx;
+const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text); };
 const kind = wf.providerKind;
 // Defensive: dispatchProviderFailureResult already filters null-providerKind
 // (class-only) workflows out of the text path and routes them to the legacy
@@ -896,7 +925,7 @@ if (!wf.fallback.arms) {
       'Context overflow killed the session (respawns on next message)',
       textPreview,
     );
-    queue.enqueueText(contextOverflowNotice());
+    notify(contextOverflowNotice());
   } else {
     log.error({ chatJid: logChatJid, textPreview }, 'suppressed provider policy-block message from result — session will be killed');
   }
@@ -923,7 +952,7 @@ const replayScheduled = activation
     })
   : false;
 if (activation) {
-  host.notifyProviderFallbackActivated(queue, activation, {
+  if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
     replayScheduled,
     blockedByToolActivity: turnHadToolWork,
   });
@@ -931,10 +960,10 @@ if (activation) {
 if (!replayScheduled) {
   // Every fallback-eligible terminal class emits one standalone notice when no
   // fallback armed. Activated fallbacks keep their existing single notifier.
-  if (reason === 'usage-limit' && !activation) queue.enqueueText(host.usageLimitNotice());
-  if (reason === 'auth-required' && !activation) host.emitNoFallbackReauthNotice(queue);
+  if (reason === 'usage-limit' && !activation) notify(host.usageLimitNotice());
+  if (reason === 'auth-required' && !activation) host.emitNoFallbackReauthNotice(queue, scheduled);
   if (!activation && (reason === 'rate-limit' || reason === 'model-unavailable')) {
-    enqueueNoFallbackTerminalNotice(queue, reason);
+    enqueueNoFallbackTerminalNotice(queue, reason, scheduled);
   }
   shutdownSessionQuietly(session);
 }
@@ -944,6 +973,8 @@ if (!replayScheduled) {
 export interface GlobalRuntimeResultArgs {
   event: Extract<AgentEvent, { type: 'result' }>;
   queue: IOutboundQueue;
+  /** #3497: the turn is a scheduled job; its user-facing notices are dropped. */
+  scheduledTurn?: boolean;
   systemTurnPurpose?: SystemTurnPurpose | null;
   tracker?: OperationTracker;
   extractUsageLimitResetTime(text: string): Date | null;
@@ -954,11 +985,16 @@ export function handleGlobalRuntimeResult(
   args: GlobalRuntimeResultArgs,
 ): void {
   const { event, queue, tracker, extractUsageLimitResetTime } = args;
+const scheduled = args.scheduledTurn === true;
+const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text); };
 const wasSilentCompact = host.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
 const runtimeContext = host.runtimeTurnCoordinator.runtimeTurnContext();
 const classifiedOutcome = host.runtimeTurnCoordinator.attemptOutcomeForResult(event);
-const attemptOutcome = classifiedOutcome.kind === 'completed'
-  && host.turnHadSuppressedReplySatisfaction
+const scheduledAnswerMissing = host.scheduledAnswerMissing?.delete(GLOBAL_TOOL_SCOPE_KEY) === true;
+const attemptOutcome = classifiedOutcome.kind === 'completed' && scheduledAnswerMissing
+  ? { kind: 'failed' as const, class: 'scheduled_answer_missing' as const }
+  : classifiedOutcome.kind === 'completed'
+    && host.turnHadSuppressedReplySatisfaction
     ? { kind: 'suppressed_by_policy' as const }
     : classifiedOutcome;
 let voice: { chatJid: string; responseText: string; inboundContentType: string | null } | undefined;
@@ -1029,13 +1065,14 @@ const recordTurnFailure = (errorClass: TurnCapabilityErrorClass): void => {
 
 // Render result.text if present (e.g. terminal context-limit errors)
 if (event.text) {
-  if (host.enqueueAutoSwitchNotice(queue, event.text, host.shared ? host.currentTurnChatJid : host.activeChatJid, 'result')) {
+  if (host.enqueueAutoSwitchNotice(queue, event.text, host.shared ? host.currentTurnChatJid : host.activeChatJid, 'result', scheduled)) {
     host.turnHadVisibleOutput = true;
     suspendHostWorkAdmissionQuietly(host.session);
     return;
   }
   if (responseRegistryDispatchEnabled() && dispatchProviderFailureResult(host, {
     queue,
+    scheduled,
     session: host.session,
     providerText: event.text,
     turnHadToolWork,
@@ -1072,13 +1109,13 @@ if (event.text) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
     }
     if (!replayScheduled) {
-      if (!activation) queue.enqueueText(host.usageLimitNotice());
+      if (!activation) notify(host.usageLimitNotice());
       shutdownSessionQuietly(host.session);
     }
     return;
@@ -1109,7 +1146,7 @@ if (event.text) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
@@ -1117,7 +1154,7 @@ if (event.text) {
     if (!replayScheduled) {
       // QR-211: no fallback took over — without this, the turn ends in
       // permanent silence (session shuts down, nothing forwarded to chat).
-      if (!activation) host.emitNoFallbackReauthNotice(queue);
+      if (!activation) host.emitNoFallbackReauthNotice(queue, scheduled);
       shutdownSessionQuietly(host.session);
     }
     return;
@@ -1140,15 +1177,15 @@ if (event.text) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
     }
     if (!replayScheduled) {
-      if (!activation && providerFailureKind === 'server-error') queue.enqueueText(providerServerErrorNoFallbackNotice());
+      if (!activation && providerFailureKind === 'server-error') notify(providerServerErrorNoFallbackNotice());
       if (!activation && providerFailureKind === 'rate-limit') {
-        enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
+        enqueueNoFallbackTerminalNotice(queue, providerFailureKind, scheduled);
       }
       shutdownSessionQuietly(host.session);
     }
@@ -1167,13 +1204,13 @@ if (event.text) {
         })
       : false;
     if (activation) {
-      host.notifyProviderFallbackActivated(queue, activation, {
+      if (!scheduled) host.notifyProviderFallbackActivated(queue, activation, {
         replayScheduled,
         blockedByToolActivity: turnHadToolWork,
       });
     }
     if (!replayScheduled) {
-      if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind);
+      if (!activation) enqueueNoFallbackTerminalNotice(queue, providerFailureKind, scheduled);
       shutdownSessionQuietly(host.session);
     }
     return;
@@ -1188,7 +1225,7 @@ if (event.text) {
       'Context overflow killed the session (respawns on next message)',
       providerPreview(event.text, 300),
     );
-    queue.enqueueText(contextOverflowNotice());
+    notify(contextOverflowNotice());
     shutdownSessionQuietly(host.session);
     return;
   }
@@ -1204,7 +1241,7 @@ if (event.text) {
       event.text.slice(0, 400),
       'warning',
     );
-    queue.enqueueText(providerTransientRetryNotice());
+    notify(providerTransientRetryNotice());
     suspendHostWorkAdmissionQuietly(host.session);
     return;
   }
@@ -1224,10 +1261,10 @@ if (event.text) {
       // after a bounded consecutive run, replacing the generic notice with a
       // fallback activation. Mirror the sibling terminal branches on the single/
       // shared path — reset the tool-activity flag and return.
-      if (host.maybeArmFallbackAfterUnknownTerminal(queue, host.session, turnHadToolWork, undefined, isUserTurnResult, event.text)) {
+      if (host.maybeArmFallbackAfterUnknownTerminal(queue, host.session, turnHadToolWork, undefined, isUserTurnResult, event.text, scheduled)) {
         return;
       }
-      queue.enqueueText(providerUnknownTerminalNotice());
+      notify(providerUnknownTerminalNotice());
       // Below threshold / no eligible fallback: the generic notice IS the visible
       // reply for this errored turn — return like every sibling terminal branch
       // (usage-limit/rate-limit/server-error/…). Falling through instead would let
@@ -1242,12 +1279,12 @@ if (event.text) {
       // empty-advance path fires; when a genuine partial reply WAS streamed first
       // (turnHadVisibleOutput true), the entry delivered output and must not be
       // advanced past — so no wasUnclassifiedError override here.
-      host.recordFallbackTurnOutcome(queue, host.turnHadVisibleOutput, turnHadToolWork, host.session);
+      host.recordFallbackTurnOutcome(queue, host.turnHadVisibleOutput, turnHadToolWork, host.session, false, scheduled);
       suspendHostWorkAdmissionQuietly(host.session);
       return;
     } else {
       const accepted = queue.enqueueResultText(
-        host.withHandoffPrefix(queue.targetChatJid, event.text),
+        scheduled ? event.text : host.withHandoffPrefix(queue.targetChatJid, event.text),
       ) !== false;
       if (accepted) {
         host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
@@ -1269,10 +1306,12 @@ if (!wasSilentCompact && !isSystemResult) {
     host.turnHadVisibleOutput || hadSuppressedReplySatisfaction,
     turnHadToolWork,
     host.session,
+    false,
+    scheduled,
   );
   // Empty/tool-only turn: surface any still-pending handoff notice
   // standalone rather than deferring it to the next reply.
-  host.flushPendingHandoffNotice(queue);
+  if (!scheduled) host.flushPendingHandoffNotice(queue);
   if (!turnCapabilityFailureRecorded) {
     if (host.turnHadVisibleOutput || turnHadToolWork || hadSuppressedReplySatisfaction) {
       host.recordTurnCapabilitySuccess(true, host.session);
@@ -1290,7 +1329,7 @@ if (!wasSilentCompact && !isSystemResult) {
         },
         'recorded empty-output turn failure',
       );
-      armedFallbackNow = host.maybeArmFallbackAfterEmptyPrimaryTurn(queue, host.session, turnHadToolWork, undefined);
+      armedFallbackNow = host.maybeArmFallbackAfterEmptyPrimaryTurn(queue, host.session, turnHadToolWork, undefined, scheduled);
     }
   }
 }
@@ -1298,7 +1337,7 @@ if (!wasSilentCompact && !isSystemResult) {
 // unless we just armed the provider fallback (its activation notice has
 // already informed the user and the turn is being replayed on the backup).
 if (!host.turnHadVisibleOutput && !hadSuppressedReplySatisfaction && !wasSilentCompact && !armedFallbackNow) {
-  queue.enqueueText('_(no response)_');
+  notify('_(no response)_');
 }
 host.turnHadVisibleOutput = false;
 if (!runtimeContext && (event.inputTokens !== undefined || event.outputTokens !== undefined) && rowId !== null) {
@@ -1358,7 +1397,9 @@ if (runtimeContext) {
   // Capture voice reply context before flush (SP4)
   const chatJidForVoice = host.shared ? host.currentTurnChatJid : host.activeChatJid;
   const inboundContentType = host.currentTurnInboundContentType;
-  const responseText = wasSilentCompact ? '' : host.currentTurnAssistantText;
+  // #3613: never voice text the client output policy withheld (see scoped path).
+  const clientOutputWithheld = queue.consumeClientOutputWithheld?.() ?? false;
+  const responseText = wasSilentCompact || clientOutputWithheld ? '' : host.currentTurnAssistantText;
   // Reset per-turn voice state
   host.currentTurnInboundContentType = null;
   host.currentTurnAssistantText = '';

@@ -354,6 +354,7 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { startHealthServer, HEALTH_TURN_ERROR_CLASSES, type HealthDeps } from '../../../src/core/health.ts';
 import type { ConnectionManager } from '../../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../../src/transport/twilio/connection-snapshot.ts';
+import { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 
 // ─── Fixtures (fictional 1555-prefixed identities, sibling-suite idiom) ──────
 
@@ -701,7 +702,7 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
     // cancellation class; neither may collapse to the legacy classless
     // admission `unknown` nor the genuine-crash `session_crash`.
     const db = makeDb();
-    const { messenger } = makeMessenger();
+    const { messenger, sentMessages } = makeMessenger();
     const runtime = makeRuntime(scope, db, messenger);
     const duraDb = new RealDatabase(':memory:');
     duraDb.open();
@@ -718,7 +719,8 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
 
     const readTerminal = (seq: number) => ({
       inbound: duraDb.raw.prepare(
-        'SELECT processing_status, terminal_reason, failure_class FROM inbound_events WHERE seq = ?',
+        `SELECT processing_status, terminal_reason, failure_class, continuity_candidate_reason
+           FROM inbound_events WHERE seq = ?`,
       ).get(seq),
       terminal: duraDb.raw.prepare(
         `SELECT attempt_kind, attempt_failure_class, inbound_disposition,
@@ -788,6 +790,7 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
           processing_status: 'failed',
           terminal_reason: 'error',
           failure_class: 'operator_cancelled',
+          continuity_candidate_reason: null,
         },
         terminal: {
           attempt_kind: 'failed',
@@ -801,6 +804,29 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       expect(readTerminal(pendingSeq)).toEqual(expected);
       expect(readTerminal(activeSeq).inbound).not.toMatchObject({ failure_class: 'unknown' });
       expect(readTerminal(pendingSeq).inbound).not.toMatchObject({ failure_class: 'session_crash' });
+      // #3716: a stop is a requested outcome, not a runtime fault.
+      expect(vi.mocked(emitAlertChecked).mock.calls
+        .filter((call) => call[1] === 'agent_reply_guarantee_breach')).toEqual([]);
+      const stoppedSeqs = mockRuntimeLogger.info.mock.calls
+        .map((call) => call[0] as { event?: unknown; inboundSeq?: unknown } | undefined)
+        .filter((fields) => fields?.event === 'operator_stop_cancelled')
+        .map((fields) => fields?.inboundSeq);
+      expect(new Set(stoppedSeqs)).toEqual(new Set([activeSeq, pendingSeq]));
+      // #3716 owner ruling: the acknowledgement says how many queued messages
+      // the stop dropped. A per_chat teardown deletes the chat's outbound queue,
+      // so the acknowledgement may land on either sink.
+      const directTexts = (): string[] => [...enqueuedTexts(), ...sentMessages.map((m) => m.text)];
+      await vi.waitFor(
+        () => expect(directTexts().some((text) => /Stopped the running task|Stop requested/.test(text))).toBe(true),
+        { timeout: 4_000 },
+      );
+      const notes = directTexts().filter((text) => text.includes('queued message'));
+      expect(notes).toHaveLength(1);
+      // The single/shared teardown drains one queue that every conversation
+      // shares, so its note says the count spans all conversations.
+      expect(notes[0]).toMatch(scope === 'per_chat'
+        ? /(?<!\d)1 queued message was also dropped\b/
+        : /(?<!\d)1 queued message across all conversations was also dropped\b/);
     } finally {
       releaseTurn();
       await Promise.allSettled([activeWork, pendingWork, stopWork].filter(
@@ -817,6 +843,104 @@ describe('B22 group 2: every COMMAND_REGISTRY entry has a local handler', () => 
       await expectStopCancellationDurability(scope);
     },
   );
+
+  it('#3716: a group /stop says how many queued messages it dropped, without naming anyone', async () => {
+    // Owner ruling on #3716: a group /stop still cancels every queued message in
+    // the conversation (#2445), other participants' included, and says how many.
+    const db = makeDb();
+    const { messenger, sentMessages } = makeMessenger();
+    const runtime = makeRuntime('per_chat', db, messenger);
+    const duraDb = new RealDatabase(':memory:');
+    duraDb.open();
+    const durability = new DurabilityEngine(duraDb);
+    runtime.setDurability(durability);
+    await runtime.start();
+    mockQueue.enqueueText.mockClear();
+    let releaseTurn: () => void = () => {};
+    mockSession.sendTurn.mockReset().mockImplementation(
+      () => new Promise<void>((resolve) => { releaseTurn = resolve; }),
+    );
+    const directTexts = (): string[] => [...enqueuedTexts(), ...sentMessages.map((m) => m.text)];
+    const pendingRuntimeTurns = (): number => [
+      ...(runtime as unknown as { perChatTurnQueues: Map<string, { pending: number }> }).perChatTurnQueues.values(),
+    ].reduce((sum, queue) => sum + queue.pending, 0);
+    const members = [
+      {
+        messageId: 'm-group-active',
+        senderJid: '15550003333@s.whatsapp.net',
+        senderName: 'Group Member Alpha',
+        content: 'active group work',
+      },
+      {
+        messageId: 'm-group-queued-1',
+        senderJid: '15550004444@s.whatsapp.net',
+        senderName: 'Group Member Beta',
+        content: 'first queued group work',
+      },
+      {
+        messageId: 'm-group-queued-2',
+        senderJid: '15550005555@s.whatsapp.net',
+        senderName: 'Group Member Gamma',
+        content: 'second queued group work',
+      },
+    ];
+    const work: Array<Promise<void>> = [];
+
+    try {
+      const seqs = members.map((member) => durability.journalInbound(
+        member.messageId, toConversationKey(GROUP_CHAT), GROUP_CHAT, 'agent',
+      ));
+      const send = (index: number): void => {
+        work.push(runtime.handleMessage(makeMsg({
+          ...members[index]!,
+          chatJid: GROUP_CHAT,
+          isGroup: true,
+          inboundSeq: seqs[index],
+        })));
+      };
+      send(0);
+      await vi.waitFor(() => expect(mockSession.sendTurn).toHaveBeenCalledTimes(1));
+      send(1);
+      send(2);
+      await vi.waitFor(() => expect(pendingRuntimeTurns()).toBe(2));
+
+      work.push(runtime.handleMessage(makeMsg({
+        messageId: 'm-group-stop', chatJid: GROUP_CHAT, isGroup: true, content: '/stop', senderJid: ADMIN_WA,
+      })));
+      await vi.waitFor(() => expect(
+        mockRuntimeLogger.warn.mock.calls.map((call) => String(call[1] ?? ''))
+          .some((message) => message.includes('/stop received mid-turn')),
+      ).toBe(true));
+      await vi.waitFor(() => expect(pendingRuntimeTurns()).toBe(0));
+      releaseTurn();
+      await Promise.allSettled(work);
+      await vi.waitFor(
+        () => expect(directTexts().some((text) => /Stopped the running task|Stop requested/.test(text))).toBe(true),
+        { timeout: 4_000 },
+      );
+
+      const notes = directTexts().filter((text) => text.includes('queued message'));
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toMatch(/(?<!\d)2 queued messages were also dropped\b/);
+      for (const member of members) {
+        expect(notes[0]).not.toContain(member.senderName);
+        expect(notes[0]).not.toContain(member.senderJid.split('@')[0]!);
+        expect(notes[0]).not.toContain(member.content);
+      }
+      await vi.waitFor(() => {
+        for (const seq of seqs) {
+          expect(duraDb.raw.prepare(
+            'SELECT attempt_failure_class FROM turn_terminal_records WHERE inbound_seq = ?',
+          ).get(seq)).toEqual({ attempt_failure_class: 'operator_cancelled' });
+        }
+      });
+    } finally {
+      releaseTurn();
+      await Promise.allSettled(work);
+      await runtime.shutdown();
+      duraDb.close();
+    }
+  });
 
   it('#2949 N1: a mid-turn compound /stop refuses the body instead of dispatching it', async () => {
     // Registration gave /stop a compound-body path it never had as forwarded
@@ -1319,7 +1443,22 @@ describe('B22 group 4: turn-error class degrade contract', () => {
       instanceType: 'agent',
       accessMode: 'allowlist',
       runtime: {
-        getHealthSnapshot: vi.fn().mockReturnValue({ status: 'healthy', details: { turnCapability } }),
+        getHealthSnapshot: vi.fn().mockReturnValue({
+          status: 'healthy',
+          details: {
+            degradedReasons: [],
+            recoveryBlockingReasons: [],
+            recoveryDebtReasons: [],
+            turnRecoveryBlockingOutstanding: 0,
+            turnRecoveryRetainedTerminal: 0,
+            turnRecoveryOpenRecoveries: 0,
+            turnRecoveryCorroboratedRetained: 0,
+            completedDeliveryIdentityBlocking: 0,
+            completedDeliveryIdentityRetained: 0,
+            completedDeliveryIdentityAdmissions: { nextAction: null },
+            turnCapability,
+          },
+        }),
       } as unknown as HealthDeps['runtime'],
     };
     const server = startHealthServer(deps);
@@ -1347,7 +1486,13 @@ describe('B22 group 4: turn-error class degrade contract', () => {
   function capability(errorClass: string, errorAgeMs: number, successAgeMs: number): Record<string, unknown> {
     const now = Date.now();
     return {
-      modelUsable: null, // keep the independent usability-probe degrade out of the frame
+      // Keep the independent usability probe healthy so this fixture isolates
+      // error-class debounce while still supplying complete latch-clear proof.
+      modelUsable: true,
+      modelUsableStale: false,
+      modelUsableCheckedAt: errorClass === 'auth-required'
+        ? now - errorAgeMs - 1
+        : now,
       modelUsabilityStatus: 'usable',
       lastSuccessfulTurnAt: now - successAgeMs,
       lastTurnErrorClass: errorClass,

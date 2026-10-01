@@ -66,6 +66,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     silencedUntil: null,
     activeAlertSources: [],
     ...overrides,
+    recoveryDebt: overrides.recoveryDebt ?? null,
   };
 }
 

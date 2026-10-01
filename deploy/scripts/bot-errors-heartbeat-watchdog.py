@@ -32,6 +32,16 @@ from lib.bounded_jsonl import (
 from lib.bot_errors_envelope import new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.fleet_config import (  # noqa: E402
+    PROFILE_MISSING_MARKER_KIND,
+    PROFILE_MISSING_MARKER_SCHEMA,
+    FleetConfigError,
+    profile_missing_due,
+    read_json_object,
+    resolve_health_profile,
+    tracked_health_profile_path,
+    utc_day,
+)
 from lib.dm_roundtrip import (  # noqa: E402
     RoundtripConfigError,
     evaluate_target as dm_roundtrip_evaluate_target,
@@ -51,6 +61,7 @@ from lib.controller_log import (
 )
 from lib.durable_json import (
     JsonVersion,
+    PublicationResult,
     durable_json_target,
     observe_json,
     operation_id,
@@ -76,8 +87,10 @@ from lib.state_files import (
     INCIDENT_STATE,
     Q_LOOP_STATE,
     SENTINEL_HEARTBEAT,
+    WATCHDOG_PROFILE_MISSING_MARKER,
 )
 from lib.state_root import q_loop_state_root, sentinel_state_root, state_root as _ssot_state_root
+from lib.classify_health import recovery_debt_issue
 
 
 def state_root() -> Path:
@@ -114,6 +127,13 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "clock_skew",
     "dm_roundtrip",
 })
+# Checks whose expectation is the per-host health profile's instance list.
+PROFILE_CHECKS: frozenset[str] = frozenset({
+    "local_services",
+    "local_instance_health",
+    "wedge_signature",
+    "turn_failure_rate",
+})
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # Live instance-config tree (the runtime_config health-port authority). The
@@ -124,7 +144,15 @@ INSTANCE_CONFIG_ROOT = Path(
     os.environ.get("WHATSOUP_INSTANCE_CONFIG_ROOT")
     or Path.home() / ".config" / "whatsoup" / "instances"
 )
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json. The
+# auth_401_* classes are unconfirmed removals; a restart would buy a fresh
+# bounded retry and park again, so they are terminal for restart purposes.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
 
 
@@ -161,6 +189,39 @@ def watchdog_renotify_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", 6 * 60 * 60)
 
 
+def watchdog_renotify_max_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS", 24 * 60 * 60)
+
+
+def renotify_interval_seconds(unchanged_renotifies: int) -> int:
+    """Renotify interval after ``unchanged_renotifies`` escalated re-sends of
+    the same evidence: base, 2x base, 4x base, ... capped at
+    BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS. The base is the floor, so a max
+    set below the base can never make re-sends more frequent."""
+    base = watchdog_renotify_seconds()
+    backed_off = base * (2 ** min(max(0, unchanged_renotifies), 32))
+    return max(base, min(backed_off, watchdog_renotify_max_seconds()))
+
+
+# Evidence values that move on their own while the condition is unchanged
+# (the deadman's age_seconds grows every cycle). Counts are NOT normalized: a
+# count that changes is new information.
+_EVIDENCE_ISO_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_EVIDENCE_VOLATILE_FIELD = re.compile(
+    r"\b([A-Za-z_]*(?:age|Age)[A-Za-z_]*|[A-Za-z_]*(?:_seconds|Seconds|_at|At|_utc))="
+    r"(?:<ts>|[0-9][0-9.]*)"
+)
+
+
+def evidence_fingerprint(evidence: str) -> str:
+    """Stable identity of an incident's evidence for renotify backoff."""
+    normalized = _EVIDENCE_ISO_TIMESTAMP.sub("<ts>", str(evidence))
+    normalized = _EVIDENCE_VOLATILE_FIELD.sub(r"\1=<v>", normalized)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 def watchdog_escalate_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", 24 * 60 * 60)
 
@@ -191,6 +252,10 @@ Q_LOOP_CAPACITY_KEY = "q_loop:supervisor:capacity"
 Q_LOOP_AWAITING_Q_KEY = "q_loop:awaiting_q"
 BROWSER_DEBUG_PREFIX = "browser_debug:"
 BROWSER_DEBUG_PROBE_KEY = f"{BROWSER_DEBUG_PREFIX}probe"
+# Interactive and scheduled work sharing a session id is a structural state
+# that persists until someone rotates the session; it pages once on open and
+# re-sends as a warning.
+SESSION_COLLISION_PREFIX = "session_collision:"
 
 # q-loop "q_unavailable_<reason>" phases that are self-recovering usage/rate
 # capacity conditions (claude-cli usage-window caps), NOT supervisor failures.
@@ -231,14 +296,17 @@ def is_nonpaging_incident_key(key: str) -> bool:
     return is_capacity_incident_key(key) or is_browser_debug_incident_key(key)
 
 
-def incident_severity(key: str, escalated: bool) -> str:
+def incident_severity(key: str, escalated: bool, *, renotify: bool = False) -> str:
     """Severity for an incident, capping non-paging signals at ``warning``.
 
     Genuine failures escalate to ``critical`` when ``escalated`` is set, but a
     capacity event or resource-observation warning must never page critical
-    regardless of age or suppression count.
+    regardless of age or suppression count. A session collision opens
+    critical once; its renotifies are warnings.
     """
     if is_nonpaging_incident_key(key) or key == Q_LOOP_AWAITING_Q_KEY:
+        return "warning"
+    if renotify and key.startswith(SESSION_COLLISION_PREFIX):
         return "warning"
     return "critical" if escalated else "warning"
 
@@ -271,6 +339,7 @@ def incident_requested_action(key: str, *, persistent: bool = False) -> str:
 
 def validate_thresholds() -> None:
     watchdog_renotify_seconds()
+    watchdog_renotify_max_seconds()
     watchdog_escalate_seconds()
     watchdog_escalate_suppressed()
     watchdog_recovery_confirmations()
@@ -653,6 +722,205 @@ def outbox_event(
     return path
 
 
+PROFILE_MISSING_PRODUCER = "heartbeat-watchdog"
+
+
+def _profile_missing_error_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _profile_missing_error_sha256(exc: FleetConfigError) -> str:
+    return hashlib.sha256(str(exc).encode("utf-8")).hexdigest()
+
+
+def profile_missing_event_text(host: str, day: str, exc: FleetConfigError) -> tuple[str, str]:
+    """Summary and evidence for the profile-missing alert.
+
+    The error message names paths, and an env-var path outside the redacted
+    config tree would survive redaction, so the event carries only fixed
+    tokens and a hash. The full message stays on the configuration_error line.
+    """
+    summary = f"health profile missing: {PROFILE_MISSING_PRODUCER} cannot load its health profile; exiting 2"
+    evidence = "\n".join([
+        "kind=profile-missing",
+        f"producer={PROFILE_MISSING_PRODUCER}",
+        f"host={host}",
+        f"utc_day={day}",
+        f"error_class={getattr(exc, 'kind', 'unknown')}",
+        f"source={getattr(exc, 'source', 'unknown')}",
+        f"error_sha256={_profile_missing_error_sha256(exc)}",
+    ])
+    return summary, evidence
+
+
+def profile_missing_marker_payload(host: str, day: str, event_path: Path, exc: FleetConfigError) -> dict[str, Any]:
+    # A hash, not the error text: the marker must not carry the private path.
+    return {
+        "schemaVersion": PROFILE_MISSING_MARKER_SCHEMA,
+        "kind": PROFILE_MISSING_MARKER_KIND,
+        "producer": PROFILE_MISSING_PRODUCER,
+        "host": host,
+        "utcDay": day,
+        "eventId": event_path.stem,
+        "errorSha256": _profile_missing_error_sha256(exc),
+    }
+
+
+def observe_profile_missing_marker() -> tuple[Any, Any]:
+    """Return ``(target, observation)`` for this producer's marker.
+
+    Raises when the marker cannot be read (unparseable, unreadable, wrong
+    type); the caller then moves it aside. Only this marker is touched:
+    controller state stays unopened.
+    """
+    root = state_root()
+    ensure_private_dir(root)
+    target = _durable_target(root / WATCHDOG_PROFILE_MISSING_MARKER)
+    return target, observe_json(target)
+
+
+def move_profile_missing_marker_aside(epoch: int) -> Path:
+    """Rename an unreadable marker to a timestamped sibling, keeping its bytes.
+
+    The compare-and-swap cannot replace a marker it cannot read, so without
+    this every run (every few minutes) would alert. The corrupt bytes are kept
+    before the fresh marker (a normal compare-and-swap from absent) supersedes
+    them, the ordering docs/superpowers/specs/2026-07-28-bot-errors-
+    durability-stack-design.md lines 514-517 ask for. Only the ordering: this
+    plain rename neither syncs the state directory nor takes the durable-JSON
+    lock, so the spec's "published and synced" guarantee and its Draft 3
+    transition contract (lines 428-437) are not met here. Raises when the
+    rename fails.
+    """
+    marker = state_root() / WATCHDOG_PROFILE_MISSING_MARKER
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
+    aside = marker.with_name(f"{marker.name}.corrupt-{stamp}")
+    if os.path.lexists(aside):
+        aside = marker.with_name(f"{marker.name}.corrupt-{stamp}-{os.getpid()}-{time.time_ns()}")
+    os.rename(marker, aside)
+    return aside
+
+
+def record_profile_missing_marker(target: Any, expected: JsonVersion, marker: dict[str, Any]) -> PublicationResult:
+    publication_operation = operation_id(
+        target,
+        marker,
+        component="heartbeat_watchdog.profile_missing_marker",
+        predecessor=expected,
+    )
+    publication = publish_state_json(
+        target,
+        marker,
+        component="heartbeat_watchdog.profile_missing_marker",
+        operation_id=publication_operation,
+        expected=expected,
+        generation=(expected.generation or 0) + 1,
+    )
+    require_advance(publication)
+    return publication
+
+
+def emit_profile_missing_event(exc: FleetConfigError) -> None:
+    """Queue the critical profile-missing alert at most once per (host, producer, UTC day).
+
+    This is daily suppression after a successfully recorded marker, not
+    exactly-once delivery. The event is published first and the marker second,
+    so a lost alert is never traded for a quiet day. Three known duplicates follow:
+    (a) the event is published but the marker write fails or the process dies
+    before it, so the next run alerts again; (b) two concurrent runs both read
+    "due" before either marker lands, so both publish (the loser's marker write
+    then fails its compare-and-swap); (c) a run that found the marker unreadable
+    renames aside whatever sits at the path, which can be a good marker a
+    concurrent run just wrote, so one more alert follows. The durable writer's
+    lock covers one state write, not the event-plus-marker pair, and the rename
+    takes no lock; no extra lock is taken here.
+
+    An unreadable marker is renamed aside and replaced. Only a state root where
+    no marker can be written (or moved) is left, and there every run alerts:
+    nothing can suppress without writable state, and that state-root failure is
+    itself what needs a page.
+
+    Every outcome is reported on stderr after the configuration_error line.
+    Nothing here raises: run_once() returns 2 whatever this does.
+    """
+    prefix = "profile-missing"
+    try:
+        host = canonical_local_host()
+        epoch = now_epoch()
+        day = utc_day(epoch)
+    except Exception as setup_exc:  # noqa: BLE001 - the exit code must stay 2.
+        print(f"{prefix} event not written (clock or host lookup failed): {_profile_missing_error_text(setup_exc)}", file=sys.stderr)
+        return
+    target: Any = None
+    observation: Any = None
+    try:
+        target, observation = observe_profile_missing_marker()
+    except Exception as read_exc:  # noqa: BLE001 - an unreadable marker must not suppress.
+        read_error = _profile_missing_error_text(read_exc)
+        try:
+            aside = move_profile_missing_marker_aside(epoch)
+        except Exception as move_exc:  # noqa: BLE001 - fall back to alerting without a marker.
+            print(
+                f"{prefix} marker read failed ({read_error}) and could not be moved aside "
+                f"({_profile_missing_error_text(move_exc)}); alerting without suppression and leaving the marker in place",
+                file=sys.stderr,
+            )
+        else:
+            print(f"{prefix} marker read failed ({read_error}); moved it aside to {aside}", file=sys.stderr)
+            try:
+                target, observation = observe_profile_missing_marker()
+            except Exception as reread_exc:  # noqa: BLE001 - alert without a marker.
+                print(
+                    f"{prefix} marker still unreadable after the move ({_profile_missing_error_text(reread_exc)})",
+                    file=sys.stderr,
+                )
+    if observation is not None:
+        decision = profile_missing_due(observation.payload, producer=PROFILE_MISSING_PRODUCER, host=host, day=day)
+        if not decision.due:
+            print(f"{prefix} event suppressed: already queued for {host} on {day}", file=sys.stderr)
+            return
+        if decision.anomaly:
+            print(f"{prefix} marker does not prove suppression ({decision.reason}); alerting", file=sys.stderr)
+    summary, evidence = profile_missing_event_text(host, day, exc)
+    try:
+        event_path = outbox_event(
+            summary,
+            evidence,
+            severity="critical",
+            source_key=f"profile-missing:{PROFILE_MISSING_PRODUCER}",
+            event_type="alert",
+            force_notify=False,
+        )
+    except Exception as publish_exc:  # noqa: BLE001 - report the stage, keep exit 2.
+        print(
+            f"{prefix} event not written (event publish failed; no marker written): "
+            f"{_profile_missing_error_text(publish_exc)}",
+            file=sys.stderr,
+        )
+        return
+    if observation is None:
+        print(
+            f"{prefix} event queued at {event_path} but marker not written (existing marker unreadable); "
+            "the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    try:
+        record_profile_missing_marker(
+            target,
+            observation.version,
+            profile_missing_marker_payload(host, day, event_path, exc),
+        )
+    except Exception as marker_exc:  # noqa: BLE001 - the event is already queued.
+        print(
+            f"{prefix} event queued at {event_path} but marker write failed "
+            f"({_profile_missing_error_text(marker_exc)}); the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    print(f"{prefix} event queued: {event_path}", file=sys.stderr)
+
+
 def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, str]:
     current = now_epoch()
     problem = critical_file_problem(path)
@@ -956,23 +1224,29 @@ def local_daily_health_hosts() -> list[str]:
     return [canonical_local_host()]
 
 
+def tracked_health_profile() -> Path:
+    return tracked_health_profile_path(REPO_ROOT, canonical_local_host())
+
+
 def health_profile_path() -> Path:
-    raw = os.environ.get("BOT_ERRORS_HEALTH_PROFILE", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return REPO_ROOT / "deploy" / "health-profiles" / f"{canonical_local_host()}.json"
+    """Profile path for evidence text; never raises (the load reports failures)."""
+    try:
+        return resolve_health_profile(tracked_health_profile()).path
+    except FleetConfigError:
+        return tracked_health_profile()
 
 
-def load_health_profile() -> dict[str, Any] | None:
-    path = health_profile_path()
-    data = load_json(path)
-    return data if isinstance(data, dict) else None
+def load_health_profile() -> dict[str, Any]:
+    """Load this host's profile via ``lib.fleet_config``.
+
+    Raises :class:`FleetConfigError` instead of returning nothing: a missing
+    profile must never read as "this host expects zero instances".
+    """
+    return read_json_object(resolve_health_profile(tracked_health_profile()))
 
 
 def expected_local_instances() -> list[dict[str, Any]]:
     profile = load_health_profile()
-    if not profile:
-        return []
     result: list[dict[str, Any]] = []
     instances = profile.get("instances")
     if not isinstance(instances, list):
@@ -1846,6 +2120,9 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
     bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
     bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
     reasons: list[str] = []
+    debt_issue = recovery_debt_issue(payload)
+    if debt_issue is not None:
+        reasons.append(debt_issue)
     if isinstance(actual_name, str) and actual_name != name:
         reasons.append(f"health_identity_mismatch actual={actual_name}")
     if health_status == "unhealthy":
@@ -2343,10 +2620,35 @@ def _browser_debug_port(args: list[str]) -> int | None:
     return None
 
 
+def _browser_identity_hash(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
 def _browser_profile_hash(args: list[str], debug_port: int) -> str:
     profile = next((arg.partition("=")[2] for arg in args if arg.startswith("--user-data-dir=")), "")
     identity = profile or f"debug-port:{debug_port}"
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    return _browser_identity_hash(identity)
+
+
+def browser_debug_owned_profile_hashes() -> set[str]:
+    """Profile hashes of debug browsers an owner keeps alive on purpose.
+
+    BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED is a comma-separated list of
+    ``--user-data-dir`` paths (for example a scheduled watcher's keep-alive
+    CDP Chrome). Matching uses the same hash as the incident key, so the path
+    itself never leaves the host. Empty or unset keeps every debug browser in
+    scope.
+    """
+    owned: set[str] = set()
+    for part in os.environ.get("BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED", "").split(","):
+        path = part.strip()
+        if not path:
+            continue
+        owned.add(_browser_identity_hash(path))
+        stripped = path.rstrip("/")
+        if stripped:
+            owned.add(_browser_identity_hash(stripped))
+    return owned
 
 
 def _established_debug_connections(ports: set[int]) -> tuple[dict[int, int], str | None]:
@@ -2422,6 +2724,9 @@ def browser_debug_snapshot() -> tuple[list[dict[str, Any]], str | None]:
 
 def browser_debug_problems() -> dict[str, str]:
     rows, scan_error = browser_debug_snapshot()
+    owned = browser_debug_owned_profile_hashes()
+    if owned:
+        rows = [row for row in rows if str(row["profileHash"]) not in owned]
     min_age = browser_debug_min_age_seconds()
     min_rss = browser_debug_min_rss_mb()
     qualifying = [
@@ -2825,6 +3130,17 @@ def reconcile(
             open_incidents.pop(key, None)
         if key in open_incidents:
             incident = open_incidents[key]
+            # State written before the backoff fields existed has no
+            # lastNotifiedEvidence; the previous lastEvidence is the best
+            # record of what was last said.
+            notified_evidence = incident.get("lastNotifiedEvidence")
+            if not isinstance(notified_evidence, str):
+                previous_evidence = incident.get("lastEvidence")
+                notified_evidence = previous_evidence if isinstance(previous_evidence, str) else None
+            evidence_unchanged = notified_evidence is not None and (
+                evidence_fingerprint(notified_evidence) == evidence_fingerprint(redacted_evidence)
+            )
+            unchanged_renotifies = int_or_zero(incident.get("renotifyCount")) if evidence_unchanged else 0
             incident["suppressed"] = int_or_zero(incident.get("suppressed")) + 1
             incident["lastSeenAt"] = now_iso(current)
             incident["lastEvidence"] = redacted_evidence
@@ -2841,11 +3157,16 @@ def reconcile(
             # when they are old or repeatedly observed.
             if is_nonpaging_incident_key(key):
                 escalated = False
-            should_renotify = since_notify >= watchdog_renotify_seconds()
+            # Escalated incidents saying the same thing back off (6 h, 12 h,
+            # 24 h, capped); changed evidence falls back to the base interval.
+            renotify_interval = renotify_interval_seconds(unchanged_renotifies if escalated else 0)
+            should_renotify = since_notify >= renotify_interval
             if should_renotify:
                 incident["lastNotifiedAt"] = now_iso(current)
                 incident["lastNotificationSuppressed"] = suppressed
-                severity = incident_severity(key, escalated)
+                incident["lastNotifiedEvidence"] = redacted_evidence
+                incident["renotifyCount"] = unchanged_renotifies + 1 if (escalated and evidence_unchanged) else 0
+                severity = incident_severity(key, escalated, renotify=True)
                 label = "escalated" if escalated else "still open"
                 append_log(
                     "renotify_open",
@@ -2854,6 +3175,9 @@ def reconcile(
                         "suppressed": suppressed,
                         "ageSeconds": age_seconds,
                         "sinceLastNotifySeconds": since_notify,
+                        "renotifyIntervalSeconds": renotify_interval,
+                        "renotifyCount": incident["renotifyCount"],
+                        "evidenceChanged": not evidence_unchanged,
                         "escalated": escalated,
                         "evidence": evidence,
                     },
@@ -2869,6 +3193,9 @@ def reconcile(
                         f"age_seconds={age_seconds}",
                         f"suppressed_duplicates={suppressed}",
                         f"last_notified={now_iso(last_notified)}",
+                        f"evidence_changed={str(not evidence_unchanged).lower()}",
+                        f"renotify_count={incident['renotifyCount']}",
+                        f"next_renotify_seconds={renotify_interval_seconds(incident['renotifyCount'] if escalated else 0)}",
                         evidence,
                         f"watchdog_state={watchdog_state_path()}",
                         f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
@@ -2912,6 +3239,13 @@ def reconcile(
                     "ageSeconds": int_or_zero(flap_record.get("ageSeconds")),
                     "flapCount": flap_count,
                 }
+                if first_reopen:
+                    open_incidents[key]["lastNotifiedEvidence"] = redacted_evidence
+                    open_incidents[key]["renotifyCount"] = 0
+                else:
+                    for carried in ("lastNotifiedEvidence", "renotifyCount"):
+                        if carried in flap_record:
+                            open_incidents[key][carried] = flap_record[carried]
                 if first_reopen:
                     append_log(
                         "flap_reopen_alert",
@@ -2970,6 +3304,8 @@ def reconcile(
             "lastSeenAt": now_iso(current),
             "lastNotifiedAt": now_iso(current),
             "lastEvidence": redacted_evidence,
+            "lastNotifiedEvidence": redacted_evidence,
+            "renotifyCount": 0,
             "suppressed": 0,
         }
         new_summary = open_incident_summary(key)
@@ -3030,6 +3366,9 @@ def reconcile(
             "recoveryObservations": recovery_observations,
             "holdNotice": flap_count > 0,
         }
+        for carried in ("lastNotifiedEvidence", "renotifyCount"):
+            if carried in incident:
+                state["recentlyRecovered"][key][carried] = incident[carried]
         if flap_count > 0:
             # A flapping incident's recovery is provisional: inside the re-arm
             # window the same condition reopens silently, so announcing each
@@ -3152,12 +3491,20 @@ def run_once(args: argparse.Namespace) -> int:
             turn_failure_window_seconds()
             turn_failure_min_count()
             turn_failure_max_chats_reported()
-    except ValueError as exc:
+        if checks & PROFILE_CHECKS:
+            # Resolve the profile before any state effect: an unreadable
+            # profile must fail the run, not expect zero instances.
+            expected_local_services()
+    except (ValueError, FleetConfigError) as exc:
         # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
         # state, or print a green-looking result. Exit nonzero with a bounded
         # diagnostic so supervisors see a configuration failure, not success.
         print(f"configuration_error: {exc}", file=sys.stderr)
         print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
+        if isinstance(exc, FleetConfigError):
+            # A missing profile also raises the daily alert. It touches only the
+            # outbox and its own marker, so controller state stays unopened.
+            emit_profile_missing_event(exc)
         return 2
     # #2723 R4.2/R4.3: open state session before domain effects (collect_problems).
     # Load/inspect mode, reconcile recovered state per _load_collector_state_for_cycle

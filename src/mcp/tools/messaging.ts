@@ -6,7 +6,14 @@ import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import type { ToolRegistry } from '../registry.ts';
-import { errorResult, toolError, type SessionContext } from '../types.ts';
+import { clientOutputWithheldResult, errorResult, toolError, type SessionContext } from '../types.ts';
+import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
+import {
+  enforceClientOutputPolicyForChat,
+  type ClientOutputGateResult,
+  type ClientOutputMessageKind,
+} from '../../core/client-output-policy-gate.ts';
+import { createChildLogger } from '../../logger.ts';
 import type { RuntimeConnection } from '../../transport/runtime-connection.ts';
 import { canonicalConversationKey } from '../../core/access-list.ts';
 import type { Database } from '../../core/database.ts';
@@ -103,6 +110,19 @@ class SuppressedOutboundMessageError extends Error {
   }
 }
 
+const log = createChildLogger('mcp:messaging');
+
+/** #3613: thrown inside send_message's pipeline transform to abort the send. */
+class ClientOutputWithheldError extends Error {
+  readonly gate: Extract<ClientOutputGateResult, { admitted: false }>;
+
+  constructor(gate: Extract<ClientOutputGateResult, { admitted: false }>) {
+    super('outbound message withheld by client output policy');
+    this.name = 'ClientOutputWithheldError';
+    this.gate = gate;
+  }
+}
+
 function suppressedResult(reason: AssistantTextSuppressionReason): Record<string, unknown> {
   return { sent: false, suppressed: true, reason };
 }
@@ -157,6 +177,11 @@ export interface MessagingDeps {
    * (treats as active — full scrub) rather than silently elevating.
    */
   fallbackActive?: () => boolean;
+  /**
+   * #3613: per-conversation client output policies. When set, send, reply,
+   * edit and poll withhold text the target conversation's policy rejects.
+   */
+  clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
 const POLL_QUESTION_MAX_CHARS = 900;
@@ -245,6 +270,22 @@ export function registerMessagingTools(
       fallbackActive: deps.fallbackActive ? deps.fallbackActive() : true,
     };
   };
+
+  // #3613: the same evaluator call and audit line as the agent outbound queue.
+  const enforceOutputPolicy = (
+    chatJid: string,
+    sourceText: string,
+    finalText: string,
+    messageKind: ClientOutputMessageKind,
+  ): ClientOutputGateResult => enforceClientOutputPolicyForChat({
+    registry: deps.clientOutputPolicies,
+    chatJid,
+    resolveConversationKey: (jid) => canonicalConversationKey(jid, deps.dbWrapper),
+    sourceText,
+    finalText,
+    messageKind,
+    log,
+  });
 
   // ── send_message ──────────────────────────────────────────────────────────
 
@@ -350,6 +391,13 @@ export function registerMessagingTools(
             guardDecision = decision;
             const reason = suppressionReason(decision);
             if (reason) throw new SuppressedOutboundMessageError(reason);
+            const policyGate = enforceOutputPolicy(
+              prepared.chatJid,
+              prepared.text,
+              decision.action === 'allow' ? prepared.text : decision.text,
+              'send_message',
+            );
+            if (!policyGate.admitted) throw new ClientOutputWithheldError(policyGate);
             if (decision.action === 'allow') return prepared;
             return {
               ...prepared,
@@ -368,6 +416,9 @@ export function registerMessagingTools(
         if (err instanceof CrossConversationDenied) throw err;
         if (err instanceof SuppressedOutboundMessageError) {
           return suppressedResult(err.reason);
+        }
+        if (err instanceof ClientOutputWithheldError) {
+          return clientOutputWithheldResult(err.gate);
         }
         if (
           err instanceof AliasNotFoundError ||
@@ -425,6 +476,8 @@ export function registerMessagingTools(
       });
       const replySuppressionReason = suppressionReason(replyDecision);
       if (replySuppressionReason) return suppressedResult(replySuppressionReason);
+      const replyPolicyGate = enforceOutputPolicy(chatJid, text, replyDecision.text, 'reply_message');
+      if (!replyPolicyGate.admitted) return clientOutputWithheldResult(replyPolicyGate);
 
       try {
         const content: Record<string, unknown> = {
@@ -559,6 +612,8 @@ export function registerMessagingTools(
       const editSuppressionReason = suppressionReason(editDecision);
       if (editSuppressionReason) return suppressedResult(editSuppressionReason);
       const safeText = editDecision.text;
+      const editPolicyGate = enforceOutputPolicy(chatJid, newText, safeText, 'edit_message');
+      if (!editPolicyGate.admitted) return clientOutputWithheldResult(editPolicyGate);
 
       try {
         await connection.sendRaw(chatJid, {
@@ -792,8 +847,17 @@ export function registerMessagingTools(
       const safeOptions = pollAudience === 'client'
         ? options.map((option) => redactInternalArtifacts(option).text)
         : options;
+      // #3613: the question and options reach the client together, so the
+      // policy judges them as one message.
+      const pollPolicyGate = enforceOutputPolicy(
+        chatJid,
+        [question, ...options].join('\n'),
+        [safeQuestion, ...safeOptions].join('\n'),
+        'send_poll',
+      );
+      if (!pollPolicyGate.admitted) return clientOutputWithheldResult(pollPolicyGate);
 
-      const resolvedResolution = (params['resolution'] as ResolutionStrategy | undefined) ?? 'first-vote-wins';
+      const resolvedResolution =(params['resolution'] as ResolutionStrategy | undefined) ?? 'first-vote-wins';
       // Defense in depth: even though the zod schema enforces [1000, 86_400_000],
       // clamp at the handler too so any path that bypasses validation still gets safe bounds.
       const resolvedTimeoutMs = Math.min(

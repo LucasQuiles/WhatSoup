@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildBaseChildEnv,
+  buildOpenCodeBaseChildEnv,
   CONFIG_ROOT_ISOLATION_FLAG,
   FAILCLOSED_FLAG,
 } from '../../../../src/runtimes/agent/providers/child-env.ts';
@@ -28,6 +29,7 @@ const MANAGED_ENV_KEYS = [
   'WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION',
   'WHATSOUP_INSTANCE',
   'WHATSOUP_MCP_SOCKET',
+  'WHATSOUP_MCP_SESSION_TOKEN',
   'ENABLE_TOOL_SEARCH',
   'TOKENOMICS_BOT',
   'BASH_MAX_OUTPUT_LENGTH',
@@ -167,6 +169,28 @@ describe('buildBaseChildEnv', () => {
     expect(explicit).toMatchObject({
       WHATSOUP_INSTANCE: 'line-a',
       WHATSOUP_MCP_SOCKET: '/tmp/line-a.sock',
+    });
+  });
+
+  // #3421 step 1: the session's own helpers learn their token only from the
+  // explicit option, never from whatever the parent process happens to hold.
+  it('emits the MCP session token only from the explicit option, for both builders', () => {
+    resetManagedEnv({
+      PATH: '/usr/bin',
+      HOME: '/tmp/child-home',
+      WHATSOUP_MCP_SESSION_TOKEN: 'parent-token-must-not-leak',
+    });
+
+    const implicit = [buildBaseChildEnv(), buildOpenCodeBaseChildEnv()]
+      .map((env) => env.WHATSOUP_MCP_SESSION_TOKEN);
+    const explicit = [
+      buildBaseChildEnv({ whatsoupMcpSessionToken: 'session-token-a' }),
+      buildOpenCodeBaseChildEnv({ whatsoupMcpSessionToken: 'session-token-a' }),
+    ].map((env) => env.WHATSOUP_MCP_SESSION_TOKEN);
+
+    expect({ implicit, explicit }).toEqual({
+      implicit: [undefined, undefined],
+      explicit: ['session-token-a', 'session-token-a'],
     });
   });
 

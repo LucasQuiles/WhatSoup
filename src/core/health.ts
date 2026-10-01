@@ -8,15 +8,24 @@ import { createChildLogger } from '../logger.ts';
 import { CURRENT_SCHEMA_MIGRATION, type Database } from './database.ts';
 import { readArcBindingHealth, resolveArcRepoRoot } from './arc-binding-health.ts';
 import {
+  CONTINUITY_GAP_HEALTH_UNREADABLE,
   readContinuityGapHealth,
   type ContinuityGapHealth,
+  type ContinuityGapHealthUnreadable,
 } from './continuity-gap-ledger.ts';
+import { normalizeRecoveryDebt } from './recovery-debt.ts';
 import { assertSafeHealthBind } from './health-bind-guard.ts';
 import { getMessageCount } from './messages.ts';
 import { getPendingCount, upsertAccess } from './access-list.ts';
 import { isFullyConnected, type HealthConnectionStateReader } from '../transport/runtime-connection.ts';
 import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { decideDisconnectAction } from '../transport/auth-disconnect-policy.ts';
+import {
+  auth401FailureClassFor,
+  formatDisconnectDecisionForHealth,
+  NO_RESTART_UNCONFIRMED_401_CLASSES,
+  type Auth401FailureClass,
+} from '../lib/disconnect-classification.ts';
 import {
   AUTH_BOND_READ_PERSISTENT_CLASS,
   DEFAULT_FRESH_INVALID_GRACE_MS,
@@ -52,6 +61,7 @@ import { isProviderId } from '../lib/provider-ids.ts';
 import type { ConnectionRecentDisconnects, ConnectionStateSnapshot } from '../transport/connection.ts';
 import { readBody } from '../lib/http.ts';
 import { readWhatsoupGitBranch, readWhatsoupGitSha } from '../lib/git-env.ts';
+import { HEALTH_INVARIANTS, HEALTH_INVARIANTS_SCHEMA } from './health-invariants.ts';
 import {
   LoopLagSampler,
   LOOP_LAG_SAMPLE_INTERVAL_MS,
@@ -288,16 +298,36 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     runtime reason disappears only after the shared alert clear is accepted.
  *     Health itself re-attempts that clear while no abandonment or exhaustion
  *     owns the source, so an accepted retry is immediately re-probed as clean.
+ *   - `recovery_debt_blocking` is the normalized recovery_debt verdict,
+ *     recomputed on every evaluation from the continuity ledger, the durable
+ *     turn-recovery and completed-delivery-identity gauges, and the delivery
+ *     ambiguity aggregate. Unreadable or contradictory evidence of any of the
+ *     three is itself service-blocking, so the reason stays present on every
+ *     poll while evidence is unreadable and disappears only when a fresh read
+ *     proves the debt non-blocking.
+ *   - `runtime.turn_finalization_debt` is recomputed on every snapshot from
+ *     the supervisor's live retained finalizations and the durable
+ *     turn-recovery counts (runtimeRecoveryDegradation); missing or malformed
+ *     counts surface as recovery_evidence_unreadable under
+ *     recovery_debt_blocking, never as silence.
+ *   - `runtime.completed_delivery_identity_debt` is recomputed on every
+ *     snapshot from the durable completed-delivery identity admissions; it
+ *     clears when the blocking count reaches zero, and an unreadable count
+ *     fails closed under recovery_debt_blocking the same way.
  *
  * Why these need it: none is in TURN_PROVABLE_STATUS_REASONS above — a turn
- * in an unrelated chat proves nothing about a per-chat ownership map — so a
- * latch carrying one could never be released by the only release channel that
- * exists, and the instance would report degraded until process restart even
- * after the runtime had repaired itself and its own snapshot read healthy. */
+ * in an unrelated chat proves nothing about a per-chat ownership map or a
+ * durable recovery ledger — so a latch carrying one could never be released
+ * by the only release channel that exists, and the instance would report
+ * degraded until process restart even after the runtime had repaired itself
+ * and its own snapshot read healthy. */
 export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.agent_respawn_failed_clear_pending',
   'runtime.per_chat_session_without_owner',
   'runtime.per_chat_respawn_abandoned',
+  'recovery_debt_blocking',
+  'runtime.turn_finalization_debt',
+  'runtime.completed_delivery_identity_debt',
 ]);
 
 /** The primary route the latch release compares a receipt against: the
@@ -482,6 +512,7 @@ export type HealthDegradationCause =
   | 'database_retention_failed'
   | 'continuity_gap_unreadable'
   | 'continuity_gap_open'
+  | 'recovery_debt_blocking'
   | 'schema_future'
   | 'schema_not_ready'
   | 'pending_polls_unreadable'
@@ -538,7 +569,7 @@ export interface HealthDegradationCauseRegistryEntry {
  * SAME condition pushes — /health reports degradation under two vocabularies
  * (ordered reasons supporting the aggregate status; typed causes that alerts
  * and flap detection key on) and several conditions reach the wire under
- * different names in the two, the clearest being runtimeTurnRecoveryIsDegraded:
+ * different names in the two, the clearest being blocking turn recovery (runtimeRecoveryDegradation):
  * `runtime.turn_finalization_debt` as a reason, `turn_recovery_degraded` as a
  * cause. `ensureStatusReasonFloor` (#3316) only guarantees a reason EXISTS;
  * this is the cross-reference that says which one. Live strings are never
@@ -579,12 +610,15 @@ export const HEALTH_DEGRADATION_CAUSE_REGISTRY: Readonly<
   database_retention_failed: { reasonTwins: ['database_retention_failed'] },
   continuity_gap_unreadable: { reasonTwins: NO_REASON_TWIN },
   continuity_gap_open: { reasonTwins: NO_REASON_TWIN },
+  // The normalized recovery_debt verdict: service-blocking debt (including
+  // unreadable or contradictory recovery evidence) can never read healthy.
+  recovery_debt_blocking: { reasonTwins: ['recovery_debt_blocking'] },
   schema_future: { reasonTwins: ['schema_future'] },
   schema_not_ready: { reasonTwins: ['schema_not_ready'] },
   pending_polls_unreadable: { reasonTwins: ['pending_polls_unreadable'] },
   // agent runtime — each cause is keyed from a runtime detail counter whose
   // companion degradedReason reaches the reason vector as `runtime.<reason>`.
-  // runtimeTurnRecoveryIsDegraded pushes ONE reason for finalization debt AND
+  // Blocking turn recovery (runtimeRecoveryDegradation) pushes ONE reason for finalization debt AND
   // recovery debt; the cause vector splits the same predicate into two names.
   agent_recent_crashes: { reasonTwins: ['runtime.recent_crashes'] },
   agent_auto_compact_backoff: { reasonTwins: ['runtime.auto_compact_backoff'] },
@@ -928,7 +962,8 @@ export function modelEvidenceStaleWhileRelied(
 type AuthFailureClass =
   | 'none'
   | 'pairing_required'
-  | 'serverside_logout_irreversible'
+  // serverside_logout_irreversible plus the three unconfirmed-401 classes.
+  | Auth401FailureClass
   | 'local_corruption_restorable'
   | 'local_corruption_unrestorable'
   | 'auth_bond_at_risk'
@@ -942,7 +977,7 @@ type AuthFailureClass =
 
 type DisconnectClass =
   | 'none'
-  | 'serverside_logout_irreversible'
+  | Auth401FailureClass
   | 'duplicate_session_replaced'
   | 'multidevice_mismatch'
   | 'restart_required'
@@ -1076,18 +1111,32 @@ function isFreshInvalidCredentialWriteInFlight(connectionState: ConnectionStateS
   return ageMs >= 0 && ageMs < DEFAULT_FRESH_INVALID_GRACE_MS;
 }
 
-function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
-  const reason = connectionState.lastDisconnectReason ?? '';
-  if (
-    !isFullyConnected(connectionState)
-    && (
-      connectionState.lastStatusCode === 401
-      || reason === 'loggedOut'
-      || reason.includes('device_removed')
-    )
-  ) {
-    return 'serverside_logout_irreversible';
+/**
+ * The 401 class a disconnected snapshot reports, or null for none.
+ *
+ * A transport that carries its policy decision (`disconnectDecision` present,
+ * even null) is authoritative: only an observed device_removed conflict is
+ * `serverside_logout_irreversible`, and each unconfirmed 401 keeps its own
+ * class. A snapshot without the field comes from a transport that does not
+ * classify disconnects; for it the conservative legacy rule stands — any 401 /
+ * loggedOut / device_removed reason reads as irreversible — because nothing
+ * there can distinguish the cases and under-reporting a real removal is worse.
+ */
+function carried401Class(connectionState: ConnectionStateSnapshot): Auth401FailureClass | null {
+  if (isFullyConnected(connectionState)) return null;
+  const decision = connectionState.disconnectDecision;
+  if (decision !== undefined) {
+    return decision === null ? null : auth401FailureClassFor(decision.classification);
   }
+  const reason = connectionState.lastDisconnectReason ?? '';
+  return connectionState.lastStatusCode === 401 || reason === 'loggedOut' || reason.includes('device_removed')
+    ? 'serverside_logout_irreversible'
+    : null;
+}
+
+function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFailureClass {
+  const auth401Class = carried401Class(connectionState);
+  if (auth401Class !== null) return auth401Class;
 
   const lifecycle = connectionState.credentialLifecycle as Partial<ConnectionStateSnapshot['credentialLifecycle']> | undefined;
   const lastQrAt = lifecycle?.lastQrAt ? Date.parse(lifecycle.lastQrAt) : NaN;
@@ -1158,9 +1207,14 @@ function classifyDisconnect(connectionState: ConnectionStateSnapshot): Disconnec
   const statusCode = connectionState.lastStatusCode ?? undefined;
   if (statusCode === undefined) return 'none';
 
+  const auth401Class = carried401Class(connectionState);
+  if (auth401Class !== null) return auth401Class;
   const action = decideDisconnectAction(statusCode);
   if (action.type === 'exit' && action.reason === 'logged-out') {
-    return 'serverside_logout_irreversible';
+    // Only reachable for a transport that carries a decision but whose
+    // decision is not a 401 one while the status code says 401 — an
+    // inconsistent snapshot. Name it unconfirmed rather than irreversible.
+    return 'auth_401_uninspected_exit';
   }
   if (action.type === 'reconnect') {
     if (action.reason === 'connection-replaced') return 'duplicate_session_replaced';
@@ -2183,9 +2237,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // Enrichment staleness only matters if enrichment has actually run before
       // (instances without RAG/Pinecone never run enrichment — that's not degraded).
       const enrichmentIsStale = enrichmentStaleness !== null && enrichmentStaleness > ENRICHMENT_STALE_MS;
+      // A parked or uninspected 401 is unhealthy (the transport stopped trying)
+      // without being a confirmed removal; the retrying class stays degraded.
       const authFailureIsUnhealthy =
         authFailureClass === 'pairing_required'
         || authFailureClass === 'serverside_logout_irreversible'
+        || (NO_RESTART_UNCONFIRMED_401_CLASSES as readonly string[]).includes(authFailureClass)
         || authFailureClass === 'local_corruption_unrestorable';
       const authFailureIsDegraded = authFailureClass !== 'none';
       // Durability debt: an outbound delivery stuck in maybe_sent past the stale
@@ -2194,40 +2251,57 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // UTC datetimes for the active ambiguity episode or a fail-closed stale
       // sentinel, so normalize that bounded value before parsing.
       const durabilityStats = deps.durability?.getHealthStats() ?? null;
+      const oldestUncorroboratedMaybeSentAt =
+        durabilityStats?.deliveryAmbiguity?.oldestUncorroboratedAt ?? null;
       const oldestMaybeSentMs =
-        durabilityStats?.oldestMaybeSentAt != null && durabilityStats.oldestMaybeSentAt !== ''
-          ? Date.parse(durabilityStats.oldestMaybeSentAt.replace(' ', 'T') + 'Z')
+        oldestUncorroboratedMaybeSentAt !== '' && oldestUncorroboratedMaybeSentAt !== null
+          ? Date.parse(oldestUncorroboratedMaybeSentAt.replace(' ', 'T') + 'Z')
           : Number.NaN;
       const durabilityDebtIsDegraded =
         Number.isFinite(oldestMaybeSentMs)
         && Date.now() - oldestMaybeSentMs > DURABILITY_STALE_MAYBE_SENT_MS;
-      const continuity = safeDbQuery<ContinuityGapHealth | {
-        readable: false;
-        open: number;
-        unresolved: number;
-        ambiguous: number;
-      }>(
+      const continuity = safeDbQuery<ContinuityGapHealth | ContinuityGapHealthUnreadable>(
         () => readContinuityGapHealth(deps.db.raw),
-        {
-          readable: false as const,
-          open: 0,
-          unresolved: 0,
-          ambiguous: 0,
-        },
+        CONTINUITY_GAP_HEALTH_UNREADABLE,
         'failed to read continuity gap ledger',
       );
-      const continuityIsDegraded = !continuity.readable || continuity.open > 0;
-      const recoveryDebt: {
-        open: boolean;
-        reason: 'continuity_gap_open' | 'continuity_gap_unreadable' | null;
-        continuity: typeof continuity;
-      } = {
-        open: continuityIsDegraded,
-        reason: continuityIsDegraded
-          ? (continuity.readable ? 'continuity_gap_open' : 'continuity_gap_unreadable')
-          : null,
-        continuity,
+      const zeroRuntimeRecoveryDetails = {
+        recoveryBlockingReasons: [],
+        recoveryDebtReasons: [],
+        turnRecoveryBlockingOutstanding: 0,
+        turnRecoveryRetainedTerminal: 0,
+        turnRecoveryOpenRecoveries: 0,
+        turnRecoveryCorroboratedRetained: 0,
+        completedDeliveryIdentityBlocking: 0,
+        completedDeliveryIdentityRetained: 0,
+        completedDeliveryIdentityAdmissions: { nextAction: null },
       };
+      const zeroDeliveryAmbiguity = {
+        readable: true,
+        uncorroboratedAmbiguous: 0,
+        corroboratedRetained: 0,
+        oldestUncorroboratedAt: null,
+      };
+      const recoveryDebt = normalizeRecoveryDebt({
+        continuity,
+        runtime: deps.instanceType === 'agent'
+          ? {
+              readable: runtimeSnapshot !== null,
+              details: runtimeSnapshot?.details ?? null,
+            }
+          : { readable: true, details: zeroRuntimeRecoveryDetails },
+        durability: deps.durability
+          ? {
+              readable: durabilityStats !== null,
+              deliveryBlocking: durabilityDebtIsDegraded,
+              deliveryAmbiguity: durabilityStats?.deliveryAmbiguity ?? null,
+            }
+          : {
+              readable: true,
+              deliveryBlocking: false,
+              deliveryAmbiguity: zeroDeliveryAmbiguity,
+            },
+      });
 
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
@@ -2287,6 +2361,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         }
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
         if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
+        if (recoveryDebt.service_blocking) statusReasons.push('recovery_debt_blocking');
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
         // #2280: silence from child processes is not proof of recovery.
         // If statusReasons is empty but the instance was recently degraded,
@@ -2649,6 +2724,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (databaseRetentionFailed) addDegradationCause('database_retention_failed');
       if (!continuity.readable) addDegradationCause('continuity_gap_unreadable');
       else if (continuity.open > 0) addDegradationCause('continuity_gap_open');
+      if (recoveryDebt.service_blocking) addDegradationCause('recovery_debt_blocking');
       if (schemaIsFuture) addDegradationCause('schema_future');
       else if (!schemaReady) addDegradationCause('schema_not_ready');
       if (!pendingPollsReadable) addDegradationCause('pending_polls_unreadable');
@@ -2672,13 +2748,30 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       ) {
         addDegradationCause('turn_finalization_degraded');
       }
-      if (
-        positiveRuntimeCounter('turnRecoveryOutstanding')
-        || positiveRuntimeCounter('turnRecoveryExhausted')
-        || positiveRuntimeCounter('turnRecoveryOpenRecoveries')
-        || positiveRuntimeCounter('turnRecoveryCorruptLinks')
-        || positiveRuntimeCounter('turnRecoveryEchoConflicts')
-      ) {
+      // turn_recovery_degraded names BLOCKING turn recovery only: the same
+      // classification (runtimeRecoveryDegradation) that pushes its
+      // runtime.turn_finalization_debt twin. Retained debt (exhausted,
+      // corroborated or historical catch-up rows) stays in recovery_debt and
+      // never names this cause. A runtime without the classification falls
+      // back to the blocking gauge plus the integrity counters.
+      const turnRecoveryBlockingReasons = new Set([
+        'turn_recovery_actionable',
+        'turn_recovery_integrity',
+        'turn_recovery_unclassified',
+      ]);
+      const runtimeRecoveryBlockingReasons = runtimeDetails?.['recoveryBlockingReasons'];
+      const turnRecoveryBlocking = Array.isArray(runtimeRecoveryBlockingReasons)
+        ? runtimeRecoveryBlockingReasons.some(
+          (reason) => turnRecoveryBlockingReasons.has(reason as string),
+        )
+        : (
+          typeof runtimeDetails?.['turnRecoveryBlockingOutstanding'] === 'number'
+            ? positiveRuntimeCounter('turnRecoveryBlockingOutstanding')
+            : positiveRuntimeCounter('turnRecoveryOutstanding')
+        )
+          || positiveRuntimeCounter('turnRecoveryCorruptLinks')
+          || positiveRuntimeCounter('turnRecoveryEchoConflicts');
+      if (agentRuntimeStatus === 'degraded' && turnRecoveryBlocking) {
         addDegradationCause('turn_recovery_degraded');
       }
       if (runtimeProviderExecution?.['pressureActive'] === true) {
@@ -2688,11 +2781,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // degraded while the cause fell through to _unclassified — the real
       // reason lived only in status_reasons, invisible to alerts/flap keying
       // (fleet-flapping root-cause, 2026-08-16). Name it.
-      const identityAdmissions = runtimeDetails?.['completedDeliveryIdentityAdmissions'] as
-        | Record<string, unknown>
-        | undefined;
-      const identityDebtCount = identityAdmissions?.['unresolvedCount'];
-      if (typeof identityDebtCount === 'number' && Number.isFinite(identityDebtCount) && identityDebtCount > 0) {
+      // Only BLOCKING identity debt (no fresh-inbound or operator next action)
+      // is named: retained identity debt stays in recovery_debt, matching the
+      // runtime.completed_delivery_identity_debt reason twin.
+      if (positiveRuntimeCounter('completedDeliveryIdentityBlocking')) {
         addDegradationCause('delivery_identity_debt');
       }
       if (
@@ -2820,6 +2912,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         generated_at: new Date().toISOString(),
         uptime_seconds: Math.floor((Date.now() - deps.startedAt) / 1000),
         arc: readArcBindingHealth(resolveArcRepoRoot()),
+        // #2481: the invariants this loaded code implements, as a compile-time
+        // constant. Diagnostic body only (the #2515 public envelope never
+        // carries it); release:activate classifies it against its own floor.
+        health_invariants: { schema: HEALTH_INVARIANTS_SCHEMA, ids: [...HEALTH_INVARIANTS] },
         instance: {
           name: deps.instanceName,
           mode: deps.instanceType,
@@ -2895,6 +2991,18 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               : null,
             disconnect_class: disconnectClass,
             auth_failure_class: authFailureClass,
+            // The transport's own decision for the last close (null after an
+            // open). Omitted for transports that do not classify, which tells
+            // consumers to use their legacy status-code reading.
+            ...(connectionState.disconnectDecision !== undefined
+              ? { disconnect_decision: formatDisconnectDecisionForHealth(connectionState.disconnectDecision) }
+              : {}),
+            // #3722: the last reconnect-state reset (a fixed reason token and a
+            // time), so the fleet poller can tell a fresh reconnect from a
+            // silent logout. Omitted for transports that do not report it.
+            ...(connectionState.reconnectReset !== undefined
+              ? { reconnect_reset: exposeDisconnectMetadata ? connectionState.reconnectReset : null }
+              : {}),
           },
           auth_bond: authBond,
           credential_lifecycle: connectionState.credentialLifecycle ?? null,

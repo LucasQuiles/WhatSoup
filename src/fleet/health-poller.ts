@@ -4,7 +4,6 @@ import {
   clearAlertSource,
   clearAlertSourceChecked,
   emitAlert,
-  emitAlertChecked,
   type AlertEmissionResult,
 } from '../lib/emit-alert.ts';
 import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
@@ -12,16 +11,29 @@ import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
 import { sqliteUtcToEpochMs } from '../lib/sqlite-time.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 import { ALERT_THROTTLE_INTERVAL_MS, loadAlertThrottleDetailed, recordAlertThrottle } from './alert-throttle-store.ts';
-import { setRecoveryMarker, clearRecoveryMarker, loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
+import { loadRecoveryMarkers } from '../lib/recovery-authority-store.ts';
+import {
+  clearRecoveryMarkerObserved,
+  setRecoveryMarkerObserved,
+} from './recovery-marker-observability.ts';
 import * as silenceManager from './silence-manager.ts';
 import type { SilenceStoreReadResult } from './silence-manager.ts';
 import {
   createSilenceRegistryEpisodeStore,
   type SilenceRegistryEpisodeStorePort,
 } from './silence-registry-episode-store.ts';
-import { hasExplicitAuthLossSignal } from './auth-loss-signals.ts';
+import { hasExplicitAuthLossSignal, TERMINAL_AUTH_FAILURE_CLASSES as SHARED_TERMINAL_AUTH_FAILURE_CLASSES } from './auth-loss-signals.ts';
 import { AUTH_BOND_READ_PERSISTENT_CLASS } from '../lib/auth-bond-policy.ts';
+import {
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION,
+  NO_RESTART_UNCONFIRMED_401_CLASSES,
+  RECONNECT_RESET_REASONS,
+  isTransientReconnectStatusCode,
+  readHealthDisconnectDecision,
+  type HealthDisconnectDecisionReading,
+} from '../lib/disconnect-classification.ts';
 import { AUTH_LOSS_SIGNAL_CLASSIFIERS, AuthLossSignalStore, type AuthLossSignalInput } from './auth-loss-signal-store.ts';
 import { AuthLossSignalTransitionController, type AuthLossSignalStorePort } from './auth-loss-signal-transition-controller.ts';
 import type { StableAuthenticatedOpenSample } from './auth-loss-signal-resolver.ts';
@@ -32,17 +44,22 @@ import {
   LoopLagSampler,
   type LoopLagSnapshot,
 } from '../lib/loop-lag-sampler.ts';
+import type { RuntimeRecoveryBlockingReason } from '../runtimes/agent/runtime-recovery-health.ts';
+import type { HealthDegradationCause } from '../core/health.ts';
 
 const log = createChildLogger('fleet:health-poller');
 
 const MIN_ALERT_INTERVAL_MS = ALERT_THROTTLE_INTERVAL_MS;
-const TERMINAL_AUTH_FAILURE_CLASSES = new Set([
-  'pairing_required',
-  'serverside_logout_irreversible',
-]);
+// Logged out with no transport retry left: a confirmed removal, pairing, or an
+// unconfirmed 401 park. Only the first two are confirmed; see
+// NO_RESTART_UNCONFIRMED_401_CLASSES for the confidence split.
+const TERMINAL_AUTH_FAILURE_CLASSES = new Set<string>(SHARED_TERMINAL_AUTH_FAILURE_CLASSES);
+const UNCONFIRMED_401_AUTH_FAILURE_CLASSES = new Set<string>(NO_RESTART_UNCONFIRMED_401_CLASSES);
 const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
   'pairing_required',
   'serverside_logout_irreversible',
+  ...NO_RESTART_UNCONFIRMED_401_CLASSES,
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION.ambiguous_401_reconnecting,
   'local_corruption_restorable',
   'local_corruption_unrestorable',
   'auth_bond_at_risk',
@@ -55,6 +72,17 @@ const NON_HEALTHY_AUTH_FAILURE_CLASSES = new Set([
 ]);
 const WEAK_LOGGED_OUT_POLLS = 3;
 const LOGGED_OUT_SETTLE_GRACE_SECONDS = 60;
+// #3722: one transport reconnect cycle (10 attempts at up to 60 s, then the
+// 5-minute cooldown), rounded. A transient basis downgrades the weak signal
+// for at most this long, because its marker persists until the next open and a
+// logged-out line never opens.
+export const WEAK_TRANSIENT_MAX_MS = 6 * 60_000;
+// #3722: weak signals that would confirm within this window of each other are
+// one shared event (a LAN or WAN outage), held for HOLD from each trip.
+const WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS = 2 * 60_000;
+const WEAK_LOGGED_OUT_CORRELATION_MIN = 3;
+export const WEAK_LOGGED_OUT_CORRELATION_HOLD_MS = 6 * 60_000;
+const WEAK_TRANSIENT_RESET_REASONS: ReadonlySet<string> = new Set(Object.values(RECONNECT_RESET_REASONS));
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 const INSTANCE_UNREACHABLE_ALERT_DWELL_MS = readNonNegativeEnvInt(
   'WHATSOUP_INSTANCE_UNREACHABLE_ALERT_DWELL_MS',
@@ -68,6 +96,69 @@ const HEALTH_BODY_DEGRADED_ALERT_DWELL_MS = readNonNegativeEnvInt(
   'WHATSOUP_HEALTH_BODY_DEGRADED_ALERT_DWELL_MS',
   10_000,
 );
+// #3694: the closed vocabulary a runtime may report in recoveryBlockingReasons.
+// A Record (not a list) so a reason added to the runtime type fails typecheck
+// here instead of rendering as `unrecognized`. Only these fixed codes reach the
+// evidence and the journal; any other value is counted, never echoed.
+const RECOVERY_BLOCKING_REASON_CODES: Readonly<Record<RuntimeRecoveryBlockingReason, true>> = {
+  turn_finalization_active: true,
+  turn_recovery_actionable: true,
+  turn_recovery_integrity: true,
+  turn_recovery_unclassified: true,
+  completed_delivery_identity_unclassified: true,
+};
+// #3694: the degradation-cause vocabulary, for the journal only (the journal is
+// a durable sink that #2386's evidence confinement does not cover). Same
+// Record-over-the-union totality as RECOVERY_BLOCKING_REASON_CODES: a cause
+// added in src/core/health.ts fails typecheck here until it is listed.
+const DEGRADATION_CAUSE_CODES: Readonly<Record<HealthDegradationCause, true>> = {
+  provider_fallback_active: true,
+  fallback_chain_exhausted: true,
+  fallback_entry_failures: true,
+  primary_model_unusable: true,
+  model_unusable: true,
+  turn_capability_error: true,
+  primary_model_evidence_stale: true,
+  turn_capability_evidence_stale: true,
+  auth_bond_degraded: true,
+  transport_disconnected: true,
+  enrichment_stale: true,
+  enrichment_runtime_degraded: true,
+  memory_readiness_degraded: true,
+  memory_context_degraded: true,
+  memory_consolidation_degraded: true,
+  connection_churn: true,
+  outbound_flood: true,
+  event_loop_starved: true,
+  durability_debt: true,
+  durability_evidence_unreadable: true,
+  database_retention_failed: true,
+  continuity_gap_unreadable: true,
+  continuity_gap_open: true,
+  recovery_debt_blocking: true,
+  schema_future: true,
+  schema_not_ready: true,
+  pending_polls_unreadable: true,
+  agent_recent_crashes: true,
+  agent_auto_compact_backoff: true,
+  agent_session_inactive: true,
+  turn_finalization_degraded: true,
+  turn_recovery_degraded: true,
+  delivery_identity_debt: true,
+  provider_execution_pressure: true,
+  agent_outbound_queue_poisoned: true,
+  credential_identity_mismatch: true,
+  credential_identity_unverifiable: true,
+  agent_respawn_failed_clear_pending: true,
+  per_chat_session_without_owner: true,
+  per_chat_respawn_abandoned: true,
+  agent_runtime_degraded_unclassified: true,
+  agent_runtime_unhealthy: true,
+  chat_runtime_degraded: true,
+  passive_runtime_degraded: true,
+  degradation_silence_unproven: true,
+  unclassified: true,
+};
 const HEALTH_PROBE_TIMEOUT_UNDER_PROXY_LOAD = 'health_probe_timeout_under_proxy_load';
 const HEALTH_SNAPSHOT_MAX_AGE_MS = 30_000;
 const HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS = 5_000;
@@ -208,6 +299,251 @@ export interface InstanceStatus {
   lastAlertAt: string | null;
   silencedUntil: string | null;
   activeAlertSources: string[];
+  recoveryDebt: FleetRecoveryDebtSummary | null;
+}
+
+export interface FleetRecoveryDebtSummary {
+  open: boolean;
+  serviceBlocking: boolean;
+  attention: 'none' | 'routine' | 'urgent';
+  reasons: string[];
+  gaugeTotal: number;
+}
+
+export function recoveryDebtGaugeBucket(value: number): 'none' | 'one' | 'few' | 'several' | 'many' {
+  if (value <= 0) return 'none';
+  if (value === 1) return 'one';
+  if (value <= 4) return 'few';
+  if (value <= 9) return 'several';
+  return 'many';
+}
+
+export type RecoveryDebtParseResult =
+  | { kind: 'absent' }
+  | { kind: 'invalid'; errors: string[] }
+  | { kind: 'valid'; summary: FleetRecoveryDebtSummary };
+
+const RECOVERY_DEBT_REASON_ORDER = [
+  'continuity_gap_unreadable',
+  'continuity_gap_open',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  'turn_finalization_active',
+  'turn_recovery_actionable',
+  'turn_recovery_integrity',
+  'turn_recovery_unclassified',
+  'completed_delivery_identity_unclassified',
+  'uncorroborated_delivery_ambiguity',
+  'turn_recovery_terminal',
+  'turn_recovery_quarantined',
+  'historical_turn_catchup',
+  'corroborated_delivery_retained',
+  'completed_delivery_identity_fresh_inbound',
+  'completed_delivery_identity_operator',
+] as const;
+const RECOVERY_DEBT_REASONS = new Set<string>(RECOVERY_DEBT_REASON_ORDER);
+const RECOVERY_DEBT_BLOCKING_REASONS = new Set([
+  'continuity_gap_unreadable',
+  'recovery_evidence_unreadable',
+  'delivery_evidence_unreadable',
+  'turn_finalization_active',
+  'turn_recovery_actionable',
+  'turn_recovery_integrity',
+  'turn_recovery_unclassified',
+  'completed_delivery_identity_unclassified',
+]);
+
+function recoveryDebtCount(value: unknown, errors: string[], field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    errors.push(field);
+    return 0;
+  }
+  return value as number;
+}
+
+function recoveryDebtReadable(
+  value: Record<string, unknown> | undefined,
+  errors: string[],
+  field: string,
+): boolean {
+  if (!value || typeof value['readable'] !== 'boolean') {
+    errors.push(`${field}.readable`);
+    return false;
+  }
+  return value['readable'];
+}
+
+export function parseRecoveryDebtHealth(health: Record<string, unknown>): RecoveryDebtParseResult {
+  if (!Object.hasOwn(health, 'recovery_debt')) return { kind: 'absent' };
+  const debt = asRecord(health['recovery_debt']);
+  if (!debt) return { kind: 'invalid', errors: ['recovery_debt'] };
+  const errors: string[] = [];
+  const open = debt['open'];
+  const serviceBlocking = debt['service_blocking'];
+  const attention = debt['attention'];
+  if (typeof open !== 'boolean') errors.push('recovery_debt.open');
+  if (typeof serviceBlocking !== 'boolean') errors.push('recovery_debt.service_blocking');
+  if (attention !== 'none' && attention !== 'routine' && attention !== 'urgent') {
+    errors.push('recovery_debt.attention');
+  }
+  const reasonsValue = debt['reasons'];
+  const reasons = Array.isArray(reasonsValue)
+    && reasonsValue.length <= 32
+    && reasonsValue.every((reason) => (
+      typeof reason === 'string'
+      && reason.length <= 96
+      && RECOVERY_DEBT_REASONS.has(reason)
+    ))
+    && new Set(reasonsValue).size === reasonsValue.length
+    ? reasonsValue as string[]
+    : [];
+  if (reasons !== reasonsValue) errors.push('recovery_debt.reasons');
+  if (
+    reasons.length > 0
+    && reasons.some((reason, index) => (
+      index > 0
+      && RECOVERY_DEBT_REASON_ORDER.indexOf(reason as typeof RECOVERY_DEBT_REASON_ORDER[number])
+        <= RECOVERY_DEBT_REASON_ORDER.indexOf(
+          reasons[index - 1] as typeof RECOVERY_DEBT_REASON_ORDER[number],
+        )
+    ))
+  ) errors.push('recovery_debt.reasons_order');
+
+  const continuity = asRecord(debt['continuity']);
+  const turnRecovery = asRecord(debt['turn_recovery']);
+  const completedIdentity = asRecord(debt['completed_delivery_identity']);
+  const delivery = asRecord(debt['delivery']);
+  const continuityReadable = recoveryDebtReadable(continuity, errors, 'recovery_debt.continuity');
+  const turnRecoveryReadable = recoveryDebtReadable(turnRecovery, errors, 'recovery_debt.turn_recovery');
+  const identityReadable = recoveryDebtReadable(
+    completedIdentity,
+    errors,
+    'recovery_debt.completed_delivery_identity',
+  );
+  const deliveryReadable = recoveryDebtReadable(delivery, errors, 'recovery_debt.delivery');
+  const counts = [
+    recoveryDebtCount(continuity?.['open'], errors, 'recovery_debt.continuity.open'),
+    recoveryDebtCount(continuity?.['unresolved'], errors, 'recovery_debt.continuity.unresolved'),
+    recoveryDebtCount(continuity?.['ambiguous'], errors, 'recovery_debt.continuity.ambiguous'),
+    recoveryDebtCount(
+      turnRecovery?.['blocking_outstanding'],
+      errors,
+      'recovery_debt.turn_recovery.blocking_outstanding',
+    ),
+    recoveryDebtCount(
+      turnRecovery?.['retained_terminal'],
+      errors,
+      'recovery_debt.turn_recovery.retained_terminal',
+    ),
+    recoveryDebtCount(
+      turnRecovery?.['open_catchups'],
+      errors,
+      'recovery_debt.turn_recovery.open_catchups',
+    ),
+    recoveryDebtCount(
+      turnRecovery?.['corroborated_retained'],
+      errors,
+      'recovery_debt.turn_recovery.corroborated_retained',
+    ),
+    recoveryDebtCount(
+      completedIdentity?.['blocking'],
+      errors,
+      'recovery_debt.completed_delivery_identity.blocking',
+    ),
+    recoveryDebtCount(
+      completedIdentity?.['retained'],
+      errors,
+      'recovery_debt.completed_delivery_identity.retained',
+    ),
+    recoveryDebtCount(
+      delivery?.['blocking_ambiguous'],
+      errors,
+      'recovery_debt.delivery.blocking_ambiguous',
+    ),
+    recoveryDebtCount(
+      delivery?.['uncorroborated_ambiguous'],
+      errors,
+      'recovery_debt.delivery.uncorroborated_ambiguous',
+    ),
+    recoveryDebtCount(
+      delivery?.['corroborated_retained'],
+      errors,
+      'recovery_debt.delivery.corroborated_retained',
+    ),
+  ];
+  const nextAction = completedIdentity?.['next_action'];
+  if (nextAction !== null && nextAction !== 'fresh_inbound' && nextAction !== 'operator') {
+    errors.push('recovery_debt.completed_delivery_identity.next_action');
+  }
+  const oldest = delivery?.['oldest_uncorroborated_at'];
+  const oldestMs = typeof oldest === 'string'
+    ? Date.parse(oldest.includes('T') ? oldest : `${oldest.replace(' ', 'T')}Z`)
+    : Number.NaN;
+  if (
+    oldest !== null
+    && (typeof oldest !== 'string' || !Number.isFinite(oldestMs))
+  ) errors.push('recovery_debt.delivery.oldest_uncorroborated_at');
+  if (counts[10]! > 0 && !Number.isFinite(oldestMs)) {
+    errors.push('recovery_debt.delivery.oldest_uncorroborated_at_missing');
+  }
+  if (counts[10] === 0 && oldest !== null) {
+    errors.push('recovery_debt.delivery.oldest_uncorroborated_at_contradiction');
+  }
+  if (counts[9]! > counts[10]!) {
+    errors.push('recovery_debt.delivery.blocking_ambiguous_contradiction');
+  }
+
+  const continuityReason = debt['reason'];
+  if (
+    continuityReason !== null
+    && continuityReason !== 'continuity_gap_open'
+    && continuityReason !== 'continuity_gap_unreadable'
+  ) errors.push('recovery_debt.reason');
+  const expectedContinuityReason = !continuityReadable
+    ? 'continuity_gap_unreadable'
+    : counts[0]! > 0
+      ? 'continuity_gap_open'
+      : null;
+  if (continuityReason !== expectedContinuityReason) {
+    errors.push('recovery_debt.reason_contradiction');
+  }
+
+  // continuity.open is unresolved + ambiguous (indices 1 and 2) and
+  // blocking_ambiguous (9) is a subset of uncorroborated_ambiguous (10), so
+  // those indices are skipped: each debt is counted once.
+  const gaugeTotal = counts.reduce((sum, value, index) => (
+    index === 1 || index === 2 || index === 9 ? sum : sum + value
+  ), 0);
+  if (!Number.isSafeInteger(gaugeTotal)) errors.push('recovery_debt.gauge_total');
+  const blockingEvidence = !continuityReadable
+    || !turnRecoveryReadable
+    || !identityReadable
+    || !deliveryReadable
+    || counts[3]! > 0
+    || counts[7]! > 0
+    || counts[9]! > 0
+    || reasons.some((reason) => RECOVERY_DEBT_BLOCKING_REASONS.has(reason));
+  const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking === true;
+  const expectedAttention = serviceBlocking === true ? 'urgent' : expectedOpen ? 'routine' : 'none';
+  if (open !== expectedOpen) errors.push('recovery_debt.open_contradiction');
+  if (typeof serviceBlocking === 'boolean' && serviceBlocking !== blockingEvidence) {
+    errors.push('recovery_debt.service_blocking_contradiction');
+  }
+  if (health['status'] === 'healthy' && serviceBlocking === true) {
+    errors.push('recovery_debt_status_contradiction');
+  }
+  if (attention !== expectedAttention) errors.push('recovery_debt.attention_contradiction');
+  if (errors.length > 0) return { kind: 'invalid', errors };
+  return {
+    kind: 'valid',
+    summary: {
+      open: open as boolean,
+      serviceBlocking: serviceBlocking as boolean,
+      attention: attention as FleetRecoveryDebtSummary['attention'],
+      reasons,
+      gaugeTotal,
+    },
+  };
 }
 
 export type StatusChangeCallback = (instance: string, newStatus: InstanceStatus['status'], oldStatus: InstanceStatus['status']) => void;
@@ -231,6 +567,8 @@ export const LOGGED_OUT_CONFIRMATION_CONTRACT = Object.freeze({
     'weak_signal_inside_settle_grace',
     'weak_signal_waiting_for_persistence',
     'weak_signal_persisted',
+    'weak_signal_transient_disconnect',
+    'weak_signal_correlated_hold',
   ] as const),
   failureCodes: Object.freeze([
     'WA_AUTH_BOND_SERVER_REVOKED',
@@ -250,6 +588,47 @@ export interface LoggedOutConfirmation {
   failureCode: LoggedOutFailureCode;
   confidence: InstanceStatus['statusConfidence'];
   evidence: string;
+}
+
+/** #3722: why a weak logged-out signal reads as a reconnect, not a logout. */
+export interface WeakTransientBasis {
+  kind: 'reset' | 'decision' | 'status_code';
+  /** Names this marker; a new marker restarts the poller's bound, the same one does not. */
+  identity: string;
+}
+
+export interface WeakTransientBasisInput {
+  lastStatusCode: number | null;
+  decisionReading: HealthDisconnectDecisionReading;
+  decisionNode: Record<string, unknown> | null | undefined;
+  reconnectReset: Record<string, unknown> | null | undefined;
+}
+
+/**
+ * #3722: the weak signal is (backoff, 0 attempts), which the transport also
+ * shows on every fresh connect after an exhaustion cycle or a keepalive
+ * reconnect. Returns the most specific marker naming such a reconnect, or null.
+ * Precedence: reset, then decision, then status code.
+ */
+export function weakSignalTransientBasis(input: WeakTransientBasisInput): WeakTransientBasis | null {
+  const resetReason = input.reconnectReset?.['reason'];
+  if (typeof resetReason === 'string' && WEAK_TRANSIENT_RESET_REASONS.has(resetReason)) {
+    const resetAt = input.reconnectReset?.['at'];
+    return { kind: 'reset', identity: `reset:${resetReason}@${typeof resetAt === 'string' ? resetAt : 'unknown'}` };
+  }
+  if (
+    input.decisionReading.kind === 'classified'
+    && input.decisionReading.classification === 'other'
+    && input.decisionNode?.['action'] === 'reconnect'
+    && input.decisionNode?.['reason'] === 'transient'
+  ) {
+    const observedAt = input.decisionNode?.['observed_at'];
+    return { kind: 'decision', identity: `decision:${typeof observedAt === 'string' ? observedAt : 'unknown'}` };
+  }
+  if (isTransientReconnectStatusCode(input.lastStatusCode)) {
+    return { kind: 'status_code', identity: `code:${String(input.lastStatusCode)}` };
+  }
+  return null;
 }
 
 interface HealthSnapshotClassification {
@@ -340,6 +719,7 @@ function classifyDatabaseInspectionHealth(
   health: Record<string, unknown>,
   httpStatus: number | undefined,
   expectedInstanceName: string,
+  nowMs: number,
 ): HealthSnapshotClassification | null {
   if (health.service_mode !== 'inspection_only') return null;
 
@@ -354,7 +734,7 @@ function classifyDatabaseInspectionHealth(
   const code = stringValue(startupBlock?.code);
   const generatedAt = stringValue(health.generated_at);
   const generatedAtMs = generatedAt === null ? Number.NaN : Date.parse(generatedAt);
-  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const generatedAtAgeMs = nowMs - generatedAtMs;
   const latest = sqlite?.schema_migration_latest;
   const required = positiveIntegerValue(sqlite?.schema_migration_required);
   const futureLatest = nonNegativeIntegerValue(latest);
@@ -420,15 +800,19 @@ function classifyDatabaseInspectionHealth(
   };
 }
 
+// `nowMs` is the poller's injected clock reading (#2200): snapshot freshness
+// is judged against it, never against a raw wall-clock read.
 function classifyHealthSnapshot(
   health: Record<string, unknown>,
   expectedInstanceName: string,
-  httpStatus?: number,
+  httpStatus: number | undefined,
+  nowMs: number,
 ): HealthSnapshotClassification {
   const databaseInspection = classifyDatabaseInspectionHealth(
     health,
     httpStatus,
     expectedInstanceName,
+    nowMs,
   );
   if (databaseInspection !== null) return databaseInspection;
 
@@ -455,6 +839,7 @@ function classifyHealthSnapshot(
   const recentDisconnectLastReason = stringValue(recentDisconnects?.last_reason);
   const recentDisconnectLastStatusCode = nonNegativeIntegerValue(recentDisconnects?.last_status_code);
   const runtime = asRecord(health.runtime);
+  const recoveryDebt = parseRecoveryDebtHealth(health);
   const accountJidStatus = accountJid === null
     ? 'missing'
     : accountJid === 'not connected'
@@ -562,6 +947,7 @@ function classifyHealthSnapshot(
     typeErrors.push('whatsapp.connection.recent_disconnects.last_status_code');
   }
   if (health.runtime !== undefined && runtime === undefined) typeErrors.push('runtime');
+  if (recoveryDebt.kind === 'invalid') typeErrors.push(...recoveryDebt.errors);
 
   const baseEvidence = [
     evidenceField('health_status', healthStatus),
@@ -596,8 +982,12 @@ function classifyHealthSnapshot(
     accountJid === 'not connected' ||
     connectionState === 'disconnected' ||
     healthStatus === 'unhealthy';
-  const explicitAuthLossSignal =
-    hasExplicitAuthLossSignal({ lastStatusCode, lastDisconnectReason, authFailureClass });
+  const explicitAuthLossSignal = hasExplicitAuthLossSignal({
+    lastStatusCode,
+    lastDisconnectReason,
+    authFailureClass,
+    disconnectDecision: readHealthDisconnectDecision(connection),
+  });
 
   if (loggedOutHeuristic && disconnectedCorroboration && explicitAuthLossSignal) {
     return {
@@ -725,7 +1115,7 @@ function classifyHealthSnapshot(
     };
   }
 
-  const generatedAtAgeMs = Date.now() - generatedAtMs;
+  const generatedAtAgeMs = nowMs - generatedAtMs;
   if (
     generatedAtAgeMs > HEALTH_SNAPSHOT_MAX_AGE_MS ||
     generatedAtAgeMs < -HEALTH_SNAPSHOT_MAX_FUTURE_SKEW_MS
@@ -778,11 +1168,27 @@ export class HealthPoller {
   private persistedAlertThrottle: Map<string, string>;
   private alertThrottleLoadErrorCode: string | null;
   private weakLoggedOutPolls: Map<string, number> = new Map();
+  /** #3722: when each instance's current transient basis was first seen, by poller clock. */
+  private weakTransientFirstSeen: Map<string, { identity: string; at: number }> = new Map();
+  /**
+   * #3722: when each instance's weak signal would have confirmed. A recovered
+   * trip still counts as correlation evidence until it ages out; a live trip
+   * keeps its time until the instance recovers or leaves the watched set.
+   */
+  private weakLoggedOutTrips: Map<
+    string,
+    { at: number; recovered: boolean; confirmed: boolean; holdLogged: boolean }
+  > = new Map();
   private failureStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedStartedAt: Map<string, number> = new Map();
   private healthBodyDegradedPolls: Map<string, number> = new Map();
+  /** #3694: last cause signature journaled per instance for the current degraded episode. */
+  private healthBodyDegradedCauseSignatures: Map<string, string> = new Map();
   private operationalFallbackReclassified: Set<string> = new Set();
   private reclassifiedHealthAlerts: Set<string> = new Set();
+  private recoveryDebtFingerprints: Map<string, string> = new Map();
+  /** Instances whose recovery-debt marker was read and found absent. */
+  private recoveryDebtMarkerSettled: Set<string> = new Set();
   private unreachableAlerted: Set<string> = new Set();
   /**
    * Open alert-suppression episodes, keyed by the same `name:source` key the
@@ -819,6 +1225,8 @@ export class HealthPoller {
   // dbReader is null (no durable rows can exist to resolve).
   private readonly authLossTransition: AuthLossSignalTransitionController | null;
   private readonly authLossObserveWarned = new Set<string>();
+  /** #2200: every time read in the poller goes through this clock. */
+  private readonly clock: Clock;
 
   constructor(
     getInstances: () => Map<string, InstanceHealth>,
@@ -830,7 +1238,9 @@ export class HealthPoller {
     silenceRegistryEpisodeStore: SilenceRegistryEpisodeStorePort = createSilenceRegistryEpisodeStore(),
     hostName: string = hostname(),
     authLossQuietDwellSeconds = 300,
+    clock: Clock = systemClock,
   ) {
+    this.clock = clock;
     this.getInstances = getInstances;
     this.selfName = selfName;
     this.getSelfHealth = getSelfHealth;
@@ -902,6 +1312,9 @@ export class HealthPoller {
       const mName = marker.slice(0, sep);
       const mSource = marker.slice(sep + 1);
       const status = this.statuses.get(mName);
+      if (mSource === 'recovery_debt_attention') {
+        if (status?.recoveryDebt?.open !== false) continue;
+      }
       // Positive-recovery evidence required: a merely-absent alert source is
       // NOT proof of recovery on the first poll — a still-down instance has
       // not yet re-accumulated consecutive failures, so its source is absent
@@ -912,12 +1325,7 @@ export class HealthPoller {
           // scan retries the idempotent clear.
           continue;
         }
-        try {
-          clearRecoveryMarker(marker);
-        } catch {
-          // intentional: marker removal is best-effort — a stale marker only
-          // causes a redundant idempotent clear on the next startup scan.
-        }
+        clearRecoveryMarkerObserved(mName, mSource);
       }
     }
   }
@@ -976,7 +1384,7 @@ export class HealthPoller {
       return;
     }
     if (open) this.endAlertSuppressionEpisode(key);
-    this.alertSuppressionEpisodes.set(key, { reason, since: Date.now(), count: 1, name, source });
+    this.alertSuppressionEpisodes.set(key, { reason, since: this.clock.now(), count: 1, name, source });
     log.info({ name, source, ...extra }, reason);
   }
 
@@ -996,7 +1404,7 @@ export class HealthPoller {
       name: open.name,
       source: open.source,
       suppressedObservations: open.count,
-      episodeDurationMs: Date.now() - open.since,
+      episodeDurationMs: this.clock.now() - open.since,
       reason: open.reason,
     }, 'alert suppression episode ended');
   }
@@ -1132,7 +1540,7 @@ export class HealthPoller {
         // itself.
         try {
           const health = this.getSelfHealth();
-          const classification = classifyHealthSnapshot(health, name);
+          const classification = classifyHealthSnapshot(health, name, undefined, this.clock.now());
           this.observeAuthRecoverySample(name, health);
           if (isNonOnlineClassification(classification)) {
             this.updateFromHealthSnapshot(name, health, classification);
@@ -1154,8 +1562,16 @@ export class HealthPoller {
             error: null,
             lastAlertAt: this.lastAlertAtFor(name, existing),
             silencedUntil: existing?.silencedUntil ?? null,
-            activeAlertSources: [],
+            activeAlertSources: existing?.activeAlertSources ?? [],
+            recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
           });
+          this.observeRecoveryDebt(name, health);
+          // Sources raised while the self instance was degraded are carried
+          // forward above, so they must be cleared here exactly as the remote
+          // online path does; otherwise they stay active forever.
+          if (existing) {
+            this.clearRecoveredAlert(name, existing, health);
+          }
         } catch (err) {
           this.updateFailure(name, (err as Error).message);
         }
@@ -1205,7 +1621,7 @@ export class HealthPoller {
                 this.updateLoggedOutFromConfirmation(name, failureHealth, loggedOutSignal);
                 return;
               }
-              const classification = classifyHealthSnapshot(failureHealth, name, res.status);
+              const classification = classifyHealthSnapshot(failureHealth, name, res.status, this.clock.now());
               this.observeAuthRecoverySample(name, failureHealth);
               if (
                 isNonOnlineClassification(classification) &&
@@ -1228,7 +1644,7 @@ export class HealthPoller {
         }
 
         const loggedOutSignal = this.classifyLoggedOutSignal(name, health);
-        const classification = classifyHealthSnapshot(health, name, responseStatus);
+        const classification = classifyHealthSnapshot(health, name, responseStatus, this.clock.now());
         this.observeAuthRecoverySample(name, health);
 
         const healthStatus = typeof health['status'] === 'string' ? health['status'] : '';
@@ -1290,7 +1706,7 @@ export class HealthPoller {
         const existing = this.statuses.get(name);
         const prevStatus = existing?.status ?? 'online';
         this.trackTargetPid(name, health);
-        this.weakLoggedOutPolls.delete(name);
+        this.resetWeakLoggedOutState(name);
         this.failureStartedAt.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
         const observedAt = new Date().toISOString();
@@ -1309,7 +1725,9 @@ export class HealthPoller {
           lastAlertAt: this.lastAlertAtFor(name, existing),
           silencedUntil: existing?.silencedUntil ?? null,
           activeAlertSources: existing?.activeAlertSources ?? [],
+          recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
         });
+        this.observeRecoveryDebt(name, health);
         if (prevStatus !== 'online') {
           this.emitStatusChange(name, 'online', prevStatus);
         }
@@ -1330,9 +1748,15 @@ export class HealthPoller {
       if (!discoveredNames.has(name)) {
         this.endRecoveryClearWithholdingEpisodesForInstance(name);
         this.statuses.delete(name);
+        this.recoveryDebtFingerprints.delete(name);
+        this.recoveryDebtMarkerSettled.delete(name);
         this.latestPollRequestIdByInstance.delete(name);
         this.targetPids.delete(name);
         this.resetHealthBodyDegradedDebounce(name);
+        // #3722: a departed instance's trip must never count as correlation.
+        this.weakLoggedOutPolls.delete(name);
+        this.weakLoggedOutTrips.delete(name);
+        this.weakTransientFirstSeen.delete(name);
       }
     }
     // #3057: on the first poll only, reconcile recovery-authority markers
@@ -1354,7 +1778,37 @@ export class HealthPoller {
     }
   }
 
+  /**
+   * #3722: the instance left the weak state (reconnected, confirmed explicitly,
+   * or restarted). Its trip is kept as correlation evidence for the others,
+   * marked recovered, and ages out; its next trip starts a fresh time.
+   */
+  private resetWeakLoggedOutState(name: string): void {
+    this.weakLoggedOutPolls.delete(name);
+    this.weakTransientFirstSeen.delete(name);
+    const trip = this.weakLoggedOutTrips.get(name);
+    if (trip) trip.recovered = true;
+  }
+
+  /**
+   * #3722: true while this instance's trip is one of at least
+   * WEAK_LOGGED_OUT_CORRELATION_MIN trips within WINDOW of each other.
+   * Measured between trip times, never against now, so a spread cluster holds
+   * as one for its whole hold.
+   */
+  private weakTripCorrelatedCount(tSelf: number): number {
+    const times = [...this.weakLoggedOutTrips.values()].map((trip) => trip.at);
+    let best = 0;
+    for (const tJ of times) {
+      if (Math.abs(tJ - tSelf) > WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS) continue;
+      const count = times.filter((tK) => Math.abs(tK - tJ) <= WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS).length;
+      if (count > best) best = count;
+    }
+    return best;
+  }
+
   private classifyLoggedOutSignal(name: string, health: Record<string, unknown>): LoggedOutConfirmation {
+    const now = this.clock.now();
     const whatsapp = this.readRecord(health['whatsapp']);
     const connection = this.readRecord(whatsapp?.['connection']);
     const connected = whatsapp?.['connected'] === true && connection?.['state'] === 'connected';
@@ -1368,24 +1822,36 @@ export class HealthPoller {
     const reconnectAttempts = nonNegativeIntegerValue(connection?.['reconnect_attempts']);
     const uptimeSeconds = this.readNumber(health['uptime_seconds']);
 
+    // A body that carries the transport's decision is authoritative: the raw
+    // 401 / loggedOut fields only decide for a legacy body without it.
+    const decisionReading = readHealthDisconnectDecision(connection);
+    const legacyBody = decisionReading.kind === 'absent';
     const explicit =
       TERMINAL_AUTH_FAILURE_CLASSES.has(authFailureClass) ||
-      lastStatusCode === 401 ||
-      lastReason === 'loggedOut' ||
-      lastReason.includes('device_removed');
+      (legacyBody && (
+        lastStatusCode === 401 ||
+        lastReason === 'loggedOut' ||
+        lastReason.includes('device_removed')
+      ));
     if (explicit) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
+      const unconfirmed401 = UNCONFIRMED_401_AUTH_FAILURE_CLASSES.has(authFailureClass);
       return {
         confirmed: true,
         weak: false,
         reason: 'explicit_auth_loss',
         failureCode: 'WA_AUTH_BOND_SERVER_REVOKED',
-        confidence: 'confirmed',
+        // The line is logged out either way; only a confirmed removal (or a
+        // legacy body that cannot say otherwise) earns 'confirmed'.
+        confidence: unconfirmed401 ? 'inferred' : 'confirmed',
         evidence: this.loggedOutEvidence(health, [
           `connected=${String(whatsapp?.['connected'])}`,
           `state=${String(connection?.['state'] ?? 'unknown')}`,
           `disconnect_class=${disconnectClass || 'unknown'}`,
           `auth_failure_class=${authFailureClass || 'unknown'}`,
+          `disconnect_classification=${
+            decisionReading.kind === 'classified' ? decisionReading.classification : decisionReading.kind
+          }`,
           `last_status_code=${String(lastStatusCode ?? 'unknown')}`,
           `last_disconnect_reason=${lastReason || 'unknown'}`,
           `reconnect_phase=${String(reconnectPhase ?? 'unknown')}`,
@@ -1395,7 +1861,7 @@ export class HealthPoller {
     }
 
     if (connected) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       return {
         confirmed: false,
         weak: false,
@@ -1408,7 +1874,7 @@ export class HealthPoller {
 
     const weak = reconnectPhase === 'backoff' && reconnectAttempts === 0;
     if (!weak) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       return {
         confirmed: false,
         weak: false,
@@ -1419,8 +1885,43 @@ export class HealthPoller {
       };
     }
 
+    // #3722: the transport shows (backoff, 0 attempts) on every fresh connect,
+    // after an exhaustion cycle and after a keepalive reconnect. Neither is a
+    // logout, so the weak signal is downgraded while the body names a transient
+    // close or a reconnect reset. Both persist until the next open, and a
+    // logged-out line never opens, so the downgrade is time-bound: after one
+    // reconnect cycle it falls through to the persistence logic below.
+    const transientBasis = weakSignalTransientBasis({
+      lastStatusCode,
+      decisionReading,
+      decisionNode: this.readRecord(connection?.['disconnect_decision']),
+      reconnectReset: this.readRecord(connection?.['reconnect_reset']),
+    });
+    let expiredBasis: WeakTransientBasis['kind'] | null = null;
+    if (transientBasis === null) {
+      this.weakTransientFirstSeen.delete(name);
+    } else {
+      const seen = this.weakTransientFirstSeen.get(name);
+      if (seen === undefined || seen.identity !== transientBasis.identity) {
+        this.weakTransientFirstSeen.set(name, { identity: transientBasis.identity, at: now });
+      }
+      const firstSeenAt = this.weakTransientFirstSeen.get(name)?.at ?? now;
+      if (now - firstSeenAt < WEAK_TRANSIENT_MAX_MS) {
+        this.weakLoggedOutPolls.delete(name);
+        return {
+          confirmed: false,
+          weak: true,
+          reason: 'weak_signal_transient_disconnect',
+          failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+          confidence: 'ambiguous',
+          evidence: '',
+        };
+      }
+      expiredBasis = transientBasis.kind;
+    }
+
     if (uptimeSeconds === null || uptimeSeconds < LOGGED_OUT_SETTLE_GRACE_SECONDS) {
-      this.weakLoggedOutPolls.delete(name);
+      this.resetWeakLoggedOutState(name);
       log.info({ name, uptimeSeconds }, 'weak logged-out signal observed inside settle grace; waiting');
       return {
         confirmed: false,
@@ -1430,6 +1931,24 @@ export class HealthPoller {
         confidence: 'ambiguous',
         evidence: '',
       };
+    }
+
+    // #3722: record the trip at the FIRST counted weak observation, not at
+    // confirm. Instances are classified one after another within a cycle, so a
+    // trip recorded at confirm would let the first instances of a shared
+    // outage page before the others had recorded theirs. A live trip keeps its
+    // time until the instance recovers or departs; only recovered trips age out.
+    const trip = this.weakLoggedOutTrips.get(name);
+    if (trip === undefined || trip.recovered) {
+      this.weakLoggedOutTrips.set(name, { at: now, recovered: false, confirmed: false, holdLogged: false });
+    }
+    for (const [tripName, entry] of this.weakLoggedOutTrips) {
+      if (
+        entry.recovered
+        && now - entry.at >= WEAK_LOGGED_OUT_CORRELATION_HOLD_MS + WEAK_LOGGED_OUT_CORRELATION_WINDOW_MS
+      ) {
+        this.weakLoggedOutTrips.delete(tripName);
+      }
     }
 
     const samples = (this.weakLoggedOutPolls.get(name) ?? 0) + 1;
@@ -1446,6 +1965,33 @@ export class HealthPoller {
       };
     }
 
+    // #3722: correlated-trip hold, checked at confirm. Correlation is measured
+    // between trip times, so a shared outage holds as one for HOLD from each trip.
+    // A trip that already confirmed is never held again: a later trip that
+    // correlates with it must not flip a paged instance back to degraded.
+    const selfTrip = this.weakLoggedOutTrips.get(name);
+    const tSelf = selfTrip?.at ?? now;
+    const correlated = this.weakTripCorrelatedCount(tSelf);
+    if (
+      selfTrip?.confirmed !== true
+      && correlated >= WEAK_LOGGED_OUT_CORRELATION_MIN
+      && now - tSelf < WEAK_LOGGED_OUT_CORRELATION_HOLD_MS
+    ) {
+      if (selfTrip && !selfTrip.holdLogged) {
+        selfTrip.holdLogged = true;
+        log.warn({ name, correlated }, `weak logged-out signal held: correlated with ${correlated} instances`);
+      }
+      return {
+        confirmed: false,
+        weak: true,
+        reason: 'weak_signal_correlated_hold',
+        failureCode: 'WEAK_LOGGED_OUT_SIGNAL',
+        confidence: 'ambiguous',
+        evidence: '',
+      };
+    }
+
+    if (selfTrip) selfTrip.confirmed = true;
     return {
       confirmed: true,
       weak: true,
@@ -1460,6 +2006,7 @@ export class HealthPoller {
         `reconnect_attempts=0`,
         `uptime_seconds=${uptimeSeconds === null ? 'unknown' : String(uptimeSeconds)}`,
         `weak_signal_polls=${samples}`,
+        ...(expiredBasis === null ? [] : [`transient_basis_expired=${expiredBasis}`]),
       ]),
     };
   }
@@ -1514,12 +2061,16 @@ export class HealthPoller {
     existing: InstanceStatus | undefined,
     loggedOutWeak: boolean,
     loggedOutFailureCode: LoggedOutAlertFailureCode,
+    statusConfidence: StatusConfidence,
   ): boolean {
     if (prevStatus !== 'logged_out') return true;
     if (!this.hasConfirmedAlert(name, 'instance_logged_out')) return true;
+    // Re-emit only for an UPGRADE to a confirmed revocation. An unconfirmed
+    // 401 park stays inferred on every poll and must not re-page each time.
     return (
       existing?.status === 'logged_out'
       && existing.statusConfidence !== 'confirmed'
+      && statusConfidence === 'confirmed'
       && !loggedOutWeak
       && loggedOutFailureCode === 'WA_AUTH_BOND_SERVER_REVOKED'
     );
@@ -1764,7 +2315,103 @@ export class HealthPoller {
   private resetHealthBodyDegradedDebounce(name: string): void {
     this.healthBodyDegradedStartedAt.delete(name);
     this.healthBodyDegradedPolls.delete(name);
+    this.healthBodyDegradedCauseSignatures.delete(name);
     this.operationalFallbackReclassified.delete(name);
+  }
+
+  /**
+   * #3694: render the runtime's recovery-blocking reasons as fixed codes.
+   * `unreported` = the runtime published no reason list (older runtime or a
+   * malformed field); `none` = an empty list. Unknown values collapse to one
+   * `unrecognized` code so free text never reaches evidence or the journal.
+   */
+  private recoveryBlockingReasonsEvidence(value: unknown): string {
+    if (!Array.isArray(value)) return 'unreported';
+    if (value.length === 0) return 'none';
+    const codes: string[] = [];
+    let unrecognized = false;
+    for (const reason of value) {
+      if (typeof reason === 'string' && Object.hasOwn(RECOVERY_BLOCKING_REASON_CODES, reason)) {
+        if (!codes.includes(reason)) codes.push(reason);
+      } else {
+        unrecognized = true;
+      }
+    }
+    if (unrecognized) codes.push('unrecognized');
+    return codes.join(',');
+  }
+
+  /** #3694: journal form of the cause vector: known codes, else one `unrecognized`. */
+  private degradationCausesJournalCode(causes: readonly string[] | null): string {
+    if (causes === null) return 'unknown';
+    const codes: string[] = [];
+    let unrecognized = false;
+    for (const cause of causes) {
+      if (Object.hasOwn(DEGRADATION_CAUSE_CODES, cause)) {
+        if (!codes.includes(cause)) codes.push(cause);
+      } else {
+        unrecognized = true;
+      }
+    }
+    if (unrecognized) codes.push('unrecognized');
+    return codes.join(',');
+  }
+
+  /** #3694: a body flag as a fixed code; a present non-boolean is `invalid`, never echoed. */
+  private booleanCode(value: unknown): 'true' | 'false' | 'unknown' | 'invalid' {
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    return value === undefined || value === null ? 'unknown' : 'invalid';
+  }
+
+  /**
+   * #3694: the recovery-debt contract as fixed codes, so a degraded alert can
+   * be read as standing debt or as a live fault. Uses the same validating
+   * parser as the recovery_debt_attention alert; a missing or invalid block is
+   * named as such rather than read as "no debt".
+   */
+  private recoveryDebtEvidenceFields(health: Record<string, unknown>): {
+    recoveryDebt: string;
+    recoveryDebtAttention: string;
+    recoveryDebtServiceBlocking: string;
+    recoveryDebtReasons: string;
+    recoveryDebtGauge: string;
+  } {
+    const parsed = parseRecoveryDebtHealth(health);
+    if (parsed.kind !== 'valid') {
+      return {
+        recoveryDebt: parsed.kind,
+        recoveryDebtAttention: 'unknown',
+        recoveryDebtServiceBlocking: 'unknown',
+        recoveryDebtReasons: 'unknown',
+        recoveryDebtGauge: 'unknown',
+      };
+    }
+    const { summary } = parsed;
+    return {
+      recoveryDebt: 'valid',
+      recoveryDebtAttention: summary.attention,
+      recoveryDebtServiceBlocking: String(summary.serviceBlocking),
+      recoveryDebtReasons: summary.reasons.length > 0 ? summary.reasons.join(',') : 'none',
+      recoveryDebtGauge: recoveryDebtGaugeBucket(summary.gaugeTotal),
+    };
+  }
+
+  /**
+   * #3694: the alert evidence is confined to a digest before the durable
+   * outbox (#2386), so the cause vector would otherwise be unrecoverable once
+   * the instance recovers. Journal it once per degraded episode and again only
+   * when it changes. Fixed codes, boolean codes, bounded buckets and the three
+   * integrity counts only, never a raw body value; exact debt counts stay in
+   * the evidence so routine count churn does not re-log.
+   */
+  private journalHealthBodyDegradedCauses(
+    name: string,
+    fields: Readonly<Record<string, string>>,
+  ): void {
+    const signature = Object.values(fields).join('|');
+    if (this.healthBodyDegradedCauseSignatures.get(name) === signature) return;
+    this.healthBodyDegradedCauseSignatures.set(name, signature);
+    log.info({ name, ...fields }, 'health body degraded causes');
   }
 
   private clearReclassifiedHealthBodyAlert(name: string, evidence: string): void {
@@ -1794,7 +2441,7 @@ export class HealthPoller {
     health: Record<string, unknown>,
     baseEvidence: string,
   ): { shouldAlert: boolean; evidence: string; operationalFallback: boolean; providerCapacity: boolean } {
-    const now = Date.now();
+    const now = this.clock.now();
     const startedAt = this.healthBodyDegradedStartedAt.get(name) ?? now;
     this.healthBodyDegradedStartedAt.set(name, startedAt);
     const polls = (this.healthBodyDegradedPolls.get(name) ?? 0) + 1;
@@ -1828,6 +2475,12 @@ export class HealthPoller {
     const recoveryQuarantinedDelivery = this.readNumber(
       runtimeAgent?.['turnRecoveryQuarantinedDelivery'],
     );
+    const recoveryBlockingReasons = this.recoveryBlockingReasonsEvidence(
+      runtimeAgent?.['recoveryBlockingReasons'],
+    );
+    const recoveryCorruptLinks = this.readNumber(runtimeAgent?.['turnRecoveryCorruptLinks']);
+    const recoveryEchoConflicts = this.readNumber(runtimeAgent?.['turnRecoveryEchoConflicts']);
+    const recoveryOrphanTransfers = this.readNumber(runtimeAgent?.['turnRecoveryOrphanTransfers']);
     const controlPeerConfigured = controlPeer?.['configured'];
     const controlPeerSuppressedUnavailableAlerts = this.readNumber(
       controlPeer?.['suppressed_unavailable_alerts'],
@@ -1866,6 +2519,27 @@ export class HealthPoller {
     if (!operationalFallback) this.operationalFallbackReclassified.delete(name);
     const statusReasons = this.healthStatusReasons(health);
     const providerCapacity = this.isHealthyProviderFallbackCapacity(health);
+    // Every value is a fixed code, a boolean code, a bucket or an integrity
+    // count: this object is the journal record, and the journal is not confined.
+    const causeFields = {
+      degradationCauses: this.degradationCausesJournalCode(degradationCauses),
+      recoveryBlockingReasons,
+      turnRecoveryCorruptLinks: recoveryCorruptLinks === null ? 'unknown' : String(recoveryCorruptLinks),
+      turnRecoveryEchoConflicts: recoveryEchoConflicts === null ? 'unknown' : String(recoveryEchoConflicts),
+      turnRecoveryOrphanTransfers: recoveryOrphanTransfers === null ? 'unknown' : String(recoveryOrphanTransfers),
+      ...this.recoveryDebtEvidenceFields(health),
+      // Live-fault side of the debt-vs-fault reading: transport and model.
+      whatsappConnected: this.booleanCode(whatsapp?.['connected']),
+      modelUsable: this.booleanCode(turnCapability?.['model_usable']),
+    };
+    // Exact debt counts, evidence only (the journal carries the gauge bucket).
+    const recoveryDebtBlock = causeFields.recoveryDebt === 'valid'
+      ? this.readRecord(health['recovery_debt'])
+      : null;
+    const debtCount = (section: string, field: string): string => {
+      const value = this.readNumber(this.readRecord(recoveryDebtBlock?.[section])?.[field]);
+      return value === null ? 'unknown' : String(value);
+    };
     const evidence = [
       baseEvidence,
       `health_body_degraded_polls=${polls}`,
@@ -1895,6 +2569,19 @@ export class HealthPoller {
       `turn_recovery_outstanding=${recoveryOutstanding === null ? 'unknown' : String(recoveryOutstanding)}`,
       `turn_recovery_blocked_unsafe=${recoveryBlockedUnsafe === null ? 'unknown' : String(recoveryBlockedUnsafe)}`,
       `turn_recovery_quarantined_delivery=${recoveryQuarantinedDelivery === null ? 'unknown' : String(recoveryQuarantinedDelivery)}`,
+      `recovery_blocking_reasons=${causeFields.recoveryBlockingReasons}`,
+      `turn_recovery_corrupt_links=${causeFields.turnRecoveryCorruptLinks}`,
+      `turn_recovery_echo_conflicts=${causeFields.turnRecoveryEchoConflicts}`,
+      `turn_recovery_orphan_transfers=${causeFields.turnRecoveryOrphanTransfers}`,
+      `model_usable=${causeFields.modelUsable}`,
+      `recovery_debt=${causeFields.recoveryDebt}`,
+      `recovery_debt_attention=${causeFields.recoveryDebtAttention}`,
+      `recovery_debt_service_blocking=${causeFields.recoveryDebtServiceBlocking}`,
+      `recovery_debt_reasons=${causeFields.recoveryDebtReasons}`,
+      `recovery_debt_gauge=${causeFields.recoveryDebtGauge}`,
+      `recovery_debt_continuity_open=${debtCount('continuity', 'open')}`,
+      `recovery_debt_blocking_outstanding=${debtCount('turn_recovery', 'blocking_outstanding')}`,
+      `recovery_debt_retained_terminal=${debtCount('turn_recovery', 'retained_terminal')}`,
       `control_peer_configured=${String(controlPeerConfigured ?? 'unknown')}`,
       `control_peer_suppressed_unavailable_alerts=${controlPeerSuppressedUnavailableAlerts === null ? 'unknown' : String(controlPeerSuppressedUnavailableAlerts)}`,
       `status_reasons=${statusReasons.length > 0 ? statusReasons.join(',') : 'unknown'}`,
@@ -1914,8 +2601,12 @@ export class HealthPoller {
         requiredDwellMs: HEALTH_BODY_DEGRADED_ALERT_DWELL_MS,
       }, 'health body degraded; waiting for debounce before alert');
     }
+    // One decision for both the caller and the journal, so the journal names
+    // exactly the degradations that raise an alert.
+    const alerting = operationalFallback ? false : shouldAlert;
+    if (alerting) this.journalHealthBodyDegradedCauses(name, causeFields);
     return {
-      shouldAlert: operationalFallback ? false : shouldAlert,
+      shouldAlert: alerting,
       evidence,
       operationalFallback,
       providerCapacity,
@@ -1967,7 +2658,7 @@ export class HealthPoller {
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const newStatus: InstanceStatus['status'] = failures >= 3 ? 'unreachable' : 'degraded';
     const everReachable = existing?.everReachable === true || reached;
-    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    const firstFailureAt = this.failureStartedAt.get(name) ?? this.clock.now();
     this.failureStartedAt.set(name, firstFailureAt);
     this.resetHealthBodyDegradedDebounce(name);
 
@@ -1989,6 +2680,7 @@ export class HealthPoller {
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
+      recoveryDebt: existing?.recoveryDebt ?? null,
     });
     this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
@@ -2009,7 +2701,7 @@ export class HealthPoller {
     }
 
     if (newStatus === 'unreachable' && everReachable && !this.unreachableAlerted.has(name)) {
-      const failureAgeMs = Date.now() - firstFailureAt;
+      const failureAgeMs = this.clock.now() - firstFailureAt;
       if (failureAgeMs < INSTANCE_UNREACHABLE_ALERT_DWELL_MS) {
         log.info({ name, failures, failureAgeMs, dwellMs: INSTANCE_UNREACHABLE_ALERT_DWELL_MS }, 'instance unreachable; waiting for sustained dwell before alert');
         return;
@@ -2054,9 +2746,9 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const prevStatus = existing?.status ?? 'online';
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
-    const firstFailureAt = this.failureStartedAt.get(name) ?? Date.now();
+    const firstFailureAt = this.failureStartedAt.get(name) ?? this.clock.now();
     this.failureStartedAt.set(name, firstFailureAt);
-    const failureAgeMs = Date.now() - firstFailureAt;
+    const failureAgeMs = this.clock.now() - firstFailureAt;
     const staysUnreachable = existing?.status === 'unreachable';
     const evidence = [
       'reason=probe_aborted_before_connect',
@@ -2098,6 +2790,7 @@ export class HealthPoller {
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
+      recoveryDebt: existing?.recoveryDebt ?? null,
     });
     this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
@@ -2152,7 +2845,9 @@ export class HealthPoller {
       lastAlertAt: this.lastAlertAtFor(name, existing),
       silencedUntil: existing?.silencedUntil ?? null,
       activeAlertSources: existing?.activeAlertSources ?? [],
+      recoveryDebt: this.recoveryDebtSummaryForHealth(health, existing),
     });
+    this.observeRecoveryDebt(name, health);
 
     this.endRecoveryClearWithholdingEpisodesForInstance(name);
 
@@ -2169,13 +2864,15 @@ export class HealthPoller {
 
     if (
       newStatus === 'logged_out'
-      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode)
+      && this.shouldEmitLoggedOutAlert(name, prevStatus, existing, loggedOutWeak, loggedOutFailureCode, statusConfidence)
     ) {
       const emitted = this.maybeEmitAlert(name, 'instance_logged_out',
         `whatsoup@${name} appears logged out`,
         evidence,
         'critical',
-        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak, loggedOutFailureCode),
+        // An inferred (unconfirmed-401) logout reports a probable failure,
+        // not a confirmed server revocation.
+        this.loggedOutCriticalAsset(name, evidence, loggedOutWeak || statusConfidence !== 'confirmed', loggedOutFailureCode),
       );
       this.trackActiveAlertSource(name, 'instance_logged_out', emitted);
       if (emitted) this.dropSupersededAlertSources(name, ALERT_SOURCES_SUPERSEDED_BY_LOGGED_OUT);
@@ -2367,6 +3064,13 @@ export class HealthPoller {
     if (sources.length === 0) return;
     const retainedSources: string[] = [];
     for (const source of sources) {
+      if (source === 'recovery_debt_attention') {
+        const debt: RecoveryDebtParseResult = currentHealth
+          ? parseRecoveryDebtHealth(currentHealth)
+          : { kind: 'absent' };
+        if (debt.kind !== 'valid' || debt.summary.open) retainedSources.push(source);
+        continue;
+      }
       if (source === currentAlertSource) {
         retainedSources.push(source);
         continue;
@@ -2390,12 +3094,7 @@ export class HealthPoller {
           continue;
         }
         // #3057: alert was durably cleared — remove the recovery-authority marker.
-        try {
-          clearRecoveryMarker(`${name}:${source}`);
-        } catch {
-          // intentional: marker removal is best-effort — a stale marker only
-          // causes a redundant idempotent clear on the next startup scan.
-        }
+        clearRecoveryMarkerObserved(name, source);
         if (source === 'instance_unreachable') this.unreachableAlerted.delete(name);
       } catch (err) {
         log.warn({ err, name, source }, 'failed to emit alert clear');
@@ -2420,7 +3119,7 @@ export class HealthPoller {
       return;
     }
     if (open) this.endRecoveryClearWithholdingEpisode(key);
-    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: Date.now(), count: 1 });
+    this.recoveryClearWithholdingEpisodes.set(key, { name, source, reason, since: this.clock.now(), count: 1 });
     log.info({ name, source, recoveryProofReason: reason }, RECOVERY_CLEAR_WITHHELD_MSG);
   }
 
@@ -2433,7 +3132,7 @@ export class HealthPoller {
       source: open.source,
       recoveryProofReason: open.reason,
       withheldObservations: open.count,
-      episodeDurationMs: Date.now() - open.since,
+      episodeDurationMs: this.clock.now() - open.since,
     }, RECOVERY_CLEAR_WITHHELD_EPISODE_END_MSG);
   }
 
@@ -2607,6 +3306,100 @@ export class HealthPoller {
     status.activeAlertSources = [...status.activeAlertSources, source];
   }
 
+  private recoveryDebtSummaryForHealth(
+    health: Record<string, unknown>,
+    existing: InstanceStatus | undefined,
+  ): FleetRecoveryDebtSummary | null {
+    const parsed = parseRecoveryDebtHealth(health);
+    return parsed.kind === 'valid' ? parsed.summary : existing?.recoveryDebt ?? null;
+  }
+
+  private observeRecoveryDebt(name: string, health: Record<string, unknown>): void {
+    const parsed = parseRecoveryDebtHealth(health);
+    if (parsed.kind !== 'valid') return;
+    const source = 'recovery_debt_attention';
+    const summary = parsed.summary;
+    const fingerprint = JSON.stringify([
+      summary.open,
+      summary.serviceBlocking,
+      summary.attention,
+      summary.reasons,
+      recoveryDebtGaugeBucket(summary.gaugeTotal),
+    ]);
+    if (summary.open) {
+      const previousFingerprint = this.recoveryDebtFingerprints.get(name);
+      if (previousFingerprint === fingerprint) return;
+      if (previousFingerprint === undefined) {
+        try {
+          if (loadRecoveryMarkers().has(`${name}:${source}`)) {
+            this.recoveryDebtFingerprints.set(name, fingerprint);
+            this.trackActiveAlertSource(name, source, true);
+            return;
+          }
+        } catch (err) {
+          log.warn({ err, name, source }, 'recovery debt marker read failed');
+        }
+      }
+      const evidence = [
+        'recovery_debt_open=true',
+        `service_blocking=${String(summary.serviceBlocking)}`,
+        `attention=${summary.attention}`,
+        `reasons=${summary.reasons.join(',') || 'none'}`,
+        `aggregate_gauge_total=${summary.gaugeTotal}`,
+      ].join(' ');
+      // Same governance as every other poller alert: silence, the 15-minute
+      // throttle, the renotify marker and the persisted throttle record that
+      // lets a restarted poller recognise and clear this source. The
+      // fingerprint is stored only after an emit, so a suppressed change is
+      // retried on a later poll rather than dropped.
+      const emitted = this.maybeEmitAlert(
+        name,
+        source,
+        `whatsoup@${name} has retained recovery debt`,
+        evidence,
+        'info',
+      );
+      if (!emitted) return;
+      this.recoveryDebtFingerprints.set(name, fingerprint);
+      this.trackActiveAlertSource(name, source, true);
+      return;
+    }
+
+    // Proof of an open alert that the clear itself removes: this process's
+    // fingerprint or active source, or the recovery marker a prior process
+    // left behind. The persisted throttle is not proof: it deliberately
+    // survives clears, so reading it here would re-clear on every poll.
+    const hadOpenDebt = this.recoveryDebtFingerprints.has(name)
+      || this.statuses.get(name)?.activeAlertSources.includes(source) === true
+      || this.recoveryDebtMarkerLeftOpen(name, source);
+    if (!hadOpenDebt) return;
+    if (!clearAlertSourceChecked(name, source, 'recovery_debt_open=false')) return;
+    clearRecoveryMarkerObserved(name, source);
+    this.recoveryDebtFingerprints.delete(name);
+    const status = this.statuses.get(name);
+    if (status) {
+      status.activeAlertSources = status.activeAlertSources.filter((item) => item !== source);
+    }
+  }
+
+  /**
+   * True while a recovery_debt_attention marker from a prior process is still
+   * on disk for this instance. The marker file is read until it is found
+   * absent once; after that the in-process fingerprint and active source
+   * carry the state, so a closed-debt poll does not re-read the file.
+   */
+  private recoveryDebtMarkerLeftOpen(name: string, source: string): boolean {
+    if (this.recoveryDebtMarkerSettled.has(name)) return false;
+    try {
+      if (loadRecoveryMarkers().has(`${name}:${source}`)) return true;
+    } catch (err) {
+      log.warn({ err, name, source }, 'recovery debt marker read failed');
+      return false;
+    }
+    this.recoveryDebtMarkerSettled.add(name);
+    return false;
+  }
+
   private hasConfirmedAlert(name: string, source: string): boolean {
     const status = this.statuses.get(name);
     return status?.activeAlertSources.includes(source) === true
@@ -2654,7 +3447,7 @@ export class HealthPoller {
     const existing = this.statuses.get(name);
     const lastAlertAt = this.persistedAlertThrottle.get(throttleKey) ?? null;
     if (!bypassThrottle && lastAlertAt !== null) {
-      const elapsed = Date.now() - new Date(lastAlertAt).getTime();
+      const elapsed = this.clock.now() - new Date(lastAlertAt).getTime();
       if (elapsed < MIN_ALERT_INTERVAL_MS) {
         this.noteAlertSuppressed(throttleKey, name, source, 'alert suppressed — rate limit (15min)', { elapsed });
         return false;
@@ -2694,13 +3487,7 @@ export class HealthPoller {
     // #3057: persist a recovery-authority marker so the alert identity
     // survives restart — a new process reads it on cold start to emit the
     // idempotent clear if the instance has recovered.
-    try {
-      setRecoveryMarker(`${name}:${source}`);
-    } catch {
-      // intentional: marker write is best-effort — a missing marker means the
-      // next startup scan cannot reconcile this source, but the alert itself
-      // was already durably queued above.
-    }
+    setRecoveryMarkerObserved(name, source);
 
     if (existing) {
       const now = new Date().toISOString();

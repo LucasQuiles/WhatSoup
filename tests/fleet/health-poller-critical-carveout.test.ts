@@ -104,6 +104,7 @@ function makePoller(): PollerPrivate {
     lastAlertAt: null,
     silencedUntil: null,
     activeAlertSources: [],
+    recoveryDebt: null,
   });
   return poller;
 }

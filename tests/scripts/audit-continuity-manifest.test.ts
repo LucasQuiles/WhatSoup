@@ -34,6 +34,14 @@ function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// Deep-equality over the ~1 MB migrated database Buffer walks every byte through
+// the generic matcher (~0.9 s locally, ~10 s on CI Node 24). Length plus SHA-256
+// checks the same byte identity in well under a millisecond.
+function fileFingerprint(filePath: string): { bytes: number; sha256: string } {
+  const bytes = readFileSync(filePath);
+  return { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+}
+
 interface ReceiptInput {
   ordinal: number;
   messageId: string;
@@ -249,7 +257,7 @@ describe('audit-continuity-manifest CLI', () => {
 
   it('classifies exact receipts and emits only content-free ordinals and states', () => {
     const fixture = installFixture();
-    const before = readFileSync(fixture.dbPath);
+    const before = fileFingerprint(fixture.dbPath);
 
     const result = captureRun(argsFor(fixture));
 
@@ -304,7 +312,7 @@ describe('audit-continuity-manifest CLI', () => {
       expect(result.text).not.toContain(row.senderFingerprint);
       expect(result.text).not.toContain(row.contentHash);
     }
-    expect(readFileSync(fixture.dbPath)).toEqual(before);
+    expect(fileFingerprint(fixture.dbPath)).toEqual(before);
   });
 
   it('returns a clean state only when every exact receipt has echoed reply proof', () => {

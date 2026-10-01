@@ -29,6 +29,18 @@ const socket = createConnection(socketPath);
 // silently corrupted to U+FFFD before the line-delimited JSON-RPC is parsed.
 socket.setEncoding('utf8');
 
+// #3421 step 1: present this session's token first, as one notification line.
+// It is attribution evidence only and gets no reply. Writes made before the
+// connection opens are queued in order, so this line always leads.
+const sessionToken = process.env['WHATSOUP_MCP_SESSION_TOKEN']?.trim();
+if (sessionToken) {
+  socket.write(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'notifications/whatsoup/session',
+    params: { token: sessionToken },
+  }) + '\n');
+}
+
 socket.on('error', () => {
   process.stdout.write(JSON.stringify(unavailable) + '\n');
   process.exit(1);

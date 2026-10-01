@@ -490,7 +490,10 @@ describe('strict exact-classification admission', () => {
     }
   });
 
-  it('rejects strict JSON transport violations and canonical shape or array mutations', () => {
+  // Five full exact-classifier runs (receipt creation plus four canonical shape or array mutations),
+  // each about 1.2 s of git subprocesses under coverage: about 6 s, too close to the 10 s default.
+  // Same bound as the two heavier cases above.
+  it('rejects strict JSON transport violations and canonical shape or array mutations', { timeout: 60_000 }, () => {
     const { root, trustedInput } = fixture();
     const receipt = createRiskClassificationReceipt(root, trustedInput);
     const raw = Buffer.from(receipt.receiptBytes).toString('utf8');

@@ -248,10 +248,11 @@ function driveResult(
   path: ResultPath,
   harness: ReturnType<typeof makeHarness>,
   text: string,
-  overrides: { queue?: IOutboundQueue; isError?: boolean } = {},
+  overrides: { queue?: IOutboundQueue; isError?: boolean; scheduledTurn?: boolean } = {},
 ): void {
   const event = { type: 'result' as const, text, isError: overrides.isError ?? true };
   const queue = overrides.queue ?? harness.queue;
+  const scheduled = overrides.scheduledTurn === undefined ? {} : { scheduledTurn: overrides.scheduledTurn };
   if (path === 'scoped') {
     handleScopedRuntimeResult(harness.host, {
       event,
@@ -263,6 +264,7 @@ function driveResult(
       toolScopeKey: '15550190050#session',
       isSystemResult: false,
       extractUsageLimitResetTime: () => null,
+      ...scheduled,
     });
     return;
   }
@@ -270,6 +272,7 @@ function driveResult(
     event,
     queue,
     extractUsageLimitResetTime: () => null,
+    ...scheduled,
   });
 }
 
@@ -324,6 +327,65 @@ describe('runtime result terminal provider notices', () => {
         expect(harness.timeline).toEqual(['fallback-notice']);
       });
     }
+  }
+});
+
+// #3497: a scheduled turn posts no user notice and never touches the chat's
+// notice dedupe or pending handoff notice; the failure itself is still acted on.
+describe('scheduled turn result notices (#3497)', () => {
+  afterEach(() => {
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
+  });
+
+  for (const registryDispatch of [false, true]) {
+    for (const testCase of CASES) {
+      it(`an activated ${testCase.reason} fallback on a scheduled turn replays without the chat's fallback notice (registry dispatch ${registryDispatch ? 'on' : 'off'})`, () => {
+        if (registryDispatch) process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+        const harness = makeHarness({ fallbackActivation: activation(testCase.reason), replayScheduled: true });
+
+        driveResult('scoped', harness, testCase.text, { scheduledTurn: true });
+
+        expect(harness.host.scheduleFallbackReplay).toHaveBeenCalledOnce();
+        expect(harness.notifyProviderFallbackActivated).not.toHaveBeenCalled();
+        expect(harness.queue.enqueueText).not.toHaveBeenCalled();
+      });
+    }
+
+    for (const path of ['scoped', 'global'] as const) {
+      for (const testCase of CASES) {
+        it(`${path} ${testCase.reason} without fallback on a scheduled turn posts nothing and still shuts down (registry dispatch ${registryDispatch ? 'on' : 'off'})`, () => {
+          if (registryDispatch) process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+          const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+          driveResult(path, harness, testCase.text, { scheduledTurn: true });
+
+          expect(harness.queue.enqueueText).not.toHaveBeenCalled();
+          expect(harness.session.shutdown).toHaveBeenCalledOnce();
+          expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+        });
+      }
+
+      it(`${path} auth-required without fallback on a scheduled turn asks for the scheduled reauth alert only (registry dispatch ${registryDispatch ? 'on' : 'off'})`, () => {
+        if (registryDispatch) process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'] = '1';
+        const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+        driveResult(path, harness, 'Invalid API key · Please run /login', { scheduledTurn: true });
+
+        expect(harness.host.emitNoFallbackReauthNotice).toHaveBeenCalledWith(harness.queue, true);
+        expect(harness.queue.enqueueText).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  for (const path of ['scoped', 'global'] as const) {
+    it(`${path} a scheduled result neither prefixes nor flushes a pending handoff notice`, () => {
+      const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+
+      driveResult(path, harness, 'Scheduled OK', { isError: false, scheduledTurn: true });
+
+      expect(harness.host.withHandoffPrefix).not.toHaveBeenCalled();
+      expect(harness.host.flushPendingHandoffNotice).not.toHaveBeenCalled();
+    });
   }
 });
 
@@ -737,6 +799,80 @@ describe('global-path tool-activity capture-and-clear (2026-08-11 review)', () =
 
     expect(harness.session.shutdown).toHaveBeenCalledOnce();
     expect(harness.host.singleTurnHadToolActivity).toBe(false);
+  });
+});
+
+describe('client output policy withheld output never becomes a voice reply (#3613)', () => {
+  const WITHHELD_TEXT = 'answer text the client output policy withheld';
+
+  function completedHarness(withheld: boolean) {
+    const harness = makeHarness({ fallbackActivation: null, replayScheduled: false });
+    const coordinator = harness.host.runtimeTurnCoordinator as unknown as {
+      attemptOutcomeForResult: ReturnType<typeof vi.fn>;
+    };
+    coordinator.attemptOutcomeForResult.mockImplementation(() => ({ kind: 'completed' as const }));
+    (harness.queue as unknown as { consumeClientOutputWithheld: () => boolean })
+      .consumeClientOutputWithheld = vi.fn(() => withheld);
+    return harness;
+  }
+
+  function voiceOf(harness: ReturnType<typeof makeHarness>): { responseText: string } | undefined {
+    const call = harness.finalizeRuntimeTurnContext.mock.calls[0] as unknown as
+      [{ voice?: { responseText: string } }] | undefined;
+    return call?.[0].voice;
+  }
+
+  it('scoped: drops the voice text when the queue withheld output this turn', () => {
+    const harness = completedHarness(true);
+    harness.host.perChatTurnText.set('15550190050', WITHHELD_TEXT);
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+    expect(voiceOf(harness)?.responseText ?? '').toBe('');
+  });
+
+  it('scoped: keeps the voice text when nothing was withheld', () => {
+    const harness = completedHarness(false);
+    harness.host.perChatTurnText.set('15550190050', WITHHELD_TEXT);
+
+    handleScopedRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      session: harness.session as never,
+      conversationKey: '15550190050',
+      inboundSeq: 71,
+      mapKey: '15550190050',
+      toolScopeKey: '15550190050#session',
+      isSystemResult: false,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(voiceOf(harness)?.responseText).toBe(WITHHELD_TEXT);
+  });
+
+  it('global: drops the voice text when the queue withheld output this turn', () => {
+    const harness = completedHarness(true);
+    harness.host.currentTurnAssistantText = WITHHELD_TEXT;
+
+    handleGlobalRuntimeResult(harness.host, {
+      event: { type: 'result', text: null, isError: false },
+      queue: harness.queue,
+      extractUsageLimitResetTime: () => null,
+    });
+
+    expect(harness.finalizeRuntimeTurnContext).toHaveBeenCalledOnce();
+    expect(voiceOf(harness)?.responseText ?? '').toBe('');
   });
 });
 

@@ -372,6 +372,12 @@ export interface TurnRecoveryHealthDetails {
   readonly turnRecoveryCorruptLinks: number;
   readonly turnRecoveryOrphanTransfers: number;
   readonly turnRecoveryEchoConflicts: number;
+  /** Settled residue on completed or exhausted jobs; diagnostic only, never degrades. */
+  readonly turnRecoveryCorruptLinksSettled: number;
+  readonly turnRecoveryEchoConflictsSettled: number;
+  readonly turnRecoveryBlockingOutstanding: number;
+  readonly turnRecoveryRetainedTerminal: number;
+  readonly turnRecoveryCorroboratedRetained: number;
   /** blockedUnsafe split — see TurnRecoverySupervisorCounts.blockedUnsafeSynthetic. */
   readonly turnRecoveryBlockedUnsafeSynthetic: number;
   readonly turnRecoveryBlockedUnsafeSuperseded: number;
@@ -388,6 +394,7 @@ export function getTurnRecoveryHealthDetails(
       outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
       blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
       orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
+      corruptLinksSettled: 0, echoConflictsSettled: 0,
       blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     };
   return {
@@ -402,6 +409,12 @@ export function getTurnRecoveryHealthDetails(
     turnRecoveryCorruptLinks: counts.corruptLinks,
     turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,
     turnRecoveryEchoConflicts: counts.echoConflicts ?? 0,
+    turnRecoveryCorruptLinksSettled: counts.corruptLinksSettled ?? 0,
+    turnRecoveryEchoConflictsSettled: counts.echoConflictsSettled ?? 0,
+    turnRecoveryBlockingOutstanding: counts.blockingOutstanding ?? counts.outstanding,
+    turnRecoveryRetainedTerminal: counts.retainedTerminal
+      ?? counts.blockedUnsafe + counts.exhausted,
+    turnRecoveryCorroboratedRetained: counts.corroboratedRetained ?? 0,
     turnRecoveryBlockedUnsafeSynthetic: counts.blockedUnsafeSynthetic ?? 0,
     turnRecoveryBlockedUnsafeSuperseded: counts.blockedUnsafeSuperseded ?? 0,
     turnRecoveryBlockedUnsafeStranded: counts.blockedUnsafeStranded ?? 0,

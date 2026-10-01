@@ -4,9 +4,11 @@ import { toConversationKey } from '../core/conversation-key.ts';
 import {
   TOOL_FAILURE_CODES,
   TOOL_FAILURE_STAGES,
+  type ToolCallCallerEvidence,
   type ToolFailureCode,
   type ToolFailureStage,
 } from '../core/durability-evidence-contract.ts';
+import type { ClientOutputGateResult } from '../core/client-output-policy-gate.ts';
 export { isPathWithinAllowedRoot } from '../lib/path-boundary.ts';
 
 export type ToolScope = 'chat' | 'global';
@@ -74,7 +76,19 @@ export interface SessionContext {
   allowedRoot?: string;
   /** Abort signal tied to the MCP client connection. Fires when the client disconnects. */
   abortSignal?: AbortSignal;
+  /**
+   * #3421 step 1: who is on the other end of this session. Recorded on each
+   * tool_calls row; never read by any admission or authorization check.
+   * Replaced, never mutated, when the connection learns more about its client.
+   */
+  callerAttribution?: Readonly<CallerAttribution>;
 }
+
+/** The connection-level half of {@link ToolCallCallerEvidence}. */
+export type CallerAttribution = Pick<
+  ToolCallCallerEvidence,
+  'transport' | 'connectionId' | 'clientName' | 'clientVersion' | 'tokenResult'
+>;
 
 /** Mutable authorization and confinement fields resolved from the turn currently executing. */
 export interface ExecutingSessionContext {
@@ -92,7 +106,10 @@ export interface ExecutingSessionContext {
    * TURN. The per-chat actor socket is the standing exception: its resolver
    * substitutes the SOCKET IDENTITY's conversation key whenever the executing turn
    * left one undefined (src/runtimes/agent/per-chat-mcp-socket-manager.ts
-   * `conversationKey: executing.conversationKey ?? toConversationKey(identity.value)`),
+   * `conversationKey: executing.conversationKey ?? toConversationKey(scheduledAgentJobBaseMapKey(identity.value))`
+   * — the scheduled isolation suffix is stripped first, so a scheduled socket
+   * falls back to its chat's key, never to the suffixed session key (#3497) — and
+   * likewise keeps the socket's own `purpose` when the turn left that undefined),
    * so every context leaving that surface carries a defined `conversationKey` and
    * classifies `'resolved'` whether or not a turn actually resolved — the
    * fail-closed UNRESOLVED branch is unreachable there by construction. That is
@@ -315,6 +332,24 @@ export function toolError<T extends Record<string, unknown>>(
 
 export function errorResult(error: string) {
   return toolError({ error });
+}
+
+/**
+ * #3613: structured tool error for a send the client output policy withheld.
+ * It tells the agent the send did not happen and why, and never echoes the
+ * text. An evaluator failure reports no violation codes.
+ */
+export function clientOutputWithheldResult(
+  gate: Extract<ClientOutputGateResult, { admitted: false }>,
+) {
+  return toolError({
+    sent: false,
+    withheld: true,
+    reason: 'client_output_policy',
+    ...(gate.decision === 'rejected'
+      ? { violationCodes: [...gate.violationCodes] }
+      : { evaluationFailed: true }),
+  });
 }
 
 export function isToolErrorPayload(value: unknown): value is ToolErrorPayload {

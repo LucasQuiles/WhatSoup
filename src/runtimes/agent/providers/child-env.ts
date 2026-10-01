@@ -33,6 +33,12 @@ export interface BuildBaseChildEnvOptions {
   allowM365Mutations?: boolean;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
+  /**
+   * #3421 step 1: this session's token, so its own MCP helpers (the stdio proxy
+   * and session hooks) can present it and be recorded as the turn's own. It
+   * travels only through the child environment, never through config on disk.
+   */
+  whatsoupMcpSessionToken?: string;
   configRoot?: string;
   /**
    * Suppress all provider credential resolution for non-inference probes.
@@ -171,6 +177,7 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       // they are meant to use.
       WHATSOUP_INSTANCE: opts?.whatsoupInstance,
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
+      WHATSOUP_MCP_SESSION_TOKEN: opts?.whatsoupMcpSessionToken,
       // Egress proxy (#1607): only present when a caller supplies a positive
       // egressProxyPort — instances that haven't opted into the allowlist
       // see zero change. Both UPPER and lower case variants are set (F4):
@@ -227,6 +234,7 @@ export function buildOpenCodeBaseChildEnv(opts?: BuildBaseChildEnvOptions): Node
       TMPDIR: process.env.TMPDIR,
       WHATSOUP_INSTANCE: opts?.whatsoupInstance,
       WHATSOUP_MCP_SOCKET: opts?.whatsoupMcpSocket,
+      WHATSOUP_MCP_SESSION_TOKEN: opts?.whatsoupMcpSessionToken,
       // Egress proxy (#1607): threaded exactly as buildBaseChildEnv does so an
       // opted-in instance's OpenCode children route outbound HTTP(S) through the
       // allowlist proxy rather than escaping it. Both UPPER and lower case

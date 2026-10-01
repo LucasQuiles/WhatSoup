@@ -130,8 +130,8 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // PR1b adds the registration write-path at the worker spawn sites and the
   // delivery daemon, and graduates this entry in the same PR.
   { path: 'src/core/background-work-store.ts', issue: '#2279', reason: 'PR1a lands schema+store unwired by design; registration write-path and delivery daemon land in PR1b (#2279)' },
-  // Client output policy evaluator: unwired by design until the enforcement change adds its send-path caller.
-  { path: 'src/core/client-output-policy.ts', issue: '#3613', reason: 'per-conversation client output policy evaluator; parsed and validated at startup, no send-path caller until the enforcement change lands (config and evaluator first, enforcement later, by owner ruling)' },
+  // src/core/client-output-policy.ts graduated out of this registry when the
+  // agent outbound queue started enforcing it on the send path (#3613).
   // FLOS Stage 1 (docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md §3):
   // the keyed-digest primitive lands DARK by design — plan §1.3 requires every
   // stage's code to ship behind `observability.fleetLifecycle` (off). The
@@ -185,6 +185,18 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // The shadow gate is logged-only; its measurement statistics run offline in the
   // operator report, never in the runtime.
   { path: 'src/lib/clopper-pearson.ts', issue: 'shadow-gate-20260923/task-4', reason: 'statistics helper is operator-CLI-only (scripts/shadow-gate-report.ts); the logged-only shadow gate computes no rates at runtime — no production importer by design' },
+  // The continuity-gap closure WRITE side is an operator action; its only caller is
+  // scripts/close-continuity-gap.ts. The runtime reads closures through
+  // continuity-gap-closure-schema.ts (health), which IS production-reachable.
+  { path: 'src/core/continuity-gap-closure.ts', issue: 'continuity-gap-closure/stage-2', reason: 'closure writer is operator-CLI-only (scripts/close-continuity-gap.ts); runtime health only reads closures via continuity-gap-closure-schema.ts — no production importer by design' },
+  // Settling an orphan recovery transfer is an operator action; its only caller is
+  // `scripts/turn-recovery-operator.ts settle-orphan-transfer`. The runtime sees the
+  // result only through the generic recovery job and plan rows it already reads.
+  { path: 'src/core/turn-recovery-orphan-settle.ts', issue: 'orphan-transfer-settle/operator-cli', reason: 'settle writer is operator-CLI-only (scripts/turn-recovery-operator.ts settle-orphan-transfer); the runtime reads the settled job through the generic recovery tables — no production importer by design' },
+  // The inbound ownership snapshot is an operator read; its only caller is
+  // scripts/inbound-ownership-snapshot.ts (docs/runbook.md). The runtime never
+  // imports it: it reports on inbound ownership, it does not decide it.
+  { path: 'src/runtimes/agent/inbound-ownership-snapshot.ts', issue: '#3560', reason: 'ownership snapshot reader is operator-CLI-only (scripts/inbound-ownership-snapshot.ts); read-only report, no runtime importer by design' },
 ];
 
 // ---------------------------------------------------------------------------

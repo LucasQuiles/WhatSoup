@@ -46,6 +46,22 @@ toolchains and Docker images, report every action, and re-measure. Malformed
 disk observations are inconclusive (exit 2); a measured post-reclaim shortfall
 is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
+Vitest's shared setup creates an owned temporary HOME and prepends synthetic
+`security` and `secret-tool` commands to `PATH`. Reads return empty; writes,
+deletes and unsupported operations are rejected; and the synthetic
+`secret-tool` reports a probe failure (exit 127), so Linux runs use the
+env-only backend and backend selection matches a host without libsecret. The
+keyring module classifies that failure as an errored probe: each Linux test
+worker logs one error-level downgrade line, which is expected. The setup also
+clears `REQUIRE_OS_KEYRING` so that failure cannot throw. The production
+resolver and its precedence still run; dedicated keyring tests keep their own
+explicit process mocks. This also covers child processes that inherit `PATH`.
+Absolute executable paths and tests that replace `PATH` require their own
+controlled fixtures: changing HOME alone does not isolate the OS credential
+store. The credential-isolation regression runs real Vitest against decoy
+stores, checks the selected backend, resolver fallback and child-process
+reads, and verifies write and delete rejection.
+
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
 The `.husky/pre-commit` hook first runs the deterministic

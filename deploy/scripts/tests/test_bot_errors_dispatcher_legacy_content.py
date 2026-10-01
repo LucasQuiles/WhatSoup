@@ -137,7 +137,10 @@ def test_escalation_prefix_does_not_bake_repr() -> None:
     assert BRACE_QUOTE not in event["summary"]
     assert "correlationDigest" not in event["summary"]
     assert BRACE_QUOTE not in event["evidence"]
-    assert CANONICAL in event["summary"]
+    # The prefix wraps the READABLE headline (bot, cause, class, digest) rather than
+    # the bare confined rendering, which named neither the bot nor the failure.
+    assert "fixture-bot: primary model unusable (TypeError) [digest a1b2c3d4]" in event["summary"]
+    assert " chars - digest " not in event["summary"]
 
 
 def test_escalation_is_idempotent_against_canonical_summary() -> None:
@@ -664,8 +667,8 @@ def test_the_coverage_scan_actually_catches_a_reverted_site() -> None:
         ),
         (
             "format_event summary",
-            'redact(event_text(event, "summary") or "unspecified bot error")',
-            'redact(event.get("summary") or "unspecified bot error")',
+            'raw_summary = event_text(event, "summary")',
+            'raw_summary = event.get("summary")',
         ),
         (
             "format_event evidence",

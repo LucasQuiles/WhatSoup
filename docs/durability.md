@@ -28,7 +28,7 @@ Every message that enters the bot's processing pipeline is written to `inbound_e
 
 The `routed_to` column records which runtime handled the message (`agent`, `chat`, `passive`, etc.). If a process crash occurs while a turn is in progress, pre-connect recovery can inspect `routed_to` to understand what context was lost.
 
-An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`; a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
+An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`, and so does a completed turn whose answers the client output policy withheld (attempt kind `withheld_by_policy`, #3613); a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
 
 ### 2.2 Outbound Operations Journal (`outbound_ops`)
 
@@ -115,7 +115,7 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
 | `processing` | `failed` | `markInboundFailed()` — error during processing, or pre-connect recovery |
-| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`) winner |
+| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`, or `client_output_withheld` for a policy-withheld answer) winner |
 | `processing` / `turn_done` | `failed` | `finalizeTurnTerminal()` — one atomic `failed_terminal` winner with its bounded failure class |
 | `processing` / `turn_done` | unchanged (recovery-owned) | `finalizeTurnTerminal()` — no inbound mutation; the linked recovery job and selected unresolved delivery become the durable owner in the same transaction, and later proof settles the source |
 | open | terminal | `sweepStuckInbound()` — live reconciler for stranded rows (see §4.5) |
@@ -380,7 +380,8 @@ missed (the QR-102 ordering strand), or a turn that finished with no reply and n
 finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
-**15 minutes**, and reconciles four buckets in a single transaction:
+**15 minutes**, and reconciles four buckets in a single transaction, plus a fifth that it only
+reports:
 
 | Bucket | Selection | Disposition |
 |---|---|---|
@@ -388,13 +389,30 @@ pre-connect recovery. It is wired in `main.ts` to run once at startup and then e
 | 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
 | 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
 | 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
+| 5. Open behind a final terminal record (**report-only**) | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`, whose identity matches the inbound and whose delivery proof still holds; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | **nothing is written** (no inbound change, no recovery evidence): the count is returned as `terminalRecordCloseCandidates` and the first 200 seqs are logged (`inboundSeqsTruncated` is true when there are more). Each close is an operator decision taken with `turn-recovery-operator close-inbound` (`docs/runbook.md`), which applies the status the record implies. Read in its own snapshot before the four-bucket transaction, and bounded per sweep (see below) |
 
 Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
 record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
 Bucket 4 is the exact inverse: it selects **only** inbound rows owning such a terminal record
-whose delivery can never echo-settle, so the four buckets remain mutually exclusive and no row is
-disposed twice (an echoed terminal op still routes to bucket 1). Each SELECT is bounded to 200 rows so a
-large backlog drains over successive sweeps rather than in one long transaction. The
+whose delivery can never echo-settle. Bucket 5 reports only rows whose single terminal record is
+final — live finalization writes that record and the inbound status atomically, so such a row is
+left only by an older release — and never a transferred or `unfinalized_retry_owned` record. The
+buckets remain mutually exclusive and no row is disposed twice (an echoed terminal op without a
+record still routes to bucket 1). The operator close derives the status by the same mapping live
+finalization uses (`deriveTerminalInboundMutation`), validates the record against the finalize
+contract and re-checks its delivery proof: `complete` with `response_echoed` / `no_reply_policy`,
+or `failed` with the record's failure class. Each SELECT of buckets 1–4 is bounded to 200
+rows so a large backlog drains over successive sweeps rather than in one long transaction.
+Bucket 5 writes nothing, so nothing drains: its SQL pre-filters only what SQL can judge
+(disposition, identity, conflicting records, links, recovery jobs, grace window), while delivery
+proof and the record contract are judged per row by the evaluator. A sweep therefore scans the
+pre-filtered rows oldest first in keyset pages of 200, evaluating at most **1000** rows, and
+resumes after the last evaluated seq on the next sweep; each scan cycle covers the seqs that
+existed when it began, then wraps to the oldest row, so refused rows can never hide a later
+eligible one and a row repaired behind the cursor is seen on the next cycle. The resume point is
+held in memory only: a restart begins a new cycle. The log line carries `scanned`, `complete`,
+`cycleUpperSeq` and `refusedByReason` (evaluated rows only; SQL-pre-filtered rows are not
+counted), and a window whose rows were all refused is logged at info level. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
 opens its own `BEGIN IMMEDIATE`) and leaves `continuity_candidate_*` columns untouched. The
@@ -575,6 +593,18 @@ FROM tool_calls t
 WHERE t.status = 'quarantined'
 ORDER BY t.id DESC;
 ```
+
+#### 5.2.1 Tool-call caller attribution (#3421)
+
+Every tool call records which caller made it in the migration 65 columns (§6, `tool_calls`). The record is evidence only: no admission, authorization or reply depends on it. The runtime mints one random token per agent session in memory and passes it to the child only through its environment. The session's MCP proxy and hooks present it as a `notifications/whatsoup/session` line, which gets no reply. A same-user process can read another process's environment, so `match` is attribution evidence and does not authenticate the caller. Calls from other clients, such as the fleet client and the bot-errors provider probe, record as outside callers.
+
+The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/caller-attribution-report.ts --db <instance>/bot.db --out-dir <dir> [--window-days 30]
+```
+
+It writes `caller-attribution-<YYYY-MM-DD>.json` and prints its path. Retention deletes terminal rows after 30 days, so the window is capped at 30 days; run it inside that window. For a sensitive outside call, `outcome_code = 'success'` means it was admitted and `failure_code = 'authorization_denied'` means it was refused.
 
 ### 5.3 `recovery_runs` Table — Audit Trail
 
@@ -1107,11 +1137,19 @@ also scans a bounded set of already-echoed exact links, closing the crash gap be
 truth and job settlement. If a late echo contradicts a worker-completed outcome or a pending/
 failed source, delivery truth is not rolled back: the completed job retains its original
 completion proof and records a durable `echo_conflict_at`/reason for operator review.
+The `/health` echo-conflict and corrupt-link counters count only live jobs (`pending`,
+`claimed`, `blocked_unsafe`). The same residue on a `completed` or `exhausted` job stays on
+the row and is reported in the diagnostic-only `turnRecoveryEchoConflictsSettled` and
+`turnRecoveryCorruptLinksSettled` counters, which never degrade health. Orphan transfers,
+which have no job row, always count as corrupt links.
 
 Database triggers keep every linked source inbound and selected outbound proof immutable and
 retained while its job exists, including completed jobs. Retention selects only an old
 `completed` job whose exact source inbound is still terminal (`complete`/`failed`) and whose
-selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). The job deletion
+selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). It also keeps the
+job whenever its terminal record must be kept: while a `turn_delivery_corroboration` row names that
+terminal, or an `inbound_disposition_links` closure supersedes to the terminal's inbound. Deleting
+the job there would leave the transferred terminal as an orphan transfer. The job deletion
 uses `RETURNING terminal_record_id`; only those returned records can drive terminal and then
 unreferenced proof deletion in the same transaction. State or age alone is never sufficient.
 Migration 40 also refuses an upgrade when a legacy completed job lacks terminal source or
@@ -1127,20 +1165,38 @@ work that requires provenance-labeled operator catch-up and emits no identifiers
 After that dry run, `record-continuity-manifest --confirm-record` can persist only the
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
-manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes open/unresolved/ambiguous counts in a `continuity`
-block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are present —
-see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes `continuity_gap_open`
-or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not send,
-replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
-exact provenance link and terminal delivery proof exist.
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
+`total`/`open`/`unresolved`/`ambiguous`/`ambiguous_total`/`closed`/`addressed`/`declined` counts in a
+`continuity` block; the open/unresolved/ambiguous counts of that same reading feed the normalized
+`recovery_debt` projection, whose `continuity` part keeps its four-field shape. Readable retained
+obligations use `open=true`, `service_blocking=false`, and `attention="routine"` without changing an
+otherwise healthy service status. Unreadable or actionable recovery evidence uses
+`service_blocking=true`, `attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6.
+Compatibility `degradation_causes` may still include continuity reason codes for diagnostic consumers,
+but those codes are not independently an outage verdict. The recorder does not send, replay, admit,
+or close work.
+Closure is a separate, append-only row in `continuity_gap_closures` (migration 66) keyed to the
+recorded plan ID and original receipt fingerprint; the recorded plan and its `started` run are never
+changed. `close-continuity-gap` appends one row per gap: `addressed` needs a later live inbound in the
+same conversation, its terminal delivery proof, an exact selected-context witness, and (for audio) bound
+media and transcript hashes; `declined` needs an owner-approved `continuity-closure-authority.v1`
+policy and a transport-verified decision inbound. Only `open > 0` keeps `continuity_gap_open` and the
+continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
+unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
+`turn_recovery_degraded` is derived independently and is not cleared by a closure.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
-Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
-an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
-independently keeps health degraded until operator closure or retention resolution. Appending the
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
+and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
+uncorroborated delivery ambiguity are blocking. An orphan transfer has no job to settle. For one
+admitted shape only (a corroborated `maybe_sent` terminal op with a NULL `wa_message_id`, and a terminal
+source inbound that is not echo-settled and has no open disposition link), `turn-recovery-operator settle-orphan-transfer`
+(`docs/runbook.md`) writes its missing job directly in `exhausted`, with no replayable content, plus an
+append-only operator `recovery_plans` row. The terminal record is kept as evidence. Every other orphan
+is refused with a reason. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
@@ -1178,6 +1234,13 @@ rewriting either durable disposition.
 | `retry_disposition`, `operator_action` | TEXT NOT NULL | Closed recovery guidance derived from typed facts, never prose. |
 | `evidence_coverage` | TEXT NOT NULL | `complete`, `partial`, or `legacy_unclassified`. |
 | `duration_ms` | INTEGER | Optional bounded execution duration; null for open rows. |
+| `caller_transport` | TEXT | Migration 65 (#3421). `socket` or `in_process` (the provider bridge). NULL for rows written before migration 65 or by a caller outside both. |
+| `caller_connection_id` | TEXT | Per-process random prefix plus the socket connection number. NULL for in-process calls. |
+| `caller_client_name`, `caller_client_version` | TEXT | The client's own `initialize.clientInfo`, printable ASCII only, at most 64 characters, else NULL. A label, never trusted. |
+| `caller_token_result` | TEXT | `match`, `mismatch` or `absent` for a socket caller's per-session token; `not_applicable` in process. |
+| `caller_turn_owned` | INTEGER | 1 when the call came from the executing turn's own helper (in process, or a matching session token), else 0. |
+| `caller_actor_source` | TEXT | `executing_turn` when the call resolved an actor from the executing turn, else `none`. |
+| `tool_sensitive` | INTEGER | 1 when the tool is marked sensitive (admin-only). |
 
 Migration 50 replaces historical input/result/error content with these markers without interpreting legacy prose. This is a logical live-schema scrub, not proof of physical erasure: old bytes may remain in SQLite free pages, WAL files, backups, or snapshots until separately approved compaction and backup-retirement work occurs.
 
@@ -1225,6 +1288,28 @@ contradictory identity fails closed; the runtime never appends a guessed namespa
 conversation key. When the runtime knows an exact `session_id`, lifecycle status changes
 update every checkpoint row for that ID so all conversations attached to a shared session
 move together.
+
+Non-sandbox `per_chat` lazy adoption (`src/runtimes/agent/checkpoint-adoption.ts`, #3530):
+the first turn of a chat manager that has not yet started reads the chat's checkpoint and
+the `agent_sessions` rows carrying its `session_id`. This applies only when the chat has no
+resident manager: the first manager after a restart, or the one after idle eviction. It
+reads the rows only after the previous provider for the chat has stopped. A manager that
+replaces one this process retired on purpose keeps the fresh spawn: route recycle, `/new`,
+crash cleanup, or a provider-fallback stand-in. Scheduled-job map keys are excluded and
+start fresh.
+- **Own session, resumable:** the manager resumes that exact row.
+- **Foreign checkpoint:** the session has rows only in another namespace, for example a
+  scheduled job's row written before #3570. The runtime never adopts it. It recovers the
+  chat's own newest resumable session and re-points the checkpoint at it, which clears the
+  foreign completed identity. The next completed turn writes the recovered session's full
+  bundle. With no own session, the chat starts fresh with a notice.
+- **Own session, not resumable:** the row is missing, crashed or quarantined, or the session
+  layer refuses the resume at spawn. The chat starts fresh with the notice "_Previous session
+  could not be restored_", and recent chat messages are merged into the turn.
+- **A live owner may exist:** the own row is `active`, the session has duplicate own rows, or
+  it is also `active` in another namespace. The turn fails closed with
+  `CHECKPOINT_ADOPTION_REFUSED` and the chat is told its previous session may still be
+  running. No session is spawned, so the chat never gets a second live session.
 
 A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
 transaction before provider initialization. The reset clears stale session, turn, watchdog,

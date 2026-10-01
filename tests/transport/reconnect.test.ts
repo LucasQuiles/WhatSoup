@@ -679,9 +679,13 @@ describe('ConnectionManager — terminal conditions', () => {
     expect(vi.mocked(makeWASocket)).toHaveBeenCalledTimes(2);
 
     const exitEvent = readBondEvents().find(
-      event => event.event === 'connection_close' && event.reconnectDecision === 'exit:logged-out',
+      event => event.event === 'connection_close' && event.reconnectDecision === 'exit:logged-out:ambiguous_401_repeated',
     );
-    expect(exitEvent).toMatchObject({ conflictType: 'replaced', reconnectDecision: 'exit:logged-out' });
+    expect(exitEvent).toMatchObject({
+      conflictType: 'replaced',
+      reconnectDecision: 'exit:logged-out:ambiguous_401_repeated',
+      disconnectDecision: expect.objectContaining({ classification: 'ambiguous_401_parked' }),
+    });
 
     await manager.shutdown();
   });
@@ -759,7 +763,8 @@ describe('ConnectionManager — terminal conditions', () => {
       event: 'connection_close',
       reason: 'loggedOut',
       conflictType: 'device_removed',
-      reconnectDecision: 'exit:logged-out',
+      reconnectDecision: 'exit:logged-out:device_removed',
+      disconnectDecision: expect.objectContaining({ classification: 'confirmed_device_removed' }),
     });
     expect(bondLostEvent).toMatchObject({
       event: 'device_bond_lost',

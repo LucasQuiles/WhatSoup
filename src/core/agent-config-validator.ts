@@ -920,6 +920,16 @@ function validateAgentOptions(
     );
   }
 
+  // queuedTurnReceipt (#2949): default ON, so config.ts disarms it only on
+  // `=== false`. Strictly boolean — a mistyped "false"/0 would otherwise pass
+  // validation and silently leave the receipt on.
+  if (opts['queuedTurnReceipt'] !== undefined && typeof opts['queuedTurnReceipt'] !== 'boolean') {
+    return err(
+      'agentOptions.queuedTurnReceipt',
+      'agentOptions.queuedTurnReceipt must be a boolean when provided',
+    );
+  }
+
   // nlRoutingTiers: optional intent→provider map for NL routing.
   if (opts['nlRoutingTiers'] !== undefined) {
     const tiers = opts['nlRoutingTiers'];

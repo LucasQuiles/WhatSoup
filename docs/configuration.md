@@ -190,7 +190,7 @@ fails visibly instead of clearing the evidence needed for diagnosis or retry.
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 | `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
-| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
+| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin, and an unknown group sender produces a contact-approval request only when they @mention the bot; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
 | `WHATSOUP_INTERNAL_JIDS` | string (comma-separated JIDs) | (empty) | Group-JID allowlist read at outbound-safety-gate time (`src/core/outbound-message-safety.ts:363`); messages to a listed group are treated as internal operator coordination and skip the client-facing redaction scrub. Re-read per send (no restart needed). Admin 1:1 DM elevation is now handled separately by `internalPeerJids` in instance config — this var stays group-oriented. |
 
 #### Enabling enforce mode
@@ -627,6 +627,17 @@ instance type) and again by the render-time resolver
 unreadable or invalid `config.json` aborts a plist install or reconcile instead
 of regenerating the plist without its governed environment; only a missing
 `config.json` (or absent block) renders the historical byte-identical plist.
+
+Every plist write replaces the installed file through a same-directory rename,
+and the replacement keeps the installed file's permission bits, capped at
+`0644` because launchd refuses group- or world-writable job definitions
+(`installedLaunchdPlistMode` in `src/fleet/platform.ts`). This covers
+reconcile, its rollback, and `release:activate`. So an owner-only (`0600`)
+instance plist, for example one carrying credentials in
+`EnvironmentVariables`, stays `0600`. When the installed plist is a symlink,
+the mode comes from the file it points to; the rename replaces the link itself
+and leaves that file untouched. A first install with no plist present creates
+the file at `0644` under the user's umask.
 
 Home-confinement of the two filesystem fields is enforced at two call sites. At
 API admission (`POST /api/lines` and `PATCH /api/lines/:name/config` in
@@ -1333,6 +1344,7 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `nlRouting` | boolean | no | `false` | Flag-gates the NL-first routing aliases (`/model`, `/why`, `/reset`) and the per-sender route-preference store. Off = byte-identical base behavior: the three commands keep forwarding to the agent session and no preference table is created. Routing preference and visibility only — never tool or authority changes (capability-preserved routing). |
 | `nlRoutingTiers` | object | no | — | Intent→provider map for NL routing: `{ "strongest": "<provider-id>", "fastest": "<provider-id>" }`. Unset tiers resolve to the default route honestly (`/model strongest` records the preference and routing reports it as unmapped). |
 | `nlRoutingEventsDir` | string | no | per-instance config dir | Sink directory for the fail-closed `route-events.ndjson` sidecar (route metadata only — no message bodies, no raw sender JIDs; emit failure degrades to a warning and never blocks a turn). |
+| `queuedTurnReceipt` | boolean | no | `true` | `per_chat` scope only. When a message arrives while that chat's agent is already running a task, the message joins the chat's turn queue and the chat gets one receipt: "*Queued behind the current task.* Send /stop to cancel the running task and everything queued behind it." A message that starts a turn on an idle chat gets no receipt, and neither do scheduled agent jobs. At most one receipt per chat per 60 seconds. The receipt is a constant text that never quotes the queued message, and it is sent outside the running turn's reply stream. `single` and `shared` scopes never send it: in `single` a mid-task message (and a mid-task `/stop`) waits until the task finishes, and in `shared` the task ahead may belong to another chat. `false` turns the receipt off. This is the queue-honesty slice of #2949; it does not steer the running task. |
 | `commandSurface` | object | no | — | Per-instance command-surface policy overlay (disable commands, cosmetic defaults). See [agentOptions.commandSurface](#agentoptionscommandsurface). **Accepted but not yet enforced (enforcement lands with T9c)** — the validator warns at config-validation time. |
 
 #### Per-chat MCP actor socket lifecycle
@@ -1408,6 +1420,20 @@ Probe mechanism is provider-specific and intentionally separate from fallback ac
 Probe deadlines are cancellation boundaries, not detached result timers. A queued OpenCode probe is removed from the shared execution gate before its `timeout` result completes. If its process has already started, cancellation terminates the process and retains the execution lease until process closure, so later turns cannot overlap a timed-out probe. Diagnostic primary-usability and recovery probes use the same cancellation path.
 
 Agent `/health` also exposes a top-level `turn_capability` block derived from runtime state: `model_usable`, `model_usability_status`, `last_successful_turn_at`, `last_turn_error_class`, and `last_turn_error_at`. `model_usable` is `true` after a successful primary model probe, `false` after a configured primary model usability failure that requires operator attention, and `null` when no definitive probe result exists yet. A failed user turn records only the failure class (for example `model-unavailable` or `unknown-terminal`) and a timestamp; raw provider stderr/stdout is not surfaced. Top-level `/health.status` becomes `degraded` when the agent runtime reports degraded health, when `model_usable` is `false`, or when a user turn has a recorded error with no later successful user turn. A later successful user turn clears `last_turn_error_class` and `last_turn_error_at`.
+
+Authenticated normal-runtime health also separates current operational status from durable recovery
+debt. `status` and `status_reasons` answer whether the instance can safely serve work now;
+`recovery_debt` reports aggregate-only continuity, turn-recovery, completed-delivery identity, and
+delivery-ambiguity obligations. Readable retained history, including corroborated ambiguous delivery,
+can therefore produce `status: "healthy"` with `recovery_debt.open: true`,
+`service_blocking: false`, and routine attention. Unreadable evidence or an active blocking gauge
+fails closed as degraded/urgent with the `recovery_debt_blocking` reason/cause pair on every poll
+until a fresh read proves it non-blocking. The recovery-debt reasons are directly re-probed and never
+arm the degradation silence latch, so a repaired instance reads healthy on the next poll without a
+restart; see `docs/runbook.md` "Degradation silence latch". In the delivery category, `blocking_ambiguous` is the stale subset of
+`uncorroborated_ambiguous`; fresh ambiguity is visible but does not become a service outage before the
+dwell threshold. Operators must close obligations through their proof-bound workflows, never by
+editing or deleting durable rows to make health green.
 
 The `durability.outboundFailureEvidence` health block is a bounded,
 content-free projection of outbound failure envelopes: `sampledRows` covers at
@@ -1508,14 +1534,17 @@ merge ensures that `opencode.json` contains a `whatsoup-headless` agent entry
 with `whatsoup_send_message: "deny"`, creating the entry when absent and
 preserving its other fields when present. The same deny is written at the
 global permission level, so both selected-agent and inherited permission
-resolution keep live-turn text as the only reply owner. These rules are
+resolution keep turn text as the only reply owner. These rules are
 dispatcher policy, not an operating-system sandbox.
 
 OpenCode children use a fresh positive environment allowlist. The non-secret
 base is `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `NODE_PATH`,
 `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `TMPDIR`, plus the
 instance/socket context `WHATSOUP_INSTANCE` and `WHATSOUP_MCP_SOCKET` when
-configured. Config-root isolation may rewrite `HOME` and the XDG config/data
+configured, and the per-session `WHATSOUP_MCP_SESSION_TOKEN`. That token is
+minted in memory for each agent session, never written to disk, and presented
+by the session's MCP proxy and hooks only so each tool call records whether it
+came from the session's own helper (#3421). It grants nothing. Config-root isolation may rewrite `HOME` and the XDG config/data
 roots, but its controlling flag is not forwarded. The child does not receive
 `SUDO_ASKPASS`, `ALLOW_M365_MUTATIONS`, `CLAUDE_CONFIG_DIR`, unrelated
 connector/provider mutation flags, non-selected provider credentials, or
@@ -1572,7 +1601,30 @@ generated MCP block, the optional custom-endpoint block, and one exact
 `whatsoup_send_message: "deny"` permission. Live-turn assistant text is the
 single delivery owner for an OpenCode reply; denying that current-chat text
 tool prevents an auto-approved fallback from sending a second copy before the
-runtime echoes its normal answer. Other existing permission rules and unrelated
+runtime echoes its normal answer. The deny also covers scheduled agent jobs,
+which share the working directory. A scheduled job on OpenCode therefore
+reports through its final answer instead of `send_message` (#3497): its turn
+is told to write the one verified update after its last tool call, or exactly
+`NO_REPLY` when there is none. The runtime holds that text, drops text written
+before or between tool calls, and delivers the final answer once to the job's
+report chat. An explicit `NO_REPLY` finalizes as `no_reply_policy`. A completed
+job turn with neither fails with attempt class `scheduled_answer_missing`
+(inbound failure class `unknown`) and raises the reply-guarantee breach alert.
+Scheduled turns on every provider send the report chat no tool-progress
+updates, no operation-tracker progress (thinking or long-tool notices), no
+provider-failure, reauthentication, fallback, fallback-replay-failure or
+provider auto-switch notices, and no crash or processing-failure notices. It
+neither stashes a one-message handoff notice nor consumes one already pending
+for the chat, and it never records the chat's notice dedupe, so the next user
+turn in that chat still gets its own notices. The failure is still recorded,
+alerted, and acted on (session shutdown, fallback arming and replay); only the
+chat text is dropped. Its operator alerts (reauthentication, empty fallback
+turn) dedupe under a separate scheduled key. A scheduled turn is recognised by its declared purpose, so these rules
+hold in every session scope, including sandbox per_chat, shared and single,
+where it has no separate lane. A session counts as scheduled from the dispatch
+of a scheduled turn until its next user dispatch, so a crash notice raised in
+the window between a scheduled turn's result and the next dispatch is also
+suppressed. Other existing permission rules and unrelated
 `agent` entries are preserved. The merge creates the reserved
 `whatsoup-headless` entry when absent, or preserves its existing fields while
 enforcing the one delivery deny when present. A route with
@@ -1992,7 +2044,30 @@ Per-instance command-surface policy overlay (W1-T9b): `{ "disabled": ["<command>
 
 Optional per-conversation output policies for an agent instance. Only `type: "agent"` instances on the Baileys transport accept the field; any other instance type or transport fails validation. An absent field means no policies. An explicit `null` is rejected.
 
-> **Not enforced yet.** WhatSoup parses, validates, stores and redacts these policies, but no send path evaluates them. A configured policy does not block or change any outbound message today. Enforcement lands in a later change.
+**Enforcement.** Every agent send path checks each message against the target conversation's policy before sending it. A message that breaks the policy is withheld. It is never rewritten, and no outbound operation is recorded for it. Conversations without a policy are not affected. The internal-artifact check reads the text before redaction; the other checks read the final text.
+
+- **Agent outbound queue.** It checks each logical message before splitting it into chunks. This covers assistant replies, streamed text, tool-update batches and progress placeholders. A withheld placeholder still takes the rate-floor slot, so repeated stalls log once per floor window.
+- **MCP tools.** `send_message`, `reply_message`, `edit_message`, `send_poll` (question and options judged together), `send_media` (the caption only) and `send_voice_reply` (before synthesis) withhold the send. The tool returns an error result to the agent: `{ "sent": false, "withheld": true, "reason": "client_output_policy", "violationCodes": [...] }`. It never echoes the text. An evaluator error returns `evaluationFailed: true` instead of `violationCodes`.
+
+Each withheld message leaves one warn-level log line. The line never contains the message text or blocked-term values. Its fields are:
+
+- `operation`: `client_output_policy`
+- `decision`: `rejected`
+- `conversationKey`: the canonical conversation key
+- `reason`: `client_output_policy`
+- `violationCodes`: one or more of `max_code_points`, `max_question_marks`, `blocked_term`, `internal_artifact` and `whatsapp_jid`
+- `messageKind`: `answer`, `lifecycle` or `status` from the queue, or the tool name from an MCP tool
+
+If the evaluator throws for a conversation that has a policy, the message is also withheld. The error-level line has `decision: "error"` and `errorName` instead of `reason` and `violationCodes`.
+
+**Turn outcome.** A turn whose answers were all withheld ends as a deliberate terminal outcome, not a delivery failure. The terminal record has attempt kind `withheld_by_policy` under the `finalized_no_reply_policy` disposition. The inbound message completes with terminal reason `client_output_withheld`. The turn is not handed to recovery, is not replayed, raises no reply-guarantee breach alert and is not marked for catch-up. The policy decision satisfies the reply guarantee, which is disarmed. A turn that also delivered another answer finalizes as replied. Withheld text never becomes an automatic voice reply.
+
+Not covered:
+
+- The redirect status send, which goes to the separate status JID, and the fixed "could not be delivered" notice are not checked.
+- `authorization` is parsed but not yet checked.
+- Matching is exact on the canonical conversation key. A chat whose key stays an unresolved LID does not match a policy keyed by phone number.
+- An automatic voice reply of admitted text is not checked again as one combined message.
 
 ```json
 "clientOutputPolicies": [
@@ -2442,6 +2517,8 @@ All migration sources are in `src/core/database.ts` unless noted otherwise.
 | 62 | `deferred_turn_obligations` table for the #3295 `deferred_by_recovery_scope` lane (slice S1): a journaled follower blocked solely by active same-scope turn recovery gains a durable non-terminal deferred owner (bounded immutable replay envelope + exact source/scope identity) instead of a terminal admission rejection. CHECK-backed six-state lifecycle (`pending | claimed | dispatched_commit | terminal_completed | terminal_quarantined | terminal_operator`), one obligation per (scope, inbound_seq), strict head-of-line drain index. Store-only in S1 — admission classification and the fenced drain supervisor land behind a default-off flag in later slices (`src/core/database-migration-62.ts`). |
 | 63 | Attestation-evidence columns on `capability_attestations` (#3221 Debt 2 graduation, owner-ruled 2026-08-28): `probe_stdout_ref` / `probe_stderr_ref` (sha256 refs of the canary streams — references, never raw content), `probe_exit`, `canary_input_ref` (sha256 of the bounded probe source), `media_root_readable` (0/1) — the probe evidence the design spec lists as row fields, previously preserved only in the round-17 nonce-keyed `--receipt-out` file (now corroborating). The `capability_attestations_immutable` trigger is rebuilt to cover the new columns; legacy rows carry NULL. The bump sits INSIDE the D5 attestation binding (`schema_version`): previously recorded attestation digests stop admitting on this binary by design, and AS-01 must be re-run 44→63 at rollout (`src/core/database-migration-63.ts`). |
 | 64 | `inbound_events.continuity_candidate_consumed_at` column (idempotent ALTER) — the durable lifecycle primitive for `continuity_candidate_reason` marks (`runtime_fault_no_terminal_outbound` / `crash_reclaim_no_terminal_outbound`), the finalizer's record of a runtime-fault drop with the reply guarantee still armed (owner-directed messages have died this way). These marks are already surfaced to operators by the out-of-process observer `deploy/scripts/reply-guarantee-observer.py`, which counts unresolved marks into its `reply-guarantee-recovery-debt` signal — this migration does NOT add a competing alert. `DurabilityEngine.reconcileContinuityCandidates` (`src/core/durability.ts`) stamps `continuity_candidate_consumed_at` only for marks whose drop was already resolved by another path (terminal record / recovery job), so the in-process reader stops re-scanning settled marks; unresolved fresh/stale drops are left untouched and reported as diagnostics, never auto-consumed. Zero delivery blast radius. Actual re-delivery of unresolved drops is a scoped follow-up requiring a replay envelope captured at mark time — a continuity candidate has no `turn_terminal_records` row, so it cannot ride the terminal-record-linked `turn_recovery_jobs` path without fabricating one (`src/core/database-migration-64.ts`). |
+| 65 | Tool-call caller attribution on `tool_calls` (#3421 step 1): eight nullable columns with no CHECK and no default, added by idempotent ALTER — `caller_transport`, `caller_connection_id`, `caller_client_name`, `caller_client_version`, `caller_token_result`, `caller_turn_owned`, `caller_actor_source`, `tool_sensitive`. Every tool call records which caller made it: the transport, the client's own declared name, whether it presented the executing session's token, and whether it resolved the turn's actor. Evidence only — no admission, authorization or reply reads these columns. Legacy rows carry NULL, and a no-op when `tool_calls` is absent. See `docs/durability.md` §5.2.1 for the read-only report (`src/core/database-migration-65.ts`). |
+| 66 | Append-only `continuity_gap_closures` table: one closure per recorded continuity-gap plan (primary key and `RESTRICT` foreign key to `recovery_plans`), keyed to the original receipt fingerprint, with digest, disposition (`addressed` \| `declined`) and proof-shape CHECKs, a `BEFORE INSERT` trigger that requires the parent to be the recorder's open gap for that exact receipt and classification, and `BEFORE UPDATE`/`BEFORE DELETE` abort triggers. The recorded plan and its `started` run are never changed. Written only by `close-continuity-gap --apply`; read by `/health` continuity counts (`src/core/database-migration-66.ts`). Rollback: a schema-65 binary refuses the migrated file as `future_schema`, so a binary-only rollback is unavailable. Like every bump, it changes the `schema_version` inside D5 capability attestation bindings, so previously recorded attestation digests stop admitting on this binary and AS-01 must be re-run at rollout. |
 
 Migrations 50 and 51 logically remove the old values from live rows and the current schema. SQLite may still retain prior bytes in free pages, WAL files, backups, or storage-layer snapshots. Do not claim forensic erasure from migration success alone. Physical compaction such as `VACUUM`, `secure_delete` policy changes, backup rotation, or snapshot retirement must be separately scheduled and operator-approved for the deployment.
 

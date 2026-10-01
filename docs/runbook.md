@@ -22,7 +22,7 @@
 ## Related Runbooks
 
 - [Fleet Bot Hardening Standard](runbooks/fleet-bot-hardening-standard.md)
-- [Release Snapshot Deployment](runbooks/release-deployment.md)
+- [Release Snapshot Deployment](runbooks/release-deployment.md) — includes `npm run release:activate`, the coordinated macOS launchd release switch with verification and automatic rollback
 - [macOS Launchd Deployment](runbooks/macos-launchd-deployment.md)
 
 ---
@@ -207,6 +207,20 @@ Two further dark-by-default checks ship alongside it:
   `BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS` (default 5); fail-closed when
   enabled without a usable reference.
 
+Watchdog renotify backoff: an open incident is re-sent every
+`BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS` (default 21600). Once it is escalated,
+each re-send whose evidence is unchanged (ages and timestamps ignored, counts
+compared) doubles the next interval, capped by
+`BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS` (default 86400). Changed evidence
+resets the interval to the base. The incident records `renotifyCount` and
+`lastNotifiedEvidence`. A `session_collision:` incident pages critical when it
+opens and re-sends as a warning.
+
+`browser_debug` ignores debug browsers an owner keeps alive on purpose:
+`BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED` is a comma-separated list of
+`--user-data-dir` paths (for example a scheduled watcher's keep-alive CDP
+Chrome profile). Unlisted debug browsers still warn.
+
 #### Instance-database snapshots (dark by default)
 
 `deploy/scripts/whatsoup-db-snapshot.py` writes a coherent per-instance
@@ -238,6 +252,11 @@ rendered from `deploy/com.whatsoup.*.plist` templates:
 
 Both plists pin `RunAtLoad=false`, so installing or re-loading them never fires
 the job immediately. Logs land in `~/Library/Logs/whatsoup/`.
+
+What the harness-maintenance job changes, its exit codes, the side-effect
+boundary of `--check`, and the agent CLI update and self-update observation
+events are described in
+[docs/runbooks/host-maintenance.md](runbooks/host-maintenance.md).
 
 **Install / update** — `deploy/setup.sh` step 4 renders both plists into
 `~/Library/LaunchAgents` (idempotent; a differing pre-existing plist is backed
@@ -438,6 +457,19 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/
 
 The diagnostic examples in this runbook pass that header.
 
+### Health invariants block
+
+The diagnostic body (never the public envelope) carries
+`health_invariants: { "schema": "whatsoup.health-invariants.v1", "ids": [...] }`.
+The ids are compile-time constants from `src/core/health-invariants.ts` naming
+the invariants the loaded code implements, for example
+`turn_capability.stale_evidence_degrades` (#2446). They are not runtime state.
+A release that predates the block does not emit it. `release:activate --apply`
+classifies the block against its own floor and records a report-only verdict;
+see [release-deployment.md](runbooks/release-deployment.md#health-invariants-verdict-report-only-2481).
+The top-level `schema_version` is unchanged and still appears only on the
+public envelope.
+
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
 - `POST /send` — send a text message to a chat
@@ -539,7 +571,7 @@ The authenticated diagnostic body (excerpt):
 | `degraded` | 200 | WhatsApp connected but enrichment stale (>10 min) or runtime reports degraded state. Service is operational but impaired. |
 | `unhealthy` | 503 | WhatsApp is disconnected or a runtime-global safety condition, such as database compatibility loss, blocks safe message processing. |
 
-**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
+**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding (pending/claimed) recovery jobs, orphan transfers, and corrupt links or echo conflicts on live recovery jobs degrade agent health even when WhatsApp remains connected; the same residue on completed or exhausted jobs, and preserved crash-exhaustion history, stay visible as diagnostic counts (`turnRecoveryCorruptLinksSettled`, `turnRecoveryEchoConflictsSettled`, `turnRecoveryExhausted`) without degrading health.
 
 ### Degradation silence latch (`degradation_silence_unproven`)
 
@@ -553,6 +585,14 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   reasons and its final verdict is `degraded`. Unhealthy verdicts and
   late-computed-only reasons (schema/durability/retention/pending-polls/fact
   export/late runtime status — all directly probed each poll) never arm.
+- **Never latched.** The directly re-probed reasons
+  (`DIRECTLY_REPROBED_STATUS_REASONS`) never arm and never enter a latched set:
+  the per-chat ownership reasons, `runtime.agent_respawn_failed_clear_pending`,
+  `recovery_debt_blocking`, `runtime.turn_finalization_debt`, and
+  `runtime.completed_delivery_identity_debt`. Each is recomputed from live or
+  durable state on every evaluation and fails closed while unreadable, so it
+  stays visible for as long as the condition lasts and clears on the first
+  poll after repair.
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and updates the latched reason set: a
   full-visibility evaluation REPLACES the set with what it observed (a reason
@@ -1007,7 +1047,45 @@ journalctl --user -u whatsoup@sandbox-agent -n 30 | grep -E 'disconnect|loggedOu
 
 **If the process is reconnecting automatically:** Wait — the connection manager retries on transient disconnects (e.g. `restartRequired`).
 
-**If logged out (credentials expired):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
+**A 401 is not proof the device was removed.** Read the authenticated health body's
+`whatsapp.connection.disconnect_decision` (the transport's own decision for the
+last close; `null` after a successful open or at process start) and
+`auth_failure_class`:
+
+| `disconnect_decision.classification` | `auth_failure_class` | HTTP | Meaning / action |
+|---|---|---|---|
+| `confirmed_device_removed` | `serverside_logout_irreversible` | 503 | The stream:error carried `conflict type="device_removed"`. The server removed the linked device; re-pair (§6.1) after owner approval. |
+| `ambiguous_401_reconnecting` | `auth_401_ambiguous_retrying` | 200 (degraded) | An inspected 401 without `device_removed`. The transport is spending its **one** bounded reconnect. Wait one poll. |
+| `ambiguous_401_parked` | `auth_401_ambiguous_parked` | 503 | A second ambiguous 401 after the bounded reconnect. The transport stopped; removal is **not** confirmed. Check the primary phone's Linked Devices before any re-pair. |
+| `uninspected_401_conservative_exit` | `auth_401_uninspected_exit` | 503 | A 401 whose stream:error node could not be inspected. Conservative exit; removal is **not** confirmed. Check Linked Devices first. |
+
+The parked and uninspected classes are no-restart for every watchdog (a restart
+would buy a fresh bounded retry, park again and loop). The decision is
+process-local: a restart starts with no decision and a fresh bounded retry. A
+health body without the `disconnect_decision` key comes from an older binary or a
+non-Baileys transport; consumers keep the old conservative rule for it (any
+401/`loggedOut` reads as `serverside_logout_irreversible`). The same fields are
+in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
+`conflict_inspected:`), whose title and `confidence` say whether removal was
+confirmed.
+
+**Reconnecting, not logged out (#3722).** Beside `disconnect_decision`, the same
+connection block carries `reconnect_reset`: `{ reason, at }` when the transport
+last reset its reconnect state, with `reason` one of the following:
+
+| `reconnect_reset.reason` | Written when |
+|---|---|
+| `exhaustion_cycle_retry` | The transport forced a fresh connect after an exhausted reconnect cycle. |
+| `graceful_reconnect_keepalive_failed` | A keepalive failure triggered a graceful reconnect. |
+| `graceful_reconnect_connection_exhausted` | Recognised by the poller, but no current transport path writes it: only the keepalive path calls the graceful reconnect. |
+
+It is `null` at process start, after every successful open, and while connected;
+the key is absent on transports that do not report it. With a reason set,
+`reconnect_phase: backoff` and zero `reconnect_attempts` mean a fresh reconnect,
+not a logout. The fleet poller holds its weak logged-out signal on that basis
+for at most one reconnect cycle (6 minutes), then pages as before.
+
+**If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
 **If the service keeps restart-looping:**
 ```bash
@@ -1434,7 +1512,7 @@ systemctl --user start whatsoup@$INSTANCE
 
 ### 7.1 Approve or Block Users
 
-Admins receive approval requests as WhatsApp messages when an unknown sender contacts the bot. Reply directly in WhatsApp:
+Admins receive approval requests as WhatsApp messages in their direct chat when an unknown sender contacts the bot in a direct chat. In a group under strict group-sender mode (`groupSenderPolicy: allowlisted_only`), an unknown sender only produces an approval request when they @mention the bot; ordinary group chatter and status broadcasts never do. Reply directly in WhatsApp:
 
 ```
 ALLOW 15551234567       # approve a phone number
@@ -1766,43 +1844,273 @@ fingerprints and bounded taxonomy into the existing recovery ledger; it never st
 destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
 contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
 
-After recording, `/health` reports `status: "healthy"` with a `recovery_debt` field (#2973
-Option A — continuity gaps no longer flip the top-level status). The `continuity` block and
-`continuity_gap_open`/`continuity_gap_unreadable` in `degradation_causes` are both preserved:
+After recording, authenticated `/health` reports the normalized recovery-debt projection separately
+from current service status. A readable retained continuity gap does not flip an otherwise healthy
+service to degraded. A blocking episode (`recovery_debt_blocking`,
+`runtime.turn_finalization_debt`, `runtime.completed_delivery_identity_debt`) does not arm the
+silence latch: those reasons are recomputed from durable state on every poll, so status returns to
+`healthy` on the first poll whose evidence reads non-blocking, without a restart, while unreadable
+evidence keeps `recovery_debt_blocking` present on every poll. See "Degradation silence latch"
+above. The compatibility `continuity` block remains available:
 
 ```json
 {
   "status": "healthy",
+  "status_reasons": [],
   "recovery_debt": {
     "open": true,
+    "service_blocking": false,
+    "attention": "routine",
     "reason": "continuity_gap_open",
+    "reasons": ["continuity_gap_open"],
     "continuity": {
       "readable": true,
       "open": 3,
       "unresolved": 2,
       "ambiguous": 1
+    },
+    "turn_recovery": {
+      "readable": true,
+      "blocking_outstanding": 0,
+      "retained_terminal": 0,
+      "open_catchups": 0,
+      "corroborated_retained": 0
+    },
+    "completed_delivery_identity": {
+      "readable": true,
+      "blocking": 0,
+      "retained": 0,
+      "next_action": null
+    },
+    "delivery": {
+      "readable": true,
+      "blocking_ambiguous": 0,
+      "uncorroborated_ambiguous": 0,
+      "corroborated_retained": 0,
+      "oldest_uncorroborated_at": null
     }
   },
   "continuity": {
     "readable": true,
+    "closure_ledger": "present",
+    "total": 4,
     "open": 3,
     "unresolved": 2,
-    "ambiguous": 1
+    "ambiguous": 1,
+    "ambiguous_total": 1,
+    "closed": 1,
+    "addressed": 1,
+    "declined": 0
   }
 }
 ```
 
-If the ledger cannot be parsed exactly, health reports `recovery_debt.reason: "continuity_gap_unreadable"`
-with `degradation_causes` still containing `continuity_gap_unreadable`.
-Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
-rows to force green health; controlled catch-up and terminal closure require a later proof-bound
-mechanism.
+The counts always reconcile: `total = open + closed`, `open = unresolved + ambiguous`, and
+`closed = addressed + declined`. `unresolved` and `ambiguous` count only open gaps; an originally
+ambiguous gap that was later closed leaves `ambiguous` but stays in `ambiguous_total`. Only
+`open > 0` raises `continuity_gap_open`; `turn_recovery_degraded` is derived separately and a closure
+never clears it. A database that has not applied migration 66 reports `closure_ledger: "absent"`
+with `total`, `closed`, `addressed`, and `declined` set to `null` (its open counts are real; its
+closure history is unknown). `recovery_debt.continuity` keeps its four-field shape and is normalized
+from the same reading, so a closed gap leaves its open counts too; the closure counts appear only in
+the top-level block.
 
-#### Close a proven operator catch-up recovery (exact schema 43 only)
+If any required recovery evidence cannot be parsed exactly, health fails closed with
+`status: "degraded"`, `status_reasons: ["recovery_debt_blocking"]`,
+`recovery_debt.service_blocking: true`, and `attention: "urgent"`. A malformed or contradictory
+present debt projection is likewise not valid green evidence for release, heal, watchdog, or fleet
+consumers.
+`blocking_ambiguous` is the sampled stale subset of `uncorroborated_ambiguous`; it is the delivery
+gauge that contributes to `service_blocking`. A fresh uncorroborated ambiguity remains routine debt
+until its dwell threshold expires. Fleet and console summaries call their numeric value an aggregate
+gauge total because category gauges can overlap and are not a count of distinct obligations.
+
+If the ledger or a closure row cannot be read exactly (malformed, orphaned, duplicated, conflicting
+with its plan, or missing its append-only guards), health reports
+`recovery_debt.reason: "continuity_gap_unreadable"` with `service_blocking: true`, every count in the
+top-level `continuity` block is `null` rather than zero, and `degradation_causes` contains
+`continuity_gap_unreadable`.
+Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
+rows to force green health; close a gap only through `close-continuity-gap` below.
+
+#### Close a continuity gap (addressed or declined)
+
+`close-continuity-gap` appends one immutable row to `continuity_gap_closures` (migration 66) for one
+recorded gap. It never sends, replays, admits, or edits the recorded plan or run; a closure cannot be
+updated or deleted. One gap has at most one closure, so decide the final disposition before applying.
+Deployment of this command does not authorize closing any existing gap: each closure needs its own
+evidence and an operator decision.
+
+**Evidence root.** Put every evidence file under one protected directory (mode `0700`, not group- or
+world-writable). The command resolves each referenced path beneath that root and refuses absolute
+paths, `..` segments, and symlinks that resolve outside it. JSON files that carry private identifiers
+(the evidence manifest, the original continuity manifest, decision records) must be mode `0600`.
+Every referenced file is bound by its SHA-256; a digest alone is never authority.
+
+The version-1 evidence manifest (`continuity-closure-evidence.v1`) is strict JSON:
+
+```json
+{
+  "contract": "continuity-closure-evidence.v1",
+  "planId": "continuity-gap:v1:<64 hex>",
+  "original": {
+    "manifest": { "path": "original/continuity-manifest.json", "sha256": "<64 hex>" },
+    "ordinal": 1,
+    "receiptFingerprint": "<64 hex>",
+    "contentType": "audio",
+    "conversationFingerprint": "<64 hex>"
+  },
+  "disposition": "addressed",
+  "proofKind": "live_reissue",
+  "actor": "operator:IDENTITY",
+  "authority": "owner-request:REFERENCE",
+  "observedAt": "2026-01-01T00:10:00.000Z",
+  "decidedAt": "2026-01-01T00:05:00.000Z",
+  "liveInbound": { "seq": 123, "messageSha256": "<sha256 of the live message ID>" },
+  "proofs": [
+    { "role": "context_witness", "path": "witness/context.json", "sha256": "<64 hex>" },
+    { "role": "original_media", "path": "audio/original.ogg", "sha256": "<64 hex>" },
+    { "role": "transcript", "path": "audio/transcript.txt", "sha256": "<64 hex>" }
+  ],
+  "audio": { "mediaSha256": "<64 hex>", "transcriptSha256": "<64 hex>", "enrichmentComplete": true },
+  "ambiguityResolution": null,
+  "decision": null
+}
+```
+
+The original continuity manifest is the same file given to `record-continuity-manifest`. The command
+re-derives the receipt, destination, manifest and evidence fingerprints from it and requires them to
+reproduce the recorded plan exactly. The message type comes from that original receipt, never from the
+evidence manifest: a manifest that calls an audio receipt `text` is rejected.
+
+- **`addressed`** (`proofKind: live_reissue`) requires a later, completed, non-self inbound in the same
+  conversation (`liveInbound`), a terminal delivery proof for it (the existing
+  `operator_catchup_delivery_proofs` view: echoed or corroborated reply), and a `context_witness` file.
+  An audio receipt also requires `original_media` and `transcript` files whose digests equal the
+  `audio` hashes, with `enrichmentComplete: true`. A later reply, elapsed time, a generic recovery note,
+  or replaying the historical text is not proof.
+- **`declined`** (`proofKind: sender_declined` or `owner_declined`) requires `--policy` and a `decision`
+  referencing a real decision inbound plus a `continuity-closure-decision.v1` record that binds the plan,
+  receipt, inbound message hash and the SHA-256 of the inbound's exact text. `original_sender_inbound`
+  accepts only the original sender, in the same conversation; `owner_inbound` accepts only a sender
+  listed in the policy's owner fingerprints. `owner_session_export` is always Blocked: there is no
+  independent actor/session verifier for it yet. A decline carries no live reissue, transcript or
+  audio-ready claim. Alert acknowledgement, silence, or operator convenience is not a decision.
+- **Originally ambiguous gaps** also require `ambiguityResolution` (a file proving the one exact
+  candidate); without it the gap stays open.
+
+**Authority policy (`continuity-closure-authority.v1`).** `declined` is Blocked unless `--policy` names
+an owner-approved instance policy (mode `0600`, owned by the operating user, not a symlink) and
+`--instance` matches its `instanceId`:
+
+```json
+{
+  "contract": "continuity-closure-authority.v1",
+  "policyVersion": "OWNER-CHOSEN-VERSION",
+  "instanceId": "INSTANCE-NAME",
+  "ownerIdentityFingerprints": ["<sha256 of an owner sender JID>"],
+  "acceptedDecisionSources": [
+    { "verifierId": "original_sender_inbound", "version": 1 },
+    { "verifierId": "owner_inbound", "version": 1 }
+  ],
+  "effectiveFrom": "2026-01-01T00:00:00.000Z",
+  "effectiveUntil": null,
+  "approvedBy": "<one of ownerIdentityFingerprints>",
+  "approvedAt": "2026-01-01T00:00:00.000Z"
+}
+```
+
+Both now and `decidedAt` must fall inside `[effectiveFrom, effectiveUntil)`. Every declined closure
+stores the policy's exact SHA-256 and `policyVersion`. The repository ships no policy file; the owner
+places one per instance. The existing recorder actor and admin allowlists are not owner attestations.
+
+**Trust anchor, stated plainly.** The only trust anchor for `declined` is the protected placement of
+the policy file: a regular, non-symlink file, owned by the operating user, with no group or other
+permission bits. `approvedBy` is checked only against the same file's `ownerIdentityFingerprints`, so
+it is self-consistent, not independently attested. No signature or out-of-band approval record is
+verified. Whoever can write that file as the operating user can authorize declines. Without a policy
+file, `declined` is Blocked.
+
+**Not supported yet (fail closed).**
+- Any `proofKind` other than `live_reissue`, `sender_declined`, or `owner_declined` is Blocked with
+  `proof_kind_unsupported`. That includes external-action outcomes: `addressed` accepts only a live
+  reissue with a terminal delivery proof.
+- `owner_session_export` decisions are Blocked (`decision_source_unverified`): no verifier binds an
+  owner-session export to an actor and session.
+- One closure per gap. There is no supersession or correction path; a wrong closure cannot be edited.
+
+**Preview (default).** Preview reads only a static copy of the database, never the live file. Make the
+copy with SQLite's own snapshot, then preview against it:
+
+```bash
+install -d -m 700 "$SNAP_DIR"
+# -readonly: never open the live file for writing; the destination must not exist yet.
+sqlite3 -readonly "$DB" "VACUUM INTO '$SNAP_DIR/bot.snapshot.db'"
+npm run close-continuity-gap -- \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --evidence closures/receipt-1.json \
+  --snapshot "$SNAP_DIR/bot.snapshot.db" \
+  [--policy "$POLICY" --instance "$INSTANCE"]
+```
+
+The snapshot is opened `immutable=1` and must have no `-wal` or `-journal` sidecar (a plain read-only
+open of a WAL-mode file creates `-wal`/`-shm` files). The command rechecks the snapshot's identity, size
+and mtime afterwards. It writes no database row, schema, salt, lock, receipt, or sidecar.
+
+**Apply.** After the preview reports `decision: "ready"`, apply against the live database:
+
+```bash
+npm run close-continuity-gap -- \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --evidence closures/receipt-1.json \
+  --db "$DB" --apply \
+  [--policy "$POLICY" --instance "$INSTANCE"]
+```
+
+Apply takes `BEGIN IMMEDIATE`, re-checks the schema ceiling, re-reads and re-hashes every evidence
+file, re-verifies every database link and that the gap is still open, then appends the row or nothing.
+The same evidence again returns `decision: "already_closed"` with the same `operationId`. A different
+closure for an already-closed gap, a stale fingerprint, a changed transcript or decision, or a wrong
+conversation fails with no write. The command never runs migrations: a database without migration 66
+reports `schema_not_migrated`.
+
+Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `already_closed`, `blocked`,
+`conflict`), `code` (`null`, `CLOSURE_BLOCKED`, `CLOSURE_PROOF_CONFLICT`), `condition`, `planId`,
+`operationId`, `disposition`, and the passed `checks`. Exit `0` means ready, applied or already closed;
+`2` Blocked (missing input, predecessor or authority); `3` `CLOSURE_PROOF_CONFLICT` (evidence
+contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
+message text, JIDs, or media.
+
+**Schema 66 rollback.** Migration 66 adds only the new table. After it is recorded, a binary whose
+ceiling is 65 refuses the database and will not write, so **binary-only rollback is unavailable**.
+Keep the 66-aware release for containment or forward repair. Restoring a pre-migration backup is an
+owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
+an older backup**: messages received after the upgrade would be lost.
+
+The refusal is rehearsed with two real checkouts on disposable files. The work directory must not
+exist; the harness creates its own database there:
+
+```bash
+git clone --no-checkout <repository> "$OLD" && git -C "$OLD" checkout --detach <previous release sha>
+ln -s "$PWD/node_modules" "$OLD/node_modules"   # only when both lockfiles are identical
+bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
+  --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
+```
+
+The old binary creates the database at 65, this release migrates it to 66, and the old binary reopens
+it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
+("Database schema migration 66 exceeds binary ceiling 65; refusing writes") and every file in the
+work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
+
+#### Close a proven operator catch-up recovery (admitted inbound sequences)
 
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
-of pending source inbounds. It never sends or replays a message. The database must already be an
-existing canonical schema-43 file; the command neither creates a database nor runs migrations.
+of pending source inbounds. It never sends or replays a message. The database must already exist
+and its migration ledger must be contiguous from 1 through the current migration, with at least 43
+entries; any later schema, including 66, is accepted. The command neither creates a database nor runs
+migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
+links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
+those gaps.
 
 Run the read-only proof inspection first:
 
@@ -1886,6 +2194,243 @@ database (dry-run previews taken before the loss will no longer match confirmed 
 back it up alongside the database if you rely on cross-run fingerprint correlation. It contains no
 identifying information by itself and only lets past/future runs against the SAME database correlate —
 it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
+
+#### Close every caught-up operator catch-up recovery (batch)
+
+`npm run close-recovery-catchups` closes every open `recovery_pending_operator_catchup` group whose
+conversation has caught up, in one pass. It selects each group's target with the automatic reconciler's
+rule (`selectOperatorCatchupCandidates`: the earliest same-chat `operator_catchup_delivery_proofs` target
+later than every source sequence). Each group is then proven with `inspectOperatorCatchupRecovery` or
+closed with `closeOperatorCatchupRecoveryRaw`, the same primitive as the single-group command above, so it
+adds no proof rule of its own. Closures record the operator's `--actor` and `--evidence-ref`, not the
+reconciler's.
+
+```bash
+npm --silent run close-recovery-catchups -- \
+  --db "$DB" --actor operator:IDENTITY --evidence-ref evidence:REFERENCE
+```
+
+The dry run (the default) changes no database rows. It still creates the redaction salt file described
+above on first use. Add `--confirm --backup-dir /abs/dir` to close. `--confirm` without `--backup-dir` is a
+usage error. The confirmed pass first writes a quick_check-verified, mode-0600 backup into that directory.
+If the backup fails, nothing is closed. The pass then re-enumerates the groups on the writable connection,
+and each group closes in its own writer transaction. Groups that are already closed no longer appear, so
+repeating the command closes nothing more. `--group-limit N` (default 50) applies the reconciler's two
+budgets.
+
+Output is one JSON document: `ok`, `dryRun`, `groupLimit`, `backup`, `summary` (`examined`, `ready`,
+`closed`, `idempotent`, `skipped`, `linksClosed`, `errors`), and `groups[]`. Each group carries the same
+keyed fingerprints as the single-group command (`planFingerprint`, `conversationFingerprint`,
+`catchupSeqFingerprint`), plus `nSourceSeqs`, `status` (`ready`, `closed`, `idempotent` or `skipped`), and
+a `reason` for skips (`no_catchup_candidate`, `closure_rejected`, `busy` or `error`). Raw identifiers,
+chat JIDs, sequences, the actor and the evidence reference are never printed. Exit `0` means no group hit
+`busy` or `error`; `1` means at least one did, or the pass failed; `2` is a usage error.
+
+#### Close an open inbound left behind a final terminal record
+
+An inbound row can sit in `pending`, `processing` or `turn_done` while its `turn_terminal_records` row
+already says `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`. Live finalization
+writes both atomically, so only an older release leaves this state. The stuck-inbound sweep never
+closes such rows: it only reports them (bucket 5 in `docs/durability.md` §4.5, the
+`terminalRecordCloseCandidates` count and a log line with their seqs). Each close is an operator
+decision, taken for ONE named row with `turn-recovery-operator close-inbound`, which applies the same
+rules without the five-minute grace window. Each sweep evaluates one bounded window (at most 1000
+rows) of a scan cycle, so the log line also carries `refusedByReason` (for example
+`delivery_proof_invalid`, `record_contract_invalid`) and `complete`: when `complete` is false the
+reported seqs cover only part of the backlog, and later sweeps report the rest. The line lists at
+most 200 seqs; `inboundSeqsTruncated` is true when the window found more, and `count` is the full number.
+
+```bash
+# 1. Dry run (the default). Read-only: it never opens the migrating database layer, never migrates,
+#    and on a stopped instance creates no -wal/-shm files. Prints the record's disposition, the status
+#    it implies, whether the schema is current, and a digest.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ
+
+# 2. Back up the database, then apply, passing the digest the dry run printed.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ --apply --expect-digest DIGEST
+```
+
+The digest binds the apply to the dry run: it covers the database file identity (device and inode), the
+row, its terminal record and the exact status to be written. `--apply` refuses (`digest_mismatch`) if any
+of these changed, including when the same content sits in a different file. It also refuses unless the
+database is at exactly the schema this checkout knows (`schema_not_current`): apply never migrates, so an
+instance running an older release must be upgraded first. It opens the existing file without SQLite's
+create fallback and re-checks the file identity, schema, eligibility and digest inside its write
+transaction.
+
+The status comes from the terminal record, through the same mapping live finalization uses:
+`finalized_replied` closes `complete` with `response_echoed`, `finalized_no_reply_policy` closes
+`complete` with `no_reply_policy`, and `failed_terminal` closes `failed` with the record's failure class.
+The command refuses and exits `1`, changing no database row, when the row does not exist
+(`inbound_not_found`), has no terminal record (`no_terminal_record`) or more than one
+(`multiple_terminal_records`), when the record is not final (`non_final_disposition`, e.g.
+`transferred_to_recovery_owner`), when its identity does not match the row (`identity_mismatch`), when an
+`inbound_disposition_links` row or a `turn_recovery_jobs` row references the row (`disposition_link`,
+`recovery_job`), when its selected delivery op no longer proves the recorded delivery
+(`delivery_proof_invalid`: missing, belonging to another row, or no longer `echoed`), when the record
+fails the finalize contract (`record_contract_invalid`), or when the row is already closed with a
+different status (`closed_differently`). A rerun on a row already closed as its record implies prints
+`alreadyClosed: true` and exits `0`.
+
+When a close applies to a record with a selected delivery op, the same transaction also marks that op
+`is_terminal = 1`, as live finalization does.
+
+Every evaluated dry run and apply, including a refusal and an already-closed rerun, appends one line to
+the audit receipt `turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that
+file is the only thing a dry run writes. An invocation that stops before the row is evaluated (an argument
+error, or a database that is missing or cannot be opened or preflighted) exits `1` without a receipt. An
+`--apply` that throws while opening, writing or committing its transaction rolls back and appends an
+apply-mode receipt with outcome `failed` and reason `write_transaction_error`, then exits `1` with the
+original error. If that append also fails, stderr reports both errors. A failure to close the database
+connection after the commit is reported on stderr and does not turn the committed close into a failure. If
+the audit file itself cannot be appended, a dry run, refusal or already-closed rerun exits `1` with that
+error and leaves no receipt (nothing was written to the database); after a committed close it exits `3`,
+below. Output and
+receipts carry only the inbound seq, record id, disposition, statuses and reason codes, never chat JIDs,
+conversation keys or message ids.
+
+Exit codes: `0` closed, previewed, or already closed as the record implies; `1` refused or failed with
+nothing applied; `3` the close WAS applied and committed (stdout carries `applied: true` and the closed
+row) but its audit receipt could not be appended — do not re-run; record the close from stdout.
+
+Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are already `failed` and
+parked behind `recovery_pending_operator_catchup` disposition links (for example synthetic scheduled-job
+inbounds reclaimed by crash recovery). Some such links have no catch-up target and currently cannot be
+closed by any tool.
+
+#### Settle an orphan recovery transfer
+
+An orphan transfer is a `turn_terminal_records` row with disposition `transferred_to_recovery_owner` and
+no `turn_recovery_jobs` row. Live finalization writes both in one transaction, so current finalization
+cannot produce one. Where a given orphan came from is not established in general. Retention is one known
+generator of a different shape: it deletes an aged `completed` job whose selected op is `echoed`,
+`failed_permanent` or `quarantined`, then keeps the terminal record when a delivery corroboration or
+disposition link still references it. Preventing that is tracked separately, and this command does not
+admit that shape. Nothing repairs an orphan. Health counts it in `runtime.agent.turnRecoveryOrphanTransfers`,
+`turnRecoveryCorruptLinks` and `turnRecoveryOutstanding`, so `recovery_debt.service_blocking` stays `true`
+with blocking reason `turn_recovery_integrity`, and a new integrity fault cannot be told apart from it. An
+orphan blocks admission for its scope only when it is uncorroborated. A corroborated orphan counts in
+`turnRecoveryCorroboratedRetained` instead of `turnRecoveryBlockingOutstanding`.
+
+`turn-recovery-operator settle-orphan-transfer` settles ONE record of the shape it was reviewed for. It
+writes the missing job directly in the settled `exhausted` state, with no replayable content, plus an
+append-only `recovery_plans` row (`origin = 'operator'`, plan ID `turn-recovery-orphan-settle:v1:<terminal
+id>`, your evidence reference in `evidence_ref`). The job's `replay_safety_proof_id` is that plan ID. The
+terminal record is never modified or deleted. The new job's foreign key keeps it, its source inbound and its
+selected delivery op as evidence.
+
+Admission is an allowlist. The record is admitted only when all of these hold:
+
+- no recovery job is linked to it;
+- its selected delivery op carries the record's own conversation, destination and source seq, and its
+  source inbound (found by that seq) carries the record's conversation and destination, so the written
+  job links to them validly;
+- its selected delivery op is `maybe_sent`, has `is_terminal = 1` and has a NULL `wa_message_id`, so no echo
+  can ever be matched to it. An empty-string `wa_message_id` counts as a message id, because echo matching
+  compares the exact value;
+- the record passes the valid delivery-corroboration predicate that health uses. The database then keeps
+  the selected op immutable, so its status cannot change after the settle;
+- its source inbound exists and is `complete` or `failed`, and is not `complete` with `terminal_reason =
+  'response_echoed'`. That is the only source state from which echo settlement could complete the job;
+- no open `inbound_disposition_links` row references its source inbound seq. Open means a
+  `recovery_pending_operator_catchup` row with no `superseded_by_operator_catchup` row for the same inbound
+  seq and recovery plan, the predicate of the supervisor's `open_recoveries` count. An open link is a catch-up
+  obligation, and a settle forbids replay.
+
+```bash
+# 1. List orphan transfers (read-only; prints terminal record ids).
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB"
+
+# 2. Dry run for one record (read-only, never migrates). Prints the delivery kind, the op's status,
+#    terminal flag and message-id presence, the source inbound's status and terminal reason, whether a
+#    later echo corroborates delivery, the recovery owner the job will name (logical turn id, manager
+#    id, generation), and a digest.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF
+
+# 3. Back up the database, then apply with the digest the dry run printed.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF --apply --expect-digest DIGEST
+```
+
+The command does not take the backup itself. Take one before step 3.
+
+`--evidence-ref` is required and names the operator investigation record (8-120 characters of
+`A-Z a-z 0-9 _ . : / -`, e.g. a ticket or incident ref) that establishes the transfer will never be
+replayed. The digest (version 3) binds the apply to the dry run in the same way as `close-inbound`. It
+covers the database file identity; every value the settled job copies from the terminal record and its
+source inbound (record id, scope, conversation key, delivery JID, source seq, source logical turn id,
+manager id and generation, source message id, the recovery owner's logical turn id, manager id and
+generation, and the group flag derived from the delivery JID); every admission input printed in step 2;
+and the evidence reference. Step 2 prints the recovery owner but not the conversation key, JID or message
+id; those are hashed into the digest only. For an admitted record the database already freezes every
+copied terminal-record value, because trigger `corroborated_terminal_proof_immutable` blocks changes to a
+record that has a corroboration row. Nothing freezes the source inbound's message id while no job exists,
+so the digest is what stops an apply from writing a job whose values differ from the dry run's.
+`--apply` refuses `digest_mismatch` or `schema_not_current`, and re-proves eligibility and recomputes the
+digest inside its write transaction.
+
+The command refuses and exits `1`, writing nothing, with one of these reasons:
+
+| Reason | Meaning |
+|---|---|
+| `terminal_not_found` | No such record. |
+| `not_transferred` | The record is not a recovery transfer. |
+| `recovery_job_exists` | A job is linked: it is not an orphan. |
+| `owner_identity_conflict` | The record names its own source as recovery owner. |
+| `settlement_conflict` | A settle plan exists without its job. |
+| `delivery_op_missing` | The selected op row is gone. |
+| `delivery_identity_mismatch` | The op's conversation, chat or source inbound seq differs from the record's. |
+| `delivery_status_not_admitted` | The op is not `maybe_sent`. `pending`, `sending` and `submitted` are live queue work; `echoed` and the terminal failures are outside the reviewed shape. |
+| `delivery_not_terminal` | The op is `maybe_sent` with `is_terminal = 0`. |
+| `delivery_has_wa_message_id` | The op carries a provider message id (an empty string counts), so a late echo could still match it. |
+| `uncorroborated` | The record fails the valid delivery-corroboration predicate. |
+| `source_inbound_missing` | The source inbound row is gone. |
+| `source_inbound_identity_mismatch` | The source inbound's conversation or chat differs from the record's conversation or delivery JID. The settled job would be a broken link. |
+| `source_inbound_open` | The source inbound is still `pending`, `processing` or `turn_done`. |
+| `source_inbound_echo_settled` | The source inbound is `complete` with `response_echoed`. |
+| `open_disposition_link` | An open `recovery_pending_operator_catchup` link references the source inbound seq. |
+| `digest_mismatch` | `--apply` only: the digest differs from `--expect-digest`, before or inside the write transaction. |
+| `schema_not_current` | `--apply` only: the database is not at the current schema. |
+| `state_changed` | `--apply` only, inside the write transaction: the recheck returned a verdict the command does not handle. The current evaluator never returns one; this is a fail-closed default. |
+
+A refusal means the record needs investigation, not a different command. A rerun on a record it already
+settled prints `alreadySettled: true` and exits `0`. So does an `--apply` whose recheck inside the write
+transaction finds the record already settled by this command, which happens when a concurrent apply
+committed first; it writes nothing. Receipts and exit codes (`0`, `1`, `3`) follow `close-inbound`,
+including the `failed` receipt for an apply that throws inside its write transaction. The list mode (no
+`--terminal`) evaluates no record and appends no receipt. Output carries ids,
+kinds, statuses and reason codes only.
+
+After the settle, `turn-recovery-operator show --job <job id>` prints an `operatorSettlement` block (plan ID,
+origin, actor, plan creation time) found by joining `recovery_plans` on the job's proof ID. It prints that
+block only when the plan exists with origin `operator` and the CLI actor, and the job is `exhausted` and
+assigned to the CLI actor. A job whose proof ID carries the settle prefix without that full shape gets a
+`settlePlan` block with the same facts and no settlement label. The block is the only thing that tells this
+row apart from real attempt exhaustion. `list` still shows `blocked_unsafe` jobs only.
+
+The reply-guarantee observer (`deploy/scripts/reply-guarantee-observer.py`) counts every `blocked_unsafe`
+or `exhausted` job in `blockedOrExhaustedRecoveryJobs`. Retention never prunes `exhausted` jobs, so a settle
+raises that count by one permanently, and the observer cannot tell the row from real exhaustion. Even once
+every other debt is resolved, that row alone keeps the observer's recovery-debt warning latch open. The observer alerts on latch flips, not on
+count changes, so no new alert fires when the latch is already open. The critical active-breach latch is not
+affected: the observer counts a recovery job there only while its source inbound is open, and the admission
+rule requires a terminal source inbound.
+
+Verify after apply:
+
+- Authenticated `GET /health` (`runtime.agent` gauges):
+  - `turnRecoveryOrphanTransfers` drops by one; `turnRecoveryCorruptLinks`, `turnRecoveryOutstanding` and
+    `turnRecoveryCorroboratedRetained` stop counting it.
+  - `turnRecoveryExhausted` and `turnRecoveryRetainedTerminal` rise by one (retained reason
+    `turn_recovery_terminal`, not blocking).
+  - `recovery_debt.service_blocking` is `false` unless another blocking reason remains. If
+    `turn_recovery_integrity` is still listed, another orphan, corrupt link or echo conflict exists:
+    re-run step 1.
+- `show --job <job id>` reports `operatorSettlement` with `planFound: true` and state `exhausted`.
+- The reply-guarantee observer's `blockedOrExhaustedRecoveryJobs` is one higher than before the apply,
+  and its state is not `active-breach` because of this record.
+- After the next restart, `show` still reports state `exhausted`.
 
 ### 7.7 Useful SQL Queries
 
@@ -2133,6 +2678,7 @@ Migration 51 removes old raw columns from the live schema, but migration success
 |--------|-------|-----------------|
 | WhatsApp connected | `health.whatsapp.connected` | False for >2 min |
 | Health status | `health.status` | `unhealthy` |
+| Recovery debt | `health.recovery_debt.open` / `service_blocking` / `attention` | Retained `routine` debt needs operator review but is not an outage; `service_blocking=true` is owned by degraded health. |
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
 | Quarantined outbound ops | `health.durability.outboundQuarantineDispositions` | Any `delivery_ambiguous_unsafe` or `legacy_unclassified` group needs review; coarse count alone does not prove loss. |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
@@ -2173,20 +2719,85 @@ machine-readable disposition registry for sources that participate in fault clas
 | Source | Producer owner | Policy / proof owner |
 |---|---|---|
 | `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges |
+| `recovery_debt_attention` | `src/fleet/health-poller.ts` | Informational, non-paging operator debt lifecycle, emitted under the same instance silence and 15-minute throttle as other poller alerts; clear only from a fresh readable `open=false` sample and never restart or heal from this source alone. |
 | `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
 | `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
-| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair |
-| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals, and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
+| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
+| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals other than operator `/stop` cancellations (`operator_cancelled`), and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
 | `reply-guarantee-observer` | `deploy/scripts/reply-guarantee-observer.py` | Probe authority, target-user/GUI context, canonical data root, schema compatibility, and read-only SQLite access |
 | `release-drift` | `scripts/live-release-drift-alert.ts` through `scripts/live-release-observers.ts` | Release manifest, artifact tree, and running service provenance |
 | `release-currency` | `scripts/live-release-currency-alert.ts` through `scripts/live-release-observers.ts` | Exact deployed manifest commit and explicitly configured remote ref; differing commits are advisory and never alter runtime health |
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
 | `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |
+
+### Who owns a stale `processing` inbound
+
+`scripts/inbound-ownership-snapshot.ts` (#3560) answers, per row, who owns every inbound that has sat
+in `processing` longer than `--min-age-minutes` (default 15, the observer's stale threshold). It opens
+the database read-only (`query_only`, never `immutable=1`), writes nothing, and prints one
+content-free JSON line: sequences, states, epochs, ages, turn ids and 12-hex chat scope hashes only.
+Capture the provider-execution gate first and pass it in, because the database alone cannot show a
+turn that is executing in the process:
+
+```bash
+HEALTH_JSON=$(mktemp)
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health > "$HEALTH_JSON"
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$HEALTH_JSON"
+# shared/single instances serialize every chat on one queue:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --queue-scope global --provider-execution-json "$HEALTH_JSON"
+# a bare providerExecution object carries no generated_at; date it explicitly:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$PE_JSON" \
+  --provider-captured-at 2026-09-28T07:20:00Z
+```
+
+The full `/health` body carries its own `generated_at`, which dates the capture. Use
+`--provider-captured-at <ISO-8601 instant with zone>` only for a capture without one, such as a
+bare `runtime.agent.providerExecution` object.
+
+Each row is classified:
+
+| Class | Meaning |
+|---|---|
+| `deferred` | A non-terminal `deferred_turn_obligations` row owns it (an exhausted one is `no_owner`). |
+| `queued` | A pending recovery job, the chat's persisted FIFO head (`queued_behind_fifo_head`), another outstanding recovery job for the scope, or the oldest provider-lane waiter owns it. A row queued behind an unowned head reports `healthy: false`. |
+| `executing` | A live recovery claim, or the provider lane is held by a `turn` whose scope hash equals this chat's (FIFO head only; a `probe` hold never counts), according to a fresh capture that no completed checkpoint contradicts. |
+| `no_owner` | Nothing attributable, including a terminal record or finished recovery job left beside an open row. Never healthy. |
+
+Exit `0` means every reported row has a healthy owner, `3` means at least one does not, and `2` is a
+usage, capture or open error. Record the output as evidence. Do not replay, reset a checkpoint or
+restart on its basis alone.
+
+Evidence limits. Read every classification against these:
+
+- **Persisted FIFO proxy, not the TurnQueue.** `queue` is derived from open inbounds per conversation
+  (or globally with `--queue-scope global`) in seq order. The runtime's in-process per-chat TurnQueue
+  (depth, position, active turn) is not readable from outside the process and is not reported.
+- **No lease generation.** The provider gate does not publish its lease generation, so a capture cannot
+  say which hold it saw. Only recovery jobs, terminal records and the checkpoint's completed identity
+  carry a turn id and generation.
+- **`active_turn_id` is dead telemetry.** `checkpoint.activeTurnId` is reported as stored, but current
+  writers only ever store null, so it never names an owner.
+- **The capture is a separate observation.** The health capture and the database read are not
+  simultaneous. The capture time comes from, in order: the body's own top-level `generated_at`;
+  else `--provider-captured-at`; else it is unknown, which counts as stale. `providerCaptureTimeSource`
+  reports which (`payload_generated_at`, `operator_flag`, `unknown`). The file's modification time is
+  never used, because a copied, touched or re-saved file would make an old body look fresh. A
+  `generated_at` that is present but unparseable is unknown; the flag does not override it. If the
+  capture is older than 60 seconds (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the
+  future, or undated, every row reads `providerExecution.evidence: stale` and it attributes nothing
+  (`provider_capture_stale`). Re-capture immediately before running the script.
+- **Unmatched scope reads unowned.** A turn held for a different scope hash (another chat, or the same
+  chat under its `@lid`/`@s.whatsapp.net` alias) is `active_other_scope`: the row is `no_owner`, never
+  `executing`.
+- **Contradiction reads unowned.** If the capture shows a turn for this chat but the chat's
+  `session_checkpoints.completed_inbound_seq` is at or past the row, the held turn cannot be this row's:
+  the row is `no_owner` with `provider_active_contradicts_completed_checkpoint`, never healthy. A
+  terminal record on the row itself takes precedence over any capture (`terminal_record_inbound_open`).
 
 Machine-local probes not present in this repository are an ownership gap, not an implicit
 WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner
@@ -2250,7 +2861,7 @@ Key log patterns to monitor:
 
 ## AskUserQuestion Poll Bridge
 
-When an agent subprocess calls `AskUserQuestion` in per-chat DM mode, the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with a 2-hour nudge timer and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
+When an agent subprocess calls `AskUserQuestion` in a per-chat session (DM or group), the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with soft/hard expiry timers and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
 
 ### Pending poll state
 
@@ -2264,13 +2875,13 @@ If a user reports they voted but the agent didn't respond:
 2. If `pollVoteFailed` fired, the runtime should have sent a text fallback — check for `"poll vote failure switched AskUserQuestion to text fallback"` in logs
 3. If the service restarted between poll send and vote, the pending state is rehydrated from the `pending_polls` table at startup, so the poll should still be live (unless its hard close time elapsed during downtime, in which case it is pruned and the chat is notified)
 
-### Nudge timer
+### Expiry
 
-Pending polls send a gentle reminder ("Still waiting on your answer") every 2 hours. There is no hard expiry — polls persist until answered or the session is cleaned up. The nudge timer is `unref`'d and does not block shutdown.
+There is no reminder nudge. Soft expiry fires at the poll's `timeoutMs` (default 1 h via `pollResolution.defaultTimeoutMs`): an unanswered poll switches to a numbered text fallback, while `majority-after-timeout` and `admin-wins` resolve from the recorded votes. Hard expiry fires at `timeoutMs * 2`: the runtime sends "This decision has expired — please re-trigger when ready." for unanswered questions and clears the poll. Both timers are `unref`'d and do not block shutdown.
 
-### Group chats
+### Groups and shared sessions
 
-AskUserQuestion poll injection is disabled in group chats. The runtime falls through to normal provider handling (agent asks as text). This is by design — AskUserQuestion is a single-answer turn-unblock protocol incompatible with multi-voter group semantics.
+Per-chat group sessions use the poll bridge too; the instance-level `pollResolution.defaultStrategy` (default `first-vote-wins`) picks the group resolution strategy. Shared/global sessions fall through to normal provider handling (agent asks as text). See [runbooks/agent-decision-polls.md](runbooks/agent-decision-polls.md) for the full contract and trigger matrix.
 
 ---
 

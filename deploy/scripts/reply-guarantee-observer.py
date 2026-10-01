@@ -37,6 +37,7 @@ REQUIRED_COLUMNS = {
     "turn_terminal_records": {
         "id",
         "inbound_seq",
+        "attempt_failure_class",
         "inbound_disposition",
         "delivery_kind",
         "delivery_op_id",
@@ -238,6 +239,7 @@ def observe_database(
                   AND t.inbound_disposition = 'failed_terminal'
                   AND t.reply_guarantee_disarmed = 0
                   AND t.delivery_kind <> 'echoed'
+                  AND COALESCE(t.attempt_failure_class, '') <> 'operator_cancelled'
                 """,
                 (),
             ),
@@ -251,6 +253,7 @@ def observe_database(
                   AND t.inbound_disposition = 'failed_terminal'
                   AND t.reply_guarantee_disarmed = 0
                   AND t.delivery_kind <> 'echoed'
+                  AND COALESCE(t.attempt_failure_class, '') <> 'operator_cancelled'
                   AND EXISTS (
                     SELECT 1
                     FROM outbound_ops o

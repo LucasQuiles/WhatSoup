@@ -1550,14 +1550,20 @@ export class AuthBondGuard {
     original: AuthBondSnapshot,
     fresh: AuthBondSnapshot,
   ): boolean {
-    return captureError === 'copied auth tree hash mismatch'
-      && original.status === 'present'
+    const sameIdentityTreeChange = original.status === 'present'
       && original.treeHash !== null
       && original.meHash !== null
       && fresh.status === 'present'
       && fresh.treeHash !== null
+      && fresh.meHash !== null
       && fresh.meHash === original.meHash
       && fresh.treeHash !== original.treeHash;
+    if (!sameIdentityTreeChange) return false;
+    if (captureError === 'copied auth tree hash mismatch') return true;
+    return captureError === 'copied creds.json hash mismatch'
+      && original.creds.sha256 !== null
+      && fresh.creds.sha256 !== null
+      && fresh.creds.sha256 !== original.creds.sha256;
   }
 
   private deferValidSameIdentityTreeChangeCapture(

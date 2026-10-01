@@ -1,5 +1,12 @@
 import { isStrictIsoUtcTimestamp } from './time-utils.ts';
 import { requireEnum, requireRecord, requireString } from '../lib/type-guards.ts';
+import { AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION } from '../lib/disconnect-classification.ts';
+
+const UNCONFIRMED_401_CLASSES = [
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION.ambiguous_401_reconnecting,
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION.ambiguous_401_parked,
+  AUTH_401_FAILURE_CLASS_BY_CLASSIFICATION.uninspected_401_conservative_exit,
+];
 
 const artifactName = 'auth-loss-mode-bucket-producer-dry-run';
 const proofName = 'auth-loss-mode-bucket-artifact-contract-proof';
@@ -47,6 +54,7 @@ const authFailureClasses = new Set([
   'none',
   'pairing_required',
   'serverside_logout_irreversible',
+  ...UNCONFIRMED_401_CLASSES,
   'local_corruption_restorable',
   'local_corruption_unrestorable',
   'auth_bond_at_risk',
@@ -56,6 +64,7 @@ const authFailureClasses = new Set([
 const disconnectClasses = new Set([
   'none',
   'serverside_logout_irreversible',
+  ...UNCONFIRMED_401_CLASSES,
   'duplicate_session_replaced',
   'multidevice_mismatch',
   'restart_required',

@@ -1190,4 +1190,6 @@ def test_terminal_auth_failure_class_inventory_matches_dispatcher_and_health_che
     assert mod.TERMINAL_AUTH_FAILURE_CLASSES == {
         "pairing_required",
         "serverside_logout_irreversible",
+        "auth_401_ambiguous_parked",
+        "auth_401_uninspected_exit",
     }

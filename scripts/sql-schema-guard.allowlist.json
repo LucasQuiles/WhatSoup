@@ -1,0 +1,41 @@
+{
+  "entries": [
+    {
+      "kind": "separate-database",
+      "path": "src/fleet/incidents/",
+      "reason": "fleet incidents store opens its own database file with its own migrations (src/fleet/incidents/schema.ts)"
+    },
+    {
+      "kind": "separate-database",
+      "path": "src/core/observability/lifecycle-event-store.ts",
+      "reason": "lifecycle event store opens its own database file (options.path), not the bot database"
+    },
+    {
+      "kind": "schema-source",
+      "path": "src/core/database-migration*",
+      "reason": "numbered migrations run against historical table shapes; the guard executes all of them to build the schema"
+    },
+    {
+      "kind": "schema-source",
+      "path": "src/core/substrate/schema.ts",
+      "reason": "substrate migration DDL; executed through the migration registry when the schema is built"
+    },
+    {
+      "kind": "schema-host",
+      "path": "src/core/database.ts",
+      "reason": "holds the inline migrations (already executed) next to runtime queries; its DDL is not replayed, its other statements are checked"
+    },
+    {
+      "kind": "literal",
+      "path": "src/core/database.ts",
+      "match": "outbound_sends_v26",
+      "reason": "migration 26 table rebuild; runs against the pre-26 outbound_sends shape and the intermediate table it creates"
+    },
+    {
+      "kind": "literal",
+      "path": "src/core/database.ts",
+      "match": "FROM old.",
+      "reason": "warm-start import reads the legacy database ATTACHed as old, a separate database"
+    }
+  ]
+}

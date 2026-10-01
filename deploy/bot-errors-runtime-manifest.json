@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "057dd1e02e9cb0ed3ee667cc2c1fbcfbdbf4441022ecf21ed972a88162dd1677",
+      "sha256": "8047690399ae3d1761f6916be193414d44168ce8819de21a81e49c6a313eda75",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -144,7 +144,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-gui-session-monitor.py",
-      "sha256": "128be8911202f03acb7806bfff95072e1134d19cb2d497662a7f70afda2065b5",
+      "sha256": "9b94b2e5056afc9d8a1a81b9b6e4cb865c5d65e42409beb6945ad4b686ce3be8",
       "mustContain": [
         "classify_gui_session",
         "gui_targets_from_fleet",
@@ -164,7 +164,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "c8e9d83e4b6c19c5b3171651075c491279860f247c1d78dc8ab5d8c96536095f",
+      "sha256": "01d650a03f22300f80c1f5c2fefcace989c47864f960c4a9f2b60f283e8f1ad0",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -279,12 +279,13 @@
         "path_starts_with_entries",
         "WHATSOUP_PATH_PREPEND",
         "provider_runtime_path_prepend_mismatch",
-        "provider_runtime_path_prepend_inconsistent"
+        "provider_runtime_path_prepend_inconsistent",
+        "health_recovery_debt_status_contradiction"
       ]
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "fa46d8b0649b579e0f20c0a1fc9aeec38f0553d94bf2752349b9e7e800cdaad8",
+      "sha256": "1ee565f07efbe45f405e95dbe125b548bb164fa305133f87a3ffd362d16198f7",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -300,7 +301,8 @@
         "health_body_not_disclosed",
         "probe_unauthorized",
         "instance_health_token",
-        "PUBLIC_HEALTH_SCHEMA_PREFIX"
+        "PUBLIC_HEALTH_SCHEMA_PREFIX",
+        "recovery_debt_issue"
       ]
     },
     {
@@ -360,7 +362,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-sentinel.py",
-      "sha256": "dd3666fcc979685aacc926f5cd4e62a38268fe0fc8665a37cbcd927ccb853c52",
+      "sha256": "10f37562cc0d87ab6164558e588f43dea706a429537b8d8d0f4de0d23aaaf854",
       "mustContain": [
         "DEFAULT_HEARTBEAT_MAX_AGE_SECONDS",
         "DEFAULT_HYSTERESIS_CYCLES",
@@ -416,7 +418,7 @@
     },
     {
       "path": "deploy/scripts/fleet-ground-truth.py",
-      "sha256": "95754b92081bed28f73b2ab3411e2343e94d396b73cf7e3410fef09c5f0d3035",
+      "sha256": "6c0ea2252c1de4505c61d8a7fd26de80f78820bbaad2515aefaabfb5cd253c42",
       "mustContain": [
         "needs_physical_repair",
         "restart_will_not_fix",
@@ -531,7 +533,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_roster.py",
-      "sha256": "d5b0e418a46320bff46e9948b00b58a917922930e0649155db15bb1a6fea335c",
+      "sha256": "882b41b4e1eb2cccea2717f1a054651d9c705d249f9ddd791578094b3e668431",
       "mustContain": [
         "roster_digest",
         "roster_inventory",
@@ -553,14 +555,15 @@
     },
     {
       "path": "deploy/scripts/lib/classify_health.py",
-      "sha256": "0070609866af404964e2693fe6553ea3e5d1afccd048422704fd2893b80b8dcd",
+      "sha256": "856f8dacc62673133db4fad6f79ee1409182c59d71f75fc13806f7a8ce01233c",
       "mustContain": [
-        "def classify(d: object) -> str:"
+        "def classify(d: object) -> str:",
+        "def recovery_debt_issue(d: object) -> Optional[str]:"
       ]
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "a761280f46c9067b63d635993ae4f93ce10c7641e79c340fc4d1a372e826e5d8",
+      "sha256": "23d82d31afdc80730033e2cc3bf9aac409c9f7b01f8ae543fe8a3c2b6d7acc9d",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -622,8 +625,18 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/fleet_config.py",
+      "sha256": "30a67aa96ea4c47c2d262eccbffedd4b81bfecaa51ead0e9a631b3ec3c58136e",
+      "mustContain": [
+        "resolve_health_profile",
+        "resolve_roster",
+        "FleetConfigError",
+        "resolver order"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/health_reader.py",
-      "sha256": "caeecd4e182a1d8fccca0e62fae08ea4e3fdf7718822c489e523c4450cbb81aa",
+      "sha256": "5f51bcb3cfa473d9a9058dc835502125e55385e9254e1ebe7f3f267f66789871",
       "mustContain": [
         "def classify_projection(payload: Any, *, token_sent: bool) -> str:",
         "def health_body_is_disclosed(payload: Any) -> bool:",
@@ -683,7 +696,7 @@
     },
     {
       "path": "deploy/scripts/lib/state_files.py",
-      "sha256": "30d6857e8344b3099ad0f01a9c91fde61600dba4811494ab5d099c99846bac7d",
+      "sha256": "f41967828a69dbbfa370282b660a3077ef5fd1d3c916aed58f7da766d239b2fc",
       "mustContain": [
         "Single source of truth for bot-errors state filenames",
         "REPLY_GUARANTEE_OBSERVER_STATE"
@@ -750,7 +763,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "679c3c23e5ac3f3975b9639512e440a0f00f8c5c19de7b2b13d3acd9b3d5cbda",
+      "sha256": "cdd222ff548d865352c46ea9cef5039e24f40c3609100ece385d8ff48e56f0ca",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -803,7 +816,7 @@
     },
     {
       "path": "src/lib/private-fs.ts",
-      "sha256": "201a9966b342f61a62a586e6954e0ef78a1a67f336954eb8223fe1a61a3f11fd",
+      "sha256": "a64179e47e9199038a086d4ce92b3d578721c04551eed2aaaea34b45428b520e",
       "mustContain": [
         "forceEnsurePrivateDirectorySync",
         "fsyncDirectory"
@@ -837,7 +850,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "5a3fb2d24c27166e66984c099460e5f0121dbed467dd158b1522ff55cb0abe73",
+      "sha256": "b0c0d2ce6068887cbbc4c09e4b90ee6e540648c21599ec6fadb46bc5aab9d21e",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -855,6 +868,13 @@
         "\"runtime_agent_chronology_delayed_dispatches\"",
         "\"runtime_agent_chronology_recovery_replay_dispatches\"",
         "\"runtime_agent_chronology_max_queue_age_seconds\"",
+        "\"runtime_agent_fallback_turns_served\"",
+        "\"runtime_agent_fallback_turns_empty\"",
+        "\"runtime_agent_fallback_activations\"",
+        "\"runtime_agent_fallback_reverts\"",
+        "\"runtime_agent_fallback_replays\"",
+        "\"runtime_agent_fallback_probe_attempts\"",
+        "\"runtime_agent_fallback_failed_entry_count\"",
         "autoCompactActiveBackoffScopes",
         "agent_respawn_failed_clear_pending"
       ]

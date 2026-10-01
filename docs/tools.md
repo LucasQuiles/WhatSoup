@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 168 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 169 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 168 documented tools, 165 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 169 documented tools, 166 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -20,7 +20,7 @@ Complete reference for all 168 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 167 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
+> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 169 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
 
 ## Scope and Replay Policy Glossary
 
@@ -50,7 +50,7 @@ Complete reference for all 168 MCP tools exposed by WhatSoup. Tools are grouped 
   receive the non-disclosing `Unknown tool: <name>` reply — listing is not the
   gate, but call() must not become an existence oracle where listing already
   conceals. Sensitive tools are still listed in `tools/list` for global sessions
-  — listing is not the gate. (The 15 admin-gated substrate tools carry this flag.)
+  — listing is not the gate. (The 16 admin-gated substrate tools carry this flag.)
 
 ---
 
@@ -77,11 +77,11 @@ Complete reference for all 168 MCP tools exposed by WhatSoup. Tools are grouped 
 | [status.ts](#statusts) | 2 |
 | [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 3 |
-| [substrate.ts](#substratets) | 22 |
+| [substrate.ts](#substratets) | 23 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **168** |
+| **Total** | **169** |
 
-> The total above (`168`) reflects the full canonical surface — `167` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`169`) reflects the full canonical surface — `168` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
 
 ---
 
@@ -714,7 +714,7 @@ Pause a trigger. Admin only.
 
 ### extend_trigger
 
-Push a trigger terminal timestamp forward, clamped to policy max. A paused trigger is also reactivated and becomes due immediately. A paused trigger with no deadline resumes with no deadline, and `until` is ignored for it. Admin only.
+Push a trigger terminal timestamp forward, clamped to policy max. Changes only the deadline: a paused trigger stays paused and is not made due. Use `resume_trigger` to reactivate it. Admin only.
 
 | | |
 |---|---|
@@ -727,6 +727,29 @@ Push a trigger terminal timestamp forward, clamped to policy max. A paused trigg
 |------|------|----------|-------------|
 | id | number | required | Trigger id. |
 | until | number | required | New requested terminal timestamp. |
+
+**Returns:** `{ ok: true }` for an active trigger. For a paused trigger: `{ ok: true, status: "paused", terminal_at, hint }`, where `hint` names `resume_trigger`.
+
+---
+
+### resume_trigger
+
+Reactivate a paused trigger. The stored spec is re-validated with the creation rules: `poll.shell` is refused, and `poll.url` needs `advanced.enableUrlWatch`. By default the trigger is scheduled at its next regular occurrence, so a daily cron job keeps its slot. `fire_now` makes it due immediately. `terminal_at` is kept unless `until` is given, and `until` is clamped to policy max. A deadline that has already passed is refused unless `until` is given. Writes a `trigger_resumed` bead event. Resuming a trigger that was retired for a forbidden report chat clears the `trigger_forbidden_target` alert. An already-active trigger is left unchanged. Expired and cancelled triggers are refused. Admin only.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Replay Policy** | `unsafe` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| id | number | required | Trigger id. |
+| fire_now | boolean | optional | Make the trigger due immediately instead of at its next regular occurrence. |
+| until | number | optional | New requested terminal timestamp, clamped to policy max. Omitted keeps the current deadline. |
+
+**Returns:** `{ ok: true, resumed, status: "active", next_fire_at, terminal_at, paused_reason }`. `resumed` is `false` when the trigger was already active. `paused_reason` is the reason recorded by the latest pause, such as `forbidden_target`, or `null` for a manual pause.
 
 ---
 

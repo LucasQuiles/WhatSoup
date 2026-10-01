@@ -97,6 +97,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'hooks-installed': { class: 'probe-refuse', reason: 'resolves cwd git config core.hooksPath and the checked-out hook objects; refuses ci.hooks.evidence-unavailable (exit 2) when neither a repo nor hooks resolve', probe: { via: 'cwd' } },
   'transport-patterns': { class: 'probe-refuse', reason: 'walks glob roots; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
   'platform-patterns': { class: 'probe-refuse', reason: 'scans cwd tree for platform-specific patterns; takes --root; floor added this session — refuses "matched 0 files"', probe: { via: 'flag', flag: '--root' } },
+  'sql-schema': { class: 'probe-refuse', reason: 'walks cwd/src (or --root) for SQL literals (#3610); refuses "examined 0 source file(s)" and a scan that found 0 SQL literals outside the allow-list', probe: { via: 'cwd' } },
   'png-estate': { class: 'probe-refuse', reason: 'tracked-PNG census ratchet over cwd git ls-files (#2219); refuses "examined 0 tracked files" and a non-repo cwd (git failure -> INCONCLUSIVE exit 2)', probe: { via: 'cwd' } },
 
   // ---- probe-nonzero: cwd-relative fixed-artifact guards that fail closed on an empty tree ----

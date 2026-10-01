@@ -141,6 +141,48 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+export interface ContinuityReceiptFingerprints {
+  receiptFingerprint: string;
+  destinationFingerprint: string;
+  manifestFingerprint: string;
+  evidenceFingerprint: string;
+}
+
+/**
+ * The one formula binding a manifest receipt to its durable continuity-gap
+ * identity. The recorder writes these fingerprints; the closure command
+ * recomputes them from the original manifest, so both must share this code.
+ */
+export function continuityReceiptFingerprints(
+  manifest: ContinuityManifest,
+  receipt: ContinuityManifestReceipt,
+): ContinuityReceiptFingerprints {
+  return {
+    receiptFingerprint: sha256(JSON.stringify([
+      manifest.source,
+      receipt.messageId,
+      receipt.sentAt,
+      receipt.senderFingerprint,
+      receipt.contentHash,
+      receipt.contentType,
+    ])),
+    destinationFingerprint: continuityDestinationFingerprint(
+      manifest.destination.conversationKey,
+      manifest.destination.channelFingerprint,
+    ),
+    manifestFingerprint: sha256(manifest.manifestId),
+    evidenceFingerprint: sha256(manifest.evidenceRef),
+  };
+}
+
+/** Destination identity as recorded: conversation key plus SHA-256 of the channel JID. */
+export function continuityDestinationFingerprint(
+  conversationKey: string,
+  channelFingerprint: string,
+): string {
+  return sha256(JSON.stringify([conversationKey, channelFingerprint]));
+}
+
 export function parseContinuityManifest(value: unknown): ContinuityManifest {
   const root = plainRecord(value, 'Continuity manifest');
   exactKeys(root, MANIFEST_KEYS, 'Continuity manifest');

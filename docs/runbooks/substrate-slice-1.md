@@ -60,7 +60,9 @@ UPDATE beads
  WHERE status='proposed';
 ```
 
-**Extend an active watch to the policy cap:** use the MCP tool `extend_trigger` with `until = now + 72*3600`. Handler clamps.
+**Extend an active watch to the policy cap:** use the MCP tool `extend_trigger` with `until = now + 72*3600`. Handler clamps. `extend_trigger` changes only the deadline; a paused trigger stays paused.
+
+**Resume a paused trigger:** use the MCP tool `resume_trigger` with the trigger `id`. It schedules the next regular occurrence; pass `fire_now: true` to make it due immediately, and `until` to set a new deadline in the same call. A trigger whose deadline has passed needs `until`.
 
 **List due triggers right now (debug):**
 ```sql

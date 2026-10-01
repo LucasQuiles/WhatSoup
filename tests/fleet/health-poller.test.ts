@@ -27,6 +27,18 @@ const silenceManager = vi.hoisted(() => ({
 
 type AlertMockCall = [string, string, ...unknown[]];
 
+function expectNoAlertSource(name: string, source: string): void {
+  expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).some(
+    ([callName, callSource]) => callName === name && callSource === source,
+  )).toBe(false);
+}
+
+function expectNoClearAlertSource(name: string, source: string): void {
+  expect((alertFns.clearAlertSource.mock.calls as unknown as AlertMockCall[]).some(
+    ([callName, callSource]) => callName === name && callSource === source,
+  )).toBe(false);
+}
+
 function durableAlertResult(): AlertEmissionResult {
   return { ok: true, channel: 'outbox', status: 'durably_queued' };
 }
@@ -99,6 +111,38 @@ function makeOnlineHealth(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+function makeRecoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: {
+      readable: true,
+      blocking_outstanding: 0,
+      retained_terminal: 0,
+      open_catchups: 1,
+      corroborated_retained: 0,
+    },
+    completed_delivery_identity: {
+      readable: true,
+      blocking: 0,
+      retained: 0,
+      next_action: null,
+    },
+    delivery: {
+      readable: true,
+      blocking_ambiguous: 0,
+      uncorroborated_ambiguous: 0,
+      corroborated_retained: 0,
+      oldest_uncorroborated_at: null,
+    },
+    ...overrides,
+  };
+}
+
 function makeOperationalFallbackHealth(overrides: {
   degradationCauses?: readonly string[];
   pressureActive?: boolean;
@@ -111,9 +155,17 @@ function makeOperationalFallbackHealth(overrides: {
   recoveryOutstanding?: number;
   recoveryBlockedUnsafe?: number;
   recoveryQuarantinedDelivery?: number;
+  // #3694: omitted from the body unless set, so every other case keeps its shape.
+  recoveryBlockingReasons?: readonly unknown[];
+  recoveryCorruptLinks?: number;
+  recoveryEchoConflicts?: number;
+  recoveryOrphanTransfers?: number;
+  recoveryDebt?: Record<string, unknown>;
+  // unknown, not boolean: #3694 feeds non-boolean body values through these.
+  modelUsable?: unknown;
   controlPeerConfigured?: boolean;
   controlPeerSuppressedUnavailableAlerts?: number;
-  whatsappConnected?: boolean;
+  whatsappConnected?: unknown;
   connectionState?: string;
   fallbackChainExhausted?: boolean;
   failedEntryCount?: number;
@@ -139,7 +191,9 @@ function makeOperationalFallbackHealth(overrides: {
     turn_capability: {
       last_successful_turn_at: Date.now() - 1_000,
       last_turn_error_class: overrides.lastTurnErrorClass ?? null,
+      ...(overrides.modelUsable !== undefined ? { model_usable: overrides.modelUsable } : {}),
     },
+    ...(overrides.recoveryDebt !== undefined ? { recovery_debt: overrides.recoveryDebt } : {}),
     runtime: {
       agent: {
         providerExecution: {
@@ -154,6 +208,18 @@ function makeOperationalFallbackHealth(overrides: {
         turnRecoveryOutstanding: overrides.recoveryOutstanding ?? 0,
         turnRecoveryBlockedUnsafe: overrides.recoveryBlockedUnsafe ?? 0,
         turnRecoveryQuarantinedDelivery: overrides.recoveryQuarantinedDelivery ?? 0,
+        ...(overrides.recoveryBlockingReasons !== undefined
+          ? { recoveryBlockingReasons: overrides.recoveryBlockingReasons }
+          : {}),
+        ...(overrides.recoveryCorruptLinks !== undefined
+          ? { turnRecoveryCorruptLinks: overrides.recoveryCorruptLinks }
+          : {}),
+        ...(overrides.recoveryEchoConflicts !== undefined
+          ? { turnRecoveryEchoConflicts: overrides.recoveryEchoConflicts }
+          : {}),
+        ...(overrides.recoveryOrphanTransfers !== undefined
+          ? { turnRecoveryOrphanTransfers: overrides.recoveryOrphanTransfers }
+          : {}),
       },
     },
     control_peer: {
@@ -501,6 +567,506 @@ describe('HealthPoller', () => {
     poller.stop();
   });
 
+  it('observes retained recovery debt without changing online service status', async () => {
+    let debt = makeRecoveryDebt();
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const statusChange = vi.fn();
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.on('statusChange', statusChange);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'online',
+      recoveryDebt: {
+        open: true,
+        serviceBlocking: false,
+        attention: 'routine',
+        reasons: ['historical_turn_catchup'],
+        gaugeTotal: 1,
+      },
+    });
+    expectNoAlertSource('remote-1', 'health_body_degraded');
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
+    expect(statusChange).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
+
+    debt = makeRecoveryDebt({
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 2,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.gaugeTotal).toBe(2);
+    // A fingerprint change inside the 15-minute alert throttle is held back,
+    // then re-notified once the throttle window has passed.
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 15 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const debtAlerts = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    );
+    expect(debtAlerts).toHaveLength(2);
+    expect(debtAlerts[1]![3]).toContain('aggregate_gauge_total=2');
+    expect(debtAlerts[1]![6]).toEqual({ renotify: true });
+
+    debt = makeRecoveryDebt({
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 3,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.gaugeTotal).toBe(3);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(2);
+
+    debt = makeRecoveryDebt({
+      open: false,
+      attention: 'none',
+      reasons: [],
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'online',
+      recoveryDebt: { open: false, gaugeTotal: 0 },
+    });
+    expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+      'remote-1',
+      'recovery_debt_attention',
+      expect.stringContaining('recovery_debt_open=false'),
+    );
+    expect(statusChange).not.toHaveBeenCalled();
+    poller.stop();
+  });
+
+  it('degrades malformed recovery debt and cannot clear the prior debt alert', async () => {
+    let health = makeOnlineHealth({ recovery_debt: makeRecoveryDebt() });
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(health),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    alertFns.clearAlertSource.mockClear();
+
+    health = makeOnlineHealth({
+      recovery_debt: makeRecoveryDebt({
+        open: false,
+        attention: 'none',
+        reasons: [],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 0,
+          retained_terminal: -1,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'degraded',
+      statusReason: 'health_body_type_error',
+      recoveryDebt: { open: true, gaugeTotal: 1 },
+    });
+    expectNoClearAlertSource('remote-1', 'recovery_debt_attention');
+    poller.stop();
+  });
+
+  it('preserves an open recovery-debt marker on restart without re-emitting or clearing it', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const stateDir = mkdtempSync(join(tmpdir(), 'recovery-debt-authority-'));
+    const originalStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = stateDir;
+    writeFileSync(join(stateDir, 'recovery-authority.json'), JSON.stringify({
+      'remote-1:recovery_debt_attention': true,
+    }));
+
+    try {
+      alertFns.emitAlert.mockReturnValue(failedAlertResult());
+      let debt = makeRecoveryDebt();
+      let healthStatus = 'healthy';
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOnlineHealth({
+          status: healthStatus,
+          recovery_debt: debt,
+        })),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(
+        () => instances,
+        'self',
+        vi.fn().mockReturnValue({}),
+        1_000,
+      );
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(poller.getStatus('remote-1')).toMatchObject({
+        status: 'online',
+        activeAlertSources: ['recovery_debt_attention'],
+        recoveryDebt: { open: true },
+      });
+      expectNoAlertSource('remote-1', 'recovery_debt_attention');
+      expectNoClearAlertSource('remote-1', 'recovery_debt_attention');
+      const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
+      expect(loadRecoveryMarkers().has('remote-1:recovery_debt_attention')).toBe(true);
+
+      alertFns.emitAlert.mockReturnValue(durableAlertResult());
+      debt = makeRecoveryDebt({
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 0,
+          retained_terminal: 0,
+          open_catchups: 2,
+          corroborated_retained: 0,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(1);
+
+      debt = makeRecoveryDebt({
+        reasons: ['turn_recovery_terminal'],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 0,
+          retained_terminal: 2,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      });
+      // Each later change is observed past the 15-minute alert throttle.
+      vi.setSystemTime(Date.now() + 15 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(2);
+
+      healthStatus = 'degraded';
+      debt = makeRecoveryDebt({
+        service_blocking: true,
+        attention: 'urgent',
+        reasons: ['turn_recovery_actionable'],
+        turn_recovery: {
+          readable: true,
+          blocking_outstanding: 2,
+          retained_terminal: 0,
+          open_catchups: 0,
+          corroborated_retained: 0,
+        },
+      });
+      vi.setSystemTime(Date.now() + 15 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(3);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+        ([, source]) => source === 'recovery_debt_attention',
+      )).toHaveLength(3);
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = originalStateDir;
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the dedicated recovery debt source non-paging when debt is service-blocking', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({
+        status: 'degraded',
+        degradation_causes: ['turn_recovery_actionable'],
+        recovery_debt: makeRecoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: {
+            readable: true,
+            blocking_outstanding: 1,
+            retained_terminal: 0,
+            open_catchups: 0,
+            corroborated_retained: 0,
+          },
+        }),
+      })),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'recovery_debt_attention',
+      expect.any(String),
+      expect.stringContaining('attention=urgent'),
+      'info',
+      undefined,
+    );
+    poller.stop();
+  });
+
+  it('suppresses recovery debt attention on a silenced instance', async () => {
+    silenceManager.isInstanceSilenced.mockReturnValue(true);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: makeRecoveryDebt() })),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')?.recoveryDebt?.open).toBe(true);
+    expectNoAlertSource('remote-1', 'recovery_debt_attention');
+    poller.stop();
+  });
+
+  it('records the alert throttle for recovery debt attention and rate-limits fingerprint churn', async () => {
+    let debt = makeRecoveryDebt();
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(alertThrottleStore.recordAlertThrottle).toHaveBeenCalledWith(
+      expect.stringMatching(/:remote-1:recovery_debt_attention$/),
+      expect.any(String),
+    );
+
+    debt = makeRecoveryDebt({
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 2,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).filter(
+      ([, source]) => source === 'recovery_debt_attention',
+    )).toHaveLength(1);
+    poller.stop();
+  });
+
+  it('clears closed recovery debt once, not on every later poll', async () => {
+    let debt = makeRecoveryDebt();
+    mockFetch.mockImplementation(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({ recovery_debt: debt })),
+    }));
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    debt = makeRecoveryDebt({
+      open: false,
+      attention: 'none',
+      reasons: [],
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect((alertFns.clearAlertSource.mock.calls as unknown as AlertMockCall[]).filter(
+      ([callName, callSource]) => callName === 'remote-1' && callSource === 'recovery_debt_attention',
+    )).toHaveLength(1);
+    poller.stop();
+  });
+
+  it('clears a recovery debt alert left by a prior process once debt has closed on a degraded instance', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const stateDir = mkdtempSync(join(tmpdir(), 'recovery-debt-restart-clear-'));
+    const originalStateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    process.env['BOT_ERRORS_STATE_DIR'] = stateDir;
+    writeFileSync(join(stateDir, 'recovery-authority.json'), JSON.stringify({
+      'remote-1:recovery_debt_attention': true,
+    }));
+
+    try {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOnlineHealth({
+          status: 'degraded',
+          degradation_causes: ['agent_recent_crashes'],
+          recovery_debt: makeRecoveryDebt({
+            open: false,
+            attention: 'none',
+            reasons: [],
+            turn_recovery: {
+              readable: true,
+              blocking_outstanding: 0,
+              retained_terminal: 0,
+              open_catchups: 0,
+              corroborated_retained: 0,
+            },
+          }),
+        })),
+      });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(poller.getStatus('remote-1')?.status).toBe('degraded');
+      expect((alertFns.clearAlertSource.mock.calls as unknown as AlertMockCall[]).filter(
+        ([callName, callSource]) => callName === 'remote-1' && callSource === 'recovery_debt_attention',
+      )).toHaveLength(1);
+      const { loadRecoveryMarkers } = await import('../../src/lib/recovery-authority-store.ts');
+      expect(loadRecoveryMarkers().has('remote-1:recovery_debt_attention')).toBe(false);
+      poller.stop();
+    } finally {
+      process.env['BOT_ERRORS_STATE_DIR'] = originalStateDir;
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['self', 'remote-1'])(
+    'clears a recovered health alert on the %s online path',
+    async (name) => {
+      const degradedBody = { status: 'degraded', reason: 'runtime_agent_at_risk' };
+      let body: Record<string, unknown> = degradedBody;
+      const getSelfHealth = vi.fn(() => body);
+      mockFetch.mockImplementation(() => Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(body),
+      }));
+      const instances = makeInstances(
+        [name, makeInstance({ name, healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(() => instances, 'self', getSelfHealth, 5_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      // The self path raises instance_degraded and the remote path raises
+      // health_body_degraded; both must be cleared once the body recovers.
+      const raised = [...(poller.getStatus(name)?.activeAlertSources ?? [])];
+      expect(raised.length).toBeGreaterThan(0);
+
+      body = makeOnlineHealth();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(poller.getStatus(name)?.status).toBe('online');
+      for (const source of raised) {
+        expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
+          name,
+          source,
+          expect.any(String),
+          undefined,
+        );
+      }
+      expect(poller.getStatus(name)?.activeAlertSources).toEqual([]);
+      poller.stop();
+    },
+  );
+
+  it('counts each continuity gap once in the recovery debt gauge total', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(makeOnlineHealth({
+        recovery_debt: makeRecoveryDebt({
+          reason: 'continuity_gap_open',
+          reasons: ['continuity_gap_open'],
+          continuity: { readable: true, open: 2, unresolved: 2, ambiguous: 0 },
+          turn_recovery: {
+            readable: true,
+            blocking_outstanding: 0,
+            retained_terminal: 0,
+            open_catchups: 0,
+            corroborated_retained: 0,
+          },
+        }),
+      })),
+    });
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 1_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(poller.getStatus('remote-1')).toMatchObject({
+      status: 'online',
+      recoveryDebt: { open: true, gaugeTotal: 2 },
+    });
+    const debtAlert = (alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+      ([callName, callSource]) => callName === 'remote-1' && callSource === 'recovery_debt_attention',
+    );
+    expect(debtAlert?.[3]).toContain('aggregate_gauge_total=2');
+    poller.stop();
+  });
+
   it('debounces a single degraded health body without alerting', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
@@ -729,6 +1295,270 @@ describe('HealthPoller', () => {
     expect(alertEvidence).toContain('control_peer_suppressed_unavailable_alerts=11');
 
     poller.stop();
+  });
+
+  describe('#3694 turn-recovery degradation reasons', () => {
+    async function pollDegradedThreeTimes(health: Record<string, unknown>): Promise<{
+      poller: HealthPoller;
+      evidence: () => string;
+    }> {
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(health) });
+      const instances = makeInstances(
+        ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+      );
+      const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+      poller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const evidence = (): string => ((alertFns.emitAlert.mock.calls as unknown as AlertMockCall[]).find(
+        (call) => call[1] === 'health_body_degraded',
+      )?.[3] ?? '') as string;
+      return { poller, evidence };
+    }
+
+    function causeJournalCalls(): unknown[][] {
+      return logger.info.mock.calls.filter((call) => call[1] === 'health body degraded causes');
+    }
+
+    it('names the blocking reason and the integrity counters in the alert evidence', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_integrity'],
+        recoveryCorruptLinks: 1,
+        recoveryEchoConflicts: 0,
+        recoveryOrphanTransfers: 0,
+      }));
+
+      expect(evidence()).toContain('degradation_causes=turn_recovery_degraded');
+      expect(evidence()).toContain('recovery_blocking_reasons=turn_recovery_integrity');
+      expect(evidence()).toContain('turn_recovery_corrupt_links=1');
+      expect(evidence()).toContain('turn_recovery_echo_conflicts=0');
+      expect(evidence()).toContain('turn_recovery_orphan_transfers=0');
+      expect(poller.getStatus('remote-1')?.statusEvidence).toEqual(expect.arrayContaining([
+        'recovery_blocking_reasons=turn_recovery_integrity',
+        'turn_recovery_corrupt_links=1',
+      ]));
+
+      poller.stop();
+    });
+
+    it('reports an absent reason list as unreported, never by omission', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+      }));
+
+      expect(evidence()).toContain('recovery_blocking_reasons=unreported');
+      expect(evidence()).toContain('turn_recovery_corrupt_links=unknown');
+      expect(evidence()).toContain('turn_recovery_echo_conflicts=unknown');
+      expect(evidence()).toContain('turn_recovery_orphan_transfers=unknown');
+
+      poller.stop();
+    });
+
+    it('renders an empty reason list as none', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: [],
+      }));
+
+      expect(evidence()).toContain('recovery_blocking_reasons=none');
+
+      poller.stop();
+    });
+
+    it('collapses unregistered reasons to one code and never echoes them', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_actionable', 'private free text', 7],
+      }));
+
+      expect(evidence()).toContain(
+        'recovery_blocking_reasons=turn_recovery_actionable,unrecognized',
+      );
+      expect(evidence()).not.toContain('private free text');
+
+      poller.stop();
+    });
+
+    // Standing recovery debt on a connected, model-usable bot: a continuity gap
+    // plus finalization debt, the shape seen live. The evidence must carry
+    // both sides so the reader can tell debt from a live fault.
+    const standingDebt = makeRecoveryDebt({
+      open: true,
+      service_blocking: true,
+      attention: 'urgent',
+      reason: 'continuity_gap_open',
+      reasons: ['continuity_gap_open', 'turn_finalization_active'],
+      continuity: { readable: true, open: 5, unresolved: 5, ambiguous: 0 },
+      turn_recovery: {
+        readable: true,
+        blocking_outstanding: 0,
+        retained_terminal: 0,
+        open_catchups: 0,
+        corroborated_retained: 0,
+      },
+    });
+
+    it('carries the debt contract and the live-fault signals side by side', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['continuity_gap_open', 'turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_finalization_active'],
+        recoveryDebt: standingDebt,
+        modelUsable: true,
+      }));
+
+      expect(evidence()).toContain('whatsapp_connected=true');
+      expect(evidence()).toContain('model_usable=true');
+      expect(evidence()).toContain('recovery_blocking_reasons=turn_finalization_active');
+      expect(evidence()).toContain('recovery_debt=valid');
+      expect(evidence()).toContain('recovery_debt_attention=urgent');
+      expect(evidence()).toContain('recovery_debt_service_blocking=true');
+      expect(evidence()).toContain('recovery_debt_reasons=continuity_gap_open,turn_finalization_active');
+      expect(evidence()).toContain('recovery_debt_gauge=several');
+      expect(evidence()).toContain('recovery_debt_continuity_open=5');
+      expect(evidence()).toContain('recovery_debt_blocking_outstanding=0');
+      expect(evidence()).toContain('recovery_debt_retained_terminal=0');
+      expect(causeJournalCalls()[0]?.[0]).toMatchObject({
+        recoveryDebt: 'valid',
+        recoveryDebtReasons: 'continuity_gap_open,turn_finalization_active',
+        recoveryDebtGauge: 'several',
+        whatsappConnected: 'true',
+        modelUsable: 'true',
+      });
+
+      poller.stop();
+    });
+
+    it('names an absent debt block instead of reading it as no debt', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+      }));
+
+      expect(evidence()).toContain('recovery_debt=absent');
+      expect(evidence()).toContain('recovery_debt_reasons=unknown');
+      expect(evidence()).toContain('recovery_debt_continuity_open=unknown');
+      expect(evidence()).toContain('model_usable=unknown');
+
+      poller.stop();
+    });
+
+    it('names a contradictory debt block invalid and publishes none of its counts', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['continuity_gap_open'],
+        // service_blocking=false contradicts the blocking reason: the parser rejects it.
+        recoveryDebt: { ...standingDebt, service_blocking: false },
+      }));
+
+      expect(evidence()).toContain('recovery_debt=invalid');
+      expect(evidence()).toContain('recovery_debt_attention=unknown');
+      expect(evidence()).toContain('recovery_debt_continuity_open=unknown');
+
+      poller.stop();
+    });
+
+    it('never journals a raw body value: free text in the flags and the causes', async () => {
+      const { poller, evidence } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded', 'private free text cause'],
+        whatsappConnected: 'private free text flag',
+        modelUsable: 'private free text model',
+      }));
+
+      expect(causeJournalCalls()).toHaveLength(1);
+      expect(causeJournalCalls()[0]?.[0]).toMatchObject({
+        degradationCauses: 'turn_recovery_degraded,unrecognized',
+        whatsappConnected: 'invalid',
+        modelUsable: 'invalid',
+      });
+      expect(JSON.stringify(causeJournalCalls())).not.toContain('private free text');
+      // model_usable= is a new evidence line and is coded too. The existing
+      // whatsapp_connected= and degradation_causes= lines are unchanged; the
+      // evidence is confined to a digest before the durable outbox (#2386).
+      expect(evidence()).toContain('model_usable=invalid');
+      expect(evidence()).not.toContain('private free text model');
+
+      poller.stop();
+    });
+
+    it('journals the cause vector once per degraded episode and again only when it changes', async () => {
+      const { poller } = await pollDegradedThreeTimes(makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_integrity'],
+        recoveryCorruptLinks: 1,
+        recoveryEchoConflicts: 0,
+        recoveryOrphanTransfers: 0,
+      }));
+
+      expect(causeJournalCalls()).toEqual([[
+        {
+          name: 'remote-1',
+          degradationCauses: 'turn_recovery_degraded',
+          recoveryBlockingReasons: 'turn_recovery_integrity',
+          turnRecoveryCorruptLinks: '1',
+          turnRecoveryEchoConflicts: '0',
+          turnRecoveryOrphanTransfers: '0',
+          recoveryDebt: 'absent',
+          recoveryDebtAttention: 'unknown',
+          recoveryDebtServiceBlocking: 'unknown',
+          recoveryDebtReasons: 'unknown',
+          recoveryDebtGauge: 'unknown',
+          whatsappConnected: 'true',
+          modelUsable: 'unknown',
+        },
+        'health body degraded causes',
+      ]]);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(causeJournalCalls()).toHaveLength(1);
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(makeOperationalFallbackHealth({
+          degradationCauses: ['turn_recovery_degraded'],
+          recoveryBlockingReasons: ['turn_recovery_actionable'],
+          recoveryCorruptLinks: 0,
+          recoveryEchoConflicts: 0,
+          recoveryOrphanTransfers: 0,
+        })),
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(causeJournalCalls()).toHaveLength(2);
+      expect(causeJournalCalls()[1]?.[0]).toMatchObject({
+        recoveryBlockingReasons: 'turn_recovery_actionable',
+        turnRecoveryCorruptLinks: '0',
+      });
+
+      poller.stop();
+    });
+
+    it('journals the same cause vector again for a new degraded episode after recovery', async () => {
+      const degraded = makeOperationalFallbackHealth({
+        degradationCauses: ['turn_recovery_degraded'],
+        recoveryBlockingReasons: ['turn_recovery_integrity'],
+        recoveryCorruptLinks: 1,
+      });
+      const { poller } = await pollDegradedThreeTimes(degraded);
+      expect(causeJournalCalls()).toHaveLength(1);
+
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(makeOnlineHealth()) });
+      await vi.advanceTimersByTimeAsync(5_000);
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve(degraded) });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(causeJournalCalls()).toHaveLength(2);
+
+      poller.stop();
+    });
+
+    it('does not journal causes for an exactly proven operational fallback', async () => {
+      const { poller } = await pollDegradedThreeTimes(makeOperationalFallbackHealth());
+
+      expect(causeJournalCalls()).toEqual([]);
+
+      poller.stop();
+    });
   });
 
   it.each([

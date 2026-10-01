@@ -2,6 +2,9 @@ type AuthFailureClass =
   | 'none'
   | 'pairing_required'
   | 'serverside_logout_irreversible'
+  | 'auth_401_ambiguous_retrying'
+  | 'auth_401_ambiguous_parked'
+  | 'auth_401_uninspected_exit'
   | 'local_corruption_restorable'
   | 'local_corruption_unrestorable'
   | 'auth_bond_at_risk'
@@ -11,6 +14,9 @@ type AuthFailureClass =
 type DisconnectClass =
   | 'none'
   | 'serverside_logout_irreversible'
+  | 'auth_401_ambiguous_retrying'
+  | 'auth_401_ambiguous_parked'
+  | 'auth_401_uninspected_exit'
   | 'duplicate_session_replaced'
   | 'multidevice_mismatch'
   | 'restart_required'
@@ -210,6 +216,22 @@ export function decideAuthLossModeEvent(input: AuthLossModeEventInput): AuthLoss
     };
   }
 
+  // A parked or uninspected 401 needs the same relink-verified close, but no
+  // device_removed node was observed, so the bucket is inferred, not confirmed.
+  if (
+    input.authFailureClass === 'auth_401_ambiguous_parked'
+    || input.authFailureClass === 'auth_401_uninspected_exit'
+    || input.disconnectClass === 'auth_401_ambiguous_parked'
+    || input.disconnectClass === 'auth_401_uninspected_exit'
+  ) {
+    return {
+      action: 'open_outage',
+      bucket: 'mode_1_manual_relink',
+      closeEdge: 'WA_AUTH_BOND_RELINK_VERIFIED',
+      confidence: 'inferred',
+    };
+  }
+
   if (
     input.authFailureClass === 'registration_blocked'
     || input.disconnectClass === 'registration_rejected'
@@ -263,6 +285,9 @@ export function decideAuthLossModeEvent(input: AuthLossModeEventInput): AuthLoss
     input.disconnectClass === 'restart_required'
     || input.disconnectClass === 'restart_required_flapping'
     || input.disconnectClass === 'transient_reconnect'
+    // An ambiguous 401 inside its one bounded retry is a flap until it parks.
+    || input.authFailureClass === 'auth_401_ambiguous_retrying'
+    || input.disconnectClass === 'auth_401_ambiguous_retrying'
   ) {
     return {
       action: 'open_outage',

@@ -78,6 +78,7 @@ import {
 import type {
   ProviderExecutionGate,
   ProviderExecutionLease,
+  ProviderExecutionPhase,
 } from './provider-execution-gate.ts';
 import { shortHash } from '../../lib/short-hash.ts';
 import { assessTreeLiveness } from './tree-liveness.ts';
@@ -291,6 +292,8 @@ export interface SessionManagerOptions {
   mcpSessionContext?: SessionContext;
   whatsoupInstance?: string;
   whatsoupMcpSocket?: string;
+  /** #3421 step 1: this session's MCP token, passed to its child env only. */
+  whatsoupMcpSessionToken?: string;
   providerTransitionReady?: Promise<void>;
   handoffSystemBlock?: () => string | null;
   /**
@@ -701,6 +704,7 @@ export class SessionManager {
   private readonly mcpSessionContext: SessionContext | undefined;
   private readonly whatsoupInstance: string | undefined;
   private readonly whatsoupMcpSocket: string | undefined;
+  private readonly whatsoupMcpSessionToken: string | undefined;
   private readonly providerTransitionReady: Promise<void> | undefined;
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
@@ -919,6 +923,7 @@ export class SessionManager {
     this.mcpSessionContext = opts.mcpSessionContext;
     this.whatsoupInstance = opts.whatsoupInstance;
     this.whatsoupMcpSocket = opts.whatsoupMcpSocket;
+    this.whatsoupMcpSessionToken = opts.whatsoupMcpSessionToken;
     this.providerTransitionReady = opts.providerTransitionReady;
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
@@ -1306,6 +1311,12 @@ export class SessionManager {
     child: ReturnType<typeof spawn>,
     signal: NodeJS.Signals,
   ): Promise<void> {
+    // #3547: reaping the tree is the holder's cleanup phase. The lease is keyed
+    // by this exact child and generation-fenced, so a child whose lease was
+    // already released cannot touch its successor.
+    const executionLease = this.childExecutionLeases.get(child);
+    executionLease?.setPhase('cleanup');
+    executionLease?.markProgress();
     let generationMarker = this.childTreeMarkers.get(child);
     if (generationMarker === undefined) {
       const generation = this.childGenerations.get(child) ?? null;
@@ -1386,6 +1397,7 @@ export class SessionManager {
         allowM365Mutations: this.allowM365Mutations,
         whatsoupInstance: this.whatsoupInstance,
         whatsoupMcpSocket: this.whatsoupMcpSocket,
+        whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
         configRoot: this.configRoot,
         egressProxyPort: this.egressProxyPort,
       },
@@ -3269,7 +3281,7 @@ export class SessionManager {
   private markProviderExecutionProgress(
     child: ReturnType<typeof spawn>,
     generation: SessionGenerationIdentity | null,
-    phase?: 'executing',
+    phase?: Exclude<ProviderExecutionPhase, 'queued_to_spawn'>,
   ): void {
     if (!this.isCurrentPersistentChild(child, generation)) return;
     const lease = this.childExecutionLeases.get(child);
@@ -3959,7 +3971,14 @@ export class SessionManager {
 
       const dispatchSpawnPerTurnEvent = (event: AgentEvent): void => {
         if (this.activeProviderTurnToken !== providerTurnToken) return;
-        this.markProviderExecutionProgress(child, childGeneration);
+        // #3547: a result (for OpenCode, a stop candidate) moves the holder to
+        // terminalizing; any later provider output is execution again, which
+        // matches the stop-candidate supersession below.
+        this.markProviderExecutionProgress(
+          child,
+          childGeneration,
+          event.type === 'result' ? 'terminalizing' : 'executing',
+        );
         if (this.provider === 'opencode-cli') {
           if (pendingOpenCodeResult !== null && event.type !== 'result') {
             if (openCodeStopCandidateCount === 1) {
@@ -4538,6 +4557,14 @@ export class SessionManager {
   /** Model ref this session was spawned with (undefined = provider default). */
   getModelRef(): string | undefined {
     return this.model;
+  }
+
+  /**
+   * The previous provider's teardown barrier for this conversation, the one
+   * spawnSession awaits. Settles immediately when there is none.
+   */
+  providerTransitionSettled(): Promise<void> {
+    return this.providerTransitionReady ?? Promise.resolve();
   }
 
   /**

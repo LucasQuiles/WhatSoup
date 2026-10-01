@@ -696,6 +696,38 @@ describe('SessionManager', () => {
     expect(callArgs[1]).toContain('bypassPermissions');
   });
 
+  // #3421 step 1: the session's MCP helpers inherit its token from the child env,
+  // on both the persistent spawn and the spawn-per-turn path.
+  it('hands the session token to the persistent child and to each spawn-per-turn child', async () => {
+    const persistent = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      whatsoupMcpSessionToken: 'session-token-persistent',
+    });
+    await persistent.spawnSession();
+    const persistentEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+
+    vi.mocked(spawn).mockClear();
+    const perTurn = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      whatsoupMcpSessionToken: 'session-token-per-turn',
+    });
+    await perTurn.spawnSession();
+    void perTurn.sendTurn('hello').catch(() => {});
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+    const perTurnEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+
+    expect([persistentEnv?.WHATSOUP_MCP_SESSION_TOKEN, perTurnEnv?.WHATSOUP_MCP_SESSION_TOKEN])
+      .toEqual(['session-token-persistent', 'session-token-per-turn']);
+  });
+
   it('spawnSession propagates ALLOW_M365_MUTATIONS when fail-closed mode is unset', async () => {
     await withConnectorMutationEnv({
       ALLOW_M365_MUTATIONS: '1',
@@ -7645,6 +7677,77 @@ describe('session.ts uncovered-branch coverage', () => {
       expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
     } finally {
       vi.mocked(spawn).mockReset();
+    }
+  });
+
+  it('#3547: reports terminalizing after a stop candidate and cleanup while the replaced child tree is reaped', async () => {
+    let now = 30_000;
+    const firstChild = makeMockChild(12021);
+    const secondChild = makeMockChild(12022);
+    vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
+    let finishKill: () => void = () => {};
+    (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finishKill = resolve; }),
+    );
+    try {
+      const gate = new ProviderExecutionGate({ now: () => now });
+      const session = new SessionManager({
+        db: makeDb(),
+        messenger: makeMessenger().messenger,
+        chatJid: '15550003547@s.whatsapp.net',
+        onEvent: vi.fn(),
+        provider: 'opencode-cli',
+        model: 'glm/test-model',
+        providerExecutionGate: gate,
+      });
+      await session.spawnSession();
+      await session.sendTurn('first');
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+
+      const stop = `${JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', reason: 'stop' } })}\n`;
+      now = 30_010;
+      firstChild.stdout.emit('data', Buffer.from(stop));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'terminalizing', progressAgeMs: 0 });
+
+      // Continued output supersedes the stop candidate, so the holder is executing again.
+      now = 30_020;
+      firstChild.stdout.emit('data', Buffer.from(`${JSON.stringify({ type: 'text', part: { text: 'continued output' } })}\n`));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 0 });
+      firstChild.stdout.emit('data', Buffer.from(stop));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'terminalizing' });
+
+      session.completeProviderTurn();
+      now = 30_030;
+      const secondTurn = session.sendTurn('second');
+      await vi.waitFor(() => {
+        expect(killSessionTree).toHaveBeenCalledWith(firstChild, 'SIGTERM', expect.objectContaining({
+          generationMarker: expect.any(String),
+          termGraceMs: (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS,
+          onOutcome: expect.any(Function),
+        }));
+      });
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeScopeHash: shortHash('15550003547@s.whatsapp.net'),
+        activePhase: 'cleanup',
+        progressAgeMs: 0,
+      });
+
+      finishKill();
+      await secondTurn;
+      expect(gate.snapshot()).toMatchObject({ active: true, activePhase: 'executing', progressAgeMs: 0 });
+
+      // A late stop candidate from the reaped child cannot move the successor.
+      now = 30_040;
+      firstChild.stdout.emit('data', Buffer.from(stop));
+      expect(gate.snapshot()).toMatchObject({ activePhase: 'executing', progressAgeMs: 10 });
+
+      secondChild._closeCb?.(0, null);
+      expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+    } finally {
+      vi.mocked(spawn).mockReset();
+      // An early failure must not leave the pending once-only kill for the next reaping test.
+      vi.mocked(killSessionTree).mockReset();
     }
   });
 

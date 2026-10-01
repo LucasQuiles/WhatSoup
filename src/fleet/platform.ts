@@ -27,8 +27,8 @@ import { repoRoot, tmpRoot, xdgDir } from './paths.ts';
 import { SIGNAL } from '../lib/signals.ts';
 
 const execFileAsync = promisify(execFile);
-const LAUNCHD_BOOTSTRAP_RETRY_LIMIT = 10;
-const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
+export const LAUNCHD_BOOTSTRAP_RETRY_LIMIT = 10;
+export const LAUNCHD_BOOTSTRAP_RETRY_DELAY_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // Platform detection
@@ -307,19 +307,50 @@ function readExpectedGeneratedLaunchdPlist(name: string, filePath: string): stri
   return contents;
 }
 
+/**
+ * launchd rejects job definitions that are group- or world-writable, so no
+ * plist writer installs anything wider than this.
+ */
+export const LAUNCHD_PLIST_MAX_MODE = 0o644;
+
+/**
+ * Permission bits for a plist that is about to replace `filePath`: those of
+ * the file installed there now, capped at LAUNCHD_PLIST_MAX_MODE. An instance
+ * plist can carry credentials in EnvironmentVariables and is then installed
+ * owner-only; a same-directory rename replaces its inode, so without this the
+ * replacement would be readable by everyone. A symlink is judged by the file it
+ * points to, whose contents the replacement takes over. Returns null when no
+ * regular file is installed, and the caller keeps its default for a new file.
+ */
+export function installedLaunchdPlistMode(filePath: string): number | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw error;
+  }
+  return stat.isFile() ? stat.mode & LAUNCHD_PLIST_MAX_MODE : null;
+}
+
 /** Publish a complete launchd plist in one same-directory rename. */
 function writeAtomicLaunchdPlist(filePath: string, contents: string): void {
   const temporaryPath = path.join(
     path.dirname(filePath),
     `.${path.basename(filePath)}.tmp-${process.pid}-${randomUUID()}`,
   );
+  const installedMode = installedLaunchdPlistMode(filePath);
   let temporaryExists = false;
   try {
-    // launchd rejects job definitions that are group- or world-writable. A
-    // same-directory rename replaces the old inode, so make the new inode safe
-    // independently of a permissive user umask.
+    // A same-directory rename replaces the old inode, so the new inode takes
+    // the installed plist's mode (never wider than 0644, which launchd needs).
+    // A new plist is created at 0644 under the user's umask. The umask only
+    // narrows the creation mode, and the chmod runs before the rename, so the
+    // plist path never names a file wider than the one it replaces.
     temporaryExists = true;
-    fs.writeFileSync(temporaryPath, contents, { encoding: 'utf-8', mode: 0o644 });
+    fs.writeFileSync(temporaryPath, contents, { encoding: 'utf-8', mode: installedMode ?? LAUNCHD_PLIST_MAX_MODE });
+    if (installedMode !== null) fs.chmodSync(temporaryPath, installedMode);
     fs.renameSync(temporaryPath, filePath);
     temporaryExists = false;
   } catch (error) {
@@ -364,7 +395,12 @@ function rollbackFailure(original: unknown, rollbacks: readonly unknown[]): Erro
   return new Error(`launchd reload failed: ${originalMessage}; rollback also failed: ${rollbackMessage}`);
 }
 
-function isTransientLaunchdBootstrapError(error: unknown): boolean {
+/**
+ * The bootstrap failure launchd returns while a booted-out job is still
+ * exiting. Exported with the retry bounds so release activation
+ * (scripts/lib/release-activation) retries the same error class the same way.
+ */
+export function isTransientLaunchdBootstrapError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const candidate = error as { code?: unknown; message?: unknown; stderr?: unknown };
   if (candidate.code === 5 || candidate.code === '5') return true;
