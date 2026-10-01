@@ -100,18 +100,23 @@ delete process.env['REQUIRE_OS_KEYRING'];
 // would make PATH lookup continue to the real binary.
 const credentialBin = join(isolatedHome, 'credential-bin');
 mkdirSync(credentialBin, { mode: 0o700 });
-// Drain piped stdin before rejecting: `secret-tool store` reads the secret from
-// stdin, and a shim that exits first makes the caller's write fail with EPIPE.
-// A terminal stdin is left unread, so an interactive caller cannot block.
-const rejectMutation =
-  "  *) [ -t 0 ] || cat >/dev/null; printf '%s\\n' 'synthetic credential backend rejects writes and unsupported operations' >&2; exit 1 ;;";
+const rejection = 'synthetic credential backend rejects writes and unsupported operations';
+// The two write operations take the secret on stdin, so their arm reads it to
+// the end before rejecting: a shim that exits first makes the caller's write
+// fail with EPIPE. The message reports the discarded byte count, which lets a
+// test witness the drain. A terminal stdin is left unread, so an interactive
+// caller cannot block. Every other operation rejects without reading stdin.
+const rejectWrite =
+  `if [ -t 0 ]; then n=0; else n=$(( $(wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
+const rejectOther = `  *) printf '%s\\n' '${rejection}' >&2; exit 1 ;;`;
 const syntheticCredentialBackends: Record<string, string> = {
   security: [
     '#!/bin/sh',
     'case "$1" in',
     '  find-generic-password) exit 0 ;;',
     "  --help) printf '%s\\n' 'Usage: synthetic credential backend'; exit 0 ;;",
-    rejectMutation,
+    `  add-generic-password) ${rejectWrite}`,
+    rejectOther,
     'esac',
     '',
   ].join('\n'),
@@ -122,7 +127,8 @@ const syntheticCredentialBackends: Record<string, string> = {
     'case "$1" in',
     "  --help) printf '%s\\n' 'secret-tool: not found (synthetic credential backend)' >&2; exit 127 ;;",
     '  lookup) exit 0 ;;',
-    rejectMutation,
+    `  store) ${rejectWrite}`,
+    rejectOther,
     'esac',
     '',
   ].join('\n'),
