@@ -1651,6 +1651,144 @@ describe('deferred-turn admission (#3295 S2)', () => {
       }
     });
 
+    /** Observes a completion without awaiting it: a stranded one never settles. */
+    function watchCompletion(completion: { promise: Promise<void> }): () => 'pending' | 'resolved' | 'rejected' {
+      let outcome: 'pending' | 'resolved' | 'rejected' = 'pending';
+      void completion.promise.then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+      return () => outcome;
+    }
+
+    /**
+     * The production alias-change call (deferIfActive left at its default)
+     * while the LID turn is active. The rekey is deferred to the turn's
+     * after-terminal action, which finalization runs before it settles the
+     * turn's completion.
+     */
+    function deferAliasChangeToTerminal(held: RuntimeTurnContext, queue: QueueDouble): void {
+      expect(held.identity.conversationKey).toBe(toConversationKey(lidJid));
+      runtime.handleJidAliasChanged(held.identity.conversationKey, lidCanonicalJid);
+      expect(lifecycle().chatQueues.get(lidJid)).toBe(queue);
+      expect(lifecycle().chatQueues.has(lidCanonicalJid)).toBe(false);
+    }
+
+    /**
+     * The finalization ran the deferred rekey and must still settle the turn's
+     * completion, now under the canonical key. The inbound is terminal, no
+     * per-chat state remains under either key, and the canonical key admits
+     * and answers the next inbound.
+     */
+    async function expectReleasedAcrossDeferredRekey(run: {
+      seq: number;
+      held: RuntimeTurnContext;
+      queue: QueueDouble;
+      turnQueue: TurnQueue;
+      finalization: Promise<unknown>;
+      heldOutcome: () => 'pending' | 'resolved' | 'rejected';
+      terminalStatus: string;
+      terminal: { attempt_kind: string; attempt_failure_class: string | null };
+      nextMessageId: string;
+    }): Promise<void> {
+      await expect(run.finalization).resolves.toMatchObject({ kind: 'terminal' });
+      const state = lifecycle();
+      // The deferred rekey ran inside that finalization.
+      expect(state.chatQueues.has(lidJid)).toBe(false);
+      expect(state.chatQueues.get(lidCanonicalJid)).toBe(run.queue);
+      expect(run.heldOutcome()).toBe('resolved');
+      await vi.waitFor(() => expect(status(run.seq)).toBe(run.terminalStatus));
+      expect(terminalRows(run.seq)).toEqual([run.terminal]);
+      for (const key of [lidJid, lidCanonicalJid]) {
+        expect(state.perChatRuntimeTurnContexts.has(key)).toBe(false);
+        expect(state.perChatInboundSeqQueue.has(key)).toBe(false);
+        expect(state.perChatRuntimeTurnCompletions.has(key)).toBe(false);
+      }
+      expect(state.perChatRuntimeTurnScopeRefs.has(run.held.identity.logicalTurnId)).toBe(false);
+      expect(state.runtimeTurnCoordinator.isRuntimeTurnContinuation(run.held)).toBe(false);
+      let idle = false;
+      void run.turnQueue.idle().then(() => { idle = true; });
+      await vi.waitFor(() => expect(idle).toBe(true));
+      expect(retainedFinalizations()).toEqual([]);
+      expect(mockEmitAlertChecked.mock.calls.filter((call) => call[1] === 'agent_turn_finalization_escaped')).toEqual([]);
+
+      const next = await admitTurn(lidCanonicalJid, run.nextMessageId, `${run.nextMessageId} question`);
+      expect(next.mapKey).toBe(lidCanonicalJid);
+      echoNextAnswer(liveQueue(lidCanonicalJid), next.seq, lidCanonicalJid);
+      next.session.emit({ type: 'result', text: `${run.nextMessageId} answer` });
+      await vi.waitFor(() => expect(status(next.seq)).toBe('complete'));
+    }
+
+    // Production order: the alias change arrives through the default deferred
+    // call while the fallback replay is in flight, and the result handler has
+    // already consumed the continuation deferral. Nothing is held back.
+    it('settles a failed replay\'s completion after its deferred rekey moves it to the canonical key', async () => {
+      const unhandled = captureUnhandledRejections();
+      let releaseHeldAwaiter: (() => void) | undefined;
+      try {
+        makeRuntime({ sessionScope: 'per_chat' });
+        const { seq, session: primary, mapKey, held } = await admitTurn(lidJid, 'wamid-deferred-rekey-replay', 'deferred rekey replay question');
+        expect(mapKey).toBe(lidJid);
+        const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+        releaseHeldAwaiter = () => heldCompletion.resolve();
+        const heldOutcome = watchCompletion(heldCompletion);
+        const turnQueue = lifecycle().perChatTurnQueues.get(mapKey)!;
+        const queue = queueFor(lidJid);
+        const replacement = await failOverToFallback(primary, queue);
+        expect(replacement.sendTurn).toHaveBeenCalledOnce();
+
+        deferAliasChangeToTerminal(held, queue);
+        const finalize = vi.spyOn(lifecycle().runtimeTurnCoordinator, 'finalizeRuntimeTurnContext');
+        replacement.failProviderTurn(new Error('fallback provider exited mid-turn'));
+        await vi.waitFor(() => expect(finalize).toHaveBeenCalled());
+        expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice);
+
+        await expectReleasedAcrossDeferredRekey({
+          seq, held, queue, turnQueue, heldOutcome,
+          finalization: finalize.mock.results[0]!.value,
+          terminalStatus: 'failed',
+          terminal: { attempt_kind: 'failed', attempt_failure_class: 'processor_throw' },
+          nextMessageId: 'wamid-deferred-rekey-replay-next',
+        });
+        expect(unhandled.reasons).toEqual([]);
+      } finally {
+        unhandled.stop();
+        // Test hygiene only: a stranded held awaiter would block shutdown.
+        releaseHeldAwaiter?.();
+      }
+    });
+
+    it('settles a completed turn\'s completion after its deferred rekey moves it to the canonical key', async () => {
+      const unhandled = captureUnhandledRejections();
+      let releaseHeldAwaiter: (() => void) | undefined;
+      try {
+        makeRuntime({ sessionScope: 'per_chat' });
+        const { seq, session, mapKey, held } = await admitTurn(lidJid, 'wamid-deferred-rekey-answer', 'deferred rekey answer question');
+        expect(mapKey).toBe(lidJid);
+        const heldCompletion = lifecycle().perChatRuntimeTurnCompletions.get(mapKey)!;
+        releaseHeldAwaiter = () => heldCompletion.resolve();
+        const heldOutcome = watchCompletion(heldCompletion);
+        const turnQueue = lifecycle().perChatTurnQueues.get(mapKey)!;
+        const queue = queueFor(lidJid);
+
+        deferAliasChangeToTerminal(held, queue);
+        const finalize = vi.spyOn(lifecycle().runtimeTurnCoordinator, 'finalizeRuntimeTurnContext');
+        echoNextAnswer(queue, seq, lidJid);
+        session.emit({ type: 'result', text: 'deferred rekey answer' });
+        await vi.waitFor(() => expect(finalize).toHaveBeenCalled());
+
+        await expectReleasedAcrossDeferredRekey({
+          seq, held, queue, turnQueue, heldOutcome,
+          finalization: finalize.mock.results[0]!.value,
+          terminalStatus: 'complete',
+          terminal: { attempt_kind: 'completed', attempt_failure_class: null },
+          nextMessageId: 'wamid-deferred-rekey-answer-next',
+        });
+        expect(unhandled.reasons).toEqual([]);
+      } finally {
+        unhandled.stop();
+        // Test hygiene only: a stranded held awaiter would block shutdown.
+        releaseHeldAwaiter?.();
+      }
+    });
+
     it('admits the replay under the live scope key when a rekey lands while the replacement spawns', async () => {
       makeRuntime({ sessionScope: 'per_chat' });
       const { seq, session: primary, mapKey, held } = await admitTurn(lidJid, 'wamid-c19-spawn-rekey', 'c19 spawn rekey question');
