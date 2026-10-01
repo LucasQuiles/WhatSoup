@@ -109,9 +109,14 @@ const rejection = 'synthetic credential backend rejects writes and unsupported o
 // fail with EPIPE. `cat` does the reading because `wc -c` alone only stats a
 // regular file. The message reports the discarded byte count, which lets a
 // test witness the drain. A terminal stdin is left unread, so an interactive
-// caller cannot block. Every other rejected operation leaves stdin unread.
+// caller cannot block. A closed stdin is not read either: the pipe of the
+// command substitution would take descriptor 0, and `cat` would wait on its own
+// pipeline forever. The check duplicates descriptor 0 onto another one, because
+// a duplication onto itself is skipped, and runs in a subshell, where a failed
+// redirection cannot end the shim. Every other rejected operation leaves stdin
+// unread.
 const rejectWrite =
-  `if [ -t 0 ]; then n=0; else n=$(( $(cat | wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
+  `if ! ( true 3<&0 ) 2>/dev/null || [ -t 0 ]; then n=0; else n=$(( $(cat | wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
 const rejectOther = `  *) printf '%s\\n' '${rejection}' >&2; exit 1 ;;`;
 const syntheticCredentialBackends: Record<string, string> = {
   security: [

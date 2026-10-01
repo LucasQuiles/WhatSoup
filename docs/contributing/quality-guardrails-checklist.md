@@ -51,9 +51,9 @@ Vitest's shared setup creates an owned temporary HOME and prepends synthetic
 find-generic-password` exits 44 with the real tool's not-found message, and
 `secret-tool lookup` returns empty. Writes, deletes and unsupported operations
 are rejected. The two write operations (`add-generic-password` and `store`)
-first read stdin to the end, unless stdin
-is a terminal, and report the discarded byte count; every other rejected
-operation leaves stdin unread. The synthetic `secret-tool` reports a probe
+first read stdin to the end, unless stdin is closed or a terminal, and report
+the discarded byte count; every other rejected operation leaves stdin unread.
+The synthetic `secret-tool` reports a probe
 failure (exit 127), so Linux runs use the env-only backend and backend
 selection matches a host without libsecret. The keyring module classifies that
 failure as an errored probe: a Linux test file that reaches unmocked backend
