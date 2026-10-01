@@ -21,6 +21,7 @@ import {
   MAX_EXACT_ADDED_LINE_BUDGET_V1,
   type ExactAddedLineBudgetV1,
 } from '../../../scripts/lib/ci-control/git-input.ts';
+import { GIT_TIMEOUT_MS } from '../../../scripts/lib/ci-control/git-input-core.ts';
 
 const temporaryRoots: string[] = [];
 
@@ -48,23 +49,44 @@ export function gitEnvironment(cwd: string): NodeJS.ProcessEnv {
   };
 }
 
+const FIXTURE_GIT_STDERR_LIMIT = 2_048;
+
+// #3561: a synchronous spawn blocks the worker's event loop, so vitest's
+// testTimeout cannot preempt it; only a spawn-level kill bounds it. On that
+// kill the error names the command so the next occurrence shows its cause.
+function runFixtureGit(
+  cwd: string,
+  args: string[],
+  options: { stdio: ['ignore' | 'pipe', 'pipe', 'pipe']; input?: Uint8Array },
+): string {
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: gitEnvironment(cwd),
+      ...options,
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    }).trim();
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & { signal?: string | null; stderr?: unknown };
+    if (failure.code !== 'ETIMEDOUT' && failure.signal !== 'SIGKILL') throw error;
+    const stderr = String(failure.stderr ?? '').slice(0, FIXTURE_GIT_STDERR_LIMIT);
+    throw new Error(
+      `fixture git ${JSON.stringify(args)} in ${cwd} was killed `
+      + `(code=${String(failure.code)}, signal=${String(failure.signal)}, timeout=${GIT_TIMEOUT_MS}ms); `
+      + `stderr: ${JSON.stringify(stderr)}`,
+      { cause: error },
+    );
+  }
+}
+
 export function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    env: gitEnvironment(cwd),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+  return runFixtureGit(cwd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 export function gitWithInput(cwd: string, args: string[], input: Uint8Array): string {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    env: gitEnvironment(cwd),
-    input,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }).trim();
+  return runFixtureGit(cwd, args, { stdio: ['pipe', 'pipe', 'pipe'], input });
 }
 
 export function write(root: string, path: string, content: string): void {

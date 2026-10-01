@@ -2,6 +2,13 @@ import type { ExecFileSyncOptions } from 'node:child_process';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  blobOid,
+  cleanupTemporaryRoots,
+  fixture,
+  hashBlob,
+} from './support/ci-control-git-input-fixtures.ts';
+
 type FixtureModule = typeof import('./support/ci-control-git-input-fixtures.ts');
 
 interface CapturedSpawn {
@@ -142,4 +149,20 @@ describe('ci-control git fixture spawns', () => {
     });
     expect(thrown).toBe(failure);
   }, 5_000);
+});
+
+describe('ci-control git fixture spawns against real git', () => {
+  afterEach(cleanupTemporaryRoots);
+
+  // The 30 s spawn bound must sit far above a healthy run, or a kill would
+  // mask a slow-but-correct git instead of a stuck one.
+  it('hashes a small blob through stdin well inside the spawn bound', () => {
+    const { root } = fixture();
+    const bytes = Buffer.from('bounded fixture spawn\n');
+    const started = performance.now();
+    const oid = hashBlob(root, bytes);
+    const elapsed = performance.now() - started;
+    expect(oid).toBe(blobOid(bytes));
+    expect(elapsed).toBeLessThan(5_000);
+  }, 15_000);
 });
