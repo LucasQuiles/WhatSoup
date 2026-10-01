@@ -832,7 +832,10 @@ describe('MessageScheduler — executeSend media fallback paths', () => {
 
 
 
-  it('treats a media row with no buffer and no media_blob as a send failure and applies the retry path', async () => {
+  // A10: a media row with no bytes is a property of the row, not a transient
+  // send failure, so it is dead-lettered on the first tick (payload_undecodable
+  // shape=missing_media) instead of walking the retry ladder.
+  it('dead-letters a media row with no buffer and no media_blob on the first tick without consuming retries', async () => {
     const { mock: conn2, sendMediaCalls } = makeMockConnection();
     const id = insertScheduledMessage(db.raw, {
       chatJid: '15550600006@s.whatsapp.net',
@@ -849,16 +852,16 @@ describe('MessageScheduler — executeSend media fallback paths', () => {
     const row = db.raw
       .prepare('SELECT status, retry_count FROM scheduled_messages WHERE id = ?')
       .get(id) as { status: string; retry_count: number };
-    expect(row.status).toBe('pending');
-    expect(row.retry_count).toBe(1);
+    expect(row.status).toBe('failed');
+    expect(row.retry_count).toBe(0);
   });
 
-  it('permanently fails a media row (no buffer, no media_blob) once retries are exhausted, embedding the row id in the error', async () => {
+  it('names missing_media as the durable reason for a media row with no buffer and no media_blob', async () => {
     const { mock: conn2, sendMediaCalls } = makeMockConnection();
     const id = insertScheduledMessage(db.raw, {
       chatJid: '15550600007@s.whatsapp.net',
       contentType: 'audio',
-      payload: JSON.stringify({ type: 'audio' }),
+      payload: JSON.stringify({ type: 'audio', mimetype: 'audio/ogg' }),
       mediaBlob: null,
       retryCount: 2,
     });
@@ -871,8 +874,7 @@ describe('MessageScheduler — executeSend media fallback paths', () => {
       .prepare('SELECT status, error FROM scheduled_messages WHERE id = ?')
       .get(id) as { status: string; error: string };
     expect(row.status).toBe('failed');
-    expect(row.error).toContain('no media_blob and no buffer in payload');
-    expect(row.error).toContain(`id=${id}`);
+    expect(row.error).toContain('payload_undecodable shape=missing_media');
   });
 
   it('routes every non-text content type (image, video, audio, document, sticker) through sendMedia and never sendRaw', async () => {
@@ -882,7 +884,8 @@ describe('MessageScheduler — executeSend media fallback paths', () => {
       insertScheduledMessage(db.raw, {
         chatJid: '15550600008@s.whatsapp.net',
         contentType: t,
-        payload: JSON.stringify({ type: t }),
+        // Required per-type fields, as every writer stores them (A10 contract).
+        payload: JSON.stringify({ type: t, mimetype: 'application/octet-stream', ...(t === 'document' ? { filename: 'f.bin' } : {}) }),
         mediaBlob: Buffer.from('payload-bytes'),
       });
     }
@@ -1227,7 +1230,7 @@ describe('scheduler.ts uncovered-branch coverage', () => {
       .run(
         '15550800004@s.whatsapp.net',
         'document',
-        JSON.stringify({ type: 'document', filename: 'doc.bin', buffer: bytes }),
+        JSON.stringify({ type: 'document', filename: 'doc.bin', mimetype: 'application/octet-stream', buffer: bytes }),
         Math.floor(Date.now() / 1000) - 10,
         'pending',
         0,

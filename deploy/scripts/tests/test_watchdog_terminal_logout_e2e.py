@@ -110,8 +110,12 @@ def fetch_loopback_health(port, path, headers, **kwargs):
             raise ValueError("diagnostic read without bearer")
         return (int((stubs / "bot.http").read_text(encoding="utf-8")),
                 (stubs / "bot.body").read_text(encoding="utf-8"))
-    if port == 9998 and path == "/":
+    # A release without built console assets: the root 404s while the
+    # asset-independent liveness route answers.
+    if port == 9998 and path == "/livez":
         return 200, "ok"
+    if port == 9998 and path == "/":
+        return 404, "not found"
     raise HealthTransportError("connect", errno.ECONNREFUSED)
 '''
 
@@ -229,6 +233,15 @@ def test_logged_out_503_does_not_kickstart_bot(tmp_path):
     assert "9999/health" in (tmp_path / "home/.local/bin/probe.argv").read_text()
     assert "kickstart" not in calls or "com.whatsoup.term-bot" not in calls, (
         f"logged-out bot must not be kickstarted; launchctl calls were:\n{calls}"
+    )
+
+
+def test_fleet_without_console_assets_is_not_restarted(tmp_path):
+    calls = _run(tmp_path, _LOGGED_OUT_BODY, "fleet-livez-bot")
+    probes = (tmp_path / "home/.local/bin/probe.argv").read_text().splitlines()
+    assert "9998/livez" in probes and "9998/" not in probes, probes
+    assert "com.whatsoup.whatsoup-fleet" not in calls, (
+        f"a serving fleet must not be restarted for a missing console; calls:\n{calls}"
     )
 
 

@@ -4,8 +4,12 @@ The load-bearing contract: the public liveness envelope must never be read as
 authenticated diagnostics, and a missing/rejected token yields `unobserved`
 (fix the token) rather than a workload verdict or the `public` outcome.
 """
+import http.server
 import importlib.util
 import pathlib
+import threading
+
+import pytest
 
 _MOD_PATH = pathlib.Path(__file__).resolve().parents[1] / "lib" / "health_reader.py"
 _spec = importlib.util.spec_from_file_location("health_reader", _MOD_PATH)
@@ -128,3 +132,34 @@ def test_read_local_health_transport_error_is_unobserved(monkeypatch) -> None:
     projection, status, body = health_reader.read_local_health("primary-bot", 9099, fetch=_fetch)
     assert projection == "unobserved"
     assert status is None
+
+
+def test_fetch_loopback_health_reads_liveness_route_over_real_loopback() -> None:
+    # The watchdog decides fleet restarts from /livez through this reader; every
+    # watchdog test stubs the reader, so the allowlist is pinned here directly.
+    requested: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested.append(self.path)
+            payload = b'{"alive":true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        assert health_reader.fetch_loopback_health(port, "/livez", {}, timeout=2) == (200, '{"alive":true}')
+        with pytest.raises(ValueError):
+            health_reader.fetch_loopback_health(port, "/api/lines", {}, timeout=2)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert requested == ["/livez"]

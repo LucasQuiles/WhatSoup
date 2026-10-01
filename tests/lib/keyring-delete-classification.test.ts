@@ -65,6 +65,37 @@ describe('deleteCredential classification — macos-keychain (#2292 L8)', () => 
     expect(deleteCredential('minimax').reason).toBe('absent');
   });
 
+  // An interrupted delete may already have printed the not-found text; the
+  // signal makes it a failure, not a clean errSecItemNotFound exit.
+  it('reports BACKEND_FAILED, not absent, when a signal-killed delete printed not-found text', () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw Object.assign(new Error('Command failed: security delete-generic-password'), {
+        status: null, signal: 'SIGTERM',
+        stderr: 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.',
+      });
+    });
+    expect(deleteCredential('minimax').reason).toBe('backend_failed');
+  });
+
+  it('reports BACKEND_FAILED, not absent, when the delete times out', () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw Object.assign(new Error('spawnSync security ETIMEDOUT'), {
+        code: 'ETIMEDOUT', status: null, signal: 'SIGKILL',
+        stderr: 'The specified item could not be found in the keychain.',
+      });
+    });
+    expect(deleteCredential('minimax').reason).toBe('backend_failed');
+  });
+
+  // "could not be found" alone is not errSecItemNotFound: exit 37 reports a
+  // missing DEFAULT keychain, which is a failure to consult the store.
+  it('reports BACKEND_FAILED, not absent, when no default keychain could be found (exit 37)', () => {
+    execFileSyncMock.mockImplementation(() => {
+      throw execFailure(37, 'security: SecKeychainCopyDefault: A default keychain could not be found.');
+    });
+    expect(deleteCredential('minimax').reason).toBe('backend_failed');
+  });
+
   // The case the issue is actually about.
   it('reports BACKEND_FAILED, not absent, when the keychain is LOCKED (status 36)', () => {
     execFileSyncMock.mockImplementation(() => {
@@ -126,5 +157,78 @@ describe('deleteCredential classification — macos-keychain (#2292 L8)', () => 
     // function; classification must not turn it into an early return.
     expect(fs.existsSync(mirror)).toBe(false);
     expect(out.reason).toBe('backend_failed');
+  });
+});
+
+// libsecret 0.21.7 `secret-tool clear` exits 1 with empty stderr whenever it
+// removed nothing — no match, or only locked matches, which it never removes.
+// A throw therefore cannot be told apart from absence, so every clear throw is
+// reported as backend_failed. Linux absence is tracked separately.
+describe('deleteCredential classification — secret-tool', () => {
+  let dir: string;
+  let calls: string[];
+  let unexpected: string[];
+
+  /** A non-zero exit as execFileSync throws it: status, signal, Buffer streams. */
+  function exitFailure(status: number, stderr: string): Error {
+    return Object.assign(new Error(`Command failed: secret-tool${stderr ? `\n${stderr}` : ''}`), {
+      status, signal: null, stdout: Buffer.from(''), stderr: Buffer.from(stderr),
+    });
+  }
+
+  // Records every call; one with no outcome (for example a `search`) is kept
+  // as unexpected and fails the test after cleanup.
+  function stubSecretTool(outcomes: Record<string, () => Buffer<ArrayBuffer>>): void {
+    execFileSyncMock.mockImplementation((_file: string, args: string[]) => {
+      if (args[0] === '--help') return Buffer.from('');
+      const key = args.join(' ');
+      calls.push(key);
+      const outcome = outcomes[key];
+      if (!outcome) {
+        unexpected.push(key);
+        throw new Error(`unexpected secret-tool call: ${key}`);
+      }
+      return outcome();
+    });
+  }
+
+  beforeEach(() => {
+    _resetBackendCache();
+    vi.stubGlobal('process', { ...process, platform: 'linux' } as unknown as NodeJS.Process);
+    execFileSyncMock.mockReset();
+    calls = [];
+    unexpected = [];
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsoup-del-class-st-'));
+    _setFileStoreDirForTests(dir);
+  });
+  afterEach(() => {
+    _setFileStoreDirForTests(null);
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    expect(unexpected).toEqual([]);
+  });
+
+  it.each([
+    ['silent exit 1', () => exitFailure(1, '')],
+    ['exit 1 with a diagnostic', () => exitFailure(1, 'secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY\n')],
+    ['timeout', () => Object.assign(new Error('spawnSync secret-tool ETIMEDOUT'), {
+      code: 'ETIMEDOUT', status: null, signal: 'SIGKILL', stdout: Buffer.from(''), stderr: Buffer.from(''),
+    })],
+  ])('reports BACKEND_FAILED for any clear throw, without searching (%s)', (_label, makeErr) => {
+    stubSecretTool({ 'clear service minimax': () => { throw makeErr(); } });
+
+    const out = deleteCredential('minimax');
+
+    expect(out).toEqual({
+      deleted: false, backend: 'secret-tool', reason: 'backend_failed', errorCode: 'KEYRING_WRITE_FAILED',
+    });
+    expect(calls).toEqual(['clear service minimax']);
+  });
+
+  it('reports DELETED when clear succeeds, without searching', () => {
+    stubSecretTool({ 'clear service minimax': () => Buffer.from('') });
+
+    expect(deleteCredential('minimax')).toEqual({ deleted: true, backend: 'secret-tool', reason: 'deleted' });
+    expect(calls).toEqual(['clear service minimax']);
   });
 });

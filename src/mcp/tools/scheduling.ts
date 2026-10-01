@@ -6,6 +6,7 @@ import { conversationBoundKey, type SessionContext } from '../types.ts';
 import { parseCron, nextCronRun } from '../../core/cron.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { enqueueScheduledMessage, isValidIanaTimeZone } from '../../core/schedule-enqueue.ts';
+import { assertScheduledPayloadWritable } from '../../core/scheduled-payload.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 // #1067: validate a recurrence timezone is a real IANA zone before storing it.
@@ -76,6 +77,7 @@ interface ScheduledMessageRow {
   sent_at: number | null;
   error: string | null;
   retry_count: number;
+  media_blob: Uint8Array | null;
 }
 
 function assertSessionAccess(rowChatJid: string, session: SessionContext): void {
@@ -320,6 +322,14 @@ export function registerSchedulingTools(
       }
 
       if (updates.length === 0) throw new Error('No fields to update');
+
+      // A10: validate the row as it will be after this UPDATE, not just the new
+      // text — a time-only update must not re-arm a payload that can never send.
+      assertScheduledPayloadWritable(
+        text !== undefined ? 'text' : row.content_type,
+        text !== undefined ? JSON.stringify({ text }) : row.payload,
+        row.media_blob,
+      );
 
       values.push(id);
       db.raw.prepare(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = ?`).run(...(values as import('node:sqlite').SQLInputValue[]));
