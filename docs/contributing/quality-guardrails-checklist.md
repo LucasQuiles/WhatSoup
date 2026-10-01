@@ -66,12 +66,17 @@ credential as present but empty. `command -v secret-tool` succeeds although
 the probe reports the tool absent. Absolute executable paths and tests that
 replace `PATH` require their own controlled fixtures: changing HOME alone does
 not isolate the OS credential store. The
-`portability.no-hardcoded-platform-binaries` guard rejects quoted absolute
-paths to either command in `src`, `scripts`, `deploy/scripts` and
-`tools/agent-runtime-probes`. The credential-isolation regression runs real
+`portability.no-hardcoded-platform-binaries` guard rejects `/usr/bin/security`
+and `/usr/bin/secret-tool` written in single quotes, double quotes or
+backticks, in `.ts`, `.py` and `.sh` files under `src`, `scripts`,
+`deploy/scripts` and `tools/agent-runtime-probes`, outside its allowlisted
+paths. It does not scan top-level `deploy/`, `deploy/lib`, `tests/`, `.mjs` or
+extensionless files, and it does not match an unquoted path in a shell script
+or a path outside `/usr/bin`. The credential-isolation regression runs real
 Vitest against decoy stores, checks the selected backend, resolver fallback
 and child-process reads, and verifies write and delete rejection; a sibling
-test pins the `PATH` order under the real configuration.
+test pins the `PATH` order and the cleared `REQUIRE_OS_KEYRING` under the real
+configuration.
 
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 

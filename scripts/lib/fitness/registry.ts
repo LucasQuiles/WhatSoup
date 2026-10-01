@@ -584,6 +584,8 @@ export const fitnessRules = [
         "\'/usr/bin/git",
         "\'/usr/bin/secret-tool",
         "\'/usr/bin/security",
+        '`/usr/bin/secret-tool',
+        '`/usr/bin/security',
       ],
       allowlistPaths: [
         'tools/agent-runtime-probes/config_surface_doctor.py',
