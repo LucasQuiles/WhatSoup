@@ -18,6 +18,8 @@ const NESTED_RUN_TIMEOUT_MS = 2 * NESTED_TEST_TIMEOUT_MS + 30_000;
 const TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
 
 const REJECTION = 'synthetic credential backend rejects writes and unsupported operations';
+// The real macOS tool's message for a missing item, which it reports with exit 44.
+const NOT_FOUND = 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.';
 // The piped write sends a small input shaped like the macOS caller's: the value
 // twice, each with a newline. Two release gates failed here when a rejection
 // that carried a 131,100-byte piped input stalled for the whole spawn guard
@@ -81,12 +83,15 @@ describe('Vitest credential isolation', () => {
         "expect({ credential, fallback }).toEqual({ credential: null, fallback: 'explicit-environment-fixture' });",
         "const command = platform === 'darwin' ? 'security' : 'secret-tool';",
         "const read = platform === 'darwin' ? 'find-generic-password' : 'lookup';",
-        `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, read], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
-        'expect(inherited.error, inherited.stderr).toBeUndefined();',
-        'expect({ status: inherited.status, output: inherited.stdout }).toEqual({ status: 0, output: \'\' });',
         // The last stderr line is the message: a shell start-up warning before it
         // is outside the contract.
         "const message = result => (result.stderr ?? '').split('\\n').at(-2);",
+        // A grandchild that inherits PATH reads through the shim. On macOS it sees
+        // a missing item, as the real tool reports one; on Linux an empty read.
+        `const inherited = spawnSync(process.execPath, ['-e', 'const read = require("node:child_process").spawnSync(process.argv[1], process.argv.slice(2), { encoding: "utf8" }); process.stdout.write(JSON.stringify({ status: read.status, stdout: read.stdout, stderr: read.stderr }))', command, read], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
+        'expect({ error: inherited.error, status: inherited.status }, inherited.stderr).toEqual({ error: undefined, status: 0 });',
+        'const inheritedRead = JSON.parse(inherited.stdout);',
+        `expect({ status: inheritedRead.status, stdout: inheritedRead.stdout, message: message(inheritedRead) }).toEqual(platform === 'darwin' ? { status: 44, stdout: '', message: ${JSON.stringify(NOT_FOUND)} } : { status: 0, stdout: '', message: undefined });`,
         // The discarded-byte count witnesses the drain, so it is asserted first.
         "const write = platform === 'darwin' ? 'add-generic-password' : 'store';",
         `const written = spawnSync(command, [write], { input: ${JSON.stringify(WRITE_FIXTURE)}, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
