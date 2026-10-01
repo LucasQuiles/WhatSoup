@@ -362,8 +362,16 @@ function main(): number {
   const repoRoot = options.repo;
 
   // Checked first so a mistyped --repo is reported as itself, not as a missing git, an
-  // unreadable control path or an unresolved revision. The path is not printed.
-  if (!statSync(repoRoot, { throwIfNoEntry: false })?.isDirectory()) {
+  // unreadable control path or an unresolved revision. The path is not printed. Any stat failure
+  // counts as "not a directory" (ENOENT, EACCES, ELOOP, ENAMETOOLONG): uncaught, it exited 1, the
+  // growth code, and printed the path in its stack trace.
+  let repoIsDirectory: boolean;
+  try {
+    repoIsDirectory = statSync(repoRoot).isDirectory();
+  } catch {
+    repoIsDirectory = false;
+  }
+  if (!repoIsDirectory) {
     console.error(
       'FAIL(inconclusive): the --repo path is not a directory, so no revision can be read.',
     );
