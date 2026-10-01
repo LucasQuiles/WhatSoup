@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, realpathSync } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { delimiter, isAbsolute, join, relative } from 'node:path';
 
 describe('Vitest filesystem isolation', () => {
   it('routes HOME and XDG roots into a worker-owned temporary directory', () => {
@@ -24,5 +24,18 @@ describe('Vitest filesystem isolation', () => {
     expect(process.env['XDG_CACHE_HOME']).toBe(join(isolatedHome!, '.cache'));
     expect(process.env['CLAUDE_CONFIG_DIR']).toBeUndefined();
     expect(existsSync(join(isolatedHome!, '.whatsoup-vitest-home'))).toBe(true);
+  });
+
+  // The credential-isolation regression loads the setup file through its own
+  // config. This pins the same contract under the real one, where a later setup
+  // file could undo it.
+  it('keeps REQUIRE_OS_KEYRING unset and the synthetic credential commands first on PATH', () => {
+    const credentialBin = join(process.env['WHATSOUP_VITEST_HOME']!, 'credential-bin');
+
+    expect(process.env['REQUIRE_OS_KEYRING']).toBeUndefined();
+    expect((process.env['PATH'] ?? '').split(delimiter)[0]).toBe(credentialBin);
+    for (const command of ['security', 'secret-tool']) {
+      expect(() => accessSync(join(credentialBin, command), constants.X_OK)).not.toThrow();
+    }
   });
 });

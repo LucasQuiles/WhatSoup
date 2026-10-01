@@ -94,24 +94,40 @@ delete process.env['CLAUDE_CONFIG_DIR'];
 // make unmocked backend detection throw instead of using env-only.
 delete process.env['REQUIRE_OS_KEYRING'];
 
-// OS credential stores are not HOME-scoped. Inherited test commands see empty
-// synthetic reads and rejected writes; dedicated keyring tests retain their
-// explicit process mocks. Each shim must stay runnable: a missing interpreter
-// would make PATH lookup continue to the real binary.
+// OS credential stores are not HOME-scoped. Inherited test commands see a
+// missing item on macOS, an empty read on Linux, and rejected writes; dedicated
+// keyring tests retain their explicit process mocks. The Linux read stays empty
+// because `secret-tool lookup` exits 1 for a missing item and for a failure
+// alike, and keyring records such an exit as a failure. Each shim must stay
+// runnable: a missing interpreter would make PATH lookup continue to the real
+// binary.
 const credentialBin = join(isolatedHome, 'credential-bin');
 mkdirSync(credentialBin, { mode: 0o700 });
-// Drain piped stdin before rejecting: `secret-tool store` reads the secret from
-// stdin, and a shim that exits first makes the caller's write fail with EPIPE.
-// A terminal stdin is left unread, so an interactive caller cannot block.
-const rejectMutation =
-  "  *) [ -t 0 ] || cat >/dev/null; printf '%s\\n' 'synthetic credential backend rejects writes and unsupported operations' >&2; exit 1 ;;";
+const rejection = 'synthetic credential backend rejects writes and unsupported operations';
+// The two write operations take the secret on stdin, so their arm reads it to
+// the end before rejecting: a shim that exits first makes the caller's write
+// fail with EPIPE. `cat` does the reading because on macOS `wc -c` alone only
+// stats a regular file. The message reports the discarded byte count, which
+// lets a test witness the drain. A terminal stdin is left unread, so an
+// interactive caller cannot block. A closed stdin is not read either: in macOS
+// sh the pipe of the command substitution would take descriptor 0, and `cat`
+// would wait on its own pipeline forever. The check duplicates descriptor 0
+// onto another one, because macOS sh skips a duplication onto itself, and runs
+// in a subshell, where a failed redirection cannot end the shim. Every other
+// rejected operation leaves stdin unread.
+const rejectWrite =
+  `if ! ( true 3<&0 ) 2>/dev/null || [ -t 0 ]; then n=0; else n=$(( $(cat | wc -c) )); fi; printf '%s\\n' "${rejection} (discarded $n bytes of stdin)" >&2; exit 1 ;;`;
+const rejectOther = `  *) printf '%s\\n' '${rejection}' >&2; exit 1 ;;`;
 const syntheticCredentialBackends: Record<string, string> = {
   security: [
     '#!/bin/sh',
     'case "$1" in',
-    '  find-generic-password) exit 0 ;;',
+    // A missing item, as the real tool reports one: keyring treats a clean exit
+    // 44 as a miss, and a shell caller that tests the status sees "not found".
+    "  find-generic-password) printf '%s\\n' 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2; exit 44 ;;",
     "  --help) printf '%s\\n' 'Usage: synthetic credential backend'; exit 0 ;;",
-    rejectMutation,
+    `  add-generic-password) ${rejectWrite}`,
+    rejectOther,
     'esac',
     '',
   ].join('\n'),
@@ -122,7 +138,8 @@ const syntheticCredentialBackends: Record<string, string> = {
     'case "$1" in',
     "  --help) printf '%s\\n' 'secret-tool: not found (synthetic credential backend)' >&2; exit 127 ;;",
     '  lookup) exit 0 ;;',
-    rejectMutation,
+    `  store) ${rejectWrite}`,
+    rejectOther,
     'esac',
     '',
   ].join('\n'),
