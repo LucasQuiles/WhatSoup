@@ -994,6 +994,35 @@ def test_policy_not_applicable_overrides_launchagent_label(mod):
     assert mod.gui_targets_from_fleet(fleet) == []
 
 
+def test_blocked_instance_policy_excludes_it_on_an_always_aqua_host(mod):
+    # A retired instance next to a running one: `expected: blocked` alone does
+    # not leave the target set under a host-level always_aqua policy, so the
+    # retired entry declares its own excluding policy. The host policy must keep
+    # the running instance monitored.
+    fleet = {"hosts": [
+        _host("mixed", role="bot-host", policy="always_aqua",
+              instances=[_inst("active-bot"),
+                         _inst("retired-bot", expected="blocked",
+                               policy="not_applicable")]),
+    ]}
+    targets = mod.gui_targets_from_fleet(fleet)
+    assert [(t["host"], t["instance"]) for t in targets] == [("mixed", "active-bot")]
+
+
+def test_tracked_manifest_never_monitors_a_blocked_instance(mod):
+    # The declared policy wins over `expected`, so a blocked entry that inherits
+    # always_aqua from its host would be probed and paged as a lost GUI session.
+    manifest = _load_tracked_manifest(mod)
+    blocked = {
+        (host_entry["host"], instance["name"])
+        for host_entry in manifest["hosts"]
+        for instance in host_entry.get("instances", [])
+        if instance.get("expected") == "blocked"
+    }
+    monitored = {(t["host"], t["instance"]) for t in mod.gui_targets_from_fleet(manifest)}
+    assert sorted(blocked & monitored) == []
+
+
 # ---------------------------------------------------------------------------
 # Test 20: FAIL-CLOSED default — bot host with unknown/missing policy is
 # STILL monitored, never silently dropped.
