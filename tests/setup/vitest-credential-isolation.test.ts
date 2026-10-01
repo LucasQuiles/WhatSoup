@@ -7,6 +7,16 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 const root = process.cwd();
 const tmp = trackTmpDirs('credential-isolation-');
 
+// These timeouts are hang guards, not performance bounds: under a loaded
+// full-suite run, one probe spawn took over 2 s. Each layer allows the worst
+// case of the layer it wraps. A platform leg makes at most four guarded spawns
+// (an inherited read and three rejections) and two keyring lookups, each under
+// the keyring's own 3 s timeout; the nested run has two legs.
+const SPAWN_GUARD_MS = 10_000;
+const NESTED_TEST_TIMEOUT_MS = 4 * SPAWN_GUARD_MS + 10_000;
+const NESTED_RUN_TIMEOUT_MS = 2 * NESTED_TEST_TIMEOUT_MS + 30_000;
+const TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
+
 describe('Vitest credential isolation', () => {
   // @skip-env The shims and decoys are POSIX sh scripts, which Windows cannot run.
   it.skipIf(process.platform === 'win32')(
@@ -32,6 +42,7 @@ describe('Vitest credential isolation', () => {
           setupFiles: [resolve(root, 'tests/setup/bot-errors-vitest-isolation.ts')],
           maxWorkers: 1,
           fileParallelism: false,
+          testTimeout: NESTED_TEST_TIMEOUT_MS,
         },
       })};`);
       writeFileSync(join(dir, 'probe.test.mjs'), [
@@ -55,11 +66,11 @@ describe('Vitest credential isolation', () => {
         "expect({ credential, fallback }).toEqual({ credential: null, fallback: 'explicit-environment-fixture' });",
         "const command = platform === 'darwin' ? 'security' : 'secret-tool';",
         "const operation = platform === 'darwin' ? 'find-generic-password' : 'lookup';",
-        `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, operation], { encoding: 'utf8', timeout: 2000 });`,
+        `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, operation], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'expect(inherited.error, inherited.stderr).toBeUndefined();',
         'expect({ status: inherited.status, output: inherited.stdout }).toEqual({ status: 0, output: \'\' });',
         "for (const mutation of platform === 'darwin' ? ['add-generic-password', 'delete-generic-password', 'synthetic-unsupported-operation'] : ['store', 'clear', 'synthetic-unsupported-operation']) {",
-        "const rejected = spawnSync(command, [mutation], { input: 'synthetic-write-fixture'.repeat(12000) /* 276,000 bytes, more than a pipe buffer: a shim that exits without draining stdin fails with EPIPE */, encoding: 'utf8', timeout: 2000 });",
+        `const rejected = spawnSync(command, [mutation], { input: 'synthetic-write-fixture'.repeat(5700) /* 131,100 bytes: above a 64 KiB pipe buffer and the 16 KiB buffer of the macOS socket pair Node uses for child stdin, so a shim that exits without draining stdin fails with EPIPE */, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'expect(rejected.error, `${mutation}: ${rejected.stderr}`).toBeUndefined();',
         'expect({ mutation, status: rejected.status }).toEqual({ mutation, status: 1 });',
         "expect(rejected.stderr).toContain('synthetic credential backend rejects writes');",
@@ -77,7 +88,7 @@ describe('Vitest credential isolation', () => {
           WHATSOUP_CREDENTIAL_PROBE_RESULTS: results,
           REQUIRE_OS_KEYRING: '1',
         },
-        encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024,
+        encoding: 'utf8', timeout: NESTED_RUN_TIMEOUT_MS, maxBuffer: 1024 * 1024,
       });
 
       const output = child.stdout + child.stderr;
@@ -98,6 +109,6 @@ describe('Vitest credential isolation', () => {
       expect(child.status, output).toBe(0);
       expect(existsSync(attempted), 'the ambient credential-store decoy was executed').toBe(false);
     },
-    90_000,
+    TEST_TIMEOUT_MS,
   );
 });
