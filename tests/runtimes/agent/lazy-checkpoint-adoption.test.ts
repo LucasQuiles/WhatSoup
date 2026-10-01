@@ -170,7 +170,11 @@ type RuntimeView = {
   chatSessions: Map<string, SessionManager>;
   sessionOwnership: SessionOwnershipRegistry;
   ensureSessionAndQueueSync(jid: string, key: string): void;
-  sendTurnToSession(s: SessionManager, jid: string, text: string, key: string): Promise<void>;
+  sendTurnToSession(
+    s: SessionManager, jid: string, text: string, key: string, actorJid?: string, beforeUserSend?: () => void,
+    systemTurnLease?: undefined, dispatchAllowed?: () => boolean, runtimeContext?: undefined, deliveryKind?: undefined,
+    purpose?: 'scheduled-agent-job',
+  ): Promise<void>;
   sendDirect(jid: string, text: string): void;
   fallback: { schedulePrimaryModelUsabilityProbe: (...a: unknown[]) => void; scheduleNextPeriodicUsabilityProbe: () => void; startChainCanary: () => void };
 };
@@ -230,10 +234,15 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
     await runtime.start();
   });
   afterEach(async () => {
-    if (runtime) await runtime.shutdown();
-    expect(spawn).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
-    expect(messenger.sendMessage).not.toHaveBeenCalled(); expect(messenger.sendMedia).not.toHaveBeenCalled();
-    db.close(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
+    // Cleanup runs even when the shutdown or a leak check throws, so one
+    // failed case cannot leak timers, stubs or spies into the next.
+    try {
+      if (runtime) await runtime.shutdown();
+      expect(spawn).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+      expect(messenger.sendMessage).not.toHaveBeenCalled(); expect(messenger.sendMedia).not.toHaveBeenCalled();
+    } finally {
+      try { db.close(); } finally { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); }
+    }
   });
 
   describe('decision 15 part 2: own session vs another session', () => {
@@ -398,9 +407,9 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
   describe('#3658: a pre-spawn close that fails only at the lifecycle step starts fresh with a notice', () => {
     const LIFECYCLE_CLOSE_FAILED = 'Exact resumable checkpoint does not match the conversation identity';
 
-    function managerWithFailingClose(error: unknown) {
-      view.ensureSessionAndQueueSync(JID, JID);
-      const session = view.chatSessions.get(JID)!;
+    function managerWithFailingClose(error: unknown, key = JID) {
+      view.ensureSessionAndQueueSync(JID, key);
+      const session = view.chatSessions.get(key)!;
       vi.spyOn(session, 'shutdown').mockRejectedValueOnce(error);
       const spawnSpy = vi.spyOn(session, 'spawnSession');
       return { session, spawnSpy };
@@ -441,15 +450,18 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
         throw new Error(LIFECYCLE_CLOSE_FAILED);
       });
-      // The first failed close leaves the manager inactive and still holding its row.
-      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
-      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      try {
+        // The first failed close leaves the manager inactive and still holding its row.
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        const spawnSpy = vi.spyOn(session, 'spawnSession');
 
-      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+        await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
 
-      expect(closeSpy).toHaveBeenCalledTimes(2);
-      closeSpy.mockRestore();
-      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+        expect(closeSpy).toHaveBeenCalledTimes(2);
+        expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      } finally {
+        closeSpy.mockRestore();
+      }
       expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
@@ -461,12 +473,15 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
         throw new Error(LIFECYCLE_CLOSE_FAILED);
       });
-      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
-      vi.spyOn(session, 'spawnSession').mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
+      try {
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        vi.spyOn(session, 'spawnSession').mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
 
-      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
-        .rejects.toThrow('fixture fresh spawn refused');
-      closeSpy.mockRestore();
+        await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+          .rejects.toThrow('fixture fresh spawn refused');
+      } finally {
+        closeSpy.mockRestore();
+      }
 
       expect(session.getDbRowId()).toBeNull();
       expect(session.getStatus().sessionId).toBeNull();
@@ -484,15 +499,18 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
         throw new Error(LIFECYCLE_CLOSE_FAILED);
       });
-      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
-      if (refuseSpawn) {
-        vi.spyOn(session, 'spawnSession').mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
-      }
+      try {
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        if (refuseSpawn) {
+          vi.spyOn(session, 'spawnSession').mockRejectedValueOnce(new Error('fixture fresh spawn refused'));
+        }
 
-      const turn = view.sendTurnToSession(session, JID, 'fixture user turn', JID);
-      if (refuseSpawn) await expect(turn).rejects.toThrow('fixture fresh spawn refused');
-      else await expect(turn).resolves.toBeUndefined();
-      closeSpy.mockRestore();
+        const turn = view.sendTurnToSession(session, JID, 'fixture user turn', JID);
+        if (refuseSpawn) await expect(turn).rejects.toThrow('fixture fresh spawn refused');
+        else await expect(turn).resolves.toBeUndefined();
+      } finally {
+        closeSpy.mockRestore();
+      }
 
       expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(abandonedRowId) as
         { status: string }).status).toBe('ended');
@@ -509,11 +527,14 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
         throw new Error(LIFECYCLE_CLOSE_FAILED);
       });
-      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
-      db.raw.prepare(sql).run(rowId);
+      try {
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        db.raw.prepare(sql).run(rowId);
 
-      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
-      closeSpy.mockRestore();
+        await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+      } finally {
+        closeSpy.mockRestore();
+      }
 
       expect((db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
         { status: string }).status).toBe(expectedStatus);
@@ -528,25 +549,71 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
         throw new Error(LIFECYCLE_CLOSE_FAILED);
       });
-      await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
-      // The provider is not proven stopped, so the fallback must refuse.
-      const realStatus = session.getStatus.bind(session);
-      const statusSpy = vi.spyOn(session, 'getStatus').mockImplementation(() => ({
-        ...realStatus(), providerTerminated: false,
-      }));
-      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      try {
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        // The provider is not proven stopped, so the fallback must refuse.
+        const realStatus = session.getStatus.bind(session);
+        const statusSpy = vi.spyOn(session, 'getStatus').mockImplementation(() => ({
+          ...realStatus(), providerTerminated: false,
+        }));
+        const spawnSpy = vi.spyOn(session, 'spawnSession');
+        try {
+          await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+            .rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        } finally {
+          statusSpy.mockRestore();
+        }
+        expect(spawnSpy).not.toHaveBeenCalled();
+      } finally {
+        closeSpy.mockRestore();
+      }
 
-      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
-        .rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
-      statusSpy.mockRestore();
-      closeSpy.mockRestore();
-
-      expect(spawnSpy).not.toHaveBeenCalled();
       expect(session.getDbRowId()).toBe(rowId);
       expect(session.getStatus().sessionId).toBe(sessionId);
       expect(db.raw.prepare('SELECT status, session_id FROM agent_sessions WHERE id = ?').get(rowId))
         .toMatchObject({ status: 'active', session_id: sessionId });
       expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('a retirement that cannot be persisted refuses the turn and keeps the generation for its next close', async () => {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      await session.spawnSession();
+      const rowId = session.getDbRowId();
+      const sessionId = session.getStatus().sessionId;
+      const closeSpy = vi.spyOn(engine, 'closeSessionLifecycle').mockImplementation(() => {
+        throw new Error(LIFECYCLE_CLOSE_FAILED);
+      });
+      // Only the abandoned-row close fails; every other statement runs for real.
+      const realPrepare = db.raw.prepare.bind(db.raw);
+      const prepareSpy = vi.spyOn(db.raw, 'prepare').mockImplementation((sql: string) => {
+        if (sql.includes(`WHERE id = ? AND status = 'active' AND session_id IS ?`)) {
+          throw new Error('fixture abandoned-row close failed');
+        }
+        return realPrepare(sql);
+      });
+      try {
+        await expect(session.shutdown()).rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+        const checkpoint = engine.getSessionCheckpoint(PHONE);
+        const spawnSpy = vi.spyOn(session, 'spawnSession');
+
+        await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+          .rejects.toThrow(LIFECYCLE_CLOSE_FAILED);
+
+        expect(spawnSpy).not.toHaveBeenCalled();
+        expect(providerSend).not.toHaveBeenCalled();
+        expect(notices).not.toHaveBeenCalled();
+        // Nothing was made resumable: the row and checkpoint stay as the failed close left them.
+        expect(db.raw.prepare('SELECT status, session_id FROM agent_sessions WHERE id = ?').get(rowId))
+          .toMatchObject({ status: 'active', session_id: sessionId });
+        expect(engine.getSessionCheckpoint(PHONE)).toEqual(checkpoint);
+      } finally {
+        prepareSpy.mockRestore();
+        closeSpy.mockRestore();
+      }
+      // The manager keeps the identity, so its next close can still retire the row.
+      expect(session.getDbRowId()).toBe(rowId);
+      expect(session.getStatus().sessionId).toBe(sessionId);
     });
 
     it('sends no notice when the fresh spawn after a failed close is refused', async () => {
@@ -556,6 +623,68 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         .rejects.toThrow('fixture fresh spawn refused');
       expect(notices).not.toHaveBeenCalled();
       expect(providerSend).not.toHaveBeenCalled();
+    });
+
+    // Host admission is opt-in (Linux only) and this suite stubs the provider
+    // boundary, so a deferred start is simulated at the session contract: the
+    // fresh spawnSession only records the start, and the boundary performs it.
+    function managerWithDeferredFreshStart(boundary: (onReady?: () => void) => Promise<void>) {
+      const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
+      let deferred = false;
+      spawnSpy.mockImplementationOnce(async () => { deferred = true; });
+      vi.spyOn(session, 'isHostWorkAdmissionStartDeferred').mockImplementation(() => deferred);
+      const noticesAtBoundary: number[] = [];
+      vi.spyOn(session, 'sendTurnAtProviderBoundary').mockImplementationOnce(async (_input, onReady) => {
+        noticesAtBoundary.push(notices.mock.calls.length);
+        await boundary(onReady);
+      });
+      return { session, spawnSpy, noticesAtBoundary };
+    }
+
+    it('a deferred fresh start the provider boundary refuses sends no notice', async () => {
+      const { session, spawnSpy, noticesAtBoundary } = managerWithDeferredFreshStart(async () => {
+        throw new Error('fixture deferred start refused');
+      });
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+        .rejects.toThrow('fixture deferred start refused');
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(noticesAtBoundary).toEqual([0]);
+      expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('a deferred fresh start superseded at the provider boundary sends no notice', async () => {
+      let allowed = true;
+      const { session, noticesAtBoundary } = managerWithDeferredFreshStart(async (onReady) => {
+        allowed = false;
+        onReady?.();
+      });
+      await expect(view.sendTurnToSession(
+        session, JID, 'fixture user turn', JID, undefined, undefined, undefined, () => allowed,
+      )).rejects.toThrow('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
+      expect(noticesAtBoundary).toEqual([0]);
+      expect(notices).not.toHaveBeenCalled();
+    });
+
+    it('a deferred fresh start sends its one notice only once the provider boundary admits it', async () => {
+      const { session, noticesAtBoundary } = managerWithDeferredFreshStart(async (onReady) => { onReady?.(); });
+      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
+      expect(noticesAtBoundary).toEqual([0]);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+    });
+
+    const scheduledTurns: Array<[string, string, 'scheduled-agent-job' | undefined]> = [
+      ['its scheduled map key', SCHEDULED, undefined],
+      ['its scheduled purpose', JID, 'scheduled-agent-job'],
+    ];
+
+    it.each(scheduledTurns)('a scheduled turn known by %s starts fresh after a failed close without the notice', async (_label, key, purpose) => {
+      const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED), key);
+      await expect(view.sendTurnToSession(
+        session, JID, 'fixture scheduled turn', key, undefined, undefined, undefined, undefined, undefined, undefined, purpose,
+      )).resolves.toBeUndefined();
+      expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(providerSend).toHaveBeenCalledTimes(1);
+      expect(notices).not.toHaveBeenCalled();
     });
 
     const unprovenStops: Array<[string, Partial<ReturnType<SessionManager['getStatus']>>]> = [
@@ -578,9 +707,12 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       vi.spyOn(session, 'getStatus').mockImplementation(() => (
         failedClose ? { ...realStatus(), ...override } : realStatus()
       ));
-      await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
-        .rejects.toThrow('fixture termination failed');
-      failedClose = false;
+      try {
+        await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID))
+          .rejects.toThrow('fixture termination failed');
+      } finally {
+        failedClose = false;
+      }
       expect(spawnSpy).not.toHaveBeenCalled();
       expect(providerSend).not.toHaveBeenCalled();
       expect(notices).not.toHaveBeenCalled();
