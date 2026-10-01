@@ -7,15 +7,24 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 const root = process.cwd();
 const tmp = trackTmpDirs('credential-isolation-');
 
-// These timeouts are hang guards, not performance bounds: under a loaded
-// full-suite run, one probe spawn took over 2 s. Each layer allows the worst
-// case of the layer it wraps. A platform leg makes at most four guarded spawns
-// (an inherited read and three rejections) and two keyring lookups, each under
-// the keyring's own 3 s timeout; the nested run has two legs.
+// These timeouts are hang guards, not performance bounds. Each layer allows the
+// worst case of the layer it wraps. A platform leg makes at most four guarded
+// spawns (an inherited read, one rejected write and two other rejections) and
+// two keyring lookups, each under the keyring's own 3 s timeout; the nested run
+// has two legs.
 const SPAWN_GUARD_MS = 10_000;
 const NESTED_TEST_TIMEOUT_MS = 4 * SPAWN_GUARD_MS + 10_000;
 const NESTED_RUN_TIMEOUT_MS = 2 * NESTED_TEST_TIMEOUT_MS + 30_000;
 const TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
+
+const REJECTION = 'synthetic credential backend rejects writes and unsupported operations';
+// The rejected write sends a small input, as real callers do. Two release gates
+// failed here when a rejection that carried a 131,100-byte input stalled for
+// the whole spawn guard while its neighbours took milliseconds: writing that
+// input needs many write-readiness wakeups on the 8 KiB macOS socket pair,
+// and a small input is written in one call. The cause in Node or macOS is not
+// established. A hang on this small-input spawn would refute that reading.
+const WRITE_FIXTURE = 'synthetic-write-fixture';
 
 describe('Vitest credential isolation', () => {
   // @skip-env The shims and decoys are POSIX sh scripts, which Windows cannot run.
@@ -65,15 +74,20 @@ describe('Vitest credential isolation', () => {
         'rows.push({ platform, backend, requireOsKeyring, credential, fallback });',
         "expect({ credential, fallback }).toEqual({ credential: null, fallback: 'explicit-environment-fixture' });",
         "const command = platform === 'darwin' ? 'security' : 'secret-tool';",
-        "const operation = platform === 'darwin' ? 'find-generic-password' : 'lookup';",
-        `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, operation], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
+        "const read = platform === 'darwin' ? 'find-generic-password' : 'lookup';",
+        `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, read], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'expect(inherited.error, inherited.stderr).toBeUndefined();',
         'expect({ status: inherited.status, output: inherited.stdout }).toEqual({ status: 0, output: \'\' });',
-        "for (const mutation of platform === 'darwin' ? ['add-generic-password', 'delete-generic-password', 'synthetic-unsupported-operation'] : ['store', 'clear', 'synthetic-unsupported-operation']) {",
-        `const rejected = spawnSync(command, [mutation], { input: 'synthetic-write-fixture'.repeat(5700) /* 131,100 bytes: above a 64 KiB pipe buffer and the 16 KiB buffer of the macOS socket pair Node uses for child stdin, so a shim that exits without draining stdin fails with EPIPE */, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
-        'expect(rejected.error, `${mutation}: ${rejected.stderr}`).toBeUndefined();',
-        'expect({ mutation, status: rejected.status }).toEqual({ mutation, status: 1 });',
-        "expect(rejected.stderr).toContain('synthetic credential backend rejects writes');",
+        // The discarded-byte count witnesses the drain, so it is asserted first.
+        "const write = platform === 'darwin' ? 'add-generic-password' : 'store';",
+        `const written = spawnSync(command, [write], { input: ${JSON.stringify(WRITE_FIXTURE)}, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
+        'const outcome = JSON.stringify({ write, status: written.status, signal: written.signal, error: written.error?.code ?? null });',
+        `expect(written.stderr, outcome).toBe(${JSON.stringify(`${REJECTION} (discarded ${WRITE_FIXTURE.length} bytes of stdin)\n`)});`,
+        'expect({ error: written.error, status: written.status }, outcome).toEqual({ error: undefined, status: 1 });',
+        // The other operations take no stdin from real callers and must not read it.
+        "for (const operation of platform === 'darwin' ? ['delete-generic-password', 'synthetic-unsupported-operation'] : ['clear', 'synthetic-unsupported-operation']) {",
+        `const rejected = spawnSync(command, [operation], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
+        `expect({ operation, error: rejected.error, status: rejected.status, signal: rejected.signal, stderr: rejected.stderr }).toEqual({ operation, error: undefined, status: 1, signal: null, stderr: ${JSON.stringify(`${REJECTION}\n`)} });`,
         '}',
         '});',
       ].join('\n'));
