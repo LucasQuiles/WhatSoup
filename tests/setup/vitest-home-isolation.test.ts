@@ -28,10 +28,11 @@ describe('Vitest filesystem isolation', () => {
 
   // The credential-isolation regression loads the setup file through its own
   // config. This pins the same contract under the real one, where a later setup
-  // file or an `env` entry could replace PATH.
-  it('keeps the synthetic credential commands first on PATH', () => {
+  // file could undo it.
+  it('keeps REQUIRE_OS_KEYRING unset and the synthetic credential commands first on PATH', () => {
     const credentialBin = join(process.env['WHATSOUP_VITEST_HOME']!, 'credential-bin');
 
+    expect(process.env['REQUIRE_OS_KEYRING']).toBeUndefined();
     expect((process.env['PATH'] ?? '').split(delimiter)[0]).toBe(credentialBin);
     for (const command of ['security', 'secret-tool']) {
       expect(() => accessSync(join(credentialBin, command), constants.X_OK)).not.toThrow();

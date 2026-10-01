@@ -8,23 +8,27 @@ const root = process.cwd();
 const tmp = trackTmpDirs('credential-isolation-');
 
 // These timeouts are hang guards, not performance bounds. Each layer allows the
-// worst case of the layer it wraps. A platform leg makes at most four guarded
-// spawns (an inherited read, one rejected write and two other rejections) and
+// worst case of the layer it wraps. A platform leg makes at most five guarded
+// spawns (an inherited read, two rejected writes and two other rejections) and
 // two keyring lookups, each under the keyring's own 3 s timeout; the nested run
 // has two legs.
 const SPAWN_GUARD_MS = 10_000;
-const NESTED_TEST_TIMEOUT_MS = 4 * SPAWN_GUARD_MS + 10_000;
+const NESTED_TEST_TIMEOUT_MS = 5 * SPAWN_GUARD_MS + 10_000;
 const NESTED_RUN_TIMEOUT_MS = 2 * NESTED_TEST_TIMEOUT_MS + 30_000;
 const TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
 
 const REJECTION = 'synthetic credential backend rejects writes and unsupported operations';
-// The rejected write sends a small input, as real callers do. Two release gates
-// failed here when a rejection that carried a 131,100-byte input stalled for
-// the whole spawn guard while its neighbours took milliseconds: writing that
-// input needs many write-readiness wakeups on the 8 KiB macOS socket pair,
-// and a small input is written in one call. The cause in Node or macOS is not
-// established. A hang on this small-input spawn would refute that reading.
-const WRITE_FIXTURE = 'synthetic-write-fixture';
+// The piped write sends a small input shaped like the macOS caller's: the value
+// twice, each with a newline. Two release gates failed here when a rejection
+// that carried a 131,100-byte piped input stalled for the whole spawn guard
+// while its neighbours took milliseconds: writing that input needs many
+// write-readiness wakeups on the 8 KiB macOS socket pair, and a small input is
+// written in one call. The cause in Node or macOS is not established. A hang on
+// this small-input spawn would refute that reading.
+const WRITE_FIXTURE = 'synthetic-write-fixture\n'.repeat(2);
+// Larger than a pipe or socket buffer on either platform. It reaches the shims
+// as a regular file, so the parent writes nothing.
+const STDIN_FILE_BYTES = 131_100;
 
 describe('Vitest credential isolation', () => {
   // @skip-env The shims and decoys are POSIX sh scripts, which Windows cannot run.
@@ -36,6 +40,8 @@ describe('Vitest credential isolation', () => {
       mkdirSync(bin, { mode: 0o700 });
       const attempted = join(dir, 'attempted');
       const results = join(dir, 'results.json');
+      const stdinFile = join(dir, 'stdin-fixture');
+      writeFileSync(stdinFile, 'x'.repeat(STDIN_FILE_BYTES));
       // A controlled command replaces the ambient store even in the failing baseline:
       // the nested run puts this directory first on PATH before any keyring import.
       const decoy = '#!/bin/sh\nprintf x >> "$WHATSOUP_CREDENTIAL_DECOY_LOG"\nprintf ambient-store-fixture\n';
@@ -58,7 +64,7 @@ describe('Vitest credential isolation', () => {
         `import { it, expect, afterAll } from ${JSON.stringify(resolve(root, 'node_modules/vitest/dist/index.js'))};`,
         `import { detectKeyringBackend, lookupCredential, _resetBackendCache } from ${JSON.stringify(resolve(root, 'src/lib/keyring.ts'))};`,
         `import { resolveApiKey } from ${JSON.stringify(resolve(root, 'src/lib/api-key-resolver.ts'))};`,
-        "import { writeFileSync } from 'node:fs';",
+        "import { closeSync, openSync, readSync, writeFileSync } from 'node:fs';",
         "import { spawnSync } from 'node:child_process';",
         'const rows = [];',
         'const originalPlatform = process.platform;',
@@ -78,16 +84,32 @@ describe('Vitest credential isolation', () => {
         `const inherited = spawnSync(process.execPath, ['-e', 'process.stdout.write(require("node:child_process").execFileSync(process.argv[1], process.argv.slice(2)))', command, read], { encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'expect(inherited.error, inherited.stderr).toBeUndefined();',
         'expect({ status: inherited.status, output: inherited.stdout }).toEqual({ status: 0, output: \'\' });',
+        // The last stderr line is the message: a shell start-up warning before it
+        // is outside the contract.
+        "const message = result => (result.stderr ?? '').split('\\n').at(-2);",
         // The discarded-byte count witnesses the drain, so it is asserted first.
         "const write = platform === 'darwin' ? 'add-generic-password' : 'store';",
         `const written = spawnSync(command, [write], { input: ${JSON.stringify(WRITE_FIXTURE)}, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
         'const outcome = JSON.stringify({ write, status: written.status, signal: written.signal, error: written.error?.code ?? null });',
-        `expect(written.stderr, outcome).toBe(${JSON.stringify(`${REJECTION} (discarded ${WRITE_FIXTURE.length} bytes of stdin)\n`)});`,
+        `expect(message(written), outcome).toBe(${JSON.stringify(`${REJECTION} (discarded ${Buffer.byteLength(WRITE_FIXTURE)} bytes of stdin)`)});`,
         'expect({ error: written.error, status: written.status }, outcome).toEqual({ error: undefined, status: 1 });',
-        // The other operations take no stdin from real callers and must not read it.
+        // A regular file as stdin shares its offset with the parent, so what the
+        // parent can still read afterwards is what the command left unread.
+        'const withFileStdin = operation => {',
+        "const fd = openSync(process.env.WHATSOUP_CREDENTIAL_PROBE_STDIN, 'r');",
+        'try {',
+        `const result = spawnSync(command, [operation], { stdio: [fd, 'pipe', 'pipe'], encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
+        'const chunk = Buffer.alloc(65_536);',
+        'let unread = 0;',
+        'for (let bytes = readSync(fd, chunk, 0, chunk.length, null); bytes > 0; bytes = readSync(fd, chunk, 0, chunk.length, null)) unread += bytes;',
+        'return { operation, error: result.error?.code ?? null, status: result.status, signal: result.signal, message: message(result), unread };',
+        '} finally { closeSync(fd); }',
+        '};',
+        // A write reads all of a large input.
+        `expect(withFileStdin(write)).toEqual({ operation: write, error: null, status: 1, signal: null, message: ${JSON.stringify(`${REJECTION} (discarded ${STDIN_FILE_BYTES} bytes of stdin)`)}, unread: 0 });`,
+        // The other operations take no stdin from real callers and read none of it.
         "for (const operation of platform === 'darwin' ? ['delete-generic-password', 'synthetic-unsupported-operation'] : ['clear', 'synthetic-unsupported-operation']) {",
-        `const rejected = spawnSync(command, [operation], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
-        `expect({ operation, error: rejected.error, status: rejected.status, signal: rejected.signal, stderr: rejected.stderr }).toEqual({ operation, error: undefined, status: 1, signal: null, stderr: ${JSON.stringify(`${REJECTION}\n`)} });`,
+        `expect(withFileStdin(operation)).toEqual({ operation, error: null, status: 1, signal: null, message: ${JSON.stringify(REJECTION)}, unread: ${STDIN_FILE_BYTES} });`,
         '}',
         '});',
       ].join('\n'));
@@ -100,6 +122,7 @@ describe('Vitest credential isolation', () => {
           PATH: `${bin}${delimiter}${process.env['PATH'] ?? ''}`,
           WHATSOUP_CREDENTIAL_DECOY_LOG: attempted,
           WHATSOUP_CREDENTIAL_PROBE_RESULTS: results,
+          WHATSOUP_CREDENTIAL_PROBE_STDIN: stdinFile,
           REQUIRE_OS_KEYRING: '1',
         },
         encoding: 'utf8', timeout: NESTED_RUN_TIMEOUT_MS, maxBuffer: 1024 * 1024,
