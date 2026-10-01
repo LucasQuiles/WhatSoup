@@ -11,7 +11,15 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -411,6 +419,35 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expect(/baseline.*\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
     expect(/-baseline\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
   });
+
+  it('BLOCKS (exit 1) when the waiver exists only in a replace ref for the base (#3669)', () => {
+    // Waiver authority is read from the base, so a local `refs/replace/<base>` must not be
+    // able to author it. An unhardened guard read the waiver through `git show <base>:...`,
+    // which follows the replacement, and reported the growth as WAIVED (exit 0).
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'no waiver at base']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeWaivers(dir, activeWaiver(501));
+    git(dir, ['add', '-A']);
+    const forgedTree = git(dir, ['write-tree']).trim();
+    const forged = git(
+      dir,
+      ['commit-tree', forgedTree, '-p', `${base}^`, '-m', 'forged waiver'],
+    ).trim();
+    git(dir, ['reset', '-q', '--hard', base]);
+    writeFitness(dir, 500);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'widen']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    git(dir, ['replace', base, forged]);
+
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/may only shrink/);
+    expect(out).not.toMatch(/WAIVED/);
+  });
 });
 
 /**
@@ -635,5 +672,220 @@ describe('CI wiring — the guard must be invoked with pinned revisions', () => 
     expect(invocation).toMatch(/github\.event\.before/);
     expect(invocation).toMatch(/pull_request\.base\.sha/);
     expect(invocation).toMatch(/merge_group\.base_sha/);
+  });
+});
+
+/**
+ * #3669: every Git read goes through the exact-Git helpers. A local replace ref or legacy graft
+ * changed what `git show` and `merge-base` returned while `rev-parse` still printed the real
+ * commit, so a receipt could name one commit while the guard weighed another. Each case pins
+ * the revisions and says what an unhardened guard reported instead.
+ */
+describe('exact Git reads — replace refs, grafts and non-blob baselines (#3669)', () => {
+  const boundaryPath = '.claude/fitness/boundary-baseline.json';
+
+  function commitAll(dir: string, message: string): string {
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', message]);
+    return git(dir, ['rev-parse', 'HEAD']).trim();
+  }
+
+  /** A commit object built from the working tree, without moving HEAD. */
+  function commitTreeFromWorktree(dir: string, parent: string, message: string): string {
+    git(dir, ['add', '-A']);
+    const tree = git(dir, ['write-tree']).trim();
+    return git(dir, ['commit-tree', tree, '-p', parent, '-m', message]).trim();
+  }
+
+  /**
+   * The base holds 2 entries and the candidate grows to 5. origin/main is a sibling commit
+   * with the candidate's tree. A graft that re-parents the candidate onto that sibling moves
+   * the inferred merge base to a commit that already weighs 5, which hides the growth.
+   */
+  function graftableGrowth(dir: string): { candidate: string; sibling: string } {
+    const realBase = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    const candidate = commitAll(dir, 'grow candidate baseline');
+    const candidateTree = git(dir, ['rev-parse', `${candidate}^{tree}`]).trim();
+    const sibling = git(
+      dir,
+      ['commit-tree', candidateTree, '-p', realBase, '-m', 'sibling with the same weight'],
+    ).trim();
+    git(dir, ['update-ref', 'refs/remotes/origin/main', sibling]);
+    return { candidate, sibling };
+  }
+
+  it('BLOCKS committed growth when a replace ref points the candidate at safe bytes', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    const candidate = commitAll(dir, 'grow baseline');
+    writeBoundary(dir, 2);
+    git(dir, ['replace', candidate, commitTreeFromWorktree(dir, base, 'safe replacement')]);
+
+    // Unhardened: `git show <candidate>:<path>` read the replacement and reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('PASSES a committed shrink when a replace ref points the candidate at larger bytes', () => {
+    const dir = makeRepo(5);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 1);
+    const candidate = commitAll(dir, 'shrink baseline');
+    writeBoundary(dir, 9);
+    git(dir, ['replace', candidate, commitTreeFromWorktree(dir, base, 'hostile replacement')]);
+
+    // Unhardened: the replacement weighed 9, so a real shrink was blocked (exit 1).
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(0);
+  });
+
+  it('is INCONCLUSIVE when a registered baseline is committed as a symlink', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    rmSync(join(dir, boundaryPath));
+    symlinkSync('[]', join(dir, boundaryPath)); // mode 120000; the blob text is `[]`
+    const candidate = commitAll(dir, 'baseline becomes a symlink');
+    expect(git(dir, ['ls-tree', candidate, '--', boundaryPath])).toMatch(/^120000 /);
+
+    // Unhardened: the symlink text `[]` weighed as an empty baseline and passed (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/regular non-executable blob/);
+  });
+
+  it('is INCONCLUSIVE with a typed code when graft metadata exists (non-bare and bare)', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    const bare = join(tmp.make('baseline-growth-bare'), 'repo.git');
+    git(dir, ['clone', '--bare', '--quiet', dir, bare]);
+    git(bare, ['update-ref', 'refs/remotes/origin/main', sibling]);
+
+    // Control: without grafts both layouts see the 2 -> 5 growth.
+    for (const repo of [dir, bare]) {
+      const before = runGuard(['--repo', repo, '--candidate', candidate]);
+      expect(before.status, before.out).toBe(1);
+    }
+
+    const graft = `${candidate} ${sibling}\n`;
+    mkdirSync(join(dir, '.git/info'), { recursive: true });
+    writeFileSync(join(dir, '.git/info/grafts'), graft);
+    mkdirSync(join(bare, 'info'), { recursive: true });
+    writeFileSync(join(bare, 'info/grafts'), graft);
+
+    // Unhardened: the graft moved the inferred base onto the sibling (weight 5) and the
+    // growth reported OK (exit 0) in both layouts.
+    for (const repo of [dir, bare]) {
+      const { status, out } = runGuard(['--repo', repo, '--candidate', candidate]);
+      expect(status, out).toBe(2);
+      expect(out).toContain('ci.input.history-graft-present');
+      expect(out).toMatch(/Remove legacy Git graft metadata/);
+      expect(out).not.toContain(repo);
+      expect(out).not.toContain(realpathSync(repo));
+    }
+  }, 60_000);
+
+  it('is INCONCLUSIVE without leaking paths when the Git control directory is a symlink', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    renameSync(join(dir, '.git'), join(dir, '.git-real'));
+    symlinkSync('.git-real', join(dir, '.git'));
+    mkdirSync(join(dir, '.git-real/info'), { recursive: true });
+    writeFileSync(join(dir, '.git-real/info/grafts'), `${candidate} ${sibling}\n`);
+
+    // Unhardened: Git followed the symlink, honoured the graft and reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toContain('ci.input.git-control-unavailable');
+    expect(out).toMatch(/trustworthy repository control path/);
+    expect(out).not.toContain(dir);
+    expect(out).not.toContain(realpathSync(dir));
+  });
+
+  it('BLOCKS working-tree growth when a replace ref re-parents HEAD onto a heavier sibling', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    git(dir, ['replace', '--graft', candidate, sibling]);
+
+    // Unhardened: plain `merge-base origin/main HEAD` followed the replacement, so the inferred
+    // base was the sibling (weight 5) and the working-tree growth reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('is INCONCLUSIVE when a replace ref makes a non-ancestor base look like an ancestor', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    git(dir, ['replace', '--graft', candidate, sibling]);
+
+    // Unhardened: plain `merge-base --is-ancestor` followed the replacement, accepted the
+    // sibling as the candidate's parent and weighed 5 against 5 (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', sibling, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/not an ancestor/);
+  });
+
+  it('is INCONCLUSIVE with a typed code when no trusted git can run', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    const candidate = commitAll(dir, 'grow baseline');
+
+    // The exact-Git layer's test seam (honoured only under VITEST) points it at a git that does
+    // not exist. Unhardened, the guard ran plain `git` and reported the growth (exit 1); a git
+    // failure mid-run was reported as an unfetched revision or a non-ancestor base.
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', base, '--candidate', candidate,
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          VITEST: 'true',
+          __CI_CONTROL_TEST_GIT_PATH: join(dir, 'no-such-git'),
+        },
+      },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(result.status, out).toBe(2);
+    expect(out).toContain('ci.input.git-control-unavailable');
+    expect(out).toMatch(/trusted git executable could not run/);
+    expect(out).not.toMatch(/could not be resolved|not an ancestor/);
+    expect(out).not.toContain(dir);
+  });
+
+  it('pin: is INCONCLUSIVE, without the path, when --repo is not a directory', () => {
+    // Pin, not a RED: the unhardened guard also exits 2 here (its git calls fail on the missing
+    // cwd). After the change the guard says so directly instead of blaming git or a revision.
+    const missing = join(tmp.make('baseline-growth-missing'), 'no-such-repo');
+    const { status, out } = runGuard(['--repo', missing, '--base', 'HEAD', '--candidate', 'HEAD']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/--repo path is not a directory/);
+    expect(out).not.toContain(missing);
+  });
+
+  it('is INCONCLUSIVE, without the path, when --repo cannot be inspected (a symlink loop)', () => {
+    // `stat` fails with ELOOP here, for root as well, and `throwIfNoEntry: false` hides only a
+    // missing entry. Unguarded, the throw escaped main(): Node exited 1, the growth code, and
+    // its stack trace printed the path.
+    const parent = tmp.make('baseline-growth-loop');
+    const loop = join(parent, 'loop-a');
+    symlinkSync('loop-b', loop);
+    symlinkSync('loop-a', join(parent, 'loop-b'));
+    const { status, out } = runGuard(['--repo', loop, '--base', 'HEAD', '--candidate', 'HEAD']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/--repo path is not a directory/);
+    // tmpdir() is not canonical on macOS (/var is a link to /private/var): check both spellings.
+    expect(out).not.toContain(parent);
+    expect(out).not.toContain(realpathSync(parent));
   });
 });
