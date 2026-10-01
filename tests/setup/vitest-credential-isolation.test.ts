@@ -8,12 +8,12 @@ const root = process.cwd();
 const tmp = trackTmpDirs('credential-isolation-');
 
 // These timeouts are hang guards, not performance bounds. Each layer allows the
-// worst case of the layer it wraps. A platform leg makes at most five guarded
-// spawns (an inherited read, two rejected writes and two other rejections) and
+// worst case of the layer it wraps. A platform leg makes at most six guarded
+// spawns (an inherited read, three rejected writes and two other rejections) and
 // two keyring lookups, each under the keyring's own 3 s timeout; the nested run
 // has two legs.
 const SPAWN_GUARD_MS = 10_000;
-const NESTED_TEST_TIMEOUT_MS = 5 * SPAWN_GUARD_MS + 10_000;
+const NESTED_TEST_TIMEOUT_MS = 6 * SPAWN_GUARD_MS + 10_000;
 const NESTED_RUN_TIMEOUT_MS = 2 * NESTED_TEST_TIMEOUT_MS + 30_000;
 const TEST_TIMEOUT_MS = NESTED_RUN_TIMEOUT_MS + 30_000;
 
@@ -116,6 +116,15 @@ describe('Vitest credential isolation', () => {
         "for (const operation of platform === 'darwin' ? ['delete-generic-password', 'synthetic-unsupported-operation'] : ['clear', 'synthetic-unsupported-operation']) {",
         `expect(withFileStdin(operation)).toEqual({ operation, error: null, status: 1, signal: null, message: ${JSON.stringify(REJECTION)}, unread: ${STDIN_FILE_BYTES} });`,
         '}',
+        // A write whose stdin is closed has nothing to read and must not try: in
+        // macOS sh the pipe of a command substitution then takes descriptor 0, so
+        // a reader waits on its own pipeline forever. The spawn timeout ends only
+        // the direct child, so the write runs in its own process group, which is
+        // killed here; a group still alive at that point is the failure.
+        `const closed = spawnSync('/bin/sh', ['-c', 'exec "$0" "$1" <&-', command, write], { detached: true, encoding: 'utf8', timeout: ${SPAWN_GUARD_MS} });`,
+        'let groupAlive = false;',
+        "if (closed.pid > 0) { try { process.kill(-closed.pid, 'SIGKILL'); groupAlive = true; } catch (error) { groupAlive = error.code !== 'ESRCH'; } }",
+        `expect({ error: closed.error?.code ?? null, status: closed.status, signal: closed.signal, message: message(closed), groupAlive }).toEqual({ error: null, status: 1, signal: null, message: ${JSON.stringify(`${REJECTION} (discarded 0 bytes of stdin)`)}, groupAlive: false });`,
         '});',
       ].join('\n'));
       const child = spawnSync(process.execPath, [
