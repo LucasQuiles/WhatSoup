@@ -6302,16 +6302,38 @@ export class AgentRuntime implements Runtime {
     if (!queue) throw new Error('Per-chat runtime turn has no outbound queue');
     context = this.runtimeTurnCoordinator.rebindRuntimeTurnForDispatch(context, session, mapKey);
     const contexts = this.perChatRuntimeTurnContexts.get(mapKey) ?? [];
-    if (contexts.length > 0) {
+    // A provider-fallback replay dispatches the very turn that still heads this
+    // FIFO: activation takes it from contexts[0] and marks it a continuation
+    // before the replay re-enters per-chat dispatch. Re-bind that held head in
+    // place (its admission evidence and completion already exist) instead of
+    // treating the turn as a conflicting owner of itself. Any other occupant
+    // is still a conflict.
+    const heldContinuation = contexts.length === 1
+      && contexts[0]!.identity.logicalTurnId === context.identity.logicalTurnId
+      && this.runtimeTurnCoordinator.isRuntimeTurnContinuation(contexts[0]!);
+    if (contexts.length > 0 && !heldContinuation) {
       throw new PerChatTurnFifoOwnerConflictError(mapKey);
     }
-    this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
-    contexts.push(context);
+    if (heldContinuation) {
+      contexts[0] = context;
+    } else {
+      this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, context, excludeJobId);
+      contexts.push(context);
+    }
     this.perChatRuntimeTurnContexts.set(mapKey, contexts);
-    this.perChatRuntimeTurnScopeRefs.set(
-      context.identity.logicalTurnId,
-      scopeRef ?? { value: mapKey },
-    );
+    // A held continuation keeps its registered scope ref: the fallback failure
+    // path captured that object, so a later rekey must keep reaching it.
+    const registeredScopeRef = heldContinuation
+      ? this.perChatRuntimeTurnScopeRefs.get(context.identity.logicalTurnId)
+      : undefined;
+    if (registeredScopeRef === undefined) {
+      this.perChatRuntimeTurnScopeRefs.set(
+        context.identity.logicalTurnId,
+        scopeRef ?? { value: mapKey },
+      );
+    }
+    const existing = heldContinuation ? this.perChatRuntimeTurnCompletions.get(mapKey) : undefined;
+    if (existing) return existing;
     const completion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
     this.perChatRuntimeTurnCompletions.set(mapKey, completion);
     return completion;
@@ -10034,11 +10056,20 @@ export class AgentRuntime implements Runtime {
         }, 'refusing fallback replay with mismatched captured turn context');
         return false;
       }
-      const scopeRef = args.mapKey === undefined
-        ? undefined
-        : this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId)
-          ?? { value: args.mapKey };
       if (!this.runtimeTurnCoordinator.beginRuntimeTurnContinuation(runtimeContext)) return false;
+      let scopeRef: PerChatRuntimeScopeRef | undefined;
+      if (args.mapKey !== undefined) {
+        scopeRef = this.perChatRuntimeTurnScopeRefs.get(runtimeContext.identity.logicalTurnId);
+        if (scopeRef === undefined) {
+          // Register the ref this replay's failure path will read, so replay
+          // admission of the held turn keeps THIS object and a rekey during the
+          // replay is visible to the failure path (a fresh, unregistered ref
+          // would keep the retired key and strand the turn). Finalization of the
+          // held turn deletes it by logical turn id, as for any registered ref.
+          scopeRef = { value: args.mapKey };
+          this.perChatRuntimeTurnScopeRefs.set(runtimeContext.identity.logicalTurnId, scopeRef);
+        }
+      }
       this.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(runtimeContext, (result) => {
         if (result.terminal.attemptOutcome.kind !== 'completed') return;
         this.fallbackMetrics.recordReplay();
@@ -10052,7 +10083,7 @@ export class AgentRuntime implements Runtime {
       });
       void this.dispatchFallbackReplay(
         {
-          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value }),
+          ...(scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value, scopeRef }),
           runtimeContext,
           routeOverride,
         },
@@ -10060,10 +10091,31 @@ export class AgentRuntime implements Runtime {
         actorJid,
         purpose,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
-        scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
+        scopeRef === undefined ? args : { ...args, scopeRef },
         runtimeContext,
         err,
-      ));
+      )).catch((err: unknown) => {
+        // A rejection escaping here is a process-fatal unhandledRejection
+        // (main.ts). Contain it the way the result handler contains an escaped
+        // finalization: degrade, reject the published completion only while
+        // this turn still owns it, alert, and mark the scope stuck. The mark is
+        // only an in-memory set; no sweep or other production path consumes it
+        // yet.
+        const mapKey = scopeRef?.value;
+        const scopeKey = this.runtimeTurnCoordinator.runtimeTurnScopeKey(runtimeContext);
+        this.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
+        this.runtimeTurnCoordinator.rejectRuntimeTurnCompletion(err, mapKey, runtimeContext);
+        log.error({ err, errorMessage: errorMessage(err), mapKey, scopeKey },
+          'fallback continuation failure finalization escaped');
+        emitAlertChecked(
+          this.instanceName,
+          'agent_turn_finalization_escaped',
+          'Runtime turn finalization escaped (fallback continuation)',
+          `mapKey=${mapKey ?? 'none'} scope=${scopeKey} err=${errorMessage(err)}`,
+          'warning',
+        );
+        this.runtimeTurnCoordinator.registerStuckScope(scopeKey);
+      });
     } else {
       void this.dispatchFallbackReplay({ ...args, routeOverride }, replayText, actorJid, purpose)
         .then(() => {
@@ -10133,6 +10185,7 @@ export class AgentRuntime implements Runtime {
       activation: ProviderFallbackActivation;
       chatJid: string;
       mapKey?: string;
+      scopeRef?: PerChatRuntimeScopeRef;
       oldSession: SessionManager | null;
       runtimeContext?: RuntimeTurnContext;
       routeOverride?: ResolvedReplayRoute;
@@ -10146,6 +10199,7 @@ export class AgentRuntime implements Runtime {
     await this.replayTurnOnFallback({
       chatJid: args.chatJid,
       mapKey: args.mapKey,
+      ...(args.scopeRef === undefined ? {} : { scopeRef: args.scopeRef }),
       replayText,
       actorJid,
       purpose,
@@ -10170,21 +10224,26 @@ export class AgentRuntime implements Runtime {
       activation: ProviderFallbackActivation;
       chatJid: string;
       mapKey?: string;
+      scopeRef?: PerChatRuntimeScopeRef;
     },
     context: RuntimeTurnContext,
     error: unknown,
   ): Promise<void> {
     if (!await this.runtimeTurnCoordinator.claimFailedRuntimeTurnContinuation(context)) return;
-    const queue = args.mapKey === undefined
+    // The claim may wait for the result handler's consume (immediate in
+    // production today); read the live key only after it.
+    const mapKey = args.scopeRef?.value ?? args.mapKey;
+    const queue = mapKey === undefined
       ? this.getActiveQueue()
-      : this.chatQueues.get(args.mapKey) ?? null;
+      : this.chatQueues.get(mapKey) ?? null;
     if (!queue) {
       this.runtimeTurnCoordinator.markRuntimeTurnDegraded(context);
       log.error({ err: error, logicalTurnId: context.identity.logicalTurnId },
         'fallback continuation failed without an outbound queue');
       return;
     }
-    this.notifyFailedFallbackReplay(queue, args.chatJid, args.mapKey);
+    // The live key: the scheduled-turn check must see the queue just looked up.
+    this.notifyFailedFallbackReplay(queue, args.chatJid, mapKey);
     // errorMessage() explicitly: the log serializer reduces unknown Error
     // subclasses to {errorClass} and drops the message — the 2026-08-15
     // incident journal recorded only {"errorClass":"Error"} here, leaving the
@@ -10193,7 +10252,7 @@ export class AgentRuntime implements Runtime {
       err: error,
       errorMessage: errorMessage(error),
       chatJid: args.chatJid,
-      mapKey: args.mapKey,
+      mapKey,
       fallbackProvider: args.activation.fallbackProvider,
     }, 'failed to replay turn on fallback provider');
     emitAlertChecked(
@@ -10202,12 +10261,26 @@ export class AgentRuntime implements Runtime {
       'Provider fallback replay failed',
       `provider=${args.activation.fallbackProvider} model=${args.activation.fallbackModel ?? 'default'} reason=${args.activation.reason}`,
     );
+    // A replay that crossed the provider boundary re-bound the held head to the
+    // replacement session's owner (manager, generation, tool scope). Record the
+    // terminal under that owner; a replay refused before the rebind keeps the
+    // context captured at scheduling.
+    const head = mapKey === undefined ? undefined : this.perChatRuntimeTurnContexts.get(mapKey)?.[0];
+    const finalContext = head?.identity.logicalTurnId === context.identity.logicalTurnId ? head : context;
     await this.finalizeRuntimeTurnContext({
-      context,
+      context: finalContext,
       queue,
       attemptOutcome: { kind: 'failed', class: 'processor_throw' },
-      session: args.mapKey === undefined ? this.session : this.chatSessions.get(args.mapKey) ?? null,
-      ...(args.mapKey === undefined ? {} : { mapKey: args.mapKey }),
+      session: mapKey === undefined ? this.session : this.chatSessions.get(mapKey) ?? null,
+      // Only a replay refused because another turn owns the per-chat FIFO
+      // leaves this turn displaced from the head; retire that one by its own
+      // identity. Any other failure keeps the head-relative drift checks.
+      ...(mapKey === undefined
+        ? {}
+        : {
+            mapKey,
+            ...(error instanceof PerChatTurnFifoOwnerConflictError ? { detachIfDisplaced: true } : {}),
+          }),
       clearReplayOnSuccess: false,
     });
   }
