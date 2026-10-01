@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveTrustedGit } from '../../scripts/lib/ci-control/trusted-git.ts';
-import { __setTestGitPath, gitBytes } from '../../scripts/lib/ci-control/git-input-core.ts';
+import { __setTestGitPath, GIT_TIMEOUT_MS, gitBytes } from '../../scripts/lib/ci-control/git-input-core.ts';
 
 import {
   ExactGitInputError,
@@ -1353,6 +1353,8 @@ describe('exact commit metadata', () => {
         GIT_COMMITTER_EMAIL: 'worker@invalid.example',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     });
     const unsafeOid = git(root, ['rev-parse', 'HEAD']);
     write(root, 'safe.txt', 'safe ambient head\n');

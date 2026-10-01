@@ -1520,3 +1520,140 @@ describe('joiners outside the guard follow set stay masked', () => {
     });
   }
 });
+
+// ─── #3723: AggregateError inner errors and non-Error error-like values ─────
+//
+// A /stop teardown failure logged only the wrapper of an AggregateError: the
+// inner errors, which name the step that failed, were dropped. And any value
+// under err/error/reason that fails `instanceof Error` (a plain object, or an
+// Error from another realm) logged as `{}`. These pin both fixes.
+
+async function captureHookedRecord(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const pino = (await import('pino')).default;
+  const { errorLikeSerializers } = await import('../../src/logger.ts');
+  const { sanitizingLogHook } = await import('../../src/lib/log-sanitizer.ts');
+  const lines: string[] = [];
+  const logger = pino(
+    { level: 'info', serializers: errorLikeSerializers, hooks: { logMethod: sanitizingLogHook } as never },
+    { write(chunk: string) { lines.push(chunk); } },
+  );
+  logger.error(payload, 'teardown failed');
+  expect(lines).toHaveLength(1);
+  return JSON.parse(lines[0]!) as Record<string, unknown>;
+}
+
+describe('#3723: an AggregateError keeps a bounded view of its inner errors', () => {
+  const WRAPPER = 'kill-session runtime turn finalization failed for SYNTHETIC_MAP_KEY';
+  const INNER = 'Runtime turn finalization remains retry-owned during reset';
+
+  it('keeps each inner error as its class and bounded message', () => {
+    const aggregate = new AggregateError([new Error(INNER), new TypeError('second step')], WRAPPER);
+    expect(sanitizeLogValue(aggregate)).toMatchObject({
+      errorClass: 'AggregateError',
+      errorMessage: WRAPPER,
+      errors: [
+        { errorClass: 'Error', errorMessage: INNER },
+        { errorClass: 'TypeError', errorMessage: 'second step' },
+      ],
+    });
+  });
+
+  it('keeps a string inner error as bounded text', () => {
+    expect(sanitizeLogValue(new AggregateError(['plain string reason'], 'outer'))).toMatchObject({
+      errors: ['plain string reason'],
+    });
+  });
+
+  it('bounds and scrubs a string inner error', () => {
+    const out = sanitizeLogValue(new AggregateError(
+      [`upstream call failed token=secret~SYNTHETICVALUE at gate ${'x'.repeat(600)}`],
+      'outer',
+    ));
+    expect(out).toMatchObject({ errors: [expect.any(String)] });
+    const entry = (out as { errors: string[] }).errors[0]!;
+    expect(entry).not.toContain('SYNTHETICVALUE');
+    expect(entry.length).toBeLessThanOrEqual(512);
+    expect(entry.endsWith('[truncated]')).toBe(true);
+  });
+
+  it('caps the list at five entries and records the total', () => {
+    const inner = Array.from({ length: 7 }, (_, i) => new Error(`inner ${i}`));
+    expect(sanitizeLogValue(new AggregateError(inner, 'outer'))).toMatchObject({
+      errorsTotal: 7,
+      errors: inner.slice(0, 5).map((e) => ({ errorClass: 'Error', errorMessage: e.message })),
+    });
+  });
+
+  it('scrubs identity and credential shapes inside inner messages', () => {
+    const jid = `${'5550100'}@s.whatsapp.net`;
+    const aggregate = new AggregateError(
+      [new Error(`delivery for ${jid} by ${MARKERS.email} upstream call failed token=secret~SYNTHETICVALUE at gate`)],
+      'outer',
+    );
+    const out = sanitizeLogValue(aggregate);
+    const serialized = JSON.stringify(out);
+    expect(out).toMatchObject({ errors: [{ errorClass: 'Error', errorMessage: expect.any(String) }] });
+    expect(serialized).not.toContain('5550100');
+    expect(serialized).not.toContain(MARKERS.email);
+    expect(serialized).not.toContain('SYNTHETICVALUE');
+  });
+
+  it('reaches a real pino sink through the hook with the inner message', async () => {
+    const record = await captureHookedRecord({ err: new AggregateError([new Error(INNER)], WRAPPER) });
+    expect(record).toMatchObject({
+      err: { errorClass: 'AggregateError', errorMessage: WRAPPER, errors: [{ errorClass: 'Error', errorMessage: INNER }] },
+    });
+  });
+
+  it('renders an AggregateError that lists itself as [circular] without throwing', () => {
+    const aggregate = new AggregateError([], 'self');
+    aggregate.errors.push(aggregate);
+    expect(sanitizeLogValue(aggregate)).toMatchObject({ errorClass: 'AggregateError', errors: ['[circular]'] });
+  });
+
+  it('marks an inner error seen twice as [circular] on its second visit (visited, not ancestor)', () => {
+    const shared = new Error('shared');
+    expect(sanitizeLogValue(new AggregateError([shared, shared], 'twice'))).toMatchObject({
+      errors: [{ errorClass: 'Error', errorMessage: 'shared' }, '[circular]'],
+    });
+  });
+});
+
+describe('#3723: a non-Error value under err, error or reason says so', () => {
+  it('annotates an empty object instead of logging {}', async () => {
+    const record = await captureHookedRecord({ err: {} });
+    expect(record.err).toEqual({ nonError: true, errConstructor: 'Object' });
+  });
+
+  it('marks an Error from another realm, which fails instanceof Error', async () => {
+    const { runInNewContext } = await import('node:vm');
+    const foreign = runInNewContext('new Error("foreign realm")') as unknown;
+    expect(foreign instanceof Error).toBe(false);
+    const record = await captureHookedRecord({ err: foreign });
+    expect(record.err).toEqual({ nonError: true, errConstructor: 'Error' });
+  });
+
+  it('names the constructor of an opaque class instance', async () => {
+    class OpaqueFailure {
+      get detail(): number { return 1; }
+    }
+    const record = await captureHookedRecord({ error: new OpaqueFailure() });
+    expect(record.error).toEqual({ nonError: true, errConstructor: 'OpaqueFailure' });
+  });
+
+  it('keeps the fields of a plain-object reason and adds the marker', async () => {
+    const record = await captureHookedRecord({ reason: { code: 'E_SYNTHETIC', detail: 'x' } });
+    expect(record.reason).toEqual({ code: 'E_SYNTHETIC', detail: 'x', nonError: true, errConstructor: 'Object' });
+  });
+
+  it('does not mark a real Error: the original value is checked, not the sanitized copy', async () => {
+    const record = await captureHookedRecord({ err: new Error('real failure') });
+    expect(record.err).toEqual({ errorClass: 'Error', errorMessage: 'real failure' });
+  });
+
+  it('leaves other keys and non-object values alone', async () => {
+    const record = await captureHookedRecord({ detail: {}, err: 'string failure' });
+    expect(record.detail).toEqual({});
+    expect(record.err).toBe('string failure');
+  });
+});

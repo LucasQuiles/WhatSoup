@@ -19,9 +19,128 @@ launchd timer plist into `~/Library/LaunchAgents` (not loaded — see the
 ad hoc without the wrapper:
 
 ```
-cd ~/LAB/WhatSoup
+cd <repo checkout>
 deploy/scripts/harness-maintenance.sh --check
 ```
+
+Every run, scheduled or ad hoc, writes its final state to
+`~/.cache/whatsoup/harness-maintenance/state.json` (one event per finding) and
+appends to `run.log` beside it. Exit codes: `0` every step clean, `1` a step
+failed or was inconclusive (the state is `degraded`) or the state could not be
+written, `2` an unknown argument (nothing runs), `3` a partial agent CLI install
+that needs reconciliation by hand. An exit `1` with `FATAL: Node is required`
+on stderr comes before any step: no usable node was found, and no state is
+written, so `state.json` still holds the previous run's.
+
+### What `--check` does and does not do
+
+`--check` validates, inventories and plans, then reports. It is safe to run on
+a live host (it does make read-only registry requests, below):
+
+- **Writes only** its state directory (`state.json`, `run.log`) and a
+  temporary directory removed on exit; npm's cache is pointed into that
+  temporary directory.
+- **Runs only** a node on this repo's scripts (`WHATSOUP_NODE_BIN` if set,
+  otherwise the `.nvmrc` version under `~/.nvm`; if that is absent, the first
+  `node` on the job's `PATH`, with a warning), `plutil`, read-only
+  `systemctl` verbs (`list-units`, `show-environment`, `show`, `is-active`),
+  read-only verbs of the pinned npm (`--version`, `config get`, `view`, `ls`),
+  `apt list`, `ps` (uid, elapsed time and executable name only),
+  `scripts/check-unit-drift.sh` and system helpers such as `awk` and `mktemp`.
+  Every command comes from the job's own `PATH` with `~/.local/bin`, the
+  npm-global bin directory and relative entries removed, so nothing placed
+  there can shadow a helper. Binaries in those directories are still reported,
+  by path. Other entries of the job's `PATH` stay, including
+  `/opt/homebrew/bin`, which on macOS is writable by the user who owns
+  Homebrew: a file placed there can still shadow a helper.
+- **Uses only the pinned npm** (`WHATSOUP_CODEX_NODE_BIN_DIR`, by default the
+  `.nvmrc` node's `bin`). If it is absent, the npm checks are skipped and
+  reported `unknown` with the reason; no other npm on any `PATH`, and no other
+  node version's npm, is run.
+- **Reads the npm registry.** `npm view` makes read-only network requests for
+  publish times and versions, and npm sends any registry credentials that
+  `~/.npmrc` configures with them. Nothing is written to the registry.
+- **Never** installs (not even npm's dry-run install smoke, so the npm cooldown
+  verdict is marked configuration only), merges or backs up `~/.npmrc`, sends
+  an alert, or executes a harness binary: not the agent CLI (so no plugin or
+  MCP listing, which can refresh MCP authentication), not codex or opencode
+  (their versions come from npm package metadata; anything else is reported
+  `unknown`), not local MCP binaries and not runtime `--version` probes (those
+  are reported by path).
+
+The boundary is enforced by
+`tests/deploy/harness-maintenance-check-boundary.test.ts`.
+
+## Agent CLI update path
+
+The nightly job updates the native agent CLI only when every service instance
+resolves the installer-managed launcher `~/.local/bin/claude` and that
+launcher is the native layout; any pin, unknown or missing instance holds the
+update. A launchd instance is any `com.whatsoup.<name>` plist that passes
+`<name>` as its argument; a systemd instance is any `whatsoup@<name>` unit,
+assumed to start through the installed `~/.local/bin/whatsoup` link as
+`deploy/whatsoup@.service` does (an `ExecStart` override is not read).
+
+Every instance is resolved only when the wrapper it starts through, followed
+through symlinks, and the files that tree composes the PATH and picks the node
+from (`deploy/lib/runtime-path.sh`, `deploy/lib/resolve-node.sh`, `.nvmrc`)
+match this checkout byte for byte; otherwise it is `unknown`. For the installed
+link, its target, not the link, selects the tree, so a link repointed at a
+different release or checkout holds the update. The comparison fails closed:
+an instance on an older release whose wrapper differs only in lines unrelated
+to the PATH still holds. Run the maintenance job from the same release as the
+instances.
+
+On systemd the user manager environment, then `Environment=`, then
+`EnvironmentFiles=` are applied, as the launcher does. Finding no instance at
+all holds with a warning alert. The target is the newest release older than `npm.cooldown_minutes`
+(never a downgrade or prerelease). The install runs from the verified previous
+binary; a failed install or postcheck swaps the launcher link back to that
+binary (never a network reinstall) and still ends `degraded`. Event statuses
+under the `claude` component: `install-attempted`, `updated`,
+`rollback-attempted`, `rollback-verified` (exit 1), `rollback-failed` (exit 3:
+reconcile the launcher by hand), plus `held`, `current`, `unmanaged-layout`,
+`missing`, `unknown` and, in `--check`, `drift`.
+
+### The cooldown is advisory while the CLI can update itself
+
+The release-age cooldown governs only this job's installs. A long-running CLI
+session can update itself on its own schedule and move the launcher link;
+`DISABLE_AUTOUPDATER` has been seen not to stop that path, while
+`DISABLE_UPDATES` did. The job **observes this and enforces nothing**; each
+surface is its own event:
+
+| Component / status | Surface |
+|--------------------|---------|
+| `claude-launcher` `moved` / `appeared` / `disappeared` / `unchanged` / `first-observation` | The launcher as this run found it, before any install, against the last normal run's `baseline` event. A change did not come from the job's install transaction. A warning alert under `harness-maintenance:claude-launcher` is sent once per distinct new link target (the `alert-history` event remembers the last 20), naming the agent CLI updating itself as the probable cause when the policy summary is `advisory` or `none`; not sent in `--check`. |
+| `claude-launcher` `moved-during-probes` / `baseline` | A normal run takes the next `baseline` after its probes. If the launcher changed during the probes, the move is recorded as `moved-during-probes` and alerted (once per target) as a change made during this job, not left for the next run to report as a change outside it. The message says the job ran the agent CLI only when the plugin and MCP listing actually started it. |
+| `claude-launcher` `observation-incomplete` | A normal run whose launcher comparison did not complete (the observation step failed, or the launcher could not be read at the start) does not advance the baseline: it carries the last `baseline` and `alert-history` forward, so the next run still compares, and alerts, the move. A run that ends before its baseline step (the final state is `failed`) carries both forward the same way. |
+| `claude-launcher` `check-observation` | `--check` never advances the baseline: it records the launcher it saw under this status and carries the last normal run's `baseline` (and `alert-history`) forward unchanged, so a move seen only by a check run is still alerted by the next normal run. A check run on a host with no baseline creates none. |
+| `claude-update-policy` `instance` | Per instance: `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` and a relocated `CLAUDE_CONFIG_DIR` from the service definition (launchd: plist on disk = next launch, the loaded job environment is not read; systemd: the loaded unit), and from that config directory's settings on disk: `installMethod`, `autoUpdates` and the settings `env` flags. The `env` flags come from managed settings (`managed-settings.json` in `/Library/Application Support/ClaudeCode` on macOS or `/etc/claude-code` on Linux, then each `*.json` in the `managed-settings.d` drop-in directory beside it in lexical order, a later file overriding an earlier one), then the config directory's `settings.json`, then the service environment: the first that sets a flag decides it, and a settings file that exists but cannot be parsed makes the flags `unreadable`. `settings.local.json` is not a source: the agent CLI reads it per project. `settings files` names the files present. Not read, and named in the summary: the project-level settings in each instance's workspace, the macOS `com.anthropic.claudecode` preference domain and remote-managed settings. The resulting error can go either way: these sources can disable updates the job reports open, and project and local settings apply after user settings, so a workspace `env` can reopen updates while the job reports the instance `disabled`. Flags are `set` only for `1` or `true` (any case); any other value, including `0` and empty, is `set-unrecognized`. Values are never recorded. |
+| `claude-update-policy` `job-env` | This maintenance job's own environment. |
+| `claude-update-policy` `advisory` / `disabled` / `none` / `unknown` | Summary: `advisory` names the instances that start the CLI without `DISABLE_UPDATES` (service environment or settings env); `unknown` when an instance has an unrecognized value or unreadable settings and none is plainly unset. `DISABLE_AUTOUPDATER` alone is not counted. |
+| `claude-processes` `observed` | Count of this user's native-layout CLI processes and those running over 30 minutes. No command line is read or recorded. |
+
+A `moved` launcher or an `advisory` summary is a finding for the host owner.
+Disabling self-updates on a host is a separate, explicitly authorized change;
+this job never edits settings or service definitions.
+
+Known limits:
+
+- The job reports the launcher (what the next launch runs) and process counts,
+  not the executable each running session actually has loaded. A long-running
+  session can keep an older binary after the launcher moves.
+- `state.json` is not locked. Two runs at once (a scheduled run and a manual
+  `--check`) each replace it whole, and the later write wins, so the other
+  run's launcher observation can be lost.
+
+### Plugin and MCP listings
+
+The scheduled run's `claude-plugins` and `mcp-servers` probes start the agent
+CLI found on the job's PATH only when the static classifier accepts it as the
+native layout, or as the npm package whose entry point is a node script.
+Anything else (a wrapper, an unknown script) is not executed and both events
+are `unknown` with the reason.
 
 ## Google Chrome (apt) upgrade
 
@@ -39,8 +158,11 @@ new binary.
 
 ## Google Drive MCP re-authentication
 
-The probe reports the claude.ai Google Drive MCP as `! Needs authentication` when
-its OAuth token has expired. Re-auth is interactive (browser consent):
+The scheduled (non-`--check`) run's `mcp-servers` event reports the claude.ai
+Google Drive MCP as `! Needs authentication` when its OAuth token has expired;
+read it from the last run's `state.json`. `--check` does not list MCP servers
+(it reports `mcp-servers` as `skipped`). Re-auth is interactive (browser
+consent):
 
 1. List MCP servers and confirm the Drive entry needs auth:
    ```

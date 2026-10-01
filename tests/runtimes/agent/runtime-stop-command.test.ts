@@ -18,7 +18,7 @@
 // :1542 'kill' for per-chat), so keying an outcome off it would report a
 // function of scope while claiming to report proof.
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   runStopCommand,
   isStopTeardownInFlight,
@@ -26,6 +26,19 @@ import {
 } from '../../../src/runtimes/agent/runtime-stop-command.ts';
 import { classifyInput } from '../../../src/runtimes/agent/commands.ts';
 import { COMMAND_REGISTRY, getCommandSpec } from '../../../src/runtimes/agent/command-registry.ts';
+import type { SingletonLoggerMock } from '../../helpers/logger-mock.ts';
+
+// Only the stop command's logger is captured; every other component keeps the
+// real child logger it gets without this mock.
+const stopLogger = vi.hoisted(() => ({ log: undefined as unknown as SingletonLoggerMock }));
+
+vi.mock('../../../src/logger.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/logger.ts')>();
+  const { componentLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = componentLoggerMock('runtime-stop-command', actual.createChildLogger);
+  stopLogger.log = mock.log;
+  return { ...actual, createChildLogger: mock.createChildLogger };
+});
 
 type SessionScope = 'single' | 'shared' | 'per_chat';
 
@@ -58,6 +71,8 @@ function makeStopHarness(options: {
   /** Scope holds no session object to prove: the disclosed vacuous path. */
   noSessionToProve?: boolean;
   teardownTimeoutMs?: number;
+  /** Turns the settled teardown finalized as operator_cancelled (#3716). */
+  operatorCancelled?: { active: number; queued: number };
 }) {
   const sentTexts: string[] = [];
   const sessionScope = options.sessionScope ?? 'per_chat';
@@ -71,7 +86,10 @@ function makeStopHarness(options: {
     if (options.terminalizeGate) await options.terminalizeGate;
     if (options.terminalizeHangs) await NEVER_SETTLES;
     teardownRan = true;
-    return { disposition: sessionScope === 'per_chat' ? 'kill' : 'interruption' };
+    return {
+      disposition: sessionScope === 'per_chat' ? 'kill' : 'interruption',
+      ...(options.operatorCancelled === undefined ? {} : { operatorCancelled: options.operatorCancelled }),
+    };
   });
   const isSessionProvablyTerminated = vi.fn(() => options.sessionProvablyTerminated ?? true);
   const args = {
@@ -436,5 +454,72 @@ describe('#2949 N1: isStopTeardownInFlight fences the other command that re-ente
     expect(isStopTeardownInFlight('guard-query-b')).toBe(false);
 
     release();
+  });
+});
+
+// ─── #3716: the acknowledgement says how many queued messages the stop dropped ─
+
+describe('#3716: a stop says how many queued messages it dropped', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(stopLogger.log)) fn.mockReset();
+  });
+
+  it.each([
+    { queued: 2, note: /(?<!\d)2 queued messages were also dropped\b/ },
+    { queued: 1, note: /(?<!\d)1 queued message was also dropped\b/ },
+  ])('stopped: the acknowledgement counts $queued dropped queued message(s)', async ({ queued, note }) => {
+    const harness = makeStopHarness({ inFlight: true, operatorCancelled: { active: 1, queued } });
+    await expect(run(harness)).resolves.toBe('stopped');
+
+    expect(harness.sentTexts).toHaveLength(1);
+    expect(harness.sentTexts[0]).toContain('Stopped the running task');
+    expect(harness.sentTexts[0]).toMatch(note);
+  });
+
+  it.each(['shared', 'single'] as const)(
+    '%s: the note says the dropped count spans all conversations',
+    async (sessionScope) => {
+      const harness = makeStopHarness({ inFlight: true, sessionScope, operatorCancelled: { active: 1, queued: 2 } });
+      await expect(run(harness)).resolves.toBe('stopped');
+
+      expect(harness.sentTexts).toHaveLength(1);
+      expect(harness.sentTexts[0]).toContain('Stopped the running task');
+      expect(harness.sentTexts[0]).toMatch(/(?<!\d)2 queued messages across all conversations were also dropped\b/);
+    },
+  );
+
+  it('adds nothing when the stop dropped no queued message', async () => {
+    const harness = makeStopHarness({ inFlight: true, operatorCancelled: { active: 1, queued: 0 } });
+    await expect(run(harness)).resolves.toBe('stopped');
+
+    expect(harness.sentTexts).toEqual(['*Stopped the running task* ✓']);
+  });
+
+  it('still counts the dropped queued messages when the outcome is uncertain after the teardown settled', async () => {
+    const harness = makeStopHarness({
+      inFlight: true,
+      inFlightAfterTeardown: true,
+      operatorCancelled: { active: 1, queued: 2 },
+    });
+    await expect(run(harness)).resolves.toBe('uncertain');
+
+    expect(harness.sentTexts).toHaveLength(1);
+    expect(harness.sentTexts[0]).toContain('uncertain');
+    expect(harness.sentTexts[0]).toMatch(/(?<!\d)2 queued messages were also dropped\b/);
+  });
+
+  it('logs one content-free summary with the active and queued counts', async () => {
+    const harness = makeStopHarness({ inFlight: true, operatorCancelled: { active: 1, queued: 2 } });
+    await expect(run(harness)).resolves.toBe('stopped');
+
+    const summaries = stopLogger.log.info.mock.calls
+      .map((call) => call[0] as Record<string, unknown> | undefined)
+      .filter((fields) => fields?.['event'] === 'operator_stop_summary');
+    expect(summaries).toEqual([{
+      event: 'operator_stop_summary',
+      sessionScope: 'per_chat',
+      cancelledActive: 1,
+      cancelledQueued: 2,
+    }]);
   });
 });

@@ -29,6 +29,7 @@ import {
   stashChangeEnvironment,
   statusConcurrencyEnvironment,
   statusOutputEnvironment,
+  statusProbeHangEnvironment,
   statusRaceEnvironment,
   worktreeOutputEnvironment,
 } from '../helpers/git-estate-guard-fixtures.ts';
@@ -43,6 +44,12 @@ const tmp = trackTmpDirs('');
 // starvation surfaces as a runner timeout. Cases that need a tighter budget
 // still override it through `extraEnv`.
 const SUITE_GIT_TIMEOUT_MS = '20000';
+// #3561: the status-timeout cases shrink the ONE budget every guard git call
+// shares (gitTimeoutMs, scripts/git-estate-guard.ts:100-113, used by runGit and
+// runGitAsync), so it must still cover each real setup call under gate load.
+// 300 ms did not: a setup call died first and the snapshot became scan_failed.
+const STATUS_TIMEOUT_GIT_BUDGET_MS = 3_000;
+const STATUS_PROBE_HANG_SECONDS = 30;
 const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
 const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
   STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
@@ -1526,29 +1533,41 @@ describe('git-estate guard', () => {
     expect(readFileSync(clean.snapshot.baselinePath, 'utf8')).toBe(baselineBefore);
   });
 
-  it('bounds every Git subprocess and fails closed when a status probe times out', () => {
+  function expectStatusProbeTimeout(setupDelaySeconds: number): void {
     const { root, repo } = initRepo();
-    const env = statusOutputEnvironment(
-      root,
-      '  exec sleep 2',
-    );
+    const hang = statusProbeHangEnvironment(root, STATUS_PROBE_HANG_SECONDS, setupDelaySeconds);
     const startedAt = Date.now();
     const result = run(repo, ['snapshot', '--json'], {
-      ...env,
-      WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: '300',
+      ...hang.env,
+      WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: String(STATUS_TIMEOUT_GIT_BUDGET_MS),
     });
     const elapsedMs = Date.now() - startedAt;
 
-    expect(elapsedMs).toBeLessThan(1_500);
-    expect(result.status).toBe(2);
-    expect(JSON.parse(result.stdout) as SnapshotDocument).toMatchObject({
+    expect(result.status, result.stderr).toBe(2);
+    expect(JSON.parse(result.stdout) as SnapshotDocument, result.stderr).toMatchObject({
       exitCode: 2,
       snapshot: {
         incomplete: true,
         errors: [expect.objectContaining({ kind: 'worktree_status_failed' })],
       },
     });
-  });
+    expect(existsSync(hang.marker)).toBe(true);
+    // Floor: the guard waited out the probe's budget (100 ms timer tolerance).
+    expect(elapsedMs).toBeGreaterThanOrEqual(STATUS_TIMEOUT_GIT_BUDGET_MS - 100);
+    // Ceiling: half the 30 s hang, so the kill held. Leaves 12 s over the budget
+    // for node start, ~12 real setup/rescan git calls and the 1 s injected delay.
+    expect(elapsedMs).toBeLessThan(STATUS_PROBE_HANG_SECONDS * 500);
+  }
+
+  it('bounds every Git subprocess and fails closed when a status probe times out', () => {
+    expectStatusProbeTimeout(0);
+  }, 20_000);
+
+  // #3561 injection: a 1 s setup call outlives a 300 ms budget (scan_failed,
+  // snapshot null) but not the status-timeout budget.
+  it('keeps a slow setup call inside the status-timeout budget', () => {
+    expectStatusProbeTimeout(1);
+  }, 20_000);
 
   // #3488: one starved status probe outlasts the guard's 5 s default git
   // budget. The suite budget must exceed vitest's 10 s test timeout, so this

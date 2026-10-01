@@ -254,7 +254,7 @@ function resolveBinary(name: string): string | undefined {
 // groups. Capture survivors before finally cleans them; cleanup cannot make a
 // lifecycle assertion pass. Processes that create a new session are outside
 // this boundary and are not claimed as covered by these probes.
-type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}`;
+type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}` | `event-order-near-deadline-${'result' | 'deadline'}-first`;
 
 // Instrument a fixture-owned string, never the production helper. Each anchor
 // must remain unique so a source change cannot silently remove an observation.
@@ -266,9 +266,20 @@ function observeLifecycleEventOrder(source: string): string {
   const event = (text: string) => `builtin printf '%s\\n' "${text}" >> "$EVENT_ORDER_LOG"`;
   insert('          sleep "$chunk" || return 2', `${event('S_OUTER budget=$budget worker=$worker_pid')}\n          sleep "$chunk" || return 2`);
   insert('        [ "$start" = run ] || exit 2\n        trap', `        [ "$start" = run ] || exit 2\n        ${event('L_COMMAND')}\n        trap`);
-  const inner = '        ( umask 077; set -C; builtin printf \'%s\\n\' "$control_token" > "$deadline_file" ) || exit 2';
+  // D_INNER_COMMIT follows the link: that is when the reader can see the token.
+  const inner = [
+    '        ( umask 077; set -C; builtin printf \'%s\\n\' "$control_token" > "$deadline_file.pending" ) || exit 2',
+    '        command -p link "$deadline_file.pending" "$deadline_file" 2>/dev/null || exit 2',
+  ].join('\n');
+  // A parked guard polls with an external sleep, not a FIFO read, so a TERM
+  // trap runs within one poll on every bash, including one that retries a read.
+  const park = [
+    `        ${event('D_OUTER_PARKED')}`,
+    '        event_polls=0; while [ "$event_polls" -lt 200 ]; do sleep 0.01; event_polls=$((event_polls + 1)); done',
+    `        ${event('CONTROL_ERROR guard-park')}`,
+  ];
   insert('        sleep "$budget" || exit 2', [
-    '        if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ]; then',
+    '        if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ] || [ "${EVENT_ORDER_MODE#event-order-near-deadline-}" != "$EVENT_ORDER_MODE" ]; then',
     '          IFS= read -r -t 2 event_release <> "$EVENT_ORDER_INNER_START" || exit 2',
     `          ${event('I_START')}`,
     '        fi',
@@ -293,17 +304,22 @@ function observeLifecycleEventOrder(source: string): string {
     '        rm -f "$timeout_file"',
   ].join('\n'));
   insert('        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"', `        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"\n        ${event('C_COMPLETE cleanup=$cleanup_rc')}`);
-  insert('      guard_status=124\n      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
-    '      guard_status=124',
+  insert('      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
     '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory|event-order-inner-deadline-command-2)',
     '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
     '        ;; esac',
+    '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-result-first ]; then',
+    ...park,
+    '      fi',
     `      ${event('D_OUTER_ENTER worker=$worker_pid')}`,
     '      _bounded_claim_outcome deadline-outer',
     '      outcome_claim_rc=$?',
     `      ${event('O_OUTER_CLAIM rc=$outcome_claim_rc worker=$worker_pid')}`,
     '      if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ]; then',
     '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
+    '      fi',
+    '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-deadline-first ]; then',
+    ...park,
     '      fi',
   ].join('\n'));
   insert('      esac\n      _bounded_read_authorization\n      authorization_state=$?\n      if [ "$authorization_state" -eq 0 ]; then', [
@@ -406,6 +422,12 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                         release_fifo('event-order-cleanup-release')
                         released = True
                         record['cleanup_released_after_authority'] = True
+                if mode.startswith('event-order-near-deadline-') and not child_released and 'D_OUTER_PARKED' in lines:
+                    release = os.open(root / 'event-order-child-release', os.O_WRONLY | os.O_NONBLOCK)
+                    try: os.write(release, b'release\n')
+                    finally: os.close(release)
+                    child_released = True
+                    record['child_released_after_guard_parked'] = True
                 if mode.startswith('event-order-natural-') and not released and any(line.startswith('O_OUTER_CLAIM rc=1 ') for line in lines) and any(line.startswith('C_HOLD ') for line in lines):
                     release = os.open(root / 'event-order-cleanup-release', os.O_WRONLY | os.O_NONBLOCK)
                     try: os.write(release, b'release\n')
@@ -540,7 +562,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 except OSError as error:
                     record['cleanup_release_error'] = repr(error)
             if mode == 'deadline-fifo-after-cleanup':
-                deadlines = list(root.glob('whatsoup-bounded-deadline.*'))
+                deadlines = [item for item in root.glob('whatsoup-bounded-deadline.*') if not item.name.endswith('.pending')]
                 if len(deadlines) != 1: raise RuntimeError('deadline handoff unavailable')
                 release = os.open(root / 'authorization-rm-release', os.O_WRONLY | os.O_NONBLOCK)
                 try: os.write(release, b'release\n')
@@ -648,6 +670,18 @@ record['helper_vanished_after_probe'] = (root / 'helper-vanished-after-probe').e
 record['helper_signal_refused'] = (root / 'helper-signal-refused').exists()
 record['timer_partial_signal'] = (root / 'timer-partial-signal').read_text() if (root / 'timer-partial-signal').exists() else None
 record['dangerous_kill_attempts'] = (root / 'dangerous-kill-attempts').read_text().splitlines() if (root / 'dangerous-kill-attempts').exists() else []
+record['deadline_writer_armed'] = (root / 'deadline-writer-armed').exists()
+record['deadline_writer_size0'] = (root / 'deadline-writer-size0').exists()
+record['deadline_writer_exit'] = sorted(item.name.rsplit('.', 1)[1] for item in root.glob('deadline-writer-exit.*'))
+record['deadline_marker_observed'] = (root / 'deadline-marker-observed').read_text().strip() if (root / 'deadline-marker-observed').exists() else None
+record['deadline_preexisting_planted'] = (root / 'deadline-preexisting-planted').exists()
+record['deadline_pending_planted'] = (root / 'deadline-pending-planted').exists()
+record['pending_victim_contents'] = (root / 'pending-victim').read_text() if (root / 'pending-victim').exists() else None
+record['deadline_watchdog_term'] = (root / 'deadline-watchdog-term').exists()
+record['deadline_publish_limited'] = (root / 'deadline-publish-limited').exists()
+record['deadline_absent_before_publish'] = (root / 'deadline-absent-before-publish').exists()
+record['deadline_marker_mode'] = (root / 'deadline-marker-mode').read_text().strip() if (root / 'deadline-marker-mode').exists() else None
+record['residual_bounded_files'] = sorted(item.name for item in root.glob('whatsoup-bounded*'))
 if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
     record.setdefault('event_observations', [])
@@ -671,11 +705,12 @@ if (root / 'outcome-fixture-ready').exists():
 print(json.dumps(record))
 `;
 
-function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'zero', terminal = false) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
-  const eventTrace = mode.startsWith('event-order-') || nearDeadlineTrace || outcomeTrace || stoppedWorkerTrace;
+  // near-deadline always records its events: its expected result follows the claim order.
+  const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
   if (mode.startsWith('outcome-') || mode === 'event-order-outcome-candidate-directory') {
@@ -893,6 +928,70 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
+    // Classify the deadline marker at the outer existence check. `[` is the only
+    // hook that runs there; every nested test uses `builtin [` to avoid recursion.
+    'case "$4" in deadline-writer-*)',
+    '  function [ {',
+    '    case "$1" in -e)',
+    '      case "${2##*/}" in *.pending) ;; whatsoup-bounded-deadline.*)',
+    '        local observed=absent line=""',
+    '        if builtin [ -L "$2" ] || builtin [ -e "$2" ]; then',
+    '          observed=other',
+    '          if builtin [ -f "$2" ] && ! builtin [ -s "$2" ]; then observed=empty',
+    '          elif builtin [ -f "$2" ] && IFS= read -r line < "$2" && builtin [ "$line" = "$control_token" ]; then observed=token; fi',
+    '        fi',
+    '        builtin printf "%s\\n" "$observed" > "$DEADLINE_MARKER_OBSERVED"',
+    '        if builtin [ "$observed" = token ]; then',
+    '          if builtin [ -n "$(command -p find "$2" -prune -perm 600 2>/dev/null)" ]; then builtin printf "600\\n" > "$DEADLINE_MARKER_MODE"; else builtin printf "other\\n" > "$DEADLINE_MARKER_MODE"; fi',
+    '        fi',
+    '        ;; esac',
+    '      ;; esac',
+    '    builtin [ "$@"',
+    '  }',
+    '  ;; esac',
+    // Interrupt the real watchdog writer after its exclusive create and before
+    // its token write: the writer subshell calls `umask 077` first, and with a
+    // zero file-size limit the create still succeeds while the write fails.
+    // XFSZ is ignored so the write returns an error instead of dumping core.
+    // The EXIT trap proves the size-0 state was reached; files it creates stay
+    // empty, so the limit cannot block them. The other modes only record that
+    // the writer was reached, except publish-limited, which lifts the soft
+    // limit the watchdog set after its sleep so only the publish step runs
+    // under it: link writes no data, while any copy leaves an empty marker.
+    'case "$4" in deadline-writer-*)',
+    '  umask() {',
+    '    if builtin [ "$#" -eq 1 ] && builtin [ "${start-}" = run ] && builtin [ "${FUNCNAME[1]}" = whatsoup_run_bounded ]; then',
+    '      builtin umask "$@" || return',
+    '      : > "$DEADLINE_WRITER_ARMED" || return 2',
+    // Lift it for the pending write only: a later umask, as in a copying
+    // publish subshell, finds the pending file and keeps the limit.
+    '      if builtin [ "$cleanup_mode" = deadline-writer-publish-limited ] && ! builtin [ -e "$deadline_file.pending" ] && ! builtin [ -L "$deadline_file.pending" ]; then',
+    '        builtin [ -e "$deadline_file" ] || builtin [ -L "$deadline_file" ] || : > "$DEADLINE_ABSENT_BEFORE_PUBLISH"',
+    '        ulimit -S -f "$(ulimit -H -f)" || return 2',
+    '      fi',
+    '      builtin [ "$cleanup_mode" = deadline-writer-interrupted ] || return 0',
+    '      trap \'writer_status=$?; for marker in "$TMPDIR"/whatsoup-bounded-deadline.*; do if builtin [ -f "$marker" ] && ! builtin [ -s "$marker" ]; then : > "$DEADLINE_WRITER_SIZE0"; fi; done; : > "$DEADLINE_WRITER_EXIT.$writer_status"\' EXIT',
+    '      trap "" XFSZ',
+    '      ulimit -f 0',
+    '      return 0',
+    '    fi',
+    '    builtin umask "$@"',
+    '  }',
+    // Record a watchdog TERM: it must follow only a published marker.
+    '  kill() {',
+    '    if builtin [ "$1" = -TERM ] && builtin [ "${start-}" = run ] && builtin [ "${FUNCNAME[1]}" = whatsoup_run_bounded ]; then : > "$DEADLINE_WATCHDOG_TERM"; fi',
+    '    builtin kill "$@"',
+    '  }',
+    '  ;; esac',
+    'case "$4" in deadline-writer-publish-limited)',
+    '  sleep() {',
+    '    command sleep "$@" || return',
+    '    if builtin [ "${start-}" = run ] && builtin [ "${FUNCNAME[1]}" = whatsoup_run_bounded ] && builtin [ -z "${publish_limit-}" ]; then',
+    '      publish_limit=1; trap "" XFSZ; ulimit -S -f 0 || return 2',
+    '      : > "$DEADLINE_PUBLISH_LIMITED"',
+    '    fi',
+    '  }',
+    '  ;; esac',
     'case "$4" in cleanup-child-group)',
     '  umask() { if [ "$#" -eq 0 ]; then /bin/bash "$TMPDIR/umask-capture.sh"; else builtin umask "$@"; fi; }',
     '  ;; esac',
@@ -932,7 +1031,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
+    'budget=6; case "$4" in event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
     'else',
@@ -957,7 +1056,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
     '    exit 2',
     '    ;; esac',
-    '  if [ "$1" = event-order-deadline-first ] || [ "$1" = event-order-expired-reaped ]; then',
+    '  if [ "$1" = event-order-deadline-first ] || [ "$1" = event-order-expired-reaped ] || [ "${1#event-order-near-deadline-}" != "$1" ]; then',
     '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
     '    exit 0',
     '  fi',
@@ -965,6 +1064,16 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '  ;; esac',
     'if [ "$1" = leader-exits ]; then sleep 30 & kill -9 "$PPID"; wait; exit; fi',
     'if [ "$1" = command-group-descendant ]; then sleep 30 & exit 0; fi',
+    'if [ "$1" = deadline-writer-preexisting ]; then',
+    '  for control in "$TMPDIR"/whatsoup-bounded-control.*; do builtin printf "preexisting\\n" > "$TMPDIR/whatsoup-bounded-deadline.${control##*/whatsoup-bounded-control.}" && : > "$TMPDIR/deadline-preexisting-planted"; done',
+    'fi',
+    'if [ "$1" = deadline-writer-pending-planted ]; then',
+    '  builtin printf "victim\\n" > "$TMPDIR/pending-victim"',
+    '  for control in "$TMPDIR"/whatsoup-bounded-control.*; do command -p ln -s "$TMPDIR/pending-victim" "$TMPDIR/whatsoup-bounded-deadline.${control##*/whatsoup-bounded-control.}.pending" && : > "$TMPDIR/deadline-pending-planted"; done',
+    'fi',
+    // Ignore TERM so the command outlives the watchdog budget and the real
+    // watchdog writer is reached instead of being reaped before it runs.
+    'case "$1" in deadline-writer-*) trap "" TERM; value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|outcome-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
@@ -1016,6 +1125,14 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       HANDSHAKE_CONT_AFTER_STOP: path.join(root, 'handshake-cont-after-stop'),
       CLEANUP_RESIDUAL_ACTIVE: path.join(root, 'cleanup-residual-active'),
       CLEANUP_RESIDUAL_POLLS: path.join(root, 'cleanup-residual-polls'),
+      DEADLINE_WRITER_ARMED: path.join(root, 'deadline-writer-armed'),
+      DEADLINE_WRITER_SIZE0: path.join(root, 'deadline-writer-size0'),
+      DEADLINE_WRITER_EXIT: path.join(root, 'deadline-writer-exit'),
+      DEADLINE_MARKER_OBSERVED: path.join(root, 'deadline-marker-observed'),
+      DEADLINE_MARKER_MODE: path.join(root, 'deadline-marker-mode'),
+      DEADLINE_WATCHDOG_TERM: path.join(root, 'deadline-watchdog-term'),
+      DEADLINE_PUBLISH_LIMITED: path.join(root, 'deadline-publish-limited'),
+      DEADLINE_ABSENT_BEFORE_PUBLISH: path.join(root, 'deadline-absent-before-publish'),
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
@@ -1043,7 +1160,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const result = runLifecycleProbe(mode);
     expect(result.exit, JSON.stringify(result)).toBe(0);
     const expected = mode === 'fast' ? 'rc=0 output=payload' : mode === 'nonzero' ? 'rc=7 output=payload' : 'rc=124 output=';
-    expect(result.stdout).toContain(expected);
+    expect(result.stdout, JSON.stringify(result)).toContain(expected);
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
@@ -1385,7 +1502,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
-  it.each(['leader-exits', 'status-255', 'printf-override', 'near-deadline', 'near-deadline', 'near-deadline'] as const)('preserves status and cleans owned groups for %s', (mode) => {
+  it.each(['leader-exits', 'status-255', 'printf-override'] as const)('preserves status and cleans owned groups for %s', (mode) => {
     const result = runLifecycleProbe(mode);
     const expected = mode === 'leader-exits' ? 'rc=137 output=' : mode === 'status-255' ? 'rc=255 output=payload' : 'rc=0 output=payload';
     expect(result.exit, JSON.stringify(result)).toBe(0);
@@ -1393,6 +1510,62 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  // With real timers the scheduler picks the winner near the deadline, so the
+  // result must agree with the observed winner, never with wall-clock hopes: a
+  // won result claim with no inner deadline read is rc 0, anything else is 124.
+  it.each([1, 2, 3] as const)('arbitrates a near-deadline result by its observed claim order (run %s)', () => {
+    const result = runLifecycleProbe('near-deadline');
+    const evidence = JSON.stringify(result);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    const events: string[] = result.events;
+    const claims = events.filter((event) => event.startsWith('O_RESULT_CLAIM '));
+    const arbitration = events.filter((event) => event.startsWith('A '));
+    expect(claims, evidence).toHaveLength(1);
+    expect(arbitration, evidence).toHaveLength(1);
+    // The outer's own read decides whether an inner deadline counted; the
+    // commit event can be lost when the watchdog is reaped right after link.
+    const deadlineRead = /^A .* deadline_rc=(\d+) rc=\d+$/.exec(arbitration[0])?.[1];
+    if (events.includes('D_INNER_COMMIT')) expect(deadlineRead, evidence).toBe('124');
+    const resultWon = claims[0] === 'O_RESULT_CLAIM rc=0 result=0' && deadlineRead === '0';
+    expect(result.stdout, evidence).toContain(resultWon ? 'rc=0 output=payload' : 'rc=124 output=');
+  });
+  // Force each claim order around the deadline while the command completes
+  // normally and the inner watchdog stays gated. The guard parks after its
+  // budget, before its claim (result-first) or after it (deadline-first).
+  it.for(['event-order-near-deadline-result-first', 'event-order-near-deadline-deadline-first'] as const)('arbitrates a near-deadline completion by forced claim order: %s', (mode, { task }) => {
+    const result = runLifecycleProbe(mode);
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedNearDeadlineOrder: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    expect(result.child_released_after_guard_parked, evidence).toBe(true);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('D_INNER_ENTER'), evidence).toBe(-1);
+    expect(index('D_OUTER_PARKED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_FIFO'), evidence).toBeGreaterThan(index('D_OUTER_PARKED'));
+    expect(events[index('R_FIFO')], evidence).toMatch(/^R_FIFO rc=0 raw=0 command=\d+ group=\d+$/);
+    if (mode === 'event-order-near-deadline-result-first') {
+      // The TERM that follows the worker's return reaches the guard before its claim.
+      expect(index('D_OUTER_ENTER'), evidence).toBe(-1);
+      expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+      expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=0 guard=\d+ guard_rc=0 deadline_rc=0 rc=0$/);
+      expect(result.stdout, evidence).toContain('rc=0 output=payload');
+    } else {
+      expect(events[index('O_OUTER_CLAIM')], evidence).toMatch(/^O_OUTER_CLAIM rc=0 worker=\d+$/);
+      expect(index('D_OUTER_PARKED'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
+      expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=1 result=0');
+      expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=124 guard=\d+ guard_rc=124 deadline_rc=0 rc=124$/);
+      expect(result.stdout, evidence).toContain('rc=124 output=payload');
+    }
   });
   it('reaps a command child that survives the first group signal', () => {
     const result = runLifecycleProbe('command-group-descendant');
@@ -1452,6 +1625,78 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+
+  // A watchdog that dies after creating its deadline marker but before writing
+  // the token must not turn an exhausted budget into a protocol failure: the
+  // outer guard still owns the deadline, so the contract result is 124.
+  it('keeps the deadline when the watchdog writer dies between create and token write', () => {
+    const result = runLifecycleProbe('deadline-writer-interrupted');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    // Setup proof: the real writer was reached, created a size-0 file, and failed.
+    expect(result.deadline_writer_armed, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_writer_size0, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_writer_exit, JSON.stringify(result)).toHaveLength(1);
+    expect(result.deadline_writer_exit[0], JSON.stringify(result)).not.toBe('0');
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
+    expect(result.deadline_marker_observed, JSON.stringify(result)).toBe('absent');
+    expect(result.deadline_watchdog_term, JSON.stringify(result)).toBe(false);
+    expect(result.residual_bounded_files, JSON.stringify(result)).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  // The deadline marker is exclusive: an existing file at its path is never
+  // replaced by the watchdog, and an unauthenticated marker fails closed. A
+  // watchdog whose publish failed must not go on to signal the command.
+  it('never replaces a deadline marker that already exists', () => {
+    const result = runLifecycleProbe('deadline-writer-preexisting');
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.deadline_preexisting_planted, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_writer_armed, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_marker_observed, JSON.stringify(result)).toBe('other');
+    expect(result.deadline_watchdog_term, JSON.stringify(result)).toBe(false);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expect(result.residual_bounded_files, JSON.stringify(result)).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
+    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
+    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  // Only the publish step runs under a zero file-size limit, so the marker path
+  // must go from absent straight to the full token: a copying publish leaves an
+  // empty marker. The published marker is private to the owner.
+  it('publishes the deadline marker without writing through its path', () => {
+    const result = runLifecycleProbe('deadline-writer-publish-limited');
+    const evidence = JSON.stringify(result);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.deadline_writer_armed, evidence).toBe(true);
+    expect(result.deadline_publish_limited, evidence).toBe(true);
+    expect(result.deadline_absent_before_publish, evidence).toBe(true);
+    expect(result.deadline_marker_observed, evidence).toBe('token');
+    expect(result.deadline_marker_mode, evidence).toBe('600');
+    expect(result.deadline_watchdog_term, evidence).toBe(true);
+    expect(result.stdout, evidence).toContain('rc=124 output=');
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+  });
+  // The pending token file is created exclusively: a planted symlink is never
+  // followed, and the refused writer neither publishes nor signals.
+  it('refuses a pending deadline file that already exists', () => {
+    const result = runLifecycleProbe('deadline-writer-pending-planted');
+    const evidence = JSON.stringify(result);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.deadline_pending_planted, evidence).toBe(true);
+    expect(result.deadline_writer_armed, evidence).toBe(true);
+    expect(result.pending_victim_contents, evidence).toBe('victim\n');
+    expect(result.deadline_marker_observed, evidence).toBe('absent');
+    expect(result.deadline_watchdog_term, evidence).toBe(false);
+    expect(result.stdout, evidence).toContain('rc=124 output=');
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
   });
 });
 

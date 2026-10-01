@@ -187,8 +187,29 @@ export const NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED =
 export const STOP_ACK_COMPOUND_BODY_REFUSED =
   '*/stop does not take a follow-up message; send it on its own after the stop acknowledgement*';
 
+/** #3716, owner ruling "All, but say so": a /stop cancels every queued message
+ *  in the conversation (#2445), other participants' included, so every
+ *  acknowledgement sent after a settled teardown says how many. A count only,
+ *  never whose; nothing is added when none was dropped. In single and shared
+ *  scope the teardown drains one queue that every conversation shares, so the
+ *  note says the count spans all conversations. */
+export function droppedQueuedNote(count: number, sessionScope: 'single' | 'shared' | 'per_chat'): string {
+  if (count <= 0) return '';
+  const where = sessionScope === 'per_chat' ? '' : ' across all conversations';
+  return count === 1
+    ? ` _1 queued message${where} was also dropped and will not be answered; send it again if it is still needed._`
+    : ` _${count} queued messages${where} were also dropped and will not be answered; send them again if they are still needed._`;
+}
+
 /** The durable outcomes. Never a false success. */
 export type StopOutcome = 'stopped' | 'nothing-to-stop' | 'uncertain' | 'already-stopping';
+
+/** What a settled teardown reports about the turns it finalized as
+ *  operator_cancelled. The coordinator's teardown carries it; it is read
+ *  structurally so this module still imports nothing from the coordinator. */
+export interface StopTeardownReport {
+  readonly operatorCancelled?: { readonly active: number; readonly queued: number };
+}
 
 /**
  * Closure-backed surface the runtime hands to {@link runStopCommand}. Every
@@ -199,7 +220,7 @@ export type StopOutcome = 'stopped' | 'nothing-to-stop' | 'uncertain' | 'already
  * TSession/TTeardown stay opaque: this module never imports the session manager
  * or the turn coordinator.
  */
-export interface StopCommandHost<TSession, TTeardown> {
+export interface StopCommandHost<TSession, TTeardown extends StopTeardownReport> {
   chatJid: string;
   sessionScope: 'single' | 'shared' | 'per_chat';
   scopeKey: string;
@@ -265,25 +286,25 @@ async function boundedWait<T>(work: Promise<T>, timeoutMs: number): Promise<Boun
  * /new's interrupt branch, verbatim in ordering, with the reset epilogue
  * removed. Scope-ref and map cleanup are TEARDOWN, not reset, so they stay.
  *
- * Returns the sessions it tore down, each captured BEFORE the cleanup that
- * unmaps it (`clearSingleScopeRefs`, `disposePerChatSession`). Reading them
+ * Returns the teardown receipt and the sessions it tore down, each session
+ * captured BEFORE the cleanup that unmaps it (`clearSingleScopeRefs`, `disposePerChatSession`). Reading them
  * back from the host afterwards would hand the caller null/undefined and make
  * the termination proof vacuous — the proof must run against the object that
  * was actually torn down.
  */
-async function tearDownActiveTurn<TSession, TTeardown>(
+async function tearDownActiveTurn<TSession, TTeardown extends StopTeardownReport>(
   host: StopCommandHost<TSession, TTeardown>,
-): Promise<readonly TSession[]> {
+): Promise<{ readonly sessions: readonly TSession[]; readonly teardown: TTeardown }> {
   if (host.sessionScope === 'per_chat') {
     const interruptedSession = host.getPerChatSession();
     host.abortPerChatQueue();
     const teardown = await host.terminalizeTurnForInterrupt();
     if (interruptedSession !== undefined) {
       await host.disposePerChatSession(interruptedSession, teardown);
-      return [interruptedSession];
+      return { sessions: [interruptedSession], teardown };
     }
     await host.retireTurnQueueAfterInterrupt(teardown);
-    return [];
+    return { sessions: [], teardown };
   }
   host.abortActiveQueue();
   const teardown = await host.terminalizeTurnForInterrupt();
@@ -295,7 +316,7 @@ async function tearDownActiveTurn<TSession, TTeardown>(
   }
   await host.retireTurnQueueAfterInterrupt(teardown);
   host.clearSingleScopeRefs();
-  return singleSession !== null ? [singleSession] : [];
+  return { sessions: singleSession !== null ? [singleSession] : [], teardown };
 }
 
 /**
@@ -333,7 +354,7 @@ export function isStopTeardownInFlight(scopeKey: string): boolean {
  * one durable outcome. Returns the outcome so the call site and tests can
  * assert it without parsing the acknowledgement text.
  */
-export async function runStopCommand<TSession, TTeardown>(
+export async function runStopCommand<TSession, TTeardown extends StopTeardownReport>(
   host: StopCommandHost<TSession, TTeardown>,
 ): Promise<StopOutcome> {
   const scope = { chatJid: host.chatJid, sessionScope: host.sessionScope, scopeKey: host.scopeKey };
@@ -385,24 +406,39 @@ export async function runStopCommand<TSession, TTeardown>(
     host.sendDirect(STOP_ACK_UNCERTAIN_FAILED);
     return 'uncertain';
   }
+  // The teardown settled, so its count of dropped queued messages is known;
+  // a timeout or a failed teardown has none to report.
+  const cancelled = result.value.teardown.operatorCancelled;
+  const dropped = droppedQueuedNote(cancelled?.queued ?? 0, host.sessionScope);
+  if (cancelled !== undefined) {
+    log.info(
+      {
+        event: 'operator_stop_summary',
+        sessionScope: host.sessionScope,
+        cancelledActive: cancelled.active,
+        cancelledQueued: cancelled.queued,
+      },
+      '/stop cancelled turns',
+    );
+  }
   // Completion is PROVEN by re-reading the runtime's own resolver, not inferred
   // from the teardown call returning.
   if (host.isTurnInFlight()) {
     log.error(scope, '/stop teardown returned but the scope still reports a turn in flight — outcome uncertain');
-    host.sendDirect(STOP_ACK_UNCERTAIN_STILL_ACTIVE);
+    host.sendDirect(STOP_ACK_UNCERTAIN_STILL_ACTIVE + dropped);
     return 'uncertain';
   }
   // The in-flight resolver reads runtime bookkeeping the teardown itself
   // partly clears (see the module header). Termination of the provider work is
   // a separate question, answered by the runtime's own predicate against the
   // sessions this teardown actually disposed of.
-  const unproven = result.value.filter((session) => !host.isSessionProvablyTerminated(session));
+  const unproven = result.value.sessions.filter((session) => !host.isSessionProvablyTerminated(session));
   if (unproven.length > 0) {
     log.error(
       { ...scope, unprovenSessions: unproven.length },
       '/stop tore the turn down but the session could not be proven terminated — outcome uncertain',
     );
-    host.sendDirect(STOP_ACK_UNCERTAIN_NOT_PROVEN);
+    host.sendDirect(STOP_ACK_UNCERTAIN_NOT_PROVEN + dropped);
     return 'uncertain';
   }
   // The flag belongs to the turn just torn down; a stale `true` would suppress
@@ -410,10 +446,10 @@ export async function runStopCommand<TSession, TTeardown>(
   host.clearTurnHadVisibleOutput();
   if (host.isOutboundQueuePoisoned()) {
     log.error(scope, '/stop tore the turn down but delivery remains blocked — outcome uncertain');
-    host.sendDirect(STOP_ACK_UNCERTAIN_DELIVERY);
+    host.sendDirect(STOP_ACK_UNCERTAIN_DELIVERY + dropped);
     return 'uncertain';
   }
   log.info(scope, '/stop: active turn torn down and the scope reads idle');
-  host.sendDirect(STOP_ACK_STOPPED);
+  host.sendDirect(STOP_ACK_STOPPED + dropped);
   return 'stopped';
 }
