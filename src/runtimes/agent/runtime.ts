@@ -10158,13 +10158,15 @@ export class AgentRuntime implements Runtime {
         actorJid,
         purpose,
       ).catch((err) => this.finalizeFailedFallbackContinuation(
-        scopeRef === undefined ? args : { ...args, mapKey: scopeRef.value },
+        scopeRef === undefined ? args : { ...args, scopeRef },
         runtimeContext,
         err,
       )).catch((err: unknown) => {
         // A rejection escaping here is a process-fatal unhandledRejection
         // (main.ts). Contain it the way the result handler contains an escaped
-        // finalization: degrade, release this turn's awaiter, alert, register.
+        // finalization: degrade, release this turn's awaiter, alert, and mark
+        // the scope stuck. The mark is only an in-memory set; no sweep or
+        // other production path consumes it yet.
         const mapKey = scopeRef?.value;
         const scopeKey = this.runtimeTurnCoordinator.runtimeTurnScopeKey(runtimeContext);
         this.runtimeTurnCoordinator.markRuntimeTurnDegraded(runtimeContext);
@@ -10287,14 +10289,18 @@ export class AgentRuntime implements Runtime {
       activation: ProviderFallbackActivation;
       chatJid: string;
       mapKey?: string;
+      scopeRef?: PerChatRuntimeScopeRef;
     },
     context: RuntimeTurnContext,
     error: unknown,
   ): Promise<void> {
     if (!await this.runtimeTurnCoordinator.claimFailedRuntimeTurnContinuation(context)) return;
-    const queue = args.mapKey === undefined
+    // The claim can wait for the primary result handler, and a rekey can land
+    // in that wait: read the live key only after it.
+    const mapKey = args.scopeRef?.value ?? args.mapKey;
+    const queue = mapKey === undefined
       ? this.getActiveQueue()
-      : this.chatQueues.get(args.mapKey) ?? null;
+      : this.chatQueues.get(mapKey) ?? null;
     if (!queue) {
       this.runtimeTurnCoordinator.markRuntimeTurnDegraded(context);
       log.error({ err: error, logicalTurnId: context.identity.logicalTurnId },
@@ -10310,7 +10316,7 @@ export class AgentRuntime implements Runtime {
       err: error,
       errorMessage: errorMessage(error),
       chatJid: args.chatJid,
-      mapKey: args.mapKey,
+      mapKey,
       fallbackProvider: args.activation.fallbackProvider,
     }, 'failed to replay turn on fallback provider');
     emitAlertChecked(
@@ -10323,20 +10329,20 @@ export class AgentRuntime implements Runtime {
     // replacement session's owner (manager, generation, tool scope). Record the
     // terminal under that owner; a replay refused before the rebind keeps the
     // context captured at scheduling.
-    const head = args.mapKey === undefined ? undefined : this.perChatRuntimeTurnContexts.get(args.mapKey)?.[0];
+    const head = mapKey === undefined ? undefined : this.perChatRuntimeTurnContexts.get(mapKey)?.[0];
     const finalContext = head?.identity.logicalTurnId === context.identity.logicalTurnId ? head : context;
     await this.finalizeRuntimeTurnContext({
       context: finalContext,
       queue,
       attemptOutcome: { kind: 'failed', class: 'processor_throw' },
-      session: args.mapKey === undefined ? this.session : this.chatSessions.get(args.mapKey) ?? null,
+      session: mapKey === undefined ? this.session : this.chatSessions.get(mapKey) ?? null,
       // Only a replay refused because another turn owns the per-chat FIFO
       // leaves this turn displaced from the head; retire that one by its own
       // identity. Any other failure keeps the head-relative drift checks.
-      ...(args.mapKey === undefined
+      ...(mapKey === undefined
         ? {}
         : {
-            mapKey: args.mapKey,
+            mapKey,
             ...(error instanceof PerChatTurnFifoOwnerConflictError ? { detachIfDisplaced: true } : {}),
           }),
       clearReplayOnSuccess: false,
