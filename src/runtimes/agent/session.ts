@@ -4843,10 +4843,10 @@ export class SessionManager {
    * #3658: forget a generation whose provider stopped but whose durable close
    * failed, before the runtime starts a fresh one in its place. Nothing later
    * may pair this row or provider session with the new generation. The row is
-   * ended while it is still this generation's active row: the zombie sweep
-   * reconciles only 'active' rows, and the startup sweep's 'orphaned' would
-   * still read as resumable. A row already reconciled or reowned is left as
-   * is. Returns false, keeping the whole identity, when the row could not be
+   * ended while it is still this generation's row, 'active' or already
+   * 'orphaned' by the stale-session sweep, which would still read as
+   * resumable. A row reconciled otherwise, or reowned, is left as is.
+   * Returns false, keeping the whole identity, when the row could not be
    * ended: the caller must not start fresh, and the next close retries it.
    * The lane and the cleanup-unproven flag are left alone, since only a fully
    * successful teardown may reset them.

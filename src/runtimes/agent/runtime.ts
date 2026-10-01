@@ -5073,6 +5073,7 @@ export class AgentRuntime implements Runtime {
                 }
               },
               resetSingleSession: async (session) => {
+                this.heldCloseFailedNotices.delete(session);
                 await this.waitForRejectedTerminalTeardown(session);
                 await session.handleNew();
                 this.rejectedTerminalTeardowns.delete(session);
@@ -5747,8 +5748,6 @@ export class AgentRuntime implements Runtime {
 
     // Fresh-spawn history preamble; provider-boundary merge only (see below).
     let contextPreamble: string | null = null;
-    // #3658: the close-failure notice, held until its fresh start is admitted.
-    let closeFailedNotice: CheckpointAdoption | null = null;
     // Read when needed, not here: a spawn can rekey the lane.
     const isScheduledDispatch = (): boolean => purpose === 'scheduled-agent-job'
       || (effectiveMapKey !== undefined && isScheduledAgentJobMapKey(effectiveMapKey));
@@ -5782,6 +5781,7 @@ export class AgentRuntime implements Runtime {
       // Shut down old session first to prevent zombie processes.
       // Without this, spawnSession() overwrites this.child, orphaning the old
       // process and its DB row. Mirrors handleNew() pattern.
+      let closeFailedNotice: CheckpointAdoption | null = null;
       try {
         await session.shutdown();
       } catch (err) {
@@ -5804,16 +5804,20 @@ export class AgentRuntime implements Runtime {
         this.sendDirect(chatJid, notice);
       });
       spawnedForTurn = true;
+      // #3658: a deferred host-admission start is admitted only at a provider
+      // boundary, maybe a later turn's, so its notice is held for the session.
+      if (closeFailedNotice !== null && this.hasDeferredHostWorkAdmissionStart(session)) {
+        this.heldCloseFailedNotices.set(session, { adoption: closeFailedNotice, chatJid });
+        closeFailedNotice = null;
+      }
       if (dispatchCancelled()) {
         await stopCancelledSpawn();
         return;
       }
       // Announced only once the fresh start is admitted, so a refused start
-      // never promises a continuation it cannot deliver. A deferred
-      // host-admission start is admitted only at the provider boundary.
-      if (closeFailedNotice !== null && !this.hasDeferredHostWorkAdmissionStart(session)) {
+      // never promises a continuation it cannot deliver.
+      if (closeFailedNotice !== null) {
         announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
-        closeFailedNotice = null;
       }
       if (effectiveMapKey !== undefined && spawnOwnership !== null) {
         effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
@@ -5899,6 +5903,14 @@ export class AgentRuntime implements Runtime {
         throw new Error('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
       }
       if (systemTurnLease) this.requireSystemTurnProviderBoundary(systemTurnLease);
+      // #3658: a held notice goes out at the first boundary that admits its
+      // deferred start, before beforeUserSend opens this turn's answer
+      // evidence. A scheduled turn leaves it held for the next user turn.
+      const heldNotice = isScheduledDispatch() ? undefined : this.heldCloseFailedNotices.get(session);
+      if (heldNotice !== undefined) {
+        this.heldCloseFailedNotices.delete(session);
+        announceAdoption(heldNotice.adoption, (notice) => this.sendDirect(heldNotice.chatJid, notice));
+      }
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
       // #2976: single/shared turns publish into the SAME executing-actor
@@ -5948,9 +5960,6 @@ export class AgentRuntime implements Runtime {
       ) {
         this.settleAbandonedRespawn(effectiveMapKey);
       }
-      // #3658: a deferred fresh start is admitted here, past every check above.
-      if (closeFailedNotice !== null) announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
-      closeFailedNotice = null;
     };
     try {
       // #3497: the delivery instructions follow the provider this session runs,
@@ -9003,6 +9012,7 @@ export class AgentRuntime implements Runtime {
     this.getQueueForChat(chatJid, mapKey)?.abortTurn();
     const oldPid = session.getStatus().pid;
     const generation = this.sessionOwnership.advanceGeneration(mapKey, managerId);
+    this.heldCloseFailedNotices.delete(session);
     let replacementPid: number | null = null;
     let oldTreeProvedEmpty = false;
 
@@ -11620,6 +11630,13 @@ export class AgentRuntime implements Runtime {
    * would re-introduce itself on every message.
    */
   private readonly introducedStandIns = new WeakSet<SessionManager>();
+
+  /**
+   * #3658: restore notices held for a manager whose deferred fresh start no
+   * provider boundary has admitted yet. A generation reset (/new) drops one;
+   * a discarded manager's entry vanishes with it.
+   */
+  private readonly heldCloseFailedNotices = new WeakMap<SessionManager, { adoption: CheckpointAdoption; chatJid: string }>();
 
   /** Whether `session` is inside its managed-crash suppression window. */
   private managedCrashNoticeActive(session: SessionManager | undefined): boolean {
