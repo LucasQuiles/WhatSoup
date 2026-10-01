@@ -781,6 +781,7 @@ describe('exact Git reads — replace refs, grafts and non-blob baselines (#3669
       const { status, out } = runGuard(['--repo', repo, '--candidate', candidate]);
       expect(status, out).toBe(2);
       expect(out).toContain('ci.input.history-graft-present');
+      expect(out).toMatch(/Remove legacy Git graft metadata/);
       expect(out).not.toContain(repo);
       expect(out).not.toContain(realpathSync(repo));
     }
@@ -798,8 +799,33 @@ describe('exact Git reads — replace refs, grafts and non-blob baselines (#3669
     const { status, out } = runGuard(['--repo', dir, '--candidate', candidate]);
     expect(status, out).toBe(2);
     expect(out).toContain('ci.input.git-control-unavailable');
+    expect(out).toMatch(/trustworthy repository control path/);
     expect(out).not.toContain(dir);
     expect(out).not.toContain(realpathSync(dir));
+  });
+
+  it('BLOCKS working-tree growth when a replace ref re-parents HEAD onto a heavier sibling', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    git(dir, ['replace', '--graft', candidate, sibling]);
+
+    // Unhardened: plain `merge-base origin/main HEAD` followed the replacement, so the inferred
+    // base was the sibling (weight 5) and the working-tree growth reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('is INCONCLUSIVE when a replace ref makes a non-ancestor base look like an ancestor', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    git(dir, ['replace', '--graft', candidate, sibling]);
+
+    // Unhardened: plain `merge-base --is-ancestor` followed the replacement, accepted the
+    // sibling as the candidate's parent and weighed 5 against 5 (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', sibling, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/not an ancestor/);
   });
 
   it('is INCONCLUSIVE with a typed code when no trusted git can run', () => {
@@ -843,6 +869,23 @@ describe('exact Git reads — replace refs, grafts and non-blob baselines (#3669
     const missing = join(tmp.make('baseline-growth-missing'), 'no-such-repo');
     const { status, out } = runGuard(['--repo', missing, '--base', 'HEAD', '--candidate', 'HEAD']);
     expect(status, out).toBe(2);
+    expect(out).toMatch(/--repo path is not a directory/);
     expect(out).not.toContain(missing);
+  });
+
+  it('is INCONCLUSIVE, without the path, when --repo cannot be inspected (a symlink loop)', () => {
+    // `stat` fails with ELOOP here, for root as well, and `throwIfNoEntry: false` hides only a
+    // missing entry. Unguarded, the throw escaped main(): Node exited 1, the growth code, and
+    // its stack trace printed the path.
+    const parent = tmp.make('baseline-growth-loop');
+    const loop = join(parent, 'loop-a');
+    symlinkSync('loop-b', loop);
+    symlinkSync('loop-a', join(parent, 'loop-b'));
+    const { status, out } = runGuard(['--repo', loop, '--base', 'HEAD', '--candidate', 'HEAD']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/--repo path is not a directory/);
+    // tmpdir() is not canonical on macOS (/var is a link to /private/var): check both spellings.
+    expect(out).not.toContain(parent);
+    expect(out).not.toContain(realpathSync(parent));
   });
 });
