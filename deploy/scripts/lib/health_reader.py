@@ -50,7 +50,7 @@ def fetch_loopback_health(
     port: int, request_path: str, headers: dict, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[int, str]:
     """One direct loopback request; callers needing a wall deadline bound the process."""
-    if type(port) is not int or not 1 <= port <= 65535 or request_path not in ("/health", "/"):
+    if type(port) is not int or not 1 <= port <= 65535 or request_path not in ("/health", "/livez", "/"):
         raise ValueError("invalid loopback health target")
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     stage = "connect"
