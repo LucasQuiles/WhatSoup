@@ -235,7 +235,7 @@ describe('buildDiagnosticProbes', () => {
     await expect(diagnostic).resolves.toMatchObject({
       ok: false,
       confidence: 'suspected',
-      data: expect.objectContaining({ status: 'timeout' }),
+      data: expect.objectContaining({ status: 'timeout', reason: 'caller-abort-gate-wait' }),
     });
     expect(gate.snapshot()).toMatchObject({
       active: true,
