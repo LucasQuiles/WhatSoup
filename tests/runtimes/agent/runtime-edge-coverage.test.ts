@@ -309,6 +309,7 @@ import { RESPONSE_WORKFLOWS } from '../../../src/runtimes/agent/response-registr
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { getRecentMessages, type StoredMessage } from '../../../src/core/messages.ts';
 import { getSessionTokenSnapshot } from '../../../src/runtimes/agent/session-db.ts';
+import { noteScheduledTurnSession } from '../../../src/runtimes/agent/scheduled-agent-job-delivery.ts';
 
 type QueueMock = IOutboundQueue & {
   enqueueText: ReturnType<typeof vi.fn>;
@@ -1469,6 +1470,12 @@ describe('AgentRuntime edge coverage', () => {
 
     created.opts.notifyUser?.('fallback session crashed');
     expect(state.handleCrashNotify).toHaveBeenCalledWith('fallback session crashed', 'group-edge@g.us');
+    // #3497 H2 regression guard: while the session's latest user turn is a
+    // scheduled job, the crash notice never reaches handleCrashNotify.
+    state.handleCrashNotify.mockClear();
+    noteScheduledTurnSession(created.session, true);
+    created.opts.notifyUser?.('fallback session crashed');
+    expect(state.handleCrashNotify).not.toHaveBeenCalled();
 
     created.opts.onResumeFailed?.();
     // X1: the replacement names its exact manager (sandbox mode ignores the target).
@@ -1834,6 +1841,12 @@ describe('AgentRuntime edge coverage', () => {
 
     created.opts.notifyUser?.('singleton fallback crashed');
     expect(state.handleCrashNotify).toHaveBeenCalledWith('singleton fallback crashed');
+    // #3497 H2 regression guard: while the session's latest user turn is a
+    // scheduled job, the crash notice never reaches handleCrashNotify.
+    state.handleCrashNotify.mockClear();
+    noteScheduledTurnSession(created.session, true);
+    created.opts.notifyUser?.('singleton fallback crashed');
+    expect(state.handleCrashNotify).not.toHaveBeenCalled();
 
     created.opts.onResumeFailed?.();
     expect(state.handleResumeFailed).toHaveBeenCalledWith('direct-edge@s.whatsapp.net');
@@ -1899,6 +1912,63 @@ describe('AgentRuntime edge coverage', () => {
       '_The backup model could not continue this turn. Please try again._',
     ));
     expect(replacementQueue.enqueueText).not.toHaveBeenCalled();
+  });
+
+  it('routes a failed per-chat fallback replay through the scope ref a rekey updated, even when none was registered', async () => {
+    // The held turn has no registered scope ref. The scheduler must register the
+    // one it creates, so replay admission keeps it and a rekey during the replay
+    // reaches the failure path; otherwise the failure resolves a retired key,
+    // finds no queue, and leaves the turn degraded with its completion unsettled.
+    const runtime = makeRuntime({ sessionScope: 'per_chat' });
+    const state = view(runtime) as unknown as RuntimeView & {
+      perChatRuntimeTurnScopeRefs: Map<string, { value: string }>;
+      pendingTurnText: Map<string, string>;
+      pendingTurnActorJid: Map<string, string>;
+    };
+    installDurabilityStub(runtime);
+    const mapKey = 'rekey-source-edge@s.whatsapp.net';
+    const rekeyedMapKey = 'rekey-target-edge@s.whatsapp.net';
+    const sourceQueue = makeQueue(mapKey);
+    const rekeyedQueue = makeQueue(rekeyedMapKey);
+    state.chatQueues.set(mapKey, sourceQueue);
+    state.chatQueues.set(rekeyedMapKey, rekeyedQueue);
+    const replayText = 'retry the unregistered per-chat turn';
+    const held = runtimeContext('per_chat', mapKey, sourceQueue.targetChatJid, 51, 'turn-unregistered-ref', {}, replayText);
+    state.perChatRuntimeTurnContexts.set(mapKey, [held]);
+    state.perChatInboundSeqQueue.set(mapKey, [51]);
+    state.pendingTurnText.set(mapKey, replayText);
+    state.pendingTurnActorJid.set(mapKey, 'sender-edge@s.whatsapp.net');
+    expect(state.perChatRuntimeTurnScopeRefs.has(held.identity.logicalTurnId)).toBe(false);
+    state.replayTurnOnFallback = vi.fn(async () => {
+      // A LID->phone rekey mid-replay: per-chat state moves to the canonical key
+      // and every registered scope ref is updated in place.
+      const registered = state.perChatRuntimeTurnScopeRefs.get(held.identity.logicalTurnId);
+      if (registered) registered.value = rekeyedMapKey;
+      state.perChatRuntimeTurnContexts.set(rekeyedMapKey, state.perChatRuntimeTurnContexts.get(mapKey)!);
+      state.perChatRuntimeTurnContexts.delete(mapKey);
+      state.perChatInboundSeqQueue.set(rekeyedMapKey, state.perChatInboundSeqQueue.get(mapKey)!);
+      state.perChatInboundSeqQueue.delete(mapKey);
+      throw new FallbackReplayOwnershipChangedError();
+    });
+    const activation = state.activateProviderFallback(null, 'usage-limit');
+    expect(activation).not.toBeNull();
+
+    expect(state.scheduleFallbackReplay({
+      activation: activation!,
+      chatJid: sourceQueue.targetChatJid,
+      mapKey,
+      oldSession: null,
+    })).toBe(true);
+    // The primary result handler consumes the continuation deferral after
+    // scheduling (production order); only then may the failure path finalize.
+    (state as unknown as {
+      runtimeTurnCoordinator: { consumeRuntimeTurnContinuationDeferral(context: RuntimeTurnContext): boolean };
+    }).runtimeTurnCoordinator.consumeRuntimeTurnContinuationDeferral(held);
+
+    await vi.waitFor(() => expect(rekeyedQueue.enqueueText).toHaveBeenCalledWith(
+      '_The backup model could not continue this turn. Please try again._',
+    ));
+    expect(sourceQueue.enqueueText).not.toHaveBeenCalled();
   });
 
   it('runs a control repair turn and escalates on timeout', async () => {

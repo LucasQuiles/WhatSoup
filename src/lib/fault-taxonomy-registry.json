@@ -159,7 +159,8 @@
         "operator_cancelled",
         "processor_throw",
         "unknown_terminal",
-        "provider_stream_corrupt"
+        "provider_stream_corrupt",
+        "scheduled_answer_missing"
       ],
       "owner": "src/runtimes/agent/turn-terminal.ts",
       "test": "tests/core/failure-taxonomy-cross-contract.test.ts"
@@ -762,7 +763,8 @@
     "operator_cancelled": "operator_cancelled",
     "processor_throw": "processor_throw",
     "unknown_terminal": "unknown",
-    "provider_stream_corrupt": "provider_failure"
+    "provider_stream_corrupt": "provider_failure",
+    "scheduled_answer_missing": "unknown"
   },
   "failureClassDispositions": {
     "git_remote_auth_failed": {

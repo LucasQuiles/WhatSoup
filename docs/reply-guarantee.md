@@ -78,9 +78,17 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    `inconclusive` without replaying or modifying durable rows. Historical failed
    terminals and continuity candidates are recovery debt with no runtime-health
    impact; only stale open inbound or recovery work is an operational breach.
+   A turn an operator cancelled with `/stop` (`operator_cancelled`) is a
+   requested outcome, not debt, so its failed terminal is not counted.
    `failedTerminalWithEchoEvidence` is a subset of failed-terminal debt, not an
    additional replay count; it exposes contradictory delivery evidence that
    must be reconciled before any targeted repair.
+   An `active-breach` names no owner. To attribute each stale `processing` row,
+   run the operator script `scripts/inbound-ownership-snapshot.ts` (#3560). It
+   reads through the same normal read-only mode and classifies each row as
+   `deferred`, `queued`, `executing` or `no_owner` (never healthy), optionally
+   joined with a captured provider-execution gate state. See runbook §8, "Who
+   owns a stale `processing` inbound".
 
 5. Runtime watchdog (shipped).
    The runtime-owned manager (`ReplyGuaranteeManager` in

@@ -15,6 +15,7 @@ import type { ExecutingSessionContext, SessionContext } from '../../mcp/types.ts
 import { WhatSoupSocketServer } from '../../mcp/socket-server.ts';
 import type { SessionTokenVerifier } from '../../mcp/caller-attribution.ts';
 import { perChatActorSession } from './per-chat-actor-session.ts';
+import { scheduledAgentJobBaseMapKey } from './scheduled-agent-job-isolation.ts';
 
 interface PerChatMcpSocketManagerOptions {
   stateRoot: string;
@@ -125,9 +126,13 @@ export class PerChatMcpSocketManager {
       ),
       () => {
         const executing = this.options.resolveExecutingSession(identity.value);
+        // The scheduled isolation suffix is a session key, not a conversation:
+        // folding it would confine the socket to a conversation no chat has.
         return {
           ...executing,
-          conversationKey: executing.conversationKey ?? toConversationKey(identity.value),
+          purpose: executing.purpose ?? purpose,
+          conversationKey: executing.conversationKey
+            ?? toConversationKey(scheduledAgentJobBaseMapKey(identity.value)),
         };
       },
       undefined,

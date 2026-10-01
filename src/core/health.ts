@@ -2997,6 +2997,12 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             ...(connectionState.disconnectDecision !== undefined
               ? { disconnect_decision: formatDisconnectDecisionForHealth(connectionState.disconnectDecision) }
               : {}),
+            // #3722: the last reconnect-state reset (a fixed reason token and a
+            // time), so the fleet poller can tell a fresh reconnect from a
+            // silent logout. Omitted for transports that do not report it.
+            ...(connectionState.reconnectReset !== undefined
+              ? { reconnect_reset: exposeDisconnectMetadata ? connectionState.reconnectReset : null }
+              : {}),
           },
           auth_bond: authBond,
           credential_lifecycle: connectionState.credentialLifecycle ?? null,

@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-09-26T09:27:13Z",
+  "generated_at": "2026-09-28T19:36:14Z",
   "repo": "WhatSoup",
-  "git_head": "ded729300da5e7e6ca8ddc8419d3786bdbf38e37",
+  "git_head": "103d716a605efd3df31be4d2cbf57a645244b990",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
   "total": 133,
   "schema_version": 5,
@@ -900,7 +900,7 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/plans",
       "supersedes_hint": null,
-      "last_modified": "2026-09-26",
+      "last_modified": "2026-09-25",
       "size_bytes": 33479
     },
     {
@@ -1485,8 +1485,8 @@
       "lifecycle": "receipt",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-07-30",
-      "size_bytes": 6012
+      "last_modified": "2026-09-28",
+      "size_bytes": 6517
     },
     {
       "path": "docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md",
@@ -1563,7 +1563,7 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs",
       "supersedes_hint": null,
-      "last_modified": "2026-09-26",
+      "last_modified": "2026-09-25",
       "size_bytes": 22887
     },
     {
