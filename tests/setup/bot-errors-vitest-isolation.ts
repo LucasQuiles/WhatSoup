@@ -94,10 +94,13 @@ delete process.env['CLAUDE_CONFIG_DIR'];
 // make unmocked backend detection throw instead of using env-only.
 delete process.env['REQUIRE_OS_KEYRING'];
 
-// OS credential stores are not HOME-scoped. Inherited test commands see empty
-// synthetic reads and rejected writes; dedicated keyring tests retain their
-// explicit process mocks. Each shim must stay runnable: a missing interpreter
-// would make PATH lookup continue to the real binary.
+// OS credential stores are not HOME-scoped. Inherited test commands see a
+// missing item on macOS, an empty read on Linux, and rejected writes; dedicated
+// keyring tests retain their explicit process mocks. The Linux read stays empty
+// because `secret-tool lookup` exits 1 for a missing item and for a failure
+// alike, and keyring records such an exit as a failure. Each shim must stay
+// runnable: a missing interpreter would make PATH lookup continue to the real
+// binary.
 const credentialBin = join(isolatedHome, 'credential-bin');
 mkdirSync(credentialBin, { mode: 0o700 });
 const rejection = 'synthetic credential backend rejects writes and unsupported operations';
@@ -114,7 +117,9 @@ const syntheticCredentialBackends: Record<string, string> = {
   security: [
     '#!/bin/sh',
     'case "$1" in',
-    '  find-generic-password) exit 0 ;;',
+    // A missing item, as the real tool reports one: keyring treats a clean exit
+    // 44 as a miss, and a shell caller that tests the status sees "not found".
+    "  find-generic-password) printf '%s\\n' 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2; exit 44 ;;",
     "  --help) printf '%s\\n' 'Usage: synthetic credential backend'; exit 0 ;;",
     `  add-generic-password) ${rejectWrite}`,
     rejectOther,

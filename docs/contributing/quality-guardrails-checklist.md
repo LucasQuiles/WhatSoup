@@ -47,9 +47,11 @@ disk observations are inconclusive (exit 2); a measured post-reclaim shortfall
 is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
 Vitest's shared setup creates an owned temporary HOME and prepends synthetic
-`security` and `secret-tool` commands to `PATH`. Reads return empty; writes,
-deletes and unsupported operations are rejected. The two write operations
-(`add-generic-password` and `store`) first read stdin to the end, unless stdin
+`security` and `secret-tool` commands to `PATH`. Reads find nothing: `security
+find-generic-password` exits 44 with the real tool's not-found message, and
+`secret-tool lookup` returns empty. Writes, deletes and unsupported operations
+are rejected. The two write operations (`add-generic-password` and `store`)
+first read stdin to the end, unless stdin
 is a terminal, and report the discarded byte count; every other rejected
 operation leaves stdin unread. The synthetic `secret-tool` reports a probe
 failure (exit 127), so Linux runs use the env-only backend and backend
@@ -60,10 +62,10 @@ also clears `REQUIRE_OS_KEYRING` so that failure cannot throw. The production
 resolver and its precedence still run; dedicated keyring tests keep their own
 explicit process mocks. This also covers child processes that inherit `PATH`.
 
-The synthetic commands have limits. A read of a missing credential exits 0
-with empty output, so a shell caller that tests the exit status sees the
-credential as present but empty. `command -v secret-tool` succeeds although
-the probe reports the tool absent. Absolute executable paths and tests that
+The synthetic commands have limits. `secret-tool lookup` exits 0 with empty
+output, where the real tool exits 1, so on Linux a shell caller that tests the
+exit status sees a missing credential as present but empty. `command -v
+secret-tool` succeeds although the probe reports the tool absent. Absolute executable paths and tests that
 replace `PATH` require their own controlled fixtures: changing HOME alone does
 not isolate the OS credential store. The
 `portability.no-hardcoded-platform-binaries` guard rejects `/usr/bin/security`
