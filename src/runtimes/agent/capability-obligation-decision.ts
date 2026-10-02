@@ -12,8 +12,9 @@
  * turn retained.
  *
  * Fail-closed rules, in order:
- *  - non-per_chat scope, minted (`obl:`) sources, unknown serving provider, or
- *    a capability-capable harness produce NO decision (nothing to owe);
+ *  - non-per_chat scope, minted (`obl:`) sources, scheduled agent job
+ *    (`agentjob-…-occN`) sources, unknown serving provider, or a
+ *    capability-capable harness produce NO decision (nothing to owe);
  *  - a contract conflict, an inconclusive effect fold, an unjournaled source,
  *    an invalid receipt time, or a media-staging failure produce a typed
  *    `obligation.not_created` audit event — recorded loss, never silent loss;
@@ -28,6 +29,7 @@ import type {
 } from '../../core/capability-obligation-store.ts';
 import type { Database } from '../../core/database.ts';
 import { retainMediaForObligation } from '../../core/obligation-media-retention.ts';
+import { classifyTurnLane } from '../../core/observability/lifecycle-emission.ts';
 import { createChildLogger } from '../../logger.ts';
 import {
   classifyInvocationEffect,
@@ -84,6 +86,9 @@ export async function deriveCapabilityDecision(
   if (context.identity.scope !== 'per_chat') return undefined;
   // Never self-spawn: an obligation-owned minted turn owes nothing new.
   if (context.replay.sourceMessageId.startsWith('obl:')) return undefined;
+  // A scheduled agent job owes the chat no replay, and a minted replay would run
+  // without the job's scheduled purpose (registry.ts scheduledAgentJobMaySee).
+  if (classifyTurnLane(context.replay.sourceMessageId).lane === 'L-SCH') return undefined;
   // Unknown serving provider = capability availability unprovable = no debt
   // (creating one could duplicate work a capable turn already performed).
   if (harnessType === null || !harnessLacksCapability(harnessType)) return undefined;
@@ -101,10 +106,10 @@ export async function deriveCapabilityDecision(
     return notCreated('not_created_unjournaled_source', decision.inputDigest);
   }
 
-  // A journaled inbound whose receipt time is invalid reaches here as NaN
-  // (turn-provider-text.ts receivedAtUnixSeconds). It bounds both the window
-  // below and the write-loss check, and a NaN bound matches nothing, so
-  // neither can prove the fold complete: refuse creation.
+  // A journaled inbound whose receipt time is unavailable or invalid reaches
+  // here as NaN (turn-provider-text.ts receivedAtUnixSeconds). It bounds both
+  // the window below and the write-loss check, and a NaN bound matches
+  // nothing, so neither can prove the fold complete: refuse creation.
   if (!Number.isFinite(context.replay.receivedAtUnixSeconds)) {
     return notCreated('not_created_receipt_time_invalid', decision.inputDigest);
   }
