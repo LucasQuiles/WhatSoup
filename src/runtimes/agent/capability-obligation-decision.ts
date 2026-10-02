@@ -11,8 +11,8 @@
  *  - non-per_chat scope, minted (`obl:`) sources, unknown serving provider, or
  *    a capability-capable harness produce NO decision (nothing to owe);
  *  - a contract conflict, an inconclusive effect fold, an unjournaled source,
- *    or a media-staging failure produce a typed `obligation.not_created`
- *    audit event — recorded loss, never silent loss;
+ *    an invalid receipt time, or a media-staging failure produce a typed
+ *    `obligation.not_created` audit event — recorded loss, never silent loss;
  *  - only a conclusive-no-effect match on a journaled source creates the
  *    dispatchable obligation row.
  */
@@ -95,6 +95,14 @@ export async function deriveCapabilityDecision(
 
   if (context.identity.inboundSeq === null || context.identity.inboundSeq <= 0) {
     return notCreated('not_created_unjournaled_source', decision.inputDigest);
+  }
+
+  // A journaled inbound whose receipt time is invalid reaches here as NaN
+  // (turn-provider-text.ts receivedAtUnixSeconds). It bounds both the window
+  // below and the write-loss check, and a NaN bound matches nothing, so
+  // neither can prove the fold complete: refuse creation.
+  if (!Number.isFinite(context.replay.receivedAtUnixSeconds)) {
+    return notCreated('not_created_receipt_time_invalid', decision.inputDigest);
   }
 
   // D2 fold over TURN-CORRELATED rows (AS-04, spec §3.2b): every row is
