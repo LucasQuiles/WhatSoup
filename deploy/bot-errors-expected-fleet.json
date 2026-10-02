@@ -32,7 +32,8 @@
         },
         {
           "name": "personal",
-          "expected": "always_on",
+          "expected": "blocked",
+          "guiSessionExpected": "not_applicable",
           "service": "com.whatsoup.personal",
           "healthPort": 9091
         }
