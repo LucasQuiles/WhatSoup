@@ -732,15 +732,16 @@ can, and then logs nothing about it. If it cannot, it logs an error line that na
 the lost decision, and the error's `errorClass` and `errcode`, and records
 `not_created_decision_lost_on_retry`. The line is the only record when that event cannot be
 written either. If the line and the event both fail while the terminal write goes on, that
-retry leaves no record of the lost decision. All of this holds only once a retry reaches the
-terminal write: a retry that stops before it, for example because the turn's delivery evidence
-still cannot be read or does not prove the turn, does not attempt the decision and logs nothing
-about it. If no retry reaches the write, the decision is recorded nowhere, and a restart closes
-the turn with no event (§4.1). A storage fault that aborts the whole terminal write still fails
-that write, and the turn stays retained, as before. While a turn's terminal write is being
-retried, and after its retries are exhausted until recovery or a restart (§4.6), its chat
-refuses new turns that reach admission (arrivals may first wait in the chat's queue); each
-refusal is recorded as a
+retry leaves no record of the lost decision. All of this holds only once a retry's terminal
+write reaches the decision, after the terminal record and its inbound and delivery proofs. A
+retry that stops earlier does not attempt the decision and logs nothing about it, whether it
+stops before the write (the turn's delivery evidence still cannot be read or does not prove the
+turn) or inside it (its inbound or delivery proof is rejected). If no retry gets that far, the
+decision is recorded nowhere, and a restart closes the turn with no event (§4.1, §4.2,
+§4.5). A storage fault that aborts the whole terminal write still fails that write, and the
+turn stays retained, as before. While a turn's terminal write is being retried, and after its
+retries are exhausted until a restart (§4.6), its chat refuses new turns that reach admission
+(arrivals may first wait in the chat's queue); each refusal is recorded as a
 `pre_dispatch_error` failure, with an `agent_turn_admission_rejected` operator warning, and a
 continuity mark and an `agent_reply_guarantee_breach` alert are attempted. A turn closed any
 other way records no event, for example one rejected before dispatch, one reclaimed by the
