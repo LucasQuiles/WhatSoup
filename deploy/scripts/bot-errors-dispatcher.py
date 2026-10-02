@@ -1721,6 +1721,9 @@ def open_dispatcher_state_session():
     )
 
 
+_NO_STAMP = object()
+
+
 class IncidentStateCycle:
     """#2723 R5.2: session adapter bridging incident-state access to
     ControllerStateSession.
@@ -1737,9 +1740,11 @@ class IncidentStateCycle:
 
     ``commit()`` returns the ``StateCommitResult`` from ``session.save()``.
     Callers do not need to collect it: ``save()`` raises
-    ``ControllerStateRequired`` on any non-advancing outcome, so the three
+    ``ControllerStateRequired`` on any failed outcome, so the three
     cycle branches in ``collapse_storm_group`` call ``commit()`` bare and
-    rely on that raise rather than on ``require_all_advance``.
+    rely on that raise rather than on ``require_all_advance``. The one
+    non-advancing success is a content-identical commit, which persists
+    nothing and returns a ``valid`` result at the current generation.
     """
 
     def __init__(self, session: Any, payload: dict[str, Any], capability: Any, paths: dict[str, Path] | None = None):
@@ -1760,9 +1765,34 @@ class IncidentStateCycle:
         the only write: the session persists the enveloped primary itself.
         The raw co-write this once did was removed with the #3053 fix, and
         the cycle is the supported path away from ``save_incident_state``.
+
+        A commit whose content matches what the store already publishes is a
+        no-op. Call sites flag ``changed`` optimistically, and every
+        ``save()`` rewrites the full
+        ~400 KB state several times over (journal x4 with both envelopes,
+        ``.previous``, primary, marker, each fsynced) -- so a tick that
+        changed nothing still wrote megabytes. ``updatedAt`` is excluded from
+        the comparison because this method stamps it on every call; the stamp
+        is kept only when something else changed. It is not a liveness
+        signal: dispatcher liveness is ``cycleCompletedAt`` in
+        dispatcher-state.json, which ``record_state`` writes every cycle.
         """
+        prior_stamp = self._payload.get("updatedAt", _NO_STAMP)
         _normalize_incident_state_for_save(self._payload)
         redacted = redacted_dispatcher_payload(self._payload)
+        unstamped = dict(redacted)
+        if prior_stamp is _NO_STAMP:
+            unstamped.pop("updatedAt", None)
+        else:
+            unstamped["updatedAt"] = prior_stamp
+        unchanged = self._session.unchanged_commit(unstamped, self._capability)
+        if unchanged is not None:
+            # Keep the in-memory payload equal to what is on disk.
+            if prior_stamp is _NO_STAMP:
+                self._payload.pop("updatedAt", None)
+            else:
+                self._payload["updatedAt"] = prior_stamp
+            return unchanged
         result = self._session.save(redacted, self._capability)
         self._capability = result.capability
         # #3053: co-write removed — session save() already writes primary via _atomic_bytes
