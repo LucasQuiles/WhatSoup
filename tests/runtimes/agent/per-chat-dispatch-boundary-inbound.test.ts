@@ -10,11 +10,14 @@
  * turn, the finalization is retained, and the turn never settles.
  *
  * Harness: a real AgentRuntime, a real DurabilityEngine on real SQLite, and the
- * real OutboundQueue the runtime builds. Two things are doubled. The provider:
+ * real OutboundQueue the runtime builds. Substituted: the provider, whose
  * `createSessionManager` returns a stub, so `ensureSessionAndQueueSync` itself
- * runs and installs the production queue. The transport: its echo is delivered
- * as soon as the engine records the submission. The stub reports itself active,
- * so the spawn-and-adopt branch of `sendTurnToSession` is not exercised here.
+ * runs and installs the production queue; the transport, whose echo is
+ * delivered as soon as the engine records the submission; the reply guarantee;
+ * the logger and `emitAlert`; a stub predecessor queue where one is mapped; and
+ * the durability engine, assigned directly rather than through `setDurability`.
+ * The stub reports itself active, so the spawn-and-adopt branch of
+ * `sendTurnToSession`, which every production spawn takes, is not exercised.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -62,9 +65,9 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
 
 const CONVERSATION_KEY = '15550100188';
 const DELIVERY_JID = `${CONVERSATION_KEY}@s.whatsapp.net`;
-// A per-chat lane is keyed by the chat's canonical JID (`resolvePerChatMapKey`),
-// not by its conversation key. Lookups that carry no key, such as a notice sent
-// by chat JID, reach the lane only under that key.
+// A non-sandbox per-chat lane is keyed by the chat's canonical JID
+// (`resolvePerChatMapKey`), not by its conversation key. Lookups that carry no
+// key, such as a notice sent by chat JID, reach the lane only under that key.
 const MAP_KEY = DELIVERY_JID;
 const ANSWER_TEXT = 'The pump runs every six hours.';
 const LIVE_TEXT = 'Your order ships on Friday.';
@@ -105,6 +108,7 @@ function makeTransport() {
 function makeRuntime(db: Database, transport: Messenger): BoundaryState {
   const runtime = new AgentRuntime(db, transport, 'dispatch-boundary', { sessionScope: 'per_chat' });
   const state = runtime as unknown as BoundaryState;
+  // Substituted: the reply guarantee's liveness sender is not under test here.
   state.replyGuarantee = replyGuaranteeMock();
   return state;
 }
@@ -200,23 +204,32 @@ function storedOps(db: Database): Array<{ text: string; sourceInboundSeq: number
   }));
 }
 
+// Queue shutdown failures seen during teardown. Teardown runs in each case's
+// `finally`, so it records them here and afterEach fails the case on them;
+// throwing from `finally` would replace the case's own assertion error.
+const teardownErrors: unknown[] = [];
+
 async function teardown(state: BoundaryState, db: Database): Promise<void> {
   // A retained finalization holds a retry timer, the session's operation tracker
   // holds stall timers, and a real queue holds typing and pacing timers. Release
   // all three before the database goes away.
-  state.runtimeTurnSupervisor.close();
-  for (const tracker of state.operationTrackers.values()) tracker.shutdown();
-  for (const queue of state.chatQueues.values()) {
-    if (!(queue instanceof OutboundQueue)) continue;
-    queue.abortTurn();
-    await queue.shutdown().catch(() => undefined);
+  try {
+    state.runtimeTurnSupervisor.close();
+    for (const tracker of state.operationTrackers.values()) tracker.shutdown();
+    for (const queue of state.chatQueues.values()) {
+      if (!(queue instanceof OutboundQueue)) continue;
+      queue.abortTurn();
+      await queue.shutdown().catch((error: unknown) => { teardownErrors.push(error); });
+    }
+  } finally {
+    db.close();
   }
-  db.close();
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
   emitAlert.mockClear();
+  expect(teardownErrors.splice(0)).toEqual([]);
 });
 
 describe('per-chat dispatch that creates the session and queue', () => {
