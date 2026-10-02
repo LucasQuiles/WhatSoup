@@ -1,4 +1,5 @@
 import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
+import type { CapabilityDecisionMode } from '../../core/turn-finalization-contract.ts';
 import type {
   DurabilityEngine,
   FinalizeTurnTerminalResult,
@@ -64,6 +65,8 @@ export interface FinalizeRuntimeTurnParams {
    * atomically with the terminal record (capability-obligation replay, D4).
    */
   readonly capabilityDecision?: CapabilityDecisionParams;
+  /** Absent means atomic; the supervisor's retries pass best_effort. */
+  readonly capabilityDecisionMode?: CapabilityDecisionMode;
 }
 
 export interface AffectedTurnScope {
@@ -419,6 +422,9 @@ export function finalizeRuntimeTurn(
       ...(params.bookkeeping === undefined ? {} : { bookkeeping: params.bookkeeping }),
       ...(recoveryJob === undefined ? {} : { recoveryJob }),
       ...(params.capabilityDecision === undefined ? {} : { capabilityDecision: params.capabilityDecision }),
+      ...(params.capabilityDecisionMode === undefined
+        ? {}
+        : { capabilityDecisionMode: params.capabilityDecisionMode }),
     });
     if (!receipt.winnerMatchesRequest) {
       throw new Error('Durable terminal winner conflicts with the requested terminal identity');
