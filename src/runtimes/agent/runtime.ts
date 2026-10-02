@@ -289,7 +289,7 @@ import {
   QueuedDecisionConsumer,
 } from './pending-poll-health.ts';
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
-import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely } from './capability-obligation-runtime.ts';
+import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
@@ -2725,7 +2725,10 @@ export class AgentRuntime implements Runtime {
         });
     this.agentFallbacks = configuredFallbacks.map((entry) => ({ ...entry }));
     this.agentFallbackDiscovery = config.agentFallbackDiscovery ?? null;
-    this.registry = new ToolRegistry();
+    this.registry = new ToolRegistry(systemClock, {
+      // Tool-call turn correlation is evidence; it must not wait for optional obligation replay.
+      turnCorrelationResolver: (key) => turnCorrelationFromContexts(this.perChatRuntimeTurnContexts, key),
+    });
     this.registerAllTools();
     const getAllowedRoot = () => this.cwd ?? homedir();
     this.perChatMcpSocketManager = new PerChatMcpSocketManager({
