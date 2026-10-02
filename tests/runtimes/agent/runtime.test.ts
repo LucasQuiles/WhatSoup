@@ -4033,7 +4033,9 @@ describe('AgentRuntime', () => {
 
       const sentTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).map(([text]) => text);
       expect(sentTurns).toEqual(['image one', 'after image']);
-      expect(mockQueue.setInboundSeq.mock.calls.map(([seq]) => seq)).toEqual([10, 11]);
+      // Each turn's sequence is written twice: by the turn-queue processor before
+      // the dispatch, and at the dispatch boundary on the queue the turn is sent through.
+      expect(mockQueue.setInboundSeq.mock.calls.map(([seq]) => seq)).toEqual([10, 10, 11, 11]);
     } finally {
       vi.useRealTimers();
     }
