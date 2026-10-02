@@ -12,12 +12,15 @@
  * Harness: a real AgentRuntime, a real DurabilityEngine on real SQLite, and the
  * real OutboundQueue the runtime builds. Substituted: the provider, whose
  * `createSessionManager` returns a stub, so `ensureSessionAndQueueSync` itself
- * runs and installs the production queue; the transport, whose echo is
- * delivered as soon as the engine records the submission; the reply guarantee;
- * the logger and `emitAlert`; a stub predecessor queue where one is mapped; and
- * the durability engine, assigned directly rather than through `setDurability`.
- * The stub reports itself active, so the spawn-and-adopt branch of
- * `sendTurnToSession`, which every production spawn takes, is not exercised.
+ * runs and installs the production queue; the transport; the reply guarantee;
+ * the logger and `emitAlert`; where one is mapped, a stub predecessor session
+ * (terminated, its tool scope registered by hand) and its stub queue; the turn
+ * context, built by the harness rather than by intake; and the durability
+ * engine, assigned directly rather than through `setDurability`.
+ * In the two answered-turn cases the transport echo is synthesized as soon as
+ * the engine records the submission. The stub reports itself active, so the
+ * spawn-and-adopt branch of `sendTurnToSession`, which every fresh non-sandbox
+ * spawn takes, is not exercised.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -204,21 +207,31 @@ function storedOps(db: Database): Array<{ text: string; sourceInboundSeq: number
   }));
 }
 
-// Queue shutdown failures seen during teardown. Teardown runs in each case's
-// `finally`, so it records them here and afterEach fails the case on them;
-// throwing from `finally` would replace the case's own assertion error.
+// Failures seen during teardown. Teardown runs in each case's `finally`, so it
+// records them here and afterEach fails the case on them; throwing from
+// `finally` would replace the case's own assertion error and skip later steps.
 const teardownErrors: unknown[] = [];
 
-async function teardown(state: BoundaryState, db: Database): Promise<void> {
+/** One teardown step: a throw is recorded and the next step still runs. */
+function release(step: () => void): void {
+  try {
+    step();
+  } catch (error: unknown) {
+    teardownErrors.push(error);
+  }
+}
+
+async function teardown(state: BoundaryState | undefined, db: Database): Promise<void> {
   // A retained finalization holds a retry timer, the session's operation tracker
   // holds stall timers, and a real queue holds typing and pacing timers. Release
-  // all three before the database goes away.
+  // all three before the database goes away; with no runtime, only close it.
   try {
-    state.runtimeTurnSupervisor.close();
-    for (const tracker of state.operationTrackers.values()) tracker.shutdown();
+    if (state === undefined) return;
+    release(() => state.runtimeTurnSupervisor.close());
+    for (const tracker of state.operationTrackers.values()) release(() => tracker.shutdown());
     for (const queue of state.chatQueues.values()) {
       if (!(queue instanceof OutboundQueue)) continue;
-      queue.abortTurn();
+      release(() => queue.abortTurn());
       await queue.shutdown().catch((error: unknown) => { teardownErrors.push(error); });
     }
   } finally {
@@ -239,9 +252,10 @@ describe('per-chat dispatch that creates the session and queue', () => {
   ] as const)('finalizes the answered turn as replied when %s', async (_label, startingState) => {
     const db = new Database(':memory:');
     db.open();
-    const { transport } = makeTransport();
-    const state = makeRuntime(db, transport);
+    let state: BoundaryState | undefined;
     try {
+      const { transport } = makeTransport();
+      state = makeRuntime(db, transport);
       const durability = new DurabilityEngine(db);
       echoOnSubmit(durability);
       state.durability = durability;
@@ -321,9 +335,10 @@ describe('per-chat dispatch that creates the session and queue', () => {
   }> {
     const db = new Database(':memory:');
     db.open();
-    const { transport, sendMessage } = makeTransport();
-    const state = makeRuntime(db, transport);
+    let state: BoundaryState | undefined;
     try {
+      const { transport, sendMessage } = makeTransport();
+      state = makeRuntime(db, transport);
       const durability = new DurabilityEngine(db);
       state.durability = durability;
       const { inboundSeq, turn } = journaledTurn(durability, logicalTurnId);
