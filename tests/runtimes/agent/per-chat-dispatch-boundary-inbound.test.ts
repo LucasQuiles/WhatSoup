@@ -60,8 +60,12 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
   emitAlertChecked: emitAlert,
 }));
 
-const MAP_KEY = '15550100188';
-const DELIVERY_JID = `${MAP_KEY}@s.whatsapp.net`;
+const CONVERSATION_KEY = '15550100188';
+const DELIVERY_JID = `${CONVERSATION_KEY}@s.whatsapp.net`;
+// A per-chat lane is keyed by the chat's canonical JID (`resolvePerChatMapKey`),
+// not by its conversation key. Lookups that carry no key, such as a notice sent
+// by chat JID, reach the lane only under that key.
+const MAP_KEY = DELIVERY_JID;
 const ANSWER_TEXT = 'The pump runs every six hours.';
 const LIVE_TEXT = 'Your order ships on Friday.';
 const FINALIZATION_ALERT = 'agent_turn_finalization_failed';
@@ -119,14 +123,14 @@ function journaledTurn(
   durability: DurabilityEngine,
   logicalTurnId: string,
 ): { inboundSeq: number; turn: QueuedTurn } {
-  const inboundSeq = durability.journalInbound(`wamid-${logicalTurnId}`, MAP_KEY, DELIVERY_JID, 'agent');
-  const runtimeContext: RuntimeTurnContext = context('per_chat', MAP_KEY, inboundSeq, logicalTurnId);
+  const inboundSeq = durability.journalInbound(`wamid-${logicalTurnId}`, CONVERSATION_KEY, DELIVERY_JID, 'agent');
+  const runtimeContext: RuntimeTurnContext = context('per_chat', CONVERSATION_KEY, inboundSeq, logicalTurnId);
   return {
     inboundSeq,
     turn: {
       sourceMessageId: runtimeContext.replay.sourceMessageId,
       receivedAtUnixSeconds: runtimeContext.replay.receivedAtUnixSeconds,
-      conversationKey: MAP_KEY,
+      conversationKey: CONVERSATION_KEY,
       chatJid: DELIVERY_JID,
       senderJid: runtimeContext.replay.senderJid,
       senderName: runtimeContext.replay.senderName,
@@ -156,7 +160,8 @@ function installUnownedEntry(state: BoundaryState): IOutboundQueue {
   const staleQueue = queueStub(DELIVERY_JID);
   state.chatSessions.set(MAP_KEY, stale);
   state.chatQueues.set(MAP_KEY, staleQueue);
-  registerSessionToolScope(state, stale, perChatToolScopeKey(MAP_KEY));
+  // The scope the queued context already holds, as the harness mints it.
+  registerSessionToolScope(state, stale, perChatToolScopeKey(CONVERSATION_KEY));
   return staleQueue;
 }
 
@@ -228,6 +233,8 @@ describe('per-chat dispatch that creates the session and queue', () => {
       echoOnSubmit(durability);
       state.durability = durability;
       const { inboundSeq, turn } = journaledTurn(durability, `turn-spawn-path-${startingState}`);
+      // The lane key is the one production derives for this chat.
+      expect(state.resolvePerChatMapKey(DELIVERY_JID)).toBe(MAP_KEY);
       const staleQueue = startingState === 'unowned' ? installUnownedEntry(state) : null;
       const provider = stubProvider(state);
       // The provider answers from inside the send, which is when a real one
@@ -259,6 +266,7 @@ describe('per-chat dispatch that creates the session and queue', () => {
       }
 
       // The stored answer belongs to the turn that produced it.
+      expect(storedOps(db).map((op) => op.sourceInboundSeq)).toEqual([inboundSeq]);
       expect(storedOps(db)).toEqual([
         { text: ANSWER_TEXT, sourceInboundSeq: inboundSeq, status: 'echoed' },
       ]);
@@ -337,6 +345,7 @@ describe('per-chat dispatch that creates the session and queue', () => {
   it('stores live text sent before a stdin timeout under its own turn', async () => {
     const { inboundSeq, ops } = await liveTextThenStdinTimeout('turn-spawn-path-stdin-timeout-attribution');
 
+    expect(ops[0]?.sourceInboundSeq).toBe(inboundSeq);
     expect(ops[0]).toMatchObject({ text: LIVE_TEXT, sourceInboundSeq: inboundSeq });
   });
 });
