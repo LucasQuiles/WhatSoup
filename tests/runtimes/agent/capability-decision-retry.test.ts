@@ -25,8 +25,9 @@ vi.mock('../../../src/lib/emit-alert.ts', () => ({
 }));
 
 // Only the durability component's logger is captured: the decision-loss line
-// is asserted there, and P6 makes its error() throw. Other components keep the
-// real logger.
+// is asserted there, and P6 makes its error() throw. The capture bypasses the
+// production sanitizer, so P7 runs the captured line through its hook. Other
+// components keep the real logger.
 const durabilityLogger = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
 vi.mock('../../../src/logger.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/logger.ts')>();
@@ -39,6 +40,7 @@ vi.mock('../../../src/logger.ts', async (importOriginal) => {
 import type { CapabilityDecisionParams } from '../../../src/core/capability-obligation-store.ts';
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
+import { sanitizingLogHook } from '../../../src/lib/log-sanitizer.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import {
   createRuntimeTurnContext,
@@ -296,16 +298,6 @@ describe('capability decision on supervisor retry', () => {
     return JSON.parse(rows[0]!.detail!) as Record<string, unknown>;
   }
 
-  it('C1 (control): a first attempt that commits records its decision and is not retained', () => {
-    const seed = seedEchoedTurn('msg-c1');
-    const ctx = turnContext(seed.inboundSeq, 'turn-c1');
-    const first = firstAttempt(ctx, seed.opId, decision(seed.inboundSeq, 'msg-c1'));
-    expect(first.kind).toBe('terminal');
-    expect(counts()).toEqual({ terminals: 1, obligations: 1, events: 1 });
-    expect(lossLogs()).toEqual([]);
-    expect(supervisor.health().retainedRetries).toBe(0);
-  });
-
   it('T1: every retry forwards the retained decision in best_effort mode (mocked durability)', async () => {
     const ctx = turnContext(7, 'turn-t1');
     const decisionParams = decision(7, 'msg-turn-t1');
@@ -440,7 +432,8 @@ describe('capability decision on supervisor retry', () => {
       inboundSeq,
       derivedAction: 'obligation.create',
       derivedReasonCode: 'conclusive_no_effect',
-      error: { name: 'Error', errcode: null },
+      errorClass: 'Error',
+      errcode: null,
     }]);
     // One pass, no exhaustion, and the chat accepts turns again.
     expect(supervisor.canAccept(ctx)).toBe(true);
@@ -521,9 +514,18 @@ describe('capability decision on supervisor retry', () => {
   it('P4b: a malformed retained decision is recorded as lost on retry 1 instead of failing before C3', async () => {
     // Atomic validation rejects it on the first attempt (normalize), so the turn is retained.
     const { inboundSeq } = retainedTurn('turn-p4b', () => {}, { replayText: '' });
+    const applySpy = vi.spyOn(durability.capabilityObligations, 'applyDecisionWithinCallerTransaction');
+    spies.push(applySpy);
 
     await supervisor.retryAll();
 
+    // The malformed decision reached the store in savepoint 1 and was rejected
+    // there; savepoint 2 then wrote the lost event.
+    expect(applySpy.mock.calls.map(([applied]) => applied.auditEvent.reasonCode)).toEqual([
+      'conclusive_no_effect',
+      'not_created_decision_lost_on_retry',
+    ]);
+    expect(applySpy.mock.results.map((outcome) => outcome.type)).toEqual(['throw', 'return']);
     expect(counts()).toEqual({ terminals: 1, obligations: 0, events: 1 });
     expect(lostEventDetail()).toEqual({
       derivedAction: 'obligation.create',
@@ -535,7 +537,8 @@ describe('capability decision on supervisor retry', () => {
       inboundSeq,
       derivedAction: 'obligation.create',
       derivedReasonCode: 'conclusive_no_effect',
-      error: { name: 'Error', errcode: null },
+      errorClass: 'Error',
+      errcode: null,
     }]);
     expect(supervisor.health()).toMatchObject({ retainedRetries: 0, retryAttempts: 1, retryExhaustions: 0 });
   });
@@ -549,16 +552,56 @@ describe('capability decision on supervisor retry', () => {
         });
       spies.push(insertSpy);
     });
+    expect(insertSpy).toHaveBeenCalledTimes(1);
     durabilityLogger['error']!.mockImplementation(() => {
       throw new Error('injected: logger unavailable');
     });
 
     await supervisor.retryAll();
 
+    expect(insertSpy).toHaveBeenCalledTimes(2);
     expect(lossLogs()).toHaveLength(1);
     expect(counts()).toEqual({ terminals: 1, obligations: 0, events: 1 });
     expect(lostEventDetail()).toMatchObject({ derivedAction: 'obligation.create' });
     expect(supervisor.health()).toMatchObject({ retainedRetries: 0, retryAttempts: 1, retryExhaustions: 0 });
+  });
+
+  it('P7: the loss log keeps the error class and errcode through the production log sanitizer', async () => {
+    let insertSpy!: MockInstance;
+    const { inboundSeq } = retainedTurn('turn-p7', () => {
+      insertSpy = vi.spyOn(durability.capabilityObligations, 'insertWithinCallerTransaction')
+        .mockImplementation(() => {
+          throw Object.assign(new Error('injected constraint failure'), { name: 'SqliteFault', errcode: 19 });
+        });
+      spies.push(insertSpy);
+    });
+    expect(insertSpy).toHaveBeenCalledTimes(1);
+
+    await supervisor.retryAll();
+
+    expect(insertSpy).toHaveBeenCalledTimes(2);
+    expect(counts()).toEqual({ terminals: 1, obligations: 0, events: 1 });
+    expect(lostEventDetail()).toEqual({
+      derivedAction: 'obligation.create',
+      derivedReasonCode: 'conclusive_no_effect',
+      error: { name: 'SqliteFault', errcode: 19 },
+    });
+    // The capture bypasses the sanitizer; the production logger runs every
+    // line through this hook before any sink.
+    const sunk: unknown[][] = [];
+    for (const fields of lossLogs()) {
+      sanitizingLogHook.call(null, [fields, LOSS_LOG], (...args: unknown[]) => {
+        sunk.push(args);
+      }, 50);
+    }
+    expect(sunk).toEqual([[{
+      logicalTurnId: 'turn-p7',
+      inboundSeq,
+      derivedAction: 'obligation.create',
+      derivedReasonCode: 'conclusive_no_effect',
+      errorClass: 'SqliteFault',
+      errcode: 19,
+    }, LOSS_LOG]]);
   });
 
   describe('coordinator (first attempt)', () => {
@@ -582,6 +625,29 @@ describe('capability decision on supervisor retry', () => {
         deriveCapabilityDecision: vi.fn(async () => decisionParams),
       }));
     }
+
+    it('C1 (control): a first attempt that commits records its decision and is not retained', async () => {
+      const inboundSeq = durability.journalInbound('msg-turn-c1', CONVERSATION_KEY, DELIVERY_JID, 'agent');
+      const ctx = turnContext(inboundSeq, 'turn-c1');
+      const decisionParams = decision(inboundSeq, 'msg-turn-c1');
+      // The coordinator retains a turn whose first terminal write fails (T3),
+      // so this spy can see a wrong retention.
+      const retainSpy = vi.spyOn(supervisor, 'retain');
+      spies.push(retainSpy);
+
+      const result = await coordinatorDeriving(decisionParams).finalizeRuntimeTurnContext({
+        context: ctx,
+        queue: queueWithoutAnswers(),
+        attemptOutcome: { kind: 'completed' },
+        session: null,
+      });
+
+      expect(result.kind).toBe('terminal');
+      expect(retainSpy).not.toHaveBeenCalled();
+      expect(supervisor.health()).toMatchObject({ retainedRetries: 0, degradedScopes: 0 });
+      expect(lossLogs()).toEqual([]);
+      expect(counts()).toEqual({ terminals: 1, obligations: 1, events: 1 });
+    });
 
     it('T3: a failed first terminal write retains the derived decision with the turn', async () => {
       const inboundSeq = durability.journalInbound('msg-turn-t3', CONVERSATION_KEY, DELIVERY_JID, 'agent');

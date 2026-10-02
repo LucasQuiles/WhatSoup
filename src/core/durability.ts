@@ -317,7 +317,9 @@ function capabilityDecisionLostEvent(
 /**
  * The floor of the decision-loss record: one error line for each retry whose
  * real decision failed, written before either transaction guard can rethrow.
- * It runs inside C3 and outside any savepoint, so it must never throw.
+ * It runs inside C3 and outside any savepoint, so it must never throw. The
+ * error's class is logged as `errorClass`: the log sanitizer redacts a `name`
+ * key as an identity, and this line may be the only record of the loss.
  */
 function logCapabilityDecisionLoss(
   decision: CapabilityDecisionParams,
@@ -326,12 +328,14 @@ function logCapabilityDecisionLoss(
 ): void {
   try {
     const auditEvent = (decision as Partial<CapabilityDecisionParams> | undefined)?.auditEvent;
+    const errorIdentity = capabilityDecisionErrorClass(err);
     log.error({
       logicalTurnId: terminal.logicalTurnId,
       inboundSeq: terminal.inboundSeq,
       derivedAction: auditEvent?.action ?? null,
       derivedReasonCode: auditEvent?.reasonCode ?? null,
-      error: capabilityDecisionErrorClass(err),
+      errorClass: errorIdentity.name,
+      errcode: errorIdentity.errcode,
     }, 'capability decision lost on retry');
   } catch { /* intentional: the decision-loss floor must never abort C3 */ }
 }
