@@ -598,7 +598,7 @@ ORDER BY t.id DESC;
 
 Every tool call records which caller made it in the migration 65 columns (§6, `tool_calls`). The record is evidence only: no admission, authorization or reply depends on it. The runtime mints one random token per agent session in memory and passes it to the child only through its environment. The session's MCP proxy and hooks present it as a `notifications/whatsoup/session` line, which gets no reply. A same-user process can read another process's environment, so `match` is attribution evidence and does not authenticate the caller. Calls from other clients, such as the fleet client and the bot-errors provider probe, record as outside callers.
 
-The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool:
+The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool. Its `turnCorrelation` section, one entry per transport, measures how many of the turn's own mid-turn calls carry their `logical_turn_id` (`eligible` against `attributed`), and counts outside mid-turn calls apart (`outsideMidTurn`, with `outsideMidTurnCorrelated` expected to be 0):
 
 ```bash
 bash scripts/run-with-pinned-node.sh scripts/caller-attribution-report.ts --db <instance>/bot.db --out-dir <dir> [--window-days 30]
@@ -1234,6 +1234,8 @@ rewriting either durable disposition.
 | `retry_disposition`, `operator_action` | TEXT NOT NULL | Closed recovery guidance derived from typed facts, never prose. |
 | `evidence_coverage` | TEXT NOT NULL | `complete`, `partial`, or `legacy_unclassified`. |
 | `duration_ms` | INTEGER | Optional bounded execution duration; null for open rows. |
+| `logical_turn_id` | TEXT | Migration 58 (AS-04). The logical turn that owned the call: the head of the runtime's per-chat context list for the call's conversation key at record time. Set only when the caller evidence marks the call as the turn's own (in process, or a socket session that presented the executing session's token). NULL for any other caller, when no head owns the key, when two heads share it, and in shared and single scopes. The capability-obligation effect fold treats a NULL row in the conversation window as enumeration-incomplete. |
+| `source_inbound_seq` | INTEGER | Migration 58. The owning turn's inbound sequence. NULL whenever `logical_turn_id` is, and when the owning turn has no journaled inbound. |
 | `caller_transport` | TEXT | Migration 65 (#3421). `socket` or `in_process` (the provider bridge). NULL for rows written before migration 65 or by a caller outside both. |
 | `caller_connection_id` | TEXT | Per-process random prefix plus the socket connection number. NULL for in-process calls. |
 | `caller_client_name`, `caller_client_version` | TEXT | The client's own `initialize.clientInfo`, printable ASCII only, at most 64 characters, else NULL. A label, never trusted. |
