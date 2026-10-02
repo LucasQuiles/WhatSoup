@@ -298,6 +298,35 @@ describe('capability decision on supervisor retry', () => {
     return JSON.parse(rows[0]!.detail!) as Record<string, unknown>;
   }
 
+  it('C1b: an echoed first attempt writes its decision atomically through the runtime finalizer', () => {
+    const seed = seedEchoedTurn('msg-c1b');
+    const ctx = turnContext(seed.inboundSeq, 'turn-c1b');
+    const decisionParams = decision(seed.inboundSeq, 'msg-c1b');
+    const terminalSpy = vi.spyOn(durability, 'finalizeTurnTerminal');
+    spies.push(terminalSpy);
+
+    const first = firstAttempt(ctx, seed.opId, decisionParams);
+
+    expect(first.kind).toBe('terminal');
+    // One atomic write (no mode) that carries the decision.
+    const writes = terminalSpy.mock.calls.map(([params]) => [params.capabilityDecisionMode, params.capabilityDecision]);
+    expect(writes).toEqual([[undefined, decisionParams]]);
+    expect(counts()).toEqual({ terminals: 1, obligations: 1, events: 1 });
+    const obligations = db.raw
+      .prepare('SELECT state, creation_evidence_event_id FROM capability_obligations')
+      .all() as unknown as Array<{ state: string; creation_evidence_event_id: number }>;
+    const createEvents = db.raw
+      .prepare('SELECT id, action, reason_code FROM capability_obligation_events')
+      .all() as unknown as Array<{ id: number; action: string; reason_code: string }>;
+    expect(createEvents).toEqual([{
+      id: obligations[0]!.creation_evidence_event_id,
+      action: 'obligation.create',
+      reason_code: 'conclusive_no_effect',
+    }]);
+    expect(obligations.map((row) => row.state)).toEqual(['waiting_capability']);
+    expect(lossLogs()).toEqual([]);
+  });
+
   it('T1: every retry forwards the retained decision in best_effort mode (mocked durability)', async () => {
     const ctx = turnContext(7, 'turn-t1');
     const decisionParams = decision(7, 'msg-turn-t1');
