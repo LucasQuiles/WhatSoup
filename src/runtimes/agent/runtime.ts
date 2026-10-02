@@ -6354,6 +6354,10 @@ export class AgentRuntime implements Runtime {
     if (contexts.length > 0 && !heldContinuation) {
       throw new PerChatTurnFifoOwnerConflictError(mapKey);
     }
+    // The turn processor wrote the sequence to the queue mapped before dispatch.
+    // Spawning the session may have installed a new queue since, so write it here too.
+    const inboundSeq = context.identity.inboundSeq;
+    if (typeof inboundSeq === 'number') queue.setInboundSeq(inboundSeq);
     if (heldContinuation) {
       contexts[0] = context;
     } else {
