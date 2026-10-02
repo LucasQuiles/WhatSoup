@@ -262,12 +262,12 @@ describe('capability decision on supervisor retry', () => {
     supervisor.retain(record, first);
   }
 
-  function failFirstTerminalWriteOnce(): void {
-    spies.push(
-      vi.spyOn(durability, 'finalizeTurnTerminal').mockImplementationOnce(() => {
-        throw new Error('injected: first terminal write failed');
-      }),
-    );
+  function failFirstTerminalWriteOnce(): MockInstance<DurabilityEngine['finalizeTurnTerminal']> {
+    const terminalSpy = vi.spyOn(durability, 'finalizeTurnTerminal').mockImplementationOnce(() => {
+      throw new Error('injected: first terminal write failed');
+    });
+    spies.push(terminalSpy);
+    return terminalSpy;
   }
 
   /** Prepares one retained turn whose first attempt failed. */
@@ -653,7 +653,7 @@ describe('capability decision on supervisor retry', () => {
       const inboundSeq = durability.journalInbound('msg-turn-t3', CONVERSATION_KEY, DELIVERY_JID, 'agent');
       const ctx = turnContext(inboundSeq, 'turn-t3');
       const decisionParams = decision(inboundSeq, 'msg-turn-t3');
-      failFirstTerminalWriteOnce();
+      const terminalSpy = failFirstTerminalWriteOnce();
       const retainSpy = vi.spyOn(supervisor, 'retain');
       spies.push(retainSpy);
 
@@ -671,6 +671,11 @@ describe('capability decision on supervisor retry', () => {
 
       // The retained decision is then written by the first retry.
       await supervisor.retryAll();
+      // The coordinator's first write is atomic (no mode); only the retry is best-effort.
+      expect(terminalSpy.mock.calls.map(([params]) => params.capabilityDecisionMode)).toEqual([
+        undefined,
+        'best_effort',
+      ]);
       expect(counts()).toEqual({ terminals: 1, obligations: 1, events: 1 });
     });
 
