@@ -64,6 +64,7 @@ function makeContext(over: Partial<{
   text: string;
   contentType: string;
   inboundSeq: number | null;
+  receivedAtUnixSeconds: number;
 }> = {}): RuntimeTurnContext {
   return {
     identity: {
@@ -78,7 +79,7 @@ function makeContext(over: Partial<{
     recoveryOwner: { logicalTurnId: 'owner-1', managerId: 'mgr-1', generation: 1 },
     replay: {
       sourceMessageId: over.sourceMessageId ?? 'TESTMSG-DEC-1',
-      receivedAtUnixSeconds: Math.floor(Date.now() / 1000) - 60,
+      receivedAtUnixSeconds: over.receivedAtUnixSeconds ?? Math.floor(Date.now() / 1000) - 60,
       replaySafe: true,
       senderJid: 'test-sender@s.whatsapp.net',
       senderName: 'Test Sender',
@@ -91,12 +92,17 @@ function makeContext(over: Partial<{
   };
 }
 
-function deps(over: { mediaRoot?: string; writeLoss?: boolean } = {}) {
+function deps(over: { mediaRoot?: string; writeLoss?: boolean; writeLossAtMs?: number } = {}) {
+  const { writeLossAtMs } = over;
   return {
     db,
     options: { ...OPTIONS, mediaRoot: over.mediaRoot ?? join(dir, 'retained') },
     externalEffectFor: (name: string) => EFFECTS[name],
-    writeLossSince: () => over.writeLoss ?? false,
+    // writeLossAtMs compares like the registry (registry.ts hadDurabilityWriteLossSince), so a
+    // test can see what the decision passes as `sinceMs`; writeLoss ignores it.
+    writeLossSince: writeLossAtMs === undefined
+      ? () => over.writeLoss ?? false
+      : (sinceMs: number) => writeLossAtMs >= sinceMs,
   };
 }
 
@@ -294,6 +300,75 @@ describe('D2 effect fold', () => {
     expect(secondId).toBe(firstId);
     const count = (db.raw.prepare('SELECT COUNT(*) AS c FROM capability_obligations').get() as { c: number }).c;
     expect(count).toBe(1);
+  });
+});
+
+describe('receipt-time bound', () => {
+  // An invalid journaled receipt time reaches the decision as NaN (ingest warns and dispatches;
+  // turn-provider-text.ts receivedAtUnixSeconds returns NaN). It bounds both the conversation
+  // window and the write-loss check, so neither can prove the turn effect-free.
+  it('FALSIFIER: an invalid receipt time plus an uncorrelated outside effectful row creates no obligation', async () => {
+    insertToolCall('send_message', 'complete', null, null); // an outside caller's row: no logical_turn_id
+    const valid = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
+    expect(valid?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
+    const nan = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(nan?.obligation).toBeUndefined();
+    expect(nan?.auditEvent.action).toBe('obligation.not_created');
+    expect(nan?.auditEvent.reasonCode).toBe('not_created_receipt_time_invalid');
+    expect(nan?.auditEvent.sourceHash).toBe(valid?.auditEvent.sourceHash);
+  });
+
+  it('FALSIFIER: an invalid receipt time does not hide a tool-durability write loss', async () => {
+    const decision = await deriveCapabilityDecision(
+      deps({ writeLossAtMs: Date.now() }),
+      makeContext({ receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(decision?.obligation).toBeUndefined();
+    expect(decision?.auditEvent.action).toBe('obligation.not_created');
+    expect(decision?.auditEvent.reasonCode).toBe('not_created_receipt_time_invalid');
+  });
+
+  it('a write loss after a valid receipt time is seen by the comparing stub', async () => {
+    const decision = await deriveCapabilityDecision(deps({ writeLossAtMs: Date.now() }), makeContext(), 'managed_loop');
+    expect(decision?.obligation).toBeUndefined();
+    expect(decision?.auditEvent.reasonCode).toBe('not_created_side_effect_uncertain');
+  });
+
+  it.each([Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'a non-finite receipt time (%s) refuses creation',
+    async (receivedAtUnixSeconds) => {
+      const decision = await deriveCapabilityDecision(deps(), makeContext({ receivedAtUnixSeconds }), 'managed_loop');
+      expect(decision?.obligation).toBeUndefined();
+      expect(decision?.auditEvent.action).toBe('obligation.not_created');
+      expect(decision?.auditEvent.reasonCode).toBe('not_created_receipt_time_invalid');
+    },
+  );
+
+  it('an invalid receipt time on a non-matching inbound still owes nothing', async () => {
+    // The receipt-time check sits after the contract match: an inbound that owes nothing with a
+    // valid receipt time owes nothing with an invalid one, and records no refusal either.
+    const valid = await deriveCapabilityDecision(deps(), makeContext({ text: 'just a hello' }), 'managed_loop');
+    expect(valid).toBeUndefined();
+    const nan = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ text: 'just a hello', receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(nan).toStrictEqual(valid);
+  });
+
+  it('an invalid receipt time on an unjournaled source keeps the unjournaled reason', async () => {
+    const decision = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ inboundSeq: null, receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(decision?.auditEvent.reasonCode).toBe('not_created_unjournaled_source');
   });
 });
 
