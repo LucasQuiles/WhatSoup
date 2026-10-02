@@ -285,7 +285,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "1ee565f07efbe45f405e95dbe125b548bb164fa305133f87a3ffd362d16198f7",
+      "sha256": "b2983023a76bdfc95ed771c422390c59f102c78f28262462c39ff6f487a7de09",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
