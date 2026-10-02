@@ -204,6 +204,15 @@ export interface FinalizeTurnTerminalResult extends RecordTurnTerminalResult {
 
 export type TurnFinalizationBookkeepingParams = Omit<TurnBookkeepingParams, 'lastOpId'>;
 
+/**
+ * How a capability decision joins C3. `atomic` (the default, the first
+ * finalization): a decision failure aborts the terminal too. `best_effort`
+ * (every supervisor retry): the decision may not block the terminal, so a
+ * failed write is recorded as `not_created_decision_lost_on_retry`, or only
+ * logged when that cannot be written either.
+ */
+export type CapabilityDecisionMode = 'atomic' | 'best_effort';
+
 export interface FinalizeTurnTerminalParams {
   terminal: TurnTerminalPersistenceParams;
   inbound?: TerminalInboundMutation;
@@ -217,6 +226,8 @@ export interface FinalizeTurnTerminalParams {
    * re-finalization cannot create a second obligation.
    */
   capabilityDecision?: CapabilityDecisionParams;
+  /** Absent means `atomic`. */
+  capabilityDecisionMode?: CapabilityDecisionMode;
 }
 
 export const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
@@ -302,7 +313,10 @@ export function normalizeFinalizeTurnTerminalParams(
   if (!['per_chat', 'shared', 'singleton'].includes(terminal.scope)) {
     throw new Error('Terminal identity has an invalid scope');
   }
-  if (params.capabilityDecision !== undefined) {
+  // A best-effort decision is validated by the store inside its savepoint, so
+  // an invalid retained decision becomes a recorded loss there instead of
+  // failing the terminal before C3 on every retry.
+  if (params.capabilityDecision !== undefined && params.capabilityDecisionMode !== 'best_effort') {
     validateCapabilityDecisionParams(params.capabilityDecision);
   }
   validateBoundedRequired(

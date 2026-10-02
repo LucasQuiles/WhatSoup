@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { systemClock } from '../../lib/clock.ts';
-import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
+import {
+  validateCapabilityDecisionParams,
+  type CapabilityDecisionParams,
+} from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
 import type {
   DurabilityEngine,
@@ -1136,6 +1139,9 @@ private async performRuntimeTurnFinalization(args: {
   if (this.host.deriveCapabilityDecision !== undefined) {
     try {
       capabilityDecision = await this.host.deriveCapabilityDecision(args.context, args.session);
+      // Validated here so an invalid decision becomes the producer-error event
+      // below on this attempt, instead of failing C3 and retaining the turn.
+      if (capabilityDecision !== undefined) validateCapabilityDecisionParams(capabilityDecision);
     } catch (err) {
       // A producer fault must neither block finalization NOR lose the signal
       // silently — record a typed not_created audit event in its place.
@@ -1172,6 +1178,7 @@ private async performRuntimeTurnFinalization(args: {
           (error) => this.observeOutboundQueueFailure(scopeKey, args.queue, error),
         ),
         bookkeeping,
+        ...(capabilityDecision === undefined ? {} : { capabilityDecision }),
         postEffects,
       }, result);
   if (result.kind === 'terminal') {

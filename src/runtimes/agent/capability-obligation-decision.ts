@@ -5,7 +5,11 @@
  * instance-declared contract is evaluated against the ORIGINAL inbound, the
  * turn's external effects are folded, media is staged, and the resulting typed
  * decision rides the C3 terminal transaction (`finalizeTurnTerminal`) — so a
- * capability-refused turn can never again echo-settle into silence.
+ * capability-refused turn can never again echo-settle into silence. If that
+ * first terminal write fails, the turn's supervisor retries carry the same
+ * decision best-effort: one a retry cannot write is recorded as
+ * `not_created_decision_lost_on_retry` (durability.ts), so it never keeps the
+ * turn retained.
  *
  * Fail-closed rules, in order:
  *  - non-per_chat scope, minted (`obl:`) sources, unknown serving provider, or

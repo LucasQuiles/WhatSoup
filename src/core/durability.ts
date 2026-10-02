@@ -6,7 +6,7 @@ import {
 import { allFromStatement } from '../lib/db-query.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
 import { DeferredTurnStore } from './deferred-turn-store.ts';
-import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
+import type { CapabilityDecisionOutcome, CapabilityDecisionParams } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
 import {
@@ -271,6 +271,70 @@ export function expireOverdueCompletedDeliveryIdentityAdmissions(
 }
 
 const log = createChildLogger('durability');
+
+/**
+ * The error's identity for a decision-loss record: its name and node:sqlite's
+ * numeric errcode (every SQLite error has code ERR_SQLITE_ERROR), never its
+ * message, so the audit detail stays redaction-safe.
+ */
+function capabilityDecisionErrorClass(err: unknown): { name: string; errcode: number | null } {
+  try {
+    const errcode = (err as { errcode?: unknown } | null | undefined)?.errcode;
+    return {
+      name: err instanceof Error ? err.name : typeof err,
+      errcode: typeof errcode === 'number' ? errcode : null,
+    };
+  } catch {
+    return { name: 'unknown', errcode: null };
+  }
+}
+
+/**
+ * The audit event recorded in place of a retained decision that a retry could
+ * not write. The decision may itself be malformed (that can be why it failed),
+ * so its fields are read defensively.
+ */
+function capabilityDecisionLostEvent(
+  decision: CapabilityDecisionParams,
+  err: unknown,
+): CapabilityDecisionParams {
+  const auditEvent = (decision as Partial<CapabilityDecisionParams> | undefined)?.auditEvent;
+  return {
+    auditEvent: {
+      action: 'obligation.not_created',
+      actorType: 'runtime',
+      reasonCode: 'not_created_decision_lost_on_retry',
+      sourceHash: auditEvent?.sourceHash ?? null,
+      detail: {
+        derivedAction: auditEvent?.action ?? null,
+        derivedReasonCode: auditEvent?.reasonCode ?? null,
+        error: capabilityDecisionErrorClass(err),
+      },
+    },
+  };
+}
+
+/**
+ * The floor of the decision-loss record: one error line for each retry whose
+ * real decision failed, written before either transaction guard can rethrow.
+ * It runs inside C3 and outside any savepoint, so it must never throw.
+ */
+function logCapabilityDecisionLoss(
+  decision: CapabilityDecisionParams,
+  terminal: TurnTerminalPersistenceParams,
+  err: unknown,
+): void {
+  try {
+    const auditEvent = (decision as Partial<CapabilityDecisionParams> | undefined)?.auditEvent;
+    log.error({
+      logicalTurnId: terminal.logicalTurnId,
+      inboundSeq: terminal.inboundSeq,
+      derivedAction: auditEvent?.action ?? null,
+      derivedReasonCode: auditEvent?.reasonCode ?? null,
+      error: capabilityDecisionErrorClass(err),
+    }, 'capability decision lost on retry');
+  } catch { /* intentional: the decision-loss floor must never abort C3 */ }
+}
 
 /**
  * PR-C: max age a `status_ping` op may sit in `pending` before the drain ages it
@@ -1891,13 +1955,17 @@ export class DurabilityEngine {
           );
         }
         if (normalized.capabilityDecision !== undefined) {
-          // D4: the typed capability-debt decision shares C3 atomicity — an
-          // audit/store failure here aborts the terminal record too. The
-          // duplicate-winner branch below is read-only, so a re-finalization
-          // can never apply the decision twice.
-          capabilityDecision = this.capabilityObligations.applyDecisionWithinCallerTransaction(
-            normalized.capabilityDecision,
-          );
+          // D4: on the first finalization the typed capability-debt decision
+          // shares C3 atomicity — an audit/store failure here aborts the
+          // terminal record too. A supervisor retry passes best_effort, so the
+          // decision can no longer keep the turn retained. The duplicate-winner
+          // branch below is read-only, so a re-finalization can never apply
+          // the decision twice.
+          capabilityDecision = normalized.capabilityDecisionMode === 'best_effort'
+            ? this.applyCapabilityDecisionBestEffort(normalized.capabilityDecision, normalized.terminal)
+            : this.capabilityObligations.applyDecisionWithinCallerTransaction(
+              normalized.capabilityDecision,
+            );
         }
         if (normalized.bookkeeping) this.runTurnBookkeeping(normalized.bookkeeping);
         if (normalized.inbound) {
@@ -1969,6 +2037,37 @@ export class DurabilityEngine {
         }
       }
       throw err;
+    }
+  }
+
+  /**
+   * A supervisor retry's decision write (capability-decision-dropped-on-retry).
+   * The decision may not keep the terminal from committing: savepoint 1 writes
+   * it; if that fails, savepoint 2 records `not_created_decision_lost_on_retry`
+   * in its place; if that fails too, the error log line is the only record.
+   * Either failure can also have ended C3 itself (SQLite rolls the whole
+   * transaction back on some errors). The error is then rethrown, so no later
+   * terminal write runs outside the transaction and the turn stays retained.
+   */
+  private applyCapabilityDecisionBestEffort(
+    decision: CapabilityDecisionParams,
+    terminal: TurnTerminalPersistenceParams,
+  ): CapabilityDecisionOutcome | undefined {
+    try {
+      return withTransaction(this.db, () =>
+        this.capabilityObligations.applyDecisionWithinCallerTransaction(decision));
+    } catch (decisionErr) {
+      logCapabilityDecisionLoss(decision, terminal, decisionErr);
+      if (!this.db.raw.isTransaction) throw decisionErr;
+      try {
+        return withTransaction(this.db, () =>
+          this.capabilityObligations.applyDecisionWithinCallerTransaction(
+            capabilityDecisionLostEvent(decision, decisionErr),
+          ));
+      } catch (lostEventErr) {
+        if (!this.db.raw.isTransaction) throw lostEventErr;
+        return undefined;
+      }
     }
   }
 
