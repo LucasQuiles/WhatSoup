@@ -303,6 +303,11 @@ export interface McpLivenessSnapshot {
   oldestCallTool: string | null;
 }
 
+/** AS-04: resolves the live turn that owns a conversation when a tool call is recorded. */
+export type TurnCorrelationResolver = (
+  conversationKey: string,
+) => { logicalTurnId: string; inboundSeq: number | null } | null;
+
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDeclaration>();
   private readonly clock: Clock;
@@ -323,9 +328,7 @@ export class ToolRegistry {
   };
   private firstDurabilityWriteLossAt: number | null = null;
   private lastDurabilityWriteLossAt: number | null = null;
-  private turnCorrelationResolver:
-    | ((conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null)
-    | null = null;
+  private turnCorrelationResolver: TurnCorrelationResolver | null = null;
   // Issue 3150 registry layer: canonical conversation-key fold for the
   // cross-conversation guard (issue 3457: both its pre-handler and its
   // post-resolution point). Null until installed (see
@@ -349,8 +352,13 @@ export class ToolRegistry {
     // durationMs 0 — not reachable in production, where systemClock and the
     // timer wheel read the same wall clock.
     clock: Clock = systemClock,
+    // AS-04: the AgentRuntime passes its turn-correlation resolver here, so tool
+    // calls are correlated from the registry's first call and never wait for
+    // optional obligation replay. Omitted = uncorrelated rows.
+    options: { turnCorrelationResolver?: TurnCorrelationResolver } = {},
   ) {
     this.clock = clock;
+    this.turnCorrelationResolver = options.turnCorrelationResolver ?? null;
   }
 
   /** Oldest in-flight tool call's age + pending count (#1753 rem-2). */
@@ -491,12 +499,14 @@ export class ToolRegistry {
   /**
    * AS-04 turn correlation: resolve the live turn owning a conversation at
    * record time (per-chat turns are serialized, so the current context head IS
-   * the owning turn). Set once by the runtime; null resolver = uncorrelated
-   * rows, which the effect fold treats as enumeration-incomplete.
+   * the owning turn). The AgentRuntime passes it to the constructor; this setter
+   * replaces it. Null resolver = uncorrelated rows, which the effect fold treats
+   * as enumeration-incomplete.
+   * Only a call the caller evidence marks as the turn's own is correlated: an
+   * outside caller can inherit the executing turn's conversation key, and its
+   * row must not carry that customer's turn.
    */
-  setTurnCorrelationResolver(
-    resolver: (conversationKey: string) => { logicalTurnId: string; inboundSeq: number | null } | null,
-  ): void {
+  setTurnCorrelationResolver(resolver: TurnCorrelationResolver): void {
     this.turnCorrelationResolver = resolver;
   }
 
@@ -621,16 +631,17 @@ export class ToolRegistry {
         };
       }
       try {
+        // #3421 step 1: evidence only. It is computed from values already on
+        // the session and never feeds any gate below.
+        const caller = getToolCallCallerEvidence(session, tool.sensitive === true);
         durabilityId = this.durability.recordToolCall(
           durabilityKey,
           name,
           normalizeToolDurabilityGroup(tool.group),
           replayPolicy,
           undefined,
-          this.turnCorrelationResolver?.(durabilityKey) ?? null,
-          // #3421 step 1: evidence only. It is computed from values already on
-          // the session and never feeds any gate below.
-          getToolCallCallerEvidence(session, tool.sensitive === true),
+          caller?.turnOwned === true ? this.turnCorrelationResolver?.(durabilityKey) ?? null : null,
+          caller,
         );
       } catch {
         this.recordDurabilityWriteLoss('record', name);

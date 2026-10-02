@@ -10,6 +10,11 @@
 //      (outcome_code 'success' = admitted; failure_code 'authorization_denied'
 //      = refused.)
 //
+// It also measures turn-correlation completeness: of the calls that are the
+// executing turn's own (turn_owned = 1 with actor_source = 'executing_turn'),
+// how many carry the owning logical turn. Mid-turn outside calls are counted
+// apart, with how many of them carry a turn (expected 0).
+//
 // Retention deletes terminal tool_calls rows after 30 days, so the window is
 // capped at 30 days. Rows written before migration 65 carry NULL attribution
 // and are counted only in `toolCalls.total`.
@@ -52,6 +57,18 @@ export interface SensitiveOutsideCallCount {
   count: number;
 }
 
+export interface TurnCorrelationCoverage {
+  transport: string;
+  /** The turn's own calls made while a turn executed. */
+  eligible: number;
+  /** Eligible calls that carry the owning logical turn. */
+  attributed: number;
+  /** Calls from outside the turn made while a turn executed. */
+  outsideMidTurn: number;
+  /** Outside mid-turn calls that carry a logical turn. */
+  outsideMidTurnCorrelated: number;
+}
+
 export interface CallerAttributionReport {
   report: 'caller-attribution';
   issue: 3421;
@@ -62,6 +79,7 @@ export interface CallerAttributionReport {
   midTurnOutsideCalls: MidTurnOutsideCallCount[];
   midTurnCalls: MidTurnCallCount[];
   sensitiveOutsideCalls: SensitiveOutsideCallCount[];
+  turnCorrelation: TurnCorrelationCoverage[];
 }
 
 export function parseCallerAttributionArgs(argv: string[]): CallerAttributionArgs {
@@ -155,6 +173,38 @@ export function getToolCallAttributionCoverage(db: DatabaseSync, since: string):
   return { total: Number(row.total), attributed: Number(row.attributed) };
 }
 
+export function getTurnCorrelationCoverage(db: DatabaseSync, since: string): TurnCorrelationCoverage[] {
+  const rows = db.prepare(`
+    SELECT caller_transport AS transport,
+           SUM(CASE WHEN caller_turn_owned = 1 AND caller_actor_source = 'executing_turn'
+                    THEN 1 ELSE 0 END) AS eligible,
+           SUM(CASE WHEN caller_turn_owned = 1 AND caller_actor_source = 'executing_turn'
+                     AND logical_turn_id IS NOT NULL THEN 1 ELSE 0 END) AS attributed,
+           SUM(CASE WHEN caller_turn_owned = 0 AND caller_actor_source = 'executing_turn'
+                    THEN 1 ELSE 0 END) AS outsideMidTurn,
+           SUM(CASE WHEN caller_turn_owned = 0 AND caller_actor_source = 'executing_turn'
+                     AND logical_turn_id IS NOT NULL THEN 1 ELSE 0 END) AS outsideMidTurnCorrelated
+      FROM tool_calls
+     WHERE created_at >= ?
+       AND caller_transport IS NOT NULL
+     GROUP BY transport
+     ORDER BY transport
+  `).all(since) as Array<{
+    transport: string;
+    eligible: number;
+    attributed: number;
+    outsideMidTurn: number;
+    outsideMidTurnCorrelated: number;
+  }>;
+  return rows.map((row) => ({
+    transport: row.transport,
+    eligible: Number(row.eligible),
+    attributed: Number(row.attributed),
+    outsideMidTurn: Number(row.outsideMidTurn),
+    outsideMidTurnCorrelated: Number(row.outsideMidTurnCorrelated),
+  }));
+}
+
 export function buildCallerAttributionReport(
   db: DatabaseSync,
   options: { now: Date; windowDays: number },
@@ -170,6 +220,7 @@ export function buildCallerAttributionReport(
     midTurnOutsideCalls: getMidTurnOutsideCallCounts(db, since),
     midTurnCalls: getMidTurnCallCounts(db, since),
     sensitiveOutsideCalls: getSensitiveOutsideCallCounts(db, since),
+    turnCorrelation: getTurnCorrelationCoverage(db, since),
   };
 }
 

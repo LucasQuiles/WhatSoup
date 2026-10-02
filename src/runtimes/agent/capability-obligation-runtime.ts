@@ -560,9 +560,11 @@ export function activateCapabilityObligationRuntime(
  * Wire the capability-obligation replay runtime to the AgentRuntime — extracted from
  * runtime.ts (arch.file-size ratchet). Returns the activated runtime, or null when the
  * feature is not opted in, the scope is not `per_chat`, or it is already active — the
- * all-or-inert guard as one decision. It also installs the shared turn-correlation
- * resolver and builds the r14-F3 single-resolution `prepareDispatch`. Runtime deps arrive
- * as closures capturing the AgentRuntime, so no private members are widened.
+ * all-or-inert guard as one decision. It builds the r14-F3 single-resolution
+ * `prepareDispatch`. The registry's tool-call turn correlation is installed by the
+ * AgentRuntime at construction, with or without replay; this function only reuses the
+ * same resolution for receipts (`turnIdFor`). Runtime deps arrive as closures capturing
+ * the AgentRuntime, so no private members are widened.
  */
 export function maybeActivateCapabilityObligationRuntime(host: {
   enabled: boolean;
@@ -584,7 +586,6 @@ export function maybeActivateCapabilityObligationRuntime(host: {
 }): CapabilityObligationRuntime | null {
   if (host.options == null || !host.enabled || host.alreadyActive) return null;
   const { registry } = host;
-  registry.setTurnCorrelationResolver((ck) => turnCorrelationFromContexts(host.perChatTurnContexts(), ck));
   return activateCapabilityObligationRuntime({
     db: host.db,
     store: host.store,

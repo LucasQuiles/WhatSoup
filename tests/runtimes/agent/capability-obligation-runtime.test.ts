@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { recordCapabilityAttestation } from '../../../src/core/capability-attestation.ts';
 import { directoryManifestDigest, resolverCompositeDigest } from '../../../src/core/capability-resolver-artifact.ts';
@@ -18,6 +18,8 @@ import { parseCapabilityObligationsOptions, type CapabilityObligationsOptions } 
 import { CapabilityObligationStore } from '../../../src/core/capability-obligation-store.ts';
 import { Database } from '../../../src/core/database.ts';
 import { withTransaction } from '../../../src/core/db-tx.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
+import { IN_PROCESS_CALLER } from '../../../src/mcp/caller-attribution.ts';
 import {
   buildObligationLiveFacts,
   CapabilityObligationRuntime,
@@ -1686,6 +1688,9 @@ describe('live wiring (maybeActivateCapabilityObligationRuntime)', () => {
     onProcessTurn?: (onBoundary: () => void, registry: ToolRegistry) => Promise<void>;
   } = {}): { host: ActivationHost; registry: ToolRegistry } {
     const registry = new ToolRegistry();
+    // The runtime installs tool-call turn correlation at construction, before any activation.
+    const liveContexts = (over.contexts ?? new Map()) as unknown as ReadonlyMap<string, readonly RuntimeTurnContext[]>;
+    registry.setTurnCorrelationResolver((key) => turnCorrelationFromContexts(liveContexts, key));
     const host = {
       enabled: true,
       alreadyActive: false,
@@ -1779,6 +1784,62 @@ describe('live wiring (maybeActivateCapabilityObligationRuntime)', () => {
     } finally {
       expect(await shutdownCapabilityObligationRuntimeSafely(runtime)).toBeNull();
     }
+  });
+
+  it('activation does not install the turn-correlation resolver: the runtime owns it from construction', async () => {
+    const { host, registry } = makeActivationHost();
+    const install = vi.spyOn(registry, 'setTurnCorrelationResolver');
+    const runtime = maybeActivateCapabilityObligationRuntime(host);
+    let shutdownError: unknown = 'not run';
+    try {
+      expect(runtime).not.toBeNull();
+    } finally {
+      shutdownError = await shutdownCapabilityObligationRuntimeSafely(runtime);
+    }
+    expect({ installs: install.mock.calls.length, shutdownError }).toEqual({ installs: 0, shutdownError: null });
+  });
+
+  it('with replay active, the execute_capability tool_calls row carries the live turn from the runtime-installed resolver', async () => {
+    const session = { getProviderId: () => 'claude-cli' };
+    const target = { scope: 'per_chat', session, mapKey: 'test-dm-target@lid', managerId: 'm1', generation: 1 };
+    const contexts = new Map([
+      ['test-dm-target@lid', [{ identity: { conversationKey: 'conv-rt', logicalTurnId: 'lt-live-row', inboundSeq: 778 } }]],
+    ]);
+    const { host, registry } = makeActivationHost({
+      target,
+      contexts,
+      onProcessTurn: async (onBoundary, reg) => {
+        onBoundary();
+        // The provider's own call: in-process attribution, as the bridge sets it.
+        const result = await reg.call(
+          'execute_capability',
+          { source: SOURCE_URL },
+          { ...TOOL_SESSION, callerAttribution: IN_PROCESS_CALLER },
+        );
+        expect(result.isError).not.toBe(true);
+      },
+    });
+    registry.setDurability(new DurabilityEngine(db));
+    const runtime = maybeActivateCapabilityObligationRuntime(host);
+    let shutdownError: unknown = 'not run';
+    let dispatched: number[] = [];
+    let id = -1;
+    try {
+      expect(runtime).not.toBeNull();
+      id = seedObligation();
+      liveProcessAttestation('claude-cli');
+      dispatched = ((await runtime!.tickOnce()) as { dispatched: number[] }).dispatched;
+    } finally {
+      shutdownError = await shutdownCapabilityObligationRuntimeSafely(runtime);
+    }
+    const rows = db.raw
+      .prepare(`SELECT tool_name, logical_turn_id, source_inbound_seq FROM tool_calls WHERE tool_name = 'execute_capability'`)
+      .all();
+    expect({ dispatched, shutdownError, rows }).toEqual({
+      dispatched: [id],
+      shutdownError: null,
+      rows: [{ tool_name: 'execute_capability', logical_turn_id: 'lt-live-row', source_inbound_seq: 778 }],
+    });
   });
 
   it('with NO live correlated turn the receipt falls back to the minted message id (the wiring seam yields null, never a wrong id)', async () => {
