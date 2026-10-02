@@ -598,7 +598,7 @@ ORDER BY t.id DESC;
 
 Every tool call records which caller made it in the migration 65 columns (§6, `tool_calls`). No admission or authorization depends on the record directly. One decision does: with capability-obligation replay active, `caller_turn_owned` decides whether the call is correlated to the executing turn (`logical_turn_id`), and so whether an obligation can be created, because an uncorrelated row in the conversation window makes the effect fold enumeration-incomplete. The runtime mints one random token per agent session in memory and passes it to the child only through its environment. The session's MCP proxy and hooks present it as a `notifications/whatsoup/session` line, which gets no reply. A same-user process can read another process's environment, so `match` is attribution evidence and does not authenticate the caller. Calls from other clients, such as the fleet client and the bot-errors provider probe, record as outside callers.
 
-The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool. Its `turnCorrelation` section, one entry per transport, measures how many of the turn's own mid-turn calls carry their `logical_turn_id` (`eligible` against `attributed`), and counts outside mid-turn calls apart (`outsideMidTurn`, with `outsideMidTurnCorrelated` expected to be 0). `eligible` also counts rows that are NULL by design: shared and single scopes, two heads with one conversation key, and a global session with no chat key. So `attributed` below `eligible` is expected outside `per_chat`; on a `per_chat` instance, a gap beyond those cases means missing correlation. The gap cannot show a turn's helper whose socket presented no matching token: its calls record `caller_turn_owned = 0`, so they leave both `eligible` and `attributed` and count in `outsideMidTurn`, where the report cannot tell them from an outside client's. Read `outsideMidTurn` together with the `capability_obligation_events` rows whose action is `obligation.not_created` and whose `reason_code` is `not_created_side_effect_uncertain`. A journaled turn whose decision is recorded (§5.7) and whose inbound matches exactly one contract rule, but whose receipt time is unavailable or invalid (an invalid journaled receipt time, or a scheduled agent job, whose message carries none), records `not_created_receipt_time_invalid` instead, so it does not add to that count. Rows written by a release that correlated every mid-turn call whatever its caller can keep `outsideMidTurnCorrelated` above 0 until they leave the window. Run the report with:
+The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool. Its `turnCorrelation` section, one entry per transport, measures how many of the turn's own mid-turn calls carry their `logical_turn_id` (`eligible` against `attributed`), and counts outside mid-turn calls apart (`outsideMidTurn`, with `outsideMidTurnCorrelated` expected to be 0). `eligible` also counts rows that are NULL by design: shared and single scopes, two heads with one conversation key, and a global session with no chat key. So `attributed` below `eligible` is expected outside `per_chat`; on a `per_chat` instance, a gap beyond those cases means missing correlation. The gap cannot show a turn's helper whose socket presented no matching token: its calls record `caller_turn_owned = 0`, so they leave both `eligible` and `attributed` and count in `outsideMidTurn`, where the report cannot tell them from an outside client's. Read `outsideMidTurn` together with the `capability_obligation_events` rows whose action is `obligation.not_created` and whose `reason_code` is `not_created_side_effect_uncertain`. A journaled turn whose decision is recorded (§5.7) and whose inbound matches exactly one contract rule, but whose receipt time is unavailable or invalid (an invalid journaled receipt time, or a scheduled agent job, whose message carries none), records `not_created_receipt_time_invalid` instead, so it does not add to that count. A lost-decision event whose `detail.derivedReasonCode` is `not_created_side_effect_uncertain` belongs with that count too. Rows written by a release that correlated every mid-turn call whatever its caller can keep `outsideMidTurnCorrelated` above 0 until they leave the window. Run the report with:
 
 ```bash
 bash scripts/run-with-pinned-node.sh scripts/caller-attribution-report.ts --db <instance>/bot.db --out-dir <dir> [--window-days 30]
@@ -723,13 +723,26 @@ instead of silently dropping the request, and a supervisor replays it later.
 
 A turn that owes nothing records no event: a turn outside `per_chat`, a minted replay turn, a
 turn served by a provider that has the capability or is unknown, or an inbound that matches no
-contract rule. A decision is derived only when the runtime finalizes a dispatched turn, and
-recorded only if that first terminal write commits. A turn closed any other way records no
-event, for example one rejected before dispatch, one reclaimed by the stuck-inbound reconciler
-(§4.5), one finalized by the supervisor's retry after a failed first write, or one interrupted
-by a restart and closed by pre-connect recovery (§4.1). A turn whose decision is recorded but
-that does not get an obligation records an `obligation.not_created` event in
-`capability_obligation_events`. Its `reason_code` is one of:
+contract rule. A decision is derived only when the runtime finalizes a dispatched turn, and the
+turn's first attempt writes it atomically with the terminal record. If that attempt does not
+commit, because its terminal write fails or because it stops before that write when the turn's
+delivery evidence cannot be read or does not prove the turn, each supervisor retry carries the
+same decision but does not let it block the terminal. The retry writes the decision if it
+can, and then logs nothing about it. If it cannot, it logs an error line that names the turn,
+the lost decision, and the error's `errorClass` and `errcode`, and records
+`not_created_decision_lost_on_retry`. The line is the only record when that event cannot be
+written either. If the line and the event both fail while the terminal write goes on, that
+retry leaves no record of the lost decision. A storage fault that aborts the whole terminal
+write still fails the turn, as before. While a turn's terminal write is being retried, its chat
+refuses new turns that reach admission (arrivals may first wait in the chat's queue); each
+refusal is recorded as a
+`pre_dispatch_error` failure, with an `agent_turn_admission_rejected` operator warning, and a
+continuity mark and an `agent_reply_guarantee_breach` alert are attempted. A turn closed any
+other way records no event, for example one rejected before dispatch, one reclaimed by the
+stuck-inbound reconciler (§4.5), or one interrupted by a restart and closed by pre-connect
+recovery (§4.1). A turn whose decision is recorded but that does not get an obligation records
+an `obligation.not_created` event in `capability_obligation_events`. Its `reason_code` is one
+of:
 `not_created_contract_conflict` (the inbound matches more than one contract rule);
 `not_created_unjournaled_source` (the inbound has no journal sequence);
 `not_created_receipt_time_invalid` (the turn's receipt time is unavailable or invalid, so neither
@@ -739,8 +752,10 @@ reason applies);
 `not_created_side_effect_uncertain` (the turn's effect fold is not conclusively effect-free);
 `not_created_media_unavailable` (the fold is effect-free, but the matched media has no persisted
 media path); `not_created_media_retention_failed` (the fold is effect-free, but staging the
-retained media copy failed); or `not_created_decision_producer_error` (deriving the decision
-threw; the turn still finalizes).
+retained media copy failed); `not_created_decision_producer_error` (deriving the decision
+threw, or the derived decision failed validation; the turn still finalizes); or
+`not_created_decision_lost_on_retry` (a retry could not write the derived decision;
+`detail.derivedAction` and `detail.derivedReasonCode` name it).
 
 **Migration 60 (post-merge-audit hotfix; renumbered from 59 when #2567's fact-export
 rebuild claimed slot 59).** Two schema changes ride migration 60: (a)
