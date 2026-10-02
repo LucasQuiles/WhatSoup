@@ -64,6 +64,8 @@ interface Seed {
   caller: ToolCallCallerEvidence | null;
   /** Finished through the real writer; absent leaves the row open. */
   finish?: 'admitted' | 'denied';
+  /** The logical turn the writer stamped; absent leaves the row uncorrelated. */
+  turn?: string;
 }
 
 const DENIED: ToolFailureEvidence = {
@@ -76,7 +78,8 @@ const DENIED: ToolFailureEvidence = {
 function seed(db: Database, rows: Seed[]): void {
   const engine = new DurabilityEngine(db);
   for (const row of rows) {
-    const id = engine.recordToolCall('conv-1', row.tool, 'chat', 'safe', undefined, null, row.caller);
+    const correlation = row.turn === undefined ? null : { logicalTurnId: row.turn, inboundSeq: 1 };
+    const id = engine.recordToolCall('conv-1', row.tool, 'chat', 'safe', undefined, correlation, row.caller);
     if (row.finish === 'admitted') engine.markToolComplete(id, { isError: false, durationMs: 1 });
     if (row.finish === 'denied') engine.markToolComplete(id, { isError: true, durationMs: 1, failure: DENIED });
     // Only the timestamp is backdated by hand, so rows land on known days.
@@ -166,6 +169,41 @@ describe('caller-attribution report (#3421 step 1)', () => {
       sensitiveOutsideCalls: [
         { toolName: 'logout', outcomeCode: 'failure', failureCode: 'authorization_denied', count: 1 },
         { toolName: 'logout', outcomeCode: 'success', failureCode: null, count: 1 },
+      ],
+      // No row here carries a turn: the turn's two own calls are eligible and unattributed,
+      // and the four mid-turn outside calls are counted apart from them.
+      turnCorrelation: [
+        { transport: 'in_process', eligible: 2, attributed: 0, outsideMidTurn: 0, outsideMidTurnCorrelated: 0 },
+        { transport: 'socket', eligible: 0, attributed: 0, outsideMidTurn: 4, outsideMidTurnCorrelated: 0 },
+      ],
+    });
+  });
+
+  it('measures turn-correlation completeness of the turn\'s own calls, with outside calls counted apart', () => {
+    const tokenOwned = outside({ tokenResult: 'match', turnOwned: true });
+    seed(db, [
+      { tool: 'list_chats', createdAt: '2026-09-24 11:00:00', caller: TURN_AGENT, turn: 'lt-1' },
+      { tool: 'list_chats', createdAt: '2026-09-24 11:01:00', caller: TURN_AGENT, turn: 'lt-1' },
+      { tool: 'list_chats', createdAt: '2026-09-24 11:02:00', caller: TURN_AGENT },
+      // The turn's own call with no executing actor is not eligible.
+      { tool: 'list_chats', createdAt: '2026-09-24 11:03:00', caller: { ...TURN_AGENT, actorSource: 'none' }, turn: 'lt-1' },
+      // A socket call that presented the session token is the turn's own.
+      { tool: 'list_chats', createdAt: '2026-09-24 11:04:00', caller: tokenOwned, turn: 'lt-2' },
+      { tool: 'list_chats', createdAt: '2026-09-24 11:05:00', caller: tokenOwned },
+      // Outside callers mid-turn: one stamped with a turn, two not.
+      { tool: 'list_chats', createdAt: '2026-09-24 11:06:00', caller: outside({}), turn: 'lt-2' },
+      { tool: 'list_chats', createdAt: '2026-09-24 11:07:00', caller: outside({}) },
+      { tool: 'list_chats', createdAt: '2026-09-24 11:08:00', caller: outside({}) },
+      // Outside and not mid-turn, legacy with no attribution, and outside the window: none counted.
+      { tool: 'list_chats', createdAt: '2026-09-24 11:09:00', caller: outside({ actorSource: 'none' }), turn: 'lt-3' },
+      { tool: 'list_chats', createdAt: '2026-09-24 11:10:00', caller: null, turn: 'lt-1' },
+      { tool: 'list_chats', createdAt: '2026-08-20 11:00:00', caller: TURN_AGENT, turn: 'lt-0' },
+    ]);
+
+    expect(buildCallerAttributionReport(db.raw, { now: NOW, windowDays: 30 })).toMatchObject({
+      turnCorrelation: [
+        { transport: 'in_process', eligible: 3, attributed: 2, outsideMidTurn: 0, outsideMidTurnCorrelated: 0 },
+        { transport: 'socket', eligible: 2, attributed: 1, outsideMidTurn: 3, outsideMidTurnCorrelated: 1 },
       ],
     });
   });
