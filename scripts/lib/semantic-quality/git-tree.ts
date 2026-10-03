@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
+import { SIGNAL } from '../../../src/lib/signals.ts';
 import { readExactBlobsWithinAggregateBudget } from '../ci-control/git-blob-input.ts';
 import type { ModuleSource } from './module-graph.ts';
 
@@ -45,7 +46,7 @@ function git(cwd: string, args: string[]): string {
     env: cleanGitEnv(),
     maxBuffer: GIT_MAX_BUFFER,
     timeout: 30_000,
-    killSignal: 'SIGKILL',
+    killSignal: SIGNAL.KILL,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
