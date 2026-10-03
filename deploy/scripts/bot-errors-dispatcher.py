@@ -19,6 +19,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 import re
+import secrets
 import shutil
 import socket
 import stat
@@ -478,6 +479,44 @@ DELIVERY_HELD_SIGNAL_FIELD = "outcomeUnknownSignalledAt"
 # is separate from DELIVERY_HELD_SIGNAL_FIELD because that one records the
 # FIRST signal only; one field cannot make two signals each once-only.
 DELIVERY_HELD_ESCALATED_FIELD = "outcomeUnknownEscalatedAt"
+# Notification bookkeeping is written only when a page is delivered. The send
+# decision runs before the send, so it leaves its intent on the event's delivery
+# block instead, and mark_incident_sent applies it on delivery. Both intents are
+# cleared at the top of every decision, so one left on a requeued event cannot
+# act on a later pass that takes another path.
+DELIVERY_RENOTIFY_INTENT_FIELD = "renotifyGeneration"
+DELIVERY_ANNOUNCE_INTENT_FIELD = "announcesAwaitingPhysicalAt"
+DELIVERY_INTENT_FIELDS = (DELIVERY_RENOTIFY_INTENT_FIELD, DELIVERY_ANNOUNCE_INTENT_FIELD)
+# Replay identity of one send attempt, minted just before the send: a random
+# nonce, plus the epoch and sequence of the incident state it was minted under.
+# A record carrying any of the three was minted by this code; a record with none
+# of them predates it and keeps the event-id test alone.
+DELIVERY_NONCE_FIELD = "nonce"
+DELIVERY_MINT_EPOCH_FIELD = "mintEpoch"
+DELIVERY_MINT_SEQ_FIELD = "mintSeq"
+DELIVERY_IDENTITY_FIELDS = (DELIVERY_NONCE_FIELD, DELIVERY_MINT_EPOCH_FIELD, DELIVERY_MINT_SEQ_FIELD)
+# Top-level incident-state keys. They live outside openIncidents because a clear
+# pops the whole record: a nonce kept on the record would vanish if a clear landed
+# between a commit and its replay, and the replay would reopen the incident.
+DELIVERY_EPOCH_KEY = "deliveryEpoch"
+DELIVERY_SEQ_KEY = "deliverySeq"
+DELIVERED_SEND_NONCES_KEY = "deliveredSendNonces"
+TERMINAL_REPLAY_EXPIRED_COUNT_KEY = "terminalReplayExpiredCount"
+# A committed alert whose nonce is no longer in the list was followed by at least
+# DELIVERED_SEND_NONCE_CAPACITY appends, so its gap is at least capacity + 1.
+# Expiring at TERMINAL_REPLAY_HORIZON therefore never applies a committed alert
+# twice as long as the horizon is at most capacity + 1 and the trim keeps the
+# newest entries.
+DELIVERED_SEND_NONCE_CAPACITY = 256
+TERMINAL_REPLAY_HORIZON = 256
+# Open-record keys.
+GENERATION_TOKEN_FIELD = "generationToken"
+AWAITING_PHYSICAL_ANNOUNCED_FIELD = "awaitingPhysicalAnnouncedFor"
+SUPPRESSED_EVENT_DIGESTS_FIELD = "suppressedEventDigests"
+PHYSICAL_CANDIDATE_DIGESTS_FIELD = "physicalCandidateEventDigests"
+# Recent event-id digests kept per record, so a retried event counts once.
+EVENT_DIGEST_SET_LIMIT = 32
+DELIVERY_TOKEN_PATTERN = re.compile(r"[a-f][0-9a-f]{15}")
 AMBIGUOUS_SEND_SIGNAL_KIND = "delivery_outcome_unknown_held"
 AMBIGUOUS_SEND_ESCALATION_KIND = "delivery_outcome_unknown_escalated"
 # How long a hold may stay quiet before it is reported again, louder. This is
@@ -3477,6 +3516,71 @@ def advance_incident_renotify_interval(open_record: dict[str, Any]) -> None:
     )
 
 
+def new_delivery_token() -> str:
+    """16 lowercase hex characters, the first from a-f, so the value is never all
+    digits and no phone-number redaction pattern can rewrite it in saved state."""
+    return secrets.choice("abcdef") + secrets.token_hex(8)[1:]
+
+
+def is_delivery_token(value: Any) -> bool:
+    return isinstance(value, str) and DELIVERY_TOKEN_PATTERN.fullmatch(value) is not None
+
+
+def is_positive_json_int(value: Any) -> bool:
+    # bool is a subclass of int, and true would otherwise read as 1.
+    return type(value) is int and value > 0
+
+
+def renotify_generation(record: dict[str, Any]) -> str | None:
+    """The generation a renotify intent names: the record's token, or None.
+
+    A replacement record gets a fresh token, so an intent minted for an earlier
+    record can never advance the interval of the one that replaced it.
+    """
+    token = record.get(GENERATION_TOKEN_FIELD)
+    return token if is_delivery_token(token) else None
+
+
+def clear_delivery_intents(event: dict[str, Any]) -> None:
+    delivery = event.get("delivery")
+    if isinstance(delivery, dict):
+        for field in DELIVERY_INTENT_FIELDS:
+            delivery.pop(field, None)
+
+
+def set_delivery_intent(event: dict[str, Any], field: str, value: Any) -> None:
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict):
+        delivery = {}
+        event["delivery"] = delivery
+    delivery[field] = value
+
+
+def delivery_field(event: dict[str, Any], field: str) -> Any:
+    delivery = event.get("delivery")
+    return delivery.get(field) if isinstance(delivery, dict) else None
+
+
+def note_event_digest(record: dict[str, Any], field: str, event_id: Any) -> bool:
+    """Remember an event id on the record; False when it was already remembered.
+
+    A failed page is retried as the same event, and each retry passes through the
+    decision again. Counting by a bounded set of recent ids, not by the last id,
+    keeps interleaved retries (A, B, A) from counting twice. An event with no id
+    always counts.
+    """
+    if not event_id:
+        return True
+    digest = hashlib.sha256(str(event_id).encode("utf-8")).hexdigest()[:16]
+    digests = record.get(field)
+    if not isinstance(digests, list):
+        digests = []
+    if digest in digests:
+        return False
+    record[field] = [*digests, digest][-EVENT_DIGEST_SET_LIMIT:]
+    return True
+
+
 def source_from_incident_key(key: str) -> str:
     parts = str(key).split("|")
     return parts[2] if len(parts) >= 3 else ""
@@ -3644,12 +3748,53 @@ def event_has_awaiting_physical_context(event: dict[str, Any]) -> bool:
     return "incident_status=awaiting_physical" in evidence or "status=awaiting_physical" in evidence
 
 
+def repair_awaiting_physical_at(record: dict[str, Any], current: int) -> None:
+    """Give an awaiting-physical record without a usable transition time one.
+
+    The announcement gate compares the delivery-stamped marker with
+    awaitingPhysicalAt, so a missing or malformed value would announce on every
+    pass. The repair writes a valid value once and, where the record has no
+    marker yet, owes exactly one announcement for it.
+    """
+    if str(record.get("status") or "") != "awaiting_physical":
+        return
+    if is_positive_json_int(record.get("awaitingPhysicalAt")):
+        return
+    record["awaitingPhysicalAt"] = current
+    record["awaitingPhysicalIso"] = now_iso()
+    record.setdefault(AWAITING_PHYSICAL_ANNOUNCED_FIELD, 0)
+
+
+def awaiting_physical_announcement_due(record: dict[str, Any]) -> bool:
+    """True while the awaiting-physical announcement has not been delivered.
+
+    A record carrying the marker announces until a delivered announcement has
+    stamped it with this transition's own awaitingPhysicalAt; no clock is
+    compared, so a clock step can neither suppress nor repeat it. A record that
+    transitioned before the marker existed keeps the earlier timestamp test.
+    """
+    if str(record.get("status") or "") != "awaiting_physical":
+        return False
+    awaiting_at = record.get("awaitingPhysicalAt")
+    if AWAITING_PHYSICAL_ANNOUNCED_FIELD in record:
+        marker = record.get(AWAITING_PHYSICAL_ANNOUNCED_FIELD)
+        return not (is_positive_json_int(awaiting_at) and type(marker) is int and marker == awaiting_at)
+    return int_field(record, "lastNotifiedAt") < int_field(record, "awaitingPhysicalAt")
+
+
+def stamp_awaiting_physical_announced(record: dict[str, Any]) -> None:
+    awaiting_at = record.get("awaitingPhysicalAt")
+    if str(record.get("status") or "") == "awaiting_physical" and is_positive_json_int(awaiting_at):
+        record[AWAITING_PHYSICAL_ANNOUNCED_FIELD] = awaiting_at
+
+
 def update_awaiting_physical_tracking(event: dict[str, Any], record: dict[str, Any], current: int) -> bool:
+    repair_awaiting_physical_at(record, current)
     if not is_physical_intervention_signal(event):
         return False
 
     event_id = str(event.get("id") or "")
-    if event_id and record.get("physicalCandidateLastEventId") == event_id:
+    if not note_event_digest(record, PHYSICAL_CANDIDATE_DIGESTS_FIELD, event_id):
         return False
 
     previous_status = str(record.get("status") or "open")
@@ -3668,6 +3813,8 @@ def update_awaiting_physical_tracking(event: dict[str, Any], record: dict[str, A
         record["status"] = "awaiting_physical"
         record["awaitingPhysicalAt"] = current
         record["awaitingPhysicalIso"] = now
+        # Owed until a delivered announcement stamps it with awaitingPhysicalAt.
+        record[AWAITING_PHYSICAL_ANNOUNCED_FIELD] = 0
         return True
     return False
 
@@ -4472,10 +4619,104 @@ def mark_attempt(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
-def mark_send_issued(event: dict[str, Any]) -> dict[str, Any]:
+def replay_identity_state(incident_state: dict[str, Any]) -> tuple[str, int, list[Any]] | None:
+    """(epoch, seq, nonces) from incident state, or None when they are not valid.
+
+    Valid only when the epoch is a token, the seq a non-negative integer, the
+    nonces a list, and the list as long as min(seq, capacity), which every append
+    keeps. A value of the wrong form is never read leniently: a non-list is not
+    an empty list and a non-integer is not 0, because the replay gap computed
+    from such a value proves nothing.
+    """
+    epoch = incident_state.get(DELIVERY_EPOCH_KEY)
+    seq = incident_state.get(DELIVERY_SEQ_KEY)
+    nonces = incident_state.get(DELIVERED_SEND_NONCES_KEY)
+    if not (
+        is_delivery_token(epoch)
+        and type(seq) is int
+        and seq >= 0
+        and type(nonces) is list
+        and len(nonces) == min(seq, DELIVERED_SEND_NONCE_CAPACITY)
+    ):
+        return None
+    return epoch, seq, nonces
+
+
+def ensure_replay_identity_state(incident_state: dict[str, Any]) -> tuple[str, int, list[Any]]:
+    """The valid replay identity state, re-initialised into a new epoch if needed.
+
+    Re-initialising writes no notification bookkeeping. Persisting it on a failed
+    pass only starts a new epoch, after which older unmatched replays expire.
+    """
+    identity = replay_identity_state(incident_state)
+    if identity is None:
+        identity = (new_delivery_token(), 0, [])
+        incident_state[DELIVERY_EPOCH_KEY] = identity[0]
+        incident_state[DELIVERY_SEQ_KEY] = identity[1]
+        incident_state[DELIVERED_SEND_NONCES_KEY] = []
+    return identity
+
+
+def record_delivered_send_nonce(incident_state: dict[str, Any], nonce: str) -> None:
+    """Append a delivered alert's nonce and add 1 to the seq, in one step.
+
+    The list keeps the newest DELIVERED_SEND_NONCE_CAPACITY nonces, so the oldest
+    is dropped first, and its length stays min(seq, capacity).
+    """
+    _epoch, seq, nonces = ensure_replay_identity_state(incident_state)
+    incident_state[DELIVERED_SEND_NONCES_KEY] = [*nonces, nonce][-DELIVERED_SEND_NONCE_CAPACITY:]
+    incident_state[DELIVERY_SEQ_KEY] = seq + 1
+
+
+def terminal_replay_decision(
+    event: dict[str, Any], incident_state: dict[str, Any], record: Any
+) -> tuple[str, str, int | None]:
+    """Decide the replay of an alert's terminal record: skip, expire or apply.
+
+    Returns (decision, reason, gap); gap is set only when the horizon expires it.
+    The reason is a bounded identifier the dispatch log keeps as a boolean key.
+    Skip when the alert is known to be committed: its nonce is in the delivered
+    list, or the open record still names its event id. A record minted before
+    this code (no identity field at all) keeps the event-id test alone. Any
+    other record is applied only when the state proves it was never committed:
+    a valid identity, the same epoch, and fewer than TERMINAL_REPLAY_HORIZON
+    deliveries since its mint. Otherwise it expires, which errs toward an
+    earlier page rather than a second application of the same transition.
+    """
+    delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    nonce = delivery.get(DELIVERY_NONCE_FIELD)
+    identity = replay_identity_state(incident_state)
+    if identity is not None and is_delivery_token(nonce) and nonce in identity[2]:
+        return "skip", "nonceDelivered", None
+    if isinstance(record, dict) and str(record.get("eventId") or "") == str(event.get("id") or ""):
+        return "skip", "recordNamesEvent", None
+    if not any(field in delivery for field in DELIVERY_IDENTITY_FIELDS):
+        return "apply", "legacyRecord", None
+    mint_epoch = delivery.get(DELIVERY_MINT_EPOCH_FIELD)
+    mint_seq = delivery.get(DELIVERY_MINT_SEQ_FIELD)
+    if not (is_delivery_token(nonce) and is_delivery_token(mint_epoch) and type(mint_seq) is int and mint_seq >= 0):
+        return "expire", "recordIdentityMalformed", None
+    if identity is None:
+        return "expire", "stateIdentityInvalid", None
+    epoch, seq, _nonces = identity
+    if epoch != mint_epoch:
+        return "expire", "epochChanged", None
+    if seq - mint_seq >= TERMINAL_REPLAY_HORIZON:
+        return "expire", "horizonReached", seq - mint_seq
+    return "apply", "notCommitted", None
+
+
+def mark_send_issued(event: dict[str, Any], incident_state: dict[str, Any] | None = None) -> dict[str, Any]:
     delivery = event.setdefault("delivery", {})
     if isinstance(delivery, dict):
         delivery[DELIVERY_SEND_ISSUED_FIELD] = now_iso()
+        if incident_state is not None:
+            # Minted per attempt, not derived from attempts, which a transient
+            # failure rolls back. Both terminal publications carry it.
+            epoch, seq, _nonces = ensure_replay_identity_state(incident_state)
+            delivery[DELIVERY_NONCE_FIELD] = new_delivery_token()
+            delivery[DELIVERY_MINT_EPOCH_FIELD] = epoch
+            delivery[DELIVERY_MINT_SEQ_FIELD] = seq
     return event
 
 
@@ -4688,6 +4929,10 @@ def archive_path(directory: Path, original_name: str, status: str, event: dict[s
 
 
 def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
+    # This decision runs before the send, so it records no notification as
+    # delivered: mark_incident_sent writes that bookkeeping on delivery, and
+    # applies the intents set below only then.
+    clear_delivery_intents(event)
     if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {"1", "true", "yes", "on"}:
         return None
     source = str(event.get("source") or "")
@@ -4853,24 +5098,24 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
             open_record["lastEventId"] = event.get("id")
             open_record["lastSummary"] = redacted_state_text(event_text(event, "summary"), 500)
             open_record["lastEvidence"] = redacted_state_text(event_text(event, "evidence"), INCIDENT_EVIDENCE_LIMIT, tail=True)
-            suppressed = int_field(open_record, "suppressedCount") + 1
+            # A retried event counts once, so retries cannot escalate sooner.
+            suppressed = int_field(open_record, "suppressedCount")
+            if note_event_digest(open_record, SUPPRESSED_EVENT_DIGESTS_FIELD, event.get("id")):
+                suppressed += 1
             open_record["suppressedCount"] = suppressed
-            became_awaiting_physical = update_awaiting_physical_tracking(event, open_record, current)
-            if became_awaiting_physical:
+            update_awaiting_physical_tracking(event, open_record, current)
+            # Announce while no delivery has stamped this transition's marker, so
+            # an announcement lost to a failed send is carried by the next pass.
+            if awaiting_physical_announcement_due(open_record):
                 append_still_open_context(event, open_record, key, current, suppressed, escalated=False, digest=False)
-                open_record["lastNotifiedAt"] = current
-                open_record["lastNotifiedIso"] = now_iso()
+                set_delivery_intent(event, DELIVERY_ANNOUNCE_INTENT_FIELD, open_record.get("awaitingPhysicalAt"))
                 return None
             level = force_notify_level(event)
             if level:
-                levels = open_record.setdefault("forceNotifyLevels", {})
+                levels = open_record.get("forceNotifyLevels")
                 last_level_sent = int(levels.get(level) or 0) if isinstance(levels, dict) else 0
                 if last_level_sent and current - last_level_sent < INCIDENT_RENOTIFY_SECONDS:
                     return f"forceNotify cooldown active for {key} level={level}; last sent {current - last_level_sent}s ago"
-                if isinstance(levels, dict):
-                    levels[level] = current
-                open_record["lastNotifiedAt"] = current
-                open_record["lastNotifiedIso"] = now_iso()
                 return None
             opened = int_field(open_record, "openedAt", current)
             last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
@@ -4909,11 +5154,9 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                         f"open renotify suppressed (non-actionable source) for {key}; "
                         f"flap-storm still escalates"
                     )
-                open_record["lastNotifiedAt"] = current
-                open_record["lastNotifiedIso"] = now_iso()
-                open_record["renotifyCount"] = int_field(open_record, "renotifyCount") + 1
+                # The interval doubles on delivery, and only for this record.
                 if not awaiting_physical:
-                    advance_incident_renotify_interval(open_record)
+                    set_delivery_intent(event, DELIVERY_RENOTIFY_INTENT_FIELD, renotify_generation(open_record))
                 append_still_open_context(event, open_record, key, current, suppressed, escalated)
                 return None
             return f"incident already open for {key}; duplicate suppressed"
@@ -5263,7 +5506,29 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
                 existing_record, "autoCloseReopenCount"
             ) + 1
             updated_record["lastAutoCloseReopen"] = reopen_record
-        update_awaiting_physical_tracking(event, updated_record, current)
+        # A delivered renotify doubles the interval, but only for the record its
+        # decision was made for: a replacement record has another generation.
+        renotify_intent = delivery_field(event, DELIVERY_RENOTIFY_INTENT_FIELD)
+        generation = renotify_generation(existing_record) if existing_record else None
+        if renotify_intent is not None and generation is not None and renotify_intent == generation:
+            advance_incident_renotify_interval(updated_record)
+        if not existing_record:
+            updated_record[GENERATION_TOKEN_FIELD] = new_delivery_token()
+        elif renotify_generation(existing_record) is None:
+            # A record opened before tokens existed gets one on its next delivery;
+            # that delivery does not advance, and the next renotify intent names it.
+            updated_record[GENERATION_TOKEN_FIELD] = new_delivery_token()
+        became_awaiting_physical = update_awaiting_physical_tracking(event, updated_record, current)
+        announced_for = delivery_field(event, DELIVERY_ANNOUNCE_INTENT_FIELD)
+        # Only a delivered announcement for this transition acknowledges it. A
+        # transition made during this delivery is announced by it, as before.
+        if became_awaiting_physical or (
+            is_positive_json_int(announced_for) and announced_for == updated_record.get("awaitingPhysicalAt")
+        ):
+            stamp_awaiting_physical_announced(updated_record)
+        nonce = delivery_field(event, DELIVERY_NONCE_FIELD)
+        if is_delivery_token(nonce):
+            record_delivered_send_nonce(incident_state, nonce)
         incident_state.setdefault("openIncidents", {})[key] = updated_record
         legacy_key = legacy_unqualified_incident_key(event)
         if legacy_key and legacy_key != key:
@@ -9986,29 +10251,42 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         #
         # IDEMPOTENCY: it is NOT idempotent for alerts (renotifyCount increments
         # and lastSentAt advances whenever a record exists), and this branch also
-        # fires for a crash AFTER the state commit, where the record already
-        # names this event. Skip the transition in exactly that case; the clear
-        # pop and the scope recorder are idempotent and always run.
+        # fires for a crash AFTER the state commit. terminal_replay_decision skips
+        # the transition when the alert is known to be committed and expires it
+        # when the state cannot prove it was not; the clear pop and the scope
+        # recorder are idempotent and always run.
         replay_open = replay_state.get("openIncidents")
         replay_record = replay_open.get(replay_key) if isinstance(replay_open, dict) else None
-        already_committed = (
-            is_incident_alert(event)
-            and not is_incident_clear(event)
-            and isinstance(replay_record, dict)
-            and str(replay_record.get("eventId") or "") == str(event.get("id") or "")
+        replay_decision, replay_reason, replay_gap = (
+            terminal_replay_decision(event, replay_state, replay_record)
+            if is_incident_alert(event) and not is_incident_clear(event)
+            else ("apply", "notAnAlert", None)
         )
-        if already_committed:
+        already_committed = replay_decision == "skip"
+        if replay_decision == "apply":
+            mark_incident_sent(event, replay_state)
+        else:
             record_conversation_scope_delivered(
                 event, replay_state, replay_key, int(time.time())
             )
-        else:
-            mark_incident_sent(event, replay_state)
+        if replay_decision == "expire":
+            expired_count = replay_state.get(TERMINAL_REPLAY_EXPIRED_COUNT_KEY)
+            replay_state[TERMINAL_REPLAY_EXPIRED_COUNT_KEY] = (
+                expired_count if type(expired_count) is int and expired_count >= 0 else 0
+            ) + 1
         if incident:
             incident.commit()
         else:
             require_all_advance([save_incident_state(paths, replay_state)])
         replay_path = archive_path(paths["sent"], path.name, "sent", event)
         os.replace(claimed, replay_path)
+        if replay_decision == "expire":
+            # Metadata only: the reason as a boolean key and the gap as a count.
+            expired_record: dict[str, Any] = {"type": "terminal_replay_expired", replay_reason: True}
+            if replay_gap is not None:
+                expired_record["gap"] = replay_gap
+            append_dispatch_log(paths, expired_record)
+            return True, f"terminal_replay_expired; deliveryStatus={terminal_status}"
         append_dispatch_log(paths, {
             "type": "terminal_replay_archived",
             "eventId": event.get("id"),
@@ -10136,8 +10414,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     # attempt publication above cannot serve as this marker: it lands long
     # before this point, so a crash anywhere in between would be indistinguishable
     # from a crash after the request left, and every such record would be held.
-    # This write is what lets reclaim tell the two apart.
-    event = mark_send_issued(event)
+    # This write is what lets reclaim tell the two apart. It also carries the
+    # attempt's replay identity, which the terminal replay reads.
+    event = mark_send_issued(event, incident_state)
     issued_target = _durable_target(claimed)
     issued_observation = observe_json(issued_target)
     issued_publication = publish_state_json(
