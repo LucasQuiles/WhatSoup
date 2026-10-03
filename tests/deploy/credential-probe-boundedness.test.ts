@@ -286,8 +286,16 @@ function observeLifecycleEventOrder(source: string): string {
     '        sleep "$budget" || exit 2',
   ].join('\n'));
   insert(inner, `        ${event('D_INNER_ENTER')}\n${inner}\n        ${event('D_INNER_COMMIT')}`);
-  const result = '          if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then rc="$completed_rc"; else rc=2; fi';
-  insert(result, `${result}\n          ${event('R_FIFO rc=$rc raw=$completed_rc command=$cmd_pid group=$cmd_group')}`);
+  // A whole frame sets rc in _bounded_take_frame; raw is the status digits.
+  const result = '        rc="$completed_rc"';
+  insert(result, `${result}\n        ${event('R_FIFO rc=$rc raw=$completed_rc command=$cmd_pid group=$cmd_group')}`);
+  const rejected = '      _bounded_wait_written_command() {';
+  insert(rejected, `${rejected}\n        ${event('R_REJECT raw=$completed_frame')}`);
+  const drained = '      _bounded_drain_frame() {';
+  insert(drained, `${drained}\n        ${event('R_DRAIN command=$cmd_pid')}`);
+  // The TMOUT case holds the tick source; only the fix has one.
+  const ticker = '      ticker_pid=$!';
+  insert(ticker, `${ticker}\n      case "$EVENT_ORDER_MODE" in event-order-frame-tmout) ${event('R_TICKER ticker=$ticker_pid')} ;; esac`);
   const resultClaim = '        _bounded_claim_outcome result "$rc"\n        outcome_claim_rc=$?';
   insert(resultClaim, `${resultClaim}\n        ${event('O_RESULT_CLAIM rc=$outcome_claim_rc result=$rc')}`);
   insert('          wait "$cmd_pid" 2>/dev/null || rc=$?', `          wait "$cmd_pid" 2>/dev/null || rc=$?\n          ${event('R_WAIT rc=$rc command=$cmd_pid group=$cmd_group')}`);
