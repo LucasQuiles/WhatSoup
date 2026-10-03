@@ -254,7 +254,7 @@ function resolveBinary(name: string): string | undefined {
 // groups. Capture survivors before finally cleans them; cleanup cannot make a
 // lifecycle assertion pass. Processes that create a new session are outside
 // this boundary and are not claimed as covered by these probes.
-type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}` | `event-order-near-deadline-${'result' | 'deadline'}-first`;
+type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}` | `event-order-near-deadline-${'result' | 'deadline'}-first` | 'event-order-frame-gap' | 'event-order-frame-gap-control' | 'event-order-frame-fragment' | 'event-order-frame-before-liveness' | 'event-order-frame-tear' | 'event-order-frame-tmout';
 
 // Instrument a fixture-owned string, never the production helper. Each anchor
 // must remain unique so a source change cannot silently remove an observation.
@@ -291,6 +291,52 @@ function observeLifecycleEventOrder(source: string): string {
   const resultClaim = '        _bounded_claim_outcome result "$rc"\n        outcome_claim_rc=$?';
   insert(resultClaim, `${resultClaim}\n        ${event('O_RESULT_CLAIM rc=$outcome_claim_rc result=$rc')}`);
   insert('          wait "$cmd_pid" 2>/dev/null || rc=$?', `          wait "$cmd_pid" 2>/dev/null || rc=$?\n          ${event('R_WAIT rc=$rc command=$cmd_pid group=$cmd_group')}`);
+  // Frame modes act at the worker's first poll, before its read: the hold
+  // modes park there; the tear and TMOUT modes only mark that the read comes
+  // next.
+  insert('        completed_rc=""', [
+    '        completed_rc=""',
+    '        case "$EVENT_ORDER_MODE" in',
+    '          event-order-frame-gap|event-order-frame-gap-control|event-order-frame-fragment)',
+    '            if [ -z "${event_poll_held-}" ]; then',
+    '              event_poll_held=1',
+    `              ${event('R_POLL_HOLD command=$cmd_pid')}`,
+    '              if IFS= read -r -t 4 event_release <> "$EVENT_ORDER_POLL_RELEASE" && [ "$event_release" = release ]; then',
+    `                ${event('R_POLL_RELEASE')}`,
+    '              else',
+    `                ${event('CONTROL_ERROR poll-hold')}`,
+    '              fi',
+    '            fi',
+    '            ;;',
+    '          event-order-frame-tear|event-order-frame-tmout)',
+    '            if [ -z "${event_read_armed-}" ]; then',
+    '              event_read_armed=1',
+    `              ${event('R_READ_ARMED command=$cmd_pid')}`,
+    '            fi',
+    '            ;;',
+    '        esac',
+  ].join('\n'));
+  // The command's frame is in the FIFO once this event is logged.
+  insert('        exit "$rc"', [
+    '        case "$EVENT_ORDER_MODE" in event-order-frame-*)',
+    `          ${event('R_WRITTEN rc=$rc')}`,
+    '          ;; esac',
+    '        exit "$rc"',
+  ].join('\n'));
+  // Before-liveness holds the worker after a poll and before its liveness
+  // check, so the command can write, exit and be reaped in that window.
+  insert('        if ! kill -0 "$cmd_pid" 2>/dev/null; then', [
+    '        if [ "$EVENT_ORDER_MODE" = event-order-frame-before-liveness ] && [ -z "${event_liveness_held-}" ]; then',
+    '          event_liveness_held=1',
+    `          ${event('R_LIVENESS_HOLD command=$cmd_pid')}`,
+    '          if IFS= read -r -t 4 event_release <> "$EVENT_ORDER_POLL_RELEASE" && [ "$event_release" = release ]; then',
+    `            ${event('R_LIVENESS_RELEASE')}`,
+    '          else',
+    `            ${event('CONTROL_ERROR liveness-hold')}`,
+    '          fi',
+    '        fi',
+    '        if ! kill -0 "$cmd_pid" 2>/dev/null; then',
+  ].join('\n'));
   insert('        rm -f "$timeout_file"', [
     '        case "$EVENT_ORDER_MODE" in event-order-natural-*|event-order-expired-reaped)',
     `          ${event('C_HOLD cleanup=$cleanup_rc command=$cmd_pid group=$cmd_group')}`,
@@ -380,7 +426,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   if (eventTrace) {
     fs.writeFileSync(path.join(root, 'event-order.log'), '', { mode: 0o600 });
     if (mode.startsWith('event-order-')) {
-      execFileSync(resolveBinary('mkfifo')!, ['event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release'].map((name) => path.join(root, name)));
+      execFileSync(resolveBinary('mkfifo')!, ['event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'event-order-poll-release'].map((name) => path.join(root, name)));
     }
   }
   if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'dead-leader-finishing-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
@@ -665,7 +711,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
+    'budget=6; case "$4" in event-order-frame-*) ;; event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
+    '[ "$4" != event-order-frame-tmout ] || { TMOUT=1; export -n TMOUT; }',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
     'else',
@@ -685,6 +732,14 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '  IFS= read -r payload',
     '  builtin printf "%s" "$payload"',
     '  builtin printf "%s\\n" "P_PAYLOAD" >> "$EVENT_ORDER_LOG"',
+    '  case "$1" in event-order-frame-*)',
+    '    if IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE" && [ "$event_release" = release ]; then',
+    '      builtin printf "%s\\n" "CHILD_RELEASED" >> "$EVENT_ORDER_LOG"',
+    '    else',
+    '      builtin printf "%s\\n" "CONTROL_ERROR child-release" >> "$EVENT_ORDER_LOG"',
+    '    fi',
+    '    exit 0',
+    '    ;; esac',
     '  case "$1" in event-order-inner-deadline-command-2|event-order-outcome-candidate-directory)',
     '    trap "exit 2" TERM',
     '    IFS= read -r -t 4 event_release <> "$EVENT_ORDER_CHILD_RELEASE"',
@@ -735,6 +790,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       EVENT_ORDER_CHILD_RELEASE: path.join(root, 'event-order-child-release'),
       EVENT_ORDER_INNER_START: path.join(root, 'event-order-inner-start'),
       EVENT_ORDER_AUTHORITY_RELEASE: path.join(root, 'event-order-authority-release'),
+      EVENT_ORDER_POLL_RELEASE: path.join(root, 'event-order-poll-release'),
       COMMAND_STARTED: path.join(root, 'command-started'),
       REAL_PS: resolveBinary('ps')!, PS_COUNTER: path.join(root, 'ps-counter'),
       PS_FAIL_AT: mode === 'ownership-command' ? '2' : mode === 'ownership-watchdog' ? '3' : '0',
@@ -1200,6 +1256,138 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
       expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=124 guard=\d+ guard_rc=124 deadline_rc=0 rc=124$/);
       expect(result.stdout, evidence).toContain('rc=124 output=payload');
     }
+  });
+  it.for(['event-order-frame-gap', 'event-order-frame-gap-control'] as const)('delivers a frame written between polls: %s', (mode, { task }) => {
+    const result = runLifecycleProbe(mode);
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedFrameGap: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.transport, evidence).toBe('pipe');
+    expect(result.exit, evidence).toBe(0);
+    expect(result.bash_version?.returncode, evidence).toBe(0);
+    expect(result.bash_version?.first_line, evidence).toMatch(/^GNU bash, version \d+\.\d+/);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('R_POLL_HOLD'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThan(index('R_POLL_HOLD'));
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_WRITTEN'), evidence).toBeGreaterThan(index('CHILD_RELEASED'));
+    expect(index('R_WRITTEN'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_POLL_RELEASE'), evidence).toBeGreaterThan(index('R_WRITTEN'));
+    expect(result.result_holder_closed, evidence).toBe(mode === 'event-order-frame-gap' ? 'before-poll-release' : 'after-delivery');
+    expect(events.filter((event) => event.startsWith('R_FIFO ')), evidence).toHaveLength(1);
+    expect(index('R_WAIT'), evidence).toBe(-1);
+    expect(events[index('R_FIFO')], evidence).toMatch(/^R_FIFO rc=0 raw=0 command=\d+ group=\d+$/);
+    expect(index('R_POLL_RELEASE'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_FIFO'), evidence).toBeGreaterThan(index('R_POLL_RELEASE'));
+    expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+    expect(index('O_OUTER_CLAIM'), evidence).toBe(-1);
+    expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=0 guard=\d+ guard_rc=0 deadline_rc=0 rc=0$/);
+    expect(result.stdout, evidence).toContain('rc=0 output=payload');
+  });
+  it('keeps the command status when the result FIFO carries a fragment', ({ task }) => {
+    const result = runLifecycleProbe('event-order-frame-fragment');
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedFrameFragment: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    expect(result.fragment_written, evidence).toBe(true);
+    expect(result.stdout, evidence).toContain('rc=0 output=payload');
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+    expect(events[index('R_REJECT')], evidence).toBe('R_REJECT raw=43');
+    expect(index('R_FIFO'), evidence).toBe(-1);
+    expect(index('R_WAIT'), evidence).toBe(-1);
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThan(index('R_REJECT'));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+  });
+  // A frame written after a poll, by a command reaped before the liveness
+  // check, must still be delivered.
+  it('delivers a frame written between a poll and the liveness check', ({ task }) => {
+    const result = runLifecycleProbe('event-order-frame-before-liveness');
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedFrameBeforeLiveness: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('R_LIVENESS_HOLD'), evidence).toBeGreaterThanOrEqual(0);
+    expect(['reaped', 'zombie'], evidence).toContain(result.command_state_at_release);
+    expect(result.result_holder_closed, evidence).toBe('before-poll-release');
+    expect(index('R_WRITTEN'), evidence).toBeGreaterThan(index('R_LIVENESS_HOLD'));
+    expect(index('R_WRITTEN'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_LIVENESS_RELEASE'), evidence).toBeGreaterThan(index('R_WRITTEN'));
+    expect(events.filter((event) => event.startsWith('R_FIFO ')), evidence).toHaveLength(1);
+    expect(index('R_WAIT'), evidence).toBe(-1);
+    if (result.command_state_at_release === 'reaped') {
+      expect(index('R_DRAIN'), evidence).toBeGreaterThanOrEqual(0);
+      expect(index('R_DRAIN'), evidence).toBeLessThan(index('R_FIFO'));
+    }
+    expect(events[index('R_FIFO')], evidence).toMatch(/^R_FIFO rc=0 raw=0 command=\d+ group=\d+$/);
+    expect(index('R_LIVENESS_RELEASE'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_FIFO'), evidence).toBeGreaterThan(index('R_LIVENESS_RELEASE'));
+    expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+    expect(result.stdout, evidence).toContain('rc=0 output=payload');
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+  });
+  // A frame that reaches the worker while it is descheduled past a poll second
+  // must be read whole.
+  it('reads a whole frame that arrives while the worker is descheduled', ({ task }) => {
+    const result = runLifecycleProbe('event-order-frame-tear');
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedFrameTear: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    expect(result.tear_setup?.stopped, evidence).toBe(true);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    expect(index('R_READ_ARMED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThan(index('R_READ_ARMED'));
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_WRITTEN'), evidence).toBeGreaterThan(index('CHILD_RELEASED'));
+    expect(events.filter((event) => event.startsWith('R_FIFO ')), evidence).toHaveLength(1);
+    expect(index('R_WAIT'), evidence).toBe(-1);
+    expect(index('R_REJECT'), evidence).toBe(-1);
+    expect(events[index('R_FIFO')], evidence).toMatch(/^R_FIFO rc=0 raw=0 command=\d+ group=\d+$/);
+    expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+    expect(result.stdout, evidence).toContain('rc=0 output=payload');
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+  });
+  // A caller's TMOUT must not put a timeout on the worker's untimed read.
+  it('keeps waiting for the frame when the caller sets TMOUT', ({ task }) => {
+    const result = runLifecycleProbe('event-order-frame-tmout');
+    const evidence = JSON.stringify(result);
+    Object.assign(task.meta, { boundedFrameTmout: result });
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    const events: string[] = result.events;
+    const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
+    expect(index('CONTROL_ERROR'), evidence).toBe(-1);
+    // A missing L_COMMAND means the command never passed its start read: a harness failure.
+    expect(index('L_COMMAND'), `HARNESS tmout-command-start ${evidence}`).toBeGreaterThanOrEqual(0);
+    expect(index('R_READ_ARMED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(events.filter((event) => event.startsWith('R_FIFO ')), evidence).toHaveLength(1);
+    expect(index('R_WAIT'), evidence).toBe(-1);
+    expect(events[index('O_RESULT_CLAIM')], evidence).toBe('O_RESULT_CLAIM rc=0 result=0');
+    expect(events[index('R_FIFO')], evidence).toMatch(/^R_FIFO rc=0 raw=0 command=\d+ group=\d+$/);
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThan(index('R_READ_ARMED'));
+    expect(index('CHILD_RELEASED'), evidence).toBeGreaterThanOrEqual(0);
+    expect(index('R_FIFO'), evidence).toBeGreaterThan(index('CHILD_RELEASED'));
+    expect(result.stdout, evidence).toContain('rc=0 output=payload');
+    expect(result.survivors_before_cleanup, evidence).toEqual([]);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
   });
   it('reaps a command child that survives the first group signal', () => {
     const result = runLifecycleProbe('command-group-descendant');

@@ -6,7 +6,7 @@ root = pathlib.Path(root)
 # so a release sent before the probe shell reaches its read would be lost as a
 # harness error. Hold each release FIFO open read-write for the whole run; a
 # release then waits in the pipe until the shell reads it.
-release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release')) if fifo.is_fifo()]
+release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release', 'event-order-poll-release')) if fifo.is_fifo()]
 def interrupted(signum, frame):
     raise TimeoutError('outer lifecycle watchdog interrupted the fixture')
 signal.signal(signal.SIGTERM, interrupted)
@@ -24,6 +24,8 @@ def members(session):
         except ProcessLookupError: pass
     return found
 record = {}
+frame_holder = None
+tear_last_miss = None
 sentinel = subprocess.Popen(['/bin/sleep', '30'], start_new_session=True)
 master, slave = pty.openpty() if terminal == 'pty' else (None, None)
 with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
@@ -54,6 +56,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             authority_released = False
             deadline = time.monotonic() + 5
             while child.poll() is None and time.monotonic() < deadline:
+                poll_started = time.monotonic()
                 lines = events.read_text().splitlines() if events.exists() else []
                 for line in lines[observed_count:]:
                     record['event_observations'].append({'event': line, 'observed_monotonic_ns': time.monotonic_ns()})
@@ -96,7 +99,125 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     finally: os.close(release)
                     released = True
                     record['cleanup_released_after_outer_deadline'] = True
+                if mode.startswith('event-order-frame-'):
+                    def release_named(name):
+                        descriptor = os.open(root / name, os.O_WRONLY | os.O_NONBLOCK)
+                        try: os.write(descriptor, b'release\n')
+                        finally: os.close(descriptor)
+                    def process_state(pid):
+                        ps_binary = '/bin/ps' if os.path.exists('/bin/ps') else '/usr/bin/ps'
+                        return subprocess.run([ps_binary, '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True, timeout=3).stdout.strip()
+                    if mode in ('event-order-frame-gap', 'event-order-frame-gap-control', 'event-order-frame-fragment', 'event-order-frame-before-liveness'):
+                        hold_prefix = 'R_LIVENESS_HOLD ' if mode == 'event-order-frame-before-liveness' else 'R_POLL_HOLD '
+                        held = next((line for line in lines if line.startswith(hold_prefix)), None)
+                        if held is not None and 'frame_hold_seen' not in record:
+                            record['frame_hold_seen'] = True
+                            results = [item for item in root.glob('whatsoup-bounded.*/result') if item.is_fifo()]
+                            if len(results) != 1: raise RuntimeError('result FIFO unavailable')
+                            frame_holder = os.open(results[0], os.O_RDWR | os.O_NONBLOCK)
+                            if mode == 'event-order-frame-fragment':
+                                os.write(frame_holder, b'43\n')
+                                record['fragment_written'] = True
+                                release_named('event-order-poll-release')
+                                record['poll_released'] = True
+                            else:
+                                release_named('event-order-child-release')
+                                record['child_released_at_hold'] = True
+                        if mode == 'event-order-frame-fragment' and record.get('poll_released') and 'fragment_child_released' not in record and any(line.startswith(('R_REJECT ', 'R_FIFO ', 'R_WAIT ')) for line in lines):
+                            release_named('event-order-child-release')
+                            record['fragment_child_released'] = True
+                        if mode != 'event-order-frame-fragment' and record.get('child_released_at_hold') and 'poll_released' not in record and any(line.startswith('R_WRITTEN ') for line in lines):
+                            if mode == 'event-order-frame-before-liveness':
+                                command_pid = int(held.rsplit('command=', 1)[1])
+                                exit_deadline = time.monotonic() + 3
+                                state = 'running'
+                                while time.monotonic() < exit_deadline:
+                                    try: os.kill(command_pid, 0)
+                                    except ProcessLookupError:
+                                        state = 'reaped'
+                                        break
+                                    if 'Z' in process_state(command_pid):
+                                        state = 'zombie'
+                                        break
+                                    time.sleep(0.005)
+                                if state == 'running': raise RuntimeError('command did not exit before the liveness check')
+                                record['command_state_at_release'] = state
+                            if mode != 'event-order-frame-gap-control':
+                                os.close(frame_holder)
+                                frame_holder = None
+                                record['result_holder_closed'] = 'before-poll-release'
+                            release_named('event-order-poll-release')
+                            record['poll_released'] = True
+                        if mode == 'event-order-frame-gap-control' and frame_holder is not None and record.get('poll_released') and any(line.startswith(('R_FIFO ', 'R_WAIT ')) for line in lines):
+                            os.close(frame_holder)
+                            frame_holder = None
+                            record['result_holder_closed'] = 'after-delivery'
+                    if mode == 'event-order-frame-tear':
+                        armed = next((line for line in lines if line.startswith('R_READ_ARMED ')), None)
+                        if armed is None:
+                            # The worker arms its read after logging R_READ_ARMED, so
+                            # an alarm fires no earlier than this poll's start + 1 s.
+                            tear_last_miss = poll_started
+                        elif 'tear_setup' not in record:
+                            command_pid = int(armed.rsplit('command=', 1)[1])
+                            worker = next((item['ppid'] for item in members(session) if item['pid'] == command_pid), None)
+                            if worker is None or worker == child.pid: raise RuntimeError('worker identity unavailable')
+                            state_deadline = time.monotonic() + 2
+                            while not process_state(worker).startswith('S') and time.monotonic() < state_deadline: time.sleep(0.005)
+                            state_at_stop = process_state(worker)
+                            if not state_at_stop.startswith('S'): raise RuntimeError('worker was not blocked in its read')
+                            os.kill(worker, signal.SIGSTOP)
+                            stopped_at = time.monotonic()
+                            # Judged by the evidence reader, never asserted: valid ordering
+                            # evidence needs this below 1000 ms.
+                            stop_after_last_miss_ms = None if tear_last_miss is None else int((stopped_at - tear_last_miss) * 1000)
+                            record['tear_setup'] = {'stopped': True, 'state_at_stop': state_at_stop, 'stop_after_last_miss_ms': stop_after_last_miss_ms}
+                            try:
+                                release_named('event-order-child-release')
+                                written_deadline = time.monotonic() + 3
+                                while time.monotonic() < written_deadline:
+                                    if any(line.startswith('R_WRITTEN ') for line in events.read_text().splitlines()): break
+                                    time.sleep(0.005)
+                                else: raise RuntimeError('frame was not written while the worker was stopped')
+                                record['tear_setup']['written_after_stop_ms'] = int((time.monotonic() - stopped_at) * 1000)
+                                # Continue no earlier than 1.05 s after the stop, so
+                                # an alarm armed before the stop has fired. Orders no event.
+                                while time.monotonic() < stopped_at + 1.05: time.sleep(0.01)
+                            finally:
+                                os.kill(worker, signal.SIGCONT)
+                            record['tear_setup']['cont_after_stop_ms'] = int((time.monotonic() - stopped_at) * 1000)
+                    if mode == 'event-order-frame-tmout':
+                        armed = next((line for line in lines if line.startswith('R_READ_ARMED ')), None)
+                        if armed is not None and 'tmout_setup' not in record:
+                            # R_TICKER exists only in the fix commit, where it precedes the
+                            # loop. On the base there is no tick source to hold.
+                            ticker_line = next((line for line in lines if line.startswith('R_TICKER ')), None)
+                            record['tmout_setup'] = {'ticker_stopped': False}
+                            if ticker_line is not None:
+                                # Hold the tick source while the command is still gated, so
+                                # the worker's read sees no line for 2 s.
+                                ticker = int(ticker_line.rsplit('ticker=', 1)[1])
+                                os.kill(ticker, signal.SIGSTOP)
+                                stopped_at = time.monotonic()
+                                record['tmout_setup']['ticker_stopped'] = True
+                                try:
+                                    while time.monotonic() < stopped_at + 2.0: time.sleep(0.01)
+                                finally:
+                                    try: os.kill(ticker, signal.SIGCONT)
+                                    except ProcessLookupError: record['tmout_setup']['ticker_gone_at_cont'] = True
+                                record['tmout_setup']['cont_after_stop_ms'] = int((time.monotonic() - stopped_at) * 1000)
+                            try:
+                                release_named('event-order-child-release')
+                                record['tmout_setup']['child_released'] = True
+                            except OSError as error:
+                                record['tmout_setup']['child_release_error'] = repr(error)
                 time.sleep(0.005)
+            if mode == 'event-order-frame-gap-control' and frame_holder is not None and record.get('poll_released'):
+                final = events.read_text().splitlines() if events.exists() else []
+                if any(line.startswith(('R_FIFO ', 'R_WAIT ')) for line in final):
+                    os.close(frame_holder)
+                    frame_holder = None
+                    record['result_holder_closed'] = 'after-delivery'
             if child.poll() is None: raise RuntimeError('event-order control did not finish within its observation bound')
         if mode in ('timeout-symlink', 'timeout-existing'):
             deadline = time.monotonic() + 3
@@ -319,6 +440,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         sentinel.wait(timeout=3)
         if master is not None: os.close(master)
         if slave is not None: os.close(slave)
+        if frame_holder is not None: os.close(frame_holder)
         for holder in release_holders: os.close(holder)
 record['duration_ms'] = int((time.monotonic() - started) * 1000)
 record['stdout'] = (root / 'stdout').read_text()
@@ -352,6 +474,11 @@ if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1'
     record['transport'] = terminal
     record['helper_sha256'] = hashlib.sha256(pathlib.Path(helper).read_bytes()).hexdigest()
     record['probe_sha256'] = hashlib.sha256((root / 'probe.sh').read_bytes()).hexdigest()
+    try:
+        version = subprocess.run([bash, '--version'], capture_output=True, text=True, timeout=3)
+        record['bash_version'] = {'returncode': version.returncode, 'first_line': (version.stdout.splitlines() or [''])[0]}
+    except Exception as error:
+        record['bash_version'] = {'returncode': None, 'first_line': '', 'error': repr(error)}
 if (root / 'cleanup-residual-polls').exists():
     polls = (root / 'cleanup-residual-polls').read_text().splitlines()
     record['cleanup_residual_polls_raw'] = polls
