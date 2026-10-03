@@ -372,6 +372,87 @@ describe('receipt-time bound', () => {
   });
 });
 
+describe('scheduled agent jobs', () => {
+  // A scheduled agent job's turn carries the synthetic `agentjob-<trigger>-<unix>-occ<n>` message
+  // id (lifecycle-emission.ts classifyTurnLane). The job owes the chat no replay, and a minted
+  // replay would run without the job's scheduled purpose, so such a turn derives no decision.
+  const SCHEDULED_ID = 'agentjob-7-1727880000-occ42';
+
+  it('FALSIFIER: a scheduled job with an invalid receipt time records no refusal', async () => {
+    const scheduled = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ sourceMessageId: SCHEDULED_ID, receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(scheduled).toBeUndefined();
+    // The same turn under an ordinary message id is refused, so only the id decides.
+    const ordinary = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(ordinary?.auditEvent.reasonCode).toBe('not_created_receipt_time_invalid');
+  });
+
+  it('FALSIFIER: a conclusive-no-effect scheduled job creates no obligation', async () => {
+    const scheduled = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ sourceMessageId: SCHEDULED_ID }),
+      'managed_loop',
+    );
+    expect(scheduled).toBeUndefined();
+    const ordinary = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
+    expect(ordinary?.auditEvent.action).toBe('obligation.create');
+  });
+
+  it('an ordinary message id still creates, and still refuses an invalid receipt time', async () => {
+    const created = await deriveCapabilityDecision(deps(), makeContext(), 'managed_loop');
+    expect(created?.auditEvent.action).toBe('obligation.create');
+    expect(created?.obligation?.sourceMessageId).toBe('TESTMSG-DEC-1');
+    const refused = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ receivedAtUnixSeconds: Number.NaN }),
+      'managed_loop',
+    );
+    expect(refused?.auditEvent.reasonCode).toBe('not_created_receipt_time_invalid');
+  });
+
+  it.each(['agentjob-x-1-occ2', 'agentjob-7-1727880000-occ42-x'])(
+    'a lookalike id (%s) is an ordinary turn and still creates',
+    async (sourceMessageId) => {
+      const decision = await deriveCapabilityDecision(deps(), makeContext({ sourceMessageId }), 'managed_loop');
+      expect(decision?.auditEvent.action).toBe('obligation.create');
+      expect(decision?.obligation?.sourceMessageId).toBe(sourceMessageId);
+    },
+  );
+
+  it('a scheduled job whose text matches no rule owes nothing, like an ordinary turn', async () => {
+    const ordinary = await deriveCapabilityDecision(deps(), makeContext({ text: 'just a hello' }), 'managed_loop');
+    expect(ordinary).toBeUndefined();
+    const scheduled = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ sourceMessageId: SCHEDULED_ID, text: 'just a hello' }),
+      'managed_loop',
+    );
+    expect(scheduled).toStrictEqual(ordinary);
+  });
+
+  it('FALSIFIER: a scheduled job whose text conflicts records no conflict', async () => {
+    const scheduled = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ sourceMessageId: SCHEDULED_ID, text: '/watch https://youtu.be/abc' }),
+      'managed_loop',
+    );
+    expect(scheduled).toBeUndefined();
+    const ordinary = await deriveCapabilityDecision(
+      deps(),
+      makeContext({ text: '/watch https://youtu.be/abc' }),
+      'managed_loop',
+    );
+    expect(ordinary?.auditEvent.reasonCode).toBe('not_created_contract_conflict');
+  });
+});
+
 describe('D3 media staging', () => {
   function seedMessageWithMedia(messageId: string, mediaPath: string | null): void {
     db.raw
