@@ -43,8 +43,8 @@ describe('ControlQueue', () => {
   });
 
   it('enqueueText buffers text and does not call messenger', () => {
-    queue.enqueueText('hello world');
-    queue.enqueueText('second line');
+    queue.enqueueText('hello world', 'answer');
+    queue.enqueueText('second line', 'answer');
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
     const log = queue.getLog();
@@ -53,8 +53,8 @@ describe('ControlQueue', () => {
   });
 
   it('buffers streaming and result text without calling messenger', () => {
-    queue.enqueueStreamingText('stream chunk');
-    queue.enqueueResultText('terminal result');
+    queue.enqueueStreamingText('stream chunk', 'answer');
+    queue.enqueueResultText('terminal result', 'answer');
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
     expect(queue.getLog()).toEqual(['stream chunk', 'terminal result']);
@@ -72,7 +72,7 @@ describe('ControlQueue', () => {
   });
 
   it('flush resolves without calling messenger', async () => {
-    queue.enqueueText('buffered');
+    queue.enqueueText('buffered', 'answer');
     await queue.flush();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -96,7 +96,7 @@ describe('ControlQueue', () => {
   });
 
   it('keeps control-only no-op settings local', async () => {
-    queue.enqueueText('kept');
+    queue.enqueueText('kept', 'answer');
 
     expect(() => queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 1000 }, 'q')).not.toThrow();
     expect(() => queue.setToolUpdateMode('friendly')).not.toThrow();
@@ -113,8 +113,8 @@ describe('ControlQueue', () => {
   });
 
   it('abortTurn clears the buffer', () => {
-    queue.enqueueText('line 1');
-    queue.enqueueText('line 2');
+    queue.enqueueText('line 1', 'answer');
+    queue.enqueueText('line 2', 'answer');
     expect(queue.getLog()).toHaveLength(2);
 
     queue.abortTurn();
@@ -145,7 +145,7 @@ describe('ControlQueue', () => {
   });
 
   it('durability lifecycle methods are no-ops for control sessions', () => {
-    queue.enqueueText('still buffered');
+    queue.enqueueText('still buffered', 'answer');
 
     expect(() => queue.clearLastOpId()).not.toThrow();
     expect(() => queue.setDurability({} as DurabilityEngine)).not.toThrow();
@@ -172,7 +172,7 @@ describe('ControlQueue', () => {
   });
 
   it('getLog returns a copy — mutations do not affect the internal buffer', () => {
-    queue.enqueueText('original');
+    queue.enqueueText('original', 'answer');
 
     const snapshot = queue.getLog();
     snapshot.push('injected');

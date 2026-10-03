@@ -109,7 +109,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
   it('drops a rejected message: nothing is sent and no outbound op is created', async () => {
     const { queue, messenger, durability } = makeQueue(registryFor(STRICT_POLICY));
 
-    queue.enqueueText(`Please ask about the ${BLOCKED_TERM} launch.`);
+    queue.enqueueText(`Please ask about the ${BLOCKED_TERM} launch.`, 'answer');
     await queue.flush();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -120,7 +120,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue } = makeQueue(registryFor(STRICT_POLICY));
     const secretText = `Unique sentence mentioning ${BLOCKED_TERM} twice? Really?`;
 
-    queue.enqueueText(secretText);
+    queue.enqueueText(secretText, 'answer');
     await queue.flush();
 
     const warns = policyCalls('warn');
@@ -143,7 +143,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue, messenger } = makeQueue(registryFor({ ...STRICT_POLICY, maxCodePoints: 50 }));
 
     // Two paragraphs of 3000 characters each: the queue would send 2 chunks.
-    queue.enqueueText(`${'a'.repeat(3000)}\n\n${'b'.repeat(3000)}`);
+    queue.enqueueText(`${'a'.repeat(3000)}\n\n${'b'.repeat(3000)}`, 'answer');
     await queue.flush();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -155,7 +155,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
   it('checks internal artifacts against the pre-redaction source text', async () => {
     const { queue, messenger } = makeQueue(registryFor(STRICT_POLICY));
 
-    queue.enqueueText('The file is at /Users/testuser/LAB/example/secret.txt');
+    queue.enqueueText('The file is at /Users/testuser/LAB/example/secret.txt', 'answer');
     await queue.flush();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -184,7 +184,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue } = makeQueue(registryFor(STRICT_POLICY));
     queue.beginTurnEvidence('turn-withheld');
 
-    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`, 'answer');
     const evidence = await queue.flushTurnEvidence('turn-withheld');
 
     expect(evidence.answerOpIds).toEqual([]);
@@ -195,7 +195,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue } = makeQueue(registryFor(STRICT_POLICY));
     queue.beginTurnEvidence('turn-allowed');
 
-    queue.enqueueText('A plain answer.');
+    queue.enqueueText('A plain answer.', 'answer');
     const evidence = await queue.flushTurnEvidence('turn-allowed');
 
     expect(evidence.answerOpIds).toHaveLength(1);
@@ -206,7 +206,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue } = makeQueue(registryFor(STRICT_POLICY));
 
     expect(queue.consumeClientOutputWithheld()).toBe(false);
-    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`, 'answer');
     await queue.flush();
 
     expect(queue.consumeClientOutputWithheld()).toBe(true);
@@ -216,7 +216,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
   it('clears the withheld flag when the turn is aborted', async () => {
     const { queue } = makeQueue(registryFor(STRICT_POLICY));
 
-    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`, 'answer');
     await queue.flush();
     queue.abortTurn();
 
@@ -227,9 +227,9 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue, messenger } = makeQueue(registryFor(STRICT_POLICY));
     queue.setToolUpdateMode('minimal');
 
-    queue.enqueueStreamingText('Let me check the records first.');
+    queue.enqueueStreamingText('Let me check the records first.', 'answer');
     queue.discardPreToolAssistantText();
-    queue.enqueueText(`the ${BLOCKED_TERM} answer`);
+    queue.enqueueText(`the ${BLOCKED_TERM} answer`, 'answer');
     queue.endTurn();
     await queue.flush();
 
@@ -298,7 +298,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
   it('sends an allowed message unchanged', async () => {
     const { queue, calls, durability } = makeQueue(registryFor(STRICT_POLICY));
 
-    queue.enqueueText('Your order ships tomorrow.');
+    queue.enqueueText('Your order ships tomorrow.', 'answer');
     await queue.flush();
 
     expect(calls).toEqual(['Your order ships tomorrow.']);
@@ -311,7 +311,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const { queue, calls } = makeQueue(registryFor(STRICT_POLICY), OTHER_JID, OTHER_KEY);
     const text = `Two questions? About ${BLOCKED_TERM}?`;
 
-    queue.enqueueText(text);
+    queue.enqueueText(text, 'answer');
     await queue.flush();
 
     expect(calls).toEqual([text]);
@@ -324,7 +324,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID, { conversationKey: CONVERSATION_KEY });
     const text = `Two questions? About ${BLOCKED_TERM}?`;
 
-    queue.enqueueText(text);
+    queue.enqueueText(text, 'answer');
     await queue.flush();
 
     expect(calls).toEqual([text]);
@@ -342,7 +342,7 @@ describe('OutboundQueue client output policy enforcement (#3613)', () => {
     const registry = new Map([[CONVERSATION_KEY, throwing]]) as unknown as ClientOutputPolicyRegistry;
     const { queue, messenger, durability } = makeQueue(registry);
 
-    queue.enqueueText('An otherwise harmless reply.');
+    queue.enqueueText('An otherwise harmless reply.', 'answer');
     await queue.flush();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();

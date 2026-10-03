@@ -275,6 +275,7 @@ describe('zero-text fallback turn signal', () => {
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
+      'status',
     );
   });
 
@@ -299,7 +300,7 @@ describe('zero-text fallback turn signal', () => {
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
     // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
     expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
-    expect(queue.enqueueText).not.toHaveBeenCalledWith(
+    expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('no reply'),
     );
   });
@@ -318,7 +319,7 @@ describe('zero-text fallback turn signal', () => {
 
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     expect(vi.mocked(emitAlert)).not.toHaveBeenCalled();
-    expect(queue.enqueueText).not.toHaveBeenCalledWith(
+    expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('no reply'),
     );
   });
@@ -346,7 +347,7 @@ describe('zero-text fallback turn signal', () => {
     expect(runtime.getFallbackState().fallbackTurnsServed).toBe(0);
     // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
     expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
-    expect(queue.enqueueText).not.toHaveBeenCalledWith(
+    expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('no reply'),
     );
   });
@@ -372,7 +373,7 @@ describe('zero-text fallback turn signal', () => {
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(1);
     // The per-chat "backup model returned no reply" notice must NOT be enqueued
     // on this path — the existing "_(no response)_" already covers the user.
-    expect(fakeQueue.enqueueText).not.toHaveBeenCalledWith(
+    expect(fakeQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('backup model returned no reply'),
     );
   });
@@ -575,7 +576,7 @@ describe('fallback_empty_turn alert — per-chat dedup', () => {
       'chat-a@s.whatsapp.net',
     ]));
     expect(scheduledQueue.enqueueText).not.toHaveBeenCalled();
-    expect(userQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('no reply'));
+    expect(userQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('no reply'), 'status');
   });
 });
 

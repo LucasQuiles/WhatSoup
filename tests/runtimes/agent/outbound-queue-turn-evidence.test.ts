@@ -66,7 +66,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     queue.setDurability(durability);
     queue.beginTurnEvidence('turn-async');
 
-    queue.enqueueText('answer');
+    queue.enqueueText('answer', 'answer');
     expect(durability.createOutboundOp).not.toHaveBeenCalled();
 
     const evidence = await settle(queue.flushTurnEvidence('turn-async'));
@@ -89,7 +89,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     queue.enqueueText('fallback notice', 'lifecycle');
     queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, 'Soup');
     queue.enqueueToolUpdate({ category: 'running', detail: 'Checking delivery' });
-    queue.enqueueText('real answer');
+    queue.enqueueText('real answer', 'answer');
 
     const evidencePromise = queue.flushTurnEvidence('turn-roles');
     await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
@@ -118,7 +118,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     queue.setDurability(makeDurability());
     queue.beginTurnEvidence('turn-chunks');
 
-    queue.enqueueText(`${'a'.repeat(4000)} ${'b'.repeat(100)}`);
+    queue.enqueueText(`${'a'.repeat(4000)} ${'b'.repeat(100)}`, 'answer');
 
     const evidence = await settle(queue.flushTurnEvidence('turn-chunks'));
     expect(evidence.answerOpIds).toEqual([1, 2]);
@@ -133,13 +133,13 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(makeDurability());
 
-    queue.enqueueText('chain blocker');
+    queue.enqueueText('chain blocker', 'answer');
     await vi.advanceTimersByTimeAsync(0);
     queue.beginTurnEvidence('turn-old');
-    queue.enqueueText('old queued answer');
+    queue.enqueueText('old queued answer', 'answer');
     queue.abortTurn();
     queue.beginTurnEvidence('turn-new');
-    queue.enqueueText('new answer');
+    queue.enqueueText('new answer', 'answer');
 
     const evidencePromise = queue.flushTurnEvidence('turn-new');
     firstSend.resolve({ waMessageId: null });
@@ -157,13 +157,13 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(makeDurability());
 
-    queue.enqueueText('chain blocker');
+    queue.enqueueText('chain blocker', 'answer');
     await vi.advanceTimersByTimeAsync(0);
     queue.beginTurnEvidence('turn-reused');
-    queue.enqueueText('aborted old answer');
+    queue.enqueueText('aborted old answer', 'answer');
     queue.abortTurn();
     queue.beginTurnEvidence('turn-reused');
-    queue.enqueueText('replacement answer');
+    queue.enqueueText('replacement answer', 'answer');
 
     const evidencePromise = queue.flushTurnEvidence('turn-reused');
     firstSend.resolve({ waMessageId: null });
@@ -186,16 +186,16 @@ describe('OutboundQueue turn delivery evidence', () => {
     });
     queue.setDurability(durability);
 
-    queue.enqueueText('chain blocker');
+    queue.enqueueText('chain blocker', 'answer');
     await vi.advanceTimersByTimeAsync(0);
     queue.beginTurnEvidence('turn-identity');
     queue.setInboundSeq(41);
-    queue.enqueueText('old identity');
+    queue.enqueueText('old identity', 'answer');
 
     const newJid = `${canonicalConversationKey}@s.whatsapp.net`;
     queue.updateDeliveryJid(newJid);
     queue.setInboundSeq(99);
-    queue.enqueueText('new identity');
+    queue.enqueueText('new identity', 'answer');
 
     const evidencePromise = queue.flushTurnEvidence('turn-identity');
     firstSend.resolve({ waMessageId: null });
@@ -223,7 +223,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
     queue.setDurability(makeDurability());
     queue.beginTurnEvidence('turn-ordinary-flush');
-    queue.enqueueText('answer before poll');
+    queue.enqueueText('answer before poll', 'answer');
 
     await settle(queue.flush());
     const evidence = await queue.flushTurnEvidence('turn-ordinary-flush');
@@ -252,7 +252,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
     queue.setDurability(makeDurability());
     queue.beginTurnEvidence('turn-concurrent');
-    queue.enqueueText('answer');
+    queue.enqueueText('answer', 'answer');
 
     const joined = Promise.all([
       queue.flushTurnEvidence('turn-concurrent'),
@@ -277,7 +277,7 @@ describe('OutboundQueue turn delivery evidence', () => {
   it('returns frozen copies and empty lists when durability is unavailable', async () => {
     const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
     queue.beginTurnEvidence('turn-no-durability');
-    queue.enqueueText('sent without durability');
+    queue.enqueueText('sent without durability', 'answer');
 
     const evidence = await settle(queue.flushTurnEvidence('turn-no-durability'));
 
@@ -303,7 +303,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
     queue.beginTurnEvidence('turn-first-op-flush');
-    queue.enqueueText('must remain blocked');
+    queue.enqueueText('must remain blocked', 'answer');
 
     const outcome = queue.flush().then(
       () => 'resolved' as const,
@@ -325,7 +325,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
     queue.setDurability(durability);
     queue.beginTurnEvidence('turn-first-op-evidence');
-    queue.enqueueText('no false empty receipt');
+    queue.enqueueText('no false empty receipt', 'answer');
 
     const outcome = queue.flushTurnEvidence('turn-first-op-evidence').then(
       () => 'resolved' as const,
@@ -350,7 +350,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
     queue.beginTurnEvidence('turn-partial');
-    queue.enqueueText(`${'a'.repeat(4000)} ${'b'.repeat(4000)} ${'c'.repeat(100)}`);
+    queue.enqueueText(`${'a'.repeat(4000)} ${'b'.repeat(4000)} ${'c'.repeat(100)}`, 'answer');
 
     const outcome = queue.flushTurnEvidence('turn-partial').then(
       () => 'resolved' as const,
@@ -366,7 +366,7 @@ describe('OutboundQueue turn delivery evidence', () => {
 
     queue.abortTurn();
     queue.beginTurnEvidence('replacement');
-    queue.enqueueText('must not retry or inherit failed work');
+    queue.enqueueText('must not retry or inherit failed work', 'answer');
 
     await expect(queue.flushTurnEvidence('replacement')).rejects.toBe(failure);
     expect(createCalls).toBe(2);
@@ -391,7 +391,7 @@ describe('OutboundQueue turn delivery evidence', () => {
     const queue = new OutboundQueue(makeMessenger(), CHAT_JID);
     queue.setDurability(makeDurability());
     queue.beginTurnEvidence('turn-crash-preserved');
-    queue.enqueueText('answer accepted before the child crashed');
+    queue.enqueueText('answer accepted before the child crashed', 'answer');
 
     queue.abortTurn({ preserveEvidence: true });
 
@@ -411,7 +411,7 @@ describe('ControlQueue turn delivery evidence', () => {
     const queue = new ControlQueue(CHAT_JID, messenger);
 
     queue.beginTurnEvidence('control-turn');
-    queue.enqueueText('buffered only');
+    queue.enqueueText('buffered only', 'answer');
     const evidence = await queue.flushTurnEvidence('control-turn');
 
     expect(evidence).toEqual({

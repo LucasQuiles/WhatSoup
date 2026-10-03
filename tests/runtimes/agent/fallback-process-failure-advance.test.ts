@@ -522,6 +522,7 @@ describe('unjournaled fallback replay failure', () => {
 
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('backup model could not continue'),
+      'status',
     );
   });
 });

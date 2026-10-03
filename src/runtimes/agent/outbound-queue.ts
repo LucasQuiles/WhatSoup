@@ -289,15 +289,16 @@ function formatElapsed(ms: number): string {
  */
 export interface IOutboundQueue {
   lastActivity?: number;
-  enqueueText(text: string, role?: OutboundMessageRole): void;
+  /** Every caller names the role: only an 'answer' op becomes a turn's answer evidence. */
+  enqueueText(text: string, role: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
-  enqueueStreamingText(text: string, role?: OutboundMessageRole, onCommit?: () => void): void;
+  enqueueStreamingText(text: string, role: OutboundMessageRole, onCommit?: () => void): void;
   /** Commit buffered streaming text at the outbound-queue delivery boundary. */
   commitStreamingText(): void;
   /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
   discardPreToolAssistantText(): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
-  enqueueResultText(text: string, role?: OutboundMessageRole): boolean;
+  enqueueResultText(text: string, role: OutboundMessageRole): boolean;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -704,7 +705,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Enqueue a text message for immediate sending (after pacing). */
-  enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
+  enqueueText(text: string, role: OutboundMessageRole): void {
     if (!isNonEmptyString(text)) return;
     if (this.rejectPostClosureEnqueue()) return;
     const attribution = this.snapshotAttribution(role);
@@ -806,7 +807,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueStreamingText(
     text: string,
-    role: OutboundMessageRole = 'answer',
+    role: OutboundMessageRole,
     onCommit?: () => void,
   ): void {
     if (!text) return;
@@ -931,7 +932,7 @@ export class OutboundQueue implements IOutboundQueue {
    * output — Claude Code often appends an internal task summary ("Done — I sent
    * the message and asked for...") that shouldn't reach non-technical users.
    */
-  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): boolean {
+  enqueueResultText(text: string, role: OutboundMessageRole): boolean {
     if (!isNonEmptyString(text)) return false;
     if (this.rejectPostClosureEnqueue()) return false;
     const hasBufferedVisibleText = this.streamBufferParts.some((part) => part.text.trim() !== '');

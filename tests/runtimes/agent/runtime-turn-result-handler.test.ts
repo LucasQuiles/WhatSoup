@@ -293,6 +293,7 @@ describe('runtime result terminal provider notices', () => {
           expect(harness.queue.enqueueText).toHaveBeenCalledOnce();
           expect(harness.queue.enqueueText).toHaveBeenCalledWith(
             expect.stringContaining(testCase.noticeFragment),
+            'status',
           );
           expect(harness.queue.enqueueResultText).not.toHaveBeenCalled();
           expect(harness.session.completeProviderTurn).toHaveBeenCalledOnce();
@@ -899,7 +900,7 @@ describe('minimal-mode result text after narration held at a tool boundary (#342
     };
     const queue = new OutboundQueue(messenger, '15550190050@s.whatsapp.net');
     queue.setToolUpdateMode('minimal');
-    queue.enqueueStreamingText('Let me check the workbook first.');
+    queue.enqueueStreamingText('Let me check the workbook first.', 'answer');
     queue.discardPreToolAssistantText();
     queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
 
