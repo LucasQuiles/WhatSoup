@@ -449,18 +449,19 @@ counters; any retained finalization degrades runtime health. Shutdown cancels th
 Each turn's outbound operations carry that turn's attribution. `beginTurnEvidence` takes the
 turn identity's conversation key and chat JID, and the turn's evidence carries them, including
 when it begins on a queue rebuilt for the turn's provider result or created when a provider
-fallback replaces the turn's session. While that evidence is active, the queue stamps each
-operation it creates with the turn's key and chat JID and sends it to that JID. Operations
-outside a turn keep the queue's own key, fixed when the queue is created, and its current
-delivery JID. An alias migration, a queue created after a LID mapping, or a single-scope queue
-serving another chat therefore cannot make an answered turn fail its delivery proof. A text
-operation the queue sends is first redacted in `enqueuePreparedText`: `redactInternalArtifacts`
-applies the audience that `resolveOutboundAudience` computes for the JID it is sent to. An
-admin's direct chat counts as internal on that ground only while no provider fallback is
-active. Then `admitClientOutput` withholds the text when `enforceClientOutputPolicy` withholds
-it under either the queue's key or the turn's key. The one exception is a fixed progress
-placeholder, which skips redaction but passes the same policy check. A voice reply goes to the
-finalized turn's chat.
+fallback replaces the turn's session. The queue captures the attribution when output is
+enqueued. Output enqueued while that evidence is active carries the turn's key and chat JID,
+and its operations carry them and are sent to that JID even when an operation is created later.
+Output enqueued outside a turn keeps the queue's own key, fixed when the queue is created, and
+the delivery JID the queue had when the output was enqueued. An alias migration, a queue
+created after a LID mapping, or a single-scope queue serving another chat therefore cannot make
+an answered turn fail its delivery proof. A text operation the queue sends is first redacted in
+`enqueuePreparedText`: `redactInternalArtifacts` applies the audience that
+`resolveOutboundAudience` computes for the JID it is sent to. An admin's direct chat counts as
+internal on that ground only while no provider fallback is active. Then `admitClientOutput`
+withholds the text when `enforceClientOutputPolicy` withholds it under either the queue's key
+or the turn's key. The one exception is a fixed progress placeholder, which skips redaction but
+passes the same policy check. A voice reply goes to the finalized turn's chat.
 
 Per-chat crash exhaustion follows the same proof boundary. The runtime first marks the current
 manager owner `exhausted` and cancels auto-respawn. When an immutable crash context exists,
