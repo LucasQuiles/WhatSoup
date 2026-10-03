@@ -232,8 +232,87 @@ export interface ExactGitShimScenario {
   responses: Record<string, GitShimResponse>;
 }
 
-export function responseKey(args: readonly string[]): string {
-  return JSON.stringify(args);
+/** The argv key, or with `input` the argv and stdin key that `resolveShimResponse` tries first. */
+export function responseKey(args: readonly string[], input?: string): string {
+  return input === undefined ? JSON.stringify(args) : JSON.stringify([args, input]);
+}
+
+/** The object ids an exact `cat-file --batch` call requests; empty for any other call. */
+export function contentBatchOids(
+  args: readonly string[],
+  input?: string | NodeJS.ArrayBufferView,
+): string[] {
+  if (args.length !== 2 || args[0] !== 'cat-file' || args[1] !== '--batch' || input === undefined) {
+    return [];
+  }
+  const text = typeof input === 'string'
+    ? input
+    : Buffer.from(input.buffer, input.byteOffset, input.byteLength).toString('latin1');
+  return text.endsWith('\n') ? text.slice(0, -1).split('\n') : [];
+}
+
+/**
+ * Answer one git call from a scenario record, in this order:
+ * 1. a key of the argv and stdin together, `JSON.stringify([args, input])`;
+ * 2. the argv-only key, `JSON.stringify(args)`, as every scenario keys its calls;
+ * 3. for the two exact cat-file batch argv vectors only, a batch derived from each
+ *    requested id's per-object `cat-file -t`, `-s` and `<type>` keys, in one walk in
+ *    the per-object order: every `-t`, then every `-s` or content key. An absent key
+ *    refuses the call; a key that exits non-zero or is killed answers the batch; a
+ *    type or size that is not one canonical line answers a frame the parser rejects.
+ * Anything else returns undefined, which the caller treats as a refused call.
+ * withGitShim embeds this function's source, so it may use only JavaScript and Node
+ * globals.
+ */
+export function resolveShimResponse(
+  responses: Record<string, GitShimResponse>,
+  args: readonly string[],
+  input?: string | NodeJS.ArrayBufferView,
+): GitShimResponse | undefined {
+  const text = input === undefined
+    ? ''
+    : typeof input === 'string'
+      ? input
+      : Buffer.from(input.buffer, input.byteOffset, input.byteLength).toString('latin1');
+  const exact = responses[JSON.stringify([args, text])];
+  if (exact !== undefined) return exact;
+  const argvOnly = responses[JSON.stringify(args)];
+  if (argvOnly !== undefined) return argvOnly;
+  const check = args.length === 2 && args[0] === 'cat-file'
+    && args[1] === '--batch-check=%(objectname) %(objecttype) %(objectsize)';
+  const content = args.length === 2 && args[0] === 'cat-file' && args[1] === '--batch';
+  if ((!check && !content) || !text.endsWith('\n')) return undefined;
+  const oids = text.slice(0, -1).split('\n');
+  const stdoutOf = (response: GitShimResponse): Buffer => (response.stdoutBase64 !== undefined
+    ? Buffer.from(response.stdoutBase64, 'base64')
+    : Buffer.from(response.stdout ?? '', 'utf8'));
+  const failed = (response: GitShimResponse): boolean =>
+    (response.exit ?? 0) !== 0 || response.signal !== undefined;
+  const types: string[] = [];
+  for (const oid of oids) {
+    const response = responses[JSON.stringify(['cat-file', '-t', '--', oid])];
+    if (response === undefined) return undefined;
+    if (failed(response)) return response;
+    const type = stdoutOf(response).toString('latin1');
+    if (!/^(blob|tree|commit|tag)\n$/.test(type)) return { stdout: `${oid} malformed\n` };
+    types.push(type.slice(0, -1));
+  }
+  const rows: Buffer[] = [];
+  for (const [index, oid] of oids.entries()) {
+    const type = types[index]!;
+    const response = responses[JSON.stringify(['cat-file', check ? '-s' : type, '--', oid])];
+    if (response === undefined) return undefined;
+    if (failed(response)) return response;
+    const bytes = stdoutOf(response);
+    if (check) {
+      const size = bytes.toString('latin1');
+      if (!/^(0|[1-9][0-9]*)\n$/.test(size)) return { stdout: `${oid} malformed\n` };
+      rows.push(Buffer.from(`${oid} ${type} ${size}`, 'latin1'));
+    } else {
+      rows.push(Buffer.from(`${oid} ${type} ${bytes.byteLength}\n`, 'latin1'), bytes, Buffer.from('\n'));
+    }
+  }
+  return { stdoutBase64: Buffer.concat(rows).toString('base64') };
 }
 
 function setBatchBlobTypeResponse(
@@ -282,8 +361,11 @@ if (process.env.GIT_OPTIONAL_LOCKS !== '0') fail('optional locks env missing', 9
 for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) {
   if (process.env[name] !== undefined) fail('ambient git env leaked', 96);
 }
-const key = JSON.stringify(args.slice(1));
-const response = scenario.responses[key];
+const shimArgs = args.slice(1);
+const readsStdin = shimArgs.length === 2 && shimArgs[0] === 'cat-file'
+  && (shimArgs[1] === '--batch' || shimArgs[1] === '--batch-check=%(objectname) %(objecttype) %(objectsize)');
+${resolveShimResponse.toString()}
+const response = resolveShimResponse(scenario.responses, shimArgs, readsStdin ? fs.readFileSync(0) : undefined);
 if (response === undefined) fail('unexpected args', 97);
 if (response.stdoutBase64 !== undefined) fs.writeSync(1, Buffer.from(response.stdoutBase64, 'base64'));
 else if (response.stdout !== undefined) fs.writeSync(1, response.stdout);
