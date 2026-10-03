@@ -1,23 +1,54 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveTrustedGit } from '../../scripts/lib/ci-control/trusted-git.ts';
 import { readExactBlobs, readExactCommitMetadata } from '../../scripts/lib/ci-control/git-input.ts';
+import {
+  __setTestGitPath,
+  type CatFileBatchRow,
+  type EvidenceGitErrorCodes,
+  parseCatFileBatch,
+  readObjectBatch,
+} from '../../scripts/lib/ci-control/git-input-core.ts';
 
 import {
+  blobOid,
   cleanupTemporaryRoots,
+  commitMetadataResponses,
+  commitOid,
   expectCode,
   gitEnvironment,
+  type GitInputModule,
+  type GitShimResponse,
+  rawCommitBody,
   registerTemporaryRoot,
+  resolveShimResponse,
+  responseKey,
+  withGitShim,
   withMockedGitInput,
 } from './support/ci-control-git-input-fixtures.ts';
 
-afterEach(cleanupTemporaryRoots);
+let shimPid: number | undefined;
+
+afterEach(() => {
+  // Only a test that failed before it saw its shim gone leaves a pid here.
+  if (shimPid !== undefined) {
+    const pid = shimPid;
+    shimPid = undefined;
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  }
+  cleanupTemporaryRoots();
+});
 
 const MISSING_OID = 'f'.repeat(40);
 
@@ -83,6 +114,65 @@ function catFile(repository: ObjectRepository, type: 'blob' | 'commit', oid: str
 
 function sha256(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+const CHECK_ARGS = ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'];
+const CONTENT_ARGS = ['cat-file', '--batch'];
+const CODES: EvidenceGitErrorCodes = {
+  unavailable: 'ci.input.blob-unavailable',
+  timeout: 'ci.input.git-execution-timeout',
+  budget: 'ci.input.blob-set-budget',
+};
+const MALFORMED = 'ci.input.blob-set-malformed';
+const OID = 'a'.repeat(40);
+const OTHER_OID = 'b'.repeat(40);
+
+/** One `--batch` row framed with the body's true length. */
+function contentRow(oid: string, type: string, body: Buffer): GitShimResponse {
+  return {
+    stdoutBase64: Buffer.concat([
+      Buffer.from(`${oid} ${type} ${body.byteLength}\n`, 'latin1'),
+      body,
+      Buffer.from('\n'),
+    ]).toString('base64'),
+  };
+}
+
+function shimBatch(
+  responses: Record<string, GitShimResponse>,
+  oids: readonly string[],
+  mode: 'check' | 'content',
+): CatFileBatchRow[] {
+  return withGitShim(responses, (cwd) => readObjectBatch(cwd, oids, mode, CODES, MALFORMED, 4_096));
+}
+
+type CoreModule = typeof import('../../scripts/lib/ci-control/git-input-core.ts');
+
+/** Run against a fresh git-input-core.ts whose every `execFileSync` call is counted. */
+async function withCountedSpawns(
+  run: (core: CoreModule) => unknown,
+): Promise<{ outcome: unknown; spawns: string[][] }> {
+  const spawns: string[][] = [];
+  vi.resetModules();
+  vi.doMock('node:child_process', () => ({
+    execFileSync: (file: string, args: string[], options: Parameters<typeof execFileSync>[2]) => {
+      spawns.push(args);
+      return execFileSync(file, args, options as never);
+    },
+  }));
+  try {
+    const core = await import('../../scripts/lib/ci-control/git-input-core.ts');
+    let outcome: unknown;
+    try {
+      outcome = run(core);
+    } catch (error) {
+      outcome = error;
+    }
+    return { outcome, spawns };
+  } finally {
+    vi.doUnmock('node:child_process');
+    vi.resetModules();
+  }
 }
 
 describe('exact object reads through cat-file batches', () => {
@@ -159,4 +249,225 @@ describe('exact object reads through cat-file batches', () => {
       'ci.input.commit-metadata-unavailable',
     );
   }, 30_000);
+});
+
+describe('readObjectBatch and parseCatFileBatch', () => {
+  it('returns a missing object as a row and does not throw', () => {
+    expect(shimBatch({ [responseKey(CHECK_ARGS)]: { stdout: `${OID} missing\n` } }, [OID], 'check'))
+      .toEqual([{ oid: OID, kind: 'missing' }]);
+  });
+
+  it('throws the unavailable code when the batch process fails', () => {
+    expectCode(() => shimBatch({
+      [responseKey(CHECK_ARGS)]: { stderr: 'private batch failure', exit: 128 },
+    }, [OID], 'check'), CODES.unavailable);
+  });
+
+  it('rejects a row that echoes a different object id', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OTHER_OID} blob 3\n`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('rejects bytes after the last row', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\nextra`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\nabc\n\n`), [OID], 'content', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('rejects a content row without its terminating LF', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\nabc`), [OID], 'content', MALFORMED),
+      MALFORMED,
+    );
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\nabcX`), [OID], 'content', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('rejects every size that is not a canonical decimal', () => {
+    for (const size of ['1e3', ' 12', '-1', '012']) {
+      expectCode(
+        () => parseCatFileBatch(Buffer.from(`${OID} blob ${size}\n`), [OID], 'check', MALFORMED),
+        MALFORMED,
+      );
+    }
+  });
+
+  it('rejects truncated output', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\n`), [OID, OTHER_OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 10\nabc\n`), [OID], 'content', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('refuses an id that is not 40 lowercase hex digits before starting any process', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ci-control-batch-input-'));
+    registerTemporaryRoot(cwd);
+    for (const oid of ['abc', 'A'.repeat(40), `${OID}\n`, `${OID}\n${OTHER_OID}`]) {
+      const { outcome, spawns } = await withCountedSpawns(
+        (core) => core.readObjectBatch(cwd, [OID, oid], 'check', CODES, MALFORMED, 4_096),
+      );
+      expect(outcome).toMatchObject({ code: MALFORMED });
+      expect(spawns).toEqual([]);
+    }
+  });
+
+  it('reads nothing for an empty set; the readers still read the object format', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'ci-control-batch-input-'));
+    registerTemporaryRoot(cwd);
+    for (const mode of ['check', 'content'] as const) {
+      const { outcome, spawns } = await withCountedSpawns(
+        (core) => core.readObjectBatch(cwd, [], mode, CODES, MALFORMED, 4_096),
+      );
+      expect(outcome).toEqual([]);
+      expect(spawns).toEqual([]);
+    }
+
+    const repository = objectRepository();
+    for (const read of [
+      (isolated: GitInputModule) => isolated.readExactCommitMetadata(repository.root, []),
+      (isolated: GitInputModule) => isolated.readExactBlobs(repository.root, []),
+    ]) {
+      const spawns: string[][] = [];
+      const outcome = await withMockedGitInput((file, args, options) => {
+        spawns.push(args);
+        return execFileSync(file, args, options as never) as unknown as Buffer;
+      }, read);
+      expect(outcome).toEqual([]);
+      expect(spawns).toEqual([['--no-replace-objects', 'rev-parse', '--show-object-format']]);
+    }
+  }, 30_000);
+
+  it('derives check and content rows for a commit and a blob from one record', () => {
+    const commitBody = rawCommitBody({ message: 'pin\n' });
+    const commitId = commitOid(commitBody);
+    const blobBytes = Buffer.from('blob body\n');
+    const blobId = blobOid(blobBytes);
+    const record = {
+      ...commitMetadataResponses([{ oid: commitId, body: commitBody }]),
+      [responseKey(['cat-file', '-t', '--', blobId])]: { stdout: 'blob\n' },
+      [responseKey(['cat-file', '-s', '--', blobId])]: { stdout: `${blobBytes.byteLength}\n` },
+      [responseKey(['cat-file', 'blob', '--', blobId])]: { stdoutBase64: blobBytes.toString('base64') },
+    };
+    const expected: CatFileBatchRow[][] = [
+      [{ oid: commitId, kind: 'present', type: 'commit', size: commitBody.byteLength, bytes: null }],
+      [{ oid: blobId, kind: 'present', type: 'blob', size: blobBytes.byteLength, bytes: null }],
+      [{ oid: commitId, kind: 'present', type: 'commit', size: commitBody.byteLength, bytes: commitBody }],
+      [{ oid: blobId, kind: 'present', type: 'blob', size: blobBytes.byteLength, bytes: blobBytes }],
+    ];
+    expect(withGitShim(record, (cwd) => [
+      readObjectBatch(cwd, [commitId], 'check', CODES, MALFORMED, 4_096),
+      readObjectBatch(cwd, [blobId], 'check', CODES, MALFORMED, 4_096),
+      readObjectBatch(cwd, [commitId], 'content', CODES, MALFORMED, 4_096),
+      readObjectBatch(cwd, [blobId], 'content', CODES, MALFORMED, 4_096),
+    ])).toEqual(expected);
+  });
+
+  it('refuses a requested object that has no keys', () => {
+    expectCode(() => shimBatch({}, [OID], 'check'), CODES.unavailable);
+  });
+
+  it('answers from an explicit argv key before deriving a batch', () => {
+    expect(shimBatch({
+      [responseKey(['cat-file', '-t', '--', OID])]: { stdout: 'blob\n' },
+      [responseKey(['cat-file', '-s', '--', OID])]: { stdout: '3\n' },
+      [responseKey(CHECK_ARGS)]: { stdout: `${OID} missing\n` },
+    }, [OID], 'check')).toEqual([{ oid: OID, kind: 'missing' }]);
+  });
+
+  it('answers from an argv and stdin key before the argv key and derivation', () => {
+    expect(shimBatch({
+      [responseKey(['cat-file', '-t', '--', OID])]: { stdout: 'blob\n' },
+      [responseKey(['cat-file', '-s', '--', OID])]: { stdout: '3\n' },
+      [responseKey(CHECK_ARGS)]: { stdout: `${OID} missing\n` },
+      [responseKey(CHECK_ARGS, `${OID}\n`)]: { stdout: `${OID} tree 7\n` },
+    }, [OID], 'check')).toEqual([{ oid: OID, kind: 'present', type: 'tree', size: 7, bytes: null }]);
+  });
+
+  it('answers a failed per-object type read with that response in one walk', () => {
+    const typeKey = responseKey(['cat-file', '-t', '--', OID]);
+    const record: Record<string, GitShimResponse> = {
+      [typeKey]: { stderr: 'private type failure', exit: 1 },
+    };
+    expect(resolveShimResponse(record, CHECK_ARGS, `${OID}\n`)).toBe(record[typeKey]);
+  });
+
+  it('answers a non-canonical per-object type with a frame the parser rejects', () => {
+    expectCode(() => shimBatch({
+      [responseKey(['cat-file', '-t', '--', OID])]: { stdout: 'blob' },
+    }, [OID], 'check'), MALFORMED);
+  });
+
+  it('maps a content row of another type to the per-object unavailable codes', () => {
+    const bytes = Buffer.from('blob body\n');
+    const blobId = blobOid(bytes);
+    expectCode(() => withGitShim({
+      [responseKey(['rev-parse', '--show-object-format'])]: { stdout: 'sha1\n' },
+      [responseKey(['cat-file', '-t', '--', blobId])]: { stdout: 'blob\n' },
+      [responseKey(['cat-file', '-s', '--', blobId])]: { stdout: `${bytes.byteLength}\n` },
+      [responseKey(['cat-file', 'blob', '--', blobId])]: { stdoutBase64: bytes.toString('base64') },
+      [responseKey(CONTENT_ARGS, `${blobId}\n`)]: contentRow(blobId, 'commit', bytes),
+    }, (cwd) => readExactBlobs(cwd, [blobId])), 'ci.input.blob-unavailable');
+
+    const body = rawCommitBody({ message: 'typed\n' });
+    const commitId = commitOid(body);
+    expectCode(() => withGitShim({
+      ...commitMetadataResponses([{ oid: commitId, body }]),
+      [responseKey(CONTENT_ARGS, `${commitId}\n`)]: contentRow(commitId, 'blob', body),
+    }, (cwd) => readExactCommitMetadata(cwd, [commitId])), 'ci.input.commit-metadata-unavailable');
+  });
+});
+
+describe('batch process cleanup', () => {
+  it('kills a batch process that ignores SIGTERM when the call times out', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ci-control-batch-kill-'));
+    registerTemporaryRoot(root);
+    const shimPath = join(root, 'git');
+    // A constant script: no path or environment value is written into it. It ignores
+    // SIGTERM before anything else, writes its pid relative to its working directory,
+    // and `exec` keeps that one pid with no grandchild.
+    writeFileSync(shimPath, [
+      '#!/bin/sh',
+      "trap '' TERM",
+      'echo $$ > batch-kill.pid',
+      'exec /bin/sleep 5',
+      '',
+    ].join('\n'), 'utf8');
+    chmodSync(shimPath, 0o755);
+    const priorGitPath = __setTestGitPath(shimPath);
+    let thrown: unknown;
+    const start = performance.now();
+    try {
+      readObjectBatch(root, [OID], 'check', CODES, MALFORMED, 4_096, 1_000);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      __setTestGitPath(priorGitPath);
+    }
+    const elapsed = performance.now() - start;
+    const pid = Number(readFileSync(join(root, 'batch-kill.pid'), 'utf8').trim());
+    shimPid = pid;
+    expect(thrown).toMatchObject({ code: CODES.timeout });
+    expect(elapsed).toBeLessThan(3_000);
+    let probe: unknown;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      probe = error;
+    }
+    expect(probe).toMatchObject({ code: 'ESRCH' });
+    shimPid = undefined;
+  }, 15_000);
 });
