@@ -512,7 +512,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "24cddb4aef0bdc497f4528f1d9cfdcdf1f58a880b69900be699e268c08a77869",
+      "sha256": "49820d24b454f565c172d1ceac867baf679fa4eff569e4fbdc312a50a62ee16b",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -805,7 +805,7 @@
     },
     {
       "path": "src/lib/alert-evidence.ts",
-      "sha256": "751cfb1f9bad824edb6353491dfe258735bf3f0ad8b2a3dea9ffe4451ea75bf1",
+      "sha256": "836928a23187aabb4c9b360b1cde93ce1436528ac197a98ba8b276e513eef21f",
       "mustContain": [
         "ConfinedAlertContent",
         "confineAlertContent",

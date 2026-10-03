@@ -1638,7 +1638,7 @@ describe('AgentRuntime edge coverage', () => {
     expect(state.perChatAssistantItemText.get(phoneJid)?.get('item-1')).toBe('partial');
     expect(state.resumeFailedHandling.has(phoneJid)).toBe(true);
     expect(state.pendingPolls.questions.get(phoneJid)?.chatJid).toBe(phoneJid);
-    expect(state.imageCoalesce.buffers.get(phoneJid)?.msg.chatJid).toBe(phoneJid);
+    expect(state.imageCoalesce.buffers.get(phoneJid)?.msg.chatJid).toBe(lidKey);
     expect(state.outboundQueues.get(phoneJid)).toBe(sharedQueue);
     await vi.advanceTimersByTimeAsync(3_000);
     expect(state.flushImageCoalesce).toHaveBeenCalledWith(phoneJid);

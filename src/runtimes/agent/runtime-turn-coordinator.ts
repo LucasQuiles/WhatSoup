@@ -969,8 +969,15 @@ turnFinalizationBookkeeping(
     && (event.inputTokens !== undefined || event.outputTokens !== undefined);
   if (attemptOutcome?.kind === 'admission_rejected' && context.identity.inboundSeq !== null) {
     const reason = attemptOutcome.class ?? 'unknown';
+    // A scope held by an unfinalized turn rejects every later message in the
+    // conversation. The log line always records that state. The alert token
+    // (mapped to the scope_blocked class by alert-evidence.ts) is opt-in per
+    // instance: a BOT ERRORS consumer without that class would quarantine the
+    // alert, so agentOptions.scopeBlockedAlertToken defaults off.
+    const scopeBlocked = this.host.runtimeTurnSupervisor.isDegraded(context);
+    const markScopeBlocked = scopeBlocked && config.scopeBlockedAlertToken === true;
     log.warn(
-      { inboundSeq: context.identity.inboundSeq, scope: context.identity.scope, reason },
+      { inboundSeq: context.identity.inboundSeq, scope: context.identity.scope, reason, scopeBlocked },
       'journaled agent turn rejected before dispatch — automatic replay unavailable',
     );
     // The `scope` above is the turn-scope KIND (per_chat | shared | singleton),
@@ -984,7 +991,8 @@ turnFinalizationBookkeeping(
       this.host.instanceName,
       'agent_turn_admission_rejected',
       'Journaled agent turn rejected before dispatch',
-      `inbound_seq=${context.identity.inboundSeq} reason=${reason} automatic_replay=false scope=${context.identity.scope}`,
+      `inbound_seq=${context.identity.inboundSeq} reason=${reason} automatic_replay=false scope=${context.identity.scope}`
+        + (markScopeBlocked ? ' scope_blocked=finalization' : ''),
       'warning',
       undefined,
       undefined,

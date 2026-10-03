@@ -1243,6 +1243,11 @@ export const config = {
   // gets one "queued behind the current task" notice (per-chat cooldown).
   // Default ON; `agentOptions.queuedTurnReceipt: false` turns it off.
   queuedTurnReceipt: resolvedAgentOptions['queuedTurnReceipt'] !== false,
+  // Opt-in: append scope_blocked=finalization to agent_turn_admission_rejected
+  // evidence. Default OFF: a BOT ERRORS consumer without the scope_blocked
+  // class quarantines the alert, so the owner enables it per instance only
+  // after every consumer host runs the new vocabulary (docs/configuration.md).
+  scopeBlockedAlertToken: resolvedAgentOptions['scopeBlockedAlertToken'] === true,
   // Intent→provider tier map for NL routing ('strongest'/'fastest'). Unset
   // tiers resolve to the default route honestly — never a hidden opinion.
   nlRoutingTiers: (resolvedAgentOptions['nlRoutingTiers'] ?? null) as { strongest?: string; fastest?: string } | null,
