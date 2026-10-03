@@ -57,6 +57,7 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
@@ -4614,8 +4615,12 @@ export class AgentRuntime implements Runtime {
       // trigger run (and what expires a one-shot schedule), so the occurrence
       // must have a DURABLE owner before we return it. Journaling the
       // synthetic inbound first means a crash between ack and turn start
-      // leaves a journaled 'processing' row that the W2 stuck-inbound
-      // reconciler surfaces — never a silent loss behind successful history.
+      // leaves a journaled 'processing' row that crash recovery fails —
+      // never a silent loss behind successful history. A synthetic turn owes
+      // no user a reply, so recovery does not enroll it as an operator
+      // catch-up (#3754); for SCHEDULED_TURN_LOSS_WINDOW_DAYS the loss
+      // surfaces in /health as runtime.agent.turnRecoveryScheduledTurnsLost
+      // and recovery_debt.turn_recovery.scheduled_turns_lost.
       // Per the agent_turn_admission_rejected disposition, a journaled but
       // undispatched turn is surfaced for owner resend, not auto-replayed.
       if (!this.durability) {
@@ -4628,7 +4633,7 @@ export class AgentRuntime implements Runtime {
       // #2566 slice 3 — the occurrence id suffix makes the journaled inbound
       // deterministically joinable to its trigger_occurrences row (the bare
       // trigger-id + wall-clock prefix is kept for existing consumers).
-      const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
+      const messageId = scheduledJobInboundMessageId(ctx.triggerId, now, ctx.occurrenceId);
       // A mapped @lid report chat keys under the resolved phone. The synthetic
       // message carries this exact key so the turn identity cannot re-read a
       // different one: terminal finalization rejects an inbound journaled under
