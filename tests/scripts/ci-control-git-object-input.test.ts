@@ -78,6 +78,7 @@ import {
   extractModuleSpecifiers,
   GitShimResponse,
   responseKey,
+  resolveShimResponse,
   withGitShim,
   addedLineShimResponses,
   addedFactsShimResponses,
@@ -504,9 +505,9 @@ describe('exact candidate tree entries', () => {
           stdoutBase64: body.toString('base64'),
         };
       }
-      return withMockedGitInput((_file, args) => {
+      return withMockedGitInput((_file, args, options) => {
         const key = responseKey(args.slice(1));
-        const response = responses[key];
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
         if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
         const treeMatch = key.match(/^\["cat-file","tree","--","([0-9a-f]{40})"\]$/u);
         if (treeMatch !== null) {
@@ -608,9 +609,9 @@ describe('exact candidate tree entries', () => {
         trees: new Map([[rootOid, rootBody], [childOid, childBody]]),
         objectTypes: new Map([['2'.repeat(40), 'blob']]),
       });
-      return withMockedGitInput((_file, args) => {
+      return withMockedGitInput((_file, args, options) => {
         const key = responseKey(args.slice(1));
-        const response = responses[key];
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
         if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
         return response.stdoutBase64 === undefined
           ? Buffer.from(response.stdout ?? '', 'utf8')
@@ -698,7 +699,7 @@ describe('exact candidate tree entries', () => {
       objectTypes: new Map([[leafOid, 'blob']]),
     });
     const reads = new Map<string, number>();
-    await withMockedGitInput((_file, args) => {
+    await withMockedGitInput((_file, args, options) => {
       const key = responseKey(args.slice(1));
       if (key === responseKey(['cat-file', 'tree', '--', childOid])) {
         const count = (reads.get(childOid) ?? 0) + 1;
@@ -708,7 +709,7 @@ describe('exact candidate tree entries', () => {
       if (key === responseKey(['cat-file', 'tree', '--', rootOid])) {
         reads.set(rootOid, (reads.get(rootOid) ?? 0) + 1);
       }
-      const response = responses[key];
+      const response = resolveShimResponse(responses, args.slice(1), options?.input);
       if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
       return response.stdoutBase64 === undefined
         ? Buffer.from(response.stdout ?? '', 'utf8')
@@ -1583,22 +1584,25 @@ describe('exact commit metadata', () => {
     expect(secondBody.byteLength).toBe(firstBody.byteLength);
     const oid = commitOid(firstBody);
     let bodyReads = 0;
+    const CHECK_ARGS = ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'];
+    const BATCH_ARGS = ['cat-file', '--batch'];
+    const batchInputs: string[] = [];
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
-      execFileSync: (_file: string, rawArgs: string[]) => {
+      execFileSync: (_file: string, rawArgs: string[], options?: { input?: Buffer | string }) => {
         const args = rawArgs.slice(1);
         if (responseKey(args) === responseKey(['rev-parse', '--show-object-format'])) {
           return Buffer.from('sha1\n');
         }
-        if (responseKey(args) === responseKey(['cat-file', '-t', '--', oid])) {
-          return Buffer.from('commit\n');
+        if (responseKey(args) === responseKey(CHECK_ARGS)) {
+          batchInputs.push(String(options?.input));
+          return Buffer.from(`${oid} commit ${firstBody.byteLength}\n`);
         }
-        if (responseKey(args) === responseKey(['cat-file', '-s', '--', oid])) {
-          return Buffer.from(`${firstBody.byteLength}\n`);
-        }
-        if (responseKey(args) === responseKey(['cat-file', 'commit', '--', oid])) {
+        if (responseKey(args) === responseKey(BATCH_ARGS)) {
+          batchInputs.push(String(options?.input));
           bodyReads += 1;
-          return bodyReads === 1 ? firstBody : secondBody;
+          const body = bodyReads === 1 ? firstBody : secondBody; // same length, same framed header
+          return Buffer.concat([Buffer.from(`${oid} commit ${body.byteLength}\n`), body, Buffer.from('\n')]);
         }
         throw new Error('unexpected synthetic command');
       },
@@ -1615,6 +1619,7 @@ describe('exact commit metadata', () => {
       expect(String(thrown)).not.toContain('private first body');
       expect(String(thrown)).not.toContain('private other body');
       expect(bodyReads).toBe(2);
+      expect(batchInputs).toEqual([`${oid}\n`, `${oid}\n`, `${oid}\n`]);
     } finally {
       vi.doUnmock('node:child_process');
       vi.resetModules();

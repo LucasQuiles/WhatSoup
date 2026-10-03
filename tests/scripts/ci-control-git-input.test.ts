@@ -74,6 +74,8 @@ import {
   extractModuleSpecifiers,
   GitShimResponse,
   responseKey,
+  resolveShimResponse,
+  contentBatchOids,
   withGitShim,
   addedLineShimScenario,
   addedFactsShimScenario,
@@ -505,10 +507,14 @@ describe('exact added lines', () => {
     let diffExecutions = 0;
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
-      execFileSync: (_file: string, args: string[]) => {
+      execFileSync: (
+        _file: string,
+        args: string[],
+        options?: { input?: string | NodeJS.ArrayBufferView },
+      ) => {
         const key = responseKey(args.slice(1));
         if (key === diffKey) diffExecutions += 1;
-        const response = responses[key];
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
         if (response === undefined) throw new Error('unexpected synthetic command');
         if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
         return Buffer.from(response.stdout ?? '', 'utf8');
@@ -742,10 +748,14 @@ describe('exact added lines', () => {
     ): Promise<void> => {
       vi.resetModules();
       vi.doMock('node:child_process', () => ({
-        execFileSync: (_file: string, args: string[]) => {
+        execFileSync: (
+          _file: string,
+          args: string[],
+          options?: { input?: string | NodeJS.ArrayBufferView },
+        ) => {
           const key = responseKey(args.slice(1));
           if (key === diffKey) throw failure;
-          const response = responses[key];
+          const response = resolveShimResponse(responses, args.slice(1), options?.input);
           if (response === undefined) throw new Error('unexpected synthetic command');
           if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
           return Buffer.from(response.stdout ?? '', 'utf8');
@@ -816,16 +826,25 @@ describe('exact added lines', () => {
       'safe.txt', oldBytes, newBytes, patch,
     );
     const changedKey = responseKey(['cat-file', 'blob', '--', newOid]);
+    const substituted = { ...responses, [changedKey]: { stdout: 'bad\n' } };
     let changedReads = 0;
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
-      execFileSync: (_file: string, args: string[]) => {
+      execFileSync: (
+        _file: string,
+        args: string[],
+        options?: { input?: string | NodeJS.ArrayBufferView },
+      ) => {
         const key = responseKey(args.slice(1));
-        if (key === changedKey) {
+        // The second content read of newOid, alone or in a batch, sees changed bytes.
+        if (key === changedKey || contentBatchOids(args.slice(1), options?.input).includes(newOid)) {
           changedReads += 1;
-          return changedReads === 1 ? newBytes : Buffer.from('bad\n');
         }
-        const response = responses[key];
+        const response = resolveShimResponse(
+          changedReads >= 2 ? substituted : responses,
+          args.slice(1),
+          options?.input,
+        );
         if (response === undefined) throw new Error('unexpected synthetic command');
         if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
         return Buffer.from(response.stdout ?? '', 'utf8');
@@ -882,13 +901,17 @@ describe('exact added lines', () => {
     let treeReads = 0;
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
-      execFileSync: (_file: string, args: string[]) => {
+      execFileSync: (
+        _file: string,
+        args: string[],
+        options?: { input?: string | NodeJS.ArrayBufferView },
+      ) => {
         const key = responseKey(args.slice(1));
         if (key === candidateTreeKey) {
           treeReads += 1;
           return treeReads === 1 ? originalTree : substitutedTree;
         }
-        const response = responses[key];
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
         if (response === undefined) throw new Error('unexpected synthetic command');
         if (response.stdoutBase64 !== undefined) return Buffer.from(response.stdoutBase64, 'base64');
         return Buffer.from(response.stdout ?? '', 'utf8');
@@ -1106,8 +1129,12 @@ describe('exact added lines', () => {
 
       vi.resetModules();
       vi.doMock('node:child_process', () => ({
-        execFileSync: (_file: string, args: string[], options: { maxBuffer: number }) => {
-          const response = scenario.responses[responseKey(args.slice(1))];
+        execFileSync: (
+          _file: string,
+          args: string[],
+          options: { maxBuffer: number; input?: string | NodeJS.ArrayBufferView },
+        ) => {
+          const response = resolveShimResponse(scenario.responses, args.slice(1), options.input);
           if (response === undefined) throw new Error('unexpected synthetic command');
           const output = response.stdoutBase64 !== undefined
             ? Buffer.from(response.stdoutBase64, 'base64')
@@ -1592,18 +1619,29 @@ describe('exact added lines', () => {
     const { baseOid, candidateOid, responses } = addedLineShimScenario(
       'safe.txt', oldBytes, newBytes, patch,
     );
+    const substituted = {
+      ...responses,
+      [responseKey(['cat-file', 'blob', '--', newOid])]: { stdout: 'bad\n' },
+    };
     const bodyReads = new Map<string, number>();
-    const run = (substituteTerminal: boolean) => withMockedGitInput((_file, args) => {
+    const run = (substituteTerminal: boolean) => withMockedGitInput((_file, args, options) => {
       const key = responseKey(args.slice(1));
-      const bodyOid = key === responseKey(['cat-file', 'blob', '--', oldOid])
-        ? oldOid
-        : key === responseKey(['cat-file', 'blob', '--', newOid]) ? newOid : null;
-      if (bodyOid !== null) {
+      // Content reads of either blob, alone or in a batch; the check batch is not one.
+      const bodyOids = [oldOid, newOid].filter((oid) => (
+        key === responseKey(['cat-file', 'blob', '--', oid])
+        || contentBatchOids(args.slice(1), options?.input).includes(oid)
+      ));
+      let substitute = false;
+      for (const bodyOid of bodyOids) {
         const count = (bodyReads.get(bodyOid) ?? 0) + 1;
         bodyReads.set(bodyOid, count);
-        if (substituteTerminal && bodyOid === newOid && count === 2) return Buffer.from('bad\n');
+        if (substituteTerminal && bodyOid === newOid && count === 2) substitute = true;
       }
-      const response = responses[key];
+      const response = resolveShimResponse(
+        substitute ? substituted : responses,
+        args.slice(1),
+        options?.input,
+      );
       if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
       return response.stdoutBase64 === undefined
         ? Buffer.from(response.stdout ?? '', 'utf8')
