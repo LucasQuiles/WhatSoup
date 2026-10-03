@@ -1874,7 +1874,8 @@ above. The compatibility `continuity` block remains available:
       "blocking_outstanding": 0,
       "retained_terminal": 0,
       "open_catchups": 0,
-      "corroborated_retained": 0
+      "corroborated_retained": 0,
+      "scheduled_turns_lost": 0
     },
     "completed_delivery_identity": {
       "readable": true,
@@ -1924,6 +1925,10 @@ consumers.
 gauge that contributes to `service_blocking`. A fresh uncorroborated ambiguity remains routine debt
 until its dwell threshold expires. Fleet and console summaries call their numeric value an aggregate
 gauge total because category gauges can overlap and are not a count of distinct obligations.
+`turn_recovery.scheduled_turns_lost` (#3754) counts scheduled agent-job turns failed by crash recovery
+in the last 7 days. It is additive visibility owed to no user: it never sets `open`, `attention` or a
+reason, consumers do not add it to the aggregate gauge total, and it is `null` when the runtime did not
+report a valid count.
 
 If the ledger or a closure row cannot be read exactly (malformed, orphaned, duplicated, conflicting
 with its plan, or missing its append-only guards), health reports
@@ -2294,9 +2299,12 @@ nothing applied; `3` the close WAS applied and committed (stdout carries `applie
 row) but its audit receipt could not be appended — do not re-run; record the close from stdout.
 
 Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are already `failed` and
-parked behind `recovery_pending_operator_catchup` disposition links (for example synthetic scheduled-job
-inbounds reclaimed by crash recovery). Some such links have no catch-up target and currently cannot be
-closed by any tool.
+parked behind `recovery_pending_operator_catchup` disposition links. Some such links have no catch-up
+target and currently cannot be closed by any tool. Since #3754 crash recovery no longer enrolls synthetic
+scheduled-job (`agentjob-*`) inbounds; links enrolled before then remain as append-only receipts, counted
+in `runtime.agent.turnRecoveryOpenRecoveriesSynthetic` rather than as user-facing open catch-ups, and a
+newly reclaimed scheduled turn is counted in `recovery_debt.turn_recovery.scheduled_turns_lost` (7-day
+window, visibility only).
 
 #### Settle an orphan recovery transfer
 
@@ -2727,7 +2735,7 @@ machine-readable disposition registry for sources that participate in fault clas
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
 | `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
-| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals other than operator `/stop` cancellations (`operator_cancelled`), and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
+| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates other than synthetic scheduled-job (`agentjob-*`) marks, which are reported as `syntheticContinuityCandidates` and never debt; failed terminals other than operator `/stop` cancellations (`operator_cancelled`); and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
 | `reply-guarantee-observer` | `deploy/scripts/reply-guarantee-observer.py` | Probe authority, target-user/GUI context, canonical data root, schema compatibility, and read-only SQLite access |
 | `release-drift` | `scripts/live-release-drift-alert.ts` through `scripts/live-release-observers.ts` | Release manifest, artifact tree, and running service provenance |
 | `release-currency` | `scripts/live-release-currency-alert.ts` through `scripts/live-release-observers.ts` | Exact deployed manifest commit and explicitly configured remote ref; differing commits are advisory and never alter runtime health |
