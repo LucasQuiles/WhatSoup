@@ -1138,10 +1138,13 @@ export function readExactCommitMetadata(
   const oids = validateCommitMetadataOids(commitOids);
   requireCommitMetadataSha1(cwd);
   const preflight = preflightCommitMetadata(cwd, oids);
-  const bodies = readCommitMetadataBodies(cwd, preflight);
+  // Each row is checked, then identity-checked and parsed, before the next row,
+  // in the per-object reads' order. Only a failed batch comes first.
+  const rows = readCommitMetadataBodies(cwd, preflight);
+  const bodies: Buffer[] = [];
   const metadata: ExactCommitMetadataV1[] = [];
   for (const [index, item] of preflight.entries()) {
-    const bytes = bodies[index]!;
+    const bytes = commitMetadataRowBytes(rows[index]!);
     const identity = createHash("sha1")
       .update(`commit ${item.byteLength}\0`)
       .update(bytes)
@@ -1149,12 +1152,14 @@ export function readExactCommitMetadata(
     if (bytes.byteLength !== item.byteLength || identity !== item.oid) {
       throw commitMetadataError("ci.input.commit-metadata-identity-mismatch");
     }
+    bodies.push(bytes);
     metadata.push(parseCommitMetadataBody(item.oid, bytes));
   }
   // A second, separate process re-reads every body. The re-read is not hashed
   // again, so this byte comparison is what rejects a substituted body.
   const rereads = readCommitMetadataBodies(cwd, preflight);
-  for (const [index, reread] of rereads.entries()) {
+  for (const [index, row] of rereads.entries()) {
+    const reread = commitMetadataRowBytes(row);
     if (!reread.equals(bodies[index]!)) {
       throw commitMetadataError("ci.input.commit-metadata-identity-mismatch");
     }
@@ -1162,11 +1167,12 @@ export function readExactCommitMetadata(
   return metadata;
 }
 
+/** One content batch for every commit. Rows come back unchecked, in input order. */
 function readCommitMetadataBodies(
   cwd: string,
   preflight: readonly CommitMetadataPreflight[],
-): Buffer[] {
-  const rows = readObjectBatch(
+): CatFileBatchRow[] {
+  return readObjectBatch(
     cwd,
     preflight.map((item) => item.oid),
     "content",
@@ -1174,13 +1180,14 @@ function readCommitMetadataBodies(
     "ci.input.commit-metadata-malformed",
     preflight.reduce((total, item) => total + item.byteLength + 128, 1_024),
   );
-  return rows.map((row) => {
-    // `cat-file commit` failed on a missing object or another type; so does this.
-    if (row.kind === "missing" || row.type !== "commit" || row.bytes === null) {
-      throw commitMetadataError("ci.input.commit-metadata-unavailable");
-    }
-    return row.bytes;
-  });
+}
+
+function commitMetadataRowBytes(row: CatFileBatchRow): Buffer {
+  // `cat-file commit` failed on a missing object or another type; so does this.
+  if (row.kind === "missing" || row.type !== "commit" || row.bytes === null) {
+    throw commitMetadataError("ci.input.commit-metadata-unavailable");
+  }
+  return row.bytes;
 }
 
 interface ParsedRawTreeEntry {
