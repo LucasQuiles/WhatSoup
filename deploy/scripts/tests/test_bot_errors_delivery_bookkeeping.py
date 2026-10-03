@@ -378,14 +378,19 @@ def _page(bench: _Bench, kind: str) -> tuple[str, dict[str, Any]]:
     return key, event
 
 
-def _assert_no_bookkeeping(before: dict[str, Any], after: dict[str, Any]) -> None:
-    for field in BOOKKEEPING:
-        assert (field in after) == (field in before), f"a failed page changed whether {field} exists"
-        assert after.get(field) == before.get(field), f"a failed page changed {field}"
+def _bookkeeping_changed(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """The BOOKKEEPING fields whose presence or value differs between `before` and `after`."""
+    return [field for field in BOOKKEEPING
+            if (field in after) != (field in before) or after.get(field) != before.get(field)]
 
 
-def _failed_page(tmp_path: Path, kind: str, exit_: str, *, adopted: bool = True) -> tuple[_Bench, str, Path]:
-    """One failed page of `kind` on `exit_`; asserts the reloaded record carries no bookkeeping."""
+def _failed_page(tmp_path: Path, kind: str, exit_: str, *,
+                 adopted: bool = True) -> tuple[_Bench, str, Path, dict[str, Any]]:
+    """One failed page of `kind` on `exit_`, and what the pass left on the reloaded record.
+
+    The observation holds the BOOKKEEPING fields the pass changed, whether the intervening event changed the
+    test key's record (None when the pass has no intervening event), and the record's lastSeenAt.
+    """
     bench = _Bench(tmp_path, adopted=adopted)
     key, event = _page(bench, kind)
     if exit_ == "dead_letter":
@@ -398,23 +403,25 @@ def _failed_page(tmp_path: Path, kind: str, exit_: str, *, adopted: bool = True)
     if intervening:
         steps.append((bench.put(_daily_health("evt-daily-1")), "ok"))
     bench.cycle(*steps)
-    if intervening:
-        assert bench.step_records[1].get(key) == bench.step_records[0].get(key), (
-            "the intervening event must leave the test key's record unchanged"
-        )
     after = bench.record(key)
-    _assert_no_bookkeeping(before, after)
-    if intervening or exit_ == "dead_letter":
-        assert after.get("lastSeenAt") == T0, "the failed pass's refresh must be durable"
-    return bench, key, path
+    observed = {
+        "bookkeepingChanged": _bookkeeping_changed(before, after),
+        "interveningChangedRecord": (
+            bench.step_records[1].get(key) != bench.step_records[0].get(key) if intervening else None
+        ),
+        "lastSeenAt": after.get("lastSeenAt"),
+    }
+    return bench, key, path, observed
 
 
-def _retry_sends(bench: _Bench, path: Path, exit_: str) -> None:
+def _retry(bench: _Bench, path: Path, exit_: str) -> dict[str, Any]:
+    """Run the page's retry at its own backoff; returns whether it was due and how many pages were delivered."""
     bench.clock.now = T0 + (60 if exit_ == "retry" else 300)
     requeued = bench.queued(path)
-    assert bench.ready(requeued), "the retry must be due at its own backoff"
-    bench.cycle((requeued, "ok"))
-    assert len(bench.delivered) == 1, "the retry must send the page"
+    due = bench.ready(requeued)
+    if due:
+        bench.cycle((requeued, "ok"))
+    return {"due": due, "delivered": len(bench.delivered)}
 
 
 def _deliver(bench: _Bench, event: dict[str, Any], outcome: str = "ok") -> Path:
@@ -458,82 +465,99 @@ def _committed_then_rewritten(bench: _Bench, *, seq: int = 0, nonces: list[str] 
     return key, claimed
 
 
-def _assert_expired(bench: _Bench, key: str, count: int) -> None:
-    assert bench.record(key).get("renotifyCount") == count
-    assert bench.state().get("terminalReplayExpiredCount") == 1
-    assert len(bench.log_records("terminal_replay_expired")) == 1
+def _expiry(bench: _Bench, key: str) -> dict[str, Any]:
+    """What a replay left: the record's renotifyCount, terminalReplayExpiredCount, and its expiry log records."""
+    return {
+        "renotifyCount": bench.record(key).get("renotifyCount"),
+        "expiredCount": bench.state().get("terminalReplayExpiredCount"),
+        "expiredLogs": len(bench.log_records("terminal_replay_expired")),
+    }
 
 
 # --- a failed page records nothing; its retry sends -------------------------------------------
 
 
 def test_a_renotify_that_fails_records_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "renotify", "retry")
-    _retry_sends(bench, path, "retry")
+    bench, _key, path, page = _failed_page(tmp_path, "renotify", "retry")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
+    assert _retry(bench, path, "retry") == {"due": True, "delivered": 1}
 
 
 def test_a_renotify_deferred_by_transport_records_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "renotify", "transient")
-    _retry_sends(bench, path, "transient")
+    bench, _key, path, page = _failed_page(tmp_path, "renotify", "transient")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
+    assert _retry(bench, path, "transient") == {"due": True, "delivered": 1}
 
 
 def test_a_dead_lettered_renotify_records_nothing_but_keeps_the_refresh(tmp_path):
-    bench, _key, _path = _failed_page(tmp_path, "renotify", "dead_letter")
+    bench, _key, _path, page = _failed_page(tmp_path, "renotify", "dead_letter")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     assert list(bench.paths["dead_letter"].glob("*")), "the page must be dead-lettered"
 
 
 def test_a_force_notify_that_fails_records_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "force", "retry")
-    _retry_sends(bench, path, "retry")
+    bench, _key, path, page = _failed_page(tmp_path, "force", "retry")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
+    assert _retry(bench, path, "retry") == {"due": True, "delivered": 1}
 
 
 def test_a_force_notify_deferred_by_transport_records_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "force", "transient")
-    _retry_sends(bench, path, "transient")
+    bench, _key, path, page = _failed_page(tmp_path, "force", "transient")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
+    assert _retry(bench, path, "transient") == {"due": True, "delivered": 1}
 
 
 def test_a_dead_lettered_force_notify_records_nothing_but_keeps_the_refresh(tmp_path):
-    bench, _key, _path = _failed_page(tmp_path, "force", "dead_letter")
+    bench, _key, _path, page = _failed_page(tmp_path, "force", "dead_letter")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     assert list(bench.paths["dead_letter"].glob("*")), "the page must be dead-lettered"
 
 
 def test_an_announcement_that_fails_records_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "announce", "retry")
-    _retry_sends(bench, path, "retry")
+    bench, _key, path, page = _failed_page(tmp_path, "announce", "retry")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
+    assert _retry(bench, path, "retry") == {"due": True, "delivered": 1}
 
 
 def test_an_announcement_deferred_by_transport_records_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "announce", "transient")
-    _retry_sends(bench, path, "transient")
+    bench, _key, path, page = _failed_page(tmp_path, "announce", "transient")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
+    assert _retry(bench, path, "transient") == {"due": True, "delivered": 1}
 
 
 def test_a_dead_lettered_announcement_records_nothing_but_keeps_the_refresh(tmp_path):
-    bench, _key, _path = _failed_page(tmp_path, "announce", "dead_letter")
+    bench, _key, _path, page = _failed_page(tmp_path, "announce", "dead_letter")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     assert list(bench.paths["dead_letter"].glob("*")), "the page must be dead-lettered"
 
 
 def test_pin_without_a_cycle_a_failed_renotify_saves_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "renotify", "retry", adopted=False)
-    _retry_sends(bench, path, "retry")
+    bench, _key, path, page = _failed_page(tmp_path, "renotify", "retry", adopted=False)
+    assert page["bookkeepingChanged"] == []
+    assert _retry(bench, path, "retry") == {"due": True, "delivered": 1}
 
 
 def test_pin_without_a_cycle_a_deferred_renotify_saves_nothing_and_its_retry_sends(tmp_path):
-    bench, _key, path = _failed_page(tmp_path, "renotify", "transient", adopted=False)
-    _retry_sends(bench, path, "transient")
+    bench, _key, path, page = _failed_page(tmp_path, "renotify", "transient", adopted=False)
+    assert page["bookkeepingChanged"] == []
+    assert _retry(bench, path, "transient") == {"due": True, "delivered": 1}
 
 
 def test_without_a_cycle_a_dead_lettered_renotify_saves_only_the_refresh(tmp_path):
-    bench, _key, _path = _failed_page(tmp_path, "renotify", "dead_letter", adopted=False)
+    bench, _key, _path, page = _failed_page(tmp_path, "renotify", "dead_letter", adopted=False)
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     assert list(bench.paths["dead_letter"].glob("*")), "the page must be dead-lettered"
 
 
 def test_without_a_cycle_a_dead_lettered_force_notify_saves_only_the_refresh(tmp_path):
-    bench, _key, _path = _failed_page(tmp_path, "force", "dead_letter", adopted=False)
+    bench, _key, _path, page = _failed_page(tmp_path, "force", "dead_letter", adopted=False)
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     assert list(bench.paths["dead_letter"].glob("*")), "the page must be dead-lettered"
 
 
 def test_without_a_cycle_a_dead_lettered_announcement_saves_only_the_refresh(tmp_path):
-    bench, _key, _path = _failed_page(tmp_path, "announce", "dead_letter", adopted=False)
+    bench, _key, _path, page = _failed_page(tmp_path, "announce", "dead_letter", adopted=False)
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     assert list(bench.paths["dead_letter"].glob("*")), "the page must be dead-lettered"
 
 
@@ -706,7 +730,7 @@ def test_a_committed_renotify_evicted_by_256_later_deliveries_expires(tmp_path):
     _seed_later_deliveries(bench, 255)
     before = bench.record(key)
     bench.replay()
-    _assert_expired(bench, key, 2)
+    assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}
     after = bench.record(key)
     for field in ("lastNotifiedAt", "renotifyIntervalSeconds", "eventId"):
         assert after.get(field) == before.get(field), f"an expired replay changed {field}"
@@ -744,7 +768,7 @@ def test_a_committed_renotify_expires_when_the_nonce_list_is_malformed(tmp_path)
     payload["deliveredSendNonces"] = "not-a-list"
     bench.seed(payload)
     bench.replay()
-    _assert_expired(bench, key, 2)
+    assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}
 
 
 def test_a_committed_renotify_expires_when_the_sequence_is_malformed(tmp_path):
@@ -755,7 +779,7 @@ def test_a_committed_renotify_expires_when_the_sequence_is_malformed(tmp_path):
     payload["deliverySeq"] = True
     bench.seed(payload)
     bench.replay()
-    _assert_expired(bench, key, 2)
+    assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}
 
 
 def test_a_committed_renotify_expires_after_the_state_was_reinitialised(tmp_path):
@@ -767,7 +791,7 @@ def test_a_committed_renotify_expires_after_the_state_was_reinitialised(tmp_path
     _deliver(bench, _alert("evt-other", source="disk_full"))
     assert bench.state().get("deliveryEpoch") != EPOCH, "the next mint must start a new epoch"
     bench.replay()
-    _assert_expired(bench, key, 2)
+    assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}
 
 
 def test_a_committed_renotify_expires_when_the_list_was_truncated(tmp_path):
@@ -779,7 +803,7 @@ def test_a_committed_renotify_expires_when_the_list_was_truncated(tmp_path):
     payload["deliveredSendNonces"] = []
     bench.seed(payload)
     bench.replay()
-    _assert_expired(bench, key, 2)
+    assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}
 
 
 def test_a_committed_renotify_with_a_partial_replay_identity_expires(tmp_path):
@@ -793,7 +817,7 @@ def test_a_committed_renotify_with_a_partial_replay_identity_expires(tmp_path):
         _seed_later_deliveries(bench, 255)
         bench.edit_delivery(claimed, edit)
         bench.replay()
-        _assert_expired(bench, key, 2)
+        assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}, name
 
 
 def test_a_committed_renotify_without_a_valid_nonce_expires(tmp_path):
@@ -803,7 +827,7 @@ def test_a_committed_renotify_without_a_valid_nonce_expires(tmp_path):
         key, claimed = _committed_then_rewritten(bench)
         bench.edit_delivery(claimed, edit)
         bench.replay()
-        _assert_expired(bench, key, 2)
+        assert _expiry(bench, key) == {"renotifyCount": 2, "expiredCount": 1, "expiredLogs": 1}, name
 
 
 def test_an_uncommitted_renotify_ten_deliveries_behind_applies(tmp_path):
@@ -819,8 +843,12 @@ def test_an_uncommitted_renotify_ten_deliveries_behind_applies(tmp_path):
     assert "terminalReplayExpiredCount" not in bench.state()
 
 
-def _clear_replayed(tmp_path: Path, prepare) -> None:
-    """A clear delivered and lost to a crash before its commit, replayed after `prepare` ran."""
+def _clear_replayed(tmp_path: Path, prepare) -> dict[str, bool]:
+    """A clear delivered and lost to a crash before its commit, replayed after `prepare` ran.
+
+    Returns what the replay left: whether the incident is still open and still has a lastSentAt entry, whether
+    deliverySeq and deliveredSendNonces kept their values from before the replay, and whether an expiry was counted.
+    """
     bench = _Bench(tmp_path)
     alert = _alert("evt-opening")
     key = bench.mod.incident_key(alert)
@@ -831,11 +859,13 @@ def _clear_replayed(tmp_path: Path, prepare) -> None:
     before = bench.state()
     bench.replay()
     after = bench.state()
-    assert key not in (after.get("openIncidents") or {}), "a replayed clear must close its incident"
-    assert key not in (after.get("lastSentAt") or {})
-    assert after.get("deliverySeq") == before.get("deliverySeq")
-    assert after.get("deliveredSendNonces") == before.get("deliveredSendNonces")
-    assert "terminalReplayExpiredCount" not in after
+    return {
+        "open": key in (after.get("openIncidents") or {}),
+        "lastSentAt": key in (after.get("lastSentAt") or {}),
+        "deliverySeqKept": after.get("deliverySeq") == before.get("deliverySeq"),
+        "noncesKept": after.get("deliveredSendNonces") == before.get("deliveredSendNonces"),
+        "expiryCounted": "terminalReplayExpiredCount" in after,
+    }
 
 
 def _make_list_malformed(bench: _Bench) -> None:
@@ -845,7 +875,9 @@ def _make_list_malformed(bench: _Bench) -> None:
 
 
 def test_pin_a_clear_replayed_beyond_the_horizon_still_closes_its_incident(tmp_path):
-    _clear_replayed(tmp_path, lambda bench: _seed_later_deliveries(bench, 256))
+    replayed = _clear_replayed(tmp_path, lambda bench: _seed_later_deliveries(bench, 256))
+    assert replayed == {"open": False, "lastSentAt": False, "deliverySeqKept": True, "noncesKept": True,
+                        "expiryCounted": False}, "a replayed clear must close its incident and change nothing else"
 
 
 def test_pin_a_clear_replayed_into_a_new_epoch_still_closes_its_incident(tmp_path):
@@ -853,11 +885,15 @@ def test_pin_a_clear_replayed_into_a_new_epoch_still_closes_its_incident(tmp_pat
         _make_list_malformed(bench)
         _deliver(bench, _alert("evt-other", source="disk_full"))
 
-    _clear_replayed(tmp_path, reinitialise)
+    replayed = _clear_replayed(tmp_path, reinitialise)
+    assert replayed == {"open": False, "lastSentAt": False, "deliverySeqKept": True, "noncesKept": True,
+                        "expiryCounted": False}, "a replayed clear must close its incident and change nothing else"
 
 
 def test_pin_a_clear_replayed_with_a_malformed_list_still_closes_its_incident(tmp_path):
-    _clear_replayed(tmp_path, _make_list_malformed)
+    replayed = _clear_replayed(tmp_path, _make_list_malformed)
+    assert replayed == {"open": False, "lastSentAt": False, "deliverySeqKept": True, "noncesKept": True,
+                        "expiryCounted": False}, "a replayed clear must close its incident and change nothing else"
 
 
 def test_an_expired_replay_still_records_its_conversation(tmp_path):
@@ -899,7 +935,8 @@ def test_a_requeued_renotify_carries_a_pending_announcement_and_not_its_old_inte
 
 
 def test_a_failed_announcement_is_carried_by_the_retry_and_stamped_once(tmp_path):
-    bench, key, path = _failed_page(tmp_path, "announce", "retry")
+    bench, key, path, page = _failed_page(tmp_path, "announce", "retry")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": False, "lastSeenAt": T0}
     bench.clock.now = T0 + 60
     bench.cycle((bench.queued(path), "ok"))
     record = bench.record(key)
@@ -984,7 +1021,8 @@ def test_a_transition_made_during_delivery_is_announced_by_that_delivery(tmp_pat
 
 
 def test_a_dead_lettered_announcement_is_carried_by_the_next_candidate(tmp_path):
-    bench, key, _path = _failed_page(tmp_path, "announce", "dead_letter")
+    bench, key, _path, page = _failed_page(tmp_path, "announce", "dead_letter")
+    assert page == {"bookkeepingChanged": [], "interveningChangedRecord": None, "lastSeenAt": T0}
     bench.clock.now = T0 + 60
     _deliver(bench, _physical_alert("evt-physical-3"))
     record = bench.record(key)
@@ -1129,7 +1167,7 @@ def test_a_held_page_records_nothing_and_the_next_event_is_sent(tmp_path):
     before = bench.record(key)
     bench.cycle((path, "ambiguous"), (bench.put(_daily_health("evt-daily-1")), "ok"))
     state = bench.state()
-    _assert_no_bookkeeping(before, bench.record(key))
+    assert _bookkeeping_changed(before, bench.record(key)) == [], "a held page must record no bookkeeping"
     held = sorted(bench.paths["processing"].glob("*.processing"))
     assert len(held) == 1, "the held record stays in processing/"
     held_nonce = json.loads(held[0].read_text(encoding="utf-8"))["delivery"].get("nonce")
