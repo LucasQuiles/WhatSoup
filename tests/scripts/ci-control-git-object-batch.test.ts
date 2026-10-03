@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -128,14 +128,16 @@ const OID = 'a'.repeat(40);
 const OTHER_OID = 'b'.repeat(40);
 
 /** One `--batch` row framed with the body's true length. */
+function contentFrame(oid: string, type: string, body: Buffer): Buffer {
+  return Buffer.concat([
+    Buffer.from(`${oid} ${type} ${body.byteLength}\n`, 'latin1'),
+    body,
+    Buffer.from('\n'),
+  ]);
+}
+
 function contentRow(oid: string, type: string, body: Buffer): GitShimResponse {
-  return {
-    stdoutBase64: Buffer.concat([
-      Buffer.from(`${oid} ${type} ${body.byteLength}\n`, 'latin1'),
-      body,
-      Buffer.from('\n'),
-    ]).toString('base64'),
-  };
+  return { stdoutBase64: contentFrame(oid, type, body).toString('base64') };
 }
 
 function shimBatch(
@@ -173,6 +175,36 @@ async function withCountedSpawns(
     vi.doUnmock('node:child_process');
     vi.resetModules();
   }
+}
+
+/**
+ * Read commits through fixed batch output: the object format, one check batch, then each
+ * content batch in call order. Returns the error the reader throws, or its result.
+ */
+async function readCommitsThroughBatches(
+  oids: readonly string[],
+  check: string,
+  contents: readonly Buffer[],
+): Promise<{ outcome: unknown; contentReads: number }> {
+  const formatCall = JSON.stringify(['rev-parse', '--show-object-format']);
+  let contentReads = 0;
+  const outcome = await withMockedGitInput<unknown>((_file, args) => {
+    const call = JSON.stringify(args.slice(1));
+    if (call === formatCall) return Buffer.from('sha1\n');
+    if (call === JSON.stringify(CHECK_ARGS)) return Buffer.from(check);
+    if (call === JSON.stringify(CONTENT_ARGS) && contentReads < contents.length) {
+      contentReads += 1;
+      return contents[contentReads - 1]!;
+    }
+    throw new Error(`unexpected synthetic command: ${call}`);
+  }, (isolated) => {
+    try {
+      return isolated.readExactCommitMetadata('/isolated-fixture', oids);
+    } catch (error) {
+      return error;
+    }
+  });
+  return { outcome, contentReads };
 }
 
 describe('exact object reads through cat-file batches', () => {
@@ -312,6 +344,55 @@ describe('readObjectBatch and parseCatFileBatch', () => {
     );
   });
 
+  it('rejects a canonical size above the largest safe integer', () => {
+    const unsafeSize = (2n ** 53n + 1n).toString();
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob ${unsafeSize}\n`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('rejects an ambiguous or short echoed id', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} ambiguous\n`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID.slice(0, 7)} blob 3\n`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('rejects an unknown type token', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} note 3\n`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+  });
+
+  it('reads a missing row in content mode without consuming a body', () => {
+    expect(parseCatFileBatch(
+      Buffer.from(`${OID} missing\n${OTHER_OID} blob 3\nabc\n`),
+      [OID, OTHER_OID],
+      'content',
+      MALFORMED,
+    )).toEqual([
+      { oid: OID, kind: 'missing' },
+      { oid: OTHER_OID, kind: 'present', type: 'blob', size: 3, bytes: Buffer.from('abc') },
+    ]);
+  });
+
+  it('rejects a CR in the header line', () => {
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\r\n`), [OID], 'check', MALFORMED),
+      MALFORMED,
+    );
+    expectCode(
+      () => parseCatFileBatch(Buffer.from(`${OID} blob 3\r\nabc\n`), [OID], 'content', MALFORMED),
+      MALFORMED,
+    );
+  });
+
   it('refuses an id that is not 40 lowercase hex digits before starting any process', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'ci-control-batch-input-'));
     registerTemporaryRoot(cwd);
@@ -430,6 +511,61 @@ describe('readObjectBatch and parseCatFileBatch', () => {
   });
 });
 
+describe('error order in batched commit reads', () => {
+  // A batch returns every row at once. Each row is still checked, then identity-checked
+  // and parsed or compared, before the next row, as the per-object reads did.
+  it('reports an earlier commit error before a later unavailable row in the content read', async () => {
+    const malformed = Buffer.from('not a commit\n');
+    const valid = rawCommitBody({ message: 'valid\n' });
+    // Same length, one byte different: the identity check fails.
+    const changed = Buffer.from(valid);
+    changed[0] = 0x54;
+    const later = { missing: `${MISSING_OID} missing\n`, blob: `${MISSING_OID} blob 3\nabc\n` };
+    for (const { earlierOid, earlierBody, laterRow, code } of [
+      { earlierOid: commitOid(malformed), earlierBody: malformed, laterRow: later.missing,
+        code: 'ci.input.commit-metadata-malformed' },
+      { earlierOid: commitOid(valid), earlierBody: changed, laterRow: later.missing,
+        code: 'ci.input.commit-metadata-identity-mismatch' },
+      { earlierOid: commitOid(malformed), earlierBody: malformed, laterRow: later.blob,
+        code: 'ci.input.commit-metadata-malformed' },
+    ]) {
+      const { outcome } = await readCommitsThroughBatches(
+        [earlierOid, MISSING_OID],
+        `${earlierOid} commit ${earlierBody.byteLength}\n${MISSING_OID} commit 3\n`,
+        [Buffer.concat([contentFrame(earlierOid, 'commit', earlierBody), Buffer.from(laterRow)])],
+      );
+      expect(outcome).toMatchObject({ code });
+    }
+  });
+
+  it('reports an earlier changed re-read before a later missing row in the re-read', async () => {
+    const commits = [rawCommitBody({ message: 'first\n' }), rawCommitBody({ message: 'second\n' })]
+      .map((body) => ({ oid: commitOid(body), body }))
+      .sort((left, right) => (left.oid < right.oid ? -1 : 1));
+    const earlier = commits[0]!;
+    const later = commits[1]!;
+    // Same length, one byte different: only the byte comparison can reject it.
+    const changed = Buffer.from(earlier.body);
+    changed[0] = 0x54;
+    const { outcome, contentReads } = await readCommitsThroughBatches(
+      [earlier.oid, later.oid],
+      `${earlier.oid} commit ${earlier.body.byteLength}\n${later.oid} commit ${later.body.byteLength}\n`,
+      [
+        Buffer.concat([
+          contentFrame(earlier.oid, 'commit', earlier.body),
+          contentFrame(later.oid, 'commit', later.body),
+        ]),
+        Buffer.concat([
+          contentFrame(earlier.oid, 'commit', changed),
+          Buffer.from(`${later.oid} missing\n`),
+        ]),
+      ],
+    );
+    expect(outcome).toMatchObject({ code: 'ci.input.commit-metadata-identity-mismatch' });
+    expect(contentReads).toBe(2);
+  });
+});
+
 describe('batch process cleanup', () => {
   it('kills a batch process that ignores SIGTERM when the call times out', () => {
     const root = mkdtempSync(join(tmpdir(), 'ci-control-batch-kill-'));
@@ -457,7 +593,11 @@ describe('batch process cleanup', () => {
       __setTestGitPath(priorGitPath);
     }
     const elapsed = performance.now() - start;
-    const pid = Number(readFileSync(join(root, 'batch-kill.pid'), 'utf8').trim());
+    // A shell that starts slower than the timeout never writes its pid: fail plainly.
+    const pidFile = join(root, 'batch-kill.pid');
+    expect(existsSync(pidFile), 'the batch process wrote no pid before the timeout').toBe(true);
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    expect(Number.isSafeInteger(pid) && pid > 1, `pid file held ${pid}`).toBe(true);
     shimPid = pid;
     expect(thrown).toMatchObject({ code: CODES.timeout });
     expect(elapsed).toBeLessThan(3_000);
