@@ -35,6 +35,7 @@ import {
   freezeTurnEvidence,
   type MutableTurnDeliveryEvidence,
   type TurnEvidenceFlush,
+  type TurnOutboundAttribution,
 } from './outbound-turn-evidence.ts';
 
 const log = createChildLogger('outbound-queue');
@@ -337,8 +338,8 @@ export interface IOutboundQueue {
   getLastOpId(): number | undefined;
   /** Clear the tracked last outbound op id without touching durability. */
   clearLastOpId(): void;
-  /** Start collecting durability op ids for one logical turn. */
-  beginTurnEvidence(turnId: string): void;
+  /** Start collecting durability op ids for one logical turn; its ops carry `attribution` when given. */
+  beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void;
   /** Flush all sends and consume an immutable durability evidence snapshot for the turn. */
   flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence>;
   /** Mark the last outbound op created by this queue as terminal. */
@@ -526,7 +527,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.currentInboundSeq = seq;
   }
 
-  beginTurnEvidence(turnId: string): void {
+  beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void {
     if (turnId.trim() === '') {
       throw new Error('Turn evidence requires a non-empty turn id');
     }
@@ -543,6 +544,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.activeTurnEvidence = {
       turnId,
       epoch: ++this.nextTurnEvidenceEpoch,
+      attribution,
       opIds: {
         answer: [],
         lifecycle: [],
@@ -609,12 +611,15 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private snapshotAttribution(role: OutboundMessageRole): OutboundAttribution {
+    // A turn's ops carry its own inbound key and chat JID, which the delivery proofs compare with;
+    // ops outside a turn keep the queue's frozen key and current JID.
+    const turn = this.activeTurnEvidence?.attribution;
     return {
       role,
       turnId: this.activeTurnEvidence?.turnId,
       turnEvidenceEpoch: this.activeTurnEvidence?.epoch,
-      chatJid: this.deliveryJid,
-      conversationKey: this.conversationKey,
+      chatJid: turn?.chatJid ?? this.deliveryJid,
+      conversationKey: turn?.conversationKey ?? this.conversationKey,
       sourceInboundSeq: this.currentInboundSeq,
     };
   }
@@ -720,15 +725,18 @@ export class OutboundQueue implements IOutboundQueue {
     finalText: string,
     attribution: OutboundAttribution,
   ): boolean {
-    const gate = enforceClientOutputPolicy({
+    // The queue's key and a turn's key can name one chat by two aliases, or two chats in single
+    // scope; a policy under either one applies.
+    const keys = new Set([this.conversationKey, attribution.conversationKey]);
+    const admitted = [...keys].every((conversationKey) => enforceClientOutputPolicy({
       registry: this.clientOutputPolicies,
-      conversationKey: attribution.conversationKey,
+      conversationKey,
       sourceText,
       finalText,
       messageKind: attribution.role,
       log,
-    });
-    if (gate.admitted) return true;
+    }).admitted);
+    if (admitted) return true;
     if (attribution.role === 'answer') {
       this.clientOutputWithheld = true;
       if (

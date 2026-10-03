@@ -3,9 +3,17 @@
 
 import type { OutboundMessageRole, TurnDeliveryEvidence } from './outbound-queue.ts';
 
+/** A turn's inbound conversation key and chat JID, which the delivery proofs compare with. */
+export interface TurnOutboundAttribution {
+  readonly conversationKey: string;
+  readonly chatJid: string;
+}
+
 export interface MutableTurnDeliveryEvidence {
   readonly turnId: string;
   readonly epoch: number;
+  /** The turn's own inbound key and chat JID; its ops carry these. */
+  readonly attribution: TurnOutboundAttribution | undefined;
   readonly opIds: Record<OutboundMessageRole, number[]>;
   withheldAnswerCount: number;
 }

@@ -340,7 +340,10 @@ describe('runtime terminal coordinator integration', () => {
       expect(queue.beginTurnEvidence).not.toHaveBeenCalled();
 
       state.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, allowed);
-      expect(queue.beginTurnEvidence).toHaveBeenCalledWith('turn-other-chat');
+      expect(queue.beginTurnEvidence).toHaveBeenCalledWith('turn-other-chat', {
+        conversationKey: allowed.identity.conversationKey,
+        chatJid: allowed.identity.deliveryJid,
+      });
     } finally {
       db.close();
     }

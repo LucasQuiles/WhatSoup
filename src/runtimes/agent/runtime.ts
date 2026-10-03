@@ -3201,10 +3201,10 @@ export class AgentRuntime implements Runtime {
       discardPerChatSessionForFallback: (mapKey, expected) =>
         runtime.discardPerChatSessionForFallback(mapKey, expected),
       discardSingletonSessionForFallback: (expected) => runtime.discardSingletonSessionForFallback(expected),
-      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid, routeOverride) =>
-        runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid, routeOverride),
-      recreateSingletonSessionForFallback: (chatJid, actorJid, routeOverride) =>
-        runtime.recreateSingletonSessionForFallback(chatJid, actorJid, routeOverride),
+      recreatePerChatSessionForFallback: (mapKey, chatJid, actorJid, routeOverride, runtimeContext) =>
+        runtime.recreatePerChatSessionForFallback(mapKey, chatJid, actorJid, routeOverride, runtimeContext),
+      recreateSingletonSessionForFallback: (chatJid, actorJid, routeOverride, runtimeContext) =>
+        runtime.recreateSingletonSessionForFallback(chatJid, actorJid, routeOverride, runtimeContext),
       isReplayRouteCurrent: (chatJid, actorJid, routeOverride) =>
         runtime.isReplayRouteCurrent(chatJid, actorJid, routeOverride),
       bindActiveGlobalMcpConversation: (chatJid) => runtime.bindActiveGlobalMcpConversation(chatJid),
@@ -7037,6 +7037,7 @@ export class AgentRuntime implements Runtime {
       if (recoveryChatJid) {
         queue = this.createOutboundQueue(recoveryChatJid, 'provider terminal route recovery');
         this.chatQueues.set(mapKey, queue);
+        if (runtimeOwnerMatches) this.runtimeTurnCoordinator.resumeRuntimeTurnOnRebuiltQueue(queue, runtimeContext!);
         log.warn(
           { mapKey, recoveryChatJid, ownerKind: resolved.owner.kind },
           'reconstructed missing output route for an owned provider terminal',
@@ -9922,6 +9923,7 @@ export class AgentRuntime implements Runtime {
     chatJid: string,
     actorJid?: string,
     routeOverride?: ResolvedReplayRoute,
+    runtimeContext?: RuntimeTurnContext,
   ): void {
     this.operationTrackers.get(mapKey)?.shutdown();
     this.operationTrackers.delete(mapKey);
@@ -9957,7 +9959,10 @@ export class AgentRuntime implements Runtime {
     });
     this.setOwnedPerChatSession(mapKey, session);
     if (!this.chatQueues.has(mapKey)) {
-      this.chatQueues.set(mapKey, this.createOutboundQueue(chatJid, 'fallback per-chat session replacement'));
+      const queue = this.createOutboundQueue(chatJid, 'fallback per-chat session replacement');
+      this.chatQueues.set(mapKey, queue);
+      // A held turn replayed onto a new queue resumes there; a kept queue already holds its evidence.
+      if (runtimeContext) this.runtimeTurnCoordinator.resumeRuntimeTurnOnRebuiltQueue(queue, runtimeContext);
     }
     const tracker = this.createOperationTracker(session, () => {
       const currentMapKey = resolveSessionMapKey();
@@ -9978,6 +9983,7 @@ export class AgentRuntime implements Runtime {
     chatJid: string,
     actorJid?: string,
     routeOverride?: ResolvedReplayRoute,
+    runtimeContext?: RuntimeTurnContext,
   ): void {
     this.operationTracker?.shutdown();
     this.operationTracker = null;
@@ -10009,10 +10015,17 @@ export class AgentRuntime implements Runtime {
     });
     this.session = replacementSession;
     this.activeChatJid = chatJid;
+    // A held turn replayed onto a new queue resumes there; a shared queue serves only its own chat.
     if (this.shared) {
+      const created = !this.outboundQueues.has(chatJid);
       this.ensureOutboundQueue(chatJid);
+      const queue = this.outboundQueues.get(chatJid);
+      if (created && queue && runtimeContext && chatJid === runtimeContext.identity.deliveryJid) {
+        this.runtimeTurnCoordinator.resumeRuntimeTurnOnRebuiltQueue(queue, runtimeContext);
+      }
     } else if (!this.queue) {
       this.queue = this.createOutboundQueue(chatJid, 'fallback single session replacement');
+      if (runtimeContext) this.runtimeTurnCoordinator.resumeRuntimeTurnOnRebuiltQueue(this.queue, runtimeContext);
     }
     this.operationTracker = this.createOperationTracker(this.session, () => this.getActiveQueue());
   }
@@ -12080,6 +12093,10 @@ export class AgentRuntime implements Runtime {
       queue = this.createOutboundQueue(routeChatJid, 'provider terminal route recovery');
       if (this.shared) this.outboundQueues.set(routeChatJid, queue);
       else this.queue = queue;
+      // The singleton queue serves every chat; a shared queue serves only its own.
+      if (runtimeOwnerMatches && (!this.shared || routeChatJid === runtimeContext!.identity.deliveryJid)) {
+        this.runtimeTurnCoordinator.resumeRuntimeTurnOnRebuiltQueue(queue, runtimeContext!);
+      }
       log.warn(
         { routeChatJid, ownerKind: resolved.owner.kind, shared: this.shared },
         'reconstructed missing output route for an owned provider terminal',
