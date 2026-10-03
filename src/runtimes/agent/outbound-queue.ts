@@ -30,6 +30,12 @@ import { preprocessText, repairChunkFormatting, splitMessage } from './whatsapp-
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
+import {
+  copyTurnEvidence,
+  freezeTurnEvidence,
+  type MutableTurnDeliveryEvidence,
+  type TurnEvidenceFlush,
+} from './outbound-turn-evidence.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -89,18 +95,6 @@ export interface OutboundQueueOptions {
    * conversation key. Defaults to the instance's `config.clientOutputPolicies`.
    */
   readonly clientOutputPolicies?: ClientOutputPolicyRegistry;
-}
-
-interface MutableTurnDeliveryEvidence {
-  readonly turnId: string;
-  readonly epoch: number;
-  readonly opIds: Record<OutboundMessageRole, number[]>;
-  withheldAnswerCount: number;
-}
-
-interface TurnEvidenceFlush {
-  readonly evidence: MutableTurnDeliveryEvidence;
-  readonly completion: Promise<TurnDeliveryEvidence>;
 }
 
 interface QueuedOutboundChunk {
@@ -564,13 +558,13 @@ export class OutboundQueue implements IOutboundQueue {
       if (inFlight.evidence.turnId !== turnId) {
         throw new Error(`Turn evidence belongs to ${inFlight.evidence.turnId}; cannot flush ${turnId}`);
       }
-      return OutboundQueue.copyTurnEvidence(await inFlight.completion);
+      return copyTurnEvidence(await inFlight.completion);
     }
 
     const active = this.activeTurnEvidence;
     if (!active) {
       if (this.completedTurnEvidence?.turnId === turnId) {
-        return OutboundQueue.copyTurnEvidence(this.completedTurnEvidence);
+        return copyTurnEvidence(this.completedTurnEvidence);
       }
       throw new Error(`No active turn evidence belongs to ${turnId}`);
     }
@@ -580,7 +574,7 @@ export class OutboundQueue implements IOutboundQueue {
 
     const completion = this.completeTurnEvidence(active);
     this.turnEvidenceFlush = { evidence: active, completion };
-    return OutboundQueue.copyTurnEvidence(await completion);
+    return copyTurnEvidence(await completion);
   }
 
   private async completeTurnEvidence(
@@ -593,7 +587,7 @@ export class OutboundQueue implements IOutboundQueue {
           throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
         }
 
-        const completed = OutboundQueue.freezeTurnEvidence(active);
+        const completed = freezeTurnEvidence(active);
         this.activeTurnEvidence = undefined;
         this.completedTurnEvidence = completed;
         return completed;
@@ -603,26 +597,6 @@ export class OutboundQueue implements IOutboundQueue {
         this.turnEvidenceFlush = undefined;
       }
     }
-  }
-
-  private static freezeTurnEvidence(evidence: MutableTurnDeliveryEvidence): TurnDeliveryEvidence {
-    return Object.freeze({
-      turnId: evidence.turnId,
-      answerOpIds: Object.freeze([...evidence.opIds.answer]),
-      lifecycleOpIds: Object.freeze([...evidence.opIds.lifecycle]),
-      statusOpIds: Object.freeze([...evidence.opIds.status]),
-      withheldAnswerCount: evidence.withheldAnswerCount,
-    });
-  }
-
-  private static copyTurnEvidence(evidence: TurnDeliveryEvidence): TurnDeliveryEvidence {
-    return Object.freeze({
-      turnId: evidence.turnId,
-      answerOpIds: Object.freeze([...evidence.answerOpIds]),
-      lifecycleOpIds: Object.freeze([...evidence.lifecycleOpIds]),
-      statusOpIds: Object.freeze([...evidence.statusOpIds]),
-      withheldAnswerCount: evidence.withheldAnswerCount,
-    });
   }
 
   private recordTurnOp(chunk: QueuedOutboundChunk, opId: number): void {
