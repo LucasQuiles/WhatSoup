@@ -10,9 +10,13 @@
 // queue and check the stamped op, the send target and the turn's outcome.
 //
 // Harness: REAL AgentRuntime + REAL OutboundQueue + REAL SQLite durability +
-// REAL ingest; only the provider boundary and the transport are doubled, as in
-// scheduled-lid-report-chat-finalize.test.ts. The transport's echo arrives as
-// soon as a send is marked submitted, unless a case turns it off.
+// REAL ingest, as in scheduled-lid-report-chat-finalize.test.ts. The doubles
+// are the provider session, the transport, configuration, the logger, alert
+// emission, access policy, command routing, message-history reads, media
+// download, preparation and bridging, session storage and classification, the
+// workspace, the MCP socket server and tool registration, speech synthesis,
+// and file-system writes. The transport's echo arrives as soon as a send is
+// marked submitted, unless a case turns it off.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
@@ -135,7 +139,7 @@ const { mockSynthesizeSpeech, mockWriteTempFile, VOICE_TEMP_PATH } = vi.hoisted(
   return { mockSynthesizeSpeech: vi.fn(), mockWriteTempFile: vi.fn(() => VOICE_TEMP_PATH), VOICE_TEMP_PATH };
 });
 
-// ─── Module mocks (provider boundary + side-effect surfaces only) ───────────
+// ─── Module mocks (provider boundary + side-effect surfaces) ────────────────
 
 vi.mock('../../../src/logger.ts', async () => {
   const { loggerMock } = await import('../../helpers/logger-mock.ts');
@@ -281,7 +285,7 @@ import { drainIngest } from '../../core/_helpers/ingest-drain.ts';
 
 // ─── Shared fixtures (synthetic identities only) ────────────────────────────
 
-const LID_LOCAL = '900000000000042';
+const LID_LOCAL = '155500000000042';
 const LID_JID = `${LID_LOCAL}@lid`;
 const PHONE_DIGITS = '15550004242';
 const PHONE_JID = `${PHONE_DIGITS}@s.whatsapp.net`;
