@@ -187,6 +187,7 @@ describe('runtime turn chronology integration', () => {
         captured.identity.deliveryJid,
         undefined,
         routeOverride,
+        captured,
       );
       expect(mutable.isReplayRouteCurrent).toHaveBeenCalledWith(
         captured.identity.deliveryJid,

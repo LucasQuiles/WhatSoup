@@ -30,6 +30,13 @@ import { preprocessText, repairChunkFormatting, splitMessage } from './whatsapp-
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
+import {
+  copyTurnEvidence,
+  freezeTurnEvidence,
+  type MutableTurnDeliveryEvidence,
+  type TurnEvidenceFlush,
+  type TurnOutboundAttribution,
+} from './outbound-turn-evidence.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -89,18 +96,6 @@ export interface OutboundQueueOptions {
    * conversation key. Defaults to the instance's `config.clientOutputPolicies`.
    */
   readonly clientOutputPolicies?: ClientOutputPolicyRegistry;
-}
-
-interface MutableTurnDeliveryEvidence {
-  readonly turnId: string;
-  readonly epoch: number;
-  readonly opIds: Record<OutboundMessageRole, number[]>;
-  withheldAnswerCount: number;
-}
-
-interface TurnEvidenceFlush {
-  readonly evidence: MutableTurnDeliveryEvidence;
-  readonly completion: Promise<TurnDeliveryEvidence>;
 }
 
 interface QueuedOutboundChunk {
@@ -343,8 +338,8 @@ export interface IOutboundQueue {
   getLastOpId(): number | undefined;
   /** Clear the tracked last outbound op id without touching durability. */
   clearLastOpId(): void;
-  /** Start collecting durability op ids for one logical turn. */
-  beginTurnEvidence(turnId: string): void;
+  /** Start collecting durability op ids for one logical turn; its ops carry `attribution` when given. */
+  beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void;
   /** Flush all sends and consume an immutable durability evidence snapshot for the turn. */
   flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence>;
   /** Mark the last outbound op created by this queue as terminal. */
@@ -532,7 +527,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.currentInboundSeq = seq;
   }
 
-  beginTurnEvidence(turnId: string): void {
+  beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void {
     if (turnId.trim() === '') {
       throw new Error('Turn evidence requires a non-empty turn id');
     }
@@ -549,6 +544,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.activeTurnEvidence = {
       turnId,
       epoch: ++this.nextTurnEvidenceEpoch,
+      attribution,
       opIds: {
         answer: [],
         lifecycle: [],
@@ -564,13 +560,13 @@ export class OutboundQueue implements IOutboundQueue {
       if (inFlight.evidence.turnId !== turnId) {
         throw new Error(`Turn evidence belongs to ${inFlight.evidence.turnId}; cannot flush ${turnId}`);
       }
-      return OutboundQueue.copyTurnEvidence(await inFlight.completion);
+      return copyTurnEvidence(await inFlight.completion);
     }
 
     const active = this.activeTurnEvidence;
     if (!active) {
       if (this.completedTurnEvidence?.turnId === turnId) {
-        return OutboundQueue.copyTurnEvidence(this.completedTurnEvidence);
+        return copyTurnEvidence(this.completedTurnEvidence);
       }
       throw new Error(`No active turn evidence belongs to ${turnId}`);
     }
@@ -580,7 +576,7 @@ export class OutboundQueue implements IOutboundQueue {
 
     const completion = this.completeTurnEvidence(active);
     this.turnEvidenceFlush = { evidence: active, completion };
-    return OutboundQueue.copyTurnEvidence(await completion);
+    return copyTurnEvidence(await completion);
   }
 
   private async completeTurnEvidence(
@@ -593,7 +589,7 @@ export class OutboundQueue implements IOutboundQueue {
           throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
         }
 
-        const completed = OutboundQueue.freezeTurnEvidence(active);
+        const completed = freezeTurnEvidence(active);
         this.activeTurnEvidence = undefined;
         this.completedTurnEvidence = completed;
         return completed;
@@ -603,26 +599,6 @@ export class OutboundQueue implements IOutboundQueue {
         this.turnEvidenceFlush = undefined;
       }
     }
-  }
-
-  private static freezeTurnEvidence(evidence: MutableTurnDeliveryEvidence): TurnDeliveryEvidence {
-    return Object.freeze({
-      turnId: evidence.turnId,
-      answerOpIds: Object.freeze([...evidence.opIds.answer]),
-      lifecycleOpIds: Object.freeze([...evidence.opIds.lifecycle]),
-      statusOpIds: Object.freeze([...evidence.opIds.status]),
-      withheldAnswerCount: evidence.withheldAnswerCount,
-    });
-  }
-
-  private static copyTurnEvidence(evidence: TurnDeliveryEvidence): TurnDeliveryEvidence {
-    return Object.freeze({
-      turnId: evidence.turnId,
-      answerOpIds: Object.freeze([...evidence.answerOpIds]),
-      lifecycleOpIds: Object.freeze([...evidence.lifecycleOpIds]),
-      statusOpIds: Object.freeze([...evidence.statusOpIds]),
-      withheldAnswerCount: evidence.withheldAnswerCount,
-    });
   }
 
   private recordTurnOp(chunk: QueuedOutboundChunk, opId: number): void {
@@ -635,12 +611,15 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private snapshotAttribution(role: OutboundMessageRole): OutboundAttribution {
+    // A turn's ops carry its own inbound key and chat JID, which the delivery proofs compare with;
+    // ops outside a turn keep the queue's frozen key and current JID.
+    const turn = this.activeTurnEvidence?.attribution;
     return {
       role,
       turnId: this.activeTurnEvidence?.turnId,
       turnEvidenceEpoch: this.activeTurnEvidence?.epoch,
-      chatJid: this.deliveryJid,
-      conversationKey: this.conversationKey,
+      chatJid: turn?.chatJid ?? this.deliveryJid,
+      conversationKey: turn?.conversationKey ?? this.conversationKey,
       sourceInboundSeq: this.currentInboundSeq,
     };
   }
@@ -746,15 +725,18 @@ export class OutboundQueue implements IOutboundQueue {
     finalText: string,
     attribution: OutboundAttribution,
   ): boolean {
-    const gate = enforceClientOutputPolicy({
+    // The queue's key and a turn's key can name one chat by two aliases, or two chats in single
+    // scope; a policy under either one applies.
+    const keys = new Set([this.conversationKey, attribution.conversationKey]);
+    const admitted = [...keys].every((conversationKey) => enforceClientOutputPolicy({
       registry: this.clientOutputPolicies,
-      conversationKey: attribution.conversationKey,
+      conversationKey,
       sourceText,
       finalText,
       messageKind: attribution.role,
       log,
-    });
-    if (gate.admitted) return true;
+    }).admitted);
+    if (admitted) return true;
     if (attribution.role === 'answer') {
       this.clientOutputWithheld = true;
       if (
