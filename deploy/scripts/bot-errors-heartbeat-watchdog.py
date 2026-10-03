@@ -16,7 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional, Union
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -2413,6 +2413,28 @@ def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
     return events
 
 
+# typing.Union, not "|": this alias is evaluated at import time and the
+# watchdog also runs under older system Pythons.
+DailyHealthScan = Union[
+    list[tuple[Path, int, Optional[dict[str, Any]]]], DailyHealthEventError
+]
+
+
+def daily_health_scan() -> DailyHealthScan:
+    """Scan the event archives ONCE, keeping a scan failure as a value.
+
+    ``daily_health_events`` reads and parses every archived event (tens of
+    thousands of files), and the per-host check used to repeat that full scan
+    once per configured host. Callers that evaluate several hosts scan once and
+    pass the result to ``daily_health_age``. A failure is returned rather than
+    raised so every host still reports it, exactly as each per-host scan did.
+    """
+    try:
+        return daily_health_events()
+    except DailyHealthEventError as exc:
+        return exc
+
+
 def daily_health_freshness_ledger_age(host: str) -> tuple[int | None, str]:
     """Read per-host daily-health freshness from the durable incident-state ledger.
 
@@ -2451,13 +2473,14 @@ def daily_health_freshness_ledger_age(host: str) -> tuple[int | None, str]:
     return max(0, current - last_seen_epoch), f"ledger dailyHealthFreshness[{host}] lastSeenAt={last_seen_epoch}"
 
 
-def _daily_health_file_age(host: str | None) -> tuple[int | None, str]:
+def _daily_health_file_age(
+    host: str | None, scan: DailyHealthScan | None = None
+) -> tuple[int | None, str]:
     newest: int | None = None
     newest_path = ""
-    try:
-        events = daily_health_events()
-    except DailyHealthEventError as exc:
-        return None, f"failed to scan daily-health events under {state_root()}: {exc}"
+    events = daily_health_scan() if scan is None else scan
+    if isinstance(events, DailyHealthEventError):
+        return None, f"failed to scan daily-health events under {state_root()}: {events}"
     for path, mtime, data in events:
         if host is not None:
             event_host = daily_health_event_host(path, data)
@@ -2478,7 +2501,9 @@ def _daily_health_file_age(host: str | None) -> tuple[int | None, str]:
     return max(0, current - newest), f"{newest_path} mtime={newest}"
 
 
-def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
+def daily_health_age(
+    host: str | None = None, *, scan: DailyHealthScan | None = None
+) -> tuple[int | None, str]:
     dry_age = os.environ.get("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS")
     if dry_age is not None and host is None:
         try:
@@ -2488,7 +2513,7 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
         if age < 0:
             return None, f"invalid dry daily-health age: value={dry_age!r}"
         return age, "dry daily-health age"
-    file_age, file_detail = _daily_health_file_age(host)
+    file_age, file_detail = _daily_health_file_age(host, scan)
     if host is None:
         # Aggregate "any daily-health" check: the per-host freshness ledger does not apply.
         return file_age, file_detail
@@ -2993,8 +3018,9 @@ def collect_problems(
     if "daily_health" in checks:
         hosts = daily_health_hosts()
         if hosts:
+            scan = daily_health_scan()
             for host in hosts:
-                age, detail = daily_health_age(host)
+                age, detail = daily_health_age(host, scan=scan)
                 key = f"daily_health:{host}"
                 if age is None or age > args.max_daily_health_age:
                     collector_context = collector_reachability_evidence(host)
