@@ -210,7 +210,7 @@ LEGACY_CONFINED_KEYS = frozenset({"failureClass", "length", "correlationDigest"}
 # confinement envelope has exactly one constructor, `confineAlertContent` in
 # src/lib/alert-evidence.ts, and its class always comes from `extractFailureClass`
 # there: either one of the six standard Error subclasses matched verbatim, one of
-# the nine fixed labels, the "none" sentinel for empty content, or the "unknown"
+# the ten fixed labels, the "none" sentinel for empty content, or the "unknown"
 # fallback. Nothing else can reach this reader from that producer.
 #
 # A lexical grammar is NOT enough on its own. "single-line ASCII token under N
@@ -245,6 +245,7 @@ LEGACY_FAILURE_CLASSES = frozenset({
     "EvalError",
     "URIError",
     # Fixed labels.
+    "scope_blocked",
     "Error",
     "provider_unknown",
     "provider_timeout",

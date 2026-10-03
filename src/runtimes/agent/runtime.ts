@@ -2313,10 +2313,14 @@ export class AgentRuntime implements Runtime {
     if (existing) {
       // More images arriving — append and reset timer
       existing.texts.push(text);
-      // The representative seq is the last image, so its journaled message id
-      // must travel with that same last message into the immutable turn snapshot.
+      // The last image becomes the batch's display message; the representative
+      // sequence and the turn's inbound identity come from the last JOURNALED
+      // image (journaledMsg), which an unjournaled replay must not displace.
       existing.msg = msg;
-      if (msg.inboundSeq !== undefined) existing.inboundSeqs.push(msg.inboundSeq);
+      if (msg.inboundSeq !== undefined) {
+        existing.inboundSeqs.push(msg.inboundSeq);
+        existing.journaledMsg = msg;
+      }
       clearTimeout(existing.timer);
       existing.timer = setTimeout(() => void this.flushImageCoalesce(mapKey), AgentRuntime.IMAGE_COALESCE_MS);
       if (existing.texts.length >= AgentRuntime.MAX_COALESCE_BATCH) {
@@ -2337,6 +2341,7 @@ export class AgentRuntime implements Runtime {
         timer,
         msg,
         inboundSeqs: msg.inboundSeq !== undefined ? [msg.inboundSeq] : [],
+        ...(msg.inboundSeq !== undefined ? { journaledMsg: msg } : {}),
       });
       log.info({ mapKey }, 'image coalesce window opened');
     }
@@ -2366,8 +2371,12 @@ export class AgentRuntime implements Runtime {
     clearTimeout(entry.timer);
     this.imageCoalesce.buffers.delete(mapKey);
 
-    const { texts, msg, inboundSeqs } = entry;
-    const chatJid = msg.chatJid;
+    const { texts, msg, inboundSeqs, journaledMsg } = entry;
+    // The turn's inbound identity is the representative sequence's journal row,
+    // which journaledMsg was journaled from. A buffer with no journaled image
+    // is an unjournaled turn and keeps the last message.
+    const identityMsg = journaledMsg ?? msg;
+    const chatJid = identityMsg.chatJid;
     const count = texts.length;
     const representativeSeq = inboundSeqs.length > 0 ? inboundSeqs[inboundSeqs.length - 1] : undefined;
 
@@ -2389,14 +2398,16 @@ export class AgentRuntime implements Runtime {
       const session = this.chatSessions.get(mapKey);
       if (!session) throw new Error(`Coalesced image turn has no session for "${mapKey}"`);
       const source: RuntimeTurnSourceSnapshot = {
-        sourceMessageId: msg.messageId,
-        receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
-        conversationKey: canonicalConversationKey(chatJid, this.db),
-        senderJid: msg.senderJid,
-        senderName: msg.senderName,
+        sourceMessageId: identityMsg.messageId,
+        receivedAtUnixSeconds: receivedAtUnixSeconds(identityMsg),
+        // The journal key, not a fresh lookup: a mapping written since ingest
+        // would give the turn a key its row lacks.
+        conversationKey: identityMsg.journaledConversationKey ?? canonicalConversationKey(chatJid, this.db),
+        senderJid: identityMsg.senderJid,
+        senderName: identityMsg.senderName,
         contentType: 'image',
-        isGroup: msg.isGroup,
-        ...(msg.isGroup ? { groupName: chatJid } : {}),
+        isGroup: identityMsg.isGroup,
+        ...(identityMsg.isGroup ? { groupName: chatJid } : {}),
       };
       const runtimeContext = this.runtimeTurnCoordinator.createRuntimeTurnForDispatch({
         scope: 'per_chat',
@@ -3382,22 +3393,17 @@ export class AgentRuntime implements Runtime {
       this.releaseWedgedReclaimedGlobalLane(rows);
       return;
     }
-    const byMessageId = new Map(rows.map((row) => [row.sourceMessageId, row]));
+    // Match on the durable inbound sequence, as the global lane does. It names
+    // the exact row the sweep reclaimed, so neither a key derivation (which a
+    // LID mapping can split) nor a cross-chat message-id collision can
+    // misattribute it.
+    const bySeq = new Map(rows.map((row) => [row.seq, row]));
     for (const [mapKey, turnQueue] of this.perChatTurnQueues) {
       const active = turnQueue.activeTurn;
-      if (!active) continue;
-      const row = byMessageId.get(active.sourceMessageId);
+      // An unjournaled turn has no durable identity to match.
+      if (!active || active.inboundSeq === undefined) continue;
+      const row = bySeq.get(active.inboundSeq);
       if (row === undefined) continue;
-      // The reclaimed row must identify THIS lane's turn, not a cross-chat
-      // message-id collision: the journaled inbound and the queued turn share
-      // a chat, so their conversation keys must agree.
-      if (row.conversationKey !== toConversationKey(active.chatJid)) {
-        log.warn(
-          { inboundSeq: row.seq, mapKey },
-          'wedged-lane release: reclaimed row conversation does not match the lane — skipping',
-        );
-        continue;
-      }
       const session = this.chatSessions.get(mapKey);
       if (!session || session === this.controlSession) {
         log.warn(
@@ -3511,8 +3517,7 @@ export class AgentRuntime implements Runtime {
    * `currentRuntimeTurnContext`, awaiting that turn's completion promise
    * (processTurn for shared, sendTurnNonShared for single). That context is the
    * global lane's observable, and it carries `identity.inboundSeq` — the exact
-   * durable key the sweep reclaimed, a stronger match than the per-chat path's
-   * source message id.
+   * durable key the sweep reclaimed, the same key the per-chat release matches.
    */
   private releaseWedgedReclaimedGlobalLane(rows: readonly StaleReclaimedInbound[]): void {
     const context = this.currentRuntimeTurnContext;
@@ -3523,7 +3528,7 @@ export class AgentRuntime implements Runtime {
     if (inboundSeq === null) return;
     const row = rows.find((candidate) => candidate.seq === inboundSeq);
     if (row === undefined) return;
-    // Identity must agree on both axes, exactly as the per-chat path requires.
+    // The sequence already names the row; the key must agree too.
     if (row.conversationKey !== context.identity.conversationKey) {
       log.warn(
         { inboundSeq: row.seq, scope: this.sessionScope },
@@ -3841,7 +3846,8 @@ export class AgentRuntime implements Runtime {
               () => void this.flushImageCoalesce(canonical),
               AgentRuntime.IMAGE_COALESCE_MS,
             );
-            imageBuffer.msg = { ...imageBuffer.msg, chatJid: newJid };
+            // Buffered messages keep the chat JID they were journaled with; the
+            // flush builds the identity from the journaled one; this rekey does not change it.
             this.imageCoalesce.buffers.delete(lidKey);
             this.imageCoalesce.buffers.set(canonical, imageBuffer);
           }
@@ -4623,12 +4629,14 @@ export class AgentRuntime implements Runtime {
       // deterministically joinable to its trigger_occurrences row (the bare
       // trigger-id + wall-clock prefix is kept for existing consumers).
       const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
-      // Same key the turn identity and its outbound ops use: a mapped @lid
-      // report chat keys under the resolved phone, and terminal finalization
-      // rejects an inbound journaled under any other key.
+      // A mapped @lid report chat keys under the resolved phone. The synthetic
+      // message carries this exact key so the turn identity cannot re-read a
+      // different one: terminal finalization rejects an inbound journaled under
+      // any key other than the turn's.
+      const journaledConversationKey = canonicalConversationKey(ctx.reportChatJid, this.db);
       const inboundSeq = this.durability.journalInbound(
         messageId,
-        canonicalConversationKey(ctx.reportChatJid, this.db),
+        journaledConversationKey,
         ctx.reportChatJid,
         'agent',
         now,
@@ -4658,6 +4666,7 @@ export class AgentRuntime implements Runtime {
         quotedMessageId: null,
         isResponseWorthy: true,
         inboundSeq,
+        journaledConversationKey,
         isSyntheticJob: true,
       };
       // Fire-and-forget onto the turn chain; failures inside the turn are logged
@@ -4897,9 +4906,11 @@ export class AgentRuntime implements Runtime {
   private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
     let content = msg.content;
     const chatJid = msg.chatJid;
-    // Mirrors ingest's journal key exactly, including mapped-LID DMs whose
-    // durable conversation key is the resolved phone while delivery stays @lid.
-    const journalConversationKey = canonicalConversationKey(chatJid, this.db);
+    // The key the inbound row was journaled under. A caller that journaled the
+    // row passes it; otherwise mirror ingest's journal key, including mapped-LID
+    // DMs whose durable key is the resolved phone while delivery stays @lid.
+    const journalConversationKey = msg.journaledConversationKey
+      ?? canonicalConversationKey(chatJid, this.db);
     const perChatMapKey = this.sessionScope === 'per_chat'
       ? resolveAgentTurnMapKey(
           this.resolvePerChatMapKey(chatJid),

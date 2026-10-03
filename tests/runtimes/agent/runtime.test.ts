@@ -3589,7 +3589,8 @@ describe('AgentRuntime', () => {
         texts: ['image-a', 'image-b'],
         inboundSeqs: [6, 7],
       });
-      expect(state.imageCoalesce.buffers.get(canonicalJid)?.msg.chatJid).toBe(canonicalJid);
+      // The buffered message keeps its journaled chat JID.
+      expect(state.imageCoalesce.buffers.get(canonicalJid)?.msg.chatJid).toBe(lidKey);
       expect(state.imageCoalesce.buffers.get(canonicalJid)?.timer).not.toBe(imageTimer);
       const migratedPoll = state.pendingPolls.questions.get(canonicalJid);
       expect(migratedPoll?.chatJid).toBe(canonicalJid);

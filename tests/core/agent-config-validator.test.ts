@@ -1776,6 +1776,20 @@ describe('agentOptions.queuedTurnReceipt (#2949 queued receipt)', () => {
   });
 });
 
+describe('agentOptions.scopeBlockedAlertToken (opt-in scope_blocked alert marker)', () => {
+  it('rejects a non-boolean scopeBlockedAlertToken (a string "true" would silently leave the marker off)', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'per_chat', scopeBlockedAlertToken: 'true' } });
+    const result = validateInstanceConfig(raw, ctx('create'));
+    expect(result?.field).toBe('agentOptions.scopeBlockedAlertToken');
+    expect(result?.message).toContain('must be a boolean when provided');
+  });
+
+  it('accepts a boolean scopeBlockedAlertToken', () => {
+    const raw = baseAgent({ agentOptions: { sessionScope: 'per_chat', scopeBlockedAlertToken: true } });
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+});
+
 describe('agentOptions.nlRoutingTiers / nlRoutingEventsDir (slice-2 B2)', () => {
   it('rejects a non-object nlRoutingTiers', () => {
     const raw = baseAgent({ agentOptions: { sessionScope: 'single', nlRoutingTiers: 'strongest' } });

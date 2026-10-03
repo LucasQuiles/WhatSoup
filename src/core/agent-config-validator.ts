@@ -930,6 +930,15 @@ function validateAgentOptions(
     );
   }
 
+  // scopeBlockedAlertToken: default OFF, so config.ts arms it only on
+  // `=== true`. Strictly boolean — a mistyped "true"/1 would silently leave it off.
+  if (opts['scopeBlockedAlertToken'] !== undefined && typeof opts['scopeBlockedAlertToken'] !== 'boolean') {
+    return err(
+      'agentOptions.scopeBlockedAlertToken',
+      'agentOptions.scopeBlockedAlertToken must be a boolean when provided',
+    );
+  }
+
   // nlRoutingTiers: optional intent→provider map for NL routing.
   if (opts['nlRoutingTiers'] !== undefined) {
     const tiers = opts['nlRoutingTiers'];

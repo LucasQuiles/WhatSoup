@@ -64,6 +64,9 @@ const EMPTY_CONFINED: ConfinedAlertContent = Object.freeze({
  * returned label is a bounded word, not raw matched text.
  */
 const FAILURE_CLASS_PATTERNS: readonly { readonly pattern: RegExp; readonly label: string }[] = [
+  // Customer impact: a conversation scope held by an unfinalized turn. Listed
+  // first so a string that also names an Error class cannot hide it.
+  { pattern: /\bscope_blocked=finalization\b/, label: 'scope_blocked' },
   // Standard Error subclasses — any position (e.g. "stderr: TypeError at line 42" → TypeError).
   { pattern: /\b(?:TypeError|RangeError|ReferenceError|SyntaxError|EvalError|URIError)\b/, label: '$0' },
   // Generic Error prefix: "... Error: ..." → "Error".

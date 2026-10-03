@@ -497,7 +497,15 @@ reconciliation and late-echo proof; its claim/reassignment APIs are not an activ
 worker. Treating those rows as proof that Q will retry its own prompt is incorrect.
 
 Every journaled admission rejection emits `agent_turn_admission_rejected` with the inbound
-sequence, scope, exact queue reason, and `automatic_replay=false`. Unjournaled system turns stay
+sequence, scope, exact queue reason, and `automatic_replay=false`. When
+`agentOptions.scopeBlockedAlertToken` is enabled (default off; see
+[configuration](configuration.md)) and the conversation's scope is held by a turn whose terminal
+finalization is unresolved, the evidence also carries `scope_blocked=finalization`, reported at
+the alert boundary as the `scope_blocked` class. The marker reports scope state when the
+rejection is recorded, not the rejection's cause. Shutdown or capacity alone does not cause the
+marker: a rejection during shutdown or at the instance-wide retained-finalization capacity carries
+it only when the scope is also held. A rejection with an earlier cause, such as outstanding
+durable recovery, is marked when the scope is also held. Unjournaled system turns stay
 silent. The safe current remediation is an owner-authorized new inbound that restates or continues
 the lost intent after checking the target worktree and external state for already-applied effects.
 The old inbound remains failed as an immutable audit record; do not relabel it delivered merely
@@ -744,7 +752,9 @@ turn stays retained, as before. While a turn's terminal write is being retried, 
 retries are exhausted until a restart (§4.6), its chat refuses new turns that reach admission
 (arrivals may first wait in the chat's queue); each refusal is recorded as a
 `pre_dispatch_error` failure, with an `agent_turn_admission_rejected` operator warning, and a
-continuity mark and an `agent_reply_guarantee_breach` alert are attempted. A turn closed any
+continuity mark and an `agent_reply_guarantee_breach` alert are attempted. With
+`agentOptions.scopeBlockedAlertToken` enabled (§4.8), that warning also carries
+`scope_blocked=finalization` whenever the refused turn's scope is held. A turn closed any
 other way records no event, for example one rejected before dispatch, one reclaimed by the
 stuck-inbound reconciler (§4.5), or one interrupted by a restart and closed by pre-connect
 recovery (§4.1). A turn whose decision is recorded but that does not get an obligation records

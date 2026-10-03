@@ -533,6 +533,9 @@ export function createIngestHandler(
           }
           shadowAttempt?.settle(seq);
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
+          // The exact key journaled above. The runtime reuses it for the turn
+          // identity instead of resolving the LID mapping a second time.
+          msg.journaledConversationKey = conversationKey;
           msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
           if (msg.receivedAtUnixSeconds === undefined) {
             log.warn(
