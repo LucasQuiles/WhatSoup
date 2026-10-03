@@ -763,13 +763,14 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "cdd222ff548d865352c46ea9cef5039e24f40c3609100ece385d8ff48e56f0ca",
+      "sha256": "478cbf965021ce11f7d93e3d35a210fcc4f533f03c7fd8d97c50f3593d3137b8",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
         "reply-guarantee-recovery-debt",
         "reply-guarantee-observer",
-        "broad failed-row replay is unsafe"
+        "broad failed-row replay is unsafe",
+        "syntheticContinuityCandidates"
       ]
     },
     {
