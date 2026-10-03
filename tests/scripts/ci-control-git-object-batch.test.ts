@@ -341,7 +341,7 @@ describe('readObjectBatch and parseCatFileBatch', () => {
       (isolated: GitInputModule) => isolated.readExactBlobs(repository.root, []),
     ]) {
       const spawns: string[][] = [];
-      const outcome = await withMockedGitInput((file, args, options) => {
+      const outcome = await withMockedGitInput<readonly unknown[]>((file, args, options) => {
         spawns.push(args);
         return execFileSync(file, args, options as never) as unknown as Buffer;
       }, read);
