@@ -49,6 +49,7 @@ function makeCoordinator(): RuntimeTurnCoordinator {
     instanceName: 'bookkeeping-test',
     runtimeTurnSupervisor: {
       scopeKey: vi.fn(() => 'per_chat:15550190099'),
+      isDegraded: vi.fn(() => false),
     } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
   });
   return new RuntimeTurnCoordinator(host);
@@ -141,6 +142,8 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
       undefined,
       { conversationKey: '15550190099' },
     );
+    const [, , , evidence] = emitAlertChecked.mock.calls[0] as unknown as [string, string, string, string, ...unknown[]];
+    expect(evidence).not.toContain('scope_blocked');
   });
 
   it('keeps unjournaled system-turn admission rejection out of BOT ERRORS', () => {

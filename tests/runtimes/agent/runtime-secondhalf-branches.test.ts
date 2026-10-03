@@ -682,6 +682,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       );
       // The synthetic turn carries the durable seq, and the ack names it.
       expect(handleMessage.mock.calls[0]?.[0]).toMatchObject({ inboundSeq: 77, isSyntheticJob: true });
+      expect(handleMessage.mock.calls[0]?.[0]).toMatchObject({ journaledConversationKey: journalArgs[1] });
       expect(result).toEqual({ dispatched: true, detail: expect.stringContaining('inbound seq 77') });
     });
 
