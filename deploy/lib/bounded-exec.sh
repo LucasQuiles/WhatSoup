@@ -241,7 +241,7 @@ whatsoup_run_bounded() {
       [ -n "$worker_pid" ] && wait "$worker_pid" 2>/dev/null
       [ -n "$guard_pid" ] && wait "$guard_pid" 2>/dev/null
       if _bounded_read_beacon; then
-        rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog"
+        rm -f "$control_directory/command" "$control_directory/result" "$control_directory/watchdog" "$control_directory/tick"
         rmdir "$control_directory" 2>/dev/null
       fi
       rm -f "$authorization_file" "$control_file" "$timeout_file" "$cleanup_file" "$deadline_file" "$deadline_file.pending" "$outcome_file"
@@ -258,13 +258,17 @@ whatsoup_run_bounded() {
       kill -STOP 0
 
       local directory="" cmd_pid="" cmd_group="" command_release_pid=""
-      local watchdog_pid="" watchdog_group="" watchdog_release_pid=""
-      local candidate observed caller_group remaining remaining_grace completed_rc cleanup_rc=0
+      local watchdog_pid="" watchdog_group="" watchdog_release_pid="" ticker_pid=""
+      local candidate observed caller_group remaining remaining_grace completed_rc completed_frame cleanup_rc=0
       local entry_timeout=0 entry_timeout_handled=0 outcome_claim_rc=0
 
       _bounded_worker_cleanup() {
         local group count
         set +m
+        # Stop the ticker before any fork below can inherit it or fd 8.
+        exec 8<&-
+        [ -z "$ticker_pid" ] || { kill -9 "$ticker_pid" 2>/dev/null; wait "$ticker_pid" 2>/dev/null; }
+        ticker_pid=""
         _bounded_reserve_cleanup_marker || cleanup_rc=2
         if [ -n "$cmd_pid" ] && [ -z "$cmd_group" ]; then kill -9 "$cmd_pid" 2>/dev/null; fi
         if [ -n "$watchdog_pid" ] && [ -z "$watchdog_group" ]; then kill -9 "$watchdog_pid" 2>/dev/null; fi
@@ -287,7 +291,7 @@ whatsoup_run_bounded() {
             sleep 0.01
           done
         done
-        [ -z "$directory" ] || { rm -f "$directory/command" "$directory/result" "$directory/watchdog"; rmdir "$directory" 2>/dev/null; }
+        [ -z "$directory" ] || { rm -f "$directory/command" "$directory/result" "$directory/watchdog" "$directory/tick"; rmdir "$directory" 2>/dev/null; }
         rm -f "$timeout_file"
         [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"
       }
@@ -307,6 +311,45 @@ whatsoup_run_bounded() {
         esac
       }
 
+      # The command subshell writes one R<status> line, then exits. Accept only
+      # that whole frame.
+      _bounded_take_frame() {
+        case "$completed_frame" in R[0-9]*) ;; *) return 1 ;; esac
+        completed_rc="${completed_frame#R}"
+        [[ "$completed_rc" =~ ^[0-9]+$ ]] || return 1
+        [ "$completed_rc" -le 255 ] || return 1
+        rc="$completed_rc"
+        return 0
+      }
+
+      # Any other line means the command already wrote, so wait returns its
+      # status. Never signal its group here: it can still be between its write
+      # and its exit. A USR1 trap interrupts wait, so wait again while it lives.
+      _bounded_wait_written_command() {
+        local frame_status=0
+        wait "$cmd_pid" 2>/dev/null || frame_status=$?
+        while [ "$frame_status" -gt 128 ] && kill -0 "$cmd_pid" 2>/dev/null; do
+          frame_status=0
+          wait "$cmd_pid" 2>/dev/null || frame_status=$?
+        done
+        rc="$frame_status"
+      }
+
+      # Every line written before this marker is read before it, so a frame
+      # written before the leader was seen gone is found here.
+      _bounded_drain_frame() {
+        local marker="M$control_token"
+        builtin printf '%s\n' "$marker" >&8 || return 1
+        while IFS= read -r -u 8 completed_frame; do
+          case "$completed_frame" in
+            T) ;;
+            "$marker") return 1 ;;
+            *) _bounded_take_frame; return ;;
+          esac
+        done
+        return 1
+      }
+
       trap '_bounded_worker_cleanup' EXIT
       trap 'exit 130' INT
       trap 'exit 143' TERM HUP
@@ -318,7 +361,7 @@ whatsoup_run_bounded() {
       [[ "$caller_group" =~ ^[0-9]+$ ]] || return 2
       directory="$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-bounded.XXXXXX")" || return 2
       ( umask 077; set -C; builtin printf 'token=%s\ndirectory=%s\n' "$control_token" "$directory" > "$control_file" ) || return 2
-      mkfifo "$directory/command" "$directory/result" "$directory/watchdog" || return 2
+      mkfifo "$directory/command" "$directory/result" "$directory/watchdog" "$directory/tick" || return 2
 
       set -m
       (
@@ -328,7 +371,7 @@ whatsoup_run_bounded() {
         trap ':' TERM
         "$@"
         rc=$?
-        builtin printf '%s\n' "$rc" > "$directory/result"
+        builtin printf 'R%s\n' "$rc" > "$directory/result"
         exit "$rc"
       ) <&0 &
       cmd_pid=$!
@@ -369,6 +412,27 @@ whatsoup_run_bounded() {
       builtin printf 'run\n' > "$directory/command" &
       command_release_pid=$!
       remaining="$budget" remaining_grace="$grace" rc=124
+      # read takes TMOUT as its default timeout, and an expired read drops the
+      # bytes it has taken. The command and its helpers are already forked
+      # with the caller's value; this subshell's change reaches no caller.
+      unset TMOUT 2>/dev/null
+      # Hold one reader for the whole loop: a FIFO discards buffered data when
+      # its last descriptor closes.
+      exec 8<>"$directory/result" || return 2
+      # The ticker wakes the untimed reads below with one whole "T" line a
+      # second. Its own timed read waits on a FIFO nobody writes, so no read
+      # with a timeout ever touches the result FIFO. It outlives a group TERM
+      # so the worker, whose trap may wait for its read to return, still wakes;
+      # every guard and outer path ends with a group SIGKILL.
+      (
+        trap '' INT TERM HUP
+        exec 9<>"$directory/tick" || exit 2
+        while :; do
+          IFS= read -r -t 1 -u 9 _
+          builtin printf 'T\n' >&8 || exit 2
+        done
+      ) </dev/null >/dev/null 2>&1 &
+      ticker_pid=$!
       while [ "$remaining" -gt 0 ] || [ "$remaining_grace" -gt 0 ]; do
         if [ "$entry_timeout" -ne 0 ] && [ "$entry_timeout_handled" -eq 0 ]; then
           remaining=0
@@ -376,12 +440,24 @@ whatsoup_run_bounded() {
           entry_timeout_handled=1
         fi
         completed_rc=""
-        if IFS= read -r -t 1 completed_rc <> "$directory/result"; then
-          if [[ "$completed_rc" =~ ^[0-9]+$ ]] && [ "$completed_rc" -le 255 ]; then rc="$completed_rc"; else rc=2; fi
+        # Untimed: bash abandons a timed read's consumed bytes when it expires.
+        if ! IFS= read -r -u 8 completed_frame; then
+          rc=2
+          _bounded_accept_result
+          break
+        fi
+        if [ "$completed_frame" != T ]; then
+          _bounded_take_frame || _bounded_wait_written_command
           _bounded_accept_result
           break
         fi
         if ! kill -0 "$cmd_pid" 2>/dev/null; then
+          # The command can write, exit and be reaped after the last line was
+          # read; its frame is then queued on fd 8 ahead of a fresh marker.
+          if _bounded_drain_frame; then
+            _bounded_accept_result
+            break
+          fi
           kill -9 -- "-$cmd_group" 2>/dev/null
           rc=0
           wait "$cmd_pid" 2>/dev/null || rc=$?
@@ -390,6 +466,10 @@ whatsoup_run_bounded() {
         fi
         if [ "$remaining" -gt 0 ]; then remaining=$((remaining - 1)); else remaining_grace=$((remaining_grace - 1)); fi
       done
+      exec 8<&-
+      kill -9 "$ticker_pid" 2>/dev/null
+      wait "$ticker_pid" 2>/dev/null
+      ticker_pid=""
       [ -z "$watchdog_group" ] || kill -9 -- "-$watchdog_group" 2>/dev/null
       [ -z "$watchdog_pid" ] || wait "$watchdog_pid" 2>/dev/null
       _bounded_worker_cleanup
