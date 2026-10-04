@@ -161,6 +161,11 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
   not group- or world-writable.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
+  The generated plist sets `WHATSOUP_LOG_STDOUT_SINK=off`, so `stdout.log`
+  carries only output from before the logger starts and crash output; the
+  structured log is the rolling `logs/whatsoup.log` (#3704). A plist installed
+  before that key gained it picks it up on the next
+  `reconcile-launchd-restart-policy --apply`.
 
 Do not confuse per-instance `tokens.env` with the unscoped credential mirror at
 `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`. An unscoped lookup may
