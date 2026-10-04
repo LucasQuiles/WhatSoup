@@ -329,11 +329,10 @@ named by the live hostname (below) then agrees with it. Write the value
 unquoted. The file read keeps quotes as part of the name, while systemd's
 `EnvironmentFile=` strips them.
 
-- systemd units with `EnvironmentFile=` get the value from their environment
-  and, when that value is non-blank, never read the file. Restart every BOT
-  ERRORS unit after setting or changing it; a long-lived unit such as the
-  dispatcher, the collector or the q-loop keeps the old value until it
-  restarts.
+- systemd units with `EnvironmentFile=` inherit this value when they start.
+  A non-blank inherited value takes precedence over the file. Restart an
+  affected running unit after changing that value; each new process reads the
+  updated environment file.
 - Every other producer reads the file on each event, once it runs a release
   that has this rule, and then needs no restart for a change: the macOS
   launchd agents, the GUI-session monitor's included (their installers do not
