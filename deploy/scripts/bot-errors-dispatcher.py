@@ -11113,7 +11113,7 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
             **new_event_fields("alert", "critical"),
             "id": f"{source}-{int(time.time())}-{os.getpid()}",
             "createdAt": now_iso(),
-            "machine": socket.gethostname(),
+            "machine": event_machine(),
             "instance": "bot-errors-dispatcher",
             "source": source,
             "summary": summary,

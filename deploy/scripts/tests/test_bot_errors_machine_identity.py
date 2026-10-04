@@ -496,6 +496,25 @@ def test_dispatcher_meta_events_stamp_the_configured_name(monkeypatch: pytest.Mo
     }
 
 
+def test_credential_meta_alert_keeps_the_configured_machine_when_hostname_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MACHINE_ENV, CONFIGURED)
+    dispatcher = _load("bot-errors-dispatcher.py")
+    sent: list[str] = []
+    monkeypatch.setattr(dispatcher, "send_whatsapp", lambda text, **kwargs: sent.append(text))
+
+    for live in (LIVE_A, LIVE_B):
+        _live(monkeypatch, live)
+        assert dispatcher.credential_meta_alert(
+            "credential-repage-state-lost", "Credential state could not be verified", time.monotonic() + 5,
+        ) is not None
+
+    assert len(sent) == 2
+    assert all(CONFIGURED in text for text in sent)
+    assert all(live not in text for text in sent for live in (LIVE_A, LIVE_B))
+
+
 def test_dispatcher_poison_page_names_the_configured_machine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(MACHINE_ENV, CONFIGURED)
     dispatcher = _load("bot-errors-dispatcher.py")
