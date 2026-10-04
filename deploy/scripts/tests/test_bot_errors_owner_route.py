@@ -615,6 +615,21 @@ def test_a_reply_that_follows_another_line_in_the_same_chunk_is_read():
     # The instance writes a line for another id and the reply in one write. The reader keeps the bytes
     # after the first newline, so the reply is found without another read.
     dispatcher = _load_dispatcher()
+    # Force a single receive; stream sockets may split one write.
+    chunks = [b'{"id":1}\n{"id":2}\n']
+
+    def receive_chunk(_size):
+        assert chunks, "the buffered second line must not require another recv"
+        return chunks.pop()
+
+    reader = dispatcher._DeadlineLineIO(
+        types.SimpleNamespace(settimeout=lambda _timeout: None, recv=receive_chunk), lambda: 3,
+    )
+    deadline = time.monotonic() + 3
+    assert reader.readline(deadline) == '{"id":1}\n'
+    assert reader.readline(deadline) == '{"id":2}\n'
+    assert chunks == []
+
     short_dir = tempfile.mkdtemp(prefix="orr-")
     sock_path = str(Path(short_dir) / "rpc.sock")
 
