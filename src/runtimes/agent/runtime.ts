@@ -9878,8 +9878,7 @@ export class AgentRuntime implements Runtime {
     if (collapse && this.stashHandoffNotice(queue.targetChatJid, message, now)) {
       return;
     }
-    if (hasContinuation) queue.enqueueText(message, 'lifecycle');
-    else queue.enqueueText(message, 'lifecycle');
+    queue.enqueueText(message, 'lifecycle');
   }
 
   private enqueueAutoSwitchNotice(
