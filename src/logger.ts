@@ -37,6 +37,13 @@ let transport: any;
 
 // env-allowed: bootstrap-early logger; cannot import config (eval-order cycle)
 const logDir = process.env.LOG_DIR;
+// Under launchd the plist sends stdout to an unrotated stdout.log, so the
+// generated plist sets WHATSOUP_LOG_STDOUT_SINK=off and the rolling file is the
+// only structured sink; systemd leaves it unset because journald bounds stdout
+// (#3704). Honoured only while the rolling file sink is configured below:
+// without LOG_DIR, or when that transport cannot start, pino keeps stdout.
+// env-allowed: bootstrap-early logger; cannot import config (eval-order cycle)
+const stdoutSinkEnabled = process.env.WHATSOUP_LOG_STDOUT_SINK !== 'off';
 // Vitest removes its per-file HOME after each suite. Starting pino's worker
 // transport there races that teardown, so Vitest stays stdout-only.
 // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
@@ -45,8 +52,8 @@ if (logDir && fileTransportEnabled) {
   try {
     transport = pino.transport({
       targets: [
-        // stdout — always present (captured by systemd/journald)
-        { target: 'pino/file', options: { destination: 1 }, level },
+        // stdout — captured by systemd/journald; off under launchd (#3704)
+        ...(stdoutSinkEnabled ? [{ target: 'pino/file', options: { destination: 1 }, level }] : []),
         // rolling file — daily rotation, keep 10 files
         {
           target: 'pino-roll',

@@ -114,7 +114,7 @@ describe('runtime shutdown outbound persistence', () => {
       state.currentInboundSeq = inboundSeq;
       state.currentTurnChatJid = deliveryJid;
 
-      queue.enqueueText('answer whose socket send never settles');
+      queue.enqueueText('answer whose socket send never settles', 'answer');
       await vi.advanceTimersByTimeAsync(0);
       expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
       expect(db.raw.prepare('SELECT COUNT(*) AS count FROM turn_terminal_records').get())

@@ -219,6 +219,11 @@ export function buildPlist(name: string, renderOptions: LaunchdPlistRenderOption
     `    <string>${escapeXml(os.homedir())}</string>`,
     '    <key>TMPDIR</key>',
     `    <string>${escapeXml(tmpDir)}</string>`,
+    // launchd sends stdout to <logDir>/stdout.log and nothing rotates it. The
+    // logger's stdout copy exists for journald; under launchd the rolling file
+    // is the structured sink, so the duplicate is turned off (#3704).
+    '    <key>WHATSOUP_LOG_STDOUT_SINK</key>',
+    '    <string>off</string>',
     ...(renderOptions.claudeConfigDir
       ? [
           '    <key>CLAUDE_CONFIG_DIR</key>',

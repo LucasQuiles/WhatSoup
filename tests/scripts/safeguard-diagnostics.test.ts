@@ -154,7 +154,7 @@ const requiredConsolePackageScripts = {
   'design:capture': 'node scripts/capture-visual-matrix.mjs',
   'design:capture:validate': 'node scripts/validate-visual-manifest.mjs',
   'design:color-semantics': 'node scripts/check-color-semantics.mjs --fail-on-rule soup/no-component-local-palette --fail-on-rule soup/provider-palette-only --fail-on-rule soup/data-series-token-only --fail-on-rule soup/traffic-neutrality',
-  'design:contrast': 'node scripts/check-contrast-matrix.mjs',
+  'design:contrast': 'node scripts/check-contrast-matrix.mjs --no-write',
   'design:font-assets': 'node scripts/check-font-assets.mjs',
   'design:lint-fixtures': 'node scripts/check-design-lint-fixtures.mjs',
   'design:metrics': 'node scripts/design-metrics.mjs',

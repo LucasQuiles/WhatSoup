@@ -21,7 +21,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import event_machine, new_event_fields
+from lib.bounded_jsonl import (
+    append_bounded_jsonl,
+    require_bounded_jsonl_commit,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -1586,6 +1590,34 @@ def controller_log_fallback(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+def positive_env_int(name: str, default: int) -> int:
+    value = int(os.environ.get(name, str(default)))
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return value
+
+
+# logs/collector.jsonl is diagnostic. It is written through the same hard-capped
+# writer as the dispatcher's dispatch.jsonl: one lock, a byte cap that trims to
+# the newest records, private mode and no-follow, with per-record fsyncs
+# skipped. The plain O_APPEND write before this had no bound and one host's
+# log reached 224 MB (#3700).
+MAX_COLLECTOR_JSONL_BYTES = positive_env_int("BOT_ERRORS_COLLECTOR_JSONL_MAX_BYTES", 50 * 1024 * 1024)
+
+
+def append_collector_log_record(path: Path, record: dict[str, Any]) -> None:
+    ensure_private_dir(path.parent)
+    require_bounded_jsonl_commit(
+        append_bounded_jsonl(
+            path,
+            record,
+            component="collector.controller_log",
+            max_bytes=MAX_COLLECTOR_JSONL_BYTES,
+            durability="best_effort",
+        )
+    )
+
+
 def append_log(
     payload: dict[str, Any],
     *,
@@ -1605,7 +1637,7 @@ def append_log(
         outcome=outcome,
         durability_class="diagnostic_best_effort",
         details=metadata_only_controller_details(details),
-        append_record=lambda record: append_private_jsonl(path, record),
+        append_record=lambda record: append_collector_log_record(path, record),
         persist_health=persist_controller_log_health,
         emit_fallback=controller_log_fallback,
     )
@@ -1709,7 +1741,7 @@ def project_collector_state_mode(diagnostic: Any) -> str:
         outcome="failed" if failed else "observed",
         durability_class="diagnostic_best_effort",
         details=details,
-        append_record=lambda record: append_private_jsonl(log_path, record),
+        append_record=lambda record: append_collector_log_record(log_path, record),
         persist_health=persist_controller_log_health,
         emit_fallback=lambda _line: emit_state_recovery_fallback(diagnostic),
     )
@@ -2236,7 +2268,7 @@ def enqueue_meta_alert(
                 **new_event_fields("observation" if effective_severity == "info" else "alert", effective_severity),
                 "id": event_id,
                 "createdAt": created_at,
-                "machine": socket.gethostname(),
+                "machine": event_machine(),
                 "platform": sys.platform,
                 "instance": "bot-errors-collector",
                 "source": source,
@@ -2309,7 +2341,7 @@ def enqueue_meta_alert(
         **new_event_fields("observation" if effective_severity == "info" else "alert", effective_severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
         "source": source,
@@ -2369,7 +2401,7 @@ def enqueue_meta_recovery(remote: str, source: str, summary: str, evidence: str,
         **new_event_fields("clear", "info"),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
         "source": source,
@@ -3507,7 +3539,7 @@ def enqueue_writefail_ack_failure(
             **new_event_fields("alert", "critical"),
             "id": event_id,
             "createdAt": now_iso(),
-            "machine": socket.gethostname(),
+            "machine": event_machine(),
             "platform": sys.platform,
             "instance": "bot-errors-collector",
             "source": "remote-writefail-ack-failed",
@@ -3970,7 +4002,7 @@ def _emit_collector_outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
         "source": source,
