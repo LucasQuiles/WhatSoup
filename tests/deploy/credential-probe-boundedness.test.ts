@@ -393,7 +393,7 @@ function observeLifecycleEventOrder(source: string): string {
 // The lifecycle driver is a Python fixture; each probe root gets a copy as lifecycle.py.
 const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bounded-exec-lifecycle-driver.py'), 'utf8');
 
-function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'zero', terminal = false) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
@@ -683,6 +683,66 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     'case "$4" in cleanup-child-group)',
     '  umask() { if [ "$#" -eq 0 ]; then /bin/bash "$TMPDIR/umask-capture.sh"; else builtin umask "$@"; fi; }',
     '  ;; esac',
+    // Mark the watchdog's budget sleep as the driver's readiness signal. Except
+    // when the guard or the outer is signalled, also stretch it, so the command
+    // and watchdog groups outlive the worker unless the guard ends them. With a
+    // valid record, keep the guard in its grace until the outer has sent it
+    // TERM, so that TERM always reaches it there. Every hold in these modes
+    // leaves a barrier-expired marker if it runs out, which fails the case.
+    'case "$4" in control-tokenless-worker-stopped|control-tokenless-cleanup-interrupted|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap|guard-terminated|outer-terminated|outcome-candidate-fork-race-symlink|guard-trap-in-record-read)',
+    '  sleep() {',
+    '    if [ "${start-}" = run ] && [ "${FUNCNAME[1]}" = whatsoup_run_bounded ] && [ "$1" = "$budget" ]; then',
+    '      : > "$WATCHDOG_SLEEP_STARTED"',
+    '      case "$cleanup_mode" in guard-terminated|outer-terminated) ;; *) : > "$WATCHDOG_SLEEP_STRETCHED"; command sleep 10; return;; esac',
+    '    fi',
+    '    if [ "${cleanup_mode#authorization-valid-}" != "$cleanup_mode" ] && [ -z "${start-}" ] && [ -n "${guard_status-}" ] && [ "${FUNCNAME[1]}" = whatsoup_run_bounded ] && [ "$1" = "$grace" ]; then',
+    '      local polls=0',
+    '      while [ ! -e "$OUTER_TERM_SENT" ] && [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+    '      [ -e "$OUTER_TERM_SENT" ] || : > "$BARRIER_EXPIRED-guard-grace"',
+    '    fi',
+    '    command sleep "$@"',
+    '  }',
+    '  ;; esac',
+    // Record the guard's USR1 to the worker, which follows the guard's read of a
+    // valid record, and the outer's TERM to the guard once it is sent. After the
+    // reap, the outer-terminated mode holds the outer at its first resume of the
+    // guard until the driver sends the outer TERM. Every status passes through.
+    'case "$4" in authorization-valid-*)',
+    '  kill() {',
+    '    local kill_rc=0 polls=0',
+    '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
+    '      outer_held=1',
+    '      : > "$OUTER_HOLDING"',
+    '      while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+    '      : > "$BARRIER_EXPIRED-outer-hold"',
+    '    fi',
+    '    builtin kill "$@" || kill_rc=$?',
+    '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then : > "$GUARD_USR1_SENT"; fi',
+    '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then : > "$OUTER_TERM_SENT"; fi',
+    '    return "$kill_rc"',
+    '  }',
+    '  ;; esac',
+    // Hold the worker's cleanup at its first step, the ticker wait, or the
+    // cleanup marker's umask where there is no ticker, until the driver has
+    // sent the worker a trapped signal.
+    'case "$4" in control-tokenless-cleanup-interrupted|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap)',
+    '  cleanup_hold() {',
+    '    [ -z "${cleanup_held-}" ] || return 0',
+    '    cleanup_held=1',
+    '    : > "$CLEANUP_HOLD"',
+    '    local polls=0',
+    '    while [ ! -e "$CLEANUP_HOLD_RELEASE" ] && [ "$polls" -lt 500 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+    '    [ -e "$CLEANUP_HOLD_RELEASE" ] || : > "$BARRIER_EXPIRED-cleanup-hold"',
+    '  }',
+    '  wait() {',
+    '    if [ "${FUNCNAME[1]}" = _bounded_worker_cleanup ] && [ -n "${ticker_pid-}" ] && [ "$1" = "$ticker_pid" ]; then cleanup_hold; fi',
+    '    builtin wait "$@"',
+    '  }',
+    '  umask() {',
+    '    if [ "$#" -eq 1 ] && [ "${FUNCNAME[1]}" = _bounded_reserve_cleanup_marker ] && [ "${FUNCNAME[2]}" = _bounded_worker_cleanup ]; then cleanup_hold; fi',
+    '    builtin umask "$@"',
+    '  }',
+    '  ;; esac',
     'case "$4" in deadline-timer-descendant|deadline-helper-vanished|deadline-helper-signal-refused)',
     '  case "$4" in deadline-helper-*)',
     '    sleep() {',
@@ -716,13 +776,47 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
+    // Model the fork race behind a one-shot group kill: the first SIGKILL of the
+    // watchdog's group, named in this call's own record, reaches its leader only,
+    // as a member forked at that instant would miss it. It records the caller.
+    'case "$4" in outcome-candidate-fork-race-symlink)',
+    '  kill() {',
+    '    local file key value group=""',
+    '    if [ "$#" -eq 3 ] && [ "$1" = -9 ] && [ "$2" = -- ] && [ ! -e "$TMPDIR/fork-race-intercept" ]; then',
+    '      for file in "$TMPDIR"/whatsoup-bounded-authorize.*; do',
+    '        [ -f "$file" ] || continue',
+    '        while IFS="=" read -r key value; do [ "$key" != watchdog_group ] || group="$value"; done < "$file"',
+    '      done',
+    '      if [[ "$group" =~ ^[0-9]+$ ]] && [ "$group" -gt 1 ] && [ "$3" = "-$group" ] && ( set -C; builtin printf "%s %s\\n" "$group" "${FUNCNAME[1]}" > "$TMPDIR/fork-race-intercept" ) 2>/dev/null; then',
+    '        builtin kill -9 "$group"; return',
+    '      fi',
+    '    fi',
+    '    builtin kill "$@"',
+    '  }',
+    '  ;; esac',
+    // TERM the guard inside its first record read, so its trap runs while that
+    // read's `IFS='='` is in effect. It records the IFS length the trap sees.
+    'case "$4" in guard-trap-in-record-read)',
+    '  read() {',
+    '    if [ "${FUNCNAME[1]}" = _bounded_read_authorization ] && [ -n "${guard_status+x}" ] && ( set -C; builtin printf "%s\\n" "${#IFS}" > "$TMPDIR/record-read-trap" ) 2>/dev/null; then',
+    '      builtin kill -TERM "$(exec /bin/sh -c \'echo "$PPID"\')"',
+    '    fi',
+    '    builtin read "$@"',
+    '  }',
+    '  ;; esac',
     outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in event-order-frame-*) ;; event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*) budget=1;; zero) budget=0;; esac',
+    'budget=6; case "$4" in event-order-frame-*) ;; event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*|guard-trap-in-record-read) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap) budget=1;; guard-terminated) budget=3;; zero) budget=0;; esac',
     '[ "$4" != event-order-frame-tmout ] || { TMOUT=1; export -n TMOUT; }',
+    // These modes count groups that outlive the call. Such a group would hold a
+    // capture pipe open and keep the probe from returning, so they use a file.
+    'case "$4" in control-tokenless-worker-stopped|control-tokenless-cleanup-interrupted|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap|guard-terminated|outer-terminated|outcome-candidate-fork-race-symlink|guard-trap-in-record-read) capture_file="$TMPDIR/bounded-output";; *) capture_file="";; esac',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
+    'elif [ -n "$capture_file" ]; then',
+    '  if builtin printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4" > "$capture_file"; then rc=0; else rc=$?; fi',
+    '  out="$(< "$capture_file")"',
     'else',
     'if out="$(builtin printf "payload\\n" | whatsoup_run_bounded "$budget" "$2" "$3" "$4")"; then rc=0; else rc=$?; fi',
     'fi',
@@ -769,9 +863,10 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '  for control in "$TMPDIR"/whatsoup-bounded-control.*; do command -p ln -s "$TMPDIR/pending-victim" "$TMPDIR/whatsoup-bounded-deadline.${control##*/whatsoup-bounded-control.}.pending" && : > "$TMPDIR/deadline-pending-planted"; done',
     'fi',
     // Ignore TERM so the command outlives the watchdog budget and the real
-    // watchdog writer is reached instead of being reaped before it runs.
-    'case "$1" in deadline-writer-*) trap "" TERM; value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
-    'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|outcome-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
+    // watchdog writer is reached instead of being reaped before it runs, or,
+    // with a valid record, outlives the guard's TERM and the worker's.
+    'case "$1" in deadline-writer-*|authorization-valid-*) trap "" TERM; value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
+    'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|outcome-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|authorization-unreadable-cleanup-interrupted|guard-terminated|outer-terminated|guard-trap-in-record-read) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
     '  IFS= read -r payload',
     '  if [ "$1" = near-deadline ]; then sleep 0.75; else sleep 0.05; fi',
@@ -831,6 +926,14 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       DEADLINE_WATCHDOG_TERM: path.join(root, 'deadline-watchdog-term'),
       DEADLINE_PUBLISH_LIMITED: path.join(root, 'deadline-publish-limited'),
       DEADLINE_ABSENT_BEFORE_PUBLISH: path.join(root, 'deadline-absent-before-publish'),
+      WATCHDOG_SLEEP_STARTED: path.join(root, 'watchdog-sleep-started'),
+      WATCHDOG_SLEEP_STRETCHED: path.join(root, 'watchdog-sleep-stretched'),
+      GUARD_USR1_SENT: path.join(root, 'guard-usr1-sent'),
+      OUTER_TERM_SENT: path.join(root, 'outer-term-sent'),
+      OUTER_HOLDING: path.join(root, 'outer-holding'),
+      BARRIER_EXPIRED: path.join(root, 'barrier-expired'),
+      CLEANUP_HOLD: path.join(root, 'cleanup-hold'),
+      CLEANUP_HOLD_RELEASE: path.join(root, 'cleanup-hold-release'),
     } });
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
@@ -1176,6 +1279,126 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
   });
+  // The groups the worker created must not outlive it when the worker cannot
+  // run its own cleanup. Each case checks its survivors right after its setup,
+  // and a label after the evidence names the list that failed.
+  it('ends the groups a stopped worker created under an invalid record', () => {
+    const result = runLifecycleProbe('control-tokenless-worker-stopped');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.control_corrupted, evidence).toBe('control-tokenless-worker-stopped');
+    expect(result.stopped_worker, evidence).toBeGreaterThan(1);
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.dangerous_kill_attempts, `${evidence} [dangerous kill attempts]`).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  it('ends the created groups before a trapped signal can cut worker cleanup short under an invalid record', () => {
+    const result = runLifecycleProbe('control-tokenless-cleanup-interrupted');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.control_corrupted, evidence).toBe('control-tokenless-cleanup-interrupted');
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.barrier_expired, evidence).toEqual([]);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.dangerous_kill_attempts, `${evidence} [dangerous kill attempts]`).toEqual([]);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  it('ends the created groups before a trapped signal can cut worker cleanup short without a readable record', () => {
+    const result = runLifecycleProbe('authorization-unreadable-cleanup-interrupted');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.authorization_unreadable, evidence).toBe(true);
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.cleanup_hold_reached, evidence).toBe(true);
+    expect(result.interrupted_worker, evidence).toBeGreaterThan(1);
+    expect(result.barrier_expired, evidence).toEqual([]);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    // The guard reports 124 from its claim, or 2 when it sees the worker still
+    // alive after its grace; which one depends on scheduling.
+    expect(result.stdout, evidence).toMatch(/rc=(2|124) output=/);
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  // With a valid record the guard trusts the recorded groups. The outer
+  // signals it only after reaping the worker, so its signal trap must end the
+  // groups that a cleanup cut short leaves behind.
+  it('ends the recorded groups after a trapped signal cuts worker cleanup short under a valid record', () => {
+    const result = runLifecycleProbe('authorization-valid-cleanup-interrupted');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.guard_usr1_sent, evidence).toBe(true);
+    expect(result.cleanup_hold_reached, evidence).toBe(true);
+    expect(result.interrupted_worker, evidence).toBeGreaterThan(1);
+    expect(result.worker_cut_observed, evidence).toBe(true);
+    expect(result.barrier_expired, evidence).toEqual([]);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=124 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  // After the reap only the guard can still check the recorded groups, so a
+  // TERM to the outer then must not end the guard before its trap ends them.
+  it('ends the recorded groups when the outer subshell receives TERM after reaping a worker whose cleanup was cut short', () => {
+    const result = runLifecycleProbe('authorization-valid-outer-terminated-after-reap');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.guard_usr1_sent, evidence).toBe(true);
+    expect(result.cleanup_hold_reached, evidence).toBe(true);
+    expect(result.interrupted_worker, evidence).toBeGreaterThan(1);
+    expect(result.terminated_pid, evidence).toBeGreaterThan(1);
+    expect(result.barrier_expired, evidence).toEqual([]);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=143 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  it('ends the worker and the groups it created when the guard receives TERM', () => {
+    const result = runLifecycleProbe('guard-terminated');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.terminated_pid, evidence).toBeGreaterThan(1);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(4_000);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  it('ends the groups the worker created when the outer subshell receives TERM', () => {
+    const result = runLifecycleProbe('outer-terminated');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.terminated_pid, evidence).toBeGreaterThan(1);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=143 output=');
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
   it.each(['outcome-symlink', 'outcome-existing', 'outcome-fifo', 'outcome-directory', 'outcome-candidate-symlink', 'outcome-candidate-existing', 'outcome-candidate-fifo', 'outcome-candidate-directory'] as const)('refuses an unauthenticated outcome without reading it: %s', (mode) => {
     const result = runLifecycleProbe(mode);
     expect(result.outcome_substitution, JSON.stringify(result)).toBe(mode);
@@ -1190,6 +1413,36 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  // The fixture lets the first SIGKILL of the watchdog's group reach its leader
+  // only, as when a member forks at that instant; the call must still end it.
+  it('ends a watchdog group member that escapes the group kill under a refused outcome', () => {
+    const result = runLifecycleProbe('outcome-candidate-fork-race-symlink');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.outcome_substitution, evidence).toBe('outcome-candidate-fork-race-symlink');
+    expect(result.fork_race_intercept, evidence).toMatch(/^\d+ \S+\n$/);
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.outcome_victim_contents, evidence).toBe('unchanged');
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+  });
+  // A trap that runs inside another read sees that read's IFS; the call must
+  // still end every group the worker created.
+  it('ends the worker groups when the guard trap runs inside its record read', () => {
+    const result = runLifecycleProbe('guard-trap-in-record-read');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.record_read_trap, evidence).toBe('1\n');
+    expect(result.watchdog_sleep_stretched, evidence).toBe(true);
+    expect(result.survivors_before_cleanup, `${evidence} [survivors before cleanup]`).toEqual([]);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
   });
   it.each(['timeout-symlink', 'timeout-existing'] as const)('does not follow or trust a pre-existing timeout marker: %s', (mode) => {
     const result = runLifecycleProbe(mode);

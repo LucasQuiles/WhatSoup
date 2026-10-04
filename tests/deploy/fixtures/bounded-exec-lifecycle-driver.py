@@ -23,6 +23,15 @@ def members(session):
             if os.getsid(pid) == session: found.append({'pid': pid, 'ppid': int(fields[1]), 'pgid': int(fields[2]), 'identity': row})
         except ProcessLookupError: pass
     return found
+# Modes that count groups outliving the call. Their injections wait for the
+# command to start and the watchdog to enter its budget sleep, not for the
+# record's release line, which the worker writes before releasing either.
+GROUP_MODES = ('control-tokenless-worker-stopped', 'control-tokenless-cleanup-interrupted', 'authorization-unreadable-cleanup-interrupted', 'authorization-valid-cleanup-interrupted', 'authorization-valid-outer-terminated-after-reap', 'guard-terminated', 'outer-terminated')
+def wait_ready():
+    deadline = time.monotonic() + 3
+    while not ((root / 'command-started').exists() and (root / 'watchdog-sleep-started').exists()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not ((root / 'command-started').exists() and (root / 'watchdog-sleep-started').exists()): raise RuntimeError('command or watchdog readiness unavailable')
 record = {}
 frame_holder = None
 tear_last_miss = None
@@ -237,6 +246,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'timeout-fixture-ready').write_text('ready')
             record['timeout_victim'] = str(victim)
         if mode.startswith('control-'):
+            if mode in GROUP_MODES: wait_ready()
             deadline = time.monotonic() + 3
             control = None
             while time.monotonic() < deadline:
@@ -266,13 +276,14 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 'watchdog_group=' + fields['watchdog_group'],
                 'release=1',
             ]
-            if mode != 'control-tokenless': replacement.insert(0, 'token=' + fields['token'])
+            if not mode.startswith('control-tokenless'): replacement.insert(0, 'token=' + fields['token'])
             if mode == 'control-duplicate-token': replacement.insert(1, 'token=' + fields['token'])
             staged = root / 'replacement-control'
             staged.write_text('\n'.join(replacement) + '\n')
             staged.replace(control)
             record['control_corrupted'] = mode
-        if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group'):
+        if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group', 'control-tokenless-worker-stopped'):
+            if mode in GROUP_MODES: wait_ready()
             deadline = time.monotonic() + 3
             authorization = None
             while time.monotonic() < deadline:
@@ -386,6 +397,67 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 time.sleep(0.01)
             record['early_cont_before_stop'] = (root / 'handshake-early-cont').exists()
             (root / 'handshake-allow-stop').write_text('continue')
+        if mode in ('control-tokenless-cleanup-interrupted', 'authorization-unreadable-cleanup-interrupted', 'authorization-valid-cleanup-interrupted', 'authorization-valid-outer-terminated-after-reap', 'guard-terminated', 'outer-terminated'):
+            wait_ready()
+            matches = list(root.glob('whatsoup-bounded-authorize.*'))
+            if len(matches) != 1: raise RuntimeError('worker authorization unavailable')
+            authorization = matches[0]
+            fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
+            command_pid = int(fields['command_pid'])
+            processes = members(session)
+            worker = next((item['ppid'] for item in processes if item['pid'] == command_pid), None)
+            worker_record = next((item for item in processes if item['pid'] == worker), None)
+            if worker is None or worker == child.pid or worker_record is None: raise RuntimeError('worker identity unavailable')
+            outer = worker_record['ppid']
+            if mode == 'authorization-unreadable-cleanup-interrupted':
+                authorization.chmod(0)
+                record['authorization_unreadable'] = not os.access(authorization, os.R_OK)
+            if mode.startswith('authorization-valid-'):
+                # The guard sends its USR1 after reading the valid record. Only
+                # then does a TERM start the worker's cleanup.
+                usr1_deadline = time.monotonic() + 3
+                while not (root / 'guard-usr1-sent').exists() and child.poll() is None and time.monotonic() < usr1_deadline:
+                    time.sleep(0.01)
+                if not (root / 'guard-usr1-sent').exists(): raise RuntimeError('guard USR1 unavailable')
+                os.kill(worker, signal.SIGTERM)
+            if mode.endswith('-cleanup-interrupted') or mode.startswith('authorization-valid-'):
+                # The probe holds the worker's cleanup at its first step. A TERM
+                # sent there runs the worker's trap, which exits from inside it.
+                hold_deadline = time.monotonic() + 5
+                while not (root / 'cleanup-hold').exists() and child.poll() is None and time.monotonic() < hold_deadline:
+                    time.sleep(0.01)
+                record['cleanup_hold_reached'] = (root / 'cleanup-hold').exists()
+                if record['cleanup_hold_reached']:
+                    os.kill(worker, signal.SIGTERM)
+                    record['interrupted_worker'] = worker
+                (root / 'cleanup-hold-release').write_text('release')
+                if mode == 'authorization-valid-cleanup-interrupted':
+                    # The worker's pid leaves the session once the outer has
+                    # reaped it; the guard's grace is held until the outer's TERM.
+                    reap_deadline = time.monotonic() + 3
+                    while any(item['pid'] == worker for item in members(session)) and time.monotonic() < reap_deadline:
+                        time.sleep(0.01)
+                    record['worker_cut_observed'] = not any(item['pid'] == worker for item in members(session))
+                    (root / 'worker-cut').write_text('cut')
+                elif mode == 'authorization-valid-outer-terminated-after-reap':
+                    # The probe holds the outer at its first resume of the guard,
+                    # after the reap, while the guard waits in its grace.
+                    outer_deadline = time.monotonic() + 3
+                    while not (root / 'outer-holding').exists() and child.poll() is None and time.monotonic() < outer_deadline:
+                        time.sleep(0.01)
+                    if not (root / 'outer-holding').exists() or outer == child.pid: raise RuntimeError('outer hold unavailable')
+                    os.kill(outer, signal.SIGTERM)
+                    record['terminated_pid'] = outer
+            else:
+                if mode == 'guard-terminated':
+                    guards = [item for item in processes if item['ppid'] == outer and item['pid'] != worker and item['pgid'] != worker_record['pgid']]
+                    if len(guards) != 1: raise RuntimeError('guard identity unavailable')
+                    target = guards[0]['pid']
+                else:
+                    target = outer
+                if target == child.pid: raise RuntimeError('termination target unavailable')
+                os.kill(target, signal.SIGTERM)
+                record['terminated_pid'] = target
         if mode in ('parent-stopped', 'parent-terminated'):
             deadline = time.monotonic() + 3
             while not (root / 'command-started').exists() and time.monotonic() < deadline: time.sleep(0.01)
@@ -466,6 +538,12 @@ record['deadline_publish_limited'] = (root / 'deadline-publish-limited').exists(
 record['deadline_absent_before_publish'] = (root / 'deadline-absent-before-publish').exists()
 record['deadline_marker_mode'] = (root / 'deadline-marker-mode').read_text().strip() if (root / 'deadline-marker-mode').exists() else None
 record['residual_bounded_files'] = sorted(item.name for item in root.glob('whatsoup-bounded*'))
+record['watchdog_sleep_stretched'] = (root / 'watchdog-sleep-stretched').exists()
+record['guard_usr1_sent'] = (root / 'guard-usr1-sent').exists()
+record['fork_race_intercept'] = (root / 'fork-race-intercept').read_text() if (root / 'fork-race-intercept').exists() else None
+record['record_read_trap'] = (root / 'record-read-trap').read_text() if (root / 'record-read-trap').exists() else None
+record.setdefault('worker_cut_observed', False)
+record['barrier_expired'] = sorted(item.name for item in root.glob('barrier-expired-*'))
 if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
     record.setdefault('event_observations', [])
