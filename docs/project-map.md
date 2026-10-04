@@ -27,7 +27,7 @@ no-systemd fallback.
 |---|---|---|
 | `src/core/` | Database, message parsing, access policy, send pipeline, durability, scheduler, substrate. | `docs/durability.md`, `docs/reply-guarantee.md`, `docs/runbooks/substrate-slice-1.md` |
 | `src/transport/` | Baileys and Twilio transport adapters, connection lifecycle, auth, contract events. | `README.md`, `docs/runbooks/twilio-transport.md` |
-| `src/mcp/` | Registry, socket server, scopes, 20 documented tool modules, and helper factories. | `docs/tools.md`, `docs/public-surface.md` |
+| `src/mcp/` | Registry, socket server, scopes, tool modules, and helper factories. | `docs/tools.md`, `docs/public-surface.md` |
 | `src/runtimes/agent/` | Agent session lifecycle, providers, fallback, handoff distiller, polls, media bridge, response registry. | `docs/runbooks/error-response-workflows.md`, `docs/runbooks/agent-decision-polls.md` |
 | `src/runtimes/chat/` | Direct chat runtime, rate limits, context, queueing, provider integrations. | `docs/configuration.md` |
 | `src/memory/` | Memory consolidation scheduler and types. | `docs/explainers/byok-memory-config-migration.md` |
@@ -65,7 +65,7 @@ no-systemd fallback.
 | Design system primitives | `console/src/components/primitives/*.tsx`, `console/src/styles/*.css` | `docs/design-system/03-spec/`, `docs/design-system/06-implementation/` |
 | Configuration and BYOK memory | `src/config*.ts`, `src/core/agent-config-validator.ts`, `src/lib/pinecone-project-guard.ts` | `docs/configuration.md`, `docs/explainers/byok-memory-config-migration.md` |
 | Bot-errors reliability services | `deploy/scripts/bot-errors-*.py`, `deploy/bot-errors-*.service`, guard scripts | `deploy/scripts/README-bot-errors.md`, `docs/runbooks/fleet-bot-hardening-standard.md` |
-| Guard and release gates | `scripts/*guard*.ts`, `scripts/*drift*.ts`, package scripts | `docs/contributing/quality-guardrails-checklist.md`, `CLAUDE.md` |
+| Guard and release gates | `scripts/*guard*.ts`, `scripts/*drift*.ts`, package scripts | `docs/contributing/quality-guardrails-checklist.md`, `AGENTS.md` |
 
 ## Artifact Ownership
 
@@ -88,4 +88,5 @@ no-systemd fallback.
    from stale planning prose.
 4. Promote missing canonical docs with `git add -f` only when the ignored root
    is intentionally selective.
-5. Update `docs/current-program.md` after the generated index changes.
+5. Update `docs/current-program.md` when objectives, ownership, blockers or delivery
+   boundaries change. Generated-index changes alone do not require a router edit.

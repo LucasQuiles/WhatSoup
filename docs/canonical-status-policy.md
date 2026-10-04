@@ -171,10 +171,10 @@ The scanner should implement the following:
 
 ## Known Exceptions and Non-Bugs
 
-These are current repo truths, not scanner defects:
+These are historical examples from the original integrity pass, not a current inventory. Read `docs/work-index.md` for the generated view and verify the authored record before acting:
 
 - `docs/sdlc/closed/mark-read-api-20260408/` has a `completed` epic state with `pending` beads. The scanner should report that mixed state honestly.
-- `docs/sdlc/active/agent-layer-hardening-20260405/` is the only genuinely active epic at present.
+- The original pass identified `docs/sdlc/active/agent-layer-hardening-20260405/` as its only active epic. This does not constrain later active work.
 - `docs/plans/` and many `docs/superpowers/*` files remain `unknown` until they are explicitly normalized; that is expected.
 
 ## Operational Expectations
@@ -183,7 +183,7 @@ These are current repo truths, not scanner defects:
 - Any future inconsistency reduction should prefer metadata repair over directory churn.
 - Regrouping work should happen only after this policy and the synthesized program view stay stable under regeneration.
 
-## Current Summary
+## Historical Integrity-Pass Summary
 
 As of the integrity pass merged in `bfbbedb`, the intended repo shape is:
 - one genuinely active SDLC epic
