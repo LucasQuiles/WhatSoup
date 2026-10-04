@@ -11,7 +11,7 @@ function makePort(overrides: { sendMessage?: ReturnType<typeof vi.fn>; getQueueF
 describe('sendDirect (#2981)', () => {
   it('T1: surfaces a bypass-path send failure as false (not swallowed)', async () => {
     const port = makePort({ sendMessage: vi.fn().mockRejectedValue(new Error('boom')) });
-    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text', true /* bypass */);
+    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text', 'status', true /* bypass */);
     expect(result).toBe(false);
   });
 
@@ -20,19 +20,19 @@ describe('sendDirect (#2981)', () => {
       sendMessage: vi.fn().mockRejectedValue(new Error('boom')),
       getQueueForChat: () => null, // force fallback path
     });
-    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text');
+    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text', 'status');
     expect(result).toBe(false);
   });
 
   it('T3: returns true on successful bypass send', async () => {
     const port = makePort({ sendMessage: vi.fn().mockResolvedValue({ waMessageId: 'm1' }) });
-    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text', true);
+    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text', 'status', true);
     expect(result).toBe(true);
   });
 
   it('T4: returns true when queued (enqueueText is void — accepted, outcome deferred)', async () => {
     const port = makePort({ getQueueForChat: () => ({ enqueueText: vi.fn(), isPoisoned: () => false }) });
-    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text');
+    const result = await sendDirect(port, 'jid@s.whatsapp.net', 'text', 'status');
     expect(result).toBe(true);
   });
 
@@ -44,7 +44,7 @@ describe('sendDirect (#2981)', () => {
       getQueueForChat: () => ({ enqueueText, isPoisoned: () => true }),
     });
 
-    await expect(sendDirect(port, 'jid@s.whatsapp.net', 'text')).resolves.toBe(false);
+    await expect(sendDirect(port, 'jid@s.whatsapp.net', 'text', 'status')).resolves.toBe(false);
     expect(enqueueText).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
   });
@@ -54,7 +54,7 @@ describe('sendDirectWithReceipt (#2981 car-B — id-bearing envelope)', () => {
   it('B1: bypass path surfaces the receipt waMessageId', async () => {
     const port = makePort({ sendMessage: vi.fn().mockResolvedValue({ waMessageId: 'wamid-77' }) });
     await expect(
-      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', true),
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', 'status', true),
     ).resolves.toEqual({ accepted: true, messageId: 'wamid-77' });
   });
 
@@ -64,7 +64,7 @@ describe('sendDirectWithReceipt (#2981 car-B — id-bearing envelope)', () => {
       getQueueForChat: () => null,
     });
     await expect(
-      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text'),
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', 'status'),
     ).resolves.toEqual({ accepted: true, messageId: 'wamid-88' });
   });
 
@@ -72,30 +72,30 @@ describe('sendDirectWithReceipt (#2981 car-B — id-bearing envelope)', () => {
     const enqueueText = vi.fn();
     const port = makePort({ getQueueForChat: () => ({ enqueueText, isPoisoned: () => false }) });
     await expect(
-      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text'),
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', 'status'),
     ).resolves.toEqual({ accepted: true, messageId: null });
-    expect(enqueueText).toHaveBeenCalledWith('text');
+    expect(enqueueText).toHaveBeenCalledWith('text', 'status');
   });
 
   it('B4: a thrown send maps to accepted:false with a null id', async () => {
     const port = makePort({ sendMessage: vi.fn().mockRejectedValue(new Error('boom')) });
     await expect(
-      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', true),
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', 'status', true),
     ).resolves.toEqual({ accepted: false, messageId: null });
   });
 
   it('B5: a receipt without an attributable id stays accepted with a null id', async () => {
     const port = makePort({ sendMessage: vi.fn().mockResolvedValue({ waMessageId: null }) });
     await expect(
-      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', true),
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', 'status', true),
     ).resolves.toEqual({ accepted: true, messageId: null });
   });
 
   it('B6: the boolean sendDirect wrapper still reports acceptance identically', async () => {
     const ok = makePort({ sendMessage: vi.fn().mockResolvedValue({ waMessageId: 'wamid-9' }) });
-    await expect(sendDirect(ok, 'jid@s.whatsapp.net', 'text', true)).resolves.toBe(true);
+    await expect(sendDirect(ok, 'jid@s.whatsapp.net', 'text', 'status', true)).resolves.toBe(true);
     const bad = makePort({ sendMessage: vi.fn().mockRejectedValue(new Error('boom')) });
-    await expect(sendDirect(bad, 'jid@s.whatsapp.net', 'text', true)).resolves.toBe(false);
+    await expect(sendDirect(bad, 'jid@s.whatsapp.net', 'text', 'status', true)).resolves.toBe(false);
   });
 
   it('B7: a known-poisoned queue rejects without enqueue or messenger bypass', async () => {
@@ -107,7 +107,7 @@ describe('sendDirectWithReceipt (#2981 car-B — id-bearing envelope)', () => {
     });
 
     await expect(
-      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text'),
+      sendDirectWithReceipt(port, 'jid@s.whatsapp.net', 'text', 'status'),
     ).resolves.toEqual({ accepted: false, messageId: null });
     expect(enqueueText).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();

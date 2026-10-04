@@ -1014,7 +1014,7 @@ export class RuntimeFallbackCoordinator {
     // own key, so a later user turn in the same chat still gets both.
     const noticeKey = scheduledDedupeKey([queue.targetChatJid, 'auth-required'].join(':'), scheduled);
     if (this.host.recentNoFallbackReauthNotices.has(noticeKey)) return;
-    if (!scheduled) queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._');
+    if (!scheduled) queue.enqueueText('_The agent needs re-authentication before it can reply here. An operator has been notified._', 'status');
     // Dedup is recorded only AFTER a successful enqueue: recording first meant a
     // teardown-race throw suppressed both the notice and the alert for the full
     // dedup window with no retry.

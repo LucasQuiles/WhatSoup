@@ -81,7 +81,7 @@ export function emitManagedLoopDegradedNotice(opts: {
   }
   const noticeKey = [opts.queue.targetChatJid, 'managed-loop-degraded'].join(':');
   if (opts.recentNotices.has(noticeKey)) return;
-  opts.queue.enqueueText(managedLoopDegradedNotice());
+  opts.queue.enqueueText(managedLoopDegradedNotice(), 'status');
   opts.recentNotices.set(noticeKey, now);
   opts.capDedupeMap(opts.recentNotices);
 }

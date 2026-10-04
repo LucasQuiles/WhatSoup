@@ -703,10 +703,10 @@ describe('scheduled turn checkpoint attribution and resume-failure visibility (#
 
       await vi.waitFor(() => {
         const chatQueue = queueDoubles.filter((q) => q.targetChatJid === dmJid).at(-1);
-        expect(chatQueue?.enqueueText).toHaveBeenCalledWith(EXPIRED_NOTICE);
+        expect(chatQueue?.enqueueText).toHaveBeenCalledWith(EXPIRED_NOTICE, 'status');
       });
       const otherQueues = queueDoubles.filter((q) => q.targetChatJid === otherDmJid);
-      for (const queue of otherQueues) expect(queue.enqueueText).not.toHaveBeenCalledWith(EXPIRED_NOTICE);
+      for (const queue of otherQueues) expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContain(EXPIRED_NOTICE);
       await expectRecovered(booted, dmJid, dmKey);
     });
   });

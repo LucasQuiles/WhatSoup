@@ -88,8 +88,8 @@ describe('OutboundQueue stable completion boundary', () => {
 
   it('drains a late text enqueue exactly once instead of synthesizing poison', async () => {
     const { queue, sent, firstSend } = makeBlockingQueue();
-    queue.enqueueText('CHUNK-ONE');
-    const lateEnqueue = currentChain(queue).then(() => queue.enqueueText('CHUNK-TWO'));
+    queue.enqueueText('CHUNK-ONE', 'answer');
+    const lateEnqueue = currentChain(queue).then(() => queue.enqueueText('CHUNK-TWO', 'answer'));
     const completion = queue.flush().then(
       () => ({ kind: 'resolved' as const }),
       (error: unknown) => ({ kind: 'rejected' as const, error }),
@@ -107,8 +107,8 @@ describe('OutboundQueue stable completion boundary', () => {
 
   it('orders one poll after a late text enqueue without poisoning the queue', async () => {
     const { queue, sent, firstSend } = makeBlockingQueue();
-    queue.enqueueText('CHUNK-ONE');
-    const lateEnqueue = currentChain(queue).then(() => queue.enqueueText('CHUNK-TWO'));
+    queue.enqueueText('CHUNK-ONE', 'answer');
+    const lateEnqueue = currentChain(queue).then(() => queue.enqueueText('CHUNK-TWO', 'answer'));
     const sendPoll = vi.fn(async () => undefined);
     const completion = queue.enqueuePoll(sendPoll).then(
       () => ({ kind: 'resolved' as const }),
@@ -129,8 +129,8 @@ describe('OutboundQueue stable completion boundary', () => {
     const { queue, sent, firstSend } = makeBlockingQueue();
     queue.setDurability(makeDurabilityStub());
     queue.beginTurnEvidence('turn-linear');
-    queue.enqueueText('CHUNK-ONE');
-    const lateEnqueue = currentChain(queue).then(() => queue.enqueueText('CHUNK-TWO'));
+    queue.enqueueText('CHUNK-ONE', 'answer');
+    const lateEnqueue = currentChain(queue).then(() => queue.enqueueText('CHUNK-TWO', 'answer'));
     const completion = queue.flushTurnEvidence('turn-linear').then(
       (evidence) => ({ kind: 'resolved' as const, evidence }),
       (error: unknown) => ({ kind: 'rejected' as const, error }),
@@ -150,8 +150,8 @@ describe('OutboundQueue stable completion boundary', () => {
 
   it('absorbs a late streaming buffer before normal flush completion', async () => {
     const { queue, sent, firstSend } = makeBlockingQueue();
-    queue.enqueueText('CHUNK-ONE');
-    const lateEnqueue = currentChain(queue).then(() => queue.enqueueStreamingText('late stream'));
+    queue.enqueueText('CHUNK-ONE', 'answer');
+    const lateEnqueue = currentChain(queue).then(() => queue.enqueueStreamingText('late stream', 'answer'));
     const completion = queue.flush();
 
     firstSend.resolve({ waMessageId: null });
@@ -165,7 +165,7 @@ describe('OutboundQueue stable completion boundary', () => {
 
   it('absorbs a late tool buffer before normal flush completion', async () => {
     const { queue, sent, firstSend } = makeBlockingQueue();
-    queue.enqueueText('CHUNK-ONE');
+    queue.enqueueText('CHUNK-ONE', 'answer');
     const lateEnqueue = currentChain(queue).then(() => {
       queue.enqueueToolUpdate({ category: 'running', detail: 'late status' });
     });
@@ -204,12 +204,12 @@ describe('OutboundQueue stable completion boundary', () => {
 
   it('rejects every content producer after shutdown begins and emits one bounded warning', async () => {
     const { queue, sent, typing, firstSend } = makeBlockingQueue();
-    queue.enqueueText('accepted before shutdown');
+    queue.enqueueText('accepted before shutdown', 'answer');
     const shutdown = queue.shutdown();
 
-    queue.enqueueText('rejected text');
-    queue.enqueueStreamingText('rejected stream');
-    queue.enqueueResultText('rejected result');
+    queue.enqueueText('rejected text', 'answer');
+    queue.enqueueStreamingText('rejected stream', 'answer');
+    queue.enqueueResultText('rejected result', 'answer');
     queue.enqueueToolUpdate({ category: 'running', detail: 'rejected tool' });
     queue.enqueueProgressUpdate({ type: 'thinking_long', gapMs: 10_000 }, 'Worker');
     queue.indicateTyping();
@@ -257,7 +257,7 @@ describe('OutboundQueue stable completion boundary', () => {
     (queue as unknown as { sendWithPacing: (chunk: unknown) => Promise<void> }).sendWithPacing =
       vi.fn(async () => { throw realError; });
 
-    queue.enqueueText('queued answer');
+    queue.enqueueText('queued answer', 'answer');
 
     await expect(queue.flush()).rejects.toBe(realError);
     expect(queue.isPoisoned()).toBe(true);
