@@ -774,9 +774,10 @@ phone notifies, plus an e-mail through the existing fallback script. Code:
 queued copies once the cycle has sent every group alert and recorded
 `cycleCompletedAt`, so an owner copy never delays a group send. The drain
 shares one time budget, enforced end to end: the socket call receives an
-absolute deadline, and every blocking step, the handshake and each read
-included, gets only the time left. The budget therefore bounds how late the
-next cycle can start. The queue holds at most 20 copies; a cycle that fails
+absolute deadline, and each write and each socket read, the handshake's
+included, gets only the time left, however slowly the instance answers or
+reads. The budget therefore bounds how late the next cycle can start. The
+queue holds at most 20 copies; a cycle that fails
 after its sends skips the drain, and a copy arriving at a full queue is
 logged as `skippedQueueFull` and dropped (its group copy exists).
 
@@ -800,7 +801,8 @@ re-sends the group alert.
 **Policy.** A copy is sent only for a critical incident alert (never a clear)
 whose source matches a pattern, on first open or as an escalated still-open
 reminder; plain still-open renotifies are skipped. The per-key interval is
-recorded before the send, so a crash yields a missed copy, never a duplicate.
+recorded before the send, so a crash yields a missed copy, never a duplicate
+(for the one stated exception, see the credential re-page section below).
 The group copy exists either way. When deduplication cannot be established the
 copy is skipped rather than risked: an existing state file that cannot be read
 or parsed, or that holds any entry without a positive integer `lastAt`, the
@@ -833,6 +835,313 @@ Then `systemctl --user daemon-reload` and restart the dispatcher. Verify with
 the `owner_route_selftest` source, which is routed by default. **Disable** by
 removing the drop-in, reloading and restarting; the code stays inert.
 
+## OPERATIONAL — Credential re-page (dead provider credential)
+
+A bot whose provider credential is dead needs a human. Before this class the
+owner heard of it once: the watchdog pages once per episode, an open incident
+re-notifies only on a new event, and the owner route has a 6 h floor. The
+dispatcher now keeps one **condition** per bot for the auth-caused sources and
+pages the owner every 4 hours until the condition ends. Code:
+`deploy/scripts/lib/credential_repage.py` (the rules; it sends nothing and
+writes no file) and the call points in `bot-errors-dispatcher.py`.
+
+It needs the owner critical route above (`BOT_ERRORS_OWNER_ROUTE_JID` and
+`BOT_ERRORS_OWNER_ROUTE_SOCKET`). With the route off the conditions are still
+kept, nothing is sent, and one `credential_repage_owner_route_disabled` record
+is logged per condition per interval. No setting narrows the member list.
+
+**Members.** Each source has one role.
+
+| Source | Role |
+|---|---|
+| `provider_credential_dead` | opens a condition at once |
+| `reauth-observe:reauth_needed_manual` | opens a condition at once |
+| `reauth-observe:credential_present_runtime_unusable` | opens it after 30 minutes |
+| `reauth-observe:account_identity_mismatch:<diagnosis>` | the role of `<diagnosis>` |
+| `reauth-observe:indeterminate_investigate`, `:public_liveness_only`, `:public_liveness_degraded` | never opens; keeps a pending or open condition alive |
+| `primary_model_unusable` | never opens; keeps a pending or open condition alive |
+| `provider_auth_required_no_fallback` | opens only beside `primary_model_unusable`; otherwise it is only named in the page |
+| `agent365-reliability-fleet_<host>_<bot>_primary_model_usable` (and `_unverified`) | never opens, never keeps alive; named in the page's e-mail |
+
+A diagnosis of the re-auth observer that this table does not name has no role.
+A condition is *latent* (only members that cannot open it), *pending* (the
+30-minute clock runs) or *open* (it pages). A latent entry changes nothing the
+dispatcher sends or logs.
+
+**Scope.** A condition is keyed `<host>|<instance>`. The emitters write
+different host strings for one bot (the runtime writes none, the watchdog its
+own host name, the re-auth observer its inventory name, the fleet probe carries
+the host in its source name), so the fleet roster decides:
+
+- the roster holds the instance name on exactly one host: that host, whatever
+  the event carried;
+- it holds the name on several hosts: the event's own host string, its first
+  label, the relay's host and that host's first label are compared with the
+  roster's hosts, and the first match wins. No match gives the event's own
+  string as its scope, and the cycle's log record counts it (`unmatchedScopes`);
+- it does not hold the name, or cannot be read: the event's own host string.
+
+A roster row with any `expected` value other than `none` counts as a host of
+its name. Unless the roster lists the name on several hosts, a pending or open
+condition is also kept alive by a member that sits in a latent entry of the
+same instance name. An unreadable roster is logged in every cycle
+(`rosterUnreadable`) and raises one group meta-alert per UTC day of delivery,
+source `credential-repage-roster-unreadable`. The alert is owed until a channel
+takes it or its UTC day ends, so it can arrive after the roster reads again: it
+names the condition in the past tense with the time it was first owed in that
+UTC day, and `rosterUnreadable` in each cycle's log shows how long it lasted.
+The page names the first opener's own host and instance, never the roster's
+label.
+
+**The page.** `<host>/<bot>: provider credential dead — human action required;
+dead for <N> h, page <K>`, to the owner's direct chat, and by e-mail with the
+list of members. When no opener is left and only a keep-alive member holds the
+condition: `<host>/<bot>: provider credential state unverified since <time>;
+primary still unusable; the re-auth observer now reports <diagnosis> — human
+action required; page <K>`. No group message carries a page.
+
+- Pages are sent after every group alert the cycle delivers from the outbox
+  and after its completion stamp, before the legacy owner copies, inside their
+  own budget of 20 s. The legacy drain then runs with its full budget, as
+  before. The class's own group meta-alerts come last (see "State and logs").
+- The 4 h floor is written to the incident state before the send. A refused
+  page is tried again in the next cycle; after three failed attempts the next
+  one waits one interval. A page that never started for lack of time costs no
+  attempt.
+- **One exception to "never a duplicate".** If the dispatcher fails after a
+  channel accepted a page (a log write that fails, for example), the attempt
+  counts as failed and the page is sent again, at most three times in one
+  interval. In the same way, a group meta-alert of the class (below) that a
+  channel took is marked by the next cycle, so it can be sent once more by a
+  restart before that cycle (each manual `--once` run is one), or when that
+  cycle fails to save its marks.
+- A group meta-alert of the class whose request left and whose answer did not
+  come counts as taken, as a held group alert does (#2424): it is not sent to
+  the group again, and it is logged as `credential_repage_meta_alert`
+  (`ambiguous`). Its e-mail is still tried, so it can reach each channel once.
+- The legacy owner copy of `provider_credential_dead` and
+  `reauth-observe:reauth_needed_manual` is dropped only when a channel accepted
+  the condition's page in that cycle or inside the last 4 hours, or when the
+  page is held on purpose (below). In every other case it goes out as before.
+- The group alert of every opener source now ends with "Human action required:
+  restore this bot's provider credential (owner). No automated remediation."
+  The other members carry that sentence while a pending or open condition
+  answers for them.
+
+**Acknowledge.** On the dispatcher host, as the dispatcher's service user:
+
+```sh
+python3 deploy/scripts/bot-errors-credential-ack.py <instance> [--machine <host>]
+```
+
+No page for that bot for 24 hours from the acknowledgement; then the pages
+resume if the condition is still open. The command reads the open condition
+from the incident state and writes that condition's own key to
+`credential-ack.json` in the state root. It refuses, and writes nothing, when
+the instance has no open condition (a pending one counts as none), when several
+open conditions carry the name and `--machine` does not select one, and when
+the incident state is missing or cannot be read. An unusable acknowledge file
+is no acknowledgement: the page goes out and says "acknowledge file
+unreadable". An acknowledgement closes nothing and silences no group alert.
+
+A maintenance window (`bot-errors-maintenance.py`) for the scope holds the page
+too, for at most 24 hours in the condition's life.
+
+**How a condition ends.** A clear of a member source removes that member. When
+no opener and no keep-alive member is left for 600 s, the condition is deleted.
+A member that returns inside those 600 s continues the same episode. There is
+no close command. To end a condition by hand, emit the clear of its member
+sources with the existing emitter for that bot; the `clearedAt` map of the
+scope is kept for 7 days so that an old copy of an alert cannot bring it back.
+Whether an alert or a clear of one source came first is decided by their
+creation times when both have one and neither was more than 1 hour ahead of
+the read when it was stored; a creation time further ahead is a wrong clock and
+counts as absent. The grace, the 30-minute promotion and the other times taken
+from events use the creation time capped at the read time; page floors and
+acknowledgement holds use the dispatcher's clock. A clear also records, as
+digests of their event ids, itself and the last alert it removed. While that
+record is the newest clear of its source in the scope and holds those digests,
+the removed alert read again after a failed send does not bring its member
+back, and the same clear read again changes nothing in its own source's
+record. A clear of `provider_credential_dead` or `primary_model_unusable` read
+again can still remove an older `provider_auth_required_no_fallback` member
+that arrived in between (limits below). An event without an id takes its
+identity from the raw text of a usable, timezone-aware creation time; an event
+with neither has none.
+A stale auto-close of the incident record does not end a condition.
+
+After a re-login one more page can follow, up to about 2 h 20 min later: the
+runtime's primary-model probe runs every 30 minutes and backs off to 2 hours,
+and the grace adds 10 minutes. A manual probe or a restart of the bot ends the
+condition sooner.
+
+Each timer pass evaluates every pending or open condition first and decides the
+age of latent entries after. A latent entry that is deleted by age in a pass
+therefore never holds a condition that opens later, whatever the order of the
+scope keys.
+
+**State and logs.** Everything is in the dispatcher's incident state:
+`credentialConditions`, `credentialConditionsQuarantine` (at most five stored
+values that failed validation), `credentialConditionsLoss`,
+`credentialConditionsAlertDays` and `credentialConditionsAlertsOwed`. A
+malformed entry is quarantined, rebuilt from
+the open incidents where one exists, paged again, and announced once per 4
+hours on both paths: a group meta-alert with source
+`credential-repage-state-lost` and an owner page that starts `BOT ERRORS:
+credential re-page state was lost for`. A fault inside the class, including
+one while its owed alerts are listed, is absorbed, logged as `passFault` and
+announced once per UTC day of delivery with source
+`credential-repage-pass-error`; the alert is owed in the state until a channel
+takes it or its UTC day ends. An owed entry whose time is not within a day of
+its own UTC day, or that names no daily alert, is malformed and dropped. A
+fault never stops a group alert, the completion stamp or a legacy owner copy.
+
+The class sends these group meta-alerts (`credential-repage-state-lost`,
+`credential-repage-pass-error`, `credential-repage-roster-unreadable`) itself,
+after the legacy owner drain and inside its own budget of 20 s, and does not
+queue them as the dispatcher's other meta-alerts are queued: a queued alert is
+an incident alert, and the incident renotify policy (6 h, then 12 h, then
+24 h) would absorb a repeat that the cadence above promises. The group send of
+one alert gets at most 8 s of the budget, so its e-mail keeps the rest; the
+8 s equal the owner route's default `BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS`
+and do not follow that setting. Each owed alert is tried at most once per
+cycle. One that the budget cuts, or that both channels refuse, is tried again
+in a later cycle and costs no attempt: a state-lost alert is owed until a
+channel takes it or the next announcement replaces it, a daily alert until a
+channel takes it or its UTC day ends. A daily alert counts for the UTC day a
+channel first took it: listed before midnight and delivered after it, it counts
+for the new day; taken by the group before midnight, it keeps that day even
+when its e-mail ends after it.
+
+Log record types start with `credential_repage_` and carry booleans and
+integers only: `credential_repage_cycle` (`unusableEvents`, `ties`,
+`unmatchedScopes`, `rosterUnreadable`, `ackUnreadable`, `passFault`; written
+only when one of them is set), `credential_repage_page` (`count`,
+`failedAttempts`, `hours`, `whatsappAccepted`, `emailEnabled`, `emailAccepted`,
+`emailSkippedBudget`), `credential_repage_owner_route_disabled` and
+`credential_repage_meta_alert` (`ambiguous`, with `metaStateLost`,
+`metaRosterUnreadable` or `metaPassFault` naming the alert; like `passFault`,
+the pass-error flag avoids "error", which the shared log projection drops from
+detail keys). A page record does not name its bot; the message does.
+
+**Limits.**
+
+- A name on exactly two hosts where one roster row is `blocked` stays a
+  duplicate: its events use the exact scope only, and an unmatched keep-alive
+  member does not hold a condition by name. When such a bot stops paging
+  early, read `unmatchedScopes`.
+- Without a readable roster, a latent keep-alive member of one bot holds every
+  pending or open condition of that instance name. That costs extra pages,
+  never a missing one.
+- When the roster changes so that a stored keep-alive member starts to hold a
+  condition by name, it holds it from the first timer pass that reads the
+  changed roster. If that condition's 600 s grace has already run out by then,
+  the condition ends, whether the roster changed before or after the 600 s
+  point, because a roster change carries no time.
+- An entry stored under the roster's host label is still reached by a clear
+  when the roster then becomes unreadable or no longer holds the name, if the
+  clear carries the machine and instance strings of the entry's first opener,
+  the entry's key names one of the clear's own host strings (its machine or its
+  relay host, or the first label of either, through the key's segment rule),
+  that entry is the only scope of the name in the incident state (a scope that
+  keeps only `clearedAt` counts), and the roster does not list the name on two
+  or more hosts. Otherwise the clear reaches its own scope only, and, once the
+  roster again holds the name on exactly one host, every entry of the name.
+  The first clear that reaches the entry this way also records itself under its
+  own key, which then counts as a second scope of the name until 7 days after
+  the last clear recorded there: the clears of the bot's other member sources
+  reach only their own scope and record themselves there too, and the entry
+  keeps those members and pages. Without a readable roster, or when the roster
+  no longer lists the name, two bots of one name whose events carry the same
+  machine and instance strings cannot be told apart: a clear from one also
+  reaches the other's entry by the strings when one of its host strings names
+  that entry's key, and in both cases the two share one key and clear each
+  other there. A runtime-only entry rebuilt after a state loss carries the
+  dispatcher's own host name, so a relayed clear of that bot does not reach it
+  by its strings.
+- A bot removed from the roster, or renamed, keeps its open condition under
+  the old name until no opener and no keep-alive member of it is left. Its
+  members are the keys of `credentialConditions.<scope>.members` of every scope
+  of that instance name: the open entry, and any latent entry of the name whose
+  keep-alive members hold it.
+  1. When the open entry has one member source, its first opener came from the
+     emitter on the bot's own host (the watchdog's `provider_credential_dead`,
+     for example), that host still runs, the entry's key names that host (by
+     its host name or the first label of it), and the open entry is the only
+     scope of the name in the incident state, emit on that host the clear of
+     that source:
+     `python3 deploy/scripts/bot-errors-emit.py --clear --instance <old name> --source <source>`.
+     The clear carries that host's string and reaches that entry.
+  2. In every other case (an entry with two or more member sources, a latent
+     entry of the name, any second scope of the name, or no running host), add
+     the old name back to the roster on exactly one host and emit the clears of
+     the member sources for every scope; the roster then makes every scope of
+     the name one bot, latent entries included. A clear stamped by another
+     host's clock removes a member only when it is newer than that member's
+     last event.
+  3. Read the incident state again. If a scope of the name still holds an
+     opener or a keep-alive member, do step 2 for it. When none does, the
+     condition ends at the first timer pass 600 s after its last member went
+     (its `emptySince`). Then remove the name from the roster again, if step 2
+     added it.
+
+  Until then, the acknowledge command holds the pages for 24 hours at a time.
+- Whether a creation time lies more than 1 hour ahead is decided when the
+  member or the clear record stores it, and is not decided again while that
+  record is the current one of its source and holds a stored digest of its
+  event; a newer event or clear that replaces the record ends that. An event of
+  which nothing is still stored, read again once its stamp is inside the hour,
+  changes from its read time to its stamp once; copies of one death with
+  different ids that cross that boundary between reads can be ordered wrongly.
+  Two events of one source without ids and with byte-identical, usable
+  creation times count as one event. An id and a creation time are hashed
+  under different prefixes, so an event with an id is never taken for one
+  without, except by a collision of the 48-bit digests. A stored digest that
+  is not an integer (a state file edited by hand) names no event: a clear with
+  a usable creation time, read again with such a record, is decided again; a
+  death read before that re-read is then removed by it, and one read after it
+  is dropped until the clock passes the clear's creation time.
+  A producer clock that runs ahead by up to 1 hour and is then set back can
+  drop one new death read inside that hour after a clear stamped on the fast
+  clock, because the death's creation time is earlier than the clear's.
+  A member alert stamped more than 1 hour ahead takes its read time, and every
+  read of it while it stays queued moves the member's last time to that read;
+  a clear, compared by read times, then stays older than the member, and the
+  condition keeps paging until a clear arrives after the alert's last read.
+- A clear remembers only the last alert it removed, and none when that alert
+  had neither an id nor a usable, timezone-aware creation time. Two queued
+  copies of one death that carry no usable creation time can therefore bring
+  one copy back, and so can such a copy removed by a clear that is not newer
+  than the stored clear.
+  No producer in this repository writes an event without a creation time.
+- A bot on a provider without a usability probe reaches this class only
+  through the watchdog or the re-auth observer.
+- A condition whose open-incident record the stale sweep already closed cannot
+  be rebuilt after a state loss; the two announcements are then its only
+  signal.
+- The incident state stores text values through the dispatcher's redaction. A
+  host written as an IPv4 address with ten or more digits, or an instance name
+  that the redaction reads as a phone number, is stored redacted, and later
+  pages of that condition carry the redacted label.
+- With class pages and the class's group meta-alerts failing, the sends after
+  the completion stamp can take up to 70 s of send budgets (20 s for the class
+  pages, 30 s for the legacy drain at its default budget, 20 s for the class's
+  group meta-alerts), plus local work, where they took 30 s. In general they
+  take up to 40 s plus `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS`, plus local
+  work; the figure bounds the sends, not the elapsed time.
+- An empty or malformed value for a setting read with `positive_env_int` stops
+  the dispatcher at import, before and after this change.
+
+**Install-time checks (with the owner).** The dispatcher's service
+user can resolve and read a roster (`BOT_ERRORS_FLEET_SENTINEL_HOSTS`, then
+`~/.config/whatsoup/bot-errors-expected-fleet.json`, then the tracked copy);
+the deployed `--max-state-age` of the health check and the daemon's interval
+leave room for 40 s plus `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS` of sends after
+the completion stamp (70 s at the default budget); the acknowledge
+command resolves the same state directory as the dispatcher's unit. Do not
+change the roster rows of a duplicated name while that name has an open
+condition.
+
 ## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
 
 The dispatcher sends to the chat transport before it can record that the send
@@ -853,7 +1162,8 @@ event:
   `delivery_outcome_unknown_held`. It is written before the durable record is
   published, so a hold whose publication does not reach disk is retried and
   logs the line again: expect at most one duplicate line per retried hold, and
-  never a duplicate send. Once the record is on disk the line is not repeated,
+  never a duplicate send (for the one stated exception, see the credential
+  re-page section above). Once the record is on disk the line is not repeated,
   including across restarts. It is deliberately anonymous: the controller log
   projects unlisted strings away, so it carries bounded metadata (`attempts`,
   `held`) and no event id. Read `processing/` to find out which item is held;

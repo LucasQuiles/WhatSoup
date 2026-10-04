@@ -21,6 +21,7 @@
     "deploy/scripts/bot-errors-sentinel.py"
   ],
   "cooperating_scripts": [
+    "deploy/scripts/bot-errors-credential-ack.py",
     "deploy/scripts/bot-errors-gui-session-monitor.py",
     "deploy/scripts/bot-errors-maintenance.py",
     "deploy/scripts/bot-errors-tree-provenance.py",
@@ -1134,6 +1135,17 @@
       "operation_identity_source": "durable_json.operation_id.v1",
       "result_policy": "require_advance",
       "result_consumer": "cmd_close",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "credential-ack-write-state",
+      "script": "deploy/scripts/bot-errors-credential-ack.py",
+      "function": "acknowledge",
+      "logical_publication": "credential_ack.write_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "acknowledge",
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
