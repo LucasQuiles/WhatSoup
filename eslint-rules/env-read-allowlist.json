@@ -133,8 +133,8 @@
     },
     {
       "file": "src/logger.ts",
-      "allowedUnmarkedSites": 3,
-      "reason": "bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) \u2014 cannot import config (eval-order cycle)."
+      "allowedUnmarkedSites": 4,
+      "reason": "bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST/WHATSOUP_LOG_STDOUT_SINK) \u2014 cannot import config (eval-order cycle)."
     },
     {
       "file": "src/main.ts",
