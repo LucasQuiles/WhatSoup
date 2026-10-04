@@ -500,6 +500,13 @@ failures. A later successful append records one recovery receipt. Existing
 legacy JSONL is retained and classified `legacy_unversioned`; it is not
 rewritten or assigned invented correlation fields.
 
+The dispatcher's `logs/dispatch.jsonl` and the collector's `logs/collector.jsonl`
+are written through `lib/bounded_jsonl.py`: a hard byte cap
+(`BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES` and `BOT_ERRORS_COLLECTOR_JSONL_MAX_BYTES`,
+each defaulting to 50 MiB) trims the file to its newest records when an append
+would pass it, and the private mode, no-follow and lock discipline stay the
+same (#2135, #3700).
+
 ### Collector capture-failure escalation: per-transition semantics
 
 `collector_remote_unreachable` (alert at `consecutiveFailures >= BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD`,
