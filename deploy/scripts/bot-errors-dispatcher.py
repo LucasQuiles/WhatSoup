@@ -42,7 +42,7 @@ from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
 )
-from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
+from lib.bot_errors_envelope import EnvelopeError, classify_event, event_machine, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
     LEGACY_FAILURE_CLASSES,
     alert_text,
@@ -4816,7 +4816,7 @@ def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: s
         **new_event_fields("alert", "critical"),
         "id": f"dispatcher-dead-letter-meta-{now}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": "meta_alert_dead_letter",
@@ -7506,7 +7506,7 @@ def storm_receipt_orphan_event(record: dict[str, Any]) -> dict[str, Any]:
         **new_event_fields("alert", severity),
         "id": storm_receipt_orphan_event_id(record),
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": STORM_RECEIPT_ORPHAN_ALERT_SOURCE,
@@ -9116,7 +9116,7 @@ def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int
         **new_event_fields("alert", "warning"),
         "id": f"dispatcher-test-provenance-refused-{now}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": "test-provenance-refused",
@@ -9198,7 +9198,7 @@ def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any
         # dispatch-log entry or quarantine file. The letter ends the digit run.
         "id": f"dispatcher-unrenderable-alert-content-{now}-p{os.getpid()}-{key_digest}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": UNRENDERABLE_META_ALERT_SOURCE,
@@ -9542,7 +9542,7 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         **new_event_fields("alert", "critical"),
         "id": f"poison-{int(time.time())}-{os.getpid()}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "instance": "bot-errors-dispatcher",
         "source": "poison-event-quarantine",
         "summary": "BOT ERRORS dispatcher quarantined an unreadable event",
@@ -10085,7 +10085,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     state = {
         "updatedAt": now_iso(),
         "pid": os.getpid(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "counts": counts,
         **updates,
     }
