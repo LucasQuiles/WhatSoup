@@ -330,7 +330,8 @@ def test_the_deadline_bounds_the_whole_rpc_call(bounded):
     started = time.monotonic()
     try:
         if bounded:
-            with pytest.raises(Exception):
+            # The tool call left at 0.6 s and its answer did not come by 0.8 s (#2424).
+            with pytest.raises(dispatcher.AmbiguousSendOutcome):
                 dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8,
                                          deadline=started + 0.8)
             assert time.monotonic() - started < 1.1
@@ -339,6 +340,297 @@ def test_the_deadline_bounds_the_whole_rpc_call(bounded):
     finally:
         stop.set()
         thread.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
+_INITIALIZED = {"ok": True}
+
+
+def _rpc_server(sock_path: str, after_initialize, methods: list[str] | None = None) -> threading.Thread:
+    """Answer initialize at once, then hand the connection to `after_initialize(conn, f)`."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        f = conn.makefile("rwb", buffering=0)
+        try:
+            msg = json.loads(f.readline())
+            if methods is not None:
+                methods.append(msg.get("method"))
+            f.write((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": _INITIALIZED}) + "\n").encode())
+            after_initialize(conn, f)
+        except (OSError, ValueError):
+            pass
+        finally:
+            conn.close()
+            srv.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+def _call_in_a_thread(dispatcher, sock_path: str, params: dict, deadline: float):
+    """Run one bounded call in a worker; what it raised is kept for the case to assert on."""
+    raised: list[BaseException] = []
+
+    def call():
+        try:
+            dispatcher.json_rpc_call(sock_path, "tools/call", params, timeout=8, deadline=deadline)
+        except Exception as exc:  # noqa: BLE001 - the case asserts on its exact type
+            raised.append(exc)
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    return worker, raised
+
+
+def test_the_deadline_bounds_a_reply_that_arrives_a_few_bytes_at_a_time():
+    # The reply to the tool call keeps coming, a byte every 0.2 s, and never ends its line. Every read is
+    # inside any per-read timeout, so only a deadline checked before each read ends the call by 0.8 s.
+    dispatcher = _load_dispatcher()
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+    stop = threading.Event()
+
+    def drip(conn, f):
+        f.readline()
+        for _ in range(50):  # 10 s at most
+            if stop.wait(0.2):
+                break
+            f.write(b" ")
+
+    server = _rpc_server(sock_path, drip)
+    started = time.monotonic()
+    worker, raised = _call_in_a_thread(dispatcher, sock_path, {"name": "x"}, started + 0.8)
+    try:
+        worker.join(3.0)
+        assert not worker.is_alive()
+        assert time.monotonic() - started < 1.5
+        assert [type(exc).__name__ for exc in raised] == ["AmbiguousSendOutcome"]
+        assert raised[0].phase == dispatcher.JSON_RPC_POST_REQUEST_PHASE
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+        server.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
+def test_the_deadline_bounds_a_request_the_peer_reads_slowly():
+    # The instance reads the tool call 4 KiB every 0.2 s. Every chunk written is inside any per-send
+    # timeout, so only a bound on the whole write ends the call by 0.8 s.
+    dispatcher = _load_dispatcher()
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+    stop = threading.Event()
+
+    def read_slowly(conn, f):
+        for _ in range(50):  # 10 s at most
+            if stop.wait(0.2) or not conn.recv(4096):
+                break
+
+    server = _rpc_server(sock_path, read_slowly)
+    started = time.monotonic()
+    worker, raised = _call_in_a_thread(dispatcher, sock_path, {"name": "x", "pad": "y" * 4_000_000},
+                                       started + 0.8)
+    try:
+        worker.join(3.0)
+        assert not worker.is_alive()
+        assert time.monotonic() - started < 1.5
+        assert [type(exc).__name__ for exc in raised] == ["TimeoutError"]
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+        server.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
+class _ShiftedClock:
+    """Stands in for the dispatcher's `time`: monotonic() runs `offset` seconds ahead, the rest is `time`."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.offset
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
+def _socket_module(socket_class) -> types.SimpleNamespace:
+    """Stands in for the dispatcher's `socket` module, with `socket_class` as its socket."""
+    names = {name: getattr(socket, name) for name in dir(socket) if not name.startswith("__")}
+    return types.SimpleNamespace(**{**names, "socket": socket_class})
+
+
+def _wait_for_close(conn, f):
+    while f.readline():
+        pass
+
+
+def test_no_request_is_written_once_the_deadline_is_spent(monkeypatch):
+    # The handshake's answer arrives just as the deadline is spent: the tool call must not be written.
+    dispatcher = _load_dispatcher()
+    clock = _ShiftedClock()
+
+    class LateAnswer(socket.socket):
+        def recv(self, *args):
+            data = super().recv(*args)
+            if data:
+                clock.offset = 100.0
+            return data
+
+        def recv_into(self, *args):
+            count = super().recv_into(*args)
+            if count:
+                clock.offset = 100.0
+            return count
+
+    monkeypatch.setattr(dispatcher, "time", clock)
+    monkeypatch.setattr(dispatcher, "socket", _socket_module(LateAnswer))
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+    methods: list[str] = []
+
+    def record_until_close(conn, f):
+        for line in iter(f.readline, b""):
+            methods.append(json.loads(line).get("method"))
+
+    server = _rpc_server(sock_path, record_until_close, methods)
+    try:
+        with pytest.raises(TimeoutError):
+            dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8,
+                                     deadline=clock.monotonic() + 5)
+        server.join(timeout=5)
+        assert methods == ["initialize"]
+    finally:
+        server.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
+def test_a_deadline_spent_after_the_request_is_the_post_request_outcome(monkeypatch):
+    # Writing the tool call takes the rest of the deadline. The request has left, so the outcome is the
+    # post-request one (#2424), never a plain failure that a caller would send again.
+    dispatcher = _load_dispatcher()
+    clock = _ShiftedClock()
+
+    class SlowWrite(socket.socket):
+        def send(self, data, *args):
+            sent = super().send(data, *args)
+            if b'"tools/call"' in bytes(data):
+                clock.offset = 100.0
+            return sent
+
+        def sendall(self, data, *args):
+            super().sendall(data, *args)
+            if b'"tools/call"' in bytes(data):
+                clock.offset = 100.0
+
+    monkeypatch.setattr(dispatcher, "time", clock)
+    monkeypatch.setattr(dispatcher, "socket", _socket_module(SlowWrite))
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+    server = _rpc_server(sock_path, _wait_for_close)
+    try:
+        with pytest.raises((dispatcher.AmbiguousSendOutcome, TimeoutError)) as caught:
+            dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8,
+                                     deadline=clock.monotonic() + 5)
+        assert caught.type.__name__ == "AmbiguousSendOutcome"
+        assert caught.value.phase == dispatcher.JSON_RPC_POST_REQUEST_PHASE
+    finally:
+        server.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
+def test_send_whatsapp_forwards_a_deadline_only_when_one_is_given(monkeypatch):
+    dispatcher = _load_dispatcher()
+    for key in ("BOT_ERRORS_DRY_SEND_FAIL", "BOT_ERRORS_DRY_SEND_CAPTURE"):
+        monkeypatch.delenv(key, raising=False)
+    calls: list[dict] = []
+
+    def record(socket_path, method, params, timeout=15.0, **options):
+        calls.append(options)
+        return {}
+
+    # No group id in the tree: the target check is not what this case is about.
+    monkeypatch.setattr(dispatcher, "validate_bot_errors_target", lambda: None)
+    monkeypatch.setattr(dispatcher, "json_rpc_call", record)
+    dispatcher.send_whatsapp("x", "unused.sock", deadline=123.0)
+    dispatcher.send_whatsapp("x", "unused.sock")
+    assert calls == [{"deadline": 123.0}, {}]
+
+
+def test_the_reply_wait_never_ends_after_the_callers_deadline(monkeypatch):
+    # Five seconds pass between computing the tool call's remaining time and starting its wait (a
+    # scheduling pause). They are not given back: no read of the call ends after the caller's deadline.
+    dispatcher = _load_dispatcher()
+    clock = _ShiftedClock()
+    real_wait = dispatcher.wait_for_response
+
+    def paused(reader, expected_id, timeout, *, phase, **options):
+        if phase == dispatcher.JSON_RPC_POST_REQUEST_PHASE:
+            clock.offset = 5.0
+        return real_wait(reader, expected_id, timeout, phase=phase, **options)
+
+    read_by: list[float] = []
+    real_readline = dispatcher._DeadlineLineIO.readline
+
+    def recorded(self, deadline):
+        read_by.append(deadline)
+        return real_readline(self, deadline)
+
+    monkeypatch.setattr(dispatcher, "time", clock)
+    monkeypatch.setattr(dispatcher, "wait_for_response", paused)
+    monkeypatch.setattr(dispatcher._DeadlineLineIO, "readline", recorded)
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+
+    def answer(conn, f):
+        msg = json.loads(f.readline())
+        f.write((json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sent": True}}) + "\n").encode())
+        _wait_for_close(conn, f)
+
+    server = _rpc_server(sock_path, answer)
+    deadline = clock.monotonic() + 8
+    try:
+        assert dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8,
+                                        deadline=deadline) == {"sent": True}
+        late = any(read > deadline for read in read_by)
+        assert late is False
+    finally:
+        server.join(timeout=5)
+        Path(sock_path).unlink(missing_ok=True)
+        os.rmdir(short_dir)
+
+
+def test_a_reply_that_follows_another_line_in_the_same_chunk_is_read():
+    # The instance writes a line for another id and the reply in one write. The reader keeps the bytes
+    # after the first newline, so the reply is found without another read.
+    dispatcher = _load_dispatcher()
+    short_dir = tempfile.mkdtemp(prefix="orr-")
+    sock_path = str(Path(short_dir) / "rpc.sock")
+
+    def answer_after_another(conn, f):
+        msg = json.loads(f.readline())
+        other = json.dumps({"jsonrpc": "2.0", "id": msg["id"] + 1000, "result": {}})
+        reply = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sent": True}})
+        f.write(f"{other}\n{reply}\n".encode())
+        _wait_for_close(conn, f)
+
+    server = _rpc_server(sock_path, answer_after_another)
+    try:
+        assert dispatcher.json_rpc_call(sock_path, "tools/call", {"name": "x"}, timeout=8,
+                                        deadline=time.monotonic() + 3) == {"sent": True}
+    finally:
+        server.join(timeout=5)
         Path(sock_path).unlink(missing_ok=True)
         os.rmdir(short_dir)
 
