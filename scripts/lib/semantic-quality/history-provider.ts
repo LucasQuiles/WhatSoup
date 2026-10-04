@@ -273,11 +273,11 @@ export function canonicalHistoryArtifact(
   return result;
 }
 
-function artifactKey(artifact: HistoryArtifactRecord): string {
+export function artifactKey(artifact: HistoryArtifactRecord): string {
   return `${artifact.kind}#${artifact.number}`;
 }
 
-function compareArtifacts(left: HistoryArtifactRecord, right: HistoryArtifactRecord): number {
+export function compareArtifacts(left: HistoryArtifactRecord, right: HistoryArtifactRecord): number {
   if (left.kind < right.kind) return -1;
   if (left.kind > right.kind) return 1;
   return left.number - right.number;
