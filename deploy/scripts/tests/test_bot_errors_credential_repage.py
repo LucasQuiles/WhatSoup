@@ -8,9 +8,9 @@ a timer until its members clear or the owner acknowledges it.
 
 Every case drives `run_once` and reads only surfaces that exist before the
 change: the outbox, the incident state, the dispatch log and the injected send
-functions. Nothing here imports a name the change adds, so on the unchanged code
-each case fails at an assertion, never at collection. The cases that need a new
-name are in test_bot_errors_credential_repage_unit.py.
+functions. The feature-positive cases require the new implementation; compatibility
+and absence-only controls can pass on the unchanged dispatcher. Tests that import
+the new module live in test_bot_errors_credential_repage_unit.py.
 
 How the cases are written:
 - one function per variant, named test_t<case>_...; a function named
