@@ -58,10 +58,34 @@ describe('scheduled turns lost to crash recovery (#3754)', () => {
     expect(engine.getTurnRecoverySupervisorCounts().scheduledTurnsLost).toBe(2);
   });
 
+  it('counts a qualifying synthetic loss at the exact inclusive seven-day cutoff', () => {
+    const atCutoff = failed(scheduledJobInboundMessageId(7, 1_780_000_005, 25), 'crash_recovery');
+    const justBeforeCutoff = failed(scheduledJobInboundMessageId(7, 1_780_000_006, 26), 'crash_recovery');
+    const cutoff = '2040-01-01 00:00:00';
+
+    db.raw.prepare('UPDATE inbound_events SET completed_at = ? WHERE seq = ?').run(cutoff, atCutoff);
+    db.raw.prepare('UPDATE inbound_events SET completed_at = ? WHERE seq = ?').run('2039-12-31 23:59:59', justBeforeCutoff);
+
+    // SQLite's "now" is stable only within one statement. Freeze the exact
+    // query clock so the edge comparison cannot cross a wall-clock second.
+    db.raw.function('datetime', { varargs: true }, (...args) => {
+      if (
+        args.length === 2
+        && args[0] === 'now'
+        && args[1] === `-${SCHEDULED_TURN_LOSS_WINDOW_DAYS} days`
+      ) return cutoff;
+      throw new Error(`Unexpected datetime() arguments: ${JSON.stringify(args)}`);
+    });
+    // Construct after installing the function: this is the actual prepared
+    // supervisor count statement, with a deterministic SQLite clock.
+    const restarted = new DurabilityEngine(db);
+
+    expect(restarted.getTurnRecoverySupervisorCounts().scheduledTurnsLost).toBe(1);
+  });
+
   it('keeps the agreed seven-day window', () => {
     // The fixtures above follow the constant, so only this pins its value. The
-    // cutoff itself is inclusive; equality at the cutoff is not tested because
-    // the SQL reads datetime('now').
+    // deterministic cutoff case above separately pins inclusive equality.
     expect(SCHEDULED_TURN_LOSS_WINDOW_DAYS).toBe(7);
   });
 
