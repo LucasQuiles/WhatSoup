@@ -338,6 +338,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | string | `info` | Pino log level. Valid values: `trace`, `debug`, `info`, `warn`, `error`, `fatal`. |
 | `LOG_DIR` | path | `<dataRoot>/logs` | Set automatically by `config.ts` from the resolved data root. Set before `logger.ts` initializes. Enables pino-roll daily file rotation when present. |
+| `WHATSOUP_LOG_STDOUT_SINK` | `on` \| `off` | `on` | `off` drops the logger's stdout copy, so the pino-roll file is the only structured sink. The generated launchd plist sets it, because launchd sends stdout to an unrotated `stdout.log` (#3704). Leave it unset under systemd, where journald bounds stdout. Honoured only while `LOG_DIR` enables the rolling file sink: without `LOG_DIR`, or when that sink fails to start, logging stays on stdout. |
 
 ### Docker
 
