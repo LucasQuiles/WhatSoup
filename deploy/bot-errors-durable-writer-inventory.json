@@ -56,6 +56,24 @@
       "fault_test_ids": ["diagnostic.serialization", "diagnostic.result-inspection"]
     },
     {
+      "site_id": "collector-controller-log",
+      "script": "deploy/scripts/bot-errors-collector.py",
+      "function": "append_collector_log_record",
+      "logical_publication": "collector.controller_log",
+      "kind": "diagnostic_jsonl_append",
+      "operation_identity_source": "bounded_jsonl.record_sha256.evidence_only.v1",
+      "result_policy": "require_bounded_jsonl_commit",
+      "result_consumer": "append_collector_log_record",
+      "fault_test_ids": [
+        "jsonl.serialization",
+        "jsonl.lock-concurrency",
+        "jsonl.retention",
+        "jsonl.post-replace-unproven",
+        "jsonl.unsafe-entry",
+        "jsonl.adapter"
+      ]
+    },
+    {
       "site_id": "collector-state",
       "script": "deploy/scripts/bot-errors-collector.py",
       "function": "save_state",

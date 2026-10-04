@@ -161,6 +161,11 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
   not group- or world-writable.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
+  The generated plist sets `WHATSOUP_LOG_STDOUT_SINK=off`, so `stdout.log`
+  carries only output from before the logger starts and crash output; the
+  structured log is the rolling `logs/whatsoup.log` (#3704). A plist installed
+  before that key gained it picks it up on the next
+  `reconcile-launchd-restart-policy --apply`.
 
 Do not confuse per-instance `tokens.env` with the unscoped credential mirror at
 `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`. An unscoped lookup may
@@ -561,11 +566,14 @@ Restart one instance:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
-tail -F ~/.config/whatsoup/instances/<instance>/stdout.log
+tail -F ~/.local/share/whatsoup/instances/<instance>/logs/whatsoup.log
 ```
 
-Expect credential-load or runtime health logs within a few seconds. For agent
-instances, a restart interrupts in-flight turns.
+Expect credential-load or runtime health logs within a few seconds. The
+rolling `logs/whatsoup.log` is the instance's structured log; its `stdout.log`
+holds only pre-logger and crash output once the plist carries
+`WHATSOUP_LOG_STDOUT_SINK=off` (#3704). For agent instances, a restart
+interrupts in-flight turns.
 
 ### Plist changes and the keychain-session hazard
 
@@ -766,8 +774,8 @@ the bot user is logged in.
 | Surface | Healthy signal | Where to check |
 | --- | --- | --- |
 | Fleet | `fleet scan complete`; expected instance count | fleet stdout log |
-| Agent instance | runtime health stats | instance stdout log |
-| Passive/chat instance | credential save or message-processing logs, no repeated auth errors | instance stdout log |
+| Agent instance | runtime health stats | instance rolling log (`logs/whatsoup.log`) |
+| Passive/chat instance | credential save or message-processing logs, no repeated auth errors | instance rolling log (`logs/whatsoup.log`) |
 | Disabled instances | `fleet scan: skipping disabled instance` | fleet stdout log |
 
 Fleet emits health-poller warnings when a polled instance is unreachable. If the
