@@ -12,15 +12,15 @@ def interrupted(signum, frame):
 signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 def members(session):
-    result = subprocess.run(['/bin/ps' if os.path.exists('/bin/ps') else '/usr/bin/ps', '-axo', 'pid=,ppid=,pgid='], capture_output=True, text=True, timeout=3)
+    result = subprocess.run(['/bin/ps' if os.path.exists('/bin/ps') else '/usr/bin/ps', '-axo', 'pid=,ppid=,pgid=,stat='], capture_output=True, text=True, timeout=3)
     if result.returncode: raise RuntimeError('process identity unavailable')
     found = []
     for row in result.stdout.splitlines():
         fields = row.split()
-        if len(fields) < 3: continue
+        if len(fields) < 4: continue
         pid = int(fields[0])
         try:
-            if os.getsid(pid) == session: found.append({'pid': pid, 'ppid': int(fields[1]), 'pgid': int(fields[2]), 'identity': row})
+            if os.getsid(pid) == session: found.append({'pid': pid, 'ppid': int(fields[1]), 'pgid': int(fields[2]), 'state': fields[3], 'identity': row})
         except ProcessLookupError: pass
     return found
 # Modes that count groups outliving the call. Their injections wait for the
@@ -56,6 +56,24 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             # command has already exited. The fixture owns the master reader.
             if select.select([master], [], [], 2)[0]: record['terminal_echo'] = os.read(master, 4096).decode()
         else: child.stdin.write('go\n'); child.stdin.close()
+        if mode == 'job-control-unavailable':
+            record['caller_group_stopped'] = False
+            record['caller_group_stop_members'] = []
+            deadline = time.monotonic() + 3
+            while child.poll() is None and time.monotonic() < deadline:
+                observation = members(session)
+                stopped = [item for item in observation if item['pgid'] == session and 'T' in item['state']]
+                if any(item['pid'] == child.pid for item in stopped):
+                    record['caller_group_stopped'] = True
+                    record['caller_group_stop_members'] = stopped
+                    record['caller_group_observation'] = observation
+                    os.killpg(session, signal.SIGCONT)
+                    (root / 'job-control-recovered').write_text('recovered\n')
+                    record['caller_group_continued'] = True
+                    break
+                time.sleep(0.01)
+            if 'caller_group_observation' not in record:
+                record['caller_group_observation'] = members(session)
         if mode.startswith('event-order-'):
             events = root / 'event-order.log'
             record['event_observations'] = []
@@ -410,8 +428,16 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if worker is None or worker == child.pid or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
             if mode == 'authorization-unreadable-cleanup-interrupted':
+                guard_timer_deadline = time.monotonic() + 3
+                while not (root / 'guard-timer-entered').exists() and child.poll() is None and time.monotonic() < guard_timer_deadline:
+                    time.sleep(0.01)
+                record['guard_timer_entered'] = (root / 'guard-timer-entered').exists()
+                record['authorization_unreadable_release'] = False
+                if not record['guard_timer_entered']: raise RuntimeError('guard timer unavailable')
                 authorization.chmod(0)
                 record['authorization_unreadable'] = not os.access(authorization, os.R_OK)
+                (root / 'authorization-unreadable-release').write_text('release')
+                record['authorization_unreadable_release'] = True
             if mode.startswith('authorization-valid-'):
                 # The guard sends its USR1 after reading the valid record. Only
                 # then does a TERM start the worker's cleanup.
@@ -518,6 +544,9 @@ record['duration_ms'] = int((time.monotonic() - started) * 1000)
 record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
+record['job_control_monitor_refused'] = (root / 'job-control-monitor-refused').exists()
+record['job_control_recovered'] = (root / 'job-control-recovered').exists()
+record['job_control_stop_witness'] = (root / 'job-control-stop-witness').read_text().strip() if (root / 'job-control-stop-witness').exists() else None
 record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['command_partial_signal'] = (root / 'command-partial-signal').read_text() if (root / 'command-partial-signal').exists() else None

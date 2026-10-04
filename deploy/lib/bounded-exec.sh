@@ -29,7 +29,8 @@ whatsoup_run_bounded() {
   (
     set +e
     set -m
-    local worker_pid="" worker_group="" guard_pid="" guard_group=""
+    case "$-" in *m*) ;; *) return 2 ;; esac
+    local worker_pid="" worker_candidate="" worker_group="" guard_pid="" guard_candidate="" guard_group=""
     local worker_rc=0 worker_reaped=0 guard_reaped=0 guard_rc=0 rc=0 deadline_rc=0
     local status_reader_pid="" status_timer_pid=""
     local status_cleanup_failed=0
@@ -292,8 +293,8 @@ whatsoup_run_bounded() {
       # After the reap only the guard can still check the recorded groups, so
       # let its trap end them before its group is killed. The reaped worker's
       # group goes first, in case a second signal cuts the wait short.
-      if [ "$worker_reaped" -eq 1 ] && [ "$guard_reaped" -eq 0 ] && [ -n "$guard_pid" ] && kill -0 "$guard_pid" 2>/dev/null; then
-        [ -n "$worker_group" ] && kill -9 -- "-$worker_group" 2>/dev/null
+      if [ "$guard_reaped" -eq 0 ] && [ -n "$guard_pid" ] && kill -0 "$guard_pid" 2>/dev/null && { [ "$worker_reaped" -eq 1 ] || [ -z "$guard_group" ]; }; then
+        [ "$worker_reaped" -eq 1 ] && [ -n "$worker_group" ] && kill -9 -- "-$worker_group" 2>/dev/null
         kill -CONT "$guard_pid" 2>/dev/null
         kill -TERM "$guard_pid" 2>/dev/null
         wait "$guard_pid" 2>/dev/null
@@ -302,7 +303,11 @@ whatsoup_run_bounded() {
       # Only a signal or a setup failure leaves the outer before it reaps the
       # worker, and the worker's own cleanup may then never run.
       if [ "$worker_reaped" -eq 0 ] && [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
-        _bounded_end_worker_groups || status_cleanup_failed=1
+        if [ -z "$worker_group" ]; then
+          kill -9 "$worker_pid" 2>/dev/null
+        else
+          _bounded_end_worker_groups || status_cleanup_failed=1
+        fi
       else
         [ -n "$worker_group" ] && kill -9 -- "-$worker_group" 2>/dev/null
       fi
@@ -323,7 +328,13 @@ whatsoup_run_bounded() {
     (
       set +e
       set +m
-      kill -STOP 0
+      local self_pid="" self_group=""
+      self_pid="$(exec /bin/sh -c 'printf %s "$PPID"')" || return 2
+      [[ "$self_pid" =~ ^[0-9]+$ ]] && [ "$self_pid" -gt 1 ] || return 2
+      self_group="$(/bin/ps -o pgid= -p "$self_pid" 2>/dev/null)" || return 2
+      self_group="${self_group//[[:space:]]/}"
+      [[ "$self_group" =~ ^[0-9]+$ ]] && [ "$self_group" = "$self_pid" ] || return 2
+      kill -STOP "$self_pid"
 
       local directory="" cmd_pid="" cmd_group="" command_release_pid=""
       local watchdog_pid="" watchdog_group="" watchdog_release_pid="" ticker_pid=""
@@ -549,8 +560,11 @@ whatsoup_run_bounded() {
       return "$rc"
     ) <&0 &
     worker_pid=$!
-    worker_group="$(jobs -p %+)"
-    if [[ ! "$worker_group" =~ ^[0-9]+$ ]] || [ "$worker_group" -le 1 ]; then return 2; fi
+    worker_candidate="$(jobs -p %+)"
+    if [[ ! "$worker_candidate" =~ ^[0-9]+$ ]] || [ "$worker_candidate" -le 1 ] || [ "$worker_candidate" != "$worker_pid" ]; then
+      return 2
+    fi
+    worker_group="$worker_candidate"
 
     (
       set +m
@@ -672,8 +686,8 @@ whatsoup_run_bounded() {
         kill -TERM -- "-$worker_group" 2>/dev/null
         kill -CONT -- "-$worker_group" 2>/dev/null
       fi
-      # A reaped command may have a worker still finishing bounded cleanup.
-      [ "$authorization_state" -eq 3 ] || kill -USR1 "$worker_pid" 2>/dev/null
+      # Only an authenticated record needs the worker's timeout-entry path.
+      [ "$authorization_state" -eq 0 ] && kill -USR1 "$worker_pid" 2>/dev/null
       if ! sleep "$grace"; then
         _bounded_guard_kill_authorized
         _bounded_guard_end_worker
@@ -696,8 +710,9 @@ whatsoup_run_bounded() {
       _bounded_guard_exit
     ) </dev/null >/dev/null 2>&1 &
     guard_pid=$!
-    guard_group="$(jobs -p %+)"
-    if [[ ! "$guard_group" =~ ^[0-9]+$ ]] || [ "$guard_group" -le 1 ] || [ "$guard_group" = "$worker_group" ]; then return 2; fi
+    guard_candidate="$(jobs -p %+)"
+    if [[ ! "$guard_candidate" =~ ^[0-9]+$ ]] || [ "$guard_candidate" -le 1 ] || [ "$guard_candidate" != "$guard_pid" ] || [ "$guard_candidate" = "$worker_group" ]; then return 2; fi
+    guard_group="$guard_candidate"
 
     wait "$worker_pid" 2>/dev/null || worker_rc=$?
     worker_reaped=1
