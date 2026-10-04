@@ -76,6 +76,7 @@ def _state_with_open(mod, event: dict, *, last_notified_age: int, record_extra: 
         "openedIso": "2026-06-13T00:00:00Z",
         "lastNotifiedAt": now - last_notified_age,
         "suppressedCount": 7,
+        "generationToken": "a0c1e2f3a4b5c6d7",
     }
     record.update(record_extra or {})
     return {"version": 1, "openIncidents": {key: record}, "lastSentAt": {}}, key
@@ -114,7 +115,10 @@ def test_open_actionable_incident_still_renotifies(tmp_path):
     assert reason is None  # falls through to send (renotify)
     rec = state["openIncidents"][key]
     assert "openRenotifySuppressedCount" not in rec
-    assert rec["renotifyCount"] == 1  # real renotify happened
+    # A real renotify: the decision names the record's generation for the
+    # delivery to apply; the count moves only when the page is delivered.
+    assert evt["delivery"]["renotifyGeneration"] == rec["generationToken"]
+    assert "renotifyCount" not in rec
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +150,9 @@ def test_gate_off_tool_error_renotifies(tmp_path):
     reason = mod.should_suppress_send(evt, state)
 
     assert reason is None  # gate off -> legacy renotify
-    assert state["openIncidents"][key]["renotifyCount"] == 1
+    rec = state["openIncidents"][key]
+    assert evt["delivery"]["renotifyGeneration"] == rec["generationToken"]
+    assert "renotifyCount" not in rec
 
 
 # ---------------------------------------------------------------------------
