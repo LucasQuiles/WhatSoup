@@ -204,7 +204,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
     queue.setToolUpdateRedirectJid('status-log@g.us');
-    queue.enqueueText('Final answer for the user');
+    queue.enqueueText('Final answer for the user', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Final answer for the user', { messageId: expect.any(String) });
@@ -221,7 +221,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('Your key lives at ~/.ssh/id_rsa - check it');
+    queue.enqueueText('Your key lives at ~/.ssh/id_rsa - check it', 'answer');
     await vi.runAllTimersAsync();
     await queue.flush();
 
@@ -237,7 +237,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueStreamingText('config is under ~/.config/whatsoup/instances/example/auth');
+    queue.enqueueStreamingText('config is under ~/.config/whatsoup/instances/example/auth', 'answer');
     await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
     await queue.flush();
 
@@ -250,8 +250,8 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueStreamingText('hello ');
-    queue.enqueueStreamingText('world');
+    queue.enqueueStreamingText('hello ', 'answer');
+    queue.enqueueStreamingText('world', 'answer');
     await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS - 100);
     expect(calls).toEqual([]);
 
@@ -265,8 +265,8 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
     queue.setTextAggregateDelayMs(30_000);
-    queue.enqueueStreamingText('chunk-a ');
-    queue.enqueueStreamingText('chunk-b');
+    queue.enqueueStreamingText('chunk-a ', 'answer');
+    queue.enqueueStreamingText('chunk-b', 'answer');
 
     expect(typingCalls.filter((value) => value === true)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(20_000);
@@ -283,7 +283,7 @@ describe('OutboundQueue', () => {
 
     queue.setTextAggregateDelayMs(0);
     queue.setTextAggregateDelayMs(-500);
-    queue.enqueueStreamingText('default-window');
+    queue.enqueueStreamingText('default-window', 'answer');
 
     await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
     expect(calls).toEqual(['default-window']);
@@ -299,7 +299,7 @@ describe('OutboundQueue', () => {
     expect(queueState.lastActivity).toBe(Date.now());
 
     vi.setSystemTime(new Date('2026-04-06T00:05:00Z'));
-    queue.enqueueText('Hello!');
+    queue.enqueueText('Hello!', 'answer');
 
     expect(queueState.lastActivity).toBe(Date.now());
 
@@ -321,8 +321,8 @@ describe('OutboundQueue', () => {
       }>;
     };
 
-    queue.enqueueStreamingText('Hel');
-    queue.enqueueStreamingText('lo');
+    queue.enqueueStreamingText('Hel', 'answer');
+    queue.enqueueStreamingText('lo', 'answer');
 
     expect(queueState.streamBufferParts).toEqual([
       {
@@ -360,7 +360,7 @@ describe('OutboundQueue', () => {
       hasPendingWork?: () => boolean;
     };
 
-    queue.enqueueStreamingText('partial');
+    queue.enqueueStreamingText('partial', 'answer');
     expect(queueState.hasPendingWork?.()).toBe(true);
 
     vi.setSystemTime(new Date('2026-04-06T01:07:00Z'));
@@ -376,7 +376,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('Hello!');
+    queue.enqueueText('Hello!', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['Hello!']);
@@ -386,7 +386,7 @@ describe('OutboundQueue', () => {
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('Ping');
+    queue.enqueueText('Ping', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Ping', { messageId: expect.any(String) });
@@ -396,7 +396,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('- [ ] Buy milk\n- [x] Walk dog\n- [X] Call Bob');
+    queue.enqueueText('- [ ] Buy milk\n- [x] Walk dog\n- [X] Call Bob', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls[0]).toBe('▫︎ Buy milk\n▪︎ Walk dog\n▪︎ Call Bob');
@@ -480,7 +480,7 @@ describe('OutboundQueue', () => {
     const long = `${para1}\n\n${para2}`;
     // length = 2000 + 2 + 2000 = 4002 > 4000
 
-    queue.enqueueText(long);
+    queue.enqueueText(long, 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls.length).toBeGreaterThanOrEqual(2);
@@ -507,7 +507,7 @@ describe('OutboundQueue', () => {
     }
     const long = words.join(' ');
 
-    queue.enqueueText(long);
+    queue.enqueueText(long, 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls.length).toBeGreaterThanOrEqual(2);
@@ -521,7 +521,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
     const long = 'X'.repeat(4001);
-    queue.enqueueText(long);
+    queue.enqueueText(long, 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls.length).toBeGreaterThanOrEqual(2);
@@ -546,9 +546,9 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(timedMessenger, CHAT_JID);
-    queue.enqueueText('First');
-    queue.enqueueText('Second');
-    queue.enqueueText('Third');
+    queue.enqueueText('First', 'answer');
+    queue.enqueueText('Second', 'answer');
+    queue.enqueueText('Third', 'answer');
 
     await vi.runAllTimersAsync();
 
@@ -578,7 +578,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('Queued message');
+    queue.enqueueText('Queued message', 'answer');
     const shutdownPromise = queue.shutdown();
     await vi.runAllTimersAsync();
     await shutdownPromise;
@@ -593,7 +593,7 @@ describe('OutboundQueue', () => {
     queue.setDurability(durability);
 
     queue.preemptForShutdown(Date.now());
-    queue.enqueueText('Queued after shutdown preemption');
+    queue.enqueueText('Queued after shutdown preemption', 'answer');
     await vi.runAllTimersAsync();
     await queue.flush();
 
@@ -620,7 +620,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('In-flight at shutdown');
+    queue.enqueueText('In-flight at shutdown', 'answer');
     await vi.advanceTimersByTimeAsync(0);
     expect(messenger.sendMessage).toHaveBeenCalledOnce();
     queue.preemptForShutdown(Date.now());
@@ -671,14 +671,14 @@ describe('OutboundQueue', () => {
     // producer's enqueue in the same tick flips `sending` synchronously via
     // drainQueue() before that continuation runs.
     const flushPromise = queue.flush();
-    queue.enqueueText('replacement turn output');
+    queue.enqueueText('replacement turn output', 'answer');
 
     await vi.runAllTimersAsync();
     await expect(flushPromise).resolves.toBeUndefined();
 
     expect(calls).toEqual(['replacement turn output']);
     // The queue stays healthy: a later enqueue+flush still delivers.
-    queue.enqueueText('later turn');
+    queue.enqueueText('later turn', 'answer');
     const flush2 = queue.flush();
     await vi.runAllTimersAsync();
     await expect(flush2).resolves.toBeUndefined();
@@ -901,7 +901,7 @@ describe('OutboundQueue', () => {
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('plain response');
+    queue.enqueueText('plain response', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.setTyping).not.toHaveBeenCalled();
@@ -955,9 +955,9 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(serialMessenger, CHAT_JID);
-    queue.enqueueText('A');
-    queue.enqueueText('B');
-    queue.enqueueText('C');
+    queue.enqueueText('A', 'answer');
+    queue.enqueueText('B', 'answer');
+    queue.enqueueText('C', 'answer');
 
     await vi.waitFor(() => {
       expect(serialMessenger.sendMessage).toHaveBeenCalledTimes(1);
@@ -1009,7 +1009,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(retryMessenger, CHAT_JID);
-    queue.enqueueText('retry me');
+    queue.enqueueText('retry me', 'answer');
     await vi.runAllTimersAsync();
 
     expect(retryMessenger.sendMessage).toHaveBeenCalledTimes(3);
@@ -1026,11 +1026,11 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('There was an issue with my conversation data. An operator has been notified.');
+    queue.enqueueText('There was an issue with my conversation data. An operator has been notified.', 'answer');
     await vi.runAllTimersAsync();
     queue.markLastTerminal({ dedupeText: true });
 
-    queue.enqueueText('There was an issue with my conversation data. An operator has been notified.');
+    queue.enqueueText('There was an issue with my conversation data. An operator has been notified.', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual([
@@ -1055,8 +1055,8 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('Repeat this exact instruction.');
-    queue.enqueueText('Repeat this exact instruction.');
+    queue.enqueueText('Repeat this exact instruction.', 'answer');
+    queue.enqueueText('Repeat this exact instruction.', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual([
@@ -1072,11 +1072,11 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('Repeatable normal answer');
+    queue.enqueueText('Repeatable normal answer', 'answer');
     await vi.runAllTimersAsync();
     queue.markLastTerminal();
 
-    queue.enqueueText('Repeatable normal answer');
+    queue.enqueueText('Repeatable normal answer', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['Repeatable normal answer', 'Repeatable normal answer']);
@@ -1089,11 +1089,11 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('Terminal notice A');
+    queue.enqueueText('Terminal notice A', 'answer');
     await vi.runAllTimersAsync();
     queue.markLastTerminal({ dedupeText: true });
 
-    queue.enqueueText('Terminal notice B');
+    queue.enqueueText('Terminal notice B', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['Terminal notice A', 'Terminal notice B']);
@@ -1108,11 +1108,11 @@ describe('OutboundQueue', () => {
     queueA.setDurability(makeDurabilityStub());
     queueB.setDurability(makeDurabilityStub());
 
-    queueA.enqueueText('Shared terminal notice');
+    queueA.enqueueText('Shared terminal notice', 'answer');
     await vi.runAllTimersAsync();
     queueA.markLastTerminal({ dedupeText: true });
 
-    queueB.enqueueText('Shared terminal notice');
+    queueB.enqueueText('Shared terminal notice', 'answer');
     await vi.runAllTimersAsync();
 
     expect(chatA.calls).toEqual(['Shared terminal notice']);
@@ -1126,12 +1126,12 @@ describe('OutboundQueue', () => {
     queue.setDurability(durability);
 
     vi.setSystemTime(new Date('2026-06-13T07:00:00Z'));
-    queue.enqueueText('Windowed terminal notice');
+    queue.enqueueText('Windowed terminal notice', 'answer');
     await vi.runAllTimersAsync();
     queue.markLastTerminal({ dedupeText: true });
 
     vi.setSystemTime(Date.now() + TERMINAL_TEXT_DEDUPE_WINDOW_MS + 1);
-    queue.enqueueText('Windowed terminal notice');
+    queue.enqueueText('Windowed terminal notice', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['Windowed terminal notice', 'Windowed terminal notice']);
@@ -1167,8 +1167,8 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(mixedMessenger, CHAT_JID);
-    queue.enqueueText('bad message');
-    queue.enqueueText('good message');
+    queue.enqueueText('bad message', 'answer');
+    queue.enqueueText('good message', 'answer');
     await vi.runAllTimersAsync();
 
     // Error was logged for exhausted retries on 'bad message'
@@ -1210,7 +1210,7 @@ describe('OutboundQueue', () => {
       throw pacingError;
     });
 
-    queue.enqueueText('message that trips the safety net');
+    queue.enqueueText('message that trips the safety net', 'answer');
     await internals.chain;
 
     expect(internals.sendWithPacing).toHaveBeenCalledWith({
@@ -1236,7 +1236,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, 'original@s.whatsapp.net');
 
     queue.updateDeliveryJid('new@lid');
-    queue.enqueueText('Hello retargeted');
+    queue.enqueueText('Hello retargeted', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.sendMessage).toHaveBeenCalledWith('new@lid', 'Hello retargeted', { messageId: expect.any(String) });
@@ -1269,7 +1269,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(alwaysFailMessenger, CHAT_JID);
-    queue.enqueueText('test jitter');
+    queue.enqueueText('test jitter', 'answer');
     await vi.runAllTimersAsync();
 
     mathRandomSpy.mockRestore();
@@ -1307,7 +1307,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(rateLimitedMessenger, CHAT_JID);
-    queue.enqueueText('respect retry-after');
+    queue.enqueueText('respect retry-after', 'answer');
 
     await vi.advanceTimersByTimeAsync(0);
     expect(rateLimitedMessenger.sendMessage).toHaveBeenCalledTimes(1);
@@ -1333,7 +1333,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('');
+    queue.enqueueText('', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toHaveLength(0);
@@ -1344,7 +1344,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueText('   \n\t  ');
+    queue.enqueueText('   \n\t  ', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toHaveLength(0);
@@ -1370,7 +1370,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(exhaustedMessenger, CHAT_JID);
-    queue.enqueueText('message that will fail');
+    queue.enqueueText('message that will fail', 'answer');
     await vi.runAllTimersAsync();
 
     expect(noticeCalls).toHaveLength(0);
@@ -1404,7 +1404,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(oversizedMessenger, CHAT_JID);
-    queue.enqueueText('message too large for the provider');
+    queue.enqueueText('message too large for the provider', 'answer');
     await vi.runAllTimersAsync();
 
     expect(noticeCalls).toEqual(['⚠️ A response could not be delivered after 3 attempts.']);
@@ -1445,7 +1445,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(transientMessenger, CHAT_JID);
-    queue.enqueueText('message that keeps hitting a transient provider failure');
+    queue.enqueueText('message that keeps hitting a transient provider failure', 'answer');
     await vi.runAllTimersAsync();
 
     expect(noticeCalls).toHaveLength(0);
@@ -1468,7 +1468,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(retryMessenger, CHAT_JID);
-    queue.enqueueText('retry shape test');
+    queue.enqueueText('retry shape test', 'answer');
     await vi.runAllTimersAsync();
 
     // 2 retries before success on attempt 3
@@ -1498,7 +1498,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(alwaysFailMessenger, CHAT_JID);
-    queue.enqueueText('terminal shape test');
+    queue.enqueueText('terminal shape test', 'answer');
     await vi.runAllTimersAsync();
 
     expect(mockLog.error).toHaveBeenCalledOnce();
@@ -1942,7 +1942,7 @@ describe('OutboundQueue', () => {
     const { messenger, typingCalls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueStreamingText('');
+    queue.enqueueStreamingText('', 'answer');
 
     // Empty string → early return → no typing indicator, no timer to clean up
     expect(typingCalls).toHaveLength(0);
@@ -1956,7 +1956,7 @@ describe('OutboundQueue', () => {
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueResultText('');
+    queue.enqueueResultText('', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -1966,7 +1966,7 @@ describe('OutboundQueue', () => {
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueResultText('   ');
+    queue.enqueueResultText('   ', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.sendMessage).not.toHaveBeenCalled();
@@ -1978,7 +1978,7 @@ describe('OutboundQueue', () => {
     queue.setToolUpdateMode('minimal');
 
     // No turnHasVisibleText yet → should pass through
-    queue.enqueueResultText('Summary for the user');
+    queue.enqueueResultText('Summary for the user', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['Summary for the user']);
@@ -1990,11 +1990,11 @@ describe('OutboundQueue', () => {
     queue.setToolUpdateMode('minimal');
 
     // Send visible text first (marks turnHasVisibleText)
-    queue.enqueueText('Real response to user');
+    queue.enqueueText('Real response to user', 'answer');
     await vi.runAllTimersAsync();
 
     const callCountBefore = calls.length;
-    queue.enqueueResultText('Internal summary that should be suppressed');
+    queue.enqueueResultText('Internal summary that should be suppressed', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toHaveLength(callCountBefore); // no new message added
@@ -2009,7 +2009,7 @@ describe('OutboundQueue', () => {
     queue.enqueueStreamingText('Let me inspect the workbook before I continue.', 'answer', onCommit);
     queue.discardPreToolAssistantText();
     queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
-    queue.enqueueResultText('Workbook updated and verified.');
+    queue.enqueueResultText('Workbook updated and verified.', 'answer');
     await vi.runAllTimersAsync();
 
     expect(calls).toEqual(['Workbook updated and verified.']);
@@ -2026,7 +2026,7 @@ describe('OutboundQueue', () => {
     queue.discardPreToolAssistantText();
     queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
     queue.endTurn({ resultTextPending: true });
-    const accepted = queue.enqueueResultText('Workbook updated and verified.');
+    const accepted = queue.enqueueResultText('Workbook updated and verified.', 'answer');
     await vi.runAllTimersAsync();
 
     expect(accepted).toBe(true);
@@ -2041,7 +2041,7 @@ describe('OutboundQueue', () => {
 
     const onCommit = vi.fn();
     queue.enqueueStreamingText('Workbook updated and verified.', 'answer', onCommit);
-    expect(queue.enqueueResultText('Internal duplicate result summary.')).toBe(false);
+    expect(queue.enqueueResultText('Internal duplicate result summary.', 'answer')).toBe(false);
 
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toHaveLength(0);
@@ -2176,11 +2176,11 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
-    queue.enqueueStreamingText('First: reading the files.');
+    queue.enqueueStreamingText('First: reading the files.', 'answer');
     queue.discardPreToolAssistantText();
-    queue.enqueueStreamingText('Second: comparing results.');
+    queue.enqueueStreamingText('Second: comparing results.', 'answer');
     queue.discardPreToolAssistantText();
-    queue.enqueueStreamingText('Third: almost done.');
+    queue.enqueueStreamingText('Third: almost done.', 'answer');
     queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
     await vi.runAllTimersAsync();
 
@@ -2200,7 +2200,7 @@ describe('OutboundQueue', () => {
     queue.setToolUpdateMode('minimal');
     queue.beginTurnEvidence('turn-3398rc');
 
-    queue.enqueueStreamingText('Narration before the tool call.');
+    queue.enqueueStreamingText('Narration before the tool call.', 'answer');
     queue.discardPreToolAssistantText();
     queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
     const evidencePromise = queue.flushTurnEvidence('turn-3398rc');
@@ -2220,7 +2220,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
-    queue.enqueueStreamingText('Doomed narration.');
+    queue.enqueueStreamingText('Doomed narration.', 'answer');
     queue.discardPreToolAssistantText();
     queue.abortTurn();
     await vi.runAllTimersAsync();
@@ -2237,11 +2237,11 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
-    queue.enqueueText('Early partial answer.');
+    queue.enqueueText('Early partial answer.', 'answer');
     await vi.runAllTimersAsync();
     expect(calls).toEqual(['Early partial answer.']);
 
-    queue.enqueueStreamingText('Later narration.');
+    queue.enqueueStreamingText('Later narration.', 'answer');
     queue.discardPreToolAssistantText();
     queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
     await vi.runAllTimersAsync();
@@ -2254,7 +2254,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
-    queue.enqueueStreamingText('Stale narration from the finished turn.');
+    queue.enqueueStreamingText('Stale narration from the finished turn.', 'answer');
     queue.discardPreToolAssistantText();
     // #3415 path C delivers the deferred text as the terminal reply and
     // empties the pen — the crash abort below must find nothing to salvage.
@@ -2275,9 +2275,9 @@ describe('OutboundQueue', () => {
 
     const oldest = `OLDEST-${'a'.repeat(MAX_SALVAGE_RETENTION_CHARS - 500)}`;
     const newest = `NEWEST-${'b'.repeat(1000)}`;
-    queue.enqueueStreamingText(oldest);
+    queue.enqueueStreamingText(oldest, 'answer');
     queue.discardPreToolAssistantText();
-    queue.enqueueStreamingText(newest);
+    queue.enqueueStreamingText(newest, 'answer');
     queue.discardPreToolAssistantText();
     queue.abortTurn({ preserveEvidence: true, salvageOwedReply: true });
     await vi.runAllTimersAsync();
@@ -2292,7 +2292,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('minimal');
 
-    queue.enqueueStreamingText('Which workbook should I update?');
+    queue.enqueueStreamingText('Which workbook should I update?', 'answer');
     await queue.enqueuePoll(async () => {
       calls.push('POLL');
     });
@@ -2306,7 +2306,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setToolUpdateMode('friendly');
 
-    queue.enqueueStreamingText('I am checking the workbook now.');
+    queue.enqueueStreamingText('I am checking the workbook now.', 'answer');
     queue.enqueueToolUpdate({ category: 'reading', detail: 'workbook.xlsx' });
     await vi.runAllTimersAsync();
 
@@ -2499,7 +2499,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('Hello');
+    queue.enqueueText('Hello', 'answer');
     await vi.runAllTimersAsync();
 
     queue.markLastTerminal({ skipDurabilityMark: true });
@@ -2513,7 +2513,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('Hello');
+    queue.enqueueText('Hello', 'answer');
     await vi.runAllTimersAsync();
 
     queue.markLastTerminal();
@@ -2533,7 +2533,7 @@ describe('OutboundQueue', () => {
     queue.markLastTerminal({ dedupeText: true });
 
     // No errors, queue still functional
-    queue.enqueueText('Subsequent text');
+    queue.enqueueText('Subsequent text', 'answer');
     await vi.runAllTimersAsync();
 
     expect(messenger.sendMessage).toHaveBeenCalledWith(CHAT_JID, 'Subsequent text', { messageId: expect.any(String) });
@@ -2556,7 +2556,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(failMessenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('durability retry test');
+    queue.enqueueText('durability retry test', 'answer');
     await vi.runAllTimersAsync();
 
     expect(durability.markMaybeSent).toHaveBeenCalledOnce();
@@ -2588,7 +2588,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(shedMessenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('governor shed classification test');
+    queue.enqueueText('governor shed classification test', 'answer');
     await vi.runAllTimersAsync();
 
     expect(durability.markFailedPermanent).toHaveBeenCalledOnce();
@@ -2614,7 +2614,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(hangingMessenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('timeout ambiguity test');
+    queue.enqueueText('timeout ambiguity test', 'answer');
     await vi.runAllTimersAsync();
 
     expect(durability.markMaybeSent).toHaveBeenCalledOnce();
@@ -2641,7 +2641,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(nonNumericPayloadMessenger, CHAT_JID);
-    queue.enqueueText('retryAfterMs string test');
+    queue.enqueueText('retryAfterMs string test', 'answer');
     await vi.runAllTimersAsync();
 
     // Succeeded on second attempt — warn logged once
@@ -2668,7 +2668,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(negativePayloadMessenger, CHAT_JID);
-    queue.enqueueText('negative retryAfterMs test');
+    queue.enqueueText('negative retryAfterMs test', 'answer');
     await vi.runAllTimersAsync();
 
     expect(mockLog.warn).toHaveBeenCalledOnce();
@@ -2701,7 +2701,7 @@ describe('OutboundQueue', () => {
 
     const queue = new OutboundQueue(clampedRetryMessenger, CHAT_JID);
     queue.setDurability(durability);
-    queue.enqueueText('clamped retryAfterMs test');
+    queue.enqueueText('clamped retryAfterMs test', 'answer');
     await vi.advanceTimersByTimeAsync(8_001);
     await queue.flush();
 
@@ -2738,7 +2738,7 @@ describe('OutboundQueue', () => {
       sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };
     const queue = new OutboundQueue(messenger, CHAT_JID);
-    queue.enqueueText('long producer floor');
+    queue.enqueueText('long producer floor', 'answer');
 
     await vi.advanceTimersByTimeAsync(0);
     expect(messenger.sendMessage).toHaveBeenCalledOnce();
@@ -2769,7 +2769,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(timeoutMessenger, CHAT_JID);
-    queue.enqueueText('timeout test');
+    queue.enqueueText('timeout test', 'answer');
     // Advance past first SEND_TIMEOUT_MS → first attempt times out
     await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 1);
     // Advance past retry delay + second SEND_TIMEOUT_MS → second attempt times out
@@ -2802,7 +2802,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(idMessenger, CHAT_JID);
-    queue.enqueueText('idempotency test');
+    queue.enqueueText('idempotency test', 'answer');
     await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 1); // first attempt times out
     await vi.advanceTimersByTimeAsync(SEND_TIMEOUT_MS + 2_000); // retry succeeds
     await queue.flush();
@@ -2819,7 +2819,7 @@ describe('OutboundQueue', () => {
     const { messenger, calls } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueStreamingText('streaming chunk');
+    queue.enqueueStreamingText('streaming chunk', 'answer');
     queue.enqueueToolUpdate({ category: 'running', detail: 'some task' });
 
     const sendFn = vi.fn(async () => {});
@@ -2992,7 +2992,7 @@ describe('OutboundQueue', () => {
     };
 
     const queue = new OutboundQueue(slowMessenger, CHAT_JID);
-    queue.enqueueText('slow message');
+    queue.enqueueText('slow message', 'answer');
 
     // Wait until send has started
     await sendStarted.promise;
@@ -3041,7 +3041,7 @@ describe('OutboundQueue', () => {
     const queue = new OutboundQueue(messenger, CHAT_JID);
     queue.setDurability(durability);
 
-    queue.enqueueText('something');
+    queue.enqueueText('something', 'answer');
     await vi.runAllTimersAsync();
 
     expect(queue.getLastOpId()).toBeDefined();
@@ -3056,7 +3056,7 @@ describe('OutboundQueue', () => {
     queue.setDurability(durability);
     queue.setInboundSeq(42);
 
-    queue.enqueueText('with seq');
+    queue.enqueueText('with seq', 'answer');
     await vi.runAllTimersAsync();
 
     expect(durability.createOutboundOp).toHaveBeenCalledWith(
@@ -3070,7 +3070,7 @@ describe('OutboundQueue', () => {
     const { messenger } = makeMessenger();
     const queue = new OutboundQueue(messenger, CHAT_JID);
 
-    queue.enqueueStreamingText('partial stream');
+    queue.enqueueStreamingText('partial stream', 'answer');
     // streamTimer is now set; abort before it fires
     queue.abortTurn();
 
@@ -3112,7 +3112,7 @@ describe('OutboundQueue', () => {
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, GROUP_JID);
 
-      queue.enqueueText('this group send should be suppressed');
+      queue.enqueueText('this group send should be suppressed', 'answer');
       await vi.runAllTimersAsync();
 
       // The echo guard dropped the send before it reached messenger.sendMessage.
@@ -3137,7 +3137,7 @@ describe('OutboundQueue', () => {
       };
 
       const queue = new OutboundQueue(retryMessenger, CHAT_JID);
-      queue.enqueueText(longText);
+      queue.enqueueText(longText, 'answer');
       await vi.runAllTimersAsync();
 
       // One retry fired before the successful second attempt.
@@ -3162,7 +3162,7 @@ describe('OutboundQueue', () => {
       };
 
       const queue = new OutboundQueue(alwaysFailMessenger, CHAT_JID);
-      queue.enqueueText(longText);
+      queue.enqueueText(longText, 'answer');
       await vi.runAllTimersAsync();
 
       expect(mockLog.error).toHaveBeenCalledOnce();
@@ -3188,7 +3188,7 @@ describe('OutboundQueue', () => {
 
       const queue = new OutboundQueue(nonErrorMessenger, CHAT_JID);
       queue.setDurability(durability);
-      queue.enqueueText('non-error throw');
+      queue.enqueueText('non-error throw', 'answer');
       await vi.runAllTimersAsync();
 
       expect(durability.markMaybeSent).toHaveBeenCalledOnce();
@@ -3211,7 +3211,7 @@ describe('OutboundQueue', () => {
       // cuts at index 4000 (no '\n\n' or space within the first 4000), leaving
       // a remainder that trimStart() reduces to '' — so no second chunk ships.
       const body = 'z'.repeat(4000) + '\n\n   ';
-      queue.enqueueText(body);
+      queue.enqueueText(body, 'answer');
       await vi.runAllTimersAsync();
 
       // Exactly one message was emitted — the trailing-whitespace remainder was
@@ -3237,7 +3237,7 @@ describe('OutboundQueue', () => {
       };
       const blockingQueue = new OutboundQueue(blockingMessenger, CHAT_JID);
 
-      blockingQueue.enqueueText('in-flight send that holds the chain open');
+      blockingQueue.enqueueText('in-flight send that holds the chain open', 'answer');
       // Let the send start (chain becomes pending).
       await vi.advanceTimersByTimeAsync(0);
 
@@ -3270,7 +3270,7 @@ describe('OutboundQueue', () => {
       const { messenger, typingCalls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
-      queue.enqueueStreamingText('long turn');             // arms composing + 8s refresh
+      queue.enqueueStreamingText('long turn', 'answer');             // arms composing + 8s refresh
       expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
 
       // Advance just past the self-bound cap; the refresh must stop re-asserting.
@@ -3289,10 +3289,10 @@ describe('OutboundQueue', () => {
       const { messenger, typingCalls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
-      queue.enqueueStreamingText('chunk-1');
+      queue.enqueueStreamingText('chunk-1', 'answer');
       // Advance to just before the original cap would fire
       await vi.advanceTimersByTimeAsync(TYPING_MAX_MS - TYPING_REFRESH_MS);
-      queue.enqueueStreamingText('chunk-2');               // new activity → resets clock to T=0
+      queue.enqueueStreamingText('chunk-2', 'answer');               // new activity → resets clock to T=0
       const assertsAfterReset = typingCalls.filter((v) => v === true).length;
 
       // Advance a full TYPING_MAX_MS from the reset — the interval should still
@@ -3325,7 +3325,7 @@ describe('OutboundQueue', () => {
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
       // Simulate an assistant_text fragment buffered mid-turn (streamTimer armed, not yet fired)
-      queue.enqueueStreamingText('buffered fragment');
+      queue.enqueueStreamingText('buffered fragment', 'answer');
       // Buffer is pending — no send yet (streamTimer hasn't fired)
       expect(calls).toHaveLength(0);
 
@@ -3356,7 +3356,7 @@ describe('OutboundQueue', () => {
       const { messenger, typingCalls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
-      queue.enqueueStreamingText('working');               // arms composing + streamTimer
+      queue.enqueueStreamingText('working', 'answer');               // arms composing + streamTimer
       expect(typingCalls.filter((v) => v === true)).toHaveLength(1);
 
       queue.endTurn();                                      // turn-end choke point
@@ -3398,7 +3398,7 @@ describe('OutboundQueue', () => {
         queue.enqueueToolUpdate({ category: 'running', detail: `turn-2-${i}` });
         await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
       }
-      queue.enqueueResultText('FINAL REPORT');
+      queue.enqueueResultText('FINAL REPORT', 'answer');
       await queue.flush();
 
       const status = calls.filter((c) => c.includes('Working on') || c.startsWith('⚙️'));
@@ -3434,7 +3434,7 @@ describe('OutboundQueue', () => {
       secondQueue.setStatusMessageWindow(1, 300_000);
       secondQueue.enqueueToolUpdate({ category: 'running', detail: 'after replacement' });
       await vi.advanceTimersByTimeAsync(TOOL_BATCH_DELAY_MS);
-      secondQueue.enqueueResultText('replacement final');
+      secondQueue.enqueueResultText('replacement final', 'answer');
       secondQueue.endTurn();
       await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS + MIN_SEND_GAP_MS * 4);
       await secondQueue.flush();
@@ -3565,10 +3565,10 @@ describe('OutboundQueue', () => {
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
       for (let i = 0; i < 60; i++) {
-        queue.enqueueText(`answer part ${i}`);
+        queue.enqueueText(`answer part ${i}`, 'answer');
         await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
       }
-      queue.enqueueResultText('FINAL REPORT');
+      queue.enqueueResultText('FINAL REPORT', 'answer');
       await queue.flush();
 
       expect(calls.filter((c) => c.startsWith('answer part')).length).toBe(60);
@@ -3634,7 +3634,7 @@ describe('OutboundQueue', () => {
       const queue = new OutboundQueue(messenger, CHAT_JID);
 
       for (let i = 0; i < 45; i++) {
-        queue.enqueueText(`content ${i}`);
+        queue.enqueueText(`content ${i}`, 'answer');
         await vi.advanceTimersByTimeAsync(TEXT_AGGREGATE_DELAY_MS);
       }
       await queue.flush();
@@ -3751,7 +3751,7 @@ describe('OutboundQueue — echo-guard token inheritance across replacement (QR-
       const queue = new OutboundQueue(messenger, CHAT_JID);
       // 256 KB reply → 64 uncapped chunks (ceil(len / 4000)). A prompt-injected
       // max-length agent reply is the realistic trigger; the cap must bound the fan-out.
-      queue.enqueueText('x'.repeat(256 * 1024));
+      queue.enqueueText('x'.repeat(256 * 1024), 'answer');
       await vi.runAllTimersAsync();
 
       // Uncapped this is 64 sends; capped it is exactly MAX_CHUNKS.
@@ -3765,7 +3765,7 @@ describe('OutboundQueue — echo-guard token inheritance across replacement (QR-
       const { messenger, calls } = makeMessenger();
       const queue = new OutboundQueue(messenger, CHAT_JID);
       // ~3 chunks worth — well under the cap; must pass through untouched.
-      queue.enqueueText('y'.repeat(3 * 4000 + 100));
+      queue.enqueueText('y'.repeat(3 * 4000 + 100), 'answer');
       await vi.runAllTimersAsync();
 
       expect(calls.length).toBeGreaterThan(1);

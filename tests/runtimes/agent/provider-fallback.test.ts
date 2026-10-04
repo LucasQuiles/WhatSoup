@@ -1039,8 +1039,9 @@ describe('usage-limit user notice', () => {
     // to try again after the limit resets.
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('add credits or switch my model'),
+      'status',
     );
-    expect(queue.enqueueText).not.toHaveBeenCalledWith(
+    expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('try again after the limit resets'),
     );
   });
@@ -1064,12 +1065,15 @@ describe('usage-limit user notice', () => {
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Primary model hit a usage/quota limit'),
+      'lifecycle',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Switching to OpenCode / minimax/minimax-m2'),
+      'lifecycle',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Please resend your last message.'),
+      'lifecycle',
     );
   });
 });

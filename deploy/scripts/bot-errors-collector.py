@@ -21,7 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import event_machine, new_event_fields
 from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
@@ -2268,7 +2268,7 @@ def enqueue_meta_alert(
                 **new_event_fields("observation" if effective_severity == "info" else "alert", effective_severity),
                 "id": event_id,
                 "createdAt": created_at,
-                "machine": socket.gethostname(),
+                "machine": event_machine(),
                 "platform": sys.platform,
                 "instance": "bot-errors-collector",
                 "source": source,
@@ -2341,7 +2341,7 @@ def enqueue_meta_alert(
         **new_event_fields("observation" if effective_severity == "info" else "alert", effective_severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
         "source": source,
@@ -2401,7 +2401,7 @@ def enqueue_meta_recovery(remote: str, source: str, summary: str, evidence: str,
         **new_event_fields("clear", "info"),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
         "source": source,
@@ -3539,7 +3539,7 @@ def enqueue_writefail_ack_failure(
             **new_event_fields("alert", "critical"),
             "id": event_id,
             "createdAt": now_iso(),
-            "machine": socket.gethostname(),
+            "machine": event_machine(),
             "platform": sys.platform,
             "instance": "bot-errors-collector",
             "source": "remote-writefail-ack-failed",
@@ -4002,7 +4002,7 @@ def _emit_collector_outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-collector",
         "source": source,

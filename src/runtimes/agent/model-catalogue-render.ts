@@ -26,6 +26,7 @@ import {
 import { configPointer, scopedCatalogue } from './model-catalogue.ts';
 import type { ProviderDescriptor } from './providers/provider-descriptor.ts';
 import type { CatalogueSnapshotCache, CatalogueEntry } from './model-snapshot-cache.ts';
+import type { OutboundMessageRole } from './outbound-queue.ts';
 
 // Same component name as AgentRuntime: the catalogue-section warning keeps its
 // existing `component: 'agent-runtime'` log binding (no observable change).
@@ -47,7 +48,7 @@ export interface ModelCatalogueRenderPort {
   // host (which owns the config read) so this render module stays free of a
   // composition-layer import (ring-boundary discipline).
   readonly nlRoutingTiers: { strongest?: string; fastest?: string } | null | undefined;
-  sendDirect(chatJid: string, text: string): void;
+  sendDirect(chatJid: string, text: string, role: OutboundMessageRole): void;
   loadRouteView(chatJid: string, senderJid: string): { live: DisplayRoute | null; next: DisplayRoute };
 }
 
@@ -118,7 +119,7 @@ export function sendModelCatalogue(
   senderJid: string,
   filter: string | null,
 ): void {
-  port.sendDirect(chatJid, renderModelCatalogue(port));
+  port.sendDirect(chatJid, renderModelCatalogue(port), 'status');
   void sendDynamicModelCatalogueSection(port, chatJid, senderJid, filter);
 }
 
@@ -255,7 +256,7 @@ export async function sendDynamicModelCatalogueSection(
     const { configPointers } = scopedCatalogue(descriptors);
     for (const id of configPointers) lines.push(`_${configPointer(id)}_`);
 
-    port.sendDirect(chatJid, lines.join('\n'));
+    port.sendDirect(chatJid, lines.join('\n'), 'status');
   } catch (err) {
     log.warn({ err, instance: port.instanceName }, '/model list dynamic catalogue section failed');
   }
