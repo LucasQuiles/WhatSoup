@@ -297,6 +297,63 @@ describe('file transport configuration', () => {
     expect(loggerModule.default.level).toBe('debug');
   });
 
+  // #3704: the generated launchd plist sets WHATSOUP_LOG_STDOUT_SINK=off because
+  // launchd sends stdout to an unrotated stdout.log; the rolling file is then
+  // the only structured sink. systemd leaves the flag unset.
+  it('drops the stdout target when WHATSOUP_LOG_STDOUT_SINK=off and the rolling file is configured', async () => {
+    const logDir = '/tmp/whatsoup-logs';
+    process.env.WHATSOUP_LOG_STDOUT_SINK = 'off';
+    try {
+      const transport: MockTransport = { end: vi.fn(), on: vi.fn() };
+      const { pinoFactory, transportFactory } = await importLoggerWithMockedPino({ logDir, transport });
+
+      expect(transportFactory).toHaveBeenCalledWith({
+        targets: [
+          {
+            target: 'pino-roll',
+            options: {
+              file: join(logDir, 'whatsoup.log'),
+              frequency: 'daily',
+              mkdir: true,
+              limit: { count: 10 },
+            },
+            level: 'info',
+          },
+        ],
+      });
+      expect(pinoFactory).toHaveBeenCalledWith(expect.objectContaining({ level: 'info' }), transport);
+    } finally {
+      delete process.env.WHATSOUP_LOG_STDOUT_SINK;
+    }
+  });
+
+  it.each(['on', 'anything-else'])('keeps the stdout target when WHATSOUP_LOG_STDOUT_SINK is %s (only "off" drops it)', async (value) => {
+    const logDir = '/tmp/whatsoup-logs';
+    process.env.WHATSOUP_LOG_STDOUT_SINK = value;
+    try {
+      const transport: MockTransport = { end: vi.fn(), on: vi.fn() };
+      const { transportFactory } = await importLoggerWithMockedPino({ logDir, transport });
+
+      const targets = (transportFactory.mock.calls[0]![0] as { targets: Array<{ target: string }> }).targets.map((target) => target.target);
+      expect(targets).toEqual(['pino/file', 'pino-roll']);
+    } finally {
+      delete process.env.WHATSOUP_LOG_STDOUT_SINK;
+    }
+  });
+
+  it('ignores WHATSOUP_LOG_STDOUT_SINK=off without LOG_DIR: pino keeps its default stdout destination', async () => {
+    process.env.WHATSOUP_LOG_STDOUT_SINK = 'off';
+    try {
+      const { pinoFactory, transportFactory } = await importLoggerWithMockedPino({});
+
+      expect(transportFactory).not.toHaveBeenCalled();
+      expect(pinoFactory).toHaveBeenCalledOnce();
+      expect(pinoFactory.mock.calls[0]).toHaveLength(1);
+    } finally {
+      delete process.env.WHATSOUP_LOG_STDOUT_SINK;
+    }
+  });
+
   it('falls back to stdout-only logging if transport setup fails', async () => {
     const { loggerModule, logger, pinoFactory, transportFactory } = await importLoggerWithMockedPino({
       logDir: '/tmp/invalid-log-dir',
