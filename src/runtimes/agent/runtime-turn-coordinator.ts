@@ -346,11 +346,13 @@ export interface RuntimeTurnCoordinatorPort {
     chatJid: string,
     actorJid?: string,
     routeOverride?: ResolvedReplayRoute,
+    runtimeContext?: RuntimeTurnContext,
   ): void;
   recreateSingletonSessionForFallback(
     chatJid: string,
     actorJid?: string,
     routeOverride?: ResolvedReplayRoute,
+    runtimeContext?: RuntimeTurnContext,
   ): void;
   isReplayRouteCurrent(
     chatJid: string,
@@ -862,7 +864,7 @@ beginRuntimeTurnEvidence(
   if (!this.host.runtimeTurnSupervisor.canAccept(context)) {
     throw new ScopeBlockedByFinalizationRecoveryError();
   }
-  queue.beginTurnEvidence(context.identity.logicalTurnId);
+  this.beginAttributedTurnEvidence(queue, context);
   // FLOS Stage 1: the turn passed every admission gate above. A scheduled
   // turn was already admitted+dispatched at the occurrence layer, so this
   // seam is the turn chain ACKNOWLEDGING the dispatched work; an interactive
@@ -871,6 +873,24 @@ beginRuntimeTurnEvidence(
     context,
     classifyTurnLane(context.replay?.sourceMessageId).lane === 'L-SCH' ? 'acknowledged' : 'admitted',
   );
+}
+
+/**
+ * A queue rebuilt for an owned provider terminal (runtime.ts route recovery) has neither this
+ * turn's evidence nor its inbound sequence. The turn was admitted when it was dispatched, so no
+ * admission gate or lifecycle phase runs again.
+ */
+resumeRuntimeTurnOnRebuiltQueue(queue: IOutboundQueue, context: RuntimeTurnContext): void {
+  const inboundSeq = context.identity.inboundSeq;
+  if (typeof inboundSeq === 'number') queue.setInboundSeq(inboundSeq);
+  this.beginAttributedTurnEvidence(queue, context);
+}
+
+private beginAttributedTurnEvidence(queue: IOutboundQueue, context: RuntimeTurnContext): void {
+  queue.beginTurnEvidence(context.identity.logicalTurnId, {
+    conversationKey: context.identity.conversationKey,
+    chatJid: context.identity.deliveryJid,
+  });
 }
 
 /**
@@ -2115,7 +2135,8 @@ async applyRuntimeTurnPostEffects(
     (config.voiceReply === 'always' || postEffects.voice.inboundContentType === 'audio')
   ) {
     ledger.voiceScheduled = true;
-    void this.host.sendVoiceReply(postEffects.voice.chatJid, postEffects.voice.responseText);
+    // The finalized turn owns the destination, as it does for its text.
+    void this.host.sendVoiceReply(context.identity.deliveryJid, postEffects.voice.responseText);
   }
 }
 

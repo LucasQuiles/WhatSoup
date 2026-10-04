@@ -430,10 +430,13 @@ terminal post-effects.
 
 If delivery proof cannot be read or the terminal transaction fails, the runtime emits the
 `agent_turn_finalization_failed` BOT ERRORS alert with bounded, hashed identity evidence and
-retains the exact finalization request. A delivery-proof failure blocks the affected lane; a
-terminal-write failure with already-frozen evidence may let the queue advance while retry
-ownership remains retained. If both terminal persistence and durable alerting fail, the scope is
-sticky-degraded and accepts no more turns until the same request recovers.
+retains the exact finalization request. Both failures block the affected lane until a retry
+succeeds or, once retries are exhausted, until a restart: `emitFailureIncident` in
+`turn-finalizer.ts` never lets the queue advance. The one exception is a terminal write that
+fails after the stuck-inbound sweep has already reclaimed the turn: nothing remains to write,
+so the turn ends as `reclaimed_by_sweep` with no alert and no retention, and the lane advances.
+If both terminal persistence and durable alerting fail, the scope is sticky-degraded and
+accepts no more turns until the same request recovers.
 
 Retries are single-flight, run after **5 seconds**, process at most **16** retained records per
 pass with a rotating cursor, and stop after **5** attempts per record. Exhausted work remains
@@ -442,6 +445,26 @@ retained and its scope remains blocked; it is never discarded. Admission stops a
 return `winnerMatchesRequest=true` before post-effects run and the scope can unblock. The health
 snapshot exposes retained/degraded gauges plus cumulative attempt, recovery, and exhaustion
 counters; any retained finalization degrades runtime health. Shutdown cancels the retry timer.
+
+Each turn's outbound operations carry that turn's attribution. `beginTurnEvidence` takes the
+turn identity's conversation key and chat JID, and the turn's evidence carries them, including
+when it begins on a queue rebuilt for the turn's provider result or created when a provider
+fallback replaces the turn's session. The queue captures the attribution when output is
+enqueued. Output enqueued while that evidence is active carries the turn's key and chat JID,
+and its operations carry them and are sent to that JID even when an operation is created later.
+The exception is crash salvage: when a crash aborts a turn that showed no text, the text of
+every retained batch is joined and passed to `enqueuePreparedText` as status output under the
+attribution of the last retained batch. Output enqueued outside a turn keeps the queue's own
+key, fixed when the queue is created, and the delivery JID the queue had when the output was
+enqueued. An alias migration, a queue created after a LID mapping, or a single-scope queue
+serving another chat therefore cannot make an answered turn fail its delivery proof. A text
+operation the queue sends is first redacted in `enqueuePreparedText`: `redactInternalArtifacts`
+applies the audience that `resolveOutboundAudience` computes for the JID it is sent to. An
+admin's direct chat counts as internal on that ground only while no provider fallback is
+active. Then `admitClientOutput` withholds the text when `enforceClientOutputPolicy` withholds
+it under either the queue's key or the turn's key. The only redaction exception is a fixed
+progress placeholder, which skips redaction but passes the same policy check. A voice reply
+goes to the finalized turn's chat.
 
 Per-chat crash exhaustion follows the same proof boundary. The runtime first marks the current
 manager owner `exhausted` and cancels auto-respawn. When an immutable crash context exists,

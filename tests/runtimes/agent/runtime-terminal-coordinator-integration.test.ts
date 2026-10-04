@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import {
+  createRuntimeTurnContext,
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
 } from '../../../src/runtimes/agent/runtime-turn-context.ts';
@@ -71,6 +72,9 @@ function queuedTurn(runtimeContext: RuntimeTurnContext): QueuedTurn {
     inboundSeq: runtimeContext.identity.inboundSeq ?? undefined,
   };
 }
+
+/** The coordinator's rebuilt-queue resume, reached through a cast the base coordinator also satisfies. */
+type Resume = { resumeRuntimeTurnOnRebuiltQueue?: (queue: unknown, context: unknown) => void };
 
 
 beforeEach(() => {
@@ -336,7 +340,80 @@ describe('runtime terminal coordinator integration', () => {
       expect(queue.beginTurnEvidence).not.toHaveBeenCalled();
 
       state.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, allowed);
-      expect(queue.beginTurnEvidence).toHaveBeenCalledWith('turn-other-chat');
+      expect(queue.beginTurnEvidence).toHaveBeenCalledWith('turn-other-chat', {
+        conversationKey: allowed.identity.conversationKey,
+        chatJid: allowed.identity.deliveryJid,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('begins a turn\'s evidence with the turn\'s own key and delivery JID', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, {
+        sessionScope: 'per_chat',
+      });
+      state.durability = durabilityMock();
+      const phoneDigits = '15550190042';
+      const lidJid = '155500000000042@lid';
+      // A scheduled job reporting to a mapped LID: the phone key with LID delivery.
+      const phoneKeyed = context('per_chat', phoneDigits, 50, 'turn-lid-delivery');
+      const lidDelivered = createRuntimeTurnContext({
+        ...phoneKeyed,
+        identity: { ...phoneKeyed.identity, deliveryJid: lidJid },
+      });
+      const queue = queueStub(lidJid);
+
+      state.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, lidDelivered);
+      expect(queue.beginTurnEvidence).toHaveBeenCalledWith('turn-lid-delivery', {
+        conversationKey: phoneDigits,
+        chatJid: lidJid,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('resumes a dispatched turn on a rebuilt queue without its admission gate', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, {
+        sessionScope: 'per_chat',
+      });
+      const durability = durabilityMock();
+      durability.hasOutstandingTurnRecoveryForScope.mockImplementation(
+        (scope, conversationKey) => scope === 'per_chat' && conversationKey === 'blocked-chat',
+      );
+      state.durability = durability;
+      const blocked = context('per_chat', 'blocked-chat', 47, 'turn-blocked-recovery');
+      const queue = queueStub(blocked.identity.deliveryJid);
+      expect(() => state.runtimeTurnCoordinator.beginRuntimeTurnEvidence(queue, blocked))
+        .toThrow(/durable recovery/i);
+
+      const rebuilt = queueStub(blocked.identity.deliveryJid);
+      const resume = (state.runtimeTurnCoordinator as unknown as Resume).resumeRuntimeTurnOnRebuiltQueue;
+      let threw = false;
+      try {
+        resume?.call(state.runtimeTurnCoordinator, rebuilt, blocked);
+      } catch {
+        threw = true;
+      }
+      expect({
+        threw,
+        seq: vi.mocked(rebuilt.setInboundSeq).mock.calls,
+        begin: vi.mocked(rebuilt.beginTurnEvidence).mock.calls,
+      }).toEqual({
+        threw: false,
+        seq: [[47]],
+        begin: [['turn-blocked-recovery', {
+          conversationKey: blocked.identity.conversationKey,
+          chatJid: blocked.identity.deliveryJid,
+        }]],
+      });
     } finally {
       db.close();
     }

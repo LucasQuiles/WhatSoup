@@ -56,11 +56,13 @@ export interface FallbackReplayHost {
     chatJid: string,
     actorJid?: string,
     routeOverride?: ResolvedReplayRoute,
+    runtimeContext?: RuntimeTurnContext,
   ): void;
   recreateSingletonSessionForFallback(
     chatJid: string,
     actorJid?: string,
     routeOverride?: ResolvedReplayRoute,
+    runtimeContext?: RuntimeTurnContext,
   ): void;
   isReplayRouteCurrent(
     chatJid: string,
@@ -144,6 +146,7 @@ export async function replayTurnOnFallback(
       args.chatJid,
       args.actorJid,
       args.routeOverride,
+      args.runtimeContext,
     );
     // Hand the live scope ref to admission: a rekey while the replacement
     // spawns must re-bind the held turn under the new key, not re-admit it
@@ -164,7 +167,7 @@ export async function replayTurnOnFallback(
     );
     return;
   }
-  host.recreateSingletonSessionForFallback(args.chatJid, args.actorJid, args.routeOverride);
+  host.recreateSingletonSessionForFallback(args.chatJid, args.actorJid, args.routeOverride, args.runtimeContext);
   host.currentTurnChatJid = args.chatJid;
   host.bindActiveGlobalMcpConversation(args.chatJid);
   host.turnHadVisibleOutput = false;
