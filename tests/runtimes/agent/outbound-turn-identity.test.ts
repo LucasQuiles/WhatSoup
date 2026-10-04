@@ -118,7 +118,7 @@ describe('outbound turn identity', () => {
     queue.setInboundSeq(inboundSeq);
     queue.beginTurnEvidence('turn-mapped-lid');
 
-    queue.enqueueText('one delivered answer');
+    queue.enqueueText('one delivered answer', 'answer');
     const evidence = await queue.flushTurnEvidence('turn-mapped-lid');
 
     expect(transport.sendMessage).toHaveBeenCalledTimes(1);
@@ -165,7 +165,7 @@ describe('outbound turn identity', () => {
     const queue = new OutboundQueue(transport, groupJid);
     queue.setDurability(durability);
 
-    queue.enqueueText('group control');
+    queue.enqueueText('group control', 'answer');
     await queue.flush();
 
     expect(db.raw.prepare(
@@ -182,7 +182,7 @@ describe('outbound turn identity', () => {
     const queue = new ControlQueue(LID_JID, transport);
 
     queue.beginTurnEvidence('control-turn');
-    queue.enqueueText('buffer only');
+    queue.enqueueText('buffer only', 'answer');
 
     await expect(queue.flushTurnEvidence('control-turn')).resolves.toEqual({
       turnId: 'control-turn',
@@ -232,7 +232,7 @@ describe('outbound turn identity', () => {
     ) {
       const seq = beginAttributed(queue, turnId, attribution);
       beforeAnswer(queue);
-      queue.enqueueText('one attributed answer');
+      queue.enqueueText('one attributed answer', 'answer');
       const evidence = await queue.flushTurnEvidence(turnId);
       for (const waId of recorder.waIds) durability.matchEcho(waId);
       const result = finalizeRuntimeTurn({
@@ -312,12 +312,12 @@ describe('outbound turn identity', () => {
       const recorder = recordingMessenger();
       const queue = migratedQueue(recorder.transport);
       beginAttributed(queue, 'turn-attributed', { conversationKey: PHONE_DIGITS, chatJid: PHONE_JID });
-      queue.enqueueText('attributed answer');
+      queue.enqueueText('attributed answer', 'answer');
       await queue.flushTurnEvidence('turn-attributed');
 
       queue.enqueueText('later', 'status');
       queue.beginTurnEvidence('turn-unattributed');
-      queue.enqueueText('unattributed answer');
+      queue.enqueueText('unattributed answer', 'answer');
       await queue.flushTurnEvidence('turn-unattributed');
 
       expect(db.raw.prepare(
@@ -380,7 +380,7 @@ describe('outbound turn identity', () => {
       });
       queue.setDurability(durability);
       beginAttributed(queue, 'turn-queue-policy', { conversationKey: LID_LOCAL, chatJid: LID_JID });
-      queue.enqueueText(`Please ask about the ${BLOCKED_TERM} launch.`);
+      queue.enqueueText(`Please ask about the ${BLOCKED_TERM} launch.`, 'answer');
       const evidence = await queue.flushTurnEvidence('turn-queue-policy');
 
       expect({
@@ -395,7 +395,7 @@ describe('outbound turn identity', () => {
         clientOutputPolicies: registryFor({ ...STRICT_POLICY, conversationKey: PHONE_DIGITS }),
       });
       beginAttributed(queue, 'turn-turn-policy', { conversationKey: PHONE_DIGITS, chatJid: PHONE_JID });
-      queue.enqueueText(`Please ask about the ${BLOCKED_TERM} launch.`);
+      queue.enqueueText(`Please ask about the ${BLOCKED_TERM} launch.`, 'answer');
       const evidence = await queue.flushTurnEvidence('turn-turn-policy');
 
       expect({

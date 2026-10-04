@@ -31,7 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import event_machine, new_event_fields
 from lib.bot_errors_daily_health import daily_health_line_is_failure, daily_health_line_is_warning
 from lib.target_provenance import (
     safe_observer_provenance,
@@ -2529,7 +2529,7 @@ def outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": HOST_PLATFORM,
         "instance": "bot-errors-health",
         "source": source,
@@ -9342,7 +9342,7 @@ def daily() -> int:
     else:
         personal_socket_line = f"personal_socket: skipped by health profile {socket_label} exists={socket_exists}"
     lines = [
-        f"machine: {socket.gethostname()}",
+        f"machine: {event_machine()}",
         f"profile: role={profile.get('role', 'unknown')} path={profile.get('_profilePath') or os.environ.get('BOT_ERRORS_HEALTH_PROFILE', 'default')}",
         *([f"profile_fallback: {profile['profileFallback']}"] if profile.get("profileFallback") else []),
         dispatcher_line,
@@ -9448,7 +9448,7 @@ def _deadman_onset_text(episode: dict[str, Any], cooldown_seconds: int) -> str:
     }
     return "\n".join([
         "BOT ERRORS DEADMAN - dispatcher supervision failed",
-        f"  > machine: {socket.gethostname()}",
+        f"  > machine: {event_machine()}",
         f"  > created: {now_iso()}",
         f"  > episode: {episode.get('episodeId')} revision={episode.get('revision')}",
         f"  > cooldown_seconds: {cooldown_seconds}",
@@ -9468,7 +9468,7 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     )
     lines = [
         "BOT ERRORS DEADMAN RECOVERY - dispatcher supervision restored",
-        f"  > machine: {socket.gethostname()}",
+        f"  > machine: {event_machine()}",
         f"  > created: {now_iso()}",
         f"  > episode: {episode.get('episodeId')} revision={episode.get('revision')}",
         f"  > opened: {episode.get('openedAt') or 'unknown'}",

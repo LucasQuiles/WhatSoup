@@ -154,6 +154,10 @@ describe('exact and related history classification', () => {
   it('groups recreated exact closed content deterministically and suppresses weaker overlap', () => {
     const first = fixtureArtifact(1838);
     const second = fixtureArtifact(1848);
+    first.number = 2;
+    first.url = `https://github.com/${REPOSITORY}/pull/2`;
+    second.number = 10;
+    second.url = `https://github.com/${REPOSITORY}/pull/10`;
 
     const findings = evaluate({
       candidate: candidateFromArtifact(first),
@@ -164,10 +168,61 @@ describe('exact and related history classification', () => {
     expect(findings[0]).toMatchObject({
       decision: 'block',
       action: 'open-pr',
-      matchedArtifacts: [{ id: '1838' }, { id: '1848' }],
+      matchedArtifacts: [{ id: '2' }, { id: '10' }],
       observed: expect.arrayContaining([{ label: 'match_count', value: '2' }]),
     });
   });
+
+  it('keeps issue and pull request identities distinct when their numbers match', () => {
+    const prior = fixtureArtifact(1838);
+    const task = { title: 'Reuse the existing history owner', body: 'Preserve artifact identity.' };
+    const proposal = candidate({ records: prior.pathBlobSet!, task });
+    const issue: HistoryArtifactRecord = {
+      repository: REPOSITORY,
+      kind: 'issue',
+      number: prior.number,
+      state: 'open',
+      url: `https://github.com/${REPOSITORY}/issues/${prior.number}`,
+      taskFingerprintSha256: taskFingerprintSha256(task),
+    };
+
+    const findings = evaluate({ candidate: proposal, artifacts: [prior, issue] });
+
+    expect(ruleIds(findings)).toEqual(['history.exact-closed-pr', 'history.exact-issue']);
+    expect(findings.map((entry) => entry.matchedArtifacts)).toEqual([
+      [expect.objectContaining({ kind: 'pull-request', id: '1838', url: prior.url })],
+      [expect.objectContaining({ kind: 'issue', id: '1838', url: issue.url })],
+    ]);
+  });
+
+  it.each(['identical', 'conflicting'] as const)(
+    'rejects %s duplicate identities in a complete collection',
+    (evidence) => {
+      const prior = fixtureArtifact(1838);
+      const duplicate = structuredClone(prior);
+      if (evidence === 'conflicting') duplicate.state = 'merged';
+
+      const findings = evaluate({
+        candidate: candidateFromArtifact(prior),
+        artifacts: [prior, duplicate],
+      });
+
+      expect(findings).toEqual([
+        expect.objectContaining({
+          ruleId: 'history.evidence-incomplete',
+          decision: 'inconclusive',
+          observed: [
+            {
+              label: 'limitation',
+              value:
+                'history evidence validation failed: duplicate artifact identity pull-request#1838',
+            },
+          ],
+          matchedArtifacts: [],
+        }),
+      ]);
+    },
+  );
 
   it('cites the recorded disposition on exact closed content', () => {
     const prior = fixtureArtifact(1857);

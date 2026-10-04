@@ -19,7 +19,7 @@ on the Linux collector host). This README establishes the repo as the source of 
 All `install-bot-errors-*launchd.sh` scripts read configuration from
 `~/.config/whatsoup/bot-errors.env` (overridable via `BOT_ERRORS_ENV_FILE`).
 The file is **not shell-sourced or eval'd**. Values are extracted by an
-`awk`-based `read_env_value()` helper that finds the first line matching
+`awk`-based `read_env_value()` helper that finds the last line matching
 `KEY=` at column 1 and returns the remainder verbatim:
 
 ```awk
@@ -49,7 +49,9 @@ over the hardcoded default. This is handled by `env_or_default()` in each
 installer, which checks `${!key:-}` before calling `read_env_value`.
 
 `deploy/setup.sh` uses the same `awk` pattern (named `read_env_file_value`)
-to read and patch the env file during initial setup.
+to read and patch the env file during initial setup. The Python producers read
+`BOT_ERRORS_MACHINE` from the same file with the same rules, then strip
+surrounding whitespace (see "Machine identity").
 
 ### NORMATIVE — D2 Fail-closed health-profile guard
 
@@ -297,6 +299,79 @@ without delivery or state mutation, with only the bounded classifier reason in
 quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
 duplicate suppression; they cannot be replay-suppressed as if they were valid
 delivery records.
+
+### NORMATIVE — Machine identity (`BOT_ERRORS_MACHINE`)
+
+Every Python producer stamps an event's `machine` field through one helper,
+`event_machine()` in `lib/bot_errors_envelope.py`. The dispatcher keys
+incidents on `machine|instance|source`, so a host whose live hostname changes
+with its network would otherwise open a second incident for one condition, and
+a clear or maintenance window under one name would never reach the other.
+
+The first non-blank source wins, and each is read on every call:
+
+1. `BOT_ERRORS_MACHINE` in the process environment;
+2. the same key in the BOT ERRORS env file (`BOT_ERRORS_ENV_FILE`, else
+   `~/.config/whatsoup/bot-errors.env`), read with the installers' D1 rules:
+   only a regular file is read, lines end at a newline only (a lone carriage
+   return stays inside its line), comment lines are skipped, the key must start
+   at column 1, the last match wins, and the rest of the line is taken as
+   written;
+3. the live hostname exactly as `socket.gethostname()` returns it, with no case
+   folding or domain stripping, so a host that configures nothing keeps its
+   incident keys.
+
+Surrounding whitespace is dropped, and a blank value counts as unset.
+
+Set it in `~/.config/whatsoup/bot-errors.env`, only on a host whose hostname is
+not stable, and pin that host's HostName to the same string: everything still
+named by the live hostname (below) then agrees with it. Write the value
+unquoted. The file read keeps quotes as part of the name, while systemd's
+`EnvironmentFile=` strips them.
+
+- systemd units with `EnvironmentFile=` inherit this value when they start.
+  A non-blank inherited value takes precedence over the file. Restart an
+  affected running unit after changing that value; each new process reads the
+  updated environment file.
+- Every other producer reads the file on each event, once it runs a release
+  that has this rule, and then needs no restart for a change: the macOS
+  launchd agents, the GUI-session monitor's included (their installers do not
+  copy this key), the reply-guarantee drain, the release observers (their
+  emitter environment passes `HOME` but not this key) and the per-bot instance
+  watchdog. These read the default path: `BOT_ERRORS_ENV_FILE` counts only
+  where it is in the producer's own environment.
+- Three of those keep running the release they were installed from until
+  someone acts on the host. The per-bot instance watchdog runs the emitter of
+  the release it was rendered from (`render-watchdog.py`), so re-render it.
+  The reply-guarantee and release-drift-check LaunchAgents bake their install
+  root into the plist (`__WHATSOUP_REPO_ROOT__` in
+  `deploy/com.whatsoup.reply-guarantee.plist` and
+  `deploy/com.whatsoup.release-drift-check.plist`), so rebind or reinstall them
+  onto a release that has this rule. Until then, their events keep the live
+  hostname.
+- `bot-errors-maintenance.py` resolves its `--machine` default the same way, so
+  run it as the host's BOT ERRORS user or pass `--machine`.
+
+Setting or changing the value re-keys this host's incidents once. Open
+incidents under the old name are not merged or migrated: they behave like any
+incident that stops receiving events (see `BOT_ERRORS_MACHINE` in
+`docs/configuration.md`). Leave the central hub unset, because daily-health
+attributes hub-local events by matching the event machine against the hub key
+(`lib/bot_errors_daily_health.py`), and keep the hub's HostName pinned, because
+its own daily-health lookups follow its live hostname.
+
+Diagnostic host fields stay on the live hostname: the collector's
+`collectorHost`, the runner's `host=` evidence line, the selfcheck `host` and
+the sentinel `controllerHost`. Per-host profile and daily-health ledger lookups
+(`host_profile_name()`, `canonical_local_host()`) keep their own normalized
+hostname rule. Only the heartbeat watchdog's `daily_health:<host>` problem key
+for this host takes the configured name, so its alert and clear keep one key.
+
+Known gaps, not wired: the TypeScript outbox writer
+(`src/lib/bot-errors-outbox.ts`) stamps no `machine`, so its events key as
+`unknown|<instance>|<source>`; fleet silences and alert throttles
+(`src/fleet/silence-manager.ts`, `src/fleet/health-poller.ts`) are scoped by
+`os.hostname()`. Neither reads `BOT_ERRORS_MACHINE`.
 
 ### Daily-health recovery scope
 

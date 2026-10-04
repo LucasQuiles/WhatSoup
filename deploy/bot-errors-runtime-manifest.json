@@ -31,7 +31,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "7aa7c450a3b576e0e0df7921209498576c9dc8b7d66c743a6bff9d1565b2c9b1",
+      "sha256": "82015ffcfb7be8e179f5397152f53e81920682517c46d37a6cc4dbc5754c551a",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "c2a2c675285dbfd146db079791761633c8373dec5775a235f49b6f6a878a1364",
+      "sha256": "6ff64a1b0e3b8dd2dd4819c8cb7b39efc7cf6a15af81fcce2cc98776e24af72d",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -138,7 +138,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-emit.py",
-      "sha256": "9beced653d22f2015b4c3bcf2dc4393eea400203f831c16c1e7be57ff5f71edf",
+      "sha256": "88573ab33f2e58a03fdf60d85fb63b5200b229a83badd013e840493d4f7edc07",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -167,7 +167,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "01d650a03f22300f80c1f5c2fefcace989c47864f960c4a9f2b60f283e8f1ad0",
+      "sha256": "d5f95be354a16dded14312daa9033e38f4b46f518193b048e3cf401f41aecfd8",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -288,7 +288,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-heartbeat-watchdog.py",
-      "sha256": "b2983023a76bdfc95ed771c422390c59f102c78f28262462c39ff6f487a7de09",
+      "sha256": "9aaddc9d2fac2add810a3c72b49021f559046860d39c7302293d64e38dc6db19",
       "mustContain": [
         "append_bounded_jsonl",
         "q_loop_state_root",
@@ -334,7 +334,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-runner.py",
-      "sha256": "3485c2866d32dae6c433dd3ee160e400a8c26ed9a701d7dc3b30c1eb8348f1c4",
+      "sha256": "b224304f5f5f528ae0352462546d65177d46f6bdda4d34b7f6165ac05ed50a9a",
       "mustContain": [
         "publish_event_json",
         "refusing to use private directory through symlink",
@@ -382,7 +382,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-tree-provenance.py",
-      "sha256": "778ec173f93e8530baf019bd2784d8809301280d66b50c7c39170866298be02a",
+      "sha256": "81e96ca1424051bea951d3585198b371d6b80639887cf0a3bd878b2ff0fb81f7",
       "mustContain": [
         "tree_provenance_inventory",
         "def redact_ref",
@@ -500,7 +500,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_envelope.py",
-      "sha256": "90d9df751f501ee4582382618f7f769737ae705778173a7db7ed6fe951dbc883",
+      "sha256": "1dedd41f56018d26f30e55fe8900dfc023f71e12c3018babb9ecd293843613cb",
       "mustContain": [
         "SCHEMA_VERSION",
         "EVENT_KINDS",
@@ -510,7 +510,10 @@
         "normalize_event",
         "new_event_fields",
         "_require_renderable_alert_content",
-        "unrenderable_alert_content"
+        "unrenderable_alert_content",
+        "def event_machine(",
+        "def configured_machine(",
+        "BOT_ERRORS_MACHINE"
       ]
     },
     {

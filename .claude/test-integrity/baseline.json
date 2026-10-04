@@ -493,6 +493,18 @@
       "signature": "da194ea84f6d223d2dee3197cda8291eaa2a40a6f97d9226adbb472a8bfcc325"
     },
     {
+      "content_signature": "ff2f5aa9deeecb9474756f8c0eb1d7289b8335e9b88480dfa49120c1cfbbbe51",
+      "file": "deploy/scripts/tests/test_bot_errors_credential_delivery_integration.py",
+      "line": 60,
+      "review": {
+        "owner": "WhatSoup maintainers",
+        "reason": "apply, skip and expire exhaust the three terminal replay modes. Every mode runs with isolated fixtures and asserts durable delivery state and absence of duplicate pages. Sampling this finite enum would not broaden the input domain; retain all three deterministic cases.",
+        "scope": "Only this finite replay-mode parameterization; no rule severity change."
+      },
+      "rule_id": "py-property-test-suggestion",
+      "signature": "db46f7d7a10135d36bbee0df9cddae7bea273b93497290c7f11d546423439766"
+    },
+    {
       "content_signature": "c0695c0a098ee65c5c31c14ea30bf768ee8c5267d1c76607c6012e33b8080929",
       "file": "tools/qsesh/tests/test_extract_codex.py",
       "line": 220,
