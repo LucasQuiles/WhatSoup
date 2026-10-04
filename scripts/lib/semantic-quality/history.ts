@@ -13,7 +13,9 @@ import {
 } from './fingerprint.ts';
 import { isNonEmptyString } from '../../../src/lib/type-guards.ts';
 import {
+  artifactKey,
   canonicalHistoryArtifact,
+  compareArtifacts,
   isValidHistoryTimestamp,
   type HistoryCollection,
 } from './history-provider.ts';
@@ -47,16 +49,6 @@ const GIT_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 function uniqueSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].sort();
-}
-
-function artifactKey(artifact: HistoryArtifactRecord): string {
-  return `${artifact.kind}#${artifact.number}`;
-}
-
-function compareArtifacts(left: HistoryArtifactRecord, right: HistoryArtifactRecord): number {
-  if (left.kind < right.kind) return -1;
-  if (left.kind > right.kind) return 1;
-  return left.number - right.number;
 }
 
 function validStringArray(value: unknown): value is string[] {
