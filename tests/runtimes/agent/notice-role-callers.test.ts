@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import { ensureChatPreferenceSchema } from '../../../src/runtimes/agent/chat-preference-db.ts';
 import { ensureHandoffArtifactSchema } from '../../../src/runtimes/agent/handoff-artifact.ts';
+import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
 import { OutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import {
   type StopTeardownReport,
@@ -352,6 +353,7 @@ describe('a local command reply is a status op of the open turn', () => {
   // M-ANS-5228 (RT:5229).
   it('/status: the reply is a status op of the open turn', async () => {
     const turn = openCommandTurn();
+    ensureAgentSchema(turn.db);
     const sendDirect = boundary(turn);
 
     await callers(turn)._handleMessageInner(inbound(turn, '/status'));
