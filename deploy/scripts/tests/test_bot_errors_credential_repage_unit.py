@@ -28,7 +28,6 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
 
-import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -67,10 +66,7 @@ class StateReadDeadline(Exception):
     pass
 
 
-@pytest.mark.parametrize("reader", ["acknowledgements", "conditions"])
-@pytest.mark.parametrize("kind", ["missing-root", "missing", "regular", "readable", "fifo",
-                                 "directory", "symlink", "bad-json", "non-object"])
-def test_t19_state_readers_classify_files_without_waiting_for_a_writer(tmp_path, monkeypatch, reader, kind):
+def _read_state_case(tmp_path, monkeypatch, reader, kind):
     root = tmp_path / "state"
     if kind != "missing-root":
         root.mkdir(mode=0o700)
@@ -117,16 +113,151 @@ def test_t19_state_readers_classify_files_without_waiting_for_a_writer(tmp_path,
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
 
-    assert not deadline_fired, f"{reader} blocked on {kind} state instead of classifying it"
-    if reader == "acknowledgements":
-        assert not refused
-        expected = ((entries, False) if kind in ("regular", "readable")
-                    else ({}, kind not in ("missing-root", "missing")))
-        assert result == expected
-    elif kind in ("regular", "readable"):
-        assert not refused and result == ["hosta|synthetic-bot"]
-    else:
-        assert refused
+    return result, refused, deadline_fired, entries
+
+
+def test_t19_acknowledgements_missing_root_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "missing-root")
+    assert not deadline_fired, "acknowledgements blocked on missing-root state instead of classifying it"
+    assert not refused
+    assert result == ({}, False)
+
+
+def test_t19_conditions_missing_root_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "missing-root")
+    assert not deadline_fired, "conditions blocked on missing-root state instead of classifying it"
+    assert refused
+    assert result is None
+
+
+def test_t19_acknowledgements_missing_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "missing")
+    assert not deadline_fired, "acknowledgements blocked on missing state instead of classifying it"
+    assert not refused
+    assert result == ({}, False)
+
+
+def test_t19_conditions_missing_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "missing")
+    assert not deadline_fired, "conditions blocked on missing state instead of classifying it"
+    assert refused
+    assert result is None
+
+
+def test_t19_acknowledgements_regular_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "regular")
+    assert not deadline_fired, "acknowledgements blocked on regular state instead of classifying it"
+    assert not refused
+    assert result == (entries, False)
+
+
+def test_t19_conditions_regular_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "regular")
+    assert not deadline_fired, "conditions blocked on regular state instead of classifying it"
+    assert not refused
+    assert result == ["hosta|synthetic-bot"]
+
+
+def test_t19_acknowledgements_readable_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "readable")
+    assert not deadline_fired, "acknowledgements blocked on readable state instead of classifying it"
+    assert not refused
+    assert result == (entries, False)
+
+
+def test_t19_conditions_readable_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "readable")
+    assert not deadline_fired, "conditions blocked on readable state instead of classifying it"
+    assert not refused
+    assert result == ["hosta|synthetic-bot"]
+
+
+def test_t19_acknowledgements_fifo_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "fifo")
+    assert not deadline_fired, "acknowledgements blocked on fifo state instead of classifying it"
+    assert not refused
+    assert result == ({}, True)
+
+
+def test_t19_conditions_fifo_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "fifo")
+    assert not deadline_fired, "conditions blocked on fifo state instead of classifying it"
+    assert refused
+    assert result is None
+
+
+def test_t19_acknowledgements_directory_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "directory")
+    assert not deadline_fired, "acknowledgements blocked on directory state instead of classifying it"
+    assert not refused
+    assert result == ({}, True)
+
+
+def test_t19_conditions_directory_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "directory")
+    assert not deadline_fired, "conditions blocked on directory state instead of classifying it"
+    assert refused
+    assert result is None
+
+
+def test_t19_acknowledgements_symlink_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "symlink")
+    assert not deadline_fired, "acknowledgements blocked on symlink state instead of classifying it"
+    assert not refused
+    assert result == ({}, True)
+
+
+def test_t19_conditions_symlink_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "symlink")
+    assert not deadline_fired, "conditions blocked on symlink state instead of classifying it"
+    assert refused
+    assert result is None
+
+
+def test_t19_acknowledgements_bad_json_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "bad-json")
+    assert not deadline_fired, "acknowledgements blocked on bad-json state instead of classifying it"
+    assert not refused
+    assert result == ({}, True)
+
+
+def test_t19_conditions_bad_json_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "bad-json")
+    assert not deadline_fired, "conditions blocked on bad-json state instead of classifying it"
+    assert refused
+    assert result is None
+
+
+def test_t19_acknowledgements_non_object_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "acknowledgements", "non-object")
+    assert not deadline_fired, "acknowledgements blocked on non-object state instead of classifying it"
+    assert not refused
+    assert result == ({}, True)
+
+
+def test_t19_conditions_non_object_state_is_classified_without_waiting(tmp_path, monkeypatch):
+    result, refused, deadline_fired, entries = _read_state_case(
+        tmp_path, monkeypatch, "conditions", "non-object")
+    assert not deadline_fired, "conditions blocked on non-object state instead of classifying it"
+    assert refused
+    assert result is None
 
 
 def raising_for(real: Callable[..., Any], wanted: str) -> Callable[..., Any]:

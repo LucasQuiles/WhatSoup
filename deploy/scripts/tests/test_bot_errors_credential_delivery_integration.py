@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from deploy.scripts.tests.test_bot_errors_credential_repage import (
     DEAD,
@@ -57,8 +56,7 @@ def test_a_credential_timer_commit_does_not_record_a_failed_legacy_renotify(make
     assert rig.page_times() == [T0, due]
 
 
-@pytest.mark.parametrize("replay", ["apply", "skip", "expire"])
-def test_a_member_terminal_replay_has_one_observation_and_no_duplicate_page(make_rig, monkeypatch, replay):
+def _prepare_terminal_replay_case(make_rig, monkeypatch, replay):
     rig = make_rig()
     open_now(rig, T0)
     assert rig.page_times() == [T0]
@@ -97,30 +95,65 @@ def test_a_member_terminal_replay_has_one_observation_and_no_duplicate_page(make
         assert before["deliverySeq"] == seq_before
         assert key not in before["openIncidents"]
 
+    return rig, before, conditions, key, seq_before, event
+
+
+def test_a_member_terminal_replay_has_one_observation_and_no_duplicate_page_apply(make_rig, monkeypatch):
+    rig, before, conditions, key, seq_before, event = _prepare_terminal_replay_case(
+        make_rig, monkeypatch, "apply")
     rig.restart()
-    if replay == "expire":
-        replacement_epoch = "f" * 16 if before["deliveryEpoch"] != "f" * 16 else "e" * 16
-        rig.edit_state(lambda state: state.update(deliveryEpoch=replacement_epoch))
     assert rig.cycle() is None
     after = rig.state()
     assert after[SECTION] == conditions
     assert rig.page_times() == [T0]
     assert len(rig.group_for(event["id"])) == 1
     assert rig.disposition(event["id"]) == ["sent"]
-    if replay == "expire":
-        assert key not in after["openIncidents"]
-        assert key not in after["lastSentAt"]
-        assert after["deliverySeq"] == seq_before
-        assert after["terminalReplayExpiredCount"] == 1
-        expired = [record for record in rig.log() if record.get("type") == "terminal_replay_expired"]
-        assert len(expired) == 1
-        assert expired[0]["details"].get("epochChanged") is True
-    else:
-        assert after["deliverySeq"] == seq_before + 1
-        record = after["openIncidents"][key]
-        assert record["eventId"] == event["id"]
-        assert record["lastSentAt"] == record["lastNotifiedAt"] == T0 + 60
-        assert record["renotifyCount"] == 0
-        assert after["lastSentAt"][key] == T0 + 60
-        assert not after.get("terminalReplayExpiredCount")
-        assert any(record.get("type") == "terminal_replay_archived" for record in rig.log())
+    assert after["deliverySeq"] == seq_before + 1
+    record = after["openIncidents"][key]
+    assert record["eventId"] == event["id"]
+    assert record["lastSentAt"] == record["lastNotifiedAt"] == T0 + 60
+    assert record["renotifyCount"] == 0
+    assert after["lastSentAt"][key] == T0 + 60
+    assert not after.get("terminalReplayExpiredCount")
+    assert any(record.get("type") == "terminal_replay_archived" for record in rig.log())
+
+
+def test_a_member_terminal_replay_has_one_observation_and_no_duplicate_page_skip(make_rig, monkeypatch):
+    rig, before, conditions, key, seq_before, event = _prepare_terminal_replay_case(
+        make_rig, monkeypatch, "skip")
+    rig.restart()
+    assert rig.cycle() is None
+    after = rig.state()
+    assert after[SECTION] == conditions
+    assert rig.page_times() == [T0]
+    assert len(rig.group_for(event["id"])) == 1
+    assert rig.disposition(event["id"]) == ["sent"]
+    assert after["deliverySeq"] == seq_before + 1
+    record = after["openIncidents"][key]
+    assert record["eventId"] == event["id"]
+    assert record["lastSentAt"] == record["lastNotifiedAt"] == T0 + 60
+    assert record["renotifyCount"] == 0
+    assert after["lastSentAt"][key] == T0 + 60
+    assert not after.get("terminalReplayExpiredCount")
+    assert any(record.get("type") == "terminal_replay_archived" for record in rig.log())
+
+
+def test_a_member_terminal_replay_has_one_observation_and_no_duplicate_page_expire(make_rig, monkeypatch):
+    rig, before, conditions, key, seq_before, event = _prepare_terminal_replay_case(
+        make_rig, monkeypatch, "expire")
+    rig.restart()
+    replacement_epoch = "f" * 16 if before["deliveryEpoch"] != "f" * 16 else "e" * 16
+    rig.edit_state(lambda state: state.update(deliveryEpoch=replacement_epoch))
+    assert rig.cycle() is None
+    after = rig.state()
+    assert after[SECTION] == conditions
+    assert rig.page_times() == [T0]
+    assert len(rig.group_for(event["id"])) == 1
+    assert rig.disposition(event["id"]) == ["sent"]
+    assert key not in after["openIncidents"]
+    assert key not in after["lastSentAt"]
+    assert after["deliverySeq"] == seq_before
+    assert after["terminalReplayExpiredCount"] == 1
+    expired = [record for record in rig.log() if record.get("type") == "terminal_replay_expired"]
+    assert len(expired) == 1
+    assert expired[0]["details"].get("epochChanged") is True
