@@ -1925,8 +1925,10 @@ consumers.
 gauge that contributes to `service_blocking`. A fresh uncorroborated ambiguity remains routine debt
 until its dwell threshold expires. Fleet and console summaries call their numeric value an aggregate
 gauge total because category gauges can overlap and are not a count of distinct obligations.
-`turn_recovery.scheduled_turns_lost` (#3754) counts scheduled agent-job turns failed by crash recovery
-in the last 7 days. It is additive visibility owed to no user: it never sets `open`, `attention` or a
+`turn_recovery.scheduled_turns_lost` (#3754) counts retained scheduled agent-job turns failed by crash
+recovery in the last 7 days. If `terminalDurabilityDays` is below 7, pruning can remove rows inside
+that window and undercount losses; zero does not establish that no losses occurred. It is additive
+visibility owed to no user: it never sets `open`, `attention` or a
 reason, consumers do not add it to the aggregate gauge total, and it is `null` when the runtime did not
 report a valid count.
 

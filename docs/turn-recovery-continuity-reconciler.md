@@ -256,9 +256,11 @@ so the loss has to surface somewhere else (#2144). It surfaces as
 `runtime.agent.turnRecoveryScheduledTurnsLost` and
 `recovery_debt.turn_recovery.scheduled_turns_lost`: synthetic inbounds failed
 with `crash_recovery`, `stale_reclaim` or `recovery_owner_reclaimed` in the
-last 7 days (`SCHEDULED_TURN_LOSS_WINDOW_DAYS`). The count is visibility only.
-It never changes `recovery_debt.open`, `attention` or `reasons`, and it pages
-nothing.
+last 7 days (`SCHEDULED_TURN_LOSS_WINDOW_DAYS`), using retained inbound rows.
+If `terminalDurabilityDays` is below 7, pruning can remove rows inside the
+window and undercount losses; zero does not establish that no losses occurred.
+The count is visibility only. It never changes `recovery_debt.open`,
+`attention` or `reasons`, and it pages nothing.
 
 Links enrolled before #3754 stay as append-only receipts. The open catch-up
 selector (`src/core/open-recoveries-sql.ts`, shared by the store's supervisor
