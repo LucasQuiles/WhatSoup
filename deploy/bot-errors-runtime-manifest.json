@@ -766,13 +766,14 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "cdd222ff548d865352c46ea9cef5039e24f40c3609100ece385d8ff48e56f0ca",
+      "sha256": "478cbf965021ce11f7d93e3d35a210fcc4f533f03c7fd8d97c50f3593d3137b8",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
         "reply-guarantee-recovery-debt",
         "reply-guarantee-observer",
-        "broad failed-row replay is unsafe"
+        "broad failed-row replay is unsafe",
+        "syntheticContinuityCandidates"
       ]
     },
     {
@@ -853,7 +854,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "b0c0d2ce6068887cbbc4c09e4b90ee6e540648c21599ec6fadb46bc5aab9d21e",
+      "sha256": "3e848ee95660a3890af5e45237d076a967fb924db78f10da6ab5be41db574872",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -862,6 +863,8 @@
         "\"runtime_agent_turn_recovery_blocked_unsafe_synthetic\"",
         "\"runtime_agent_turn_recovery_blocked_unsafe_superseded\"",
         "\"runtime_agent_turn_recovery_blocked_unsafe_stranded\"",
+        "\"runtime_agent_turn_recovery_open_recoveries_synthetic\"",
+        "\"runtime_agent_turn_recovery_scheduled_turns_lost\"",
         "\"runtime_agent_per_chat_sessions_without_owner\"",
         "\"runtime_agent_per_chat_respawn_abandoned\"",
         "\"runtime_agent_turn_queue_halted_scopes\"",

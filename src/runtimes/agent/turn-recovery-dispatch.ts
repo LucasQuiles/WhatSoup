@@ -367,7 +367,21 @@ export interface TurnRecoveryHealthDetails {
   readonly turnRecoveryExpiredClaimed: number;
   readonly turnRecoveryBlockedUnsafe: number;
   readonly turnRecoveryExhausted: number;
+  /** User-facing open catch-ups; synthetic scheduled-job sources are excluded (#3754). */
   readonly turnRecoveryOpenRecoveries: number;
+  /**
+   * Open catch-ups whose source is a synthetic scheduled-job turn: residue
+   * enrolled before #3754. Diagnostic only, never user-facing debt.
+   */
+  readonly turnRecoveryOpenRecoveriesSynthetic: number;
+  /**
+   * Synthetic scheduled-job turns failed by crash recovery inside the loss
+   * window (DurabilityRecoveryEvidence.countScheduledTurnsLost). Diagnostic
+   * only. Pre-#3754 residue inside the window is also in
+   * turnRecoveryOpenRecoveriesSynthetic, so the two must not be summed. Null
+   * when the count could not be read.
+   */
+  readonly turnRecoveryScheduledTurnsLost: number | null;
   readonly turnRecoveryQuarantinedDelivery: number;
   readonly turnRecoveryCorruptLinks: number;
   readonly turnRecoveryOrphanTransfers: number;
@@ -394,6 +408,7 @@ export function getTurnRecoveryHealthDetails(
       outstanding: 0, pending: 0, liveClaimed: 0, expiredClaimed: 0,
       blockedUnsafe: 0, exhausted: 0, quarantinedDelivery: 0, corruptLinks: 0,
       orphanTransfers: 0, echoConflicts: 0, openRecoveries: 0,
+      openRecoveriesSynthetic: 0, scheduledTurnsLost: 0,
       corruptLinksSettled: 0, echoConflictsSettled: 0,
       blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     };
@@ -405,6 +420,8 @@ export function getTurnRecoveryHealthDetails(
     turnRecoveryBlockedUnsafe: counts.blockedUnsafe,
     turnRecoveryExhausted: counts.exhausted,
     turnRecoveryOpenRecoveries: counts.openRecoveries,
+    turnRecoveryOpenRecoveriesSynthetic: counts.openRecoveriesSynthetic ?? 0,
+    turnRecoveryScheduledTurnsLost: counts.scheduledTurnsLost === undefined ? 0 : counts.scheduledTurnsLost,
     turnRecoveryQuarantinedDelivery: counts.quarantinedDelivery,
     turnRecoveryCorruptLinks: counts.corruptLinks,
     turnRecoveryOrphanTransfers: counts.orphanTransfers ?? 0,

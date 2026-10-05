@@ -213,6 +213,35 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
+  it('projects synthetic catch-up residue and lost scheduled turns as non-debt diagnostics (#3754)', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ openRecoveriesSynthetic: 4, scheduledTurnsLost: 5 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'synthetic-residue-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: [],
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryOpenRecoveriesSynthetic: 4,
+          turnRecoveryScheduledTurnsLost: 5,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('projects settled recovery residue as diagnostic-only fields that keep health green', () => {
     const db = new Database(':memory:');
     db.open();

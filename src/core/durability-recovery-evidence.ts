@@ -3,10 +3,66 @@ import { createChildLogger } from '../logger.ts';
 import { errorMessage } from '../lib/error-message.ts';
 import type { Database } from './database.ts';
 import { withTransaction } from './db-tx.ts';
+import type { InboundFailureClass } from './inbound-failure-class.ts';
+import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
+import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
 
 const log = createChildLogger('durability');
 const RECOVERY_ACTOR = 'durability_engine';
 const DELIVERY_CORROBORATION_BASIS = 'same_source_later_echoed_op';
+
+/**
+ * Window for counting scheduled agent-job turns lost to crash recovery (#3754).
+ * Inclusive: a row whose completed_at is exactly the cutoff counts. It is
+ * shorter than the default 30-day terminal-durability retention, so a row
+ * inside the window has not been pruned; a configured terminalDurabilityDays
+ * under 7 prunes rows inside the window, and the count under-reports. The count
+ * is visibility only: it drains as rows age out and pages nothing.
+ */
+export const SCHEDULED_TURN_LOSS_WINDOW_DAYS = 7;
+
+/** The failure classes stamped by the three crash-recovery enrollment arms. */
+export const SCHEDULED_TURN_LOSS_FAILURE_CLASSES = [
+  'crash_recovery',
+  'stale_reclaim',
+  'recovery_owner_reclaimed',
+] as const satisfies readonly InboundFailureClass[];
+
+/**
+ * SQL boolean over bare inbound_events columns: the row is a synthetic
+ * scheduled-job turn that a crash-recovery arm failed as a loss. A NULL
+ * failure_class yields NULL. The lost count reads these rows and the seq-keyed
+ * inbound writers skip them, so both judge the same row set.
+ */
+const SCHEDULED_TURN_LOSS_ROW_SQL = `(${syntheticSourceMessageIdSql('message_id')}
+          AND processing_status = 'failed'
+          AND failure_class IN (${SCHEDULED_TURN_LOSS_FAILURE_CLASSES.map((value) => `'${value}'`).join(', ')}))`;
+
+/**
+ * WHERE conjunct for the seq-keyed inbound writers (#3754). The first terminal
+ * wins for a scheduled-turn loss row, so no later writer moves it out of the
+ * lost count. COALESCE keeps a row the predicate cannot decide (a NULL
+ * failure_class) writable, as on main.
+ */
+export const NOT_SCHEDULED_TURN_LOSS_ROW_SQL = `NOT COALESCE(${SCHEDULED_TURN_LOSS_ROW_SQL}, 0)`;
+
+/**
+ * Synthetic scheduled-job inbounds failed by a crash-recovery arm inside the
+ * window. Served by the UNIQUE(message_id) index
+ * (sqlite_autoindex_inbound_events_1) as a prefix range; the status, class and
+ * window filters apply only to the rows that range returns. So the work is
+ * bounded by the retained synthetic rows, not by the window: retention deletes
+ * a terminal inbound after terminalDurabilityDays unless a recovery job,
+ * terminal record or disposition link still references it
+ * (database-retention.ts), which leaves about one retention period of
+ * scheduled runs plus linked residue.
+ */
+export const SCHEDULED_TURNS_LOST_SQL = `
+        SELECT COUNT(*) AS count
+        FROM inbound_events
+        WHERE ${SCHEDULED_TURN_LOSS_ROW_SQL}
+          AND completed_at >= datetime('now', '-${SCHEDULED_TURN_LOSS_WINDOW_DAYS} days')
+      `;
 
 type PreparedStatement = ReturnType<Database['raw']['prepare']>;
 
@@ -40,7 +96,9 @@ interface RecoveryEvidenceStatements {
   finalizeStartedRecoveryRun: PreparedStatement;
   recordIncompleteRecoveryRun: PreparedStatement;
   insertPendingDisposition: PreparedStatement;
+  isSyntheticSourceInbound: PreparedStatement;
   countOpenRecoveries: PreparedStatement;
+  countScheduledTurnsLost: PreparedStatement;
   reconcileTurnDeliveryCorroboration: PreparedStatement;
   hasTurnDeliveryCorroboration: PreparedStatement;
 }
@@ -125,18 +183,15 @@ export class DurabilityRecoveryEvidence {
           reason, evidence_ref, actor
         ) VALUES (?, ?, 'recovery_pending_operator_catchup', NULL, ?, ?, ?)
       `),
-      countOpenRecoveries: prepare(`
-        SELECT COUNT(*) AS count
-        FROM inbound_disposition_links pending
-        WHERE pending.disposition = 'recovery_pending_operator_catchup'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM inbound_disposition_links closure
-            WHERE closure.inbound_seq = pending.inbound_seq
-              AND closure.recovery_plan_id = pending.recovery_plan_id
-              AND closure.disposition = 'superseded_by_operator_catchup'
-          )
+      isSyntheticSourceInbound: prepare(`
+        SELECT 1 AS present FROM inbound_events source
+        WHERE source.seq = ? AND ${syntheticSourceMessageIdSql('source.message_id')}
       `),
+      countOpenRecoveries: prepare(`
+        WITH ${OPEN_RECOVERIES_CTE_SQL}
+        SELECT count FROM open_recoveries
+      `),
+      countScheduledTurnsLost: prepare(SCHEDULED_TURNS_LOST_SQL),
       reconcileTurnDeliveryCorroboration: prepare(`
         INSERT OR IGNORE INTO turn_delivery_corroboration (
           terminal_record_id, corroborating_op_id, basis, actor, evidence_ref
@@ -265,8 +320,19 @@ export class DurabilityRecoveryEvidence {
     }
   }
 
+  /** User-facing open catch-ups; synthetic scheduled-job residue is excluded. */
   countOpen(): number {
     return (this.statements.countOpenRecoveries.get() as { count: number }).count;
+  }
+
+  /**
+   * Synthetic scheduled-job inbounds failed by a crash-recovery arm within the
+   * last SCHEDULED_TURN_LOSS_WINDOW_DAYS. Such a turn is never enrolled as a
+   * catch-up, and its trigger run already reads `ok`, so this count is where
+   * the loss stays visible (#2144, #3754).
+   */
+  countScheduledTurnsLost(): number {
+    return (this.statements.countScheduledTurnsLost.get() as { count: number }).count;
   }
 
   recordPendingWithinTransaction(
@@ -276,6 +342,10 @@ export class DurabilityRecoveryEvidence {
     mutateInbound: () => void,
   ): void {
     mutateInbound();
+    // A synthetic scheduled-job source owes no user a reply, so it is never
+    // enrolled (#3754). Judged by this seq's own row; any other seq, including
+    // one with no inbound row, still attempts the insert and fails closed.
+    if (this.statements.isSyntheticSourceInbound.get(seq) !== undefined) return;
     const result = this.statements.insertPendingDisposition.run(
       seq,
       receipt.recoveryPlanId,

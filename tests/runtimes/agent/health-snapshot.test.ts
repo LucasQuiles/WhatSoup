@@ -339,6 +339,8 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryBlockedUnsafe: 0,
     turnRecoveryExhausted: 0,
     turnRecoveryOpenRecoveries: 0,
+    turnRecoveryOpenRecoveriesSynthetic: 0,
+    turnRecoveryScheduledTurnsLost: 0,
     turnRecoveryQuarantinedDelivery: 0,
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
