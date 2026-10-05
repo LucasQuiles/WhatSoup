@@ -36,7 +36,7 @@ function hasReviewedSafeVersion(version: unknown): boolean {
   return true;
 }
 
-function findUnapprovedBraceExpansionNodes(lockfilePath: string): string[] {
+function readLockPackages(lockfilePath: string): Record<string, LockPackage> {
   const lockfile = JSON.parse(
     readFileSync(path.join(repoRoot, lockfilePath), 'utf8'),
   ) as PackageLock;
@@ -44,7 +44,11 @@ function findUnapprovedBraceExpansionNodes(lockfilePath: string): string[] {
     throw new Error(`${lockfilePath} does not contain a package-lock packages map`);
   }
 
-  return Object.entries(lockfile.packages)
+  return lockfile.packages;
+}
+
+function findUnapprovedBraceExpansionNodes(lockfilePath: string): string[] {
+  return Object.entries(readLockPackages(lockfilePath))
     .filter(([packagePath]) =>
       packagePath === 'node_modules/brace-expansion'
       || packagePath.endsWith('/node_modules/brace-expansion'))
@@ -93,6 +97,15 @@ describe('dependency security lock policy', () => {
 
   it('keeps every tracked lockfile free of affected brace-expansion nodes', () => {
     const findings = lockfiles.flatMap(findUnapprovedBraceExpansionNodes);
+    expect(findings).toEqual([]);
+  });
+
+  it('does not retain the unpatched braces parser through installation tooling', () => {
+    const findings = lockfiles.flatMap((lockfilePath) => {
+      return Object.keys(readLockPackages(lockfilePath))
+        .filter((packagePath) => packagePath === 'node_modules/braces' || packagePath.endsWith('/node_modules/braces'))
+        .map((packagePath) => `${lockfilePath}:${packagePath}`);
+    });
     expect(findings).toEqual([]);
   });
 });
