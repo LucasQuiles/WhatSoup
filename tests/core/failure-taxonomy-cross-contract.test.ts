@@ -164,6 +164,8 @@ describe('failure taxonomy cross-contract', () => {
       'turnRecoveryBlockedUnsafeStranded',
       'turnRecoveryExhausted',
       'turnRecoveryOpenRecoveries',
+      'turnRecoveryOpenRecoveriesSynthetic',
+      'turnRecoveryScheduledTurnsLost',
       'turnRecoveryQuarantinedDelivery',
       'turnRecoveryCorruptLinks',
       'turnRecoveryOrphanTransfers',
@@ -223,6 +225,8 @@ describe('failure taxonomy cross-contract', () => {
       completedDeliveryIdentityRetained: 'diagnostic_only',
       turnRecoveryExhausted: 'diagnostic_only',
       turnRecoveryOpenRecoveries: 'diagnostic_only',
+      turnRecoveryOpenRecoveriesSynthetic: 'diagnostic_only',
+      turnRecoveryScheduledTurnsLost: 'diagnostic_only',
     });
   });
 

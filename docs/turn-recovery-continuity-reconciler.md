@@ -211,9 +211,9 @@ of `TurnRecoverySupervisor.scanOnce()`'s result. They are visible to a direct
 buckets, mirrored into the health details surface
 (`turnRecoveryBlockedUnsafe{Synthetic,Superseded,Stranded}`):
 
-- **synthetic** — `agentjob-%` source IDs: internal scheduled self-turns
-  that owe no user a reply. Parked synthetics are expected residue, never an
-  incident.
+- **synthetic** — `agentjob-*` source IDs (the case-sensitive prefix GLOB in
+  `src/core/synthetic-turn-source.ts`): internal scheduled self-turns that owe
+  no user a reply. Parked synthetics are expected residue, never an incident.
 - **superseded** — real sources whose conversation has ANY newer inbound
   (the same newer-activity signal the safe-replay fence uses): the thread
   moved on; the parked replay is correctly superseded.
@@ -231,18 +231,57 @@ health check labels them
 when non-zero, and none of them raises `runtime_agent_at_risk`, including
 stranded. Paging on a positive stranded count is intended but not yet wired;
 it is tracked in a follow-up issue, which will first observe real stranded
-counts on the fleet before changing the effect. The enrollment-side
-half of ② (stop enrolling synthetic self-turns into user-facing recovery at
-all — live finalize + boot reclaim arms) is still open; the gauge split
-makes the residue visible and non-paging in the meantime.
+counts on the fleet before changing the effect.
+
+## ② — synthetic enrollment exclusion (#3754)
+
+Crash recovery no longer enrolls a synthetic self-turn as a user-facing
+operator catch-up. The three enrollment arms (pre-connect recovery, the
+stuck-inbound stale reclaim, and the recovery-owner reclaim) all write through
+`DurabilityRecoveryEvidence.recordPendingWithinTransaction`, which skips the
+insert for a source inbound with an `agentjob-*` message id. The inbound is
+still failed with its `failure_class`, and the pre-connect arm still sets its
+continuity mark. A real-user source enrolls exactly as before, and an insert
+that writes no row for a real-user source still fails closed. Once failed this
+way, the synthetic inbound keeps its first terminal: `markTurnDone`,
+`markInboundComplete`, `markInboundFailed` and `markInboundSkipped` leave it
+unchanged, so a late runtime path cannot drop it from the lost count below.
+
+#3754 covers those three crash-recovery catch-up arms only. The live-finalize
+arm, where a synthetic turn's terminal transfers it to `turn_recovery_jobs`
+(parked as blocked-unsafe synthetic residue), is still open.
+
+The scheduler records an agent job's trigger run `ok` once the turn is queued,
+so the loss has to surface somewhere else (#2144). It surfaces as
+`runtime.agent.turnRecoveryScheduledTurnsLost` and
+`recovery_debt.turn_recovery.scheduled_turns_lost`: synthetic inbounds failed
+with `crash_recovery`, `stale_reclaim` or `recovery_owner_reclaimed` in the
+last 7 days (`SCHEDULED_TURN_LOSS_WINDOW_DAYS`), using retained inbound rows.
+If `terminalDurabilityDays` is below 7, pruning can remove rows inside the
+window and undercount losses; zero does not establish that no losses occurred.
+The count is visibility only. It never changes `recovery_debt.open`,
+`attention` or `reasons`, and it pages nothing.
+
+Links enrolled before #3754 stay as append-only receipts. The open catch-up
+selector (`src/core/open-recoveries-sql.ts`, shared by the store's supervisor
+counts and the recovery-evidence ledger) reports them apart:
+`turnRecoveryOpenRecoveries` and `recovery_debt.turn_recovery.open_catchups`
+count user-facing links only, and `turnRecoveryOpenRecoveriesSynthetic`
+counts the synthetic residue. Synthetic residue no longer raises
+`historical_turn_catchup`. Pre-fix residue inside the 7-day window appears in
+both synthetic counts, so the two must not be summed. The automatic
+reconciler can still close a synthetic group when its chat has a later
+delivered reply (the issue proposed excluding them; keeping them closable
+costs nothing and lets real proof retire residue).
 
 ## Follow-ups (separate PRs)
 
 - ~~**PR2 — wiring**~~: shipped — see "PR2 — supervisor wiring" above.
-- **② synthetic exclusion + actionable gauge:** the gauge split shipped
-  (see above); the enrollment-side synthetic exclusion is still open, and
-  paging on a positive stranded count is not yet wired (tracked in a
-  follow-up issue).
+- **② synthetic exclusion + actionable gauge:** the gauge split and the
+  crash-recovery catch-up arms of the enrollment-side synthetic exclusion
+  (#3754) shipped (see above). The live-finalize arm (synthetic transfer to
+  `turn_recovery_jobs`) is still open, and paging on a positive stranded count
+  is not yet wired (tracked in a follow-up issue).
 - **③ user-facing catch-up nudge** for genuinely-stranded real user turns that
   the conversation has *not* resumed within a window; plus a newer-activity
   fence on the automatic replay path (today only the operator CLI has one).

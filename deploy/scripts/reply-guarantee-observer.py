@@ -26,9 +26,14 @@ STATE_PRECEDENCE = {
     "active-breach": 2,
     "inconclusive": 3,
 }
+# A scheduled agent job runs as a synthetic inbound whose message id carries
+# this case-sensitive prefix (src/core/synthetic-turn-source.ts). It owes no
+# user a reply, so its continuity mark is not reply-guarantee debt (#3754).
+SYNTHETIC_SOURCE_MESSAGE_ID_GLOB = "agentjob-*"
 REQUIRED_COLUMNS = {
     "inbound_events": {
         "seq",
+        "message_id",
         "received_at",
         "processing_status",
         "continuity_candidate_reason",
@@ -76,6 +81,21 @@ SOURCE_SEVERITIES = {
     "reply-guarantee-recovery-debt": "warning",
     "reply-guarantee-observer": "error",
 }
+
+
+_UNRESOLVED_CONTINUITY_CANDIDATES_SQL = """
+                SELECT COUNT(*)
+                FROM inbound_events i
+                WHERE i.continuity_candidate_reason IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq = i.seq
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM outbound_ops o WHERE o.source_inbound_seq = i.seq
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = i.seq
+                  )"""
 
 
 def _utc_sqlite(now: datetime) -> str:
@@ -213,21 +233,20 @@ def observe_database(
             ),
             "unresolvedContinuityCandidates": _scalar(
                 db,
-                """
-                SELECT COUNT(*)
-                FROM inbound_events i
-                WHERE i.continuity_candidate_reason IS NOT NULL
-                  AND NOT EXISTS (
-                    SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq = i.seq
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1 FROM outbound_ops o WHERE o.source_inbound_seq = i.seq
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = i.seq
-                  )
+                f"""
+                {_UNRESOLVED_CONTINUITY_CANDIDATES_SQL}
+                  AND NOT (i.message_id GLOB ?)
                 """,
-                (),
+                (SYNTHETIC_SOURCE_MESSAGE_ID_GLOB,),
+            ),
+            # Diagnostic only: never part of debt_count or an alert latch.
+            "syntheticContinuityCandidates": _scalar(
+                db,
+                f"""
+                {_UNRESOLVED_CONTINUITY_CANDIDATES_SQL}
+                  AND i.message_id GLOB ?
+                """,
+                (SYNTHETIC_SOURCE_MESSAGE_ID_GLOB,),
             ),
             "failedTerminalDebt": _scalar(
                 db,

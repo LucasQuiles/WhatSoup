@@ -80,6 +80,9 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    impact; only stale open inbound or recovery work is an operational breach.
    A turn an operator cancelled with `/stop` (`operator_cancelled`) is a
    requested outcome, not debt, so its failed terminal is not counted.
+   A continuity candidate whose inbound is a synthetic scheduled-job turn
+   (message id `agentjob-*`, case-sensitive) owes no user a reply, so it is
+   reported as `syntheticContinuityCandidates` and not counted as debt (#3754).
    `failedTerminalWithEchoEvidence` is a subset of failed-terminal debt, not an
    additional replay count; it exposes contradictory delivery evidence that
    must be reconciled before any targeted repair.

@@ -534,6 +534,22 @@
       "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
     },
     {
+      "field": "turnRecoveryOpenRecoveriesSynthetic",
+      "label": "runtime_agent_turn_recovery_open_recoveries_synthetic",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
+      "field": "turnRecoveryScheduledTurnsLost",
+      "label": "runtime_agent_turn_recovery_scheduled_turns_lost",
+      "kind": "terminal_audit_count",
+      "currentHealthEffect": "diagnostic_only",
+      "owner": "src/runtimes/agent/turn-recovery-dispatch.ts",
+      "test": "tests/runtimes/agent/runtime-turn-recovery-health.test.ts"
+    },
+    {
       "field": "turnRecoveryQuarantinedDelivery",
       "label": "runtime_agent_turn_recovery_quarantined_delivery",
       "kind": "terminal_audit_count",

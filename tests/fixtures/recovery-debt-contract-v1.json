@@ -213,6 +213,38 @@
         "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
         "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
       }
+    },
+    {
+      "name": "lost scheduled turns are additive visibility, not open debt",
+      "status": "healthy",
+      "expectedIssue": null,
+      "debt": {
+        "open": false,
+        "service_blocking": false,
+        "attention": "none",
+        "reason": null,
+        "reasons": [],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0, "scheduled_turns_lost": 3 },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
+    },
+    {
+      "name": "an unreported lost scheduled turn count is null and still valid",
+      "status": "healthy",
+      "expectedIssue": null,
+      "debt": {
+        "open": false,
+        "service_blocking": false,
+        "attention": "none",
+        "reason": null,
+        "reasons": [],
+        "continuity": { "readable": true, "open": 0, "unresolved": 0, "ambiguous": 0 },
+        "turn_recovery": { "readable": true, "blocking_outstanding": 0, "retained_terminal": 0, "open_catchups": 0, "corroborated_retained": 0, "scheduled_turns_lost": null },
+        "completed_delivery_identity": { "readable": true, "blocking": 0, "retained": 0, "next_action": null },
+        "delivery": { "readable": true, "blocking_ambiguous": 0, "uncorroborated_ambiguous": 0, "corroborated_retained": 0, "oldest_uncorroborated_at": null }
+      }
     }
   ]
 }
