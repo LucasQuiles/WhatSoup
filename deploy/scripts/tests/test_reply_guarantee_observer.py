@@ -90,6 +90,7 @@ def _insert_inbound(
     status: str,
     failure_class: str | None = None,
     continuity: str | None = None,
+    message_id: str | None = None,
 ) -> None:
     db.execute(
         """
@@ -102,7 +103,7 @@ def _insert_inbound(
         """,
         (
             seq,
-            f"message-{seq}",
+            message_id or f"message-{seq}",
             f"private-conversation-{seq}",
             f"private-jid-{seq}",
             received_at,
@@ -180,6 +181,7 @@ def test_separates_active_breach_from_historical_recovery_debt(db_path: Path) ->
         "staleOpenInbounds": 1,
         "staleRecoveryJobs": 0,
         "unresolvedContinuityCandidates": 1,
+        "syntheticContinuityCandidates": 0,
         "failedTerminalDebt": 0,
         "failedTerminalWithEchoEvidence": 0,
         "blockedOrExhaustedRecoveryJobs": 0,
@@ -236,6 +238,67 @@ def test_failed_terminal_and_exhausted_recovery_are_debt_not_runtime_health(db_p
     assert result["counts"]["failedTerminalDebt"] == 1
     assert result["counts"]["failedTerminalWithEchoEvidence"] == 1
     assert result["counts"]["blockedOrExhaustedRecoveryJobs"] == 1
+
+
+def test_synthetic_scheduled_job_continuity_mark_is_not_reply_debt(db_path: Path) -> None:
+    # #3754: a crash-reclaimed scheduled agent job owes no user a reply. Its
+    # continuity mark is counted apart and raises no debt state or latch.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_inbound(
+            db,
+            seq=1,
+            received_at="2026-08-15 20:00:00",
+            status="failed",
+            failure_class="crash_recovery",
+            continuity="crash_reclaim_no_terminal_outbound",
+            message_id="agentjob-7-1780000000-occ11",
+        )
+
+    result = mod.observe_database(
+        db_path,
+        instance="agent-a",
+        now=datetime(2026, 8, 15, 22, 0, tzinfo=UTC),
+        stale_seconds=900,
+    )
+    latches = mod._desired_latches(
+        result,
+        {"activeAlerted": False, "debtAlerted": False, "observerAlerted": False, "lastState": None},
+    )
+
+    assert result["state"] == "clear"
+    assert result["counts"]["unresolvedContinuityCandidates"] == 0
+    assert result["counts"]["syntheticContinuityCandidates"] == 1
+    assert latches["reply-guarantee-recovery-debt"] is False
+    assert "agentjob-" not in str(result)
+
+
+def test_continuity_mark_split_matches_the_case_sensitive_synthetic_prefix(db_path: Path) -> None:
+    # Only the exact lowercase prefix is synthetic, as in the runtime's GLOB.
+    # A real user's mark and an uppercase lookalike stay reply-guarantee debt.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        for seq, message_id in ((1, "agentjob-7-1780000000-occ11"), (2, "AGENTJOB-7-1780000000-occ12"), (3, "message-3")):
+            _insert_inbound(
+                db,
+                seq=seq,
+                received_at="2026-08-15 20:00:00",
+                status="failed",
+                failure_class="crash_recovery",
+                continuity="crash_reclaim_no_terminal_outbound",
+                message_id=message_id,
+            )
+
+    result = mod.observe_database(
+        db_path,
+        instance="agent-a",
+        now=datetime(2026, 8, 15, 22, 0, tzinfo=UTC),
+        stale_seconds=900,
+    )
+
+    assert result["state"] == "recovery-debt"
+    assert result["counts"]["unresolvedContinuityCandidates"] == 2
+    assert result["counts"]["syntheticContinuityCandidates"] == 1
 
 
 def test_clean_database_reports_clear(db_path: Path) -> None:

@@ -2671,6 +2671,7 @@ describe('GET /health', () => {
         retained_terminal: 0,
         open_catchups: 0,
         corroborated_retained: 0,
+        scheduled_turns_lost: 0,
       },
       completed_delivery_identity: {
         readable: true,

@@ -5094,6 +5094,8 @@ print(m.probe_health(9092))
         turnRecoveryBlockedUnsafeSynthetic: 3,
         turnRecoveryBlockedUnsafeSuperseded: 2,
         turnRecoveryBlockedUnsafeStranded: 1,
+        turnRecoveryOpenRecoveriesSynthetic: 9,
+        turnRecoveryScheduledTurnsLost: 7,
         turnRecoveryQuarantinedDelivery: 2,
         turnRecoveryOrphanTransfers: 1,
         turnFinalizationRetryAttempts: 8,
@@ -5109,6 +5111,8 @@ print(m.probe_health(9092))
       expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_synthetic=3');
       expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_superseded=2');
       expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_stranded=1');
+      expect(line).toContain('runtime_agent_turn_recovery_open_recoveries_synthetic=9');
+      expect(line).toContain('runtime_agent_turn_recovery_scheduled_turns_lost=7');
       expect(line).toContain('runtime_agent_turn_finalization_retry_exhaustions=3');
     });
 

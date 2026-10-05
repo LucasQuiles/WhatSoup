@@ -7,6 +7,8 @@ import {
   validDeliveryCorroborationForJobSql,
   validDeliveryCorroborationForTerminalSql,
 } from './delivery-corroboration-sql.ts';
+import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
+import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
@@ -229,8 +231,10 @@ export interface TurnRecoverySupervisorCounts {
   corruptLinksSettled?: number;
   /** Late-echo contradictions on completed or exhausted jobs. Diagnostic only. */
   echoConflictsSettled?: number;
-  /** Pending operator catch-ups that lack an append-only closure link. */
+  /** User-facing pending operator catch-ups without a closure link (OPEN_RECOVERIES_CTE_SQL). */
   openRecoveries: number;
+  /** Pending catch-ups whose source is a synthetic scheduled-job turn (#3754). Diagnostic only. */
+  openRecoveriesSynthetic?: number;
   /**
    * Pending/claimed work that can still be acted on automatically, plus
    * orphan transfers without valid later-echo proof.
@@ -246,7 +250,7 @@ export interface TurnRecoverySupervisorCounts {
   /**
    * Actionability split of `blockedUnsafe` (② of the continuity work,
    * docs/turn-recovery-continuity-reconciler.md). Synthetic self-turns
-   * (`agentjob-%` source IDs) owe no user a reply — a parked synthetic job is
+   * (`agentjob-*` source IDs) owe no user a reply — a parked synthetic job is
    * expected residue, never an incident. Real-source jobs split by whether
    * their conversation has ANY newer inbound (the same newer-activity signal
    * the safe-replay fence uses): newer activity means the thread moved on and
@@ -950,18 +954,7 @@ export class TurnRecoveryStore {
           WHERE terminal.inbound_disposition = 'transferred_to_recovery_owner'
             AND linked.id IS NULL
         ),
-        open_recoveries AS (
-          SELECT COUNT(*) AS count
-          FROM inbound_disposition_links pending
-          WHERE pending.disposition = 'recovery_pending_operator_catchup'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM inbound_disposition_links closure
-              WHERE closure.inbound_seq = pending.inbound_seq
-                AND closure.recovery_plan_id = pending.recovery_plan_id
-                AND closure.disposition = 'superseded_by_operator_catchup'
-            )
-        )
+        ${OPEN_RECOVERIES_CTE_SQL}
         SELECT
           COALESCE(SUM(CASE WHEN j.state IN ('pending', 'claimed') THEN 1 ELSE 0 END), 0)
             + (SELECT count FROM orphan_transfers)
@@ -1005,6 +998,7 @@ export class TurnRecoveryStore {
             ELSE 0
           END), 0) AS echo_conflicts_settled,
           (SELECT count FROM open_recoveries) AS open_recoveries,
+          (SELECT synthetic FROM open_recoveries) AS open_recoveries_synthetic,
           COALESCE(SUM(CASE
             WHEN j.state IN ('pending', 'claimed')
               AND NOT ${validDeliveryCorroborationForJobSql('j')}
@@ -1021,12 +1015,12 @@ export class TurnRecoveryStore {
           END), 0)
             + (SELECT corroborated FROM orphan_transfers) AS corroborated_retained,
           COALESCE(SUM(CASE
-            WHEN j.state = 'blocked_unsafe' AND j.source_message_id LIKE 'agentjob-%' THEN 1
+            WHEN j.state = 'blocked_unsafe' AND ${syntheticSourceMessageIdSql('j.source_message_id')} THEN 1
             ELSE 0
           END), 0) AS blocked_unsafe_synthetic,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe'
-              AND j.source_message_id NOT LIKE 'agentjob-%'
+              AND NOT ${syntheticSourceMessageIdSql('j.source_message_id')}
               AND EXISTS (
                 SELECT 1 FROM inbound_events i2
                 WHERE i2.conversation_key = j.conversation_key
@@ -1036,7 +1030,7 @@ export class TurnRecoveryStore {
           END), 0) AS blocked_unsafe_superseded,
           COALESCE(SUM(CASE
             WHEN j.state = 'blocked_unsafe'
-              AND j.source_message_id NOT LIKE 'agentjob-%'
+              AND NOT ${syntheticSourceMessageIdSql('j.source_message_id')}
               AND NOT EXISTS (
                 SELECT 1 FROM inbound_events i2
                 WHERE i2.conversation_key = j.conversation_key
@@ -1872,6 +1866,7 @@ export class TurnRecoveryStore {
       corrupt_links_settled: number;
       echo_conflicts_settled: number;
       open_recoveries: number;
+      open_recoveries_synthetic: number;
       blocking_outstanding: number;
       retained_terminal: number;
       corroborated_retained: number;
@@ -1893,6 +1888,7 @@ export class TurnRecoveryStore {
       corruptLinksSettled: row.corrupt_links_settled,
       echoConflictsSettled: row.echo_conflicts_settled,
       openRecoveries: row.open_recoveries,
+      openRecoveriesSynthetic: row.open_recoveries_synthetic,
       blockingOutstanding: row.blocking_outstanding,
       retainedTerminal: row.retained_terminal,
       corroboratedRetained: row.corroborated_retained,

@@ -2272,6 +2272,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         turnRecoveryRetainedTerminal: 0,
         turnRecoveryOpenRecoveries: 0,
         turnRecoveryCorroboratedRetained: 0,
+        turnRecoveryScheduledTurnsLost: 0,
         completedDeliveryIdentityBlocking: 0,
         completedDeliveryIdentityRetained: 0,
         completedDeliveryIdentityAdmissions: { nextAction: null },

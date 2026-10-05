@@ -141,6 +141,7 @@
 // while claiming to report proof.
 
 import { createChildLogger } from '../../logger.ts';
+import type { OutboundMessageRole } from './outbound-queue.ts';
 
 const log = createChildLogger('runtime-stop-command');
 
@@ -252,7 +253,7 @@ export interface StopCommandHost<TSession, TTeardown extends StopTeardownReport>
    *  "turn in progress" forever, the un-cancelable wedge this path exists to fix. */
   clearSingleScopeRefs(): void;
   clearTurnHadVisibleOutput(): void;
-  sendDirect(text: string): void;
+  sendDirect(text: string, role: OutboundMessageRole): void;
 }
 
 type BoundedResult<T> =
@@ -361,7 +362,7 @@ export async function runStopCommand<TSession, TTeardown extends StopTeardownRep
 
   if (teardownsInFlight.has(host.scopeKey)) {
     log.warn(scope, '/stop received while a teardown for this scope is still in flight — not re-entering');
-    host.sendDirect(STOP_ACK_ALREADY_STOPPING);
+    host.sendDirect(STOP_ACK_ALREADY_STOPPING, 'status');
     return 'already-stopping';
   }
 
@@ -371,6 +372,7 @@ export async function runStopCommand<TSession, TTeardown extends StopTeardownRep
       host.sessionScope === 'single'
         ? STOP_ACK_NOTHING_TO_STOP_SERIALIZED_SCOPE
         : STOP_ACK_NOTHING_TO_STOP,
+      'status',
     );
     return 'nothing-to-stop';
   }
@@ -398,12 +400,12 @@ export async function runStopCommand<TSession, TTeardown extends StopTeardownRep
     // The lane stays poisoned deliberately: an unproven cancellation must never
     // authorize a concurrent replacement.
     log.error(scope, '/stop teardown did not complete within the bounded wait — outcome uncertain');
-    host.sendDirect(STOP_ACK_UNCERTAIN_TIMEOUT);
+    host.sendDirect(STOP_ACK_UNCERTAIN_TIMEOUT, 'status');
     return 'uncertain';
   }
   if (result.kind === 'error') {
     log.error({ ...scope, err: result.error }, '/stop teardown failed — outcome uncertain');
-    host.sendDirect(STOP_ACK_UNCERTAIN_FAILED);
+    host.sendDirect(STOP_ACK_UNCERTAIN_FAILED, 'status');
     return 'uncertain';
   }
   // The teardown settled, so its count of dropped queued messages is known;
@@ -425,7 +427,7 @@ export async function runStopCommand<TSession, TTeardown extends StopTeardownRep
   // from the teardown call returning.
   if (host.isTurnInFlight()) {
     log.error(scope, '/stop teardown returned but the scope still reports a turn in flight — outcome uncertain');
-    host.sendDirect(STOP_ACK_UNCERTAIN_STILL_ACTIVE + dropped);
+    host.sendDirect(STOP_ACK_UNCERTAIN_STILL_ACTIVE + dropped, 'status');
     return 'uncertain';
   }
   // The in-flight resolver reads runtime bookkeeping the teardown itself
@@ -438,7 +440,7 @@ export async function runStopCommand<TSession, TTeardown extends StopTeardownRep
       { ...scope, unprovenSessions: unproven.length },
       '/stop tore the turn down but the session could not be proven terminated — outcome uncertain',
     );
-    host.sendDirect(STOP_ACK_UNCERTAIN_NOT_PROVEN + dropped);
+    host.sendDirect(STOP_ACK_UNCERTAIN_NOT_PROVEN + dropped, 'status');
     return 'uncertain';
   }
   // The flag belongs to the turn just torn down; a stale `true` would suppress
@@ -446,10 +448,10 @@ export async function runStopCommand<TSession, TTeardown extends StopTeardownRep
   host.clearTurnHadVisibleOutput();
   if (host.isOutboundQueuePoisoned()) {
     log.error(scope, '/stop tore the turn down but delivery remains blocked — outcome uncertain');
-    host.sendDirect(STOP_ACK_UNCERTAIN_DELIVERY + dropped);
+    host.sendDirect(STOP_ACK_UNCERTAIN_DELIVERY + dropped, 'status');
     return 'uncertain';
   }
   log.info(scope, '/stop: active turn torn down and the scope reads idle');
-  host.sendDirect(STOP_ACK_STOPPED + dropped);
+  host.sendDirect(STOP_ACK_STOPPED + dropped, 'status');
   return 'stopped';
 }

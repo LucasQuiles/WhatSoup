@@ -57,6 +57,7 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
@@ -147,6 +148,7 @@ import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './sys
 import {
   OutboundQueue,
   type IOutboundQueue,
+  type OutboundMessageRole,
   type ToolUpdate,
   type ToolCategory,
 } from './outbound-queue.ts';
@@ -2581,7 +2583,7 @@ export class AgentRuntime implements Runtime {
     } else if (answer.kind === 'missing') {
       this.scheduledAnswerMissing.add(mapKey);
       log.warn({ chatJid: queue.targetChatJid }, 'scheduled job ended without a final answer');
-    } else if (queue.enqueueResultText(answer.text) !== false) {
+    } else if (queue.enqueueResultText(answer.text, 'answer') !== false) {
       this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(global ? undefined : mapKey);
       if (global) {
         this.turnHadVisibleOutput = true;
@@ -2827,9 +2829,9 @@ export class AgentRuntime implements Runtime {
       set activeChatJid(value) { runtime.activeChatJid = value; },
       get operationTracker() { return runtime.operationTracker; },
       set operationTracker(value) { runtime.operationTracker = value; },
-      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      sendDirect: (chatJid, text, role) => runtime.sendDirect(chatJid, text, role),
       // F2a (#2121): the id-bearing send, used by the pin-receipt path only.
-      sendDirectWithReceipt: (chatJid, text) => runtime.sendDirectWithReceipt(chatJid, text),
+      sendDirectWithReceipt: (chatJid, text, role) => runtime.sendDirectWithReceipt(chatJid, text, role),
       resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
       routeSessionProviderConfig: (route) => runtime.routeSessionProviderConfig(route),
@@ -2860,7 +2862,7 @@ export class AgentRuntime implements Runtime {
       getSession: () => runtime.session,
       getActiveChatJid: () => runtime.activeChatJid,
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
-      sendDirect: (chatJid, text, force) => runtime.sendDirect(chatJid, text, force),
+      sendDirect: (chatJid, text, role, force) => runtime.sendDirect(chatJid, text, role, force),
       abortPerChatQueue: (mapKey) => runtime.chatQueues.get(mapKey)?.abortTurn({ preserveEvidence: true }),
       terminalizePerChatTurn: (mapKey) =>
         runtime.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey),
@@ -2965,7 +2967,7 @@ export class AgentRuntime implements Runtime {
       get lastSpawnRouteProvider() { return runtime.lastSpawnRouteProvider; },
       sessionProviderConfig: () => runtime.sessionProviderConfig(),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
-      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      sendDirect: (chatJid, text, role) => runtime.sendDirect(chatJid, text, role),
       routablePinTargets: () => runtime.routablePinTargets(),
       isEntryCredentialed: (entry) => runtime.isEntryCredentialed(entry),
     };
@@ -3103,7 +3105,7 @@ export class AgentRuntime implements Runtime {
       observeOutboundQueueOperation: (scopeKey, queue, operation) =>
         runtime.observeOutboundQueueOperation(scopeKey, queue, operation),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      sendDirect: (chatJid, text, role) => runtime.sendDirect(chatJid, text, role),
       deletePendingPollQuestions: (mapKey) => runtime.deletePendingPollQuestions(mapKey),
       fetchGroupAdminJids: (chatJid) => runtime.fetchGroupAdminJids(chatJid),
       markSystemTurn: (session, scopeKey, purpose, routeChatJid) =>
@@ -4614,8 +4616,12 @@ export class AgentRuntime implements Runtime {
       // trigger run (and what expires a one-shot schedule), so the occurrence
       // must have a DURABLE owner before we return it. Journaling the
       // synthetic inbound first means a crash between ack and turn start
-      // leaves a journaled 'processing' row that the W2 stuck-inbound
-      // reconciler surfaces — never a silent loss behind successful history.
+      // leaves a journaled 'processing' row that crash recovery fails —
+      // never a silent loss behind successful history. A synthetic turn owes
+      // no user a reply, so recovery does not enroll it as an operator
+      // catch-up (#3754); for SCHEDULED_TURN_LOSS_WINDOW_DAYS the loss
+      // surfaces in /health as runtime.agent.turnRecoveryScheduledTurnsLost
+      // and recovery_debt.turn_recovery.scheduled_turns_lost.
       // Per the agent_turn_admission_rejected disposition, a journaled but
       // undispatched turn is surfaced for owner resend, not auto-replayed.
       if (!this.durability) {
@@ -4628,7 +4634,7 @@ export class AgentRuntime implements Runtime {
       // #2566 slice 3 — the occurrence id suffix makes the journaled inbound
       // deterministically joinable to its trigger_occurrences row (the bare
       // trigger-id + wall-clock prefix is kept for existing consumers).
-      const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
+      const messageId = scheduledJobInboundMessageId(ctx.triggerId, now, ctx.occurrenceId);
       // A mapped @lid report chat keys under the resolved phone. The synthetic
       // message carries this exact key so the turn identity cannot re-read a
       // different one: terminal finalization rejects an inbound journaled under
@@ -4889,7 +4895,7 @@ export class AgentRuntime implements Runtime {
         // Notify user of failure. #3497 H3: a scheduled job's report chat did not
         // send it; its failure stays with the durable terminal and the log above.
         if (!wedgedReclaim && msg.isSyntheticJob !== true) {
-          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?', 'status');
         }
       });
     const recycleScopeKey = this.sessionScope === 'per_chat'
@@ -5017,7 +5023,7 @@ export class AgentRuntime implements Runtime {
         );
         // B21-A F4a: denial must be user-visible, never a silent drop — same
         // queue-routed send path the other local-command replies use.
-        this.sendDirect(chatJid, '_Not authorized._');
+        this.sendDirect(chatJid, '_Not authorized._', 'status');
         // B21-A F1: this return bypasses the R14 post-switch completion below,
         // so the denied inbound must be finalized HERE — same shape as the
         // 'empty_content' skip in handleMessageInner — or the row strands in
@@ -5036,7 +5042,7 @@ export class AgentRuntime implements Runtime {
             // for an unproven cancellation, so refuse until the guard clears.
             if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
               newRefusedForStopTeardown = true;
-              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
+              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS, 'status');
               break;
             }
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
@@ -5098,7 +5104,7 @@ export class AgentRuntime implements Runtime {
                 deleteHandoffArtifact(this.db, resetKey);
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
-              sendDirect: (text) => this.sendDirect(chatJid, text),
+              sendDirect: (text, role) => this.sendDirect(chatJid, text, role),
             });
             break;
 
@@ -5151,7 +5157,7 @@ export class AgentRuntime implements Runtime {
                 this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
-              sendDirect: (text) => this.sendDirect(chatJid, text),
+              sendDirect: (text, role) => this.sendDirect(chatJid, text, role),
             });
             break;
 
@@ -5225,7 +5231,7 @@ export class AgentRuntime implements Runtime {
             } else {
               text = '_No active session._ Send a message to start one.';
             }
-            this.sendDirect(chatJid, text);
+            this.sendDirect(chatJid, text, 'status');
             break;
           }
 
@@ -5267,7 +5273,7 @@ export class AgentRuntime implements Runtime {
             const helpText = classified.args
               ? renderHelpDetail(classified.args, helpOpts)
               : renderHelp(helpOpts);
-            this.sendDirect(chatJid, helpText);
+            this.sendDirect(chatJid, helpText, 'status');
             break;
           }
 
@@ -5352,7 +5358,7 @@ export class AgentRuntime implements Runtime {
             );
             this.sendDirect(chatJid, newRefusedForStopTeardown
               ? NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED
-              : STOP_ACK_COMPOUND_BODY_REFUSED);
+              : STOP_ACK_COMPOUND_BODY_REFUSED, 'status');
           } else {
             forwardAfterLocalCommand = classified.compoundBody;
           }
@@ -5360,7 +5366,7 @@ export class AgentRuntime implements Runtime {
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
           log.info({ command: classified.command, chatJid }, 'local command deferred while turn is active');
-          this.sendDirect(chatJid, '_A response is still in progress. Send /new again after it finishes._');
+          this.sendDirect(chatJid, '_A response is still in progress. Send /new again after it finishes._', 'status');
         } else {
         // Contain local-command handler faults: without this, a throwing handler
         // escapes to the turnChain catch-all, whose unguarded markInboundFailed
@@ -5368,7 +5374,7 @@ export class AgentRuntime implements Runtime {
         // The R14 completion below still runs and finalizes the row truthfully
         // (the inbound WAS a locally-handled command).
           log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
-          this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
+          this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?', 'status');
           // #2357 B1 AC4: command failed with a compound body present → retain it
           // truthfully (NOT dispatched). Running the body under failed-command
           // semantics would violate the issue's exactly-once rule. Complete the
@@ -5700,7 +5706,7 @@ export class AgentRuntime implements Runtime {
           sessionId: status.sessionId,
           pid: status.pid,
         }, 'stdin write timed out — notifying user');
-        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.');
+        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.', 'status');
         throw err;
       } else {
         throw err;
@@ -5775,7 +5781,7 @@ export class AgentRuntime implements Runtime {
         ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
         : NO_CHECKPOINT_ADOPTION;
       if (dispatchCancelled()) return;
-      announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice));
+      announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice, 'status'));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -5815,7 +5821,7 @@ export class AgentRuntime implements Runtime {
       if (dispatchCancelled()) return;
       const spawned = await spawnForAdoption(session, adoption, (err, notice) => {
         log.warn({ err, chatJid }, 'lazy resume refused — starting fresh with a notice');
-        this.sendDirect(chatJid, notice);
+        this.sendDirect(chatJid, notice, 'status');
       });
       spawnedForTurn = true;
       // #3658: a deferred host-admission start is admitted only at a provider
@@ -5831,7 +5837,7 @@ export class AgentRuntime implements Runtime {
       // Announced only once the fresh start is admitted, so a refused start
       // never promises a continuation it cannot deliver.
       if (closeFailedNotice !== null) {
-        announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
+        announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice, 'status'));
       }
       if (effectiveMapKey !== undefined && spawnOwnership !== null) {
         effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
@@ -5923,7 +5929,7 @@ export class AgentRuntime implements Runtime {
       const heldNotice = isScheduledDispatch() ? undefined : this.heldCloseFailedNotices.get(session);
       if (heldNotice !== undefined) {
         this.heldCloseFailedNotices.delete(session);
-        announceAdoption(heldNotice.adoption, (notice) => this.sendDirect(heldNotice.chatJid, notice));
+        announceAdoption(heldNotice.adoption, (notice) => this.sendDirect(heldNotice.chatJid, notice, 'status'));
       }
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
@@ -6007,7 +6013,7 @@ export class AgentRuntime implements Runtime {
           sessionId: status.sessionId,
           pid: status.pid,
         }, 'stdin write timed out — notifying user');
-        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.');
+        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.', 'status');
         throw err;
       } else {
         throw err;
@@ -6170,7 +6176,7 @@ export class AgentRuntime implements Runtime {
           if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
             const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
             if (queue) {
-              queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
+              queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.', 'status');
               try {
                 await this.observeOutboundQueueOperation(mapKey, queue, () => queue.flush());
               } catch (err) {
@@ -6180,6 +6186,7 @@ export class AgentRuntime implements Runtime {
               this.sendDirect(
                 pendingPoll.chatJid,
                 'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+                'status',
               );
             }
             await this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply', runtimeContext, scopeRef);
@@ -6303,7 +6310,7 @@ export class AgentRuntime implements Runtime {
             providerConfig: this.agentProviderConfig,
           }),
         );
-        this.sendDirect(chatJid, credNote ?? 'Something went wrong starting a session. Try sending your message again.');
+        this.sendDirect(chatJid, credNote ?? 'Something went wrong starting a session. Try sending your message again.', 'status');
         return;
       }
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
@@ -7345,7 +7352,7 @@ export class AgentRuntime implements Runtime {
               }
             });
           } else {
-            queue.enqueueStreamingText(normalizedText);
+            queue.enqueueStreamingText(normalizedText, 'answer');
             if (markReplayUnsafe) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
             }
@@ -7415,6 +7422,7 @@ export class AgentRuntime implements Runtime {
         queue.indicateTyping();
         queue.enqueueText(
           'Context compacted — older details summarized. Restate any important context I should carry forward.',
+          'lifecycle',
         );
         break;
 
@@ -9250,8 +9258,8 @@ export class AgentRuntime implements Runtime {
   // Promise<boolean> but this method's callers (53 sites) still expect void.
   // Car-C deletes this shim and propagates the boolean to F2a consumers.
   // Tracking marker: #2981-SHIM-RUNTIME-SENDDIRECT
-  private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
-    void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  private sendDirect(chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard = false): void {
+    void sendDirectForPort(this.chatTransportHost, chatJid, text, role, bypassEchoGuard);
   }
 
   /**
@@ -9259,8 +9267,8 @@ export class AgentRuntime implements Runtime {
    * envelope so reply-threading consumers (F2a #2121) can reference the sent
    * message. The void shim above stays for the legacy fire-and-forget sites.
    */
-  sendDirectWithReceipt(chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
-    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  sendDirectWithReceipt(chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, role, bypassEchoGuard);
   }
 
   // ---------------------------------------------------------------------------
@@ -9875,8 +9883,7 @@ export class AgentRuntime implements Runtime {
     if (collapse && this.stashHandoffNotice(queue.targetChatJid, message, now)) {
       return;
     }
-    if (hasContinuation) queue.enqueueText(message, 'lifecycle');
-    else queue.enqueueText(message);
+    queue.enqueueText(message, 'lifecycle');
   }
 
   private enqueueAutoSwitchNotice(
@@ -9897,8 +9904,8 @@ export class AgentRuntime implements Runtime {
       scheduled,
     }, 'surfaced provider auto-switch notice');
     if (scheduled) return true;
-    if (mode === 'streaming') queue.enqueueStreamingText(message);
-    else queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, message));
+    if (mode === 'streaming') queue.enqueueStreamingText(message, 'lifecycle');
+    else queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, message), 'lifecycle');
     return true;
   }
 
@@ -10288,7 +10295,7 @@ export class AgentRuntime implements Runtime {
     } catch (noticeError) {
       log.warn({ err: noticeError, chatJid }, 'failed to clear abandoned fallback handoff notice');
     }
-    queue.enqueueText('_The backup model could not continue this turn. Please try again._');
+    queue.enqueueText('_The backup model could not continue this turn. Please try again._', 'status');
   }
 
   private async finalizeFailedFallbackContinuation(
@@ -11093,7 +11100,7 @@ export class AgentRuntime implements Runtime {
               processFailure.activation.fallbackModel,
             ),
             replayScheduled,
-          }));
+          }), 'lifecycle');
           void Promise.resolve(noticeQueue?.flush())
             .catch((flushErr: unknown) => {
               // A failed notice flush must not strand the replay — its own
@@ -11117,7 +11124,7 @@ export class AgentRuntime implements Runtime {
           fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
           toCard: null,
           replayScheduled: false,
-        }));
+        }), 'lifecycle');
       }
     }
 
@@ -11764,7 +11771,7 @@ export class AgentRuntime implements Runtime {
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
     if (queue) {
-      queue.enqueueText(msg);
+      queue.enqueueText(msg, 'status');
       const scopeKey = this.sessionScope === 'per_chat' && chatJid
         ? this.resolvePerChatMapKey(chatJid)
         : GLOBAL_TOOL_SCOPE_KEY;
@@ -11836,7 +11843,7 @@ export class AgentRuntime implements Runtime {
       this.pendingStartupChatNotices.set(chatJid, { kind: 'expired_session_notice', chatJid, text });
       return;
     }
-    this.sendDirect(chatJid, text);
+    this.sendDirect(chatJid, text, 'status');
   }
 
   /**
@@ -12236,7 +12243,7 @@ export class AgentRuntime implements Runtime {
               this.currentTurnAssistantText += committedText;
             });
           } else {
-            queue.enqueueStreamingText(normalizedText);
+            queue.enqueueStreamingText(normalizedText, 'answer');
             this.turnHadVisibleOutput = true;
             if (markReplayUnsafe) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
@@ -12304,6 +12311,7 @@ export class AgentRuntime implements Runtime {
         queue.indicateTyping();
         queue.enqueueText(
           'Context compacted — older details summarized. Restate any important context I should carry forward.',
+          'lifecycle',
         );
         this.turnHadVisibleOutput = true;
         break;
