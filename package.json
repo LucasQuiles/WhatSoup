@@ -11,7 +11,7 @@
     "node": "24.15.0"
   },
   "scripts": {
-    "postinstall": "patch-package",
+    "postinstall": "patch-package --error-on-fail",
     "start": "bash scripts/run-with-pinned-node.sh src/main.ts",
     "start:instance": "bash scripts/run-with-pinned-node.sh src/bootstrap.ts",
     "fleet": "bash scripts/run-with-pinned-node.sh src/fleet/standalone.ts 9099",
