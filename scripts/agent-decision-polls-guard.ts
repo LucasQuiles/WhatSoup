@@ -28,6 +28,10 @@ const DOCUMENTATION_ANCHORS: RequiredAnchor[] = [
     anchors: ['docs/runbooks/agent-decision-polls.md'],
   },
   {
+    file: 'CLAUDE.md',
+    anchors: ['docs/runbooks/agent-decision-polls.md'],
+  },
+  {
     file: 'README.md',
     anchors: ['docs/runbooks/agent-decision-polls.md'],
   },

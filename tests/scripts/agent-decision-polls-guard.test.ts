@@ -95,7 +95,7 @@ export function writeSandboxArtifacts(
   symlinkSync(path.join(repoRoot, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
   writeFixtureFile(fixture, 'docs/runbooks/agent-decision-polls.md', 'AskUserQuestion send_poll multiSelect selectableCount Known Limits\n');
   writeFixtureFile(fixture, 'AGENTS.md', 'docs/runbooks/agent-decision-polls.md\n');
-  writeFixtureFile(fixture, 'CLAUDE.md', 'See [contributor instructions](AGENTS.md).\n');
+  writeFixtureFile(fixture, 'CLAUDE.md', 'See [contributor instructions](AGENTS.md) and [decision polls](docs/runbooks/agent-decision-polls.md).\n');
   writeFixtureFile(fixture, 'README.md', 'docs/runbooks/agent-decision-polls.md\n');
   writeFixtureFile(fixture, 'docs/tools.md', 'send_poll AskUserQuestion\n');
   writeFixtureFile(fixture, 'docs/configuration.md', 'poll-interaction-lint.mjs\n');
@@ -234,16 +234,15 @@ describe('agent decision polls guard', () => {
     expect(result.findings).toEqual(expect.arrayContaining([expect.stringContaining(rule)]));
   });
 
-  it('requires decision guidance in shared contributor instructions even when the provider file has it', () => {
+  it.each(['AGENTS.md', 'CLAUDE.md'])('requires decision guidance in %s even when the other entry point has it', (file) => {
     const fixture = makeCompleteFixture();
-    writeFixtureFile(fixture, 'AGENTS.md', 'Shared contributor instructions.\n');
-    writeFixtureFile(fixture, 'CLAUDE.md', 'docs/runbooks/agent-decision-polls.md\n');
+    writeFixtureFile(fixture, file, 'Contributor instructions without decision guidance.\n');
 
     const result = checkAgentDecisionPolls(fixture);
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual([
-      'decision-polls.docs AGENTS.md: missing documented promise "docs/runbooks/agent-decision-polls.md"',
+      `decision-polls.docs ${file}: missing documented promise "docs/runbooks/agent-decision-polls.md"`,
     ]);
   });
 
