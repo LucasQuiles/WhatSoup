@@ -63,17 +63,11 @@ def open_conditions(instance: str, machine: str | None) -> list[str]:
     root = state_root()
     path = root / INCIDENT_STATE
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raise Refused(f"no incident state under {root}; is this the dispatcher's state directory?") from None
-    except (OSError, UnicodeDecodeError) as exc:
+        state = credential_repage.read_state_object(path)
+    except (OSError, DurableWriteError) as exc:
         raise Refused(f"the incident state under {root} cannot be read ({type(exc).__name__})") from None
-    try:
-        state = json.loads(raw)
-    except ValueError:
-        raise Refused(f"the incident state under {root} cannot be read (not valid JSON)") from None
-    if not isinstance(state, dict):
-        raise Refused(f"the incident state under {root} cannot be read (not a JSON object)")
+    if state is None:
+        raise Refused(f"no incident state under {root}; is this the dispatcher's state directory?")
     section = state.get(credential_repage.SECTION)
     section = section if isinstance(section, dict) else {}
     wanted = credential_repage.safe_segment(instance)

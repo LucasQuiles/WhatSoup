@@ -20,12 +20,15 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import time as real_time
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
+
+import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -58,6 +61,72 @@ NO_INCIDENT_STATE = "no incident state under"
 # sets BOT_ERRORS_FLEET_SENTINEL_HOSTS to a path inside that directory, never to an empty value: an
 # unset one would read the developer's roster.
 make_rig = cases.make_rig
+
+
+class StateReadDeadline(Exception):
+    pass
+
+
+@pytest.mark.parametrize("reader", ["acknowledgements", "conditions"])
+@pytest.mark.parametrize("kind", ["missing-root", "missing", "regular", "readable", "fifo",
+                                 "directory", "symlink", "bad-json", "non-object"])
+def test_t19_state_readers_classify_files_without_waiting_for_a_writer(tmp_path, monkeypatch, reader, kind):
+    root = tmp_path / "state"
+    if kind != "missing-root":
+        root.mkdir(mode=0o700)
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(root))
+    cli = load_cli("credential_ack_state_reader")
+    path = root / ("credential-ack.json" if reader == "acknowledgements" else "incident-state.json")
+    entries = {"hosta|synthetic-bot": {"ackedAt": 100, "by": "operator"}}
+    payload = entries if reader == "acknowledgements" else {
+        "credentialConditions": {"hosta|synthetic-bot": {"openedAt": 100, "members": {}}}}
+    if kind in ("regular", "readable"):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        path.chmod(0o644 if kind == "readable" else 0o600)
+    elif kind == "fifo":
+        os.mkfifo(path, 0o600)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        target = tmp_path / "outside-state.json"
+        target.write_text(json.dumps(payload), encoding="utf-8")
+        target.chmod(0o600)
+        path.symlink_to(target)
+    elif kind in ("bad-json", "non-object"):
+        path.write_text("{broken" if kind == "bad-json" else "[]", encoding="utf-8")
+        path.chmod(0o600)
+
+    def expired(signum, frame):
+        raise StateReadDeadline()
+
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    previous = signal.signal(signal.SIGALRM, expired)
+    deadline_fired = False
+    refused = False
+    result = None
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        try:
+            result = (credential_repage.read_acknowledgements(path) if reader == "acknowledgements"
+                      else cli.open_conditions("synthetic-bot", None))
+        except StateReadDeadline:
+            deadline_fired = True
+        except cli.Refused:
+            refused = True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert not deadline_fired, f"{reader} blocked on {kind} state instead of classifying it"
+    if reader == "acknowledgements":
+        assert not refused
+        expected = ((entries, False) if kind in ("regular", "readable")
+                    else ({}, kind not in ("missing-root", "missing")))
+        assert result == expected
+    elif kind in ("regular", "readable"):
+        assert not refused and result == ["hosta|synthetic-bot"]
+    else:
+        assert refused
 
 
 def raising_for(real: Callable[..., Any], wanted: str) -> Callable[..., Any]:

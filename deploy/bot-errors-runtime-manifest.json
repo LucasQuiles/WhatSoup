@@ -919,7 +919,7 @@
     },
     {
       "path": "deploy/scripts/lib/credential_repage.py",
-      "sha256": "a574e382277d0bf39030fc0c77793089713b6a58c48fdc9144c96668612daa8c",
+      "sha256": "c1845ff5f9229944439532555157c0a78806096ce807c83ef24fc7760aa0fb23",
       "mustContain": [
         "def observe_event(",
         "def evaluate_entry(",
@@ -930,7 +930,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-credential-ack.py",
-      "sha256": "5fb2e044eb866558202d7671c20a33d2d1c60fa345cdca0304aeacc80e86ebb2",
+      "sha256": "14d484ea3412c43bc45a97d616190d01aac3f5604de1507ccbfca7a7cc3602c3",
       "mustContain": [
         "credential_ack.write_state",
         "no open condition for",

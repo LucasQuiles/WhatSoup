@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from lib.bot_errors_roster import _is_runtime_relevant, load_roster, roster_identity
+from lib.durable_json import DurableWriteError, durable_json_target, observe_json
 from lib.owner_route import _FLEET_MODEL, event_machine
 
 SECTION = "credentialConditions"
@@ -711,19 +712,28 @@ def _resettle(cycle: Cycle, name: str, at: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def read_state_object(path: Path) -> Mapping[str, Any] | None:
+    """Read regular state JSON without following the state directory or file as a symlink."""
+    parent = path.absolute().parent
+    try:
+        parent.lstat()
+    except FileNotFoundError:
+        return None
+    target = durable_json_target(
+        trusted_root=parent.parent.resolve(strict=True) / parent.name,
+        relative_path=path.name,
+        owner_controlled_readable=True,
+    )
+    return observe_json(target).payload
+
+
 def read_acknowledgements(path: Path) -> tuple[Mapping[str, Any], bool]:
     """(the acknowledge file's entries, whether the file exists and cannot be used)."""
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}, False
-    except (OSError, UnicodeDecodeError):
+        data = read_state_object(path)
+    except (OSError, DurableWriteError):
         return {}, True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}, True
-    return (data, False) if isinstance(data, dict) else ({}, True)
+    return data or {}, False
 
 
 def acknowledged_at(value: Any, now: int) -> int | None:
