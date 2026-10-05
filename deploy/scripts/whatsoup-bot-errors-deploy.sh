@@ -62,6 +62,9 @@ FILES=(
   "deploy/scripts/bot-errors-collector.py"
   "deploy/scripts/bot-errors-emit.py"
   "deploy/scripts/bot-errors-runner.py"
+  # The operator's acknowledge command for the credential re-page class. Nothing imports
+  # it; it is shipped so that the one command the runbook names exists on the host.
+  "deploy/scripts/bot-errors-credential-ack.py"
   "deploy/scripts/lib/__init__.py"
   "deploy/scripts/lib/bounded_jsonl.py"
   "deploy/scripts/lib/bot_errors_envelope.py"
@@ -79,6 +82,9 @@ FILES=(
   # bot-errors-heartbeat-watchdog.py import recovery_debt_issue from it at
   # module scope to validate the /health recovery_debt contract (#3224).
   "deploy/scripts/lib/classify_health.py"
+  # credential_repage.py: bot-errors-dispatcher.py imports it at module scope. Its own
+  # imports, bot_errors_roster.py and owner_route.py, are entries of this array.
+  "deploy/scripts/lib/credential_repage.py"
   "deploy/scripts/lib/dm_roundtrip.py"
   "deploy/scripts/lib/durable_json.py"
   # fleet_config.py: the health-check and watchdog profile loaders and the

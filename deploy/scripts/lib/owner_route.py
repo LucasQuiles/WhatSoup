@@ -41,7 +41,7 @@ import re
 import socket
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from lib.send_acceptance import validate_send_acceptance
 
@@ -102,17 +102,25 @@ def _evidence_value(evidence: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def owner_line(event: dict[str, Any]) -> str:
-    """'<host>/<bot>: <plain title> — <one-line detail>' built only from
-    source/machine/instance and dispatcher-derived fields (never the
-    digest-confined summary)."""
-    source = str(event.get("source") or "")
+def event_machine(event: Mapping[str, Any]) -> str:
+    """The machine an event came from: its `machine`, else the relay's remote
+    host, else this (dispatcher) host. The runtime's emitter writes no
+    `machine`, so the relay block is what names a relayed event's host."""
     machine = str(event.get("machine") or "").strip()
     if not machine or machine.lower() == "unknown":
         diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
         relay = diagnostics.get("relay") if isinstance(diagnostics.get("relay"), dict) else {}
         # No relay block = produced on this (dispatcher) host.
         machine = str(relay.get("remoteHost") or socket.gethostname()).strip().lower()
+    return machine
+
+
+def owner_line(event: dict[str, Any]) -> str:
+    """'<host>/<bot>: <plain title> — <one-line detail>' built only from
+    source/machine/instance and dispatcher-derived fields (never the
+    digest-confined summary)."""
+    source = str(event.get("source") or "")
+    machine = event_machine(event)
     instance = str(event.get("instance") or "").strip()
     title = TITLES.get(source)
     match = _FLEET_MODEL.match(source)
@@ -199,6 +207,83 @@ def enabled() -> bool:
     )
 
 
+def _remaining(deadline: float | None) -> float:
+    return float("inf") if deadline is None else deadline - time.monotonic()
+
+
+def _send_owner_message(
+    cfg: dict[str, Any],
+    line: str,
+    email_body: str,
+    *,
+    json_rpc_call: Callable[..., dict[str, Any]],
+    email_fallback: Callable[..., bool],
+    deadline: float | None,
+) -> dict[str, Any]:
+    """Send one line to the owner's chat and, when enabled, by e-mail, inside
+    the caller's deadline. A channel's failure is that channel's False, never
+    raised; the result is the channel fields of the caller's log record."""
+    whatsapp_accepted = False
+    receipt: dict[str, str] = {}
+    try:
+        result = json_rpc_call(
+            cfg["socket"],
+            "tools/call",
+            {"name": "send_message", "arguments": {"chatJid": cfg["jid"], "text": line}},
+            timeout=max(1.0, min(cfg["timeout"], _remaining(deadline))),
+            **({"deadline": deadline} if deadline is not None else {}),
+        )
+        receipt = validate_send_acceptance(result, cfg["resolved"] or cfg["jid"])
+        whatsapp_accepted = True
+    except Exception:  # noqa: BLE001 - fail-open by design
+        whatsapp_accepted = False
+    email_accepted: bool | None = None
+    email_skipped_budget = False
+    if cfg["email"]:
+        email_timeout = min(EMAIL_TIMEOUT_SECONDS, _remaining(deadline))
+        if email_timeout < 1:
+            email_skipped_budget = True
+        else:
+            try:
+                email_accepted = bool(email_fallback(line, email_body, timeout=email_timeout))
+            except Exception:  # noqa: BLE001
+                email_accepted = False
+    return {
+        "whatsappAccepted": whatsapp_accepted,
+        "emailEnabled": cfg["email"],
+        "emailAccepted": email_accepted,
+        "emailSkippedBudget": email_skipped_budget,
+        "auditReceipt": receipt.get("audit_receipt"),
+    }
+
+
+def send_credential_page(
+    line: str,
+    body: str,
+    *,
+    counters: Mapping[str, int],
+    json_rpc_call: Callable[..., dict[str, Any]],
+    email_fallback: Callable[..., bool],
+    log: Callable[[dict[str, Any]], None],
+    deadline: float | None = None,
+) -> bool:
+    """Send one page of the credential re-page class; True when a channel
+    accepted it.
+
+    The class keeps its own pacing in the incident state, so this takes none of
+    the route's policy above: no source filter, no 6 h floor, no lock and no
+    state file. The caller checks enabled() and owns the deadline. The log
+    record carries booleans and the caller's integer counters only.
+    """
+    sent = _send_owner_message(
+        _cfg(), line, body,
+        json_rpc_call=json_rpc_call, email_fallback=email_fallback, deadline=deadline,
+    )
+    del sent["auditReceipt"]
+    log({"type": "credential_repage_page", **counters, **sent})
+    return bool(sent["whatsappAccepted"] or sent["emailAccepted"])
+
+
 def route_owner_critical(
     event: dict[str, Any],
     *,
@@ -220,12 +305,9 @@ def route_owner_critical(
     def skip(**flags: Any) -> None:
         log({"type": "owner_route_skipped", "eventId": event.get("id"), "incidentKey": key, **flags})
 
-    def remaining() -> float:
-        return float("inf") if deadline is None else deadline - time.monotonic()
-
     # Checked before the floor is recorded: a copy skipped for time must not
     # also block the next occurrence for a whole interval.
-    if remaining() < 1:
+    if _remaining(deadline) < 1:
         skip(skippedBudget=True)
         return
     state_path = state_dir / "owner-route-state.json"
@@ -252,33 +334,9 @@ def route_owner_critical(
         _save_state(state_path, state)
 
     line = owner_line(event)
-    whatsapp_accepted = False
-    receipt: dict[str, str] = {}
-    try:
-        result = json_rpc_call(
-            cfg["socket"],
-            "tools/call",
-            {"name": "send_message", "arguments": {"chatJid": cfg["jid"], "text": line}},
-            timeout=max(1.0, min(cfg["timeout"], remaining())),
-            **({"deadline": deadline} if deadline is not None else {}),
-        )
-        receipt = validate_send_acceptance(result, cfg["resolved"] or cfg["jid"])
-        whatsapp_accepted = True
-    except Exception:  # noqa: BLE001 - fail-open by design
-        whatsapp_accepted = False
-    email_accepted: bool | None = None
-    email_skipped_budget = False
-    if cfg["email"]:
-        email_timeout = min(EMAIL_TIMEOUT_SECONDS, remaining())
-        if email_timeout < 1:
-            email_skipped_budget = True
-        else:
-            try:
-                email_accepted = bool(email_fallback(line, f"{line}\n\n{group_text}", timeout=email_timeout))
-            except Exception:  # noqa: BLE001
-                email_accepted = False
+    sent = _send_owner_message(
+        cfg, line, f"{line}\n\n{group_text}",
+        json_rpc_call=json_rpc_call, email_fallback=email_fallback, deadline=deadline,
+    )
     log({"type": "owner_route_sent", "eventId": event.get("id"), "incidentKey": key,
-         "source": event.get("source"), "whatsappAccepted": whatsapp_accepted,
-         "emailEnabled": cfg["email"], "emailAccepted": email_accepted,
-         "emailSkippedBudget": email_skipped_budget,
-         "auditReceipt": receipt.get("audit_receipt")})
+         "source": event.get("source"), **sent})
