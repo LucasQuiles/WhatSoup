@@ -185,7 +185,8 @@ These are historical examples from the original integrity pass, not a current in
 
 ## Historical Integrity-Pass Summary
 
-As of the integrity pass merged in `bfbbedb`, the intended repo shape is:
+The integrity pass merged in `bfbbedb` recorded this intended shape. Use
+[current work](current-program.md) and the generated index for later state:
 - one genuinely active SDLC epic
 - completed and deferred SDLC history preserved in place
 - `docs/plans` as a legacy bucket to drain later

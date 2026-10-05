@@ -1,6 +1,7 @@
 # Project Map - WhatSoup
 
-Last refreshed: 2026-06-20.
+Navigation updated: 2026-10-05. The source descriptions retain the June 20 map;
+verify the relevant implementation before changing behavior.
 
 This map orients future documentation and feature-sweep work. It is a source
 tree and docs ownership map, not a replacement for generated guards such as

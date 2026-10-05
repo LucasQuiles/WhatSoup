@@ -102,7 +102,7 @@ WhatSoup auto-detects the host platform via `src/fleet/platform.ts` (`linux-syst
 
 ```bash
 # 1. Clone
-git clone https://github.com/LucasQuiles/WhatSoup.git
+git clone git@github.com:LucasQuiles/WhatSoup.git
 cd WhatSoup
 
 # 2. Inspect the runtime prerequisites without changing the host
@@ -135,7 +135,7 @@ After readiness passes, setup installs the service templates, symlinks wrapper s
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/LucasQuiles/WhatSoup.git
+git clone git@github.com:LucasQuiles/WhatSoup.git
 cd WhatSoup
 cp .env.example .env
 # Edit .env — set API keys, WHATSOUP_INSTANCES, WHATSOUP_HEALTH_TOKEN
