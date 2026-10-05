@@ -19,6 +19,9 @@ DISPATCHER_META_STATE = "dispatcher-meta-state.json"
 # Maintenance window (written by BOTH dispatcher and maintenance.py — MUST share one constant)
 MAINTENANCE = "maintenance.json"
 
+# Credential re-page acknowledgements (written by bot-errors-credential-ack.py, read by the dispatcher)
+CREDENTIAL_ACK = "credential-ack.json"
+
 # Per-component self state
 HEARTBEAT_WATCHDOG_STATE = "heartbeat-watchdog-state.json"
 SELFCHECK_STATE = "selfcheck-state.json"
