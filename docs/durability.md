@@ -1265,6 +1265,9 @@ per-chat or global scope. When the selected delivery is provably dead (`failed_p
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
 Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
 and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Only user-facing catch-ups count as historical catch-ups: a link whose source is a synthetic
+scheduled-job (`agentjob-*`) inbound, enrolled before #3754, is reported apart as
+`turnRecoveryOpenRecoveriesSynthetic` (see docs/turn-recovery-continuity-reconciler.md).
 Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
 uncorroborated delivery ambiguity are blocking. An orphan transfer has no job to settle. For one
 admitted shape only (a corroborated `maybe_sent` terminal op with a NULL `wa_message_id`, and a terminal
@@ -1643,10 +1646,20 @@ are independently queryable.
 
 `AgentJobContext` carries the durable `occurrenceId` of the dispatching claim, and the agent
 runtime embeds it in the journaled synthetic inbound's messageId
-(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`). The #2144 turn journal and
+(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`, minted by
+`scheduledJobInboundMessageId` in `src/core/synthetic-turn-source.ts`). The #2144 turn journal and
 `trigger_occurrences` are therefore deterministically joinable — an accepted agent-job
 occurrence without a matching journaled owner is auditable incoherence rather than an
 unanswerable question.
+
+The trigger run is recorded `ok` once the turn is queued, so a turn that later dies is not a
+trigger failure. Crash recovery fails its synthetic inbound but does not enroll it as an operator
+catch-up, because it owes no user a reply (#3754). The loss surfaces in `/health` as
+`runtime.agent.turnRecoveryScheduledTurnsLost` and `recovery_debt.turn_recovery.scheduled_turns_lost`:
+synthetic inbounds failed with `crash_recovery`, `stale_reclaim` or `recovery_owner_reclaimed`
+within `SCHEDULED_TURN_LOSS_WINDOW_DAYS` (7). The count is visibility only and pages nothing. The
+first terminal wins for such a row: the seq-keyed inbound writers leave it unchanged
+(`NOT_SCHEDULED_TURN_LOSS_ROW_SQL`), so a late runtime path cannot drop it from the count.
 
 ### 8.6 History lifecycle, gauges, reader, and field audit
 

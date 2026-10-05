@@ -33,6 +33,14 @@ export interface RecoveryDebtSnapshot {
     retained_terminal: number;
     open_catchups: number;
     corroborated_retained: number;
+    /**
+     * Synthetic scheduled-job turns lost to crash recovery inside the loss
+     * window (#3754). Additive and never user-facing: it does not change
+     * `open`, `attention` or `reasons`, so consumers that validate those
+     * against their own count fields stay consistent. `null` when the runtime
+     * did not report a valid count.
+     */
+    scheduled_turns_lost: number | null;
   };
   completed_delivery_identity: {
     readable: boolean;
@@ -130,6 +138,7 @@ function normalizeRuntime(value: RecoveryDebtEvidence['runtime']): {
       retained_terminal: 0,
       open_catchups: 0,
       corroborated_retained: 0,
+      scheduled_turns_lost: null,
     },
     completedIdentity: {
       readable: false,
@@ -152,6 +161,9 @@ function normalizeRuntime(value: RecoveryDebtEvidence['runtime']): {
   const retainedTerminal = count(details['turnRecoveryRetainedTerminal']);
   const openCatchups = count(details['turnRecoveryOpenRecoveries']);
   const corroboratedRetained = count(details['turnRecoveryCorroboratedRetained']);
+  // Visibility only: an invalid value reports null rather than making the
+  // section unreadable, which would escalate a diagnostic to service-blocking.
+  const scheduledTurnsLost = count(details['turnRecoveryScheduledTurnsLost']);
   const identityBlocking = count(details['completedDeliveryIdentityBlocking']);
   const identityRetained = count(details['completedDeliveryIdentityRetained']);
   // Granular blocking reasons travel apart from `degradedReasons`, whose
@@ -214,6 +226,7 @@ function normalizeRuntime(value: RecoveryDebtEvidence['runtime']): {
       retained_terminal: retainedTerminal,
       open_catchups: openCatchups,
       corroborated_retained: corroboratedRetained,
+      scheduled_turns_lost: scheduledTurnsLost,
     },
     completedIdentity: {
       readable: true,

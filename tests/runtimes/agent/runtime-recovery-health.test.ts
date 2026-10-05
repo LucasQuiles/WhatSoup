@@ -34,6 +34,8 @@ function input(
       turnRecoveryBlockedUnsafe: 0,
       turnRecoveryExhausted: 0,
       turnRecoveryOpenRecoveries: 0,
+      turnRecoveryOpenRecoveriesSynthetic: 0,
+      turnRecoveryScheduledTurnsLost: 0,
       turnRecoveryQuarantinedDelivery: 0,
       turnRecoveryCorruptLinks: 0,
       turnRecoveryOrphanTransfers: 0,
@@ -106,6 +108,15 @@ describe('classifyRuntimeRecoveryHealth', () => {
       blocking: false,
       blockingReasons: [],
       retainedReasons: ['historical_turn_catchup'],
+    },
+    {
+      // #3754: synthetic scheduled-job residue and lost scheduled turns owe no
+      // user a reply, so neither is catch-up debt of any kind.
+      label: 'synthetic catch-up residue and lost scheduled turns',
+      value: input({ turnRecoveryOpenRecoveriesSynthetic: 3, turnRecoveryScheduledTurnsLost: 2 }),
+      blocking: false,
+      blockingReasons: [],
+      retainedReasons: [],
     },
     {
       label: 'corrupt recovery link',
