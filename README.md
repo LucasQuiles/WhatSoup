@@ -267,7 +267,7 @@ The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` 
 
 ### Legacy authentication (deprecated)
 
-Passing the root fleet token via the `?token=<root>` query parameter is **deprecated**. The recorded removal deadline, **2026-06-30**, has passed, but the HTTP and WebSocket handlers still accept this legacy path in the audited source revision `59cc562bc` (2026-10-06). Removal remains outstanding; the date does not disable authentication automatically. Successful HTTP query-token authentication emits a one-shot `http_legacy_token_path` warning with `removeAfter: "2026-06-30"`; WebSocket authentication has the corresponding `ws_legacy_token_path` warning. Query-string credentials can leak into access logs, browser history, and HTTP `Referer` headers. The console uses session cookies and audience-scoped tickets instead.
+Passing the root fleet token via the `?token=<root>` query parameter is **deprecated**. It was scheduled for removal after **2026-06-30**. That deadline has passed, but the HTTP and WebSocket handlers still accept this legacy path in the audited source revision `59cc562bc` (2026-10-06). Removal remains outstanding; the date does not disable authentication automatically. Successful HTTP query-token authentication emits a one-shot `http_legacy_token_path` warning with `removeAfter: "2026-06-30"`; WebSocket authentication has the corresponding `ws_legacy_token_path` warning. Query-string credentials can leak into access logs, browser history, and HTTP `Referer` headers. The console uses session cookies and audience-scoped tickets instead.
 
 External scripts and integrations should obtain a short-lived audience-scoped ticket via `POST /api/auth-ticket` using the root token as a Bearer credential:
 
