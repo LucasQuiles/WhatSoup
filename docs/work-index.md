@@ -76,7 +76,7 @@ scoped markdown files currently on disk.
 
 | Path | Kind | Topic | Last Mod |
 |------|------|-------|----------|
-| `docs/sdlc/convention-map.md` | doc | sdlc | 2026-09-01 |
+| `docs/sdlc/convention-map.md` | doc | sdlc | 2026-10-04 |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | incident-control-plane-finder-report | 2026-07-28 |
 | `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | headless-fallback-runtime-alignment | 2026-07-15 |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
@@ -96,7 +96,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | poisoned-direct-send-rejection | 2026-08-20 |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | anonymous-health-projection-ceiling | 2026-08-21 |
 | `docs/superpowers/specs/2026-07-11-turn-lifecycle-fitness-extraction-design.md` | spec | turn-lifecycle-fitness-extraction-design | 2026-07-11 |
-| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-07-17 |
+| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | macos-credential-durability-design | 2026-09-28 |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
 | `docs/superpowers/specs/2026-07-28-bot-errors-durability-stack-design.md` | spec | bot-errors-durability-stack-design | 2026-08-03 |
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | spec | chat-queue-admission-design | 2026-07-29 |
@@ -150,7 +150,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/sdlc/convention-map.md` | doc | unknown | body-marker | sdlc | 2026-09-01 |  |
+| `docs/sdlc/convention-map.md` | doc | unknown | body-marker | sdlc | 2026-10-04 |  |
 
 ### docs/sdlc/closed/fleet-charts-20260407  _(1 entries)_
 
@@ -275,7 +275,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-15-semantic-boundary-hygiene-design.md` | spec | active | body-marker | semantic-boundary-hygiene-design | 2026-07-16 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-exit-parser-codeql-hardening-design.md` | spec | active | body-marker | boundary-exit-parser-codeql-hardening-design | 2026-07-17 |  |
 | `docs/superpowers/specs/2026-07-17-boundary-validator-ci-refactor-design.md` | spec | active | body-marker | boundary-validator-ci-refactor-design | 2026-07-17 |  |
-| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-07-17 |  |
+| `docs/superpowers/specs/2026-07-17-macos-credential-durability-design.md` | spec | unknown | fallback | macos-credential-durability-design | 2026-09-28 |  |
 | `docs/superpowers/specs/2026-07-20-cicd-enforcement-control-plane-design.md` | spec | active | body-marker | cicd-enforcement-control-plane-design | 2026-07-28 |  |
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | unknown | body-marker | agent-reliability-remediation-design | 2026-07-27 |  |
 | `docs/superpowers/specs/2026-07-26-open-issue-triage-and-cohort-pr-design.md` | spec | active | body-marker | open-issue-triage-and-cohort-pr-design | 2026-07-27 |  |
@@ -322,4 +322,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-09-28T19:36:14Z from commit `103d716a605efd3df31be4d2cbf57a645244b990`
+- Generated at 2026-10-05T01:46:43Z from commit `456c7b7f8200e61885833ae55f9718bfc44f7639`

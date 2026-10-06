@@ -8,12 +8,18 @@ named module directory, and the presence of every cited file — rather than
 re-deriving the whole map, so the observation commit above remains the honest
 source. This map records established repository practice; it does not grant
 permission to deploy, publish, restart services, or modify credentials.
+Repository instruction citations were refreshed on 2026-10-05; this does not
+change the scope of the structural verification above.
 
 ## Authority and precedence
 
-- The workspace-level `AGENTS.md` owns portable workspace, git-safety, delegation, secret,
-  and publication rules. Repository-specific architecture and commands come
-  from `CLAUDE.md` and `docs/agent-operating-procedure.md`.
+- The workspace-level `AGENTS.md`, outside this repository, owns portable workspace,
+  git-safety, delegation, secret, and publication rules. The repository-root
+  [AGENTS.md](../../AGENTS.md) owns project commands, conventions and verification.
+  [The project map](../project-map.md) describes architecture, and
+  [the agent operating procedure](../agent-operating-procedure.md) maps workflow
+  phases to skills and checks. [CLAUDE.md](../../CLAUDE.md) retains the short
+  entry for instruction consumers that read only that file.
 - Prefer current files and runtime evidence over session summaries. Record
   requested, configured, and observed runtime state separately; unknown stays
   unknown.
@@ -23,11 +29,11 @@ permission to deploy, publish, restart services, or modify credentials.
 ## Repository and module layout
 
 - Production TypeScript lives under `src/`; tests mirror source responsibilities
-  under `tests/` (`CLAUDE.md`, `tests/fleet/platform.test.ts`).
+  under `tests/` ([repository instructions](../../AGENTS.md), `tests/fleet/platform.test.ts`).
 - Shared infrastructure belongs in `src/core/`; transport and Baileys lifecycle
   in `src/transport/`; MCP registry and tools in `src/mcp/`; agent and chat
   runtimes in `src/runtimes/{agent,chat}/`; fleet/platform orchestration in
-  `src/fleet/` (`CLAUDE.md`).
+  `src/fleet/` ([source roots](../project-map.md#source-roots)).
 - Developer and CI tools live in `scripts/`. Host-shipped operational programs
   live in `deploy/scripts/`; Python deploy programs may use focused helpers in
   `deploy/scripts/lib/` but must remain independent of Node and cross-tree
@@ -53,17 +59,17 @@ permission to deploy, publish, restart services, or modify credentials.
 - Zod is the common boundary validator, while configuration paths also use
   shared custom validators. Reuse the owning boundary's established validator;
   do not introduce a second schema source. Use discriminated results or typed
-  domain errors for operational failure classes (`CLAUDE.md`, representative
+  domain errors for operational failure classes ([repository instructions](../../AGENTS.md), representative
   schemas and validators under `src/core/` and `src/fleet/`).
 - Use Pino for structured runtime logging. Do not interpolate credentials,
-  configuration contents, or raw identity data into error text (`CLAUDE.md`,
+  configuration contents, or raw identity data into error text ([repository instructions](../../AGENTS.md),
   `src/core/settings-template.ts`).
 
 ## Platform and service behavior
 
 - Route service control through the platform abstraction in
   `src/fleet/platform.ts`; supported backends are `linux-systemd`,
-  `macos-launchd`, `docker`, and `linux-no-systemd` (`CLAUDE.md`).
+  `macos-launchd`, `docker`, and `linux-no-systemd` ([host deployment](../../README.md#host-deployment-systemd--launchd)).
 - Treat service-manager configuration as an input, not proof of the executing
   binary. Operational verification must inspect the live process and resolved
   code path in addition to plist/unit contents.
@@ -72,7 +78,7 @@ permission to deploy, publish, restart services, or modify credentials.
   variables (`tests/fleet/platform.test.ts`).
 - Runtime activation, rollback, and observer jobs move as one release selector;
   update the owning runbook whenever code closes or changes a documented runtime
-  gap (`CLAUDE.md`, `docs/runbooks/release-deployment.md`).
+  gap ([repository instructions](../../AGENTS.md), `docs/runbooks/release-deployment.md`).
 
 ## Console conventions
 
@@ -103,7 +109,7 @@ permission to deploy, publish, restart services, or modify credentials.
 ## Testing conventions
 
 - Use Vitest for TypeScript and real SQLite (`:memory:` or temporary files) and
-  real Unix sockets where the behavior depends on them (`CLAUDE.md`).
+  real Unix sockets where the behavior depends on them ([repository instructions](../../AGENTS.md)).
 - Run targeted tests with `npx vitest run --pool=forks <paths>`; use focused
   Python `pytest` modules for deploy-script behavior. Test observable behavior,
   failure classes, rollback, and state transitions rather than symbol presence.
@@ -114,7 +120,7 @@ permission to deploy, publish, restart services, or modify credentials.
   change (`tests/fleet/platform.test.ts`).
 - `verify:push:branch` is curated and is not the full suite. Run every touched
   test directly, `npm run typecheck:all`, applicable guards, and the full/coverage
-  lane in proportion to risk (`CLAUDE.md`, `package.json`).
+  lane in proportion to risk ([repository instructions](../../AGENTS.md), `package.json`).
 - Skips, masked failures, fixture stderr, and unavailable platform checks must be
   labelled explicitly; none is evidence of a clean result.
 
@@ -126,7 +132,7 @@ permission to deploy, publish, restart services, or modify credentials.
 - Durable cross-session operational receipts belong in the external project-state
   store, not in public repository prose.
 - A code change that closes or alters a documented TODO, unwired behavior, or
-  runtime gap updates that runbook in the same PR (`CLAUDE.md`).
+  runtime gap updates that runbook in the same PR ([repository instructions](../../AGENTS.md)).
 - Public-surface line anchors and generated/pinned manifests are contracts; use
   their repository guards rather than hand-waving drift (`package.json`).
 

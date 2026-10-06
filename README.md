@@ -102,7 +102,7 @@ WhatSoup auto-detects the host platform via `src/fleet/platform.ts` (`linux-syst
 
 ```bash
 # 1. Clone
-git clone https://github.com/LucasQuiles/WhatSoup.git
+git clone git@github.com:LucasQuiles/WhatSoup.git
 cd WhatSoup
 
 # 2. Inspect the runtime prerequisites without changing the host
@@ -135,7 +135,7 @@ After readiness passes, setup installs the service templates, symlinks wrapper s
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/LucasQuiles/WhatSoup.git
+git clone git@github.com:LucasQuiles/WhatSoup.git
 cd WhatSoup
 cp .env.example .env
 # Edit .env — set API keys, WHATSOUP_INSTANCES, WHATSOUP_HEALTH_TOKEN
@@ -399,7 +399,8 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | Document | Description |
 |----------|-------------|
 | [Project Map](docs/project-map.md) | Current source, feature, documentation, and artifact ownership map |
-| [Current Program](docs/current-program.md) | Current generated-index synthesis and artifact-sweep status |
+| [Current Program](docs/current-program.md) | Active-work navigation, authoritative state and verification routes |
+| [Contributor Instructions](AGENTS.md) | Shared engineering commands, conventions and publication requirements |
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
 | [MCP Tool Reference](docs/tools.md) | All 169 tools across 21 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
