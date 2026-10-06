@@ -1,15 +1,15 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 169 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 169 documented tools, 166 are always registered at startup and 3 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 170 documented tools, 166 are always registered at startup and 4 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
 > - `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is a non-empty array, and
 > - `memory.pinecone.knowledgeSearch.enabled` is not explicitly `false`, and
 > - `enableKnowledgeSearch` has not been disabled at the registration call site, and
-> - the configured Pinecone API key environment variable is set, and
+> - `resolveApiKey` resolves a Pinecone key using the configured service/environment sources, and
 > - at least one allowed index has a declared knowledge profile and the Pinecone client initializes successfully.
 >
 > The initial gate lives in `src/mcp/register-all.ts` (the `Knowledge search — only when instance config specifies allowed indexes` block), and the credential/profile gate lives in `src/mcp/tools/knowledge.ts`.
@@ -20,7 +20,18 @@ Complete reference for all 169 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> The intent is that only the repair-issuing role (Q) exposes `emit_heal_result`; sandboxed repair targets (Loops) do not. Instances that fail any of these gates omit the corresponding tool at runtime; the documented total of 169 reflects the full tool surface available to a fully-configured non-sandboxed Q instance with Pinecone configured.
+> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and the
+> environment variable named by `memory.pinecone.apiKeyEnv` (default
+> `PINECONE_API_KEY`) is set. This registration gate is separate from the
+> credential resolver used by `knowledge_search`.
+>
+> **`restart_self`** is registered when the runtime is neither sandboxed nor in
+> `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
+> peers are not required for this tool. Calls also require an authenticated admin.
+>
+> The total of 170 describes the full declaration surface, including all four
+> conditional tools. An instance's available tools depend on registration gates,
+> session scope and authorization. Instance names do not confer these capabilities.
 
 ## Scope and Replay Policy Glossary
 
@@ -31,6 +42,8 @@ Complete reference for all 169 MCP tools exposed by WhatSoup. Tools are grouped 
 **Target Mode**
 - `injected` — `chatJid` is auto-injected from the session in chat-scoped sessions and must NOT be passed by the caller. In global sessions `chatJid` must be supplied explicitly.
 - `caller-supplied` — all parameters including any JID must be supplied by the caller.
+
+Conversation-bound sessions have an additional registry allowlist and target boundary even when their tier is `global`. For injected tools, the target comes from the binding and caller-supplied `chatJid`/supported `to` values are rejected. Unbound global tools with a declared `to` alias may accept that alias instead of `chatJid`; consult the individual schema. Optional caller parameters remain optional.
 
 **Replay Policy**
 - `read_only` — safe to replay on recovery; read-only operation.
@@ -79,9 +92,13 @@ Complete reference for all 169 MCP tools exposed by WhatSoup. Tools are grouped 
 | [audit.ts](#auditts) | 3 |
 | [substrate.ts](#substratets) | 23 |
 | [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **169** |
+| **Total** | **170** |
 
-> The total above (`169`) reflects the full canonical surface — `168` tools registered from the per-module `src/mcp/tools/*.ts` factories plus `1` (`emit_heal_result`) registered inline (declared in `src/runtimes/agent/runtime-tool-registrations.ts`, wired from `AgentRuntime.start()`). The inline registration is documented below under [runtime-tool-registrations.ts (inline)](#runtime-tool-registrationsts-inline); it is intentionally absent from the module breakdown because it does not live under `src/mcp/tools/`.
+> The total above (`170`) includes `168` declarations in the per-module
+> `src/mcp/tools/*.ts` factories and two runtime declarations:
+> [`emit_heal_result`](#emit_heal_result) and [`restart_self`](#restart_self).
+> `registerRuntimeInlineTools` wires both from `AgentRuntime.start()`; their
+> declaration files are outside the per-module breakdown above.
 
 ---
 
@@ -112,12 +129,13 @@ Send a text message. In chat-scoped sessions the current chat is injected. In gl
 | viewOnce | boolean | optional | Send as a view-once message that disappears after viewing |
 | link_preview | `"auto"` or `"off"` | optional | Control link preview generation. Defaults to `auto`; `off` suppresses previews. |
 | profile | string | optional | Per-instance send profile from `profiles`. Profiles can prepend `prefix`, append `tag`, and provide a default `linkPreview`. |
+| dryRun | boolean | optional | Resolve and authorize the destination without sending. Returns `{ sent: false, dryRun: true, resolved_chatJid }`; no outbound audit row or text-safety transformation is applied. Target/profile validation still applies. |
 
 **Profile order:** target resolution happens first, then the profile decorates text, then the message is sent. If both `link_preview` and the selected profile's `linkPreview` are set, the request-level `link_preview` value wins.
 
 **Target/profile errors:** `chatJid` + `to` returns `chatJid and to are mutually exclusive; provide exactly one`; neither target returns `request body must contain chatJid (raw JID) or to (alias)`; an unknown alias returns `alias not found: <alias>`; an unknown profile returns `unknown profile: <profile>`. MCP returns these as tool error envelopes. The health `/send` route maps the same request errors to HTTP 400.
 
-**Outbound audit:** `send_message` creates one metadata-only `outbound_sends` intent after target/profile preparation, returns its opaque audit receipt, and finalizes the row from typed transport evidence. A normal provider acknowledgement is `submitted`; it is not a recipient-delivery claim. Reply Guarantee Protocol fallbacks and health `/send` attempts use the same table. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows by receipt; destinations, message bodies, fingerprints, exact lengths, provider IDs, and error prose are not stored or returned.
+**Outbound audit:** Except for `dryRun`, `send_message` creates one metadata-only `outbound_sends` intent after target/profile preparation, returns its opaque audit receipt, and finalizes the row from typed transport evidence. A normal provider acknowledgement is `submitted`; it is not a recipient-delivery claim. Reply Guarantee Protocol fallbacks and health `/send` attempts use the same table. Use [`read_outbound_sends`](#read_outbound_sends) to inspect recent rows by receipt; destinations, message bodies, fingerprints, exact lengths, provider IDs, and error prose are not stored or returned.
 
 ---
 
@@ -136,6 +154,7 @@ Reply to a specific message by its ID.
 |------|------|----------|-------------|
 | messageId | string | required | ID of the message to quote/reply to |
 | text | string | required | Reply text |
+| link_preview | `"auto"` or `"off"` | optional | Defaults to automatic preview; `off` suppresses it. |
 
 ---
 
@@ -152,7 +171,7 @@ React to a message with an emoji. Pass empty string to remove reaction.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| messageId | string | required | ID of the message to react to |
+| messageId | string | optional | ID of the message to react to. When omitted, resolves the latest inbound message in this chat; the result includes `messageId` and `resolved: "last_inbound"`. Returns a tool error if no inbound message exists. |
 | emoji | string | required | Emoji character; empty string removes the reaction |
 
 ---
@@ -248,9 +267,12 @@ For multi-select polls, set `selectableCount` to the maximum number of options t
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| question | string | required | Poll question text |
-| options | array of string | required | Poll options (2–12 items) |
+| question | string | required | Trimmed, non-empty question, at most 900 characters. |
+| options | array of string | required | 2–12 trimmed, non-empty labels, each at most 95 characters; unique ignoring case. |
 | selectableCount | number | optional | Whole number from `1` through `options.length`; defaults to `1`. Use values above `1` for multi-select polls. |
+| resolution | enum | optional | `first-vote-wins` (default), `admin-only`, `admin-wins`, or `majority-after-timeout`. Used when awaiting a result. |
+| timeoutMs | integer | optional | 1,000–86,400,000 milliseconds; defaults to 3,600,000. |
+| awaitResult | boolean | optional | Defaults to false. If true, waits for vote resolution when registration is available. A poll can be sent successfully while awaiting fails: the result then includes `sent: true`, `awaitFailed: true` and an error description. |
 
 ---
 
@@ -359,7 +381,7 @@ Redacted fact-export queue evidence (#2567): summary counts by state, oldest-pen
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | state | enum | optional | Row filter: `pending` \| `leased` \| `retry_wait` \| `exported` \| `quarantined` \| `retry_exhausted` \| `legacy_unclassified`. The summary always covers the whole queue. |
-| limit | number | optional | Maximum rows to return. Defaults to `50`; clamps to `1..200`. |
+| limit | integer | optional | Maximum rows to return, `1..200`; out-of-range input is rejected by the MCP schema. The helper defaults to `50` and clamps defensively for other callers. |
 
 **Return shape**
 
@@ -432,7 +454,7 @@ Create a watch bead and poll trigger. Admin only. TTL defaults and caps come fro
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | title | string | optional | Bead title; defaults to `watch:<source>`. |
-| source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"event.message"` | required | Trigger source kind. `poll.shell` was REMOVED (no executor). `poll.url` is gated behind `advanced.enableUrlWatch` — creation is rejected when the flag is off (default). |
+| source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"event.message"` | required | Trigger source kind. `poll.shell` was REMOVED (no executor). `poll.url` requires `advanced.enableUrlWatch` (off by default). `poll.email` persists but its executor is not wired; `event.message` persists as a reserved scaffold with no next fire time and is never polled. |
 | criteria | object | required | Trigger criteria/spec payload. |
 | interval_seconds | number | optional | Poll interval. |
 | ttl_hours | number | optional | Requested TTL, clamped by policy. |
@@ -898,10 +920,13 @@ Download media from a received WhatsApp message. Returns the local file path. Us
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | message_id | string | required | The message ID to download media from |
+| quoted | boolean | optional | Download the quoted message's media instead of the enclosing message's media. |
 
 **Returns:** `file_path`, `content_type`, `file_size`, `cached` (boolean), and `mime_type` (for fresh downloads).
 
-**Error codes:** `not_found`, `unsupported_type`, `no_raw_message`, `media_expired`, `download_timeout`, `download_failed`.
+**Error codes:** `not_found`, `unsupported_type`, `no_raw_message`, `no_quoted_media`, `media_expired`, `download_timeout`, `download_failed`.
+
+**Admission:** `download_media` is not on the registry's conversation-safe global-tool allowlist, so conversation-bound sessions cannot call it. The handler also checks conversation access before using a stored message.
 
 ---
 
@@ -921,7 +946,7 @@ Transcribe an audio/voice message using the shared transcription chain. Download
 |------|------|----------|-------------|
 | message_id | string | required | The audio message ID to transcribe |
 
-**Returns:** `transcription`, `duration`, `cached` (boolean).
+**Returns:** cached results contain `transcription` and `cached: true`; fresh results also contain `duration` (number or null) and `cached: false`.
 
 **Error codes:** `not_found`, `not_audio`, `no_audio_data`, `media_expired`, `download_failed`, `transcription_failed`.
 
@@ -948,7 +973,7 @@ List messages in a WhatsApp conversation (paginated). Use `before_pk` for cursor
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | conversation_key | string | required | Canonical conversation key (auto-resolved in chat-scoped sessions) |
-| limit | number | optional | Page size; defaults to 50 |
+| limit | integer | optional | Page size, `1..1000`; defaults to `50`. |
 | before_pk | number | optional | Cursor: return messages with pk < this value |
 
 ---
@@ -1030,7 +1055,7 @@ Forward a WhatsApp message (by `message_id`) to another chat JID.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | message_id | string | required | ID of the stored message to forward |
-| to_jid | string | required | Recipient chat JID |
+| to_jid | string | required | Routable WhatsApp JID with domain `s.whatsapp.net`, `lid`, or `g.us`; local part must be non-empty and contain no whitespace, `@`, or `_at_`. |
 
 ---
 
@@ -1384,7 +1409,7 @@ Full-text search across all WhatsApp messages (global). Returns messages matchin
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | query | string | required | FTS5 query string |
-| limit | number | optional | Max results; defaults to 20 |
+| limit | integer | optional | Maximum results, `1..1000`; defaults to `20`. |
 
 ---
 
@@ -1404,7 +1429,7 @@ Full-text search within a specific WhatsApp conversation. Returns messages match
 |------|------|----------|-------------|
 | conversation_key | string | required | Conversation to search within (auto-resolved in chat-scoped sessions) |
 | query | string | required | FTS5 query string |
-| limit | number | optional | Max results; defaults to 20 |
+| limit | integer | optional | Maximum results, `1..1000`; defaults to `20`. |
 
 ---
 
@@ -1423,13 +1448,13 @@ Search contacts by display name or phone number (global). Returns matching conta
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | query | string | required | Substring to match against display_name, notify_name, canonical_phone, or JID |
-| limit | number | optional | Max results; defaults to 20 |
+| limit | integer | optional | Maximum results, `1..1000`; defaults to `20`. |
 
 ---
 
 ### search_messages_advanced
 
-Advanced message search with metadata filters and optional full-text search. When a text `query` is provided, uses FTS5 for ranking (joins `messages_fts`). When absent, filters on metadata only. Supports combining multiple filters.
+Advanced message search with metadata filters and optional full-text search. A text `query` uses FTS5 matching through `messages_fts`; without it, filtering uses metadata only. Both paths order results by message timestamp descending, not FTS rank. Supports combining multiple filters.
 
 | | |
 |---|---|
@@ -1448,7 +1473,7 @@ Advanced message search with metadata filters and optional full-text search. Whe
 | after | number | optional | Unix timestamp — messages after this time |
 | before | number | optional | Unix timestamp — messages before this time |
 | has_media | boolean | optional | Filter for messages with (`true`) or without (`false`) downloaded media |
-| limit | number | optional | Max results; defaults to 20 |
+| limit | integer | optional | Maximum results, `1..1000`; defaults to `20`. |
 
 **Returns:** `messages` array (standard message format via `rowToMessage`) and `total` count.
 
@@ -1963,7 +1988,7 @@ Get, revoke, or accept a WhatsApp community invite. `action=get` (default) retur
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| jid | string | required | Community JID — required for `get` and `revoke` actions; unused for `accept` |
+| jid | string | required | Required by the schema for every action, including `accept`; the accept handler does not use its value. |
 | action | `"get"` \| `"revoke"` \| `"accept"` | optional | `get` (default): fetch current invite code; `revoke`: rotate and return new code; `accept`: join via invite code |
 | code | string | optional | Invite code — required for `action=accept` |
 
@@ -2457,7 +2482,7 @@ Get the product catalog for a WhatsApp Business account.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | jid | string | optional | Business JID; omit to get own catalog |
-| limit | number | optional | Max products to return |
+| limit | number (int) | optional | Max products to return (1–100) |
 | cursor | string | optional | Pagination cursor from a previous response |
 
 ---
@@ -2476,7 +2501,7 @@ Get product collections for a WhatsApp Business account.
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | jid | string | optional | Business JID; omit to use own JID |
-| limit | number | optional | Max collections to return |
+| limit | number (int) | optional | Max collections to return (1–100) |
 
 ---
 
@@ -2616,9 +2641,9 @@ Manage WhatsApp Business labels. Actions: `add_label`, `add_chat_label`, `remove
 |------|------|----------|-------------|
 | action | `"add_label"` \| `"add_chat_label"` \| `"remove_chat_label"` \| `"add_message_label"` \| `"remove_message_label"` | required | Operation to perform |
 | label_id | string | optional | Label ID — required for `add_chat_label`, `remove_chat_label`, `add_message_label`, `remove_message_label` |
-| chat_jid | string | optional | Chat JID — required for all actions except standalone `add_label` |
+| chat_jid | string | optional in schema | Chat JID — the handler requires it for every action, including `add_label` |
 | message_id | string | optional | Message ID — required for `add_message_label` and `remove_message_label` |
-| labels | array | optional | Label definitions — required for `add_label` |
+| labels | array | optional | Non-empty label definitions — required for `add_label` |
 | labels[].id | string | required (if labels) | Label ID |
 | labels[].name | string | required (if labels) | Label name |
 | labels[].color | number | optional | Label color index |
@@ -3069,6 +3094,8 @@ No caller parameters (chatJid is injected).
 
 **WARNING: This will log out the WhatsApp session. You will need to re-authenticate.** Disconnects the current WhatsApp session and invalidates credentials.
 
+This sensitive tool requires authenticated instance-admin authorization. It records `bondEffect: requests_device_removal` at dispatch; successful logout requires a physical relink to recover the companion device.
+
 | | |
 |---|---|
 | **Scope** | `global` |
@@ -3086,6 +3113,8 @@ No caller parameters (chatJid is injected).
 ### resync_app_state
 
 Resync one or more WhatsApp app-state collections.
+
+Requires `advanced.enableResync: true` in instance configuration; the default is `false`.
 
 | | |
 |---|---|
@@ -3105,6 +3134,8 @@ Resync one or more WhatsApp app-state collections.
 ### relay_message
 
 Low-level: relay a raw protobuf message to a JID. Use only for advanced protocol operations.
+
+Requires `advanced.enableRelayMessage: true` (default `false`) and a connected WhatsApp socket. The recipient must end in `@s.whatsapp.net`, `@g.us`, or `@lid` and pass the outbound identity guard. The handler compares `JSON.stringify(proto).length` against `advanced.relayMaxPayloadBytes` (default 1,048,576); despite the setting's name, this check measures JavaScript string length, not encoded bytes.
 
 | | |
 |---|---|
@@ -3216,7 +3247,7 @@ Subscribe to presence updates for a WhatsApp contact or group JID. After subscri
 
 ### get_presence
 
-Get the cached presence status for a WhatsApp contact JID. Returns `null` if no presence has been received yet.
+Get the cached presence status for a WhatsApp contact JID. If no presence has been received, returns `{ jid, status: null, lastSeen: null, stale: null }`.
 
 | | |
 |---|---|
@@ -3254,9 +3285,11 @@ Synthesize text to speech via ElevenLabs and send as a WhatsApp voice note (PTT)
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
 | text | string | required | Text to synthesize and send as a voice note |
-| voice_id | string | optional | ElevenLabs voice ID (defaults to instance config) |
+| voice_id | string | optional | ElevenLabs voice ID; this MCP path defaults to `pNInz6obpgDQGcFmaJgB` (Adam), not `config.elevenlabs.defaultVoiceId` |
 
-**Requires:** `ELEVENLABS_API_KEY` in GNOME Keyring. Circuit breaker trips after 3 consecutive failures (60s recovery window).
+**Requires:** `ELEVENLABS_API_KEY` or the `elevenlabs` system-keyring credential, resolved by `lookupCredential`. Circuit breaker trips after 5 failed synthesis calls, each with one retry (60s recovery window); see [`elevenlabs.ts`](../src/runtimes/chat/providers/elevenlabs.ts). This MCP handler passes only an explicit `voice_id`; omitted voice/model/settings use provider defaults. The agent runtime's automatic voice-response path separately passes all four `config.elevenlabs` settings. Aligning the MCP path with those instance settings remains an implementation gap.
+
+The handler's target comes from `session.deliveryJid`; the global registry's required `chatJid` does not replace that session field. Client-output policy is checked before synthesis; rejected text returns the shared withheld-output result without synthesis or sending. Success returns `{ sent: true, duration, file_path }`. Handler error codes are `invalid_input`, `no_target`, `synthesis_failed`, `write_failed`, and `send_failed`.
 
 ---
 
@@ -3270,7 +3303,7 @@ Pinecone-backed semantic search across configured knowledge base indexes.
 
 Search company knowledge bases using natural language queries. Results are pre-formatted summaries from Pinecone vector search with reranking.
 
-> **Conditional registration.** This is the only tool that is not always registered. It is registered only when `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is non-empty, `memory.pinecone.knowledgeSearch.enabled` is not `false`, the call site has not disabled knowledge search, the configured Pinecone API key environment variable is set, at least one allowed index has a declared knowledge profile, and the Pinecone client initializes successfully. Instances without usable Pinecone configuration will not expose this tool. See `src/mcp/register-all.ts` and `src/mcp/tools/knowledge.ts` for the gates.
+> **Conditional registration.** Registered only when `memory.pinecone.allowedIndexes` (or legacy `pineconeAllowedIndexes`) is non-empty, `memory.pinecone.knowledgeSearch.enabled` is not `false`, the call site has not disabled knowledge search, `resolveApiKey` resolves a Pinecone key from the configured service/environment sources, at least one allowed index has a declared knowledge profile, and the Pinecone client initializes successfully. Instances without usable Pinecone configuration will not expose this tool. Other conditional tools are listed at the top of this reference. See `src/mcp/register-all.ts` and `src/mcp/tools/knowledge.ts` for the gates.
 
 | | |
 |---|---|
@@ -3325,6 +3358,10 @@ Persist a durable memory about the current conversation into the instance's conf
 
 **Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied.
 
+Although the wire-schema enum still includes `self_fact`, this handler rejects
+that value. Global self-identity memory must come from a trusted path; conversation
+input cannot use this tool to author it.
+
 ---
 
 ## retention.ts
@@ -3349,7 +3386,7 @@ Scan and delete expired media files (downloads, voice notes, cached thumbnails) 
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| max_age_hours | number | optional | Override temp file max age in hours for this run. Default: uses instance retention config. |
+| max_age_hours | positive number | optional | Override temp file max age in hours for this run. Default: uses instance retention config. |
 | dry_run | boolean | optional | If `true`, report what would be deleted without deleting. Default: `false`. |
 
 **Returns:** `{ dry_run, deleted, skipped, bytes_freed }`.
@@ -3382,7 +3419,7 @@ Post a WhatsApp Status update to all known contacts. Supports text statuses and 
 | filePath | string | optional | Absolute path to an image or video file (`.png`, `.jpg`, `.jpeg`, `.gif`, `.mp4`, `.mov`, `.webm`). Required if `text` is not provided. |
 | caption | string | optional | Caption to overlay on image/video statuses. Falls back to `text` if omitted. |
 | backgroundColor | string | optional | Background color for text statuses (hex string). |
-| font | number | optional | Font index for text statuses. |
+| font | number (int) | optional | Font index for text statuses. |
 
 **Returns:** `{ sent: true, statusType, recipientCount, messageId }`.
 
@@ -3423,7 +3460,7 @@ List stored WhatsApp Status messages grouped by sender. Optionally mark the retu
 
 ## scheduling.ts
 
-Scheduled message tools: create, list, and cancel messages queued for future delivery.
+Scheduled message tools: create, list, get, update, and cancel messages queued for future delivery.
 
 > Uses `scope: chat` — in chat-scoped sessions `chatJid` is auto-injected for `schedule_message`.
 
@@ -3456,6 +3493,9 @@ Schedule a text or media message to be sent later. In chat-scoped sessions the c
 | viewOnce | boolean | optional | Send image or video as view-once. |
 | isAnimated | boolean | optional | Mark a WebP sticker as animated. |
 | mediaType | `"image"` \| `"video"` \| `"audio"` \| `"document"` \| `"sticker"` | optional | Override the media type inferred from the file extension. |
+| recurrence | string | optional | 5-field cron expression for recurring messages. |
+| timezone | string | optional | Valid IANA timezone for recurrence evaluation; defaults to UTC. |
+| chatName | string | optional | Display name for the target chat. |
 
 **Supported file extensions:** `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.pdf`, `.doc`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.zip`, `.mp3`, `.ogg`, `.m4a`, `.wav`, `.mp4`, `.mov`, `.webm`.
 
@@ -3467,7 +3507,7 @@ Schedule a text or media message to be sent later. In chat-scoped sessions the c
 |------|-----------|
 | `Error` | `scheduled_at` is not a future timestamp |
 | `Error` | Neither `text` nor `filePath` provided |
-| `Error` | File not found, outside workspace root, too large (> 50 MB), or unsupported extension |
+| `Error` | File not found, outside workspace root, too large (> 25 MiB), or unsupported extension |
 | `Error` | The payload could never be sent, for example an empty media file (`Invalid scheduled payload: payload_undecodable shape=<class>`); no row is created |
 
 ---
@@ -3490,7 +3530,7 @@ List scheduled messages. Chat-scoped sessions only see messages for the current 
 | limit | number | optional | Max messages to return (1–200). Default: 100. |
 | status | `"pending"` \| `"processing"` \| `"failed"` \| `"cancelled"` \| `"sent"` | optional | Filter by status. Default: returns `pending` and `processing` only. |
 
-**Returns:** `{ count, messages[] }` where each message contains `id`, `chatJid`, `contentType`, `payload`, `scheduledAt`, `status`, `createdAt`, `sentAt`, `error`, `retryCount`.
+**Returns:** `{ count, messages[] }` where each message contains `id`, `chatJid`, `chatName`, `contentType`, `payload`, `scheduledAt`, `recurrence`, `timezone`, `nextRunAt`, `runCount`, `status`, `createdAt`, `sentAt`, `error`, `retryCount`. The SQL limit applies before conversation filtering, so a confined session may receive fewer than `limit` rows even when more matching rows exist.
 
 ---
 
@@ -3538,7 +3578,7 @@ Get details for a single scheduled message by ID.
 |------|------|----------|-------------|
 | id | number (int) | required | Scheduled message ID. |
 
-**Returns:** the scheduled message row as `{ id, chatJid, chatName, contentType, payload, scheduledAt, recurrence, nextRunAt, runCount, status, createdAt, sentAt, error, retryCount }`.
+**Returns:** the scheduled message row as `{ id, chatJid, chatName, contentType, payload, scheduledAt, recurrence, timezone, nextRunAt, runCount, status, createdAt, sentAt, error, retryCount }`.
 
 **Errors:**
 
@@ -3620,7 +3660,7 @@ Signal completion of a repair cycle. Only callable during an active repair sessi
 | commitSha | string | optional | Commit SHA of the landed fix when `result: 'fixed'`. Surfaced in the outbound `HEAL_COMPLETE` payload. |
 | diagnosis | string | required | Human-readable summary of what was done (for `fixed`) or why the cycle is being escalated (for `escalate`). |
 
-**Returns:** `{ sent: true, reportId, result }` once the corresponding control message has been queued.
+**Returns:** `{ sent: true, reportId, result }` after completing the handler. A control message is queued only when a `loops` peer is configured; `sent: true` alone is not proof of that send. Escalation also messages the first configured admin, when present. The handler attempts to mark `pending_heal_reports` resolved (best effort with warning on failure), then marks the report completed so a repeated result is rejected. The active report owner and timeout remain until the provider's terminal result.
 
 **Errors:**
 
@@ -3629,3 +3669,37 @@ Signal completion of a repair cycle. Only callable during an active repair sessi
 | `Error` | No active repair session (`activeControlReportId` is unset) |
 | `Error` | `reportId` does not match the runtime's active repair |
 | `Error` | Control queue not found |
+| `Error` | A repair result was already emitted for this `reportId` |
+
+## self-restart.ts (runtime)
+
+### restart_self
+
+Requests a graceful restart of this instance through its injected service manager.
+Invoke only for an explicit trusted operator request. `registerRuntimeInlineTools`
+registers the tool only when `sandbox` and `sandboxPerChat` are both disabled and
+the runtime supplies `restartSelf`. The declaration and input schema live in
+[`self-restart.ts`](../src/runtimes/agent/self-restart.ts).
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `unsafe` |
+| **Sensitive** | `true`; central authorization and the handler both require an authenticated instance admin |
+| **Core** | `false` |
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `reason` | string | yes | Non-empty reason for the restart. |
+| `code` | enum | no | `self_restart` (default), `redeploy`, or `config_reload`. |
+
+The handler attempts an acknowledgement to the originating chat, writes an
+intentional-restart marker, emits an alert and requests a service restart. An
+acknowledgement failure is logged and does not stop the restart. A repeated
+request in the same process returns `ok: false` / `restarting: false`.
+
+**Returns:** `{ ok, restarting, reason, code, text }` when the caller survives
+long enough to receive a result. A fast service-manager rejection throws and marks
+the intent rejected. A successful request is not proof of a healthy reboot;
+verify service health and continuity after startup.

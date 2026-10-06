@@ -1,6 +1,8 @@
 # Architecture and Verification Quality Implementation Plan
 
-**Status:** Pending implementation
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Implementation is mixed, not wholly pending. `scripts/guard-test-coverage-check.ts` already checks parsing, import/invocation and a failure assertion; its current reasons include `test-does-not-parse` and `test-does-not-import-or-invoke-guard`. `scripts/agent-decision-polls-guard.ts` already uses AST checks and executable hook probes. Treat Tasks 8–9 as verification against their acceptance criteria before further implementation. Other workstreams remain subject to their original requirements and proof gates; historical line numbers and proposed snippets are not live source.
+
+**Status:** Mixed implementation; see the source reconciliation above. Open acceptance criteria remain pending.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

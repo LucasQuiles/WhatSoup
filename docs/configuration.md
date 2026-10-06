@@ -5,7 +5,7 @@ infrastructure-level settings, and per-instance `config.json` files for runtime 
 In multi-instance mode, `config.json` values take precedence over environment variables.
 Both take precedence over built-in defaults.
 
-**Resolution order:** canonical `memory.*` in `config.json` > legacy flat aliases in `config.json` > environment variable > built-in default
+**Memory resolution order:** canonical `memory.*` in `config.json` > legacy flat aliases in `config.json` > environment variable > built-in default, except the [unresolved recency-setting runtime gap](explainers/byok-memory-config-migration.md#what-the-migrator-changes).
 
 ---
 
@@ -138,11 +138,11 @@ lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 |----------|------|---------|-------------|
 | `MAX_TOKENS` | integer | `750` | Maximum tokens in a single LLM response. Parsed by `intEnv()` — invalid values fall back to the default. |
 | `RATE_LIMIT_PER_HOUR` | integer | `45` | Maximum messages per user per hour (chat runtime). |
-| `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts:928`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
+| `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
 
 ### Agent session lifecycle (per_chat / shared agent runtimes)
 
-Bounds resident per-chat agent sessions so a long-running instance does not accumulate one `claude` subprocess (plus its MCP and browser children) per distinct chat until the host exhausts memory. A periodic sweep suspends idle sessions via the session's graceful `shutdown(true)` (resumable — the next message rehydrates via `--resume`); sessions mid-turn, awaiting a poll vote, mid-dispatch, or younger than the residency floor are never evicted. In-turn watchdogs (`TURN_WATCHDOG_MS` etc.) handle hangs; these knobs handle idle accumulation. All parsed as positive integers (invalid/≤0 → default).
+Bounds resident per-chat agent sessions so a long-running instance does not accumulate one `claude` subprocess (plus its MCP and browser children) per distinct chat until the host exhausts memory. A periodic sweep suspends idle sessions via the session's graceful `shutdown(true)` (resumable — the next message rehydrates via `--resume`); sessions mid-turn, awaiting a poll vote, mid-dispatch, or younger than the residency floor are never evicted. In-turn watchdogs in `src/runtimes/agent/session.ts`, with provider hard-timeout policy in `src/runtimes/agent/providers/watchdog-policy.ts`, handle hangs; these knobs handle idle accumulation. All parsed as positive integers (invalid/≤0 → default).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -190,7 +190,7 @@ fails visibly instead of clearing the evidence needed for diagnosis or retry.
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 | `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
-| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin, and an unknown group sender produces a contact-approval request only when they @mention the bot; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
+| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts`). `allowlisted_only` requires the group sender to be allowlisted or admin, and an unknown group sender produces a contact-approval request only when they @mention the bot; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
 | `WHATSOUP_INTERNAL_JIDS` | string (comma-separated JIDs) | (empty) | Group-JID allowlist read at outbound-safety-gate time (`src/core/outbound-message-safety.ts:363`); messages to a listed group are treated as internal operator coordination and skip the client-facing redaction scrub. Re-read per send (no restart needed). Admin 1:1 DM elevation is now handled separately by `internalPeerJids` in instance config — this var stays group-oriented. |
 
 #### Enabling enforce mode
@@ -207,21 +207,21 @@ structured logs from the `outbound-identity` child logger (`code`, `reason`,
 
 #### Guarded egresses and out-of-scope direct callers
 
-The guard runs at every free-recipient egress. The five `Messenger` methods
-(`ConnectionManager` `sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia` and
-`TwilioConnection.sendMessage`) are guarded inline. Two MCP tools that reach the
-raw socket directly — `forward_message` and `relay_message` — are **also** routed
-through the guard. `relay_message` is disabled by default
-(`advanced.enableRelayMessage`) and is guarded before it can be enabled.
+The guard is wired into `ConnectionManager`
+`sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia` and
+`TwilioConnection.sendMessage`. Raw-socket MCP paths also invoke it:
+`forward_message`, `relay_message`, `share_phone_number`,
+`request_phone_number`, `send_product_message`, and `send_group_invite`.
+The latter four accept a recipient or injected conversation target; they are
+not exempt merely because they exchange profile, catalog, or invite content.
+See `src/mcp/tools/advanced.ts`, `groups.ts`, and `chat-operations.ts`.
 
-The following direct callers are intentionally **out of scope**: they are
-fixed-destination, self-profile, or catalog sends with no free recipient, so the
-identity floor does not apply:
-
-- **status broadcast** — posts to the WhatsApp status JID, not a chosen recipient.
-- **send_product / send_product_message** — catalog content to a fixed target.
-- **share_phone_number / request_phone_number** — self-profile exchange, no message body to a cold target.
-- **group invite (send_group_invite)** — invite link delivery, fixed-destination.
+Normal module registration supplies the database-backed identity store. A null
+store causes `applyOutboundIdentityGuard` to return without blocking, and the
+default `log-only` mode records would-blocks rather than enforcing them.
+`relay_message` additionally requires `advanced.enableRelayMessage: true`.
+Status broadcasts target the fixed WhatsApp status JID rather than an arbitrary
+recipient; retain that distinction when auditing additional send paths.
 
 ### Storage Paths (single-instance / legacy mode only)
 
@@ -244,7 +244,7 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `PINECONE_INDEX` | string | `whatsapp-bot` | Pinecone index name for the memory pipeline. When this equals `whatsapp-bot` (the default), `pineconeSearchMode` defaults to `memory`; any other index defaults to `entity`. |
 | `PINECONE_PROJECT_ID` | string | unset | Optional project guard. When set, readiness and knowledge search verify that the resolved index host belongs to this project ID. |
 | `PINECONE_EXPECTED_HOST_SUFFIX` | string | unset | Optional stricter project guard, for example `-nf9hzvy.svc.aped-4627-b74a.pinecone.io`. |
-| `KNOWLEDGE_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Canonical local embed endpoint for vector knowledge profiles. Resolution order is `memory.pinecone.embedUrl` (per-instance) → `KNOWLEDGE_EMBED_URL` → `MW_MIND_EMBED_URL` (deprecated) → this default (`src/config.ts:691`). |
+| `KNOWLEDGE_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Canonical local embed endpoint for vector knowledge profiles. Resolution order is `memory.pinecone.embedUrl` (per-instance) → `KNOWLEDGE_EMBED_URL` → `MW_MIND_EMBED_URL` (deprecated) → this default (`src/config.ts`). |
 | `MW_MIND_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | **Deprecated alias** of `KNOWLEDGE_EMBED_URL` (expires 2026-10-26). Honored only when neither `memory.pinecone.embedUrl` nor `KNOWLEDGE_EMBED_URL` is set; using it emits a startup deprecation warning. Prefer `KNOWLEDGE_EMBED_URL`. |
 | `RECENCY_HALF_LIFE_DAYS` | integer | `14` | Positive day-count half-life for memory-search recency decay. Smaller values forget faster; zero/negative/malformed values fall back to `14`. |
 | `MAX_AGE_DAYS` | integer | `90` | Positive day-count cutoff for memory search; records older than this are filtered out. Zero/negative/malformed values fall back to `90`. |
@@ -474,6 +474,11 @@ into place during deployment.
 
 ### Top-Level Fields
 
+For the recency overrides `recencyHalfLifeDays` and `maxAgeDays`, read the
+[migration runtime gap](explainers/byok-memory-config-migration.md#what-the-migrator-changes)
+before removing legacy fields. The nested migration targets are not consumed by
+the runtime at the audited revision.
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `enabled` | boolean | no | `true` | Fleet opt-out switch. Set to `false` to keep the config on disk while taking the instance out of fleet rotation — discovery skips it, ops routes ignore its `healthPort`, and no polling or proxying occurs. Any other value (including absent) leaves the instance enabled. See note below.[^enabled] |
@@ -511,25 +516,25 @@ into place during deployment.
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
 | `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default), `twilio` (SMS), `signal`, or `imessage`. Transport-specific settings are required by their selected transport; see [`twilioConfig`](#twilioconfig), the [Signal transport runbook](runbooks/signal-transport.md), and the [iMessage transport runbook](runbooks/imessage-transport.md). |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
-| `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
+| `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts`). |
 | `rateLimitNoticeWindowMs` | integer (ms) | `3600000` (1 h) | Dedup window for the "chill, I need a minute" rate-limit notice — once a user is told they are rate-limited, the notice is suppressed for this long before it can be sent again (`src/runtimes/chat/runtime.ts:174`). Distinct from `rateLimitWindowMs` (the counting window). |
-| `recencyHalfLifeDays` | integer | `14` | Per-instance override of `RECENCY_HALF_LIFE_DAYS` — positive day-count half-life for memory-search recency decay (`src/config.ts:858`). Smaller values forget faster. Falls back to the `RECENCY_HALF_LIFE_DAYS` env var, then `14`; non-positive/non-integer values are ignored. |
-| `maxAgeDays` | integer | `90` | Per-instance override of `MAX_AGE_DAYS` — positive day-count cutoff for memory search; records older than this are filtered out (`src/config.ts:859`). Falls back to the `MAX_AGE_DAYS` env var, then `90`; non-positive/non-integer values are ignored. |
+| `recencyHalfLifeDays` | integer | `14` | Per-instance override of `RECENCY_HALF_LIFE_DAYS` — positive day-count half-life for memory-search recency decay (`src/config.ts`). Smaller values forget faster. Falls back to the `RECENCY_HALF_LIFE_DAYS` env var, then `14`; non-positive/non-integer values are ignored. |
+| `maxAgeDays` | integer | `90` | Per-instance override of `MAX_AGE_DAYS` — positive day-count cutoff for memory search; records older than this are filtered out (`src/config.ts`). Falls back to the `MAX_AGE_DAYS` env var, then `90`; non-positive/non-integer values are ignored. |
 | `toolUpdateRedirectJid` | string | `null` | Redirect target for the agent's batched tool-status updates. When set, the aggregated tool-status text is sent to this JID instead of the originating chat (`src/runtimes/agent/outbound-queue.ts:717`), keeping operational chatter out of the user-facing conversation. `null` (default) sends status inline as a typing indicator in the active chat. |
 | `startupNotifications` | boolean | `true` | Gates only the generic agent back-online aggregate. `false` does not suppress early boot evidence or named resume, restart-loop-guard, expired-session, or intentional-restart-receipt policies. Only consulted for `agent` instances and only when `toolUpdateMode` is not `minimal`; see [Startup-notification protocol](#startup-notification-protocol). |
 | `startupNotificationStabilitySeconds` | integer (s) | `600` | Stability window for the generic back-online aggregate. Every applicable agent boot is recorded in `<stateRoot>/startup-notify.json`; one aggregate covers every boot since the last generic settlement. The controller waits for this window and strict readiness, with a three-second floor even when configured as `0`. Accepted range is an integer `0`–`86400`; any other value falls back to `600`. See [Startup-notification protocol](#startup-notification-protocol). |
 | `proactiveResumeOnStartup` | boolean | `true` | For `per_chat` (non-sandboxed) agents, controls whether sessions that were active or gracefully suspended at last shutdown are proactively resumed instead of waiting for the next user message. Resume requires a complete, self-consistent persisted delivery identity. Missing, invalid, or scope-mismatched identities enter durable admission debt and are excluded from proactive, lazy, direct, shared, and single-session resume selection; eligible fresh inbound work resolves its own debt, while unscoped shared/single debt requires operator action. Runtime health remains degraded while this debt is unresolved. `false` disables proactive resume. Group conversations are never proactively resumed. |
 | `restartLoopGuard` | object | `{ enabled: true, maxRestarts: 3, windowMs: 300000 }` | Resume-replay circuit breaker for proactive resume (`src/runtimes/agent/restart-loop-guard.ts`). Each boot marks a crash marker in `<stateRoot>/restart-loop-guard.json`; a graceful shutdown clears it. When a boot follows an unclean exit with resumable checkpoints pending, the guard counts it; at `maxRestarts` crashy boots inside `windowMs`, proactive resume is suppressed for that boot (sessions still lazy-resume on their next message) and one admin notice is sent via the startup-notification channel. Defaults trip strictly before systemd's `StartLimitBurst=10`/`StartLimitIntervalSec=300` wedge, so the instance self-heals instead of the whole unit going dark. The guard fails open on any persistence error and never blocks inbound service. `enabled: false` disables the trip consult entirely. Guard state is surfaced in the runtime health snapshot (`restartLoopGuard` field). |
 | `textAggregateDelayMs` | integer (ms) | `2000` | Debounce window for aggregating an agent's streamed text chunks into one outbound WhatsApp message — the stream buffer flushes this long after the last chunk (`src/runtimes/agent/outbound-queue.ts:382`). Non-positive/non-integer values fall back to `2000`. |
-| `pollResolution` | object | `{ defaultStrategy: "first-vote-wins", defaultTimeoutMs: 3600000 }` | Group poll behaviour for `AskUserQuestion`-bridged decisions. `defaultStrategy` (`first-vote-wins`, `admin-only`, or `admin-wins`) is applied to group polls (`src/runtimes/agent/runtime.ts:3416`); DMs always use `first-vote-wins`. `defaultTimeoutMs` is the default pending-poll timeout, clamped to the poll-resolution min/max before use (`src/runtimes/agent/poll-resolution.ts:401`). |
-| `gui` | boolean | `false` | Per-instance flag indicating the instance exposes a GUI surface; surfaced through fleet discovery/line metadata. Read into `config.gui` (`src/config.ts:891`). |
-| `guiPort` | integer | `9099` | Port advertised for this instance's GUI. Read into `config.guiPort` (`src/config.ts:892`) and surfaced by fleet discovery (`src/fleet/discovery.ts:177`) and the `GET /api/lines/:name` route (`src/fleet/routes/lines.ts:559`). Falls back to the `WHATSOUP_GUI_PORT` env var, then the fleet-port default `9099`. |
+| `pollResolution` | object | `{ defaultStrategy: "first-vote-wins", defaultTimeoutMs: 3600000 }` | Group poll behaviour for `AskUserQuestion`-bridged decisions. The four strategies are `first-vote-wins`, `admin-only`, `admin-wins`, and `majority-after-timeout`; DMs use `first-vote-wins`. `defaultTimeoutMs` is clamped to 1,000–86,400,000 ms by `configuredDefaultPollTimeoutMs` in `src/runtimes/agent/poll-resolution.ts`. See [the decision-poll contract](runbooks/agent-decision-polls.md#trigger-matrix). |
+| `gui` | boolean | `false` | Per-instance flag indicating the instance exposes a GUI surface; surfaced through fleet discovery/line metadata. Read into `config.gui` (`src/config.ts`). |
+| `guiPort` | integer | `9099` | Port advertised for this instance's GUI. Read into `config.guiPort` (`src/config.ts`) and surfaced by fleet discovery (`src/fleet/discovery.ts:177`) and the `GET /api/lines/:name` route (`src/fleet/routes/lines.ts:559`). Falls back to the `WHATSOUP_GUI_PORT` env var, then the fleet-port default `9099`. |
 | `controlPeers` | object | `{}` | Map of trusted-peer name → phone number for the self-healing control plane. Messages from these phones carrying a control protocol are routed to `control_messages` instead of normal ingest (`src/core/ingest.ts:151`), and named peers (`q`, `loops`) gate degradation-monitor and runtime control behaviour (`src/main.ts:705`, `src/runtimes/agent/runtime.ts:2158`). Empty disables the control-peer paths. |
 | `pausedChats` | string[] | `[]` | JIDs (chat JID or conversation key, e.g. `120363...@g.us`) whose inbound messages are stored but never dispatched to the runtime (`src/core/ingest.ts:250`). Lets an operator toggle a chat off without losing messages. Admin commands from a paused chat still process. Non-string/blank entries are dropped. |
 | `pausedChatBypassPatterns` | string[] | `[]` | Case-insensitive regex source strings matched against inbound message content in a paused chat (`src/core/ingest.ts`). A match dispatches the message through the normal path as if the chat were not paused, so operator-directed traffic (e.g. escalations) survives pausing a busy group. Default empty keeps `pausedChats` behavior unchanged. Null content (media) never matches. Invalid regex entries are rejected by the instance-config validator; at runtime a bad entry is skipped with a single warn and never breaks ingest. |
 | `voiceReply` | string | `never` | Agent voice-reply policy (`src/runtimes/agent/runtime.ts:4196`): `never` (text only), `when_received` (reply with TTS audio only when the inbound message was a voice note), or `always` (always reply with audio). Requires ElevenLabs configuration to produce audio. |
 | `autoTyping` | string | `off` | Outbound typing-presence simulation while sending (`src/transport/connection.ts:754`): `off` (no presence), `composing` ("typing…"), or `recording` ("recording audio…"). The presence is set before the send and cleared (`paused`) after. |
-| `elevenlabs` | object | see fields | ElevenLabs TTS settings used when a voice reply is produced (`src/runtimes/agent/runtime.ts:7214`). Fields: `defaultVoiceId` (default `pNInz6obpgDQGcFmaJgB`), `defaultModel` (default `eleven_multilingual_v2`), `stability` (default `0.5`), `similarityBoost` (default `0.75`). |
+| `elevenlabs` | object | see fields | ElevenLabs TTS settings passed by the agent runtime's automatic voice-response path in `src/runtimes/agent/runtime.ts`. Fields: `defaultVoiceId` (default `pNInz6obpgDQGcFmaJgB`), `defaultModel` (default `eleven_multilingual_v2`), `stability` (default `0.5`), `similarityBoost` (default `0.75`). The MCP `send_voice_reply` path currently passes only its explicit `voice_id` and otherwise uses provider defaults; see [the tool contract](tools.md#send_voice_reply). |
 | `generateHighQualityLinkPreview` | boolean | `false` | When `true`, Baileys generates high-quality link-preview thumbnails for outbound messages (`src/transport/connection.ts:704`). Default `false` keeps the lighter-weight preview behaviour. |
 | `mediaRetention` | object | `{ tempHours: 72, cacheHours: 168, intervalHours: 6 }` | Media-sweep retention policy (`src/main.ts:679`). `tempHours` is the max age for temp media, `cacheHours` for cached media (default 7 days), and `intervalHours` is how often the retention timer runs. |
 | `ingest` | object | `{ maxConcurrent: 20, maxQueueDepth: 500 }` | Inbound ingest backpressure (`src/core/ingest.ts:60`). `maxConcurrent` caps simultaneous in-flight ingests; `maxQueueDepth` caps the waiting queue before new inbound work is shed. |
@@ -1131,6 +1136,8 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
 | `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
 | `memory.pinecone.searchMode` | string | auto | `memory` for chat/sender/self-fact filters, `entity` for entity index search. Defaults from the index name. |
+| `memory.pinecone.recencyHalfLifeDays` | number | migration target only | Recognized by validation and migration, but the runtime still reads top-level `recencyHalfLifeDays`, then `RECENCY_HALF_LIFE_DAYS`, then `14`. Retain an existing legacy override with `--keep-legacy`; see the linked recency gap. |
+| `memory.pinecone.maxAgeDays` | number | migration target only | Recognized by validation and migration, but the runtime still reads top-level `maxAgeDays`, then `MAX_AGE_DAYS`, then `90`. Retain an existing legacy override with `--keep-legacy`; see the linked recency gap. |
 | `memory.pinecone.allowedIndexes` | string[] | `[]` | Indexes exposed through the agent `knowledge_search` MCP tool. Empty disables that tool. |
 | `memory.pinecone.knowledgeSearch.enabled` | boolean | `true` | Global on/off switch for knowledge tool registration. Still requires `allowedIndexes`. |
 | `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions` | boolean | `false` | Allows `knowledge_search` in non-`sandboxPerChat` agent sessions. Default is fail-closed because global sessions can span callers. |
@@ -1224,7 +1231,7 @@ npm run migrate-memory-config -- --instance example-agent --write
 
 The migrator only reads and writes `config.json`. It does not touch `tokens.env`, `auth/`, `bot.db`, provider keychains, or WhatsApp session credentials, so a successful config migration does not require a QR re-auth.
 
-Field aliases migrated into `memory.*` include `pineconeIndex`, `pineconeAllowedIndexes`, `pineconeSearchMode`, `pineconeRerank`, `pineconeTopK`, `pineconeRerankTopN`, `pineconeNamespaces`, `pineconeFactsNamespace`, `pineconeChunksNamespace`, `pineconeSummariesNamespace`, `pineconeApiKeyEnv`, `pineconeProjectId`, `pineconeExpectedHostSuffix`, `conversationWindow`, `conversationWindowExtended`, `windowExtensionThresholdMs`, `retentionDays`, and enrichment tuning fields.
+The [migration field table](explainers/byok-memory-config-migration.md#what-the-migrator-changes) owns the complete alias mapping, including `recencyHalfLifeDays` and `maxAgeDays` and their unresolved runtime-consumption gap. Review that gap before removing legacy fields.
 
 ### `operationTracker`
 
@@ -1989,13 +1996,13 @@ orphaned by the interrupt.
 
 #### `agentOptions.sandbox`
 
-Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.sh`). Sandboxed agent workspaces also install `deploy/hooks/poll-interaction-lint.mjs` as a fail-open `PostToolUse` diagnostic hook for poll/AskUser friction; it writes session-local JSONL telemetry and does not block tool calls.
+The runtime writes a policy consumed by `deploy/hooks/agent-sandbox.sh`. For the instance workspace, `AgentRuntime` resolves configured `allowedPaths` to absolute paths; per-chat workspace provisioning instead confines that policy to the generated chat workspace. Sandboxed agent workspaces also install `deploy/hooks/poll-interaction-lint.mjs` as a fail-open `PostToolUse` diagnostic hook for poll/AskUser friction; it writes session-local JSONL telemetry and does not block tool calls.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowedPaths` | string[] | Filesystem paths the agent may read/write. |
-| `allowedTools` | string[] | Claude Code tools the agent may use. Empty array blocks all non-essential tools. |
-| `allowedMcpTools` | string[] | MCP tools permitted within the sandbox. |
+| `allowedPaths` | string[] | Roots checked for file-tool paths and, when enabled, Bash path checks. Per-chat provisioning writes `[workspacePath]` rather than copying this configured list. An empty list in the effective policy applies no path restriction. |
+| `allowedTools` | string[] | Allowlist for core tools after the separate MCP and Bash checks. An omitted or empty list applies no core-tool allowlist restriction; it does **not** deny all tools. |
+| `allowedMcpTools` | string[] | Non-empty allowlist accepting full MCP tool names or their tool-name suffixes. An omitted or empty list in the effective policy applies no MCP restriction. When this field is omitted, chat-scoped provisioning can supply the runtime's scoped tool list. |
 | `bash` | object | Bash execution policy: `{ "enabled": boolean, "pathRestricted": boolean }`. |
 | `allowedEgress` | string[] | Opt-in network egress allowlist for the filtering proxy (#1607 / QR-008). Entries are `host` (any port) or `host:port` (exact); host match is case-insensitive; no wildcards. **Absent or omitted ⇒ no proxy is started and no egress restriction applies (today's behaviour, unchanged).** A present array (including `[]`) starts a loopback filtering proxy for this instance's agent subprocesses — see **Agent egress allowlist** below. |
 
@@ -2199,7 +2206,7 @@ To give the repo a real say without rewriting existing on-disk settings, two mec
 **1. `REQUIRED_DENY` floor (`src/core/settings-template.ts`).**
 A repo-owned readonly list of deny patterns that `mergeSettingsJson` always unions into the resulting deny array, and that `isValidPermissionsSettings` requires as a subset. Custom `settingsJson` payloads cannot remove a floor entry.
 
-The floor is populated with full permission strings for the mutation-capable connector tools approved in the #411 inventory. It covers Gmail and Google Calendar mutation tools exposed through the `mcp__claude_ai_*` namespace, Microsoft 365 mail, calendar, file, list, contact, group, task, chat, channel, Dataverse, Booking, OneNote, meeting, workbook, attachment, dynamic execution, batch, and subscription mutation tools. The read-only `mcp__google-workspace__*` namespace is intentionally not denied.
+The floor is populated with full permission strings for the mutation-capable connector tools approved in the #411 inventory and subsequent additions. It covers Gmail and Google Calendar mutation tools and Google Drive `create_file` / `copy_file` exposed through the `mcp__claude_ai_*` namespace, Microsoft 365 mail, calendar, file, list, contact, group, task, chat, channel, Dataverse, Booking, OneNote, meeting, workbook, attachment, dynamic execution, batch, and subscription mutation tools. The read-only `mcp__google-workspace__*` namespace is intentionally not denied.
 
 The source of truth is `REQUIRED_DENY`; this document describes categories only. New defaults, merged settings, and repaired settings receive the floor. Existing `.claude/settings.json` files that are not rewritten keep their current contents.
 
@@ -2307,8 +2314,9 @@ The loader enforces these constraints before the process starts:
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
-- `transport`, when present, must be `baileys` or `twilio`.
+- `transport`, when present, must be `baileys`, `twilio`, `signal`, or `imessage`; omission defaults to `baileys`.
 - `twilioConfig` is required when `transport` is `twilio` and rejected otherwise; its field rules (SID shapes, sender XOR, inbound mode, webhook block, voice coherence, numeric ranges) are listed under [`twilioConfig`](#twilioconfig).
+- `signalConfig` and `imessageConfig` are likewise required for their matching transports and rejected for other transports; see the [Signal](runbooks/signal-transport.md) and [iMessage](runbooks/imessage-transport.md) runbooks.
 
 ---
 
@@ -2346,6 +2354,9 @@ The loader creates all directories on startup with mode `0700`.
 
 A sandboxed agent available to an allowlist of friends. Each chat gets its own Claude Code
 workspace under `~/workspace/sandbox-agent`. Bash is permitted but path-restricted.
+The empty `allowedTools` list below adds no core-tool restriction. Per-chat
+provisioning sets the effective allowed path to that chat's workspace; Bash path
+checks remain best-effort as described above.
 
 ```json
 {

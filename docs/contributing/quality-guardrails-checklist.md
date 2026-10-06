@@ -4,7 +4,7 @@
 
 ## Layer 1 — CI gates (must pass for merge)
 
-> **This table is a curated subset.** As of 2026-07-21 the live `quality.yml` runs ~40+ steps: the full `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. Blocking authority for the 36-rule architectural-fitness registry (`scripts/lib/fitness/registry.ts`) lives in the **guard ring** (`verify:push:branch`), not the ESLint ring, which is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
+> **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
 The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR and
 every push to `main`, with two explicit required-context jobs:

@@ -32,7 +32,7 @@ runtime), plus the runtime assistant-text egress gate. Layer-level status is
 noted inline below.
 
 
-> **Rate-limit layering note:** two independent throttles are keyed per chat — the in-process watchdog limits its typing-only liveness nudge to 1 per 15 min (in-memory, reset on restart), while the hook-tier drain limits actual fallback messages to 3 per hour (persisted per instance in `fallback-rate-limit.json`). Tune them together without treating the runtime nudge as delivery or terminal proof.
+> **Rate-limit wiring:** the in-process watchdog limits its typing-only liveness nudge to 1 per 15 min per chat (in-memory, reset on restart). `rgp-state.mjs` defines `checkAndRecordRateLimit` for a persisted 3-per-hour fallback limit, but the Stop hook and drain do not call it in source revision `59cc562bc` (2026-10-06). That fallback limit is not currently enforced by these callers. Wiring and validating it remains an implementation gap; the runtime nudge is never delivery or terminal proof.
 
 ## Current Surface
 
@@ -58,8 +58,9 @@ RGP is decomposed into independently reviewable layers, all now shipped:
 2. Hook-tier state and MCP client helpers (shipped).
    A per-instance queue (`deploy/hooks/lib/rgp-state.mjs`) and a small UNIX-socket
    JSON-RPC client (`deploy/hooks/lib/whatsoup-mcp-call.mjs`). Those helpers stay
-   under `deploy/hooks/lib/` because hook processes cannot import runtime
-   TypeScript modules.
+   under `deploy/hooks/lib/` to keep hook state separate from runtime business
+   logic. `rgp-state.mjs` imports shared filesystem and process-lock utilities
+   from `src/lib/`.
 
 3. Stop hook (shipped).
    The Stop hook (`deploy/hooks/stop-ensure-reply.mjs`) uses transcript
@@ -143,8 +144,9 @@ lines are ignored so a partial transcript does not crash the Stop hook.
 RGP implementation must keep these boundaries intact:
 
 - Hook helpers may read transcript files and hook-local state only.
-- Hook helpers call runtime behavior through the MCP socket; they do not import
-  `src/` modules or open SQLite directly.
+- Hook helpers call runtime behavior through the MCP socket. Shared `src/lib/`
+  filesystem and process-lock utilities are imported by `rgp-state.mjs`; hooks
+  must not import runtime business logic or open the instance SQLite database.
 - The scheduled durability observer is not a hook helper. It may read the
   canonical per-instance database, but only through normal SQLite read-only mode;
   it must not use `immutable=1`, copy a live main file without its WAL/SHM

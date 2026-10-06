@@ -1,5 +1,7 @@
 # Select — native select policy, custom popover anatomy, one dismiss contract
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Resolves P2-1 (3 native selects ×3 stylings, 4 custom popovers with duplicated dismiss code).

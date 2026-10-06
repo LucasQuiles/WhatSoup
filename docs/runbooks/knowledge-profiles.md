@@ -125,13 +125,16 @@ Each entry in `knowledgeProfiles` must satisfy:
 | `rerankModel` | string | yes | e.g. `"pinecone-rerank-v0"`; `""` when `rerank: false` |
 | `topK` | number | yes | Initial candidate fetch count |
 | `rerankTopN` | number | yes | Results returned after rerank |
+| `minScore` | number | no | Finite score floor applied to ranked hits; an all-low-score result returns zero hits. |
 | `description` | string | yes | Human-readable label shown in tool listing |
 | `embedUrl` | string | no | Override embed endpoint; required for `vector` mode if non-standard |
 
-An index name in `allowedIndexes` that references a built-in profile name
-(`oneplatform-search`, `oneplatform-entities`, `mw-mind`) is rejected by the
-config validator for non-mw bots — those profiles target the mw project's
-host. Declare a custom profile with the same index name to override.
+An index name in `allowedIndexes` that references an undeclared built-in profile
+(`oneplatform-search`, `oneplatform-entities`, `mw-mind`) produces a deprecation
+warning in `src/config.ts` (expiry metadata: 2026-10-26); this check does not
+reject the configuration and is not limited to non-mw instances. Declare a
+custom profile with the same index name to bind retrieval to the intended
+project. Project routing guards still apply independently.
 
 ---
 

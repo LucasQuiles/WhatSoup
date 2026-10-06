@@ -1,5 +1,7 @@
 # Drawer / Inspector — contextual drill-in with the squeeze-layout production rule
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Resolves **G2 open item 1** (mandatory): the v2 mockup overlays the compressed table's right

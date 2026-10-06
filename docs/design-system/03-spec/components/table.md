@@ -1,5 +1,7 @@
 # Table — the first-class data surface: one component, two densities
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Resolves P2-10 (4 padding schemes, 2 log viewers) and carries the C-graft density model. Locked

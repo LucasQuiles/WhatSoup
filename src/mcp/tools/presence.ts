@@ -55,7 +55,7 @@ function makeGetPresence(presenceCache: PresenceCache): ToolDeclaration {
   return {
     name: 'get_presence',
     description:
-      'Get the cached presence status for a WhatsApp contact JID (global). Returns null if no presence has been received yet.',
+      'Get the cached presence status for a WhatsApp contact JID (global). Returns jid with null status, lastSeen, and stale fields if no presence has been received yet.',
     schema: GetPresenceSchema,
     scope: 'global',
     targetMode: 'caller-supplied',

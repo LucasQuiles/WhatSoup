@@ -1,17 +1,37 @@
-# SOUP Design System v3 — Design Program
+# SOUP Design System — Navigation and Program History
+
+For the running console, start with [the console guide](../console-guide.md),
+[`App.tsx`](../../console/src/App.tsx), the component implementations, and
+[`styles/`](../../console/src/styles/). Source and behavioral checks establish
+what is implemented; visual approval records establish design decisions.
+
+[The v3.5 program](v35/README.md) reopens v3's direction and retains v3 work as
+reusable inventory. Its [cutover plan](v35/20-t5-cutover-plan.md) records G1/G2
+approval and the implementation acceptance criteria. Neither the presence of a
+page nor a dated PASS row proves that every planned interaction has shipped.
+
+The v3 program below is the **June 2026 historical record**. Preserve its locked
+decisions, requirements and evidence, but do not use its dependency versions,
+component counts, route inventory or token values as a current source census.
+V3 specifications remain reference; reconcile disagreements with v3.5 decisions
+and implementation explicitly. Original section anchors are retained below.
+
+## v3 program scope (historical)
 
 Design-phase program: inventory, research, mockups, specs, enforcement plan, and cutover plan
 for rebranding the WhatSoup console UI to **SOUP** and formalizing Design System v3
 (dual dark/light themes, primitive → semantic → component token architecture).
 
-**Scope: docs/mockups/specs only. No production implementation.** Implementation requires a
-separate plan after G3 sign-off. Plan SSOT lives in the operator's local plans directory
+**Original design-phase scope: docs/mockups/specs only.** G3 subsequently authorized
+implementation, as recorded below. The original plan lived in the operator's local plans directory
 (`let-s-review-the-current-woolly-turtle.md`).
 
 - Branch: `design/soup-rebrand` (dedicated worktree `soup-design`), base `0ff1fe0a` (origin/main, 2026-06-11)
 - Predecessor: Design System v2 — `docs/console-mockups/` (April 2026). This program supersedes it.
 
 ## Status
+
+These rows describe the v3 design-phase closeout, not the current v3.5 build state.
 
 | Task | Description | Status |
 |---|---|---|

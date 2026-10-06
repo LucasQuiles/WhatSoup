@@ -187,8 +187,8 @@ is permanently rejected because the bot was removed from the target chat (`forbi
 `MAX_CONSECUTIVE_FORBIDDEN_REJECTS` (default 3) consecutive `notify_forbidden_target` rejects the
 poller RETIRES the trigger (`status='paused'`, `next_fire_at=NULL`) and signals the producer
 out-of-band: a `trigger_paused` bead_event `{ reason:'forbidden_target' }` plus a
-`trigger_forbidden_target` BOT ERRORS alert. See `docs/runbooks/personal-line-watch.md` §"defensive
-policies". Transient send failures (timeout, connection closed, session `401`) are unaffected and
+`trigger_forbidden_target` BOT ERRORS alert. See
+[Safety behaviours](personal-line-watch.md#safety-behaviours). Transient send failures (timeout, connection closed, session `401`) are unaffected and
 keep retrying as before.
 
 ### Tests
@@ -204,13 +204,19 @@ present on baseline with these changes stashed. `npm run typecheck` clean.
 
 ## Deploy constraint
 
-This checkout (`~/LAB/WhatSoup`, remote `origin` = LucasQuiles/WhatSoup on GitHub) is what the live
-fleet runs (native `--experimental-strip-types`, no build step). Deploying = restarting the fleet =
-restarting the operator-agent (this bot). Per `~/CLAUDE.md`, platform code changes and fleet
-restarts require Lucas Quiles's explicit approval. This document and any code live on branch
-`fix/agent-job-dispatch-durability`; nothing is merged or deployed without his go-ahead.
+The original investigation used branch `fix/agent-job-dispatch-durability`; the
+header records the later source merge. That merge is separate from deployment.
+Confirm the checkout or release path actually used by each service through the
+[deployment runbook](release-deployment.md) before planning activation. Fleet
+restarts are operational changes requiring the owner's explicit approval; this
+historical incident record is not a restart authorization.
 
 ## Current invoicing status (so nothing is lost in the meantime)
+
+**Historical snapshot, 2026-06-29.** The observations and manual workaround below
+belong to the original incident. They do not establish today's invoice backlog or
+whether the source fix has been deployed. Current invoicing state belongs in its
+private operational record.
 
 Last real invoicing: **Invoice 19758** on 2026-06-25 (Manhattanville Apex additional work — units
 1H, 20B, 19E, 18B; total $9,475.00). Since then only empty cron ticks (Jun 26/27/28/29); no new

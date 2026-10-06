@@ -1,7 +1,7 @@
 # target bot Tokenomics Pilot - Design Specification
 
 Date: 2026-05-19
-Status: Locked design, ready for implementation
+Status: Locked broader design; v1 is implemented in part, v2+ remains backlog. See the implementation boundary below.
 Scope: target bot pilot, designed for fleet portability
 Primary host: target host / target user / target bot
 
@@ -16,6 +16,12 @@ The design uses target bot as the first deployment target, but all artifacts are
 ### Architecture-Level Validation Philosophy
 
 `IMPLEMENTATION_PLAN.md` is the thin v1 pilot plan. This `SPEC.md` remains the broader design archive for v2+ components. When the two documents differ, the implementation plan governs v1 behavior; this spec explains the larger architecture and backlog.
+
+Source reconciliation at `59cc562bc` (2026-10-06): executable hook/watchdog contracts
+are owned by `hooks/hooks.json`, `hooks/browser-loop-interrupt.py` and
+`scripts/token-budget-watchdog`. The plan's original task code is historical
+where it differs. Requirements for unimplemented v2+ components remain in this
+spec; their presence is not a claim those files or controls ship today.
 
 Tokenomics is evaluated as a control system, not as a prose guideline. Each shipped control has three required surfaces:
 
@@ -164,6 +170,10 @@ launchd starts `tokenomics/scripts/token-budget-watchdog` every 60 seconds. The 
 npm run token-window -- --instance <INSTANCE_PATH> --window 5h --json
 ```
 
+That is the public helper entrypoint. The v1 watchdog resolves Node using the
+repository pin or `TOKENOMICS_NODE_BIN` and invokes `scripts/token-window.ts`
+directly with the same instance/window/JSON arguments and a 30-second timeout.
+
 The helper returns:
 
 ```json
@@ -209,7 +219,10 @@ else:
 
 If `agentOptions.tokenomics.manualCeiling` is set, it overrides the adaptive threshold. Learned runtime state stays in `threshold.json`; bot config holds operator intent, not learned values.
 
-### Cycle Record
+### Cycle Record (v2+ target)
+
+The v1 watchdog appends `{ts, window_sum, ceiling, pct}`. The richer record and
+forecasting below remain design requirements, not the current v1 record shape.
 
 Every successful cycle appends to `history.jsonl`:
 
@@ -320,7 +333,7 @@ The browser guard is a strategy interrupt, not a permanent block. It fires on 8 
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENOMICS_BOT=\"${TOKENOMICS_BOT:-target bot}\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/browser-loop-interrupt.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/browser-loop-interrupt.py\"",
             "timeout": 5
           }
         ]
@@ -367,7 +380,7 @@ Deny path:
 }
 ```
 
-The reason should also tell the agent to inspect auto-captured `.md`, `.html`, screenshot, and console artifacts before requesting another extraction when those files exist.
+The reason should also tell the agent to inspect auto-captured `.md`, `.html`, screenshot, and console artifacts before requesting another extraction when those files exist. This is an open requirement: the current hook asks for a summary and a different strategy, but does not include artifact-inspection guidance. The JSON above illustrates intended recovery wording rather than quoting the current message. `TOKENOMICS_BOT` must come from the launch environment; the shipped hook command supplies no default, and the hook fails open when it is absent.
 
 Failure policy:
 
@@ -416,13 +429,20 @@ F.2 - Prompt composition:
 - Thread top-level `config.systemPrompt` through `main.ts -> AgentRuntime -> SessionManager`.
 - Compose:
   1. generated WhatsApp transport prelude
-  2. top-level `systemPrompt`
-  3. `agentOptions.instructionsPath` contents
+  2. optional runtime handoff block, when its callback is wired
+  3. optional degraded-capability block
+  4. optional natural-language routing block
+  5. top-level `systemPrompt`
+  6. `agentOptions.instructionsPath` contents
+
+  The optional runtime blocks are later additions to the original three-source
+  design. `SessionManager.buildSystemPrompt()` in `src/runtimes/agent/session.ts`
+  owns the implemented ordering (source checked 2026-10-06).
 - Use exact-line dedup only.
 - Do not normalize, rewrite, or section-dedup instructions.
 - Preserve empty lines.
 - `instructionsPath` policy:
-  - When unset: no source 3, no warning, session boots normally.
+  - When unset: omit the configured instruction-file contents without a warning; session boots normally.
   - When explicitly configured and missing or unreadable: refuse session start (fail-closed). An operator-referenced instruction file is load-bearing; silently dropping it is a quality regression. See Blocking Clarification B5.
 - Empty composed prompt refuses session start.
 - Native `CLAUDE.md` discovery is left to agent runtime.
@@ -619,7 +639,7 @@ Operator can override via `agentOptions.tokenomics.playwrightProfile`. Source: P
 ### G. State Layout
 
 ```text
-~/Library/Application Support/<bot>-tokenomics/
+~/Library/Application Support/<bot>-tokenomics/  # v2+ target layout
 +-- threshold.json
 +-- history.jsonl
 +-- last-generated-alert.json
@@ -636,6 +656,11 @@ Operator can override via `agentOptions.tokenomics.playwrightProfile`. Source: P
 |   +-- <sha256[:16]>.txt
 +-- STALL.flag
 ```
+
+The v1 watchdog uses `history.jsonl` and `last-alert.json`; the browser hook
+uses `browser-loop/`. Both support `TOKENOMICS_STATE_DIR`; otherwise macOS uses
+Application Support and other platforms use `XDG_STATE_HOME` (falling back to
+`~/.local/state`). Keep the additional files above as v2+ requirements.
 
 The state directory survives reinstall and rollback unless the installer created it and it is empty.
 
@@ -965,7 +990,7 @@ Setting `ENABLE_TOOL_SEARCH=auto:5` in a launchd plist only helps if WhatSoup fo
 Required (added to F as F.8):
 
 - F.8 - Env allowlist extension:
-  - Locate WhatSoup's child-env construction (typically `src/core/child-env.ts` or equivalent; verify against current source at implementation time).
+  - Locate WhatSoup's child-env construction in `src/runtimes/agent/providers/child-env.ts`; verify against current source at implementation time.
   - Extend the allowlist to include: `ENABLE_TOOL_SEARCH`, `BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`, `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, and `TOKENOMICS_BOT`.
   - Each var is passed through only when set in the parent env; missing values do not synthesize defaults.
   - Default behavior unchanged for hosts that do not set these vars.

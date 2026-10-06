@@ -1,8 +1,16 @@
-# SOUP Design System v3.5 — Program Skeleton
+# SOUP Design System v3.5 — Program and Requirements
 
-**Status:** T0 complete; **G0 approved**; all three interview rounds locked (41 decisions,
-`04-decision-register.md`). **T1 in progress**: WS2.6 instance-model investigation → product
-model + vocabulary lock, WS1 research digest. T3 is wall-to-wall (R3-16): 10 mockup tracks.
+**Recorded gate state:** T0 complete and **G0 approved** in the seed record;
+G1 locked and **G2 approved 2026-07-22** in
+[the cutover plan](20-t5-cutover-plan.md#gate-state). The interview decisions remain
+in `04-decision-register.md`. T3 is wall-to-wall (R3-16): 10 mockup tracks.
+The phase table below is the program's sequence and acceptance structure, not a
+live implementation tracker. Read [the console guide](../../console-guide.md) for
+current routes and backend limitations, and verify source and delivery evidence
+before closing any cutover bead.
+The [G3 record](G3-SIGNOFF.md) preserves later integration tests, visual evidence,
+conditional acceptance, and residuals. Its historical pass counts are not a
+fresh verification of this checkout.
 **Mandate date:** 2026-07-21 (owner: Lucas).
 **Home:** branch `design/soup-v35` on `LucasQuiles/WhatSoup`, path
 `docs/design-system/v35/` (A1).
@@ -34,13 +42,13 @@ creative bar: clean, calm, soothing-subtle, dense-operator when needed.
 | Phase | Name | Content | Exit |
 |---|---|---|---|
 | T0 | Seed | This package: landscape inventory, gap audit, mapping, subtasks | ✅ done |
-| **G0** | Kickoff | Owner approves skeleton, picks first direction batch | pending |
+| **G0** | Kickoff | Owner approves skeleton, picks first direction batch | approved (seed record) |
 | T1 | Product model | Channel / Line / Agent / Assignment entities + vocabulary lock | model spec |
 | T2 | Research digest | Hatching (done → fold in), onboarding journey references, multi-channel console references | digest |
 | T3 | Directions | 2–3 visual directions for: Fleet (multi-channel), Hatch flow, Agents surface, Landing | mockups |
-| **G1** | Direction lock | Owner picks direction/blend | locked mockup |
+| **G1** | Direction lock | Owner picks direction/blend | locked; see cutover gate record |
 | T4 | Spec v3.5 | Token deltas, channel glyphography, agent identity layer, ceremony motion budget, onboarding spec, marketing spec | spec set |
-| **G2** | Spec lock | Owner locks spec | authority doc |
+| **G2** | Spec lock | Owner locks spec | approved 2026-07-22; see cutover gate record |
 | T5 | Enforcement + cutover | Lint plan delta, v3 debt carryover plan, cutover sequencing | plans |
 | **G3** | Implementation readiness | Sign-off; slices begin | readiness packet |
 

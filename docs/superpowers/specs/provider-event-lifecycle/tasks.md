@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Implementation Tasks
 
-**Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`, which historically understands migrations through 46; migrations 47 through 52 are already consumed, and the current branch advances the schema to migration 53 for outbound-quarantine disposition and retirement receipts. No provider-lifecycle implementation or deployment is authorized
+**Status:** Active specification — source reconciliation at `59cc562bc` (2026-10-06), schema 66. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** current canonical schema is migration 66; bounded terminal recovery/canonical `not_sent` is forward migration 67; the provider-event lifecycle ledger is migration 68. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), migration 62 by the durable deferred_turn_obligations lane (#3295 S1), migration 63 by the capability-obligation attestation-evidence columns (#3221), migration 64 by the continuity-candidate consumer stamp, migration 65 by the tool-call caller-attribution columns (#3421), and migration 66 by the append-only continuity-gap closure ledger (#3638), so the still-unpublished forward allocations move to migrations 67 and 68.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-66 base, terminal recovery is planned as 67 and the provider lifecycle ledger as 68; recheck before implementation.
 
 > **REQUIRED COMPANION SKILL:** superpowers:spec-driven-development
 
@@ -20,6 +20,10 @@
 
 ## Sequencing & Dependencies
 
+The historical lineage in item 2 and completed checkboxes records the original
+rollout. The shared allocation above governs new work; none of the old source
+SHAs, migration-53 publication steps, or fleet claims is a fresh deployment receipt.
+
 1. Land this approved structured spec as a documentation-only pull request so its
    requirement/check identifiers exist on canonical `main` before implementation.
 2. Schema-lineage canonicalization is merged through PR #1768
@@ -28,7 +32,7 @@
    migrations 41/42 and adding forward repair migration 43. Canonical base
    `482b707d716aee5641db25d40c2a954caee5d78f` additionally contains migrations
    44 through 46. Migrations 47 through 52 are already consumed by later durable
-   work; the current branch advances the schema to migration 53 with outbound-
+   work; the prior branch advanced the schema to migration 53 with outbound-
    quarantine disposition and retirement receipts.
 3. Treat #1744/#1749 as required terminal-recovery prerequisites and #1750 as an open
    taxonomy issue. Merged PR #1748 (`625b17f0`) proves a governor
@@ -42,14 +46,14 @@
    terminal closure. The prerequisite also gives blocked/exhausted/expired/orphaned/terminal-
    non-echoed recovery owners a five-minute fail-closed abandonment path that closes
    the inbound, preserves evidence/replay veto, and releases scope without asserting
-   delivery truth. Implement that prerequisite as forward migration 54 on canonical
-   schema 53; do not alter historical migrations or merge the stale
+   delivery truth. Implement that prerequisite as forward migration 67 on canonical
+   schema 66; do not alter historical migrations or merge the stale
    DGX recovery branch wholesale.
-4. Exact-head verify and publish the current branch's migration-53 quarantine
-   disposition and retirement-receipt schema, fleet-verify compatibility, then land
-   terminal recovery migration 54. Rebase the implementation branch onto both
-   resulting canonical merges; migration 55 is then available to the provider-event
-   ledger.
+4. Migration 53 is now part of the schema-66 source baseline. Preserve its
+   exact-head review and fleet-compatibility obligations; source presence does
+   not prove live deployment. Reconcile that evidence, then land the terminal-
+   recovery prerequisite and rebase before implementing the lifecycle ledger
+   under the shared allocation above.
 5. Add and commit each task's owned failing checks immediately before that production
    slice.
 6. Implement the ledger before runtime admission, then add quarantine/replay policy
@@ -101,16 +105,16 @@
 - **Fleet drift:** Installed artifacts are compared to repository manifests. No raw
   reinstall, state replacement, or uncoordinated restart is permitted.
 - **Rollback:** After activation the runtime is roll-forward-only; before activation,
-  rollback permits the immutable migration-55 marker but requires no activation row,
+  rollback permits the immutable migration-68 marker but requires no activation row,
   zero rows across the other nine lifecycle tables, zero nonterminal inbound rows,
   zero active agent sessions, and runtime proof of no provider request/process. A downgrade
-  otherwise requires full v55 write compatibility or drain/read-only rejection of
+  otherwise requires full v68 write compatibility or drain/read-only rejection of
   every new provider turn. Pre-activation rollout requires a quiesced SQLite backup,
   integrity check, scratch restore proof, and checkpoint. Unresolved evidence and
   migration history are never manually/in-place deleted or rewritten. The sole
   exception is the verified preactivation whole-database restore, which returns both
-  data and schema history to the exact schema-54 backup fingerprint and removes the source
-  v55 row as part of that atomic state replacement. Unknown fleet fingerprints stop rollout.
+  data and schema history to the exact schema-67 backup fingerprint and removes the source
+  v68 row as part of that atomic state replacement. Unknown fleet fingerprints stop rollout.
 
 ## Validation Strategy
 
@@ -132,8 +136,8 @@
 
 ## Tasks
 
-#### TSK-010: Land migration-54 canonical terminal no-send/recovery-owner prerequisites
-- **Status:** pending — migrations through 53 are allocated to durable work; canonical `not_sent`, bounded terminal closure, and migration 54 remain absent
+#### TSK-010: Land migration-67 canonical terminal no-send/recovery-owner prerequisites
+- **Status:** pending — canonical source is at schema 66; the specified canonical `not_sent` and bounded terminal-closure prerequisite remains open, with forward allocation 67
 - **Traces-from:** REQ-006, CON-002, CON-004, DES-006
 - **Owns-AC:** REQ-006.AC-06, CON-002.AC-06, CON-004.AC-07
 - **Checks:** CHK-075, CHK-076, CHK-078
@@ -159,13 +163,13 @@
     `failed_permanent` is not accepted as no-transmission truth and cannot cause a
     repeating durable-failure incident.
   - [ ] Reserve `outbound_ops.status='not_sent'` for typed pre-send rejection and keep
-    the exact op ID/status in terminal `deliveryKind=not_sent`. Migration 54 permits
+    the exact op ID/status in terminal `deliveryKind=not_sent`. Migration 67 permits
     terminal aggregate no-send only for positively proved single-op answers; 1:N stays
-    partial/uncertain until migration 55's immutable sealed expected set proves every
+    partial/uncertain until migration 68's immutable sealed expected set proves every
     required sibling not-sent. Cover missing/late-created siblings and crash-between-
     chunks; any echoed/submitted/maybe-sent/pending/sending/quarantined/generic-failure
     sibling dominates. Prove no-send never clears provider/tool/lifecycle replay veto.
-  - [ ] Base this work on canonical schema 53 and allocate forward migration 54 for
+  - [ ] Base this work on canonical schema 66 and allocate forward migration 67 for
     canonical outbound/terminal `not_sent`, immutable transfer
     deadlines, and append-only `turn_recovery_terminal_closures` witnesses. The unique
     witness retains exact terminal/job/inbound/op identity, nullable job for valid
@@ -189,7 +193,7 @@
     Completed witnesses
     make claim/renew/promote/reassign/requeue/worker queries ineligible while remaining
     durable history/retention roots.
-  - [ ] Add a declared closure-eligibility index and migration-54 storage accounting.
+  - [ ] Add a declared closure-eligibility index and migration-67 storage accounting.
     Prune oldest first only after the bound inbound, terminal, optional job, selected
     op, and every late-echo/conflict row are terminal, no live owner/reference remains,
     and the canonical cutoff passes; delete the witness last in the guarded aggregate.
@@ -211,8 +215,8 @@
   - [ ] Rebase lifecycle implementation onto those commits. TSK-006 consumes that
     contract but must not redefine terminal outbound truth inside this PR.
 
-#### TSK-001: Verify canonical schema lineage through migration 53
-- **Status:** in progress — the historical canonical base `482b707d716aee5641db25d40c2a954caee5d78f` understands migrations through 46 and contains the schema-ceiling guard plus CHK-071; migration 47 receipt chronology and migrations 48 through 52 are already consumed, while this branch's migration 53 requires exact-head review, publication, and fleet verification
+#### TSK-001: Verify canonical schema lineage and deployment evidence
+- **Status:** in progress — audited source is at schema 66. The historical base `482b707d716aee5641db25d40c2a954caee5d78f` understood migrations through 46 and included the schema-ceiling guard plus CHK-071. Migration 53 is now in source; verify its exact-head review/publication evidence and current fleet compatibility rather than treating it as an unpublished change.
 - **Traces-from:** CON-005, DES-008, DES-009
 - **Owns-AC:** CON-005.AC-01, CON-005.AC-05
 - **Checks:** CHK-001, CHK-071
@@ -235,7 +239,9 @@
     migrations remain immutable.
   - [x] Add the marked `CHK-071` conformance case under
     `tests/spec-conformance/provider-event-lifecycle/` so real SQLite future-schema
-    rejection and the 53/54/55 allocation remain executable against this spec.
+    rejection and the then-current allocation were checked. Rerun that
+    conformance case against the shared 66/67/68 allocation before accepting
+    the forward implementation; a historical checkbox is not current proof.
   - [x] Add or relocate the remaining marked `CHK-001` plan-stage conformance case
     without duplicating existing migration unit coverage.
   - [x] Capture the marked `CHK-071` stale-documentation RED against the existing
@@ -244,7 +250,7 @@
     drain/read-only gate. When database max migration exceeds the binary maximum,
     preserve backup/inspection but reject every provider turn.
   - [ ] After exact-head review and publication, deploy and verify the guard fleet-wide
-    before any schema-54/55 writer; record and prohibit older pre-guard binary
+    before any schema-67/68 writer; record and prohibit older pre-guard binary
     fingerprints as rollback targets.
   - [x] Preserve recovery retention roots required by the installed tables; remove
     incident-specific labels and regenerate current-main indexes/manifests only.
@@ -255,12 +261,13 @@
   - [ ] Run the focused migration/recovery suite, `npm run typecheck:all`,
     `npm run guard:test-integrity`, and `npm run verify:release` through
     `scripts/run-with-pinned-npm.sh`.
-  - [ ] Obtain exact-head local and independent review for migration 53, publish it
-    as a focused pull request, wait for required checks, merge it, and record its
-    canonical merge hash separately from PR #1768.
-  - [ ] After TSK-010 also merges migration 54, rebase this lifecycle branch onto both
-    exact prerequisite merge commits before TSK-002; do not begin fixtures on the
-    intermediate migration-53-only base.
+  - [ ] Verify and record the existing exact-head local/independent review,
+    publication, required checks and canonical merge hash for migration 53,
+    separately from PR #1768. Source inclusion does not prove those acceptance
+    receipts; retain missing evidence as open without republishing the migration.
+  - [ ] After TSK-010 merges migration 67, rebase this lifecycle branch onto
+    current canonical source and the exact terminal-recovery prerequisite merge
+    before TSK-002; do not begin fixtures on a base missing either prerequisite.
 
 #### TSK-002: Add the sanitized fixture corpus and conformance scaffolding
 - **Status:** pending
@@ -309,7 +316,7 @@
     add and commit their own marked failing `CHK` cases immediately before the
     corresponding production slice, so no task inherits an ownerless broad RED suite.
 
-#### TSK-003: Add migration 55 and the durable receipt ledger
+#### TSK-003: Add migration 68 and the durable receipt ledger
 - **Status:** pending
 - **Traces-from:** REQ-002, CON-001, CON-002, CON-004, CON-007, DES-002, DES-003
 - **Owns-AC:** REQ-002.AC-03, REQ-002.AC-13, CON-001.AC-01, CON-001.AC-03, CON-002.AC-01, CON-002.AC-02, CON-002.AC-03, CON-002.AC-07, CON-004.AC-01, CON-004.AC-02, CON-004.AC-03, CON-004.AC-04, CON-004.AC-05, CON-004.AC-06, CON-007.AC-01, CON-007.AC-03
@@ -318,7 +325,7 @@
   - [ ] Add only TSK-003's marked migration/durability `CHK` cases from the fixture
     scaffold, run them to capture the expected RED assertions, and commit that RED
     slice before changing production schema or durability code.
-  - [ ] Add `src/core/database-migration-55.ts` and register it in
+  - [ ] Add `src/core/database-migration-68.ts` and register it in
     `src/core/database.ts`; create an initially empty
     `provider_lifecycle_activation` plus content-free `provider_request_attempts`,
     immutable `provider_attempt_handoffs`, append-only `provider_request_segments`
@@ -755,7 +762,7 @@
     Explicitly ignore legacy/zero-byte DB decoys and perform no raw setup or overwrite.
   - [ ] Extend the existing deploy preflight/cutover path and managed compatibility
     metadata with a fail-closed schema-ceiling gate. Before starting a selected
-    runtime artifact, it proves that artifact is v55 write-compatible; otherwise it
+    runtime artifact, it proves that artifact is v68 write-compatible; otherwise it
     keeps the instance drained/read-only and rejects all new provider turns. The
     rollback selector refuses an older unproved artifact even if it can read the
     database. Cover the empty-on-migration activation table, its atomic first-attempt
@@ -768,16 +775,16 @@
     schema fingerprinting, roll-forward activation, quiesced application-consistent
     SQLite backup, source/backup integrity, scratch restore/fingerprint proof,
     pre-activation checkpoint/rollback (the sole state-replacement exception is the
-    exact verified schema-54 (pre-v55) backup while still quiesced with no activation marker,
+    exact verified schema-67 (pre-v68) backup while still quiesced with no activation marker,
     zero rows in the other nine named lifecycle tables, zero nonterminal inbound rows,
     zero active agent sessions, and runtime proof of no provider request/process;
-    the migration-55 marker may exist in the source; the whole-database restore returns
-    schema history to the exact schema-54 backup fingerprint and is the sole allowed removal
+    the migration-68 marker may exist in the source; the whole-database restore returns
+    schema history to the exact schema-67 backup fingerprint and is the sole allowed removal
     of that row; never manually/in-place delete/rewrite migration history; verify restore
     integrity/fingerprint before restart; never restore after activation),
     capacity/backpressure/storage governors, provider version/build gating, staged targeted update, and the
     prohibition on raw reinstall/state replacement/uncoordinated restart. Require a
-    downgrade to be fully v55 write-compatible or drain/read-only with all new
+    downgrade to be fully v68 write-compatible or drain/read-only with all new
     provider turns rejected.
   - [ ] Reverify merged PR #1747 (`5c52f571`, merge `77cd0718`) for active, pending,
     rejected, retry-owned, published-context, and non-settling teardown evidence. File

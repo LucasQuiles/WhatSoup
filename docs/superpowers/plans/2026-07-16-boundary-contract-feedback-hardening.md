@@ -2,8 +2,20 @@
 
 **Status:** Pending
 
-**Planning state:** Specification approved and direct in-scope falsifiers recorded; implementation
-has not started.
+**Planning state:** Specification approved and direct in-scope falsifiers recorded.
+The BCF-00 validator prerequisite is present; remaining task acceptance must be
+reconciled against source rather than inferred from the original checkboxes.
+
+**Source reconciliation (2026-10-06, `59cc562bc`):** the validator entry points
+already exist. `scripts/lib/verification/boundary-run-manifest.ts` re-exports the
+implementation under `boundary-run/`; the CLI is split under `boundary-run-cli/`.
+`tests/scripts/verify-boundary-run.test.ts` loads cases from
+`tests/scripts/verify-boundary-run/`. The BCF00 marker registry is in
+`scripts/lib/verification/boundary-run/contracts.ts`, with test markers in those
+case modules. Original single-file create/marker instructions below must be
+reconciled with this layout. Keep the normative contracts, negative and neighbor
+cases, preserved-run notes and unresolved semantic-hardening requirements intact.
+Use current package pins when executing; the toolchain block is the plan's baseline.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use

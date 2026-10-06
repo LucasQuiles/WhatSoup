@@ -1,5 +1,7 @@
 # Phase 4 M2: WebSocket Console Integration
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The `RouteDeps.wsServer` snippets below are superseded: `src/fleet/index.ts` exposes `RouteDeps.realtime` through `FleetRealtimePublisher`. Current authentication and polling behavior are owned by `docs/console-guide.md` and `console/src/hooks/use-fleet.ts`; line queries retain a bounded polling backstop while connected. Preserve the invalidation, typing-payload and fallback requirements; do not reintroduce the historical root-token URL examples or obsolete dependency field.
+
 > **HISTORICAL — superseded by PR #310 (WS ticket + rotatable tokens) and PR #287 (HTTP API token auth). For current operator commands see `docs/runbook.md` and `docs/runbooks/`. Examples below referencing `~/.config/whatsoup/fleet-token` or `/ws?token=...` reflect the pre-rotation design and should not be used as guidance.**
 
 > **READ-ONLY HISTORICAL REFERENCE:** This plan predates the WS ticket + rotatable token design. Do not execute the steps below against the current codebase; they target the deprecated single-token auth model. Preserved for historical context only.

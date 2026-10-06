@@ -264,11 +264,11 @@ git commit -m "runbook: F.7 correct stream-json stalled-recovery language"
 
 **Contract:**
 
-`composeWithExactLineDedup(sources: string[]): string` is pure: exact-line dedup only; empty/whitespace-only lines preserved verbatim. The session builds its system prompt by composing three sources in order: WhatSoup transport prelude, top-level `config.systemPrompt`, contents of `agentOptions.instructionsPath`.
+`composeWithExactLineDedup(sources: string[]): string` is pure: exact-line dedup only; empty/whitespace-only lines preserved verbatim. The original three-source contract has since gained optional handoff, degraded-capability, and routing blocks. [SPEC.md, F.2](SPEC.md#f-whatsoup-patch-set) records the source-checked order; `SessionManager.buildSystemPrompt()` is the implementation owner.
 
 **B5 policy:**
 
-- `instructionsPath` **unset** -> source 3 omitted silently. Session boots.
+- `instructionsPath` **unset** -> instruction-file contents omitted silently. Session boots.
 - `instructionsPath` **set AND missing/unreadable** -> session refuses to start (throw with the path and the underlying error).
 - `instructionsPath` **set AND readable** -> contents loaded.
 
@@ -282,7 +282,7 @@ Native agent runtime `CLAUDE.md` discovery is left intact (no manual append).
 - [ ] Write `session-prompt-composition.test.ts` covering: configSystemPrompt threads end-to-end; identity line dedup across transport + configSystemPrompt; B5 fail-closed when `instructionsPath` is set but unreadable; unset `instructionsPath` boots silently.
 - [ ] Add a prompt-size regression assertion for the no-extra-instructions case: measure byte length of the composed prompt string returned by `buildSystemPrompt()` or the pure composer, not tokenizer-counted tokens. Composing only the transport prelude should not grow materially beyond today's baseline. Do not add tokenomics prose to the runtime prompt.
 - [ ] Run tests (expect FAIL).
-- [ ] Thread `configSystemPrompt?: string` through `main.ts -> AgentRuntime -> SessionManager`. Extract a testable `buildSystemPrompt(): string` on `SessionManager` that composes the three sources and throws on configured-but-unreadable `instructionsPath` or empty composed prompt.
+- [ ] Thread `configSystemPrompt?: string` through `main.ts -> AgentRuntime -> SessionManager`. Extract a testable `buildSystemPrompt(): string` on `SessionManager` that composes the transport prelude, optional runtime blocks, configured prompt and `instructionsPath`, and throws on configured-but-unreadable `instructionsPath` or empty composed prompt.
 - [ ] Run tests (expect PASS).
 - [ ] Commit:
 
@@ -333,7 +333,7 @@ and exits 0. Below threshold: exits 0 with no stdout.
         "hooks": [
           {
             "type": "command",
-            "command": "TOKENOMICS_BOT=\"${TOKENOMICS_BOT:-target bot}\" python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/browser-loop-interrupt.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/browser-loop-interrupt.py\"",
             "timeout": 5
           }
         ]
@@ -347,7 +347,7 @@ The PostToolUse output-cap entry (M) is **not** registered in v1.
 
 **Steps:**
 
-- [ ] Write `test_hooks_schema.py` asserting: top-level `hooks` key present; PreToolUse matcher matches `mcp__superpowers-chrome_chrome__use_browser`; command string contains `TOKENOMICS_BOT` and `${CLAUDE_PLUGIN_ROOT}`; timeout is 5.
+- [ ] Verify `test_hooks_schema.py`: top-level `hooks` key present; PreToolUse matcher matches `mcp__superpowers-chrome_chrome__use_browser`; command contains `${CLAUDE_PLUGIN_ROOT}` and does not inject a `TOKENOMICS_BOT` default; timeout is 5. Supply `TOKENOMICS_BOT` through the launch environment; the hook fails open when it is absent.
 - [ ] Write `test_browser_loop_interrupt.py` covering: first call allows; seventh call allows; eighth in 60s denies with correct JSON shape; calls older than 60s do not count (seed state with stale ts); two sessions are isolated; path-like session_id is sanitized; empty stdin fails open; missing `TOKENOMICS_BOT` fails open.
 - [ ] Assert the deny reason is recovery-oriented, not merely punitive: it should tell the model to stop repeating the same browser strategy and summarize/choose a different approach. This reduces user-visible task failure from blocked browser calls.
 - [ ] Run both test files (expect FAIL).

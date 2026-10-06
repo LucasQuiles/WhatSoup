@@ -379,7 +379,16 @@ compatibility and add ordered `reasons`.
 
 - [x] **Step 5: Implement explicit latch clearing**
 
-Replace unconditional set-only behavior with:
+**Historical implementation sketch, superseded by the September 25 rework:**
+the following proof functions were not merged. The current implementation in
+`src/core/health.ts` puts the three debt reasons in
+`DIRECTLY_REPROBED_STATUS_REASONS`, so they do not arm the latch. The checked
+step records the original execution plan; it does not attest this sketch.
+Retain current-evidence and unreadable-evidence coverage from Step 2, applying
+it to the directly reprobed behavior described in the
+[design spec](../specs/2026-08-14-operational-health-recovery-debt-design.md#acceptance-criteria).
+
+Original sketch:
 
 ```ts
 const proof = evaluateRecoveryProof(currentEvidence);
