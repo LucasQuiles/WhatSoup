@@ -141,7 +141,7 @@ export const fitnessRules = [
       },
       anyMayImportRoot: true,
     },
-    source: ['docs:duplicates-report.md', 'architecture:CLAUDE.md'],
+    source: ['docs:duplicates-report.md', 'architecture:docs/project-map.md#source-roots'],
   },
   {
     id: 'invariant.seq-locality',
