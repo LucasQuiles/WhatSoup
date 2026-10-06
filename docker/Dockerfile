@@ -18,6 +18,8 @@ RUN cd console && npm ci
 # ── Stage 2: Build console frontend ───────────────────────────────────────────
 FROM deps AS console-build
 
+# Console imports canonical shared modules from the application source.
+COPY src/ /app/src/
 WORKDIR /app/console
 COPY console/ .
 # 'npm run build' runs 'tsc -b && vite build' — matches the CI Console
