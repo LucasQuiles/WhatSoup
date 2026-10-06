@@ -1,5 +1,7 @@
 # Button — the single button primitive: six variants, three sizes, one reveal-label mechanic
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Resolves P1-1 (11 legacy variants, 24 raw buttons, 4 reveal-label copies). Locked source: v2.html

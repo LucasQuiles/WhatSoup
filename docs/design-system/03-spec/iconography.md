@@ -1,5 +1,7 @@
 # Iconography — Lucide-only, sized ramp, weight semantics, label law
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Sources: research-digest (iconography section: Lucide retained, stroke 1.75 continuity), seed-3

@@ -197,7 +197,7 @@ collect-loop-lag-samples collect --instance <name> --base-url <url>
   --token-file <absolute-path> --output <absolute-path>
   [--once | --interval-ms <1000..300000> --duration-ms <positive>]
   [--limit <1..160>] [--max-output-bytes <positive>]
-  [--format json]
+  --format json
 ```
 
 Rules:

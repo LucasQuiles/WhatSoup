@@ -1,5 +1,7 @@
 # Twilio SMS Transport (Stage 1) — Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** This is the Stage 1 design record. The later voice/webhook plan and `docs/runbooks/twilio-transport.md` own current operation; config now accepts poll and webhook modes and supports voice settings. The transport registry also includes Signal and iMessage. Poll-only restrictions and two-ID assertions below are historical, not current validation rules. Preserve keyring handling, SID deduplication, the port boundary and exhaustive-switch requirements.
+
 **Status:** completed — shipped as PR #731 (squash `5001c5c4`, merged 2026-06-11).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

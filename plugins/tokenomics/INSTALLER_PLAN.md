@@ -15,9 +15,9 @@
 **Test command:** `bash scripts/run-tokenomics-pytests.sh` runs the full tokenomics pytest suite. Individual file form: `python3 -m pytest -q plugins/tokenomics/tests/test_<name>.py`.
 
 **Specs this plan implements:**
-- `plugins/tokenomics/SPEC.md` §K "Installer Hook-Surface Audit" (line 728), "Installer Search-Toolchain Baseline" (738), "Installer Doctor Gate" (748), "Plugin Manifest" (752).
-- `plugins/tokenomics/SPEC.md` §5.4 "Installer Tests" (866) — Task 2 covers cases 5–9 (rollback semantics).
-- `plugins/tokenomics/IMPLEMENTATION_PLAN.md` line 20 "K full installer with hook-surface audit + rollback checkpoint framework" (v1 deferral; this plan is the deferred work).
+- SPEC §K: [hook-surface audit](SPEC.md#installer-hook-surface-audit), [search toolchain](SPEC.md#installer-search-toolchain-baseline), [doctor gate](SPEC.md#installer-doctor-gate), and [plugin manifest](SPEC.md#plugin-manifest).
+- [Installer tests](SPEC.md#54-installer-tests) — Task 2 covers cases 5–9 (rollback semantics).
+- `IMPLEMENTATION_PLAN.md` v1 deferral: "K full installer with hook-surface audit + rollback checkpoint framework"; this plan is that deferred work.
 
 ---
 
@@ -39,7 +39,7 @@ Module boundary rule: `rollback.py` knows nothing about hooks, plists, or the do
 
 ---
 
-## Task list (Tasks 1–2 in this revision)
+## Task list (Tasks 1–4 recorded shipped; later tasks remain proposals)
 
 ### Task 1: Install config schema + validator — **DONE (`b3dac2d6`)**
 
@@ -297,6 +297,12 @@ Expected: collection error / 10 errors with `ModuleNotFoundError: No module name
 
 - [x] **Step 2.3: Implement the minimal module**
 
+The embedded listing records the initial implementation. Current
+`scripts/lib/rollback.py` also exposes malformed journal records through
+`SkippedLine` entries in `RollbackJournal.skipped_lines`; keep that operator
+visibility when changing the loader. Do not replace the current module with
+this earlier listing.
+
 Create `plugins/tokenomics/scripts/lib/rollback.py` with the following content:
 
 ```python
@@ -538,8 +544,8 @@ Deferred to follow-up (reviewer "Minor"): public accessor for `_entries` (curren
 
 Reserved for follow-on revisions of this plan. Sketch only — these are **not** to be executed under this revision:
 
-- **Task 5:** Doctor gate wrapper — invoke `tokenomics-doctor --json` and bail on any `fail` record (exit 80). Depends on Doctor (L) existing or being mocked. SPEC.md §748, §5.4 cases 17–18.
-- **Task 6:** Plugin-manifest emitter — write `tokenomics/.claude-plugin/plugin.json` with `name`, `version`, `sourceRepo`. SPEC.md §752, §5.4 case 19.
+- **Task 5:** Doctor gate wrapper — invoke `tokenomics-doctor --json` and bail on any `fail` record (exit 80). Depends on Doctor (L) existing or being mocked. [Doctor gate](SPEC.md#installer-doctor-gate), §5.4 cases 17–18.
+- **Task 6:** Plugin-manifest emitter — write `tokenomics/.claude-plugin/plugin.json` with `name`, `version`, `sourceRepo`. [Plugin manifest](SPEC.md#plugin-manifest), §5.4 case 19.
 - **Task 7:** Plist materialization via existing `render-plist.py` + `launchctl load`, recorded as `record_command(["launchctl", "unload", ...])` on the journal. SPEC.md §5.4 cases 1, 9, 14.
 - **Task 8:** Top-level orchestrator `scripts/install.py` — composes Tasks 1–7 in order, instantiates one `RollbackJournal`, calls `journal.undo()` on any exception, translates `HookConflict`/`InstallConfigError`/missing-toolchain/doctor-fail into the named exit codes (`EX_HOOK_CONFLICT=78`, `EX_INSTRUCTION_BLOAT=77`, `EX_MISSING_TOOLCHAIN=79`, `EX_DOCTOR_RED_FINDING=80`), and on success leaves the journal in place for forensic inspection.
 

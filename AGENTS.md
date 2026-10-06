@@ -53,7 +53,7 @@ and [the quality checklist](docs/contributing/quality-guardrails-checklist.md).
 - [Current program](docs/current-program.md): active-work navigation, not a copied backlog.
 - [Project map](docs/project-map.md): source and documentation ownership.
 - [Configuration](docs/configuration.md): environment, schemas and plugin scoping.
-- [Tool reference](docs/tools.md): generated MCP API, including conditional registrations.
+- [Tool reference](docs/tools.md): MCP API maintained against declarations; `guard:doc-drift` checks counts and module coverage, while schemas and behavior require source review.
 - [Runbooks](docs/runbook.md): operations, recovery and troubleshooting.
 - [Durability](docs/durability.md): durable state and recovery contracts.
 - [Security handoffs](docs/security-handoffs/): open application-lifecycle security work.

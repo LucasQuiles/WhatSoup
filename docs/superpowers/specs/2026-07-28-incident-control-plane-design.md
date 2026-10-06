@@ -126,6 +126,12 @@ Credentials are: scoped to one producer; rotatable with a bounded overlap window
 
 Dispositions: `incident_opened`, `incident_updated`, `incident_resolved`, `heartbeat_recorded`, `notice_recorded`, `stored_no_state_change`, `stored_stale_observation`, `stored_quarantined_observation`, `stored_evaluation_faulted`.
 
+Implementation scope at `59cc562bc`: `stored_evaluation_faulted` is the
+forward-declared Plan 3 disposition, also excluded by the ingestion-surface
+spec. It is absent from the currently shipped `DISPOSITIONS` vocabulary and
+SQLite CHECK in `src/fleet/incidents/schema.ts`. Preserve the requirement, but
+do not emit the value until its migration and evaluator path are implemented.
+
 Exact replay returns `200` with the originally stored receipt body and `Idempotent-Replay: true`; the evaluator and scheduler are not rerun. A response lost after commit is safe: resend identical bytes, obtain the original receipt.
 
 ### Error contract

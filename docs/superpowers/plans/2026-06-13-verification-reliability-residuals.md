@@ -1,5 +1,7 @@
 # Verification Reliability Residuals Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Task 3 snippets are superseded by `scripts/check-coverage-headroom.ts`: reported headroom findings are advisory and do not set a failure exit code; input/read failures can still fail. Hard coverage floors belong to `vitest.config.ts`; do not copy the historical numeric thresholds below. Preserve the requirement to measure headroom before dependency bumps and the independent hard coverage gate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stabilize the remaining merge-blocking verification risks: BOT ERRORS collector cooldown flake, file-size warning identity drift, coverage-threshold headroom, and deploy Python fixture hygiene coverage.

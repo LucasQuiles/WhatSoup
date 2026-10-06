@@ -1,5 +1,7 @@
 # Brand — the SOUP nameplate, locked vocabulary, microcopy voice, and protected identity boundaries
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Sources: v2.html (locked nameplate), decision-log G1/G2 (vocabulary locks; open item 2 assigned

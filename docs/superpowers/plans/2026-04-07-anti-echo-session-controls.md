@@ -1,5 +1,7 @@
 # Anti-Echo Protocol & Session Management Controls — Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The implementation sketches below are the April design record. Current `src/config.ts` defaults `echoGuard.groupCooldownMs` to 1 second, not the proposed 60 seconds. `src/core/echo-guard.ts` exempts same-sender rapid sends, bounds the group map to 10,000 entries, and leaves DMs unaffected. Commands are owned by the current command registry/runtime; old literal unions and code blocks are not replacement source. The original AE1–AE6 requirements and operational acceptance remain preserved; source presence alone does not establish every sub-project complete.
+
 **Status:** completed — echo guard shipped as `src/core/echo-guard.ts`, wired through `src/runtimes/agent/outbound-queue.ts` and `runtime.ts`.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
