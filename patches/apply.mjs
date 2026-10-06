@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const patchDirectory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(patchDirectory);
-// A calling Git hook can export another worktree's repository context.
+// Ignore a calling hook's context and repositories above a release export.
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
+env.GIT_CEILING_DIRECTORIES = path.dirname(root);
 
 function apply(patch, flags = []) {
   const result = spawnSync('git', ['apply', '--whitespace=nowarn', ...flags, '--', patch], {

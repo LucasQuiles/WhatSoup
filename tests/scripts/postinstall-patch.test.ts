@@ -27,8 +27,10 @@ function withPatchFixture(contents: string, check: (fixture: {
   read: () => string;
   patchPath: string;
   targetPath: string;
+  cwd: string;
 }) => void) {
-  const cwd = mkdtempSync(path.join(tmpdir(), 'whatsoup patch contract '));
+  const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'whatsoup patch contract '));
+  const cwd = path.join(fixtureRoot, 'release');
   const dependency = path.join(cwd, 'node_modules/fixture-dependency');
   const patchPath = path.join(cwd, 'patches/fixture-dependency+1.0.0.patch');
   const targetPath = path.join(dependency, 'index.js');
@@ -50,9 +52,10 @@ function withPatchFixture(contents: string, check: (fixture: {
       read: () => readFileSync(targetPath, 'utf8'),
       patchPath,
       targetPath,
+      cwd,
     });
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
+    rmSync(fixtureRoot, { recursive: true, force: true });
   }
 }
 
@@ -115,11 +118,30 @@ describe('required dependency patch installation', () => {
     });
   });
 
-  it('applies in a release export without inheriting a calling Git worktree', () => {
-    withPatchFixture(before, ({ run, read }) => {
-      const result = run({ GIT_DIR: '/missing-repository', GIT_WORK_TREE: '/missing-worktree' });
-      expect(result.status, String(result.stderr)).toBe(0);
-      expect(read()).toBe(after);
-    });
+  it.each(['automatic parent discovery', 'inherited repository environment'])(
+    'applies a nested release export despite %s',
+    (context) => {
+      withPatchFixture(before, ({ run, read, cwd }) => {
+        const foreign = path.dirname(cwd);
+        const init = spawnSync('git', ['init', '--quiet', foreign], { encoding: 'utf8' });
+        expect(init.status, String(init.stderr)).toBe(0);
+        const result = run(context === 'inherited repository environment'
+          ? { GIT_DIR: path.join(foreign, '.git'), GIT_WORK_TREE: foreign }
+          : {});
+        expect(result.status, String(result.stderr)).toBe(0);
+        expect(read()).toBe(after);
+      });
+    },
+  );
+
+  it('stages the patch entry point and Git before the Docker production install', () => {
+    const dockerfile = readFileSync(path.join(repoRoot, 'docker/Dockerfile'), 'utf8');
+    const deps = dockerfile.split(/^FROM /m)[1]!;
+    const install = deps.indexOf('RUN npm ci --omit=dev');
+    expect(install).toBeGreaterThan(0);
+    const beforeInstall = deps.slice(0, install).replace(/\\\n/g, ' ');
+    expect(beforeInstall).toMatch(/^COPY patches\/ \.\/patches\/$/m);
+    expect(beforeInstall).toMatch(/apt-get install\b[^\n]*\bgit\b/);
+    expect(deps.slice(install)).not.toContain('--ignore-scripts');
   });
 });

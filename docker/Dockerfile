@@ -2,8 +2,13 @@
 # Node version pinned to match .nvmrc and package.json#volta.node.
 FROM node:24.15.0-slim AS deps
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY patches/ ./patches/
 RUN npm ci --omit=dev
 
 # Console has its own dependency tree (React, Vite, Tailwind)
