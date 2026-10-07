@@ -200,7 +200,9 @@ Expected: tests PASS; typecheck exits 0.
 - Modify: `src/fleet/routes/fleet-metrics.ts`
 - Create: `console/src/lib/metrics-quality.ts`
 - Create: `console/src/components/MetricsCompletenessNotice.tsx`
-- Modify: `console/src/types.ts:100-155`
+- Modify: `console/src/types.ts` — metric bucket and response contracts.
+- Modify: `console/src/lib/csv-export.ts` — carry the quality column through exports.
+- Modify: `console/src/lib/metrics-sparklines.ts` — exclude unknown buckets from sparkline/KPI totals.
 - Modify: `console/src/pages/Metrics.tsx`
 - Modify: `console/src/components/line-detail/MetricsTab.tsx`
 - Test: `tests/fleet/db-reader-metrics.test.ts`

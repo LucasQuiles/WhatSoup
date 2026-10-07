@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 169 MCP tools (166 always-registered + 3 conditionally-registered: `knowledge_search` when Pinecone config, credentials, and profiles are usable, `emit_heal_result` on non-sandboxed instances with at least one configured control-plane peer, and `memory_write` when a Pinecone key and index are configured). No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`). Probably too many MCP tools.
+One process per instance. One SQLite database per instance. 170 MCP tools (166 always registered and 4 conditional); see the [tool reference](docs/tools.md#whatsoup-mcp-tool-api-reference) for exact registration and authorization gates. No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`).
 
 ## What It Does
 
@@ -96,7 +96,7 @@ WhatSoup auto-detects the host platform via `src/fleet/platform.ts` (`linux-syst
 - **Docker** with Compose V2 (`docker compose version`)
 - No Node.js, systemd, or keyring required — the image bundles everything
 
-> **Dependency policy:** Production and dev dependencies in `package.json` and `console/package.json` use caret-range constraints; reproducibility is enforced by the committed `package-lock.json` files, which pin every direct and transitive version. Setup runs `npm ci` after proving the pinned Node runtime. When installing JavaScript dependencies directly, use `npm ci` (not `npm install`). Lockfile updates are reviewed before merge as the supply-chain boundary.
+> **Dependency policy:** `package.json` and `console/package.json` contain both exact pins and version ranges. The committed `package-lock.json` files pin the resolved direct and transitive versions. Setup runs `npm ci` after proving the pinned Node runtime. When installing JavaScript dependencies directly, use `npm ci` (not `npm install`). Review manifest and lockfile changes together before merge.
 
 ## Quick Start
 
@@ -163,7 +163,7 @@ cd console && npm run dev # Vite dev server with hot reload + API proxy
 src/
   core/           DB, access control, messages, durability engine, reply-guarantee, JID handling
   transport/      Baileys v7 (default) — auth, reconnection, parsing, event routing; optional Twilio SMS transport (webhook + voicemail)
-  mcp/            Tool registry (169 documented tools; 166 always registered + 3 conditional), Unix socket server, 21 tool modules
+  mcp/            Tool registry (170 documented tools; 166 always registered + 4 conditional), Unix socket server, 21 tool modules
   runtimes/
     passive/      Store-only. No auto-response. MCP socket for external access.
     chat/         LLM API — Anthropic/OpenAI, Pinecone RAG, enrichment, media
@@ -267,7 +267,7 @@ The fleet token is stored at `~/.config/whatsoup/fleet-tokens.json` as `active` 
 
 ### Legacy authentication (deprecated)
 
-Passing the root fleet token via the `?token=<root>` query parameter is **deprecated** and scheduled for removal after **2026-06-30**. The legacy path still works today, but every successful query-token authentication emits a one-shot `http_legacy_token_path` warning on the fleet server with `removeAfter: "2026-06-30"` (matching the existing `ws_legacy_token_path` warning on the WebSocket path). Query-string credentials leak into access logs, browser history, and HTTP `Referer` headers, which is why the console has already migrated off this path.
+Passing the root fleet token via the `?token=<root>` query parameter is **deprecated**. It was scheduled for removal after **2026-06-30**. That deadline has passed, but the HTTP and WebSocket handlers still accept this legacy path in the audited source revision `59cc562bc` (2026-10-06). Removal remains outstanding; the date does not disable authentication automatically. Successful HTTP query-token authentication emits a one-shot `http_legacy_token_path` warning with `removeAfter: "2026-06-30"`; WebSocket authentication has the corresponding `ws_legacy_token_path` warning. Query-string credentials can leak into access logs, browser history, and HTTP `Referer` headers. The console uses session cookies and audience-scoped tickets instead.
 
 External scripts and integrations should obtain a short-lived audience-scoped ticket via `POST /api/auth-ticket` using the root token as a Bearer credential:
 
@@ -283,7 +283,7 @@ curl -sS "http://127.0.0.1:9099/api/lines" \
   -H "Authorization: Bearer $TICKET"
 ```
 
-Tickets are single-use, audience-scoped (`api` or `sse`), and expire quickly; mint a fresh one per logical operation. Bearer authentication with the root token itself remains supported and does not trigger the deprecation warning. Removal plan: keep warning-only compatibility through 2026-06-30, then remove root-token `?token=` acceptance from generic `/api/*` routes while keeping audience-scoped `?ticket=` support for SSE constraints and Bearer support for root-token bootstrap routes.
+Tickets are single-use, audience-scoped (`api` or `sse`), and expire quickly; mint a fresh one per logical operation. Bearer authentication with the root token itself remains supported and does not trigger the deprecation warning. The original removal plan kept warning-only compatibility through 2026-06-30, then required removal of root-token `?token=` acceptance from generic `/api/*` routes while retaining audience-scoped `?ticket=` for SSE constraints and Bearer authentication for root-token bootstrap routes. That removal remains outstanding at `59cc562bc`; the date did not disable the compatibility path.
 
 `POST /api/lines/:name/send` accepts exactly one target: raw `chatJid` or alias `to`. Aliases resolve through that instance's private `chatAliases` config and `chat_aliases` table. Requests may also pass a named send `profile`.
 
@@ -403,7 +403,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Contributor Instructions](AGENTS.md) | Shared engineering commands, conventions and publication requirements |
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 169 tools across 21 documented modules plus the inline runtime tool, with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 170 tools across 21 documented modules plus two runtime tools, with scopes, parameters, replay policies |
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |

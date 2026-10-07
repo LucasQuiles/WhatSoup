@@ -1,8 +1,16 @@
 # Provider-Event Lifecycle Requirements
 
-**Status:** Active — refreshed against canonical base `482b707d716aee5641db25d40c2a954caee5d78f`; migrations 47 through 52 are already consumed, and the current branch advances the schema to migration 53 for outbound-quarantine disposition and retirement receipts. Provider-lifecycle implementation and activation remain unauthorized
+**Status:** Active specification — source reconciliation at `59cc562bc` (2026-10-06), schema 66. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+
+## Schema allocation
 
 **Schema allocation:** current canonical schema is migration 66; bounded terminal recovery/canonical `not_sent` is forward migration 67; the provider-event lifecycle ledger is migration 68. Migrations 50 and 51 are consumed by metadata-only durability evidence, migration 52 by outbound ambiguity-episode timing, migration 53 by outbound quarantine disposition/retirement receipts, migration 54 by the completed-delivery identity-admission ledger, migration 55 by typed online enrichment-cycle receipts, migration 56 by the inbound_events processing-status CHECK constraint (#2250), migration 57 by the durable trigger-occurrence ledger (#2566), migration 58 by the capability-obligation replay ledger, migration 59 by the fact-export queue state machine and lease durability (#2567), migration 60 by the capability-obligation audit hotfix (execution reservations + creation-reason honesty rebuild), migration 61 by completed-delivery identity-admission terminalization (expired state + preserved receipt), migration 62 by the durable deferred_turn_obligations lane (#3295 S1), migration 63 by the capability-obligation attestation-evidence columns (#3221), migration 64 by the continuity-candidate consumer stamp, migration 65 by the tool-call caller-attribution columns (#3421), and migration 66 by the append-only continuity-gap closure ledger (#3638), so the still-unpublished forward allocations move to migrations 67 and 68.
+
+This is the shared allocation owner for all three lifecycle documents. The
+forward 67/68 reservations are planning allocations, not applied migrations.
+Recheck `src/core/database-schema-version.ts` and the registry immediately before
+implementation; never reuse an occupied number. Historical chronology and the
+amendment log retain their original numbers and do not override this section.
 
 ## Purpose
 
@@ -18,6 +26,7 @@ are coalesced into bounded egress batches; effect-bearing and boundary events ar
 never coalesced. Every adapter event variant must be exhaustively
 classified as actionable or as a proved non-actionable kind with no state effect.
 
+**Historical chronology (allocations below are superseded by [Schema allocation](#schema-allocation)):**
 The historical canonical base recorded here is
 `482b707d716aee5641db25d40c2a954caee5d78f`, which understood migrations
 through 46. PR #1768 merged canonical migration-41-through-43 history at
@@ -602,7 +611,7 @@ unproved child origins default to internal no-send/no-effect handling.
     settlement and before/after this transaction prove exactly-once closure.
   - **REQ-006.AC-06:** Every transferred terminal owner carries an immutable database-
     UTC block start/deadline no later than 300 seconds after terminal creation;
-    migration 54 backfills legacy transfers. Progress, heartbeat, retry, operator
+    migration 67 backfills legacy transfers. Progress, heartbeat, retry, operator
     action, or restart cannot extend it. Jobs persist a monotonic wall-clock high-water
     mark and the live process also tracks monotonic elapsed time. Database time before
     terminal/start, or more than the exported five-second tolerance below that high-
@@ -628,7 +637,7 @@ unproved child origins default to internal no-send/no-effect handling.
     cross-instance/scope, stale, substituted, conflicting-replay, or competing requests
     are denied and audited. This resolver cannot mutate provider quarantine.
     It revalidates terminal/job/inbound plus the selected representative operation and,
-    for migration-55 turns, the final attempt's exact immutable publication-set seal/
+    for migration-68 turns, the final attempt's exact immutable publication-set seal/
     membership, plus assignment/claim epochs; inserts or
     returns an append-only unique `turn_recovery_terminal_closures` witness with
     closure `echoed | not_sent | abandoned_uncertain`, bounded
@@ -940,7 +949,7 @@ unproved child origins default to internal no-send/no-effect handling.
     scanning message content. The witness is deleted last in the same guarded aggregate
     transaction (or immediately before an inseparable parent delete); unresolved,
     recent, owner-bearing, or conflict-pending witnesses never prune. These rows are
-    included in migration-54 storage/retention accounting rather than growing outside
+    included in migration-67 storage/retention accounting rather than growing outside
     the lifecycle governors.
 - **Verified-by:** {acceptance, contract, review}
 - **Traces-to:** DES-003, DES-007
@@ -954,14 +963,13 @@ unproved child origins default to internal no-send/no-effect handling.
 - **Acceptance criteria:**
   - **CON-005.AC-01:** The implementation allocates the next unclaimed schema
     migration after reconciling all merged durability migrations and verifies both
-    fresh-database and upgrade paths. Canonical base
-    `482b707d716aee5641db25d40c2a954caee5d78f` understands migrations through
-    46; migrations 47 through 52 are consumed by later durable work, and the current
-    branch consumes migration 53 for outbound-quarantine disposition and retirement
-    receipts.
+    fresh-database and upgrade paths. The audited source baseline understands
+    migrations through 66, including migration 53's quarantine disposition and
+    retirement receipts. Historical lineage is retained in the Purpose section;
+    it does not override the shared forward allocation.
     This lifecycle work therefore allocates bounded terminal recovery/canonical
-    `not_sent` to migration 54 and the provider-event lifecycle ledger to migration
-    55.
+    `not_sent` to migration 67 and the provider-event lifecycle ledger to migration
+    68.
   - **CON-005.AC-02:** Changed deployed runtime entrypoints are represented in the
     repository's managed-component and runtime manifests, and manifest guards pass.
     Before lifecycle activation, the effective configured primary/fallback routing set
@@ -974,14 +982,14 @@ unproved child origins default to internal no-send/no-effect handling.
   - **CON-005.AC-03:** The rollout runbook compares installed artifacts to canonical
     source hashes and uses the existing targeted update mechanism; it forbids raw
     reinstallation, state-directory replacement, and uncoordinated fleet restart.
-    Migration 55 may leave its immutable `schema_migrations(version=55)` marker.
+    Migration 68 may leave its immutable `schema_migrations(version=68)` marker.
     Runtime activation is the first insert into `provider_lifecycle_activation`,
     committed atomically with the first lifecycle-enabled attempt and before any
     provider invocation. Activation is roll-forward-only after that marker or any
     lifecycle/provider activity: rollback is allowed only before activation with
     proof of zero rows across the ten named lifecycle data tables and zero in-flight
     requests. A downgrade binary must either be
-    fully v55 write-compatible or enter drain/read-only mode and reject every new
+    fully v68 write-compatible or enter drain/read-only mode and reject every new
     provider turn; merely reading existing rows and vetoing replay is insufficient.
   - **CON-005.AC-04:** Before migration/activation, each target instance gracefully
     drains or quiesces and creates a fresh private content-addressed evidence packet.
@@ -999,24 +1007,24 @@ unproved child origins default to internal no-send/no-effect handling.
     verifies its schema/row-count fingerprint, and records a pre-activation rollback
     checkpoint. While still quiesced and before any inbound/provider activation, the
     sole state-replacement exception is a coordinated restore of that exact verified
-    schema-54 (pre-v55) backup after proving: no `provider_lifecycle_activation` row; zero rows
+    schema-67 (pre-v68) backup after proving: no `provider_lifecycle_activation` row; zero rows
     in `provider_request_attempts`, `provider_attempt_handoffs`,
     `provider_request_segments`, `provider_continuation_obligations`,
     `provider_event_receipts`, `provider_event_transitions`,
     `provider_event_effect_plans`, `provider_event_effect_links`, and
     `provider_effect_authorizations`; zero `inbound_events` rows whose
     `processing_status NOT IN ('complete','failed')`; zero active agent sessions; and
-    runtime drain proof that no provider process/request exists. The migration-55
+    runtime drain proof that no provider process/request exists. The migration-68
     marker may exist in the pre-restore source and is excluded from the lifecycle-row
     predicate. The verified whole-database restore returns schema history to the exact
-    backup schema-54 fingerprint; this is the sole permitted removal of that v55 row. Manual
+    backup schema-67 fingerprint; this is the sole permitted removal of that v68 row. Manual
     or in-place migration-history deletion or rewrite is prohibited.
     Source and backup fingerprints and zero in-flight/inbound mutations must agree;
     source/restore integrity and fingerprints must pass before restart. This does not
     otherwise rewrite an applied migration in place. After activation there is no restore/data
-    rollback: leave v55 drained/read-only and roll forward. Any other failure aborts
+    rollback: leave v68 drained/read-only and roll forward. Any other failure aborts
     rollout without restart, migration, or state replacement.
-  - **CON-005.AC-05:** Before deploying any schema-54/55 writer, the production
+  - **CON-005.AC-05:** Before deploying any schema-67/68 writer, the production
     schema-ceiling gate based on the canonical migration lineage applies to
     `Database.runPendingMigrations` and agent-turn
     admission. When `MAX(schema_migrations.version)` exceeds the binary's supported

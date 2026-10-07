@@ -1,5 +1,7 @@
 # D20 Provider Keychain Unlock Policy Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Numeric source anchors and helper sketches below are from plan time. Current `deploy/scripts/bot-errors-health-check.py` owns `provider_keychain_unlock_status`, `provider_keychain_unlock_allowed` and the default-bearing `profile_bool` call. The observe-only default, explicit opt-in, item-level false precedence and prohibition on raw credential output remain requirements; this note does not authorize a keychain mutation.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make BOT ERRORS provider credential diagnostics non-mutating by default while preserving an explicit, testable opt-in path for macOS login-keychain unlock probes.

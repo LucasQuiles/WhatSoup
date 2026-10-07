@@ -154,13 +154,18 @@ fleet-console data.
 ### Correct pattern
 
 Install a pinned-node wrapper at `~/.local/bin/whatsoup-fleet` (or the
-appropriate service name) that resolves the node binary from NVM:
+appropriate service name) that delegates to the repository's fleet launcher:
 
 ```sh
 #!/bin/bash
-exec "$HOME/.nvm/versions/node/v24.15.0/bin/node" \
-  "$HOME/LAB/WhatSoup/deploy/fleet" "$@"
+exec /bin/bash "$HOME/LAB/WhatSoup/deploy/whatsoup-fleet" "$@"
 ```
+
+`deploy/whatsoup-fleet` reads `.nvmrc` for its default NVM binary, checks the
+resolved Node version against the repository's engine range, and launches
+`src/fleet/standalone.ts` with native type stripping. Install the repository pin
+first and verify the service's resolved binary; the launcher can fall back to
+`PATH` if the default binary is absent.
 
 Then reference only the wrapper in the plist `ProgramArguments`:
 

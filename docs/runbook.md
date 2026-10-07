@@ -1498,7 +1498,8 @@ mv ${DB}.recovered $DB
 # 4. If unrecoverable, start fresh (auth state is separate — preserved)
 mv $DB ${DB}.corrupted.$(date +%Y%m%d%H%M%S)
 # The next startup will create a fresh database and run the current migration
-# set through version 40.
+# set registered in src/core/database.ts; consult src/core/database-schema-version.ts
+# for the current version.
 # If another instance has the same phone's message history, a warm-start import
 # will be attempted automatically from legacy paths.
 
@@ -2928,20 +2929,24 @@ only the older released slot.
 ### Diagnosis
 
 ```bash
+# Choose the instance, then inspect its XDG rolling logs (see §3).
+INSTANCE=operator-agent
+LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/instances/$INSTANCE/logs"
+
 # Check if prompt-too-long fired
-grep "prompt too long" /var/log/whatsoup/<instance>.log
+rg "prompt too long" "$LOG_DIR"
 
 # Check auto-compact activity
-grep -E "auto compact triggered|auto compact timed out" /var/log/whatsoup/<instance>.log
+rg "auto compact triggered|auto compact timed out" "$LOG_DIR"
 
 # Check bounded-spiral detections
-grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log
+rg "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" "$LOG_DIR"
 
 # Check current state followed by lifetime counters
 curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
 
 # Verify current threshold
-grep "autoCompactInputTokens" instances/<name>/instance.json
+rg "autoCompactInputTokens" "${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/$INSTANCE/config.json"
 ```
 
 Canary a compact change on one host first. During the canary window, the pass
@@ -3146,18 +3151,22 @@ docker compose up -d
 
 ### Rollback
 
-To remove Docker and revert to host deployment:
+To return to host deployment, preserve the instance configuration, credentials,
+database (including its WAL/SHM state), media, and Docker volumes before changing
+service ownership. If the checkout has local work, preserve it with
+`git stash --include-untracked` before changing revisions. Follow the host's
+deployment runbook and restart-safety preflight; do not start the host instance
+while the container still owns the same account or data.
 
 ```bash
-# Stop and remove containers (keep volumes for safety)
+# Stop and remove containers; named volumes are retained without --volumes.
 docker compose down
-
-# Remove Docker files from the repo
-git checkout -- src/fleet/platform.ts src/core/health.ts
-rm -rf docker/ docker-compose.yml .dockerignore .env.example .env
 ```
 
-Volumes persist until explicitly removed with `docker volume rm`.
+Docker support files are part of the application and need no deletion for host
+deployment. Select a verified release if a code rollback is required. Keep the
+volumes and saved configuration until host health, durable delivery state, and
+recovery have been verified; stopping containers alone does not migrate their data.
 
 ## Restart-safety preflight blocked a start
 

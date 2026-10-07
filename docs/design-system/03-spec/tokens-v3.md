@@ -1,5 +1,7 @@
 # Tokens v3 — the single source of truth for every design token in the SOUP console
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Locked source of values: `docs/design-system/02-directions/iterations/v2.html` (G2, Option A).

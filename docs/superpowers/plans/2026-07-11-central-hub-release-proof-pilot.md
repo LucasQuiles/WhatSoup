@@ -11,7 +11,7 @@
 **Tech Stack:** Python 3.12 (detectors, pytest suites), Bash (runner, installer), systemd user units, TypeScript + Vitest (black-box subprocess tests), existing BOT ERRORS outbox/dispatcher pipeline.
 
 > **Post-review supersession (2026-07-12):** The final Gate 0 implementation
-> supersedes the illustrative Task 7/8 installer listings below. In particular,
+> supersedes the illustrative Task 1–8 code listings below. In particular,
 > the final installer binds `--bundle-sha` to a clean source `HEAD`, validates
 > staged unit copies before changing `current`, treats versioned bundles as
 > immutable, uses exclusive random replacement files, rejects symlinked managed
@@ -20,6 +20,8 @@
 > unknown timer-state probes, and verifies timers are both enabled and active.
 > The executable script and its black-box tests are authoritative where an
 > older inline listing differs.
+
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The detectors now include cadence receipts, bounded probe-error kinds and observe-only reporting. The runner attempts a `lock-skip` receipt before exit 75; its receipt-write failure is deliberately non-fatal, so that exit is coordination evidence, not proof the receipt was persisted. The old Task 4 zero-ledger assertion is superseded by that behavior. Runtime manifest coverage includes discovered paths and the installer's transitive bundle files. Preserve all Gate 0 requirements and owner-gated rollout boundaries; no old inline listing or test count is fresh execution proof.
 
 ## Global Constraints
 
@@ -1201,10 +1203,10 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(0);
-    expect(res.stdout).toContain('all managed systemd units match');
+    expect(res.stdout).toContain('all selected systemd units match; wrapper checks not applicable');
     for (const unit of MONITOR_UNITS) expect(res.stdout).toContain(`ok: ${unit}`);
   });
 
@@ -1215,7 +1217,7 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', systemd, '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('drift: bot-errors-tree-provenance.timer');
@@ -1226,7 +1228,7 @@ describe('release-proof explicit unit scope', () => {
     const res = run([
       '--repo-root', repo, '--systemd-dir', join(repo, 'nonexistent-systemd'), '--bin-dir', bin,
       '--unit', ...MONITOR_UNITS,
-      '--wrapper',
+      '--no-wrappers',
     ]);
     expect(res.status).toBe(3);
     expect(res.stdout).toContain('SKIP');
@@ -1234,7 +1236,7 @@ describe('release-proof explicit unit scope', () => {
 });
 ```
 
-(`--wrapper` given with no values clears the default wrapper list, keeping the fixture minimal.)
+(`--no-wrappers` clears the default wrapper list, keeping the fixture minimal. A valueless `--wrapper` is an argument error.)
 
 - [ ] **Step 2: Run — these should already pass**
 
@@ -2318,7 +2320,7 @@ The pilot always passes all four monitor unit names explicitly:
     bash scripts/check-unit-drift.sh --unit \
       bot-errors-tree-provenance.service bot-errors-tree-provenance.timer \
       bot-errors-runtime-staleness.service bot-errors-runtime-staleness.timer \
-      --wrapper
+      --no-wrappers
 
 plus `install-bot-errors-release-proof.sh verify`, which additionally checks
 loaded fragment paths and drop-ins via `systemctl --user show`.

@@ -1,5 +1,7 @@
 # Switch — the boolean on/off toggle primitive (`role="switch"`)
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 The single-setting boolean toggle. A `Switch` flips one independent on/off setting

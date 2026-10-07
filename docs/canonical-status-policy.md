@@ -8,7 +8,10 @@ It exists to keep three things aligned:
 - scanner behavior
 - human expectations when reading `docs/sdlc`, `docs/plans`, and `docs/superpowers`
 
-This policy is metadata-first. It does not require any directory moves.
+This policy is metadata-first. It does not require any directory moves. The
+implemented resolution below is checked against `scripts/work-index.ts` at
+`59cc562bc` on 2026-10-06. Outstanding policy requirements are identified separately;
+their presence here does not prove scanner enforcement.
 
 ## Scope
 
@@ -94,29 +97,41 @@ For an epic `state.md`, precedence is:
 
 ### Child-Artifact Precedence
 
-For beads, docs, handoffs, reviews, plans, and specs, precedence is:
+For children under `docs/sdlc`, `resolveSdlcStatus` currently applies:
 
-1. `Bead Manifest` row in the parent `state.md` when the child is explicitly listed there
-2. artifact-local `Status:` / `**Status:**` marker
+1. artifact-local `Status:` / `**Status:**` marker
+2. `Bead Manifest` row in the parent `state.md` when the child is explicitly listed there
 3. inherited parent `state.md` explicit status
 4. inherited parent `Phase Log` status when no stronger source exists
-5. generic content markers such as archived/superseded wording
-6. directory fallback
+5. directory fallback
+6. `unknown` when no source resolves a status
 
-This is why `work-index` records row-level `status_source` values such as:
+For `docs/plans` and `docs/superpowers/*`, `resolveSuperpowersStatus` uses an
+artifact-local marker or returns `unknown`. It does not inherit an SDLC parent
+status. Generic archived/superseded prose does not resolve status in either path.
+
+The row-level `status_source` vocabulary is:
 - `bead-manifest`
 - `body-marker`
 - `state-md-status`
 - `phase-log`
-- `content-marker`
 - `directory`
+- `fallback`
 
 **Rules**
-- Child-local truth beats parent inheritance, except for explicit `Bead Manifest` rows, which are authoritative for the listed work unit.
+- Child-local truth currently beats parent inheritance, including a conflicting `Bead Manifest` row. The earlier policy required manifest rows to be authoritative for their listed unit. That requirement and the implementation diverge: preserve both records and reconcile the conflict explicitly; do not claim the scanner enforces manifest-first precedence.
 - Do not auto-promote a bead to `completed` just because its epic is complete.
 - Parent `active` should not spread blindly to sibling docs when those docs have their own explicit markers or are clearly historical evidence.
-- If a bead file exists but its parent epic has no `state.md` (or the bead ID is absent from the Bead Manifest), resolve via body-marker, then directory, then `unknown`. Do not invent a status.
+- If the parent has no `state.md`, a child resolves via body-marker, then directory, then `unknown`. If a parent exists but omits the bead from its manifest, parent status and phase-log inheritance still apply before directory fallback.
 - If no trustworthy authored source exists, return `unknown`, not a guessed status.
+
+### Lifecycle classification
+
+The JSON index also records `lifecycle`: `executable`, `receipt`, or
+`stale-backlog`. `deriveLifecycle` derives it from task boxes, execution
+language, status, and gap prose. This heuristic is separate from `status` and
+`status_source`; it does not prove implementation or closeout. The Markdown
+index does not render this field.
 
 ## Authoring Rules
 
@@ -127,7 +142,12 @@ Whenever an epic moves between `active/`, `closed/`, or `completed/`:
 - update any self-references to the old path prefix
 - ensure `Phase Log` does not still claim an open execution phase unless that is intentional
 
-**Atomicity:** perform the directory move and the state.md Status rewrite in the same commit. The scanner's active-sibling damping rule (§Scanner Rules) suppresses `active` propagation to sibling files when the epic's declared status disagrees with its directory bucket. That is the correct steady-state behavior, but it means a mid-transition commit where the directory has moved but the state.md still says `active` will briefly classify sibling docs via their own body-marker or fallback instead of inheriting from the parent. The directory-status-mismatch inconsistency is still flagged, but operators should not rely on sibling-row statuses during a transitional commit.
+**Atomicity:** perform the directory move and the `state.md` status rewrite in the
+same commit. The current scanner has no active-sibling damping rule: an explicit
+parent `active` status can still propagate after a directory move unless a child
+has a stronger marker. The index guard reports missing/stale index entries; it
+does not independently flag directory/status mismatches. Inspect authored status
+and directory placement together during a transition.
 
 ### 2. Successor epics and follow-on work
 
@@ -162,12 +182,17 @@ For `docs/plans` and `docs/superpowers/*` artifacts:
 
 ## Scanner Rules
 
-The scanner should implement the following:
+The scanner implements the following:
 - match status markers with word boundaries, not loose substring matches
 - recognize `deferred`, `shelved`, `in_progress`, and `in-progress`
 - parse `Phase Log` status from the status column only
-- extend mismatch detection to `docs/sdlc/completed/` when authored status is non-completed
 - treat directory placement as fallback only
+
+Outstanding requirements from the original policy remain open until explicitly
+resolved: reconcile manifest-first authority with the body-first implementation;
+define whether generic archived/superseded markers should affect status; and
+detect directory/status mismatches, including non-completed authored status in
+`docs/sdlc/completed/`. These are requirements, not current guard guarantees.
 
 ## Known Exceptions and Non-Bugs
 
@@ -179,7 +204,7 @@ These are historical examples from the original integrity pass, not a current in
 
 ## Operational Expectations
 
-- Regenerating `docs/work-index` must refresh generation metadata so `git_head` and timestamps match current `HEAD`.
+- Regeneration refreshes `git_head` and timestamps for the scan. The recorded hash may differ from a later landing or squash-merge commit; the guard normalizes these volatile fields before comparison. A matching hash alone is not freshness proof.
 - Any future inconsistency reduction should prefer metadata repair over directory churn.
 - Regrouping work should happen only after this policy and the synthesized program view stay stable under regeneration.
 

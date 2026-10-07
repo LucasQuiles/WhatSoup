@@ -1,15 +1,17 @@
 # Project Map - WhatSoup
 
-Navigation updated: 2026-10-05. The source descriptions retain the June 20 map;
-verify the relevant implementation before changing behavior.
+Navigation and runtime inventory reviewed: 2026-10-06 at source revision
+`59cc562bc`. Verify the relevant implementation before changing behavior.
 
 This map orients future documentation and feature-sweep work. It is a source
-tree and docs ownership map, not a replacement for generated guards such as
-`docs/work-index.*`, `docs/tools.md`, or `docs/public-surface.md`.
+tree and docs ownership map, not a replacement for generated work indexes or the source-checked tool and public-surface references.
 
 ## Runtime Shape
 
-WhatSoup is one TypeScript/Node application with four instance roles:
+WhatSoup is one TypeScript/Node application with three runtime types: `passive`,
+`agent`, and `chat`. The names below are deployment examples, not a fixed fleet
+roster or additional runtime types. Instance names, access modes, session scope,
+transports, and health ports come from instance configuration.
 
 | Role | Runtime | Notes |
 |---|---|---|
@@ -27,7 +29,7 @@ no-systemd fallback.
 | Root | Contents | Primary docs |
 |---|---|---|
 | `src/core/` | Database, message parsing, access policy, send pipeline, durability, scheduler, substrate. | `docs/durability.md`, `docs/reply-guarantee.md`, `docs/runbooks/substrate-slice-1.md` |
-| `src/transport/` | Baileys and Twilio transport adapters, connection lifecycle, auth, contract events. | `README.md`, `docs/runbooks/twilio-transport.md` |
+| `src/transport/` | Baileys, Twilio, Signal and iMessage adapters, connection lifecycle, auth, contract events. | `docs/configuration.md`, `docs/runbooks/twilio-transport.md` |
 | `src/mcp/` | Registry, socket server, scopes, tool modules, and helper factories. | `docs/tools.md`, `docs/public-surface.md` |
 | `src/runtimes/agent/` | Agent session lifecycle, providers, fallback, handoff distiller, polls, media bridge, response registry. | `docs/runbooks/error-response-workflows.md`, `docs/runbooks/agent-decision-polls.md` |
 | `src/runtimes/chat/` | Direct chat runtime, rate limits, context, queueing, provider integrations. | `docs/configuration.md` |
@@ -37,6 +39,7 @@ no-systemd fallback.
 | `deploy/` | systemd units, launchd templates, bot-errors services, hooks, setup scripts. | `docs/runbook.md`, `docs/runbooks/macos-launchd-deployment.md` |
 | `scripts/` | Guards, doc drift checks, release gates, migrations, maintenance scripts. | `docs/contributing/quality-guardrails-checklist.md`, `docs/architecture/fitness-taxonomy.md` |
 | `tools/` | Auxiliary guard/probe packages. | Per-tool README files. |
+| `tools/qsesh/` | Python session source adapters, extraction, archive, scan, metrics and distillation. | Source contracts in `qsesh/cli.py`, `qsesh/config.py` and package tests; `package.json` owns `test:qsesh` / `lint:qsesh`. Historical planning snapshots are not current execution instructions. |
 
 ## Documentation Roots
 
@@ -46,10 +49,12 @@ no-systemd fallback.
 | `docs/specs/` | Internal design specs that are tracked selectively despite the ignored root. |
 | `docs/superpowers/` | Planning, specs, handoffs, and review artifacts indexed by `docs/work-index.*`. |
 | `docs/sdlc/` | SDLC state artifacts indexed by `docs/work-index.*`. |
-| `docs/design-system/` | SOUP v3 design program, inventories, specs, and implementation evidence. |
+| `docs/design-system/` | Design navigation, v3 history and v3.5 specifications; dated inventories and acceptance records remain evidence at their recorded revision. |
 | `docs/reliability-runner/` | Reliability-runner matrices and pending-bead dispositions. |
 | `docs/reviews/` | Review findings and code-quality bead registers. |
+| `docs/triage/` | Sealed historical issue registry and cluster catalogs; [the triage README](triage/README.md) owns their scope and links to current work discovery. |
 | `docs/security-handoffs/` | Security handoffs retained for the application lifecycle. |
+| `docs/audits/`, `docs/artifacts/`, `artifacts/`, `.distill/` | Existing tracked and ignored audit/snapshot evidence. These roots are outside the generated work-index scope. Retain provenance and owner decisions; check code consumers before moving even an untracked file. |
 | `.sweep/` | Ignored local artifact-sweep manifests, collected copies, and backups. |
 
 ## Feature Inventory
@@ -74,10 +79,40 @@ no-systemd fallback.
 |---|---|
 | Generated planning index | Regenerate with `npm run work-index:regen`; do not hand-edit `docs/work-index.*`. |
 | Public-surface registry | Update `docs/public-surface.md` with code changes and run `npm run guard:public-surface-drift`. |
-| MCP tool docs | Update generated `docs/tools.md` when the registry changes and run `npm run guard:doc-drift`. |
+| MCP tool docs | Update `docs/tools.md` against tool declarations when the registry changes and run `npm run guard:doc-drift`. |
 | Internal tracked docs | Add a row in `docs/publication-audit.md` when covered by the publication guard. |
-| Local-only sweep output | Keep under ignored `.sweep/<run-id>/`; do not commit collected session logs or local artifact archives. |
-| Ignored scratch artifacts | Archive to a sweep run before pruning; keep tracked `artifacts/` evidence files unless a replacement is explicit. |
+| Local-only sweep output | `.sweep/<run-id>/` holds local collection intermediates. Reusable evidence and recovery copies belong in the operator's retention-protected durable project-state root; do not commit session logs or private archives. |
+| Ignored scratch artifacts | Preserve bytes and a source-to-canonical disposition before pruning. Check live/configured dependencies and the host's cleanup approval requirements; keep evidence whose replacement or retirement is unproven. |
+
+Some local evidence has executable consumers. `scripts/qregistry-loop.ts`
+defines `DEFAULT_AUDIT` for an operator-local audit that is not tracked in this
+repository. Inspect that constant and the configured input before running the
+loop or moving local audit files. Ignored status alone does not make evidence
+disposable when an executable consumer still requires it.
+Old qSesh review snapshots likewise preserve owner choices and test-fixture
+requirements; the checked-in package and its current test runner determine
+implemented behavior. The runner's multi-interpreter checks are distinct from
+old single-interpreter verification receipts.
+
+## Canonical documentation structure
+
+Use one owner for each fact, with links from other entry points:
+
+| Surface | Owns | Keep elsewhere |
+|---|---|---|
+| `README.md` | Product overview, setup, usage and high-level API navigation. | Detailed schemas in configuration; operational recovery in runbooks. |
+| `AGENTS.md` | Shared repository instructions, commands and verification boundaries. | Tool-specific loading guidance in the short root `CLAUDE.md` router. |
+| `docs/current-program.md` | Navigation to current work and its evidence owners. | Backlog and delivery claims in their original issue, plan, Git or runtime record. |
+| `docs/configuration.md`, `docs/tools.md`, `docs/public-surface.md` | Configuration, source-checked tool API, and public-surface contract respectively. | Historical examples and proposed interfaces in dated specs/plans. |
+| `docs/runbook.md`, `docs/runbooks/` | General operations and focused procedures. | Host-specific evidence in its private operational record. |
+| `docs/durability.md`, focused architecture/specification docs | State contracts and required behavior. | Unimplemented requirements remain explicit; source disagreement is a gap, not permission to drop a requirement. |
+| `docs/design-system/README.md` | Route to current console implementation, design requirements and dated design evidence. | Old inventories and mockups retain their original baseline. |
+
+Historical reports, reviews, plans and snapshots remain traceable at their existing
+paths. Their dates, hashes and decisions are part of the record. They do not become
+current instructions merely because a search finds them. Before consolidating a
+section, account for every requirement and unique fact in its destination; retain
+uncertain material with an explicit scope rather than silently discarding it.
 
 ## Refresh Checklist
 

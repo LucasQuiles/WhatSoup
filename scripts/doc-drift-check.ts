@@ -194,6 +194,7 @@ export function findToolRegistrations(cwd: string = process.cwd()): ToolRegistra
     // registerRuntimeInlineTools. Anchor the scan at the declaration file (where
     // the `name:` field is) so the canonical count stays correct after #1977.
     { relativePath: 'src/runtimes/agent/runtime-tool-registrations.ts', toolName: 'emit_heal_result' },
+    { relativePath: 'src/runtimes/agent/self-restart.ts', toolName: 'restart_self' },
   ];
 
   const inlineRegistrationPattern = (toolName: string) =>

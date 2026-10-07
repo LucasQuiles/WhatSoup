@@ -1,5 +1,7 @@
 # SP1: Media Access Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Task bodies are retained as the original design record, not the current tool schema. `docs/tools.md` and `src/mcp/tools/media.ts` own `download_media`, including quoted media, conversation access checks, managed-path confinement and current error envelopes. Historical registration counts, host paths and code snippets do not authorize replacing that implementation. The original media persistence, access, caching and acceptance requirements survive.
+
 **Status:** completed — shipped as SP1 bead in the `whatsapp-mcp-features` epic (Phase 1, merged 2026-04-05).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

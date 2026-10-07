@@ -372,6 +372,8 @@ It can move:
 | `pineconeContextTopK` | `memory.pinecone.contextTopK` |
 | `pineconeSenderTopK` | `memory.pinecone.senderTopK` |
 | `pineconeSelfFactTopK` | `memory.pinecone.selfFactTopK` |
+| `recencyHalfLifeDays` | `memory.pinecone.recencyHalfLifeDays` |
+| `maxAgeDays` | `memory.pinecone.maxAgeDays` |
 | `pineconeAllowedIndexes` | `memory.pinecone.allowedIndexes` |
 | `pineconeKnowledgeSearch` | `memory.pinecone.knowledgeSearch` |
 | `pineconeKnowledgeProfiles` | `memory.pinecone.knowledgeProfiles` |
@@ -385,7 +387,20 @@ It can move:
 | `pineconeLocalDocsNamespace` | `memory.pinecone.namespaces.localDocs` |
 | `pineconeOneDriveNamespace` | `memory.pinecone.namespaces.oneDrive` |
 
-When both canonical and legacy values exist, canonical values win. This lets an operator add `memory.pinecone.projectId` without a stale flat field taking precedence.
+When both canonical and legacy values exist, canonical values win in the migration
+result. This lets an operator add `memory.pinecone.projectId` without a stale flat
+field overwriting it.
+
+**Runtime gap for recency settings (source `59cc562bc`, 2026-10-06):** the migrator
+moves `recencyHalfLifeDays` and `maxAgeDays` into `memory.pinecone`, but the exported
+runtime configuration in `src/config.ts` still reads their top-level fields, then
+`RECENCY_HALF_LIFE_DAYS` / `MAX_AGE_DAYS`, then defaults of 14 / 90. The canonical
+resolver does not read the nested equivalents. A default `--write` migration
+removes the legacy values and can therefore change the effective settings.
+For an instance using either override, preserve the original config and use
+`--keep-legacy` until runtime consumption is corrected and verified. Keep the
+legacy and canonical values equal during this transition. A file-transformation
+test alone does not prove runtime use of the nested values.
 
 ## Migration Algorithm
 
@@ -465,7 +480,7 @@ After restart:
 
 Every write creates `config.json.bak-<timestamp>` unless `--no-backup` is passed.
 
-Rollback is just replacing `config.json` with the backup and restarting the instance. Auth state remains in place because the migrator never touched it.
+Preview restoration of the most recent backup with `npm run migrate-memory-config -- --instance <name> --rollback`; add `--write` only after reviewing the preview. The helper refuses a backup whose modification time is newer than the current config. Preserve intervening changes and coordinate the instance restart before applying a rollback. Manual restoration is also possible after comparing the backup with the current file. Auth state remains in place because the migrator never touched it.
 
 ## Remaining Work
 

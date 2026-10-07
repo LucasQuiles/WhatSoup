@@ -1,5 +1,7 @@
 # Component Inventory — WhatSoup Console
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 Design-system audit, phase 00. Stack: React 19 + Vite + Tailwind v4 + TypeScript (`console/`).
 Every entry lists repo-relative path, role, notable props/variants (with line evidence), consumers (verified by import grep), and state handling.
 

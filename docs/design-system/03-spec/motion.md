@@ -1,5 +1,7 @@
 # Motion — the semantic motion system: durations, easings, budget, and the reduced-motion contract
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Token values live in `tokens-v3.md` §2.5. Sources: v2.html (locked, incl. annotations motion

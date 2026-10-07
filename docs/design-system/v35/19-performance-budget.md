@@ -2,13 +2,30 @@
 
 Scale set by owner: **200 lines** on Fleet. All targets are at N=200 lines unless noted.
 **Owner approval received 2026-07-22** (G2 sign-off) — §1 numbers are approved for
-CI enforcement when the b-12 lane lands.
+CI enforcement when the b-12 lane lands. The later `G3-SIGNOFF.md` §5.2 records
+the budgets as provisional and awaiting an enforcement sign-off. Preserve both
+dated decisions; this documentation reconciliation does not resolve that owner
+decision or authorize a flag change.
+
+**Implemented gate, source checked 2026-10-06:** `console/scripts/perf-lane.mjs`
+is report-only unless `PERF_LANE_ENFORCE=1`. The checked-in Quality workflow
+does not set that flag. Budget approval and actual blocking enforcement are
+separate facts; confirm both before claiming a failing budget blocks delivery.
+
+The 200-row mount and event-storm measurements are implemented separately in
+`tests/browser/perf-budget.test.tsx`. That suite currently hardcodes
+`ENFORCE = false`; its comments about the environment flag do not wire the flag
+into those assertions. The script's deferred-leg report describes its own
+coverage, not absence of the browser harness. Budget enforcement in both paths
+still needs explicit wiring and acceptance.
 
 **Baseline evidence (pre-G2 audit, prod build at b-02 tip):** console shell =
 **134 KB gzip JS** vs the ≤250 KB budget (46% headroom). The bundle number is the
 only §1 target with an observed baseline; all others are approved-but-unmeasured
 until b-12 instrumentation exists. **Bundle falsifier wired to b-12:** the CI perf
-lane fails any PR that pushes the shell above 250 KB gzip.
+lane records a budget violation above 250 KB gzip and exits nonzero for budget
+failure only when enforcement is enabled. This qualifies the original
+approved-but-not-yet-enforced falsifier requirement.
 
 ## 1. Budget doc (6.1) — proposed targets
 
@@ -32,13 +49,13 @@ lane fails any PR that pushes the shell above 250 KB gzip.
 | WS throughput | per-line token bucket + global meter | runtime, always on |
 | Long-task observer | `PerformanceObserver('longtask')` > 50ms | runtime, sampled 1% |
 | Memory | `performance.memory` hourly snapshot (self-heal watchdog surface) | hourly |
-| CI perf lane | headless Chrome: cold/warm paint + 200-line mount + event-storm frame cost | per PR, budget-fail CI |
+| CI perf lane | cold/warm paint + entry-bundle gzip in `perf-lane.mjs`; 200-row mount + event-storm measurements in `tests/browser/perf-budget.test.tsx` | per PR; budget enforcement remains pending as described above |
 
 ## 3. Virtualization audit (6.3) — per-surface ruling
 
 | Surface | List type | N (owner scale) | Ruling |
 |---|---|---|---|
-| Fleet lines table | fixed-height rows | 200 | **Virtualize** above 50 rows (react-virtual); below, plain render |
+| Fleet lines table | fixed-height rows | 200 | **Virtualize** above 50 rows (`@tanstack/react-virtual`); below, plain render |
 | Fleet activity feed | append-only | unbounded | **Virtualize** + cap DOM at 200 with windowing |
 | Inbox message thread | variable-height bubbles | per-thread | **Virtualize** (already the v3 pattern — carry) |
 | Inbox conversation list | fixed rows | ~200 | Virtualize above 50 |
