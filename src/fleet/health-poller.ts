@@ -108,10 +108,11 @@ const RECOVERY_BLOCKING_REASON_CODES: Readonly<Record<RuntimeRecoveryBlockingRea
   turn_recovery_unclassified: true,
   completed_delivery_identity_unclassified: true,
 };
-// #3694: the degradation-cause vocabulary, for the journal only (the journal is
-// a durable sink that #2386's evidence confinement does not cover). Same
-// Record-over-the-union totality as RECOVERY_BLOCKING_REASON_CODES: a cause
-// added in src/core/health.ts fails typecheck here until it is listed.
+// #3694: the degradation-cause vocabulary. It feeds the journal (a durable sink
+// that #2386's evidence confinement does not cover) and the structured
+// diagnostics of a degraded alert (#2409). Same Record-over-the-union totality
+// as RECOVERY_BLOCKING_REASON_CODES: a cause added in src/core/health.ts fails
+// typecheck here until it is listed.
 const DEGRADATION_CAUSE_CODES: Readonly<Record<HealthDegradationCause, true>> = {
   provider_fallback_active: true,
   fallback_chain_exhausted: true,

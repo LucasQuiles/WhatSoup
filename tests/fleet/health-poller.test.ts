@@ -1087,12 +1087,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(poller.getStatus('remote-1')!.status).toBe('degraded');
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
 
     poller.stop();
   });
@@ -1151,12 +1146,7 @@ describe('HealthPoller', () => {
     poller.start();
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
 
     await vi.advanceTimersByTimeAsync(5_000);
     // No cause list in the body: only the connected flag rides the alert, and
@@ -1282,14 +1272,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
     expect(poller.getStatus('remote-1')?.statusEvidence).toEqual(expect.arrayContaining([
       'degradation_class=operational_fallback',
       'degradation_causes=provider_fallback_active,primary_model_evidence_stale',
@@ -1834,14 +1817,7 @@ describe('HealthPoller', () => {
       'warning',
       undefined,
     );
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-      'critical',
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
     expect(alertFns.clearAlertSource).toHaveBeenCalledTimes(1);
     expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
       'remote-1',
@@ -1881,14 +1857,7 @@ describe('HealthPoller', () => {
       undefined,
       { degradationDiagnostics: { whatsappConnected: true } },
     );
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'provider_fallback_capacity',
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'provider_fallback_capacity');
 
     poller.stop();
   });
