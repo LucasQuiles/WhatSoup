@@ -3183,11 +3183,11 @@ def close_recovered_daily_health_incidents(event: dict[str, Any], incident_state
     recovered = daily_health_recovered_incident_keys(event, incident_state)
     if not recovered:
         return []
-    open_incidents = incident_state.setdefault("openIncidents", {})
-    last_sent = incident_state.setdefault("lastSentAt", {})
+    # The same removal a matching clear performs, so a recovered key also drops
+    # its transient bookkeeping: a promoted record left behind would page the
+    # next hold-tier episode at once.
     for recovered_key in recovered:
-        open_incidents.pop(recovered_key, None)
-        last_sent.pop(recovered_key, None)
+        close_open_incident(incident_state, recovered_key)
     return recovered
 
 
@@ -4379,6 +4379,23 @@ def format_daily_health_event(core: list[str], evidence: str, details: list[str]
     return text
 
 
+def retired_stronger_incidents_text(diagnostics: dict[str, Any]) -> str | None:
+    """Root sources this event retired, with the fixed readings that did it."""
+    retired = diagnostics.get("retiredStrongerIncidents")
+    if not isinstance(retired, list):
+        return None
+    parts = []
+    for entry in retired:
+        if not isinstance(entry, dict):
+            continue
+        root = str(entry.get("incidentKey") or "").rsplit("|", 1)[-1]
+        if not root:
+            continue
+        readings = str(entry.get("contradictingEvidence") or "").strip()
+        parts.append(f"{root} ({readings})" if readings else root)
+    return "; ".join(parts) or None
+
+
 def format_event(event: dict[str, Any]) -> str:
     classification = classify_event(event)
     severity = classification.severity
@@ -4452,6 +4469,10 @@ def format_event(event: dict[str, Any]) -> str:
             else None,
             900,
         ),
+        # This alert retired a stronger incident (an open logout or bond loss
+        # its connectivity reading contradicts). It is the only notice of that
+        # closure: the root's own later clear finds nothing open.
+        event_line("closes_incident", retired_stronger_incidents_text(diagnostics), 300),
     ]
     freshness_lines = [
         event_line("dispatcher_attempts", delivery.get("attempts")),
@@ -5112,6 +5133,12 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         )
         retired_stronger = True
         stronger = stronger_open_incident_for(event, incident_state)
+    # The retirement audit rides the event, so a retried send (the parent was
+    # already removed on the failed attempt) still skips the hold below. The
+    # field can only force a send, never a hold.
+    event_diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    if event_diagnostics.get("retiredStrongerIncidents"):
+        retired_stronger = True
     if stronger is not None:
         stronger_key, stronger_record = stronger
         mark_suppressed_by_stronger(event, stronger_key, stronger_record, current)

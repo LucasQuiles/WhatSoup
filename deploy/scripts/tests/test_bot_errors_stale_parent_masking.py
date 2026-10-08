@@ -231,6 +231,34 @@ def test_hold_tier_child_that_retires_a_parent_is_sent_not_held():
     assert mod.incident_key(child) not in state.get("transientState", {})
 
 
+def test_retried_child_that_retired_a_parent_is_still_not_held():
+    # The send failed after the retirement was recorded: the parent is gone
+    # from state and the event is processed again from the outbox. Its own
+    # retirement audit must still keep it out of the hold.
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _hold_tier_connected_child("evt-child-hold-retry")
+    assert mod.should_suppress_send(child, state) is None
+    assert parent_key not in state["openIncidents"]
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is None, reason
+    assert child["severity"] == "critical"
+    assert "transientHeld" not in child["diagnostics"]
+
+
+def test_page_of_a_retiring_child_names_the_closed_incident():
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _hold_tier_connected_child("evt-child-hold-render")
+    assert mod.should_suppress_send(child, state) is None
+
+    text = mod.format_event(child)
+
+    assert "  > closes_incident: instance_logged_out (diagnostics.whatsappConnected=true)" in text.splitlines()
+
+
 def test_daily_health_prefixed_connectivity_root_is_retired():
     os.environ["BOT_ERRORS_INHIBITION_MAP"] = (
         '{"daily-health:whatsapp_device_bond_lost": ["health_body_degraded"]}'

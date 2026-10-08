@@ -13,7 +13,6 @@ import { forceEnsurePrivateDirectorySync, fsyncDirectory } from './private-fs.ts
 import { confineAlertContent, confineConversationScope } from './alert-evidence.ts';
 import { redactText } from './redaction-text.ts';
 import { asNonEmptyString } from './type-guards.ts';
-import faultTaxonomyRegistry from './fault-taxonomy-registry.json' with { type: 'json' };
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -402,21 +401,17 @@ function newBotErrorsEnvelope(eventType: BotErrorsEventType, severity: BotErrors
 // is never cut.
 const DEGRADATION_CAUSE_TOKEN_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const MAX_DEGRADATION_CAUSES = 64;
-// The closed vocabulary: the registry section the dispatcher reads its hold
-// tiers from, plus `unrecognized`, the poller's code for a cause this build
-// does not know (no tier, so it pages). Membership, not just shape, keeps any
-// caller from carrying content past the #2386 confinement in a code-shaped token.
-const DEGRADATION_CAUSE_VOCABULARY: ReadonlySet<string> = new Set([
-  ...Object.keys(faultTaxonomyRegistry.degradationCauseDispositions.dispositions),
-  'unrecognized',
-]);
 
 /**
  * Keep only well-formed degradation diagnostics. A cause vector that is empty,
- * oversized or holds a token outside the vocabulary is dropped whole rather
- * than filtered: a partial vector could hold a degradation whose dropped cause
- * should page. Without the vector the dispatcher classifies the event as an
- * outage, which is the visible side.
+ * oversized or holds a non-code token is dropped whole rather than filtered:
+ * a partial vector could hold a degradation whose dropped cause should page.
+ * Without the vector the dispatcher classifies the event as an outage, which
+ * is the visible side.
+ *
+ * This bounds the shape, not registry membership: the outbox is in the
+ * deployer's TS-only import closure, so it cannot read the registry JSON. The
+ * one caller, the health poller, sends only registry codes or `unrecognized`.
  */
 function boundedDegradationDiagnostics(
   value: BotErrorsDegradationDiagnostics | undefined,
@@ -426,9 +421,7 @@ function boundedDegradationDiagnostics(
   const validCauses = Array.isArray(causes)
     && causes.length > 0
     && causes.length <= MAX_DEGRADATION_CAUSES
-    && causes.every((cause) => typeof cause === 'string'
-      && DEGRADATION_CAUSE_TOKEN_RE.test(cause)
-      && DEGRADATION_CAUSE_VOCABULARY.has(cause));
+    && causes.every((cause) => typeof cause === 'string' && DEGRADATION_CAUSE_TOKEN_RE.test(cause));
   return {
     ...(validCauses ? { degradationCauses: [...new Set(causes)] } : {}),
     ...(typeof value.whatsappConnected === 'boolean' ? { whatsappConnected: value.whatsappConnected } : {}),

@@ -321,6 +321,28 @@ def test_held_then_outage_then_clear_closes_the_surfaced_incident(tmp_path):
     assert key not in state.get("transientState", {})
 
 
+def test_daily_health_recovery_retires_transient_bookkeeping(monkeypatch, tmp_path):
+    # Held, promoted and paged, then closed by a verified daily-health
+    # recovery. A promoted record left behind would page the next hold-tier
+    # episode at once instead of holding it.
+    mod = _load()
+    state = _empty_state()
+    key = _key(mod, _alert())
+    mod.apply_transient_tiering(_alert(), state, key, 1000)
+    mod.apply_transient_tiering(_alert(), state, key, 1000 + 1800)  # promote
+    mod.mark_incident_sent(_alert(), state)
+    assert state["transientState"][key]["promoted"] is True
+    assert isinstance(state["openIncidents"].get(key), dict)
+    monkeypatch.setattr(mod, "daily_health_recovered_incident_keys", lambda event, incident_state: [key])
+
+    assert mod.close_recovered_daily_health_incidents(_alert(source="daily-health"), state) == [key]
+
+    assert key not in state["openIncidents"]
+    assert key not in state.get("transientState", {})
+    reason = mod.should_suppress_send(_alert(), state)
+    assert reason is not None and reason.startswith("transient_held:"), reason
+
+
 def test_clear_without_transient_record_noop(tmp_path):
     mod = _load()
     state = _empty_state()

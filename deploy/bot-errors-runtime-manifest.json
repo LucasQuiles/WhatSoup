@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "4f1385d8f3a8c3a3b4633ea090e3055fcb3b4e824625a42693daf39ba1f4ff55",
+      "sha256": "e935f2becab57cdf59083f0c840c3e499b54059868ec74d529bea7f7766a9a30",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -800,7 +800,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "3dc89bf5ce1a1fa52333437fe0a4a8fed9ccb75c6e7c6eb877943931b983592f",
+      "sha256": "f2000451bdb02083841c9bdf113f2202c5bc2eec3b6395515dbe91bf4b16bc87",
       "mustContain": [
         "import { redactText } from './redaction-text.ts';",
         "export { redactText as redactBotErrorsText } from './redaction-text.ts';",

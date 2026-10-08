@@ -552,9 +552,10 @@ describe('degradation diagnostics on a degraded-health alert', () => {
   it.each([
     ['an empty vector', []],
     ['a token with content characters', ['degradation_silence_unproven', 'Bad Token']],
-    ['a code-shaped token outside the registry', ['degradation_silence_unproven', 'customer_alice']],
     ['a token over 64 characters', [`a${'b'.repeat(64)}`]],
-    ['more causes than the cap', Array.from({ length: 65 }, (_, i) => `cause_${i}`)],
+    // Copies of one valid code: only the length cap rejects this vector (the
+    // dedup would otherwise shrink it to one kept cause).
+    ['more causes than the cap', Array.from({ length: 65 }, () => 'enrichment_stale')],
   ])('drops the whole cause vector for %s, so the dispatcher pages', (_label, degradationCauses) => {
     const event = degradedEvent({ degradationCauses, whatsappConnected: true });
 

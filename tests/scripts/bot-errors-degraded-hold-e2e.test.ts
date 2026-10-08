@@ -11,13 +11,16 @@
  * `buildBotErrorsEvent()` and goes through one real dispatcher pass.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { buildBotErrorsEvent, type BotErrorsDegradationDiagnostics } from '../../src/lib/bot-errors-outbox.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
-const tmpRoots: string[] = [];
+// Under /tmp, not os.tmpdir(): the dispatcher's test-leak screen drops events
+// whose paths sit in a macOS per-user temp dir (/var/folders/.../T/).
+const tmpDirs = trackTmpDirs('bot-errors-degraded-hold-', { base: '/tmp' });
 
 /**
  * Producer environment for a live-shaped build: no runner signals (the
@@ -54,8 +57,7 @@ function buildDegradedAlert(root: string, id: EventId, degradationDiagnostics?: 
 
 /** Build one event in a fresh state root and run one dispatcher pass over it. */
 function dispatchOnce(id: EventId, degradationDiagnostics?: BotErrorsDegradationDiagnostics) {
-  const root = mkdtempSync(join('/tmp', 'bot-errors-degraded-hold-'));
-  tmpRoots.push(root);
+  const root = tmpDirs.make('state');
   const event = buildDegradedAlert(root, id, degradationDiagnostics);
   const outbox = join(root, 'outbox');
   mkdirSync(outbox, { recursive: true, mode: 0o700 });
@@ -73,6 +75,7 @@ function dispatchOnce(id: EventId, degradationDiagnostics?: BotErrorsDegradation
       BOT_ERRORS_DRY_SEND_CAPTURE: join(root, 'sent-message.txt'),
     },
     encoding: 'utf8',
+    timeout: 60_000,
   });
   const suppressedDir = join(root, 'suppressed');
   const suppressed = (existsSync(suppressedDir) ? readdirSync(suppressedDir) : []).map(
@@ -84,10 +87,6 @@ function dispatchOnce(id: EventId, degradationDiagnostics?: BotErrorsDegradation
   );
   return { event, counts: JSON.parse(result) as Record<string, unknown>, suppressed };
 }
-
-afterEach(() => {
-  for (const root of tmpRoots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
 
 describe('bot-errors dispatcher — degraded-health hold from the real producer (#2409)', () => {
   it('holds a connected instance whose only cause is hold-tier', () => {
