@@ -4379,21 +4379,49 @@ def format_daily_health_event(core: list[str], evidence: str, details: list[str]
     return text
 
 
-def retired_stronger_incidents_text(diagnostics: dict[str, Any]) -> str | None:
-    """Root sources this event retired, with the fixed readings that did it."""
+_RETIREMENT_READING_TOKENS = frozenset({
+    "diagnostics.whatsappConnected=true",
+    "whatsapp_connected=true",
+    "connected=true",
+    "connection_state=connected",
+})
+
+
+def retired_stronger_incidents(diagnostics: dict[str, Any]) -> list[str]:
+    """The event's retirement audit, reduced to its fixed vocabulary.
+
+    Keeps only what retire_contradicted_stronger_incident writes: a
+    connectivity-loss root source and the positive reading tokens of
+    positive_connectivity_readings, one rendered entry per root and readings
+    (a retried send can retire the same root again). A queued event's
+    diagnostics can hold anything a producer put there, so every other value
+    is dropped: it neither skips the transient hold nor reaches the WhatsApp
+    message or the email fallback.
+    """
     retired = diagnostics.get("retiredStrongerIncidents")
     if not isinstance(retired, list):
-        return None
-    parts = []
+        return []
+    parts: list[str] = []
     for entry in retired:
         if not isinstance(entry, dict):
             continue
-        root = str(entry.get("incidentKey") or "").rsplit("|", 1)[-1]
-        if not root:
+        root = _bare_root_source(str(entry.get("incidentKey") or ""))
+        if root not in CONNECTIVITY_LOSS_ROOT_SOURCES:
             continue
-        readings = str(entry.get("contradictingEvidence") or "").strip()
-        parts.append(f"{root} ({readings})" if readings else root)
-    return "; ".join(parts) or None
+        readings = [
+            token
+            for token in str(entry.get("contradictingEvidence") or "").split()
+            if token in _RETIREMENT_READING_TOKENS
+        ]
+        part = f"{root} ({' '.join(readings)})" if readings else root
+        if part not in parts:
+            parts.append(part)
+    return parts
+
+
+def retired_stronger_incidents_text(diagnostics: dict[str, Any]) -> str | None:
+    """Root sources this event retired, with the readings that did it."""
+    return "; ".join(retired_stronger_incidents(diagnostics)) or None
 
 
 def format_event(event: dict[str, Any]) -> str:
@@ -5134,10 +5162,11 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         retired_stronger = True
         stronger = stronger_open_incident_for(event, incident_state)
     # The retirement audit rides the event, so a retried send (the parent was
-    # already removed on the failed attempt) still skips the hold below. The
-    # field can only force a send, never a hold.
+    # already removed on the failed attempt) still skips the hold below. Read
+    # through the same vocabulary filter the page renders with, so a skipped
+    # hold always shows its closes_incident line. It can only force a send.
     event_diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
-    if event_diagnostics.get("retiredStrongerIncidents"):
+    if retired_stronger_incidents(event_diagnostics):
         retired_stronger = True
     if stronger is not None:
         stronger_key, stronger_record = stronger

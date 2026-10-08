@@ -259,6 +259,50 @@ def test_page_of_a_retiring_child_names_the_closed_incident():
     assert "  > closes_incident: instance_logged_out (diagnostics.whatsappConnected=true)" in text.splitlines()
 
 
+def test_closes_incident_line_renders_only_the_fixed_vocabulary():
+    # A queued event's diagnostics are producer-controlled: a forged audit
+    # entry must not carry a path or identifier into the message.
+    mod = _load()
+    child = _hold_tier_connected_child("evt-child-forged-audit")
+    child["diagnostics"]["retiredStrongerIncidents"] = [
+        {"incidentKey": "host-a|sample|instance_logged_out", "contradictingEvidence": "/srv/customer-a/report.txt whatsapp_connected=true"},
+        {"incidentKey": "customer_alice", "contradictingEvidence": "connected=true"},
+        "not-a-dict",
+    ]
+
+    text = mod.format_event(child)
+
+    closes = [line for line in text.splitlines() if "closes_incident" in line]
+    assert closes == ["  > closes_incident: instance_logged_out (whatsapp_connected=true)"]
+    assert "/srv/customer-a" not in text
+    assert "customer_alice" not in text
+
+
+@pytest.mark.parametrize("forged", ["x", ["not-a-dict"], [{"incidentKey": "customer_alice"}]])
+def test_forged_retirement_audit_does_not_skip_the_hold(forged):
+    # Only an audit entry in the fixed vocabulary skips the hold, so a skipped
+    # hold always has a closes_incident line to show for it.
+    mod = _load()
+    state: dict = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    child = _hold_tier_connected_child("evt-child-forged-skip")
+    child["diagnostics"]["retiredStrongerIncidents"] = forged
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is not None and reason.startswith("transient_held:"), reason
+
+
+def test_closes_incident_line_names_a_root_once_after_repeat_retirement():
+    mod = _load()
+    child = _hold_tier_connected_child("evt-child-repeat-audit")
+    entry = {"incidentKey": "host-a|sample|instance_logged_out", "contradictingEvidence": "diagnostics.whatsappConnected=true"}
+    child["diagnostics"]["retiredStrongerIncidents"] = [dict(entry), dict(entry)]
+
+    closes = [line for line in mod.format_event(child).splitlines() if "closes_incident" in line]
+
+    assert closes == ["  > closes_incident: instance_logged_out (diagnostics.whatsappConnected=true)"]
+
+
 def test_daily_health_prefixed_connectivity_root_is_retired():
     os.environ["BOT_ERRORS_INHIBITION_MAP"] = (
         '{"daily-health:whatsapp_device_bond_lost": ["health_body_degraded"]}'
