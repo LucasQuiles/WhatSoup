@@ -2377,15 +2377,25 @@ export class HealthPoller {
    * dispatcher's per-cause hold (#2409). The evidence text carries the same
    * values, but #2386 confines it to a digest before it leaves this process.
    * `unrecognized` has no registered tier, so the dispatcher pages it.
+   *
+   * The flag is true only when the connection state agrees with the connected
+   * flag, as everywhere else in this poller. The dispatcher retires an open
+   * logout or bond-loss incident on a true flag alone, and the contradicting
+   * `connection_state=` token is inside the digest, so a body reading
+   * connected=true with any other state sends false (not proven up).
    */
   private healthBodyDegradedDiagnostics(
     health: Record<string, unknown>,
   ): BotErrorsDegradationDiagnostics | undefined {
     const causes = this.readDegradationCauses(health);
-    const connected = this.readRecord(health['whatsapp'])?.['connected'];
+    const whatsapp = this.readRecord(health['whatsapp']);
+    const connected = whatsapp?.['connected'];
+    const connectionState = this.readRecord(whatsapp?.['connection'])?.['state'];
     const diagnostics: BotErrorsDegradationDiagnostics = {
       ...(causes !== null ? { degradationCauses: this.degradationCauseCodes(causes) } : {}),
-      ...(typeof connected === 'boolean' ? { whatsappConnected: connected } : {}),
+      ...(typeof connected === 'boolean'
+        ? { whatsappConnected: connected && connectionState === 'connected' }
+        : {}),
     };
     return Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
   }

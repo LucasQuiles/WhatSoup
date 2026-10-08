@@ -1160,7 +1160,8 @@ describe('HealthPoller', () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
     // No cause list in the body: only the connected flag rides the alert, and
-    // the dispatcher pages a degraded event without causes.
+    // the dispatcher pages a degraded event without causes. A null connection
+    // state does not prove the link up, so the flag is false.
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
       'health_body_degraded',
@@ -1168,7 +1169,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('health_body_degraded_polls=3'),
       'critical',
       undefined,
-      { degradationDiagnostics: { whatsappConnected: true } },
+      { degradationDiagnostics: { whatsappConnected: false } },
     );
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
@@ -1177,7 +1178,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('connection_state=unknown'),
       'critical',
       undefined,
-      { degradationDiagnostics: { whatsappConnected: true } },
+      { degradationDiagnostics: { whatsappConnected: false } },
     );
 
     poller.stop();
@@ -1217,6 +1218,48 @@ describe('HealthPoller', () => {
           // registry has no hold tier for, so the dispatcher still pages it.
           degradationCauses: ['degradation_silence_unproven', 'unrecognized'],
           whatsappConnected: true,
+        },
+      },
+    );
+
+    poller.stop();
+  });
+
+  it.each([
+    ['a disconnected connection state', { connected: true, connection: { state: 'disconnected' } }],
+    ['no connection state', { connected: true }],
+  ] as const)('sends connected=false when the connected flag sits beside %s', async (_label, whatsapp) => {
+    // The dispatcher may retire an open logout incident on a true flag alone,
+    // and the contradicting connection_state token is inside the digest.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        degradation_causes: ['degradation_silence_unproven'],
+        whatsapp,
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('whatsapp_connected=true'),
+      'critical',
+      undefined,
+      {
+        degradationDiagnostics: {
+          degradationCauses: ['degradation_silence_unproven'],
+          whatsappConnected: false,
         },
       },
     );
@@ -1640,12 +1683,13 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(5_000);
 
     // An empty cause list sends no vector, so the dispatcher pages it; a
-    // disconnected body sends connected=false, which the dispatcher pages too.
+    // disconnected body, or a connected flag beside any other transport
+    // state, sends connected=false, which the dispatcher pages too.
     const expectedDiagnostics = {
       ...('degradationCauses' in overrides
         ? {}
         : { degradationCauses: ['provider_fallback_active', 'primary_model_evidence_stale'] }),
-      whatsappConnected: 'whatsappConnected' in overrides ? overrides.whatsappConnected : true,
+      whatsappConnected: !('whatsappConnected' in overrides) && !('connectionState' in overrides),
     };
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
@@ -4482,7 +4526,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('health_body_degraded_polls=3'),
       'critical',
       undefined,
-      { degradationDiagnostics: { whatsappConnected: true } },
+      { degradationDiagnostics: { whatsappConnected: false } },
     );
     expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['health_body_degraded']);
 
