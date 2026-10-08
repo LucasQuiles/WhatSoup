@@ -27,7 +27,11 @@ const tmpRoots: string[] = [];
 const RUNNER_SIGNALS = ['VITEST', 'VITEST_POOL_ID', 'VITEST_WORKER_ID', 'JEST_WORKER_ID', 'PYTEST_CURRENT_TEST'] as const;
 const OVERRIDDEN = [...RUNNER_SIGNALS, 'BOT_ERRORS_STATE_DIR', 'BOT_ERRORS_OUTBOX_DIR'] as const;
 
-function buildDegradedAlert(root: string, id: string, degradationDiagnostics?: BotErrorsDegradationDiagnostics) {
+type EventId = `${string}-${string}-${string}-${string}-${string}`;
+const HOLD_EVENT_ID: EventId = '00000000-0000-4000-8000-000000002409';
+const PAGE_EVENT_ID: EventId = '00000000-0000-4000-8000-000000002410';
+
+function buildDegradedAlert(root: string, id: EventId, degradationDiagnostics?: BotErrorsDegradationDiagnostics) {
   const saved = new Map(OVERRIDDEN.map((key) => [key, process.env[key]]));
   for (const key of OVERRIDDEN) delete process.env[key];
   process.env['BOT_ERRORS_STATE_DIR'] = root;
@@ -49,7 +53,7 @@ function buildDegradedAlert(root: string, id: string, degradationDiagnostics?: B
 }
 
 /** Build one event in a fresh state root and run one dispatcher pass over it. */
-function dispatchOnce(id: string, degradationDiagnostics?: BotErrorsDegradationDiagnostics) {
+function dispatchOnce(id: EventId, degradationDiagnostics?: BotErrorsDegradationDiagnostics) {
   const root = mkdtempSync(join('/tmp', 'bot-errors-degraded-hold-'));
   tmpRoots.push(root);
   const event = buildDegradedAlert(root, id, degradationDiagnostics);
@@ -87,7 +91,7 @@ afterEach(() => {
 
 describe('bot-errors dispatcher — degraded-health hold from the real producer (#2409)', () => {
   it('holds a connected instance whose only cause is hold-tier', () => {
-    const { event, counts, suppressed } = dispatchOnce('degraded-hold-tier', {
+    const { event, counts, suppressed } = dispatchOnce(HOLD_EVENT_ID, {
       degradationCauses: ['degradation_silence_unproven'],
       whatsappConnected: true,
     });
@@ -100,7 +104,7 @@ describe('bot-errors dispatcher — degraded-health hold from the real producer 
     });
     expect(suppressed).toHaveLength(1);
     expect(suppressed[0]).toMatchObject({
-      id: 'degraded-hold-tier',
+      id: HOLD_EVENT_ID,
       severity: 'warning',
       diagnostics: { failureClass: 'transient', transientHeld: true },
     });
@@ -112,7 +116,7 @@ describe('bot-errors dispatcher — degraded-health hold from the real producer 
     ['the producer sends an unrecognized cause', { degradationCauses: ['unrecognized'], whatsappConnected: true }],
     ['the producer sends no diagnostics (the shape before this fix)', undefined],
   ])('pages when %s', (_label, diagnostics) => {
-    const { counts, suppressed } = dispatchOnce('degraded-page', diagnostics);
+    const { counts, suppressed } = dispatchOnce(PAGE_EVENT_ID, diagnostics);
 
     expect(counts).toMatchObject({
       processed: 1, sent: 1, suppressed: 0, failed: 0, testLeakDropped: 0, testProvenanceSuppressed: 0,
