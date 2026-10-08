@@ -800,7 +800,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "e8ded92d38ca3c5544812cfa3b5e0276ed410b79f52f5258f05fffb4fbafe66b",
+      "sha256": "a58de318288b738b9e8c2925ca5b5f88901a465e0fbe901c9651c6e7b45d0619",
       "mustContain": [
         "import { redactText } from './redaction-text.ts';",
         "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
