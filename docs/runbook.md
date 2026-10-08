@@ -2729,7 +2729,7 @@ machine-readable disposition registry for sources that participate in fault clas
 
 | Source | Producer owner | Policy / proof owner |
 |---|---|---|
-| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges |
+| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges. A `health_body_degraded` alert carries `diagnostics.degradationCauses` (fixed registry codes; an unknown cause becomes `unrecognized`) and `diagnostics.whatsappConnected`, because its evidence text is confined to a digest. The dispatcher holds the event at warning tier only when the instance is connected and every cause is hold-tier in the registry, and promotes it after `TRANSIENT_PROMOTE_SECONDS`. An event without these fields pages at once |
 | `recovery_debt_attention` | `src/fleet/health-poller.ts` | Informational, non-paging operator debt lifecycle, emitted under the same instance silence and 15-minute throttle as other poller alerts; clear only from a fresh readable `open=false` sample and never restart or heal from this source alone. |
 | `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |

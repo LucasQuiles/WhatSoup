@@ -54,6 +54,22 @@ export interface BotErrorsCriticalAssetDiagnostic {
   evidenceRefs?: string[];
 }
 
+/**
+ * Structured inputs for the dispatcher's per-cause hold on a
+ * `health_body_degraded` alert (#2409). The dispatcher holds such an event
+ * only when the bot reports WhatsApp connected AND every cause carries a
+ * registered hold tier. It reads both from `diagnostics` or from the evidence
+ * text, but #2386 confines the evidence text to a digest, so without these
+ * fields every degraded event classifies as an outage and pages at once.
+ *
+ * Values are fixed cause codes and a boolean, never content, so they cross the
+ * confinement boundary unchanged.
+ */
+export interface BotErrorsDegradationDiagnostics {
+  degradationCauses?: readonly string[];
+  whatsappConnected?: boolean;
+}
+
 export interface BotErrorsOutboxInput {
   eventType: BotErrorsEventType;
   instance: string;
@@ -85,6 +101,13 @@ export interface BotErrorsOutboxInput {
    * event shape unchanged for every existing source.
    */
   conversationKey?: string;
+  /**
+   * Cause codes and the connected flag of a degraded instance; see
+   * {@link BotErrorsDegradationDiagnostics}. Validated in the builder and
+   * merged into `diagnostics`. Omitted for every other source, which keeps
+   * their emitted shape unchanged.
+   */
+  degradationDiagnostics?: BotErrorsDegradationDiagnostics;
 }
 
 export interface BotErrorsOutboxWrite {
@@ -373,6 +396,34 @@ function newBotErrorsEnvelope(eventType: BotErrorsEventType, severity: BotErrors
   throw new Error('invalid bot errors envelope');
 }
 
+// Same token shape the dispatcher accepts (_DEGRADATION_CAUSE_TOKEN_RE), with a
+// length bound. The cap is above the registry's cause count, so a valid vector
+// is never cut.
+const DEGRADATION_CAUSE_TOKEN_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const MAX_DEGRADATION_CAUSES = 64;
+
+/**
+ * Keep only well-formed degradation diagnostics. A cause vector that is empty,
+ * oversized or holds a non-code token is dropped whole rather than filtered:
+ * a partial vector could hold a degradation whose dropped cause should page.
+ * Without the vector the dispatcher classifies the event as an outage, which
+ * is the visible side.
+ */
+function boundedDegradationDiagnostics(
+  value: BotErrorsDegradationDiagnostics | undefined,
+): { degradationCauses?: string[]; whatsappConnected?: boolean } {
+  if (!value) return {};
+  const causes = value.degradationCauses;
+  const validCauses = Array.isArray(causes)
+    && causes.length > 0
+    && causes.length <= MAX_DEGRADATION_CAUSES
+    && causes.every((cause) => typeof cause === 'string' && DEGRADATION_CAUSE_TOKEN_RE.test(cause));
+  return {
+    ...(validCauses ? { degradationCauses: [...new Set(causes)] } : {}),
+    ...(typeof value.whatsappConnected === 'boolean' ? { whatsappConnected: value.whatsappConnected } : {}),
+  };
+}
+
 export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = randomUUID(), createdAt = nowIso()) {
   const instance = input.instance.trim() || 'unknown';
   const source = input.source.trim() || 'unknown';
@@ -426,6 +477,9 @@ export function buildBotErrorsEvent(input: BotErrorsOutboxInput, eventId = rando
     },
     diagnostics: {
       queue: botErrorsOutboxDir(),
+      // Additive, absent-by-default: only a degraded-health alert carries
+      // these. See BotErrorsDegradationDiagnostics.
+      ...boundedDegradationDiagnostics(input.degradationDiagnostics),
     },
     delivery: {
       attempts: 0,

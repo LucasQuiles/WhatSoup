@@ -4,9 +4,10 @@ import {
   clearAlertSource,
   clearAlertSourceChecked,
   emitAlert,
+  type AlertEmissionOptions,
   type AlertEmissionResult,
 } from '../lib/emit-alert.ts';
-import type { BotErrorsCriticalAssetDiagnostic } from '../lib/bot-errors-outbox.ts';
+import type { BotErrorsCriticalAssetDiagnostic, BotErrorsDegradationDiagnostics } from '../lib/bot-errors-outbox.ts';
 // Aliased to keep this module's call sites unchanged (asRecord returns
 // `undefined` for non-records; the one null-typed seam adapts with `?? null`).
 import { asRecord, nonEmptyString, nonEmptyStringRaw } from '../lib/type-guards.ts';
@@ -2341,9 +2342,18 @@ export class HealthPoller {
     return codes.join(',');
   }
 
-  /** #3694: journal form of the cause vector: known codes, else one `unrecognized`. */
-  private degradationCausesJournalCode(causes: readonly string[] | null): string {
-    if (causes === null) return 'unknown';
+  /** The body's cause vector when it is a non-empty list of non-empty strings, else null. */
+  private readDegradationCauses(health: Record<string, unknown>): string[] | null {
+    const raw = health['degradation_causes'];
+    return Array.isArray(raw)
+      && raw.length > 0
+      && raw.every((cause) => typeof cause === 'string' && cause.length > 0)
+      ? raw as string[]
+      : null;
+  }
+
+  /** #3694: the cause vector as fixed codes: known causes once each, any other value as one `unrecognized`. */
+  private degradationCauseCodes(causes: readonly string[]): string[] {
     const codes: string[] = [];
     let unrecognized = false;
     for (const cause of causes) {
@@ -2354,7 +2364,30 @@ export class HealthPoller {
       }
     }
     if (unrecognized) codes.push('unrecognized');
-    return codes.join(',');
+    return codes;
+  }
+
+  /** #3694: journal form of the cause vector. */
+  private degradationCausesJournalCode(causes: readonly string[] | null): string {
+    return causes === null ? 'unknown' : this.degradationCauseCodes(causes).join(',');
+  }
+
+  /**
+   * The cause codes and connected flag as structured alert fields, for the
+   * dispatcher's per-cause hold (#2409). The evidence text carries the same
+   * values, but #2386 confines it to a digest before it leaves this process.
+   * `unrecognized` has no registered tier, so the dispatcher pages it.
+   */
+  private healthBodyDegradedDiagnostics(
+    health: Record<string, unknown>,
+  ): BotErrorsDegradationDiagnostics | undefined {
+    const causes = this.readDegradationCauses(health);
+    const connected = this.readRecord(health['whatsapp'])?.['connected'];
+    const diagnostics: BotErrorsDegradationDiagnostics = {
+      ...(causes !== null ? { degradationCauses: this.degradationCauseCodes(causes) } : {}),
+      ...(typeof connected === 'boolean' ? { whatsappConnected: connected } : {}),
+    };
+    return Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
   }
 
   /** #3694: a body flag as a fixed code; a present non-boolean is `invalid`, never echoed. */
@@ -2485,12 +2518,7 @@ export class HealthPoller {
     const controlPeerSuppressedUnavailableAlerts = this.readNumber(
       controlPeer?.['suppressed_unavailable_alerts'],
     );
-    const degradationCausesRaw = health['degradation_causes'];
-    const degradationCauses = Array.isArray(degradationCausesRaw)
-      && degradationCausesRaw.length > 0
-      && degradationCausesRaw.every((cause) => typeof cause === 'string' && cause.length > 0)
-      ? degradationCausesRaw as string[]
-      : null;
+    const degradationCauses = this.readDegradationCauses(health);
     const operationalFallbackCauses = new Set([
       'provider_fallback_active',
       'primary_model_unusable',
@@ -2888,6 +2916,8 @@ export class HealthPoller {
         alertSummary ?? `whatsoup@${name} is degraded`,
         evidence,
         alertSource === 'provider_fallback_capacity' ? 'warning' : 'critical',
+        undefined,
+        alertSource === 'health_body_degraded' ? this.healthBodyDegradedDiagnostics(health) : undefined,
       );
       this.trackActiveAlertSource(name, alertSource, emitted);
     }
@@ -3420,6 +3450,7 @@ export class HealthPoller {
     evidence: string,
     severity: 'critical' | 'error' | 'warning' | 'info' = 'critical',
     criticalAsset?: BotErrorsCriticalAssetDiagnostic,
+    degradationDiagnostics?: BotErrorsDegradationDiagnostics,
   ): boolean {
     // Reliability 4.3: an emit while this source is ALREADY active for the
     // instance is a re-NOTIFICATION of an unchanged open condition, not a
@@ -3462,14 +3493,18 @@ export class HealthPoller {
     const throttleEvidence = throttleLoadErrorCode
       ? `${evidence} alert_throttle_load_error=true alert_throttle_load_error_code=${throttleLoadErrorCode}`
       : evidence;
+    const emitOptions: AlertEmissionOptions = {
+      ...(renotify ? { renotify: true } : {}),
+      ...(degradationDiagnostics ? { degradationDiagnostics } : {}),
+    };
     let result: AlertEmissionResult;
     try {
-      // The renotify option is appended only when set: call arity stays 6 for
+      // The options are appended only when one is set: call arity stays 6 for
       // the common occurrence path (mock-arity-stable), and the single call
       // node keeps the emission-governance scanner's fail-closed status
       // decision adjacency intact.
       result = emitAlert(name, source, summary, throttleEvidence, severity, criticalAsset,
-        ...(renotify ? [{ renotify: true }] as const : []));
+        ...(Object.keys(emitOptions).length > 0 ? [emitOptions] as const : []));
     } catch (err) {
       log.warn({ err, name, source }, 'alert emission threw before durable acceptance');
       return false;
