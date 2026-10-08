@@ -534,6 +534,14 @@ describe('degradation diagnostics on a degraded-health alert', () => {
     });
   });
 
+  it('keeps the unrecognized code, which has no hold tier', () => {
+    expect(degradedEvent({ degradationCauses: ['unrecognized'], whatsappConnected: true }).diagnostics).toEqual({
+      queue: botErrorsOutboxDir(),
+      degradationCauses: ['unrecognized'],
+      whatsappConnected: true,
+    });
+  });
+
   it('keeps a false connected flag, which the dispatcher must read as disconnected', () => {
     expect(degradedEvent({ whatsappConnected: false }).diagnostics).toEqual({
       queue: botErrorsOutboxDir(),
@@ -544,6 +552,7 @@ describe('degradation diagnostics on a degraded-health alert', () => {
   it.each([
     ['an empty vector', []],
     ['a token with content characters', ['degradation_silence_unproven', 'Bad Token']],
+    ['a code-shaped token outside the registry', ['degradation_silence_unproven', 'customer_alice']],
     ['a token over 64 characters', [`a${'b'.repeat(64)}`]],
     ['more causes than the cap', Array.from({ length: 65 }, (_, i) => `cause_${i}`)],
   ])('drops the whole cause vector for %s, so the dispatcher pages', (_label, degradationCauses) => {

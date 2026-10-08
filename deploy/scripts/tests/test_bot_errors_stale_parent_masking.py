@@ -190,6 +190,47 @@ def test_structured_whatsapp_connected_diagnostic_retires_parent():
     assert parent_key not in state["openIncidents"]
 
 
+def _hold_tier_connected_child(event_id: str) -> dict:
+    child = _alert("health_body_degraded", evidence="health_status=degraded", event_id=event_id)
+    child["diagnostics"] = {
+        "whatsappConnected": True,
+        "degradationCauses": ["degradation_silence_unproven"],
+    }
+    return child
+
+
+def test_hold_tier_child_without_a_parent_is_held():
+    # Control for the test below: in this environment the #2409 per-cause
+    # hold is active for a connected, hold-tier-only degraded alert.
+    mod = _load()
+    state: dict = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    child = _hold_tier_connected_child("evt-child-hold-control")
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is not None and reason.startswith("transient_held:"), reason
+    assert child["severity"] == "warning"
+    assert child["diagnostics"]["transientHeld"] is True
+
+
+def test_hold_tier_child_that_retires_a_parent_is_sent_not_held():
+    # The alert that retires a paged logout parent is the only notice of that
+    # closure; holding it as transient would close the incident silently.
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _hold_tier_connected_child("evt-child-hold-retires")
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is None, reason
+    assert parent_key not in state["openIncidents"]
+    assert child["severity"] == "critical"
+    assert "transientHeld" not in child["diagnostics"]
+    retired = child["diagnostics"]["retiredStrongerIncidents"]
+    assert [entry["incidentKey"] for entry in retired] == [parent_key]
+    assert mod.incident_key(child) not in state.get("transientState", {})
+
+
 def test_daily_health_prefixed_connectivity_root_is_retired():
     os.environ["BOT_ERRORS_INHIBITION_MAP"] = (
         '{"daily-health:whatsapp_device_bond_lost": ["health_body_degraded"]}'

@@ -2897,6 +2897,13 @@ def resolve_transient_on_clear(
             return None
         if record.get("promoted"):
             return None  # promoted to outage — normal clear closes the open incident
+        # An open incident on this key means an alert on it WAS surfaced even
+        # though this record never promoted: a later event classified outage
+        # (a degraded body that lost its connected reading), or one that
+        # retired a stronger incident skipped the hold. Its recovery is news.
+        open_incidents = incident_state.get("openIncidents")
+        if isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict):
+            return None
         event.setdefault("diagnostics", {})["transientAutoresolved"] = True
         return f"transient_autoresolved: {key} recovered before promotion; held recovery not surfaced"
     except Exception:
@@ -5093,6 +5100,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # normally. Loop because one scope can hold several roots (bond loss AND
     # logout) and stronger_open_incident_for returns only the first match. Each
     # pass removes one open record, so the loop is bounded by the map size.
+    retired_stronger = False
     while stronger is not None:
         contradiction = stronger_incident_contradiction(
             event, stronger[0], stronger[1], incident_state.get("openIncidents")
@@ -5102,6 +5110,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         retire_contradicted_stronger_incident(
             event, incident_state, stronger[0], stronger[1], contradiction, current
         )
+        retired_stronger = True
         stronger = stronger_open_incident_for(event, incident_state)
     if stronger is not None:
         stronger_key, stronger_record = stronger
@@ -5139,7 +5148,11 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         # Pattern D — hold a transient soft-fault at warning tier; only a
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
         # the hard-outage tier and falls through to normal send handling.
-        if TRANSIENT_TIERING_ENABLED:
+        # Never hold an alert that just retired a stronger incident: it is the
+        # only notice that incident's closure gets, so holding it would close a
+        # paged logout or bond loss silently (#2409 hold-tier degraded alerts
+        # carry the connected reading that retires those roots).
+        if TRANSIENT_TIERING_ENABLED and not retired_stronger:
             transient_reason = apply_transient_tiering(event, incident_state, key, current)
             if transient_reason is not None:
                 return transient_reason

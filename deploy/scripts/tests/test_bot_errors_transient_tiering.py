@@ -294,6 +294,33 @@ def test_clear_of_promoted_transient_flows(tmp_path):
     assert key not in state["transientState"]  # bookkeeping still retired
 
 
+def test_held_then_outage_then_clear_closes_the_surfaced_incident(tmp_path):
+    # Held at first sight (connected, hold-tier cause), then the same key
+    # pages as an outage (the body lost its connected reading). The outage
+    # leaves the unpromoted transient record behind, so its clear must not be
+    # mistaken for the silent recovery of a never-surfaced transient.
+    mod = _load()
+    state = _empty_state()
+    held = _alert()
+    key = _key(mod, held)
+    assert mod.should_suppress_send(held, state).startswith("transient_held:")
+    assert state["transientState"][key].get("promoted") is not True
+
+    outage = _alert(evidence="status=degraded whatsapp_connected=false connection_state=reconnecting degradation_causes=enrichment_stale")
+    assert mod.should_suppress_send(outage, state) is None
+    mod.mark_incident_sent(outage, state)
+    assert isinstance(state["openIncidents"].get(key), dict)
+
+    clear = _clear()
+    reason = mod.should_suppress_send(clear, state)
+
+    assert reason is None, reason
+    assert "transientAutoresolved" not in clear.get("diagnostics", {})
+    mod.mark_incident_sent(clear, state)
+    assert key not in state["openIncidents"]
+    assert key not in state.get("transientState", {})
+
+
 def test_clear_without_transient_record_noop(tmp_path):
     mod = _load()
     state = _empty_state()
