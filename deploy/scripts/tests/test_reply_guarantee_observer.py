@@ -1225,23 +1225,30 @@ def _run_cli(mod, monkeypatch: pytest.MonkeyPatch, capsys, commands: list, argv:
     return status, output, _emission_projection(commands), mod._state_target_and_observation()[1].payload
 
 
-def _assert_paging_unchanged(expected_run, observed_run, *reasons: str) -> None:
-    expected_status, expected, expected_emissions, expected_latches = expected_run
-    status, observed, emissions, latches = observed_run
-    expected_instance = expected["instances"][0]
-    observed_instance = observed["instances"][0]
-    assert expected_instance["progressDiagnostics"] == _diagnosed(2, 1, 0)
-    assert observed_instance["progressDiagnostics"] in [_unavailable(reason) for reason in reasons]
-    assert _without_diagnostics(observed_instance) == _without_diagnostics(expected_instance)
-    assert status == expected_status == 0
-    assert observed["state"] == expected["state"] == "active-breach"
-    assert observed["emissionSucceeded"] is expected["emissionSucceeded"] is True
-    assert emissions == expected_emissions
-    assert [(source, clear) for _instance, source, clear, _severity in emissions] == [
-        ("reply-guarantee-active-breach", False),
-    ]
-    assert latches == expected_latches
-    assert latches["instances"]["agent-a"]["activeAlerted"] is True
+def _run_diagnostics(run) -> dict:
+    return run[1]["instances"][0]["progressDiagnostics"]
+
+
+def _paging_outcome(run) -> tuple:
+    """Everything a run pages, saves and exits with, without its progress diagnostics."""
+    status, output, emissions, latches = run
+    observation = _without_diagnostics(output["instances"][0])
+    return status, observation, output["state"], output["emissionSucceeded"], emissions, latches
+
+
+def _breach_page_facts(outcome: tuple) -> tuple:
+    """The facts every two-stale-row run must show: exit 0, one sent breach page, the latch armed."""
+    status, _observation, state, succeeded, emissions, latches = outcome
+    return (
+        status,
+        state,
+        succeeded is True,
+        [(source, clear) for _instance, source, clear, _severity in emissions],
+        latches["instances"]["agent-a"]["activeAlerted"] is True,
+    )
+
+
+_BREACH_PAGED = (0, "active-breach", True, [("reply-guarantee-active-breach", False)], True)
 
 
 @pytest.mark.parametrize(
@@ -1267,7 +1274,10 @@ def test_failed_diagnostic_keeps_emissions_latches_and_exit_code(
 
     observed = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-observed")
 
-    _assert_paging_unchanged(expected, observed, reason)
+    assert _run_diagnostics(expected) == _diagnosed(2, 1, 0)
+    assert _run_diagnostics(observed) == _unavailable(reason)
+    assert _paging_outcome(observed) == _paging_outcome(expected)
+    assert _breach_page_facts(_paging_outcome(observed)) == _BREACH_PAGED
 
 
 def test_lock_held_through_the_diagnostics_costs_at_most_the_budget(
@@ -1308,7 +1318,12 @@ def test_lock_held_through_the_diagnostics_costs_at_most_the_budget(
 
     # diagnostic_failed is the outcome on an SQLite build without usleep,
     # whose sub-second busy timeout gives up at once.
-    _assert_paging_unchanged(expected, observed, "diagnostic_budget_exceeded", "diagnostic_failed")
+    assert _run_diagnostics(expected) == _diagnosed(2, 1, 0)
+    assert _run_diagnostics(observed) in [
+        _unavailable("diagnostic_budget_exceeded"), _unavailable("diagnostic_failed"),
+    ]
+    assert _paging_outcome(observed) == _paging_outcome(expected)
+    assert _breach_page_facts(_paging_outcome(observed)) == _BREACH_PAGED
     # Absolute: the 2 s budget plus a margin for the last wait and scheduling.
     assert len(durations) == 1
     assert durations[0] <= 2.5
