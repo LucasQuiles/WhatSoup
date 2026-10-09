@@ -3882,6 +3882,24 @@ def relay_writefail(remote_host: str, remote_root: str, record: dict[str, Any]) 
     return path, "harvested"
 
 
+# The dispatcher's DELIVERY_ESCALATED_FROM_FIELD and DELIVERY_ESCALATED_NOW_FIELD
+# (R73): the severity a still-open reminder escalated from, and whether it still
+# carries that escalation. They travel with the event's severity, which the relay
+# keeps, so they are the two delivery fields the relay keeps.
+RELAYED_DELIVERY_FIELD_TYPES: dict[str, type] = {"escalatedFromSeverity": str, "escalatedNow": bool}
+
+
+def relayed_delivery(remote_delivery: Any) -> dict[str, Any]:
+    """A fresh delivery block for the hub's own attempts, keeping only the R73
+    escalation fields, and each only when the remote block holds it with its type."""
+    delivery: dict[str, Any] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
+    if isinstance(remote_delivery, dict):
+        for field, field_type in RELAYED_DELIVERY_FIELD_TYPES.items():
+            if type(remote_delivery.get(field)) is field_type:
+                delivery[field] = remote_delivery[field]
+    return delivery
+
+
 def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> Path:
     event = json.loads(record["payload"])
     if not isinstance(event, dict):
@@ -3922,7 +3940,7 @@ def relay_event(remote_host: str, remote_root: str, record: dict[str, Any]) -> P
         log_hints.append(str(state_root() / "logs/collector.jsonl"))
     else:
         diagnostics["logHints"] = [str(state_root() / "logs/collector.jsonl")]
-    event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None}
+    event["delivery"] = relayed_delivery(event.get("delivery"))
     event = redacted_collector_payload(event)
     path = local_outbox_path(event, remote_host)
     target = _durable_target(path)

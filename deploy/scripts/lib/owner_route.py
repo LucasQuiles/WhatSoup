@@ -1,4 +1,7 @@
-"""Owner critical route: copy selected critical BOT ERRORS alerts to the owner.
+"""Owner critical route: copy selected critical alerts and escalated reminders to the owner.
+
+An escalated still-open reminder of a routed source is copied at its own severity,
+so a warning sender's reminder now routes at error (register R73).
 
 The BOT ERRORS group is written by the owner's own line, so the owner's phone
 never notifies for it. This route sends a short, readable line from a SEPARATE
@@ -12,7 +15,8 @@ stamp, within one shared time budget, and swallows every failure: this route
 can never delay, fail, or re-send a group alert.
 
 Policy:
-  * severity critical, incident ALERT (never a clear);
+  * severity critical, or a still-open reminder escalated by age or repeat
+    count (see ``is_escalated_reminder``), incident ALERT (never a clear);
   * source matches BOT_ERRORS_OWNER_ROUTE_SOURCES (fnmatch patterns);
   * first open only, plus ESCALATED still-open reminders; plain still-open
     renotifies are skipped;
@@ -43,6 +47,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from lib.bot_errors_envelope import SEVERITIES
 from lib.send_acceptance import validate_send_acceptance
 
 DEFAULT_SOURCES = (
@@ -71,6 +76,15 @@ TITLES = {
     "whatsapp_device_bond_lost": "WhatsApp device link lost",
     SELFTEST_SOURCE: "TEST — BOT ERRORS routing check",
 }
+
+# The dispatcher's DELIVERY_ESCALATED_FROM_FIELD: the sender's severity, written
+# on the delivery block only when a still-open reminder escalates by age or count.
+ESCALATED_FROM_FIELD = "escalatedFromSeverity"
+# The dispatcher's DELIVERY_ESCALATED_NOW_FIELD: true while the reminder still carries
+# the severity its escalation gave it (base sent it at critical).
+ESCALATED_NOW_FIELD = "escalatedNow"
+# The dispatcher's ESCALATED_SEVERITY_STEP: the severity escalation gives each recorded one.
+ESCALATED_SEVERITY_STEP = {"info": "warning", "warning": "error", "error": "critical", "critical": "critical"}
 
 STATE_RETENTION_SECONDS = 7 * 86400
 EMAIL_TIMEOUT_SECONDS = 20.0
@@ -144,11 +158,55 @@ def owner_line(event: dict[str, Any]) -> str:
     return f"{where}: {title} — {detail}"
 
 
+def _is_readable_severity(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in SEVERITIES
+
+
+def escalated_now(event: Mapping[str, Any]) -> bool:
+    """The dispatcher's escalated_now, kept as an identical copy (R73).
+
+    The escalatedNow marker, plus a readable recorded sender severity, the
+    escalated=true evidence line, and a current severity at least the one-step
+    escalation of the recorded one. A copy rather than an import: the dispatcher
+    is a script this module cannot import, and it loads this module lazily so the
+    owner route can never break dispatch. One test table holds both copies to the
+    same answers.
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, Mapping) or delivery.get(ESCALATED_NOW_FIELD) is not True:
+        return False
+    recorded = delivery.get(ESCALATED_FROM_FIELD)
+    severity = event.get("severity")
+    if not (_is_readable_severity(recorded) and _is_readable_severity(severity)):
+        return False
+    raised = ESCALATED_SEVERITY_STEP[recorded.strip().lower()]
+    if SEVERITIES.index(severity.strip().lower()) > SEVERITIES.index(raised):
+        return False
+    return "escalated=true" in str(event.get("evidence") or "").splitlines()
+
+
+def is_escalated_reminder(event: Mapping[str, Any]) -> bool:
+    """Did the dispatcher escalate this still-open reminder by age or repeat count?
+
+    Escalation used to force critical, which is how these reminders qualified.
+    It now raises the sender's severity one step (register R73), so a warning
+    source's escalated reminder arrives as error; the recorded sender severity
+    keeps the copy the owner got before. A reminder escalated now that also
+    carries ``incident_still_open=true`` qualifies: markers on a first-open
+    alert do not make it a reminder, and one sent below its escalation (Pattern
+    D restored a lower first severity on a later pass) was not copied by base
+    either.
+    """
+    return escalated_now(event) and (
+        _evidence_value(str(event.get("evidence") or ""), "incident_still_open") == "true"
+    )
+
+
 def qualifies(event: dict[str, Any], sources: list[str], is_alert: bool) -> str | None:
     """Return None when the event qualifies, else a skip reason."""
     if not is_alert:
         return "not_incident_alert"
-    if str(event.get("severity") or "").lower() != "critical":
+    if str(event.get("severity") or "").lower() != "critical" and not is_escalated_reminder(event):
         return "not_critical"
     source = str(event.get("source") or "")
     if not any(fnmatch.fnmatchcase(source, pattern) for pattern in sources):

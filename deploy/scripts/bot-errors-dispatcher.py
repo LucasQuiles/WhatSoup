@@ -43,7 +43,7 @@ from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
 )
-from lib.bot_errors_envelope import EnvelopeError, classify_event, event_machine, new_event_fields, normalize_event
+from lib.bot_errors_envelope import SEVERITIES, EnvelopeError, classify_event, event_machine, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
     LEGACY_FAILURE_CLASSES,
     alert_text,
@@ -490,6 +490,16 @@ DELIVERY_HELD_ESCALATED_FIELD = "outcomeUnknownEscalatedAt"
 DELIVERY_RENOTIFY_INTENT_FIELD = "renotifyGeneration"
 DELIVERY_ANNOUNCE_INTENT_FIELD = "announcesAwaitingPhysicalAt"
 DELIVERY_INTENT_FIELDS = (DELIVERY_RENOTIFY_INTENT_FIELD, DELIVERY_ANNOUNCE_INTENT_FIELD)
+# The sender's severity, kept the first time a still-open reminder escalates. A
+# failed send requeues the event with the raised severity, so every attempt
+# raises from this value and the reminder climbs one step, not one per attempt.
+# It is not an intent: the decision must not clear it.
+DELIVERY_ESCALATED_FROM_FIELD = "escalatedFromSeverity"
+# True while base's copy of this event would be critical because of the age or
+# count escalation: set where base set critical, cleared wherever base would
+# then overwrite that severity (Pattern D, the awaiting-physical announcement).
+# A severity value alone cannot say why the event carries it (R73).
+DELIVERY_ESCALATED_NOW_FIELD = "escalatedNow"
 # Replay identity of one send attempt, minted just before the send: a random
 # nonce, plus the epoch and sequence of the incident state it was minted under.
 # A record carrying any of the three was minted by this code; a record with none
@@ -2843,7 +2853,9 @@ def apply_transient_tiering(
         if not isinstance(record, dict):
             record = {
                 "transientSince": current,
-                "firstSeverity": str(event.get("severity") or ""),
+                # R73: base stored critical for a reminder escalated now, so a
+                # later promotion of this record restores what base restored.
+                "firstSeverity": "critical" if escalated_now(event) else str(event.get("severity") or ""),
             }
             transient_state[key] = record
         since = int_field(record, "transientSince", current)
@@ -2859,12 +2871,14 @@ def apply_transient_tiering(
             record["promoted"] = True
             record["promotedAt"] = int_field(record, "promotedAt", current)
             event["severity"] = str(record.get("firstSeverity") or "critical") or "critical"
+            clear_escalated_now(event)
             diagnostics["failureClass"] = "outage_promoted"
             diagnostics["transientPromoted"] = True
             return None
 
         # Still inside the soft window: hold at warning tier, do not push.
         event["severity"] = "warning"
+        clear_escalated_now(event)
         held = int_field(record, "heldCount") + 1
         record["heldCount"] = held
         diagnostics["failureClass"] = "transient"
@@ -3848,6 +3862,64 @@ def event_has_stale_context(event: dict[str, Any]) -> bool:
     return "incident_stale=true" in evidence or "incident_status=stale" in evidence
 
 
+ESCALATED_SEVERITY_STEP = {"info": "warning", "warning": "error", "error": "critical", "critical": "critical"}
+
+
+def is_readable_severity(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in SEVERITIES
+
+
+def higher_severity(*values: Any) -> Any:
+    """The most severe readable value in `values`; the last value when none is readable."""
+    readable = [v.strip().lower() for v in values if is_readable_severity(v)]
+    return min(readable, key=SEVERITIES.index) if readable else values[-1]
+
+
+def escalated_severity(value: Any, current: Any = None) -> str:
+    """The severity one step above `value`, never below `current`; critical for anything unreadable.
+
+    Age and repeat count say an incident has lasted, not that it got worse, so
+    they raise the sender's severity by one step at most: a sender's warning
+    must not become a critical page on age alone (register R73). A value this
+    cannot read escalates to critical, toward paging. The result is never lower
+    than the event's own readable severity `current`.
+    """
+    if not isinstance(value, str):
+        return "critical"
+    return higher_severity(current, ESCALATED_SEVERITY_STEP.get(value.strip().lower(), "critical"))
+
+
+def escalated_now(event: dict[str, Any]) -> bool:
+    """Would base's copy of this event be critical because of the age or count escalation?
+
+    Base sent such a reminder at critical, so storm collapse and Pattern D give it
+    base's critical treatment. The decision is the escalatedNow marker, which is set
+    where base set critical and cleared wherever base then overwrote the severity.
+    The other checks are belt and braces: a readable recorded sender severity, the
+    escalated=true evidence line written in the same call, and a current severity
+    at least the one-step escalation of the recorded one. lib/owner_route.py keeps
+    an identical copy (R73).
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict) or delivery.get(DELIVERY_ESCALATED_NOW_FIELD) is not True:
+        return False
+    recorded = delivery.get(DELIVERY_ESCALATED_FROM_FIELD)
+    severity = event.get("severity")
+    if not (is_readable_severity(recorded) and is_readable_severity(severity)):
+        return False
+    raised = ESCALATED_SEVERITY_STEP[recorded.strip().lower()]
+    if SEVERITIES.index(severity.strip().lower()) > SEVERITIES.index(raised):
+        return False
+    return "escalated=true" in event_text(event, "evidence").splitlines()
+
+
+def clear_escalated_now(event: dict[str, Any]) -> None:
+    """Base overwrote the escalated critical here, so base's critical treatment ends."""
+    delivery = event.get("delivery")
+    if isinstance(delivery, dict):
+        delivery.pop(DELIVERY_ESCALATED_NOW_FIELD, None)
+
+
 def append_still_open_context(
     event: dict[str, Any],
     open_record: dict[str, Any],
@@ -3857,6 +3929,7 @@ def append_still_open_context(
     escalated: bool,
     *,
     digest: bool = True,
+    sender_severity: Any = None,
 ) -> None:
     opened = int_field(open_record, "openedAt", current)
     last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
@@ -3887,10 +3960,23 @@ def append_still_open_context(
             event["summary"] = f"Still-open digest, awaiting physical action: {event_display_summary(event) or key}"
     elif awaiting_physical:
         event["severity"] = "critical"
+        clear_escalated_now(event)
         if "awaiting physical" not in event_text(event, "summary").lower():
             event["summary"] = f"Awaiting physical action: {event_display_summary(event) or key}"
     elif escalated:
-        event["severity"] = "critical"
+        delivery = event.get("delivery")
+        if not isinstance(delivery, dict):
+            delivery = {}
+            event["delivery"] = delivery
+        recorded = delivery.get(DELIVERY_ESCALATED_FROM_FIELD)
+        if not is_readable_severity(recorded):
+            # Missing, or unreadable and so treated as missing. Pattern D may have
+            # lowered the severity this pass; start from what the sender sent.
+            recorded = higher_severity(sender_severity, event.get("severity"))
+            delivery[DELIVERY_ESCALATED_FROM_FIELD] = recorded
+        event["severity"] = escalated_severity(recorded, event.get("severity"))
+        # Base set critical here, on every attempt that escalates.
+        delivery[DELIVERY_ESCALATED_NOW_FIELD] = True
         if "escalated" not in event_text(event, "summary").lower():
             event["summary"] = f"ESCALATED still open: {event_display_summary(event) or key}"
     elif digest:
@@ -5136,6 +5222,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         if unrepresented:
             return None
     if is_incident_alert(event):
+        # Read before Pattern D can rewrite it: escalation starts no lower (R73).
+        sender_severity = event.get("severity")
         # Pattern D — hold a transient soft-fault at warning tier; only a
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
         # the hard-outage tier and falls through to normal send handling.
@@ -5215,7 +5303,9 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 # The interval doubles on delivery, and only for this record.
                 if not awaiting_physical:
                     set_delivery_intent(event, DELIVERY_RENOTIFY_INTENT_FIELD, renotify_generation(open_record))
-                append_still_open_context(event, open_record, key, current, suppressed, escalated)
+                append_still_open_context(
+                    event, open_record, key, current, suppressed, escalated, sender_severity=sender_severity
+                )
                 return None
             return f"incident already open for {key}; duplicate suppressed"
         last_sent = int(incident_state.setdefault("lastSentAt", {}).get(key) or 0)
@@ -7160,9 +7250,17 @@ def normalized_summary(event: dict[str, Any]) -> str:
 
 
 def storm_fingerprint(event: dict[str, Any]) -> str:
+    # R73: base sent every escalated reminder at critical, so a reminder that is
+    # escalated now keeps that fingerprint whatever step it took; every other
+    # event keeps its own severity, as in base.
+    severity = (
+        "critical"
+        if escalated_now(event)
+        else str(event.get("severity") or "critical").strip().lower()
+    )
     parts = [
         str(event.get("source") or "unknown").strip().lower(),
-        str(event.get("severity") or "critical").strip().lower(),
+        severity,
         normalized_summary(event),
     ]
     return "\n".join(parts)
@@ -7916,7 +8014,13 @@ def is_storm_candidate(event: dict[str, Any]) -> bool:
     if isinstance(event.get("storm"), dict):
         return False
     classification = classify_event(event)
-    return classification.kind == "incident_alert" and classification.severity in {"critical", "warning"}
+    if classification.kind != "incident_alert":
+        return False
+    # R73: a reminder escalated warning -> error is requeued at error when its send
+    # fails; base requeued it at critical, a candidate.
+    return classification.severity in {"critical", "warning"} or (
+        classification.severity == "error" and escalated_now(event)
+    )
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
@@ -8014,7 +8118,13 @@ def storm_digest_event(
 ) -> dict[str, Any]:
     first = events[0]
     hosts = sorted_unique_hosts(events)
-    severity = str(first.get("severity") or "critical").lower()
+    # R73: a digest with a reminder escalated now in it pages critical, as base sent
+    # it; otherwise the members share their fingerprint's severity.
+    severity = (
+        "critical"
+        if any(escalated_now(event) for event in events)
+        else str(higher_severity(*(event.get("severity") for event in events)) or "critical").lower()
+    )
     source = str(first.get("source") or "unknown")
     summary = normalized_summary(first) or "same fingerprint alert storm"
     digest_id = storm_window_token(fingerprint_hash, bucket_start)
