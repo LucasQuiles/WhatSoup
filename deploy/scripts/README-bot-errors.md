@@ -849,7 +849,9 @@ shipping the matching registry fails the local manifest and deployer guards.
 
 The BOT ERRORS group is written by the owner's own line, so the owner's phone
 does not notify for it. The owner critical route copies selected critical
-alerts to the owner's direct chat, sent from a **different** instance so the
+alerts, and the escalated still-open reminders of the same sources (which route
+at error when their sender sent a warning), to the owner's direct chat, sent
+from a **different** instance so the
 phone notifies, plus an e-mail through the existing fallback script. Code:
 `deploy/scripts/lib/owner_route.py`. After a group send is archived,
 `route_to_owner()` only queues the copy; `drain_owner_route_queue()` sends the
@@ -880,9 +882,11 @@ re-sends the group alert.
 | `BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS` | Socket send timeout, clamped to the remaining budget | `8` |
 | `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS` | Total time one cycle may spend on owner copies; the e-mail timeout (20 s) is clamped to what remains | `30` |
 
-**Policy.** A copy is sent only for a critical incident alert (never a clear)
-whose source matches a pattern, on first open or as an escalated still-open
-reminder; plain still-open renotifies are skipped. The per-key interval is
+**Policy.** A copy is sent only for an incident alert (never a clear) whose
+source matches a pattern: a critical alert on first open, or a still-open
+reminder escalated by age or repeat count, at the severity escalation gives it
+(one step above the sender's, so a warning source's reminder arrives as
+error); plain still-open renotifies are skipped. The per-key interval is
 recorded before the send, so a crash yields a missed copy, never a duplicate
 (for the one stated exception, see the credential re-page section below).
 The group copy exists either way. When deduplication cannot be established the
@@ -894,6 +898,61 @@ State entries are kept for at least the configured interval (seven days or the
 interval, whichever is longer). Stale-incident digests are info severity and
 are never routed. The default sources exclude the
 `…_primary_model_usable_unverified` fleet probe, which flaps every 15 minutes.
+
+**Escalated reminders.** A still-open reminder escalated by age (24 h by
+default) or repeat count (72 by default) is sent one severity step above its
+sender's severity (warning to error, error to critical); an unreadable severity
+goes to critical, and escalation never lowers a severity, transient tiering
+included. The dispatcher records the sender's severity once in
+`delivery.escalatedFromSeverity`. The field survives a failed, transient, held
+and released, or crash-reclaimed retry, is kept in the dead-letter record, and
+crosses the collector relay: `relay_event` starts a fresh delivery block for the
+hub's own attempts but keeps this field and `escalatedNow` (each only with its
+type), as it keeps the event's severity. A retry that escalates again raises
+from the field, so a reminder climbs one step however often its send fails. The
+field is retained metadata, not a severity floor: a retry whose incident record
+is gone takes the first-open path, where Pattern D can restore a lower first
+severity, as it could before this change.
+
+A reminder is *escalated now* while base's copy of it would be critical because
+of the escalation. The dispatcher marks that with `delivery.escalatedNow: true`,
+set on every attempt that escalates, where base set critical, and removed
+wherever base then overwrote that severity: Pattern D's promotion and hold, and
+the awaiting-physical announcement. The check also requires a readable recorded
+severity, the `escalated=true` evidence line, and a current severity at least
+the one-step escalation of the recorded one; a severity value alone cannot say
+why the event carries it. A reminder escalated now gets the critical treatment
+base gave it: requeued at error it stays a storm candidate, its storm
+fingerprint carries critical, a digest with it as a member pages critical, and
+a Pattern D record it starts stores critical as the first severity. Every other
+event, including a retry Pattern D restored to a lower severity, is treated by
+its own severity in candidacy, fingerprint, digest and a new Pattern D record,
+as base treated it. An owner-route reminder is copied when it is escalated now
+and carries `incident_still_open=true`. The route's renotify check reads the
+first `escalated=` evidence line, as before this change, so a reminder whose
+evidence first records a non-escalated renotify (an earlier pass appended
+`escalated=false`) is skipped as `non_escalated_renotify`. Four limits: the
+fields are not defended against a planted value, since every producer writes a
+fixed fresh delivery block and a writer that can set `delivery` can set
+`severity` itself; the step is taken from the severity of the occurrence that
+triggers the reminder, not the incident's opening severity, which the incident
+record does not keep; `reset_delivery` wipes both fields, its only caller being
+the recovery of outbox-write-failure records, which producers write before any
+escalation (it is the only remaining site that wipes them; `relay_event` also
+rebuilds an existing event's delivery block, but keeps both); and requeued
+reminders escalated now that storm (the storm threshold of hosts, 3 by default,
+matching within one window) still page critical through their digest. The storm
+scan runs before the send decision, so only a reminder whose first send did not
+complete reaches it as escalated, and daily release-currency escalations land at
+a different time on each host, so that should be rare.
+
+**Rollout order.** In a fleet where collected hosts run their own dispatcher,
+deploy the hub's collector, dispatcher and `lib/owner_route.py` no later than
+any remote dispatcher. A remote that escalates one step while the hub still
+runs the earlier code loses what the earlier remote's critical reminder kept: an
+earlier hub collector drops `escalatedNow` and `escalatedFromSeverity` from the
+relayed reminder; an earlier hub owner route sends that error reminder with no
+owner copy; and an earlier hub dispatcher gives it no critical storm treatment.
 
 **Log records.** `owner_route_sent` carries booleans only (`whatsappAccepted`,
 `emailEnabled`, `emailAccepted`, `emailSkippedBudget`); `owner_route_skipped`
