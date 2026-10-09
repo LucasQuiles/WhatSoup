@@ -94,6 +94,78 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    joined with a captured provider-execution gate state. See runbook §8, "Who
    owns a stale `processing` inbound".
 
+   `staleOpenInbounds` counts the open inbounds (`pending`, `processing` or
+   `turn_done`) whose `received_at` text sorts before `datetime(now,
+   -threshold)` and that have no terminal record. Every alert latch reads that
+   count and the other `counts` fields only.
+   Each conclusive observation also carries `progressDiagnostics`, which a
+   page can cite but which never changes the state, an alert latch, a
+   `--clear` or the exit code (R46). Inconclusive observations omit it. The
+   diagnostics are read only after every instance's base observation is
+   complete, in the same instance order, each on a read-only connection of
+   its own, so they never delay a base read. Each result joins its
+   observation before anything is printed or emitted.
+   - **Available.** `{"available": true, "staleRows", "staleChats",
+     "staleRowsWithRecentSend"}`, read by one SQL statement over the
+     `staleOpenInbounds` predicate, copied verbatim:
+     - `staleRows`: the number of rows in that set;
+     - `staleChats`: the number of distinct `conversation_key` values among
+       them;
+     - `staleRowsWithRecentSend`: the rows in that set with at least one
+       `outbound_ops` row whose `source_inbound_seq` is the row's `seq`,
+       whose status is `submitted` or `echoed`, and whose send time
+       `COALESCE(datetime(echoed_at), datetime(submitted_at))` is after
+       `received_at`, no later than now, and no earlier than now minus the
+       stale threshold. The send time is the first of the two that parses as
+       a time, so a malformed `echoed_at` falls back to `submitted_at`; a
+       send with neither does not count. The stale set keeps base's text
+       comparison of `received_at`; the send bounds compare
+       `datetime()`-normalised values. Because the send time prefers
+       `echoed_at`, a send echoed after `now` but before the diagnostics read
+       drops out of `staleRowsWithRecentSend`, even if it was submitted
+       inside the window; this affects the diagnostics only.
+   - **What they do not say.** The fields make no claim about queue
+     position. In `single` and `shared` session scope one queue serves every
+     chat, so several stale chats can sit behind one stuck turn. Sends with no
+     source inbound never count: the "Queued behind the current task"
+     receipt, startup, admin and health notices. `outbound_ops` records no
+     message role, so a command reply sent through the chat queue while a row
+     is the active turn is tied to that row and counts as a recent send; that
+     is one reason these fields never page.
+   - **Time bound.** The diagnostics of each instance have a 2 s wall-clock
+     budget, counted from before their schema check. Before each diagnostic
+     statement the busy timeout is set to the budget that remains, so a lock
+     wait ends by the deadline; an SQLite progress handler interrupts
+     statement work once the budget is spent; and a result that arrives after
+     the budget, a missing column included, is discarded. The diagnostics add
+     at most about the budget plus one progress-check interval per conclusive
+     instance, before anything is emitted; instances run one after another.
+     The bound is cooperative, not strict:
+     - the cap applies to each lock wait, not to each statement, so a
+       statement that SQLite prepares again after a schema change can wait
+       again for up to the same remaining budget;
+     - neither mechanism covers a blocking file read inside one SQLite VM
+       instruction, or SQLite's own retry loop when it starts a WAL read,
+       which can back off for up to about 10 s before it fails. Base's own
+       reads carry the same exposure to both.
+   - **Unavailable.** `{"available": false, "reason": ...}` with one fixed
+     reason code:
+     - `diagnostic_columns_missing`: the database lacks
+       `inbound_events.conversation_key`, `outbound_ops.submitted_at` or
+       `outbound_ops.echoed_at`;
+     - `diagnostic_failed`: a diagnostic statement failed within the budget,
+       the database path is no longer a regular file or has become a
+       symlink, or opening the diagnostics connection, setting `query_only`
+       on it or closing it failed;
+     - `diagnostic_budget_exceeded`: the diagnostics ran past the budget,
+       whether waiting for a lock or working; any values are discarded;
+     - `diagnostic_count_changed`: `staleRows` differs from
+       `staleOpenInbounds`, which the base observation read earlier on its
+       own connection; the later instances' base observations and the
+       earlier instances' diagnostics run in between. This is a count check
+       only: a write between the two reads that leaves the count unchanged is
+       not detected.
+
 5. Runtime watchdog (shipped).
    The runtime-owned manager (`ReplyGuaranteeManager` in
    `src/core/reply-guarantee.ts`, armed from the agent runtime) arms per inbound
