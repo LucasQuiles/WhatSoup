@@ -5,6 +5,7 @@ import {
   buildBotErrorsEvent,
   writeBotErrorsEvent,
   type BotErrorsCriticalAssetDiagnostic,
+  type BotErrorsDegradationDiagnostics,
   type BotErrorsOutboxWrite,
   type BotErrorsSeverity,
 } from './bot-errors-outbox.ts';
@@ -88,6 +89,8 @@ export interface AlertEmissionOptions {
   renotify?: boolean;
   /** Raw conversation identifier; confined to a digest by the event builder. */
   conversationKey?: string;
+  /** Cause codes and connected flag of a degraded instance; validated by the event builder. */
+  degradationDiagnostics?: BotErrorsDegradationDiagnostics;
 }
 
 export interface AlertEmissionContext {
@@ -235,6 +238,7 @@ function captureToAlertSink(
     criticalAsset?: BotErrorsCriticalAssetDiagnostic;
     renotify?: boolean;
     conversationKey?: string;
+    degradationDiagnostics?: BotErrorsDegradationDiagnostics;
   },
 ): AlertEmissionResult {
   try {
@@ -296,12 +300,15 @@ export function emitAlert(
   // forwarded to the legacy spawn path below, which deliberately ships a
   // fixed {failureClass, source, reason} JSON and nothing else.
   const conversationKey = opts?.conversationKey;
+  // Fixed codes and a boolean; like the conversation key, not forwarded to the
+  // legacy spawn path, whose payload stays fixed.
+  const degradationDiagnostics = opts?.degradationDiagnostics;
   const sink = alertSinkPath();
   if (sink) {
-    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey });
+    return captureToAlertSink(sink, { eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics });
   }
   try {
-    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey });
+    const outbox = writeBotErrorsEvent({ eventType: 'alert', instance, source, summary, evidence, severity, criticalAsset, renotify, conversationKey, degradationDiagnostics });
     return { ok: true, channel: 'outbox', status: 'durably_queued', outbox };
   } catch (err) {
     const reason = errorMessage(err);

@@ -506,3 +506,72 @@ describe('credential-path confinement at the evidence boundary (issue #2386)', (
     expect(JSON.stringify(event)).not.toContain('a/a/');
   });
 });
+
+describe('degradation diagnostics on a degraded-health alert', () => {
+  // The dispatcher's per-cause hold (#2409) reads these structured fields,
+  // because the evidence text that also carries them is confined to a digest.
+  function degradedEvent(degradationDiagnostics?: Parameters<typeof buildBotErrorsEvent>[0]['degradationDiagnostics']) {
+    return buildBotErrorsEvent({
+      eventType: 'alert',
+      instance: 'agent-alpha',
+      source: 'health_body_degraded',
+      summary: 'whatsoup@agent-alpha health is degraded',
+      evidence: 'whatsapp_connected=true degradation_causes=degradation_silence_unproven',
+      degradationDiagnostics,
+    });
+  }
+
+  it('carries valid cause codes and the connected flag into diagnostics', () => {
+    const event = degradedEvent({
+      degradationCauses: ['degradation_silence_unproven', 'agent_auto_compact_backoff', 'degradation_silence_unproven'],
+      whatsappConnected: true,
+    });
+
+    expect(event.diagnostics).toEqual({
+      queue: botErrorsOutboxDir(),
+      degradationCauses: ['degradation_silence_unproven', 'agent_auto_compact_backoff'],
+      whatsappConnected: true,
+    });
+  });
+
+  it('keeps the unrecognized code, which has no hold tier', () => {
+    expect(degradedEvent({ degradationCauses: ['unrecognized'], whatsappConnected: true }).diagnostics).toEqual({
+      queue: botErrorsOutboxDir(),
+      degradationCauses: ['unrecognized'],
+      whatsappConnected: true,
+    });
+  });
+
+  it('keeps a false connected flag, which the dispatcher must read as disconnected', () => {
+    expect(degradedEvent({ whatsappConnected: false }).diagnostics).toEqual({
+      queue: botErrorsOutboxDir(),
+      whatsappConnected: false,
+    });
+  });
+
+  it.each([
+    ['an empty vector', []],
+    ['a token with content characters', ['degradation_silence_unproven', 'Bad Token']],
+    ['a token over 64 characters', [`a${'b'.repeat(64)}`]],
+    // Copies of one valid code: only the length cap rejects this vector (the
+    // dedup would otherwise shrink it to one kept cause).
+    ['more causes than the cap', Array.from({ length: 65 }, () => 'enrichment_stale')],
+  ])('drops the whole cause vector for %s, so the dispatcher pages', (_label, degradationCauses) => {
+    const event = degradedEvent({ degradationCauses, whatsappConnected: true });
+
+    expect(event.diagnostics).toEqual({ queue: botErrorsOutboxDir(), whatsappConnected: true });
+  });
+
+  it('drops a non-boolean connected flag', () => {
+    const event = degradedEvent({
+      degradationCauses: ['enrichment_stale'],
+      whatsappConnected: 'true' as unknown as boolean,
+    });
+
+    expect(event.diagnostics).toEqual({ queue: botErrorsOutboxDir(), degradationCauses: ['enrichment_stale'] });
+  });
+
+  it('leaves the diagnostics shape unchanged when the emitter passes none', () => {
+    expect(Object.keys(degradedEvent().diagnostics)).toEqual(['queue']);
+  });
+});

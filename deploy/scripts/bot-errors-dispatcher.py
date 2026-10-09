@@ -2897,6 +2897,13 @@ def resolve_transient_on_clear(
             return None
         if record.get("promoted"):
             return None  # promoted to outage — normal clear closes the open incident
+        # An open incident on this key means an alert on it WAS surfaced even
+        # though this record never promoted: a later event classified outage
+        # (a degraded body that lost its connected reading), or one that
+        # retired a stronger incident skipped the hold. Its recovery is news.
+        open_incidents = incident_state.get("openIncidents")
+        if isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict):
+            return None
         event.setdefault("diagnostics", {})["transientAutoresolved"] = True
         return f"transient_autoresolved: {key} recovered before promotion; held recovery not surfaced"
     except Exception:
@@ -3176,11 +3183,11 @@ def close_recovered_daily_health_incidents(event: dict[str, Any], incident_state
     recovered = daily_health_recovered_incident_keys(event, incident_state)
     if not recovered:
         return []
-    open_incidents = incident_state.setdefault("openIncidents", {})
-    last_sent = incident_state.setdefault("lastSentAt", {})
+    # The same removal a matching clear performs, so a recovered key also drops
+    # its transient bookkeeping: a promoted record left behind would page the
+    # next hold-tier episode at once.
     for recovered_key in recovered:
-        open_incidents.pop(recovered_key, None)
-        last_sent.pop(recovered_key, None)
+        close_open_incident(incident_state, recovered_key)
     return recovered
 
 
@@ -4372,6 +4379,51 @@ def format_daily_health_event(core: list[str], evidence: str, details: list[str]
     return text
 
 
+_RETIREMENT_READING_TOKENS = frozenset({
+    "diagnostics.whatsappConnected=true",
+    "whatsapp_connected=true",
+    "connected=true",
+    "connection_state=connected",
+})
+
+
+def retired_stronger_incidents(diagnostics: dict[str, Any]) -> list[str]:
+    """The event's retirement audit, reduced to its fixed vocabulary.
+
+    Keeps only what retire_contradicted_stronger_incident writes: a
+    connectivity-loss root source and the positive reading tokens of
+    positive_connectivity_readings, one rendered entry per root and readings
+    (a retried send can retire the same root again). A queued event's
+    diagnostics can hold anything a producer put there, so every other value
+    is dropped: it neither skips the transient hold nor reaches the WhatsApp
+    message or the email fallback.
+    """
+    retired = diagnostics.get("retiredStrongerIncidents")
+    if not isinstance(retired, list):
+        return []
+    parts: list[str] = []
+    for entry in retired:
+        if not isinstance(entry, dict):
+            continue
+        root = _bare_root_source(str(entry.get("incidentKey") or ""))
+        if root not in CONNECTIVITY_LOSS_ROOT_SOURCES:
+            continue
+        readings = [
+            token
+            for token in str(entry.get("contradictingEvidence") or "").split()
+            if token in _RETIREMENT_READING_TOKENS
+        ]
+        part = f"{root} ({' '.join(readings)})" if readings else root
+        if part not in parts:
+            parts.append(part)
+    return parts
+
+
+def retired_stronger_incidents_text(diagnostics: dict[str, Any]) -> str | None:
+    """Root sources this event retired, with the readings that did it."""
+    return "; ".join(retired_stronger_incidents(diagnostics)) or None
+
+
 def format_event(event: dict[str, Any]) -> str:
     classification = classify_event(event)
     severity = classification.severity
@@ -4445,6 +4497,10 @@ def format_event(event: dict[str, Any]) -> str:
             else None,
             900,
         ),
+        # This alert retired a stronger incident (an open logout or bond loss
+        # its connectivity reading contradicts). It is the only notice of that
+        # closure: the root's own later clear finds nothing open.
+        event_line("closes_incident", retired_stronger_incidents_text(diagnostics), 300),
     ]
     freshness_lines = [
         event_line("dispatcher_attempts", delivery.get("attempts")),
@@ -5093,6 +5149,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # normally. Loop because one scope can hold several roots (bond loss AND
     # logout) and stronger_open_incident_for returns only the first match. Each
     # pass removes one open record, so the loop is bounded by the map size.
+    retired_stronger = False
     while stronger is not None:
         contradiction = stronger_incident_contradiction(
             event, stronger[0], stronger[1], incident_state.get("openIncidents")
@@ -5102,7 +5159,15 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         retire_contradicted_stronger_incident(
             event, incident_state, stronger[0], stronger[1], contradiction, current
         )
+        retired_stronger = True
         stronger = stronger_open_incident_for(event, incident_state)
+    # The retirement audit rides the event, so a retried send (the parent was
+    # already removed on the failed attempt) still skips the hold below. Read
+    # through the same vocabulary filter the page renders with, so a skipped
+    # hold always shows its closes_incident line. It can only force a send.
+    event_diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    if retired_stronger_incidents(event_diagnostics):
+        retired_stronger = True
     if stronger is not None:
         stronger_key, stronger_record = stronger
         mark_suppressed_by_stronger(event, stronger_key, stronger_record, current)
@@ -5139,7 +5204,11 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         # Pattern D — hold a transient soft-fault at warning tier; only a
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
         # the hard-outage tier and falls through to normal send handling.
-        if TRANSIENT_TIERING_ENABLED:
+        # Never hold an alert that just retired a stronger incident: it is the
+        # only notice that incident's closure gets, so holding it would close a
+        # paged logout or bond loss silently (#2409 hold-tier degraded alerts
+        # carry the connected reading that retires those roots).
+        if TRANSIENT_TIERING_ENABLED and not retired_stronger:
             transient_reason = apply_transient_tiering(event, incident_state, key, current)
             if transient_reason is not None:
                 return transient_reason
