@@ -2853,20 +2853,63 @@ def collector_failure_escalate_threshold() -> int:
 # relay_host_down is re-asserted. The dispatcher holds relay_host_down as a
 # transient (Pattern H) and promotes it only when a later one for the same
 # remote arrives past its promote window. With every retry capped here the
-# attempts after entry are +300, +1200, +2100, then every 900 s, so the first
-# re-assertion at or past ANY window lands at most 900 s after it (36 min after
-# the first failed poll with the default 1800 s window), and a host that comes
-# back after the critical is seen within 15 minutes. The plain schedule's
-# 3600 s step would land up to 50 minutes late on both counts.
+# attempts after entry are about +300, +1200, +2100, then every 900 s, so the
+# first re-assertion at or past ANY window lands about 900 s after it at most
+# (about 36 min after the first failed poll with the default 1800 s window),
+# and a host that comes back after the critical is seen within about
+# 15 minutes. The plain schedule's 3600 s step would land up to 50 minutes late
+# on both counts. These figures are nominal: each interval is 900 s, plus up to
+# one claim timeout (30 s by default; the next attempt is timed from when the
+# claim failed), plus up to one poll (30 s) before a poll reaches the deadline.
 #
 # The collector deliberately does not read the dispatcher's window: each
-# service fixes its settings when it starts, so the two can differ.
+# service fixes its settings when it starts, so the two can differ. A deadline
+# stored before the cap applied is held to it too (cap_stored_tier3_next_attempt).
 #
-# Cost: a down remote is attempted every 900 s instead of hourly (a serial SSH
-# claim of up to the claim timeout, plus the reachability probe), and once the
-# critical is open each re-assertion is a suppressed duplicate, which brings
-# the dispatcher's 72-duplicate escalation to about 18 h.
+# Cost: a down remote is attempted every 900 s instead of hourly. Each attempt
+# runs serially in the cycle: an SSH claim of up to the claim timeout, the
+# reachability probe, and the writefail claim (also up to the claim timeout)
+# unless the reachability diagnosis skips it. Once the critical is open each
+# re-assertion is a suppressed duplicate, which brings the dispatcher's
+# 72-duplicate escalation to about 18 h.
 RELAY_DOWN_RETRY_CAP_S: int = 900
+
+
+def tier3_retry_is_capped(is_best_effort: bool) -> bool:
+    """Whether a down remote re-asserts relay_host_down and retries on the cap.
+
+    A best-effort remote with its info tier on emits an info observation that
+    the dispatcher never holds or promotes, so it keeps the plain schedule and
+    is not re-asserted. Every other remote is re-asserted and capped.
+    """
+    return not (is_best_effort and best_effort_info_tier_enabled())
+
+
+def cap_stored_tier3_next_attempt(remote_record: dict[str, Any], next_attempt_at: int, now_epoch: int) -> int:
+    """Hold a down remote's stored nextAttemptAt to the cap after its last attempt.
+
+    New deadlines are at most RELAY_DOWN_RETRY_CAP_S after the attempt that set
+    them, but a remote already down when a capped collector starts keeps the
+    deadline the previous collector stored, up to 3600 s ahead, which would
+    delay its promoting re-assertion or its recovery by up to an hour. So
+    every tier-3 poll decision caps the stored value at the last attempt +
+    RELAY_DOWN_RETRY_CAP_S. The last attempt is lastFailureAt, which every
+    failed attempt sets; when it is missing, the cap counts from now. A
+    lowered deadline is written back, so a cap counted from now is fixed once
+    instead of moving forward with each poll. For a deadline this collector
+    stored the cap changes nothing (to the second): it stored that attempt's
+    time plus at most RELAY_DOWN_RETRY_CAP_S.
+    """
+    last_failure_at = remote_record.get("lastFailureAt")
+    if isinstance(last_failure_at, int) and not isinstance(last_failure_at, bool):
+        last_attempt_at = min(last_failure_at, now_epoch)
+    else:
+        last_attempt_at = now_epoch
+    capped = last_attempt_at + RELAY_DOWN_RETRY_CAP_S
+    if next_attempt_at <= capped:
+        return next_attempt_at
+    remote_record["nextAttemptAt"] = capped
+    return capped
 
 
 FAILURE_RETENTION_DETAIL_MAX_CHARS: int = 1000
@@ -4291,6 +4334,8 @@ def _run_once_with_state(
         next_attempt_at = int(remote_record_pre.get("nextAttemptAt") or 0)
         is_host_down = consecutive_failures_pre >= RELAY_BACKOFF_FAILURE_THRESHOLD
         now_epoch = int(time.time())
+        if is_host_down and tier3_retry_is_capped(is_best_effort):
+            next_attempt_at = cap_stored_tier3_next_attempt(remote_record_pre, next_attempt_at, now_epoch)
         if is_host_down and now_epoch < next_attempt_at:
             # Inside backoff window: skip SSH entirely, do not count as failure.
             remotes_skipped_backoff += 1
@@ -4375,9 +4420,7 @@ def _run_once_with_state(
                     schedule_index_new = 0
                 remote_record["backoffScheduleIndex"] = schedule_index_new
                 attempt_epoch = int(time.time())
-                # A best-effort remote's info observation is never held or
-                # promoted, so it keeps the plain schedule and is not re-asserted.
-                reasserts_tier3 = not (is_best_effort and best_effort_info_tier_enabled())
+                reasserts_tier3 = tier3_retry_is_capped(is_best_effort)
                 next_attempt_delay = RELAY_BACKOFF_SCHEDULE_S[schedule_index_new]
                 if reasserts_tier3:
                     # Capped from entry on, with no dependence on downSince or

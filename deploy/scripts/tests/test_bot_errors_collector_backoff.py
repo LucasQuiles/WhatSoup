@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -715,20 +716,24 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
 _REASSERT_REMOTE = "host-a:/srv/whatsoup/bot-errors"
 _PROMOTE_ENV = "BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS"
 _CAPPED_DEFAULT_OFFSETS = [0, 300, 1200, 2100, 3000, 3900, 4800, 5700]
+_DRIVE_CLOCK_START = 3_000_000
+# Tier 3 opens on the third failed poll.
+_DRIVE_ENTRY_AT = _DRIVE_CLOCK_START + 60
 
 
 def _drive_dead_remote(mod, state_dir, outbox_dir, seconds, *, best_effort=False, extra_env=None,
-                       after_entry=None):
+                       edit_state_at=None):
     """Poll an always-failing remote every 30 s for `seconds` past tier-3 entry.
 
-    Entry is the third failed poll; `after_entry(mod)`, when given, runs once
-    right after it. Returns (emitted, attempts): emitted is
-    (offset_after_entry, event) for every relay_host_down alert or
-    observation; attempts is the sorted offsets of polls that made an SSH
-    attempt.
+    Entry is the third failed poll. `edit_state_at` maps an offset after entry
+    to `edit(mod, entry_at)`, run once right after that offset's poll.
+    Returns (emitted, attempts): emitted is (offset_after_entry, event) for
+    every relay_host_down alert or observation; attempts is the sorted
+    offsets of polls that made an SSH attempt.
     """
-    clock = FakeCollectorClock(3_000_000)
-    entry_at = clock.now + 60
+    clock = FakeCollectorClock(_DRIVE_CLOCK_START)
+    entry_at = _DRIVE_ENTRY_AT
+    edits = dict(edit_state_at or {})
     best_effort_remotes = {_REASSERT_REMOTE} if best_effort else set()
     emitted = []
     attempts: set[int] = set()
@@ -750,8 +755,9 @@ def _drive_dead_remote(mod, state_dir, outbox_dir, seconds, *, best_effort=False
                 event = json.loads(path.read_text())
                 if event.get("source") == "relay_host_down" and event.get("eventType") != "clear":
                     emitted.append((clock.now - entry_at, event))
-            if after_entry is not None and clock.now == entry_at:
-                after_entry(mod)
+            edit = edits.get(clock.now - entry_at)
+            if edit is not None:
+                edit(mod, entry_at)
             clock.advance(30)
     return emitted, sorted(attempts)
 
@@ -795,9 +801,14 @@ def test_only_reassertions_are_marked_renotify(tmp_state):
         (0, False), (300, True), (1200, True), (2100, True),
     ]
     assert all(e["renotify"] is True for _, e in emitted[1:])
+    # The _ns clock drives gmtime() too: each createdAt is the simulated time
+    # of the poll that emitted it, not wall-clock time.
+    assert [e["createdAt"] for _, e in emitted] == [
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_DRIVE_ENTRY_AT + offset)) for offset, _ in emitted
+    ]
 
 
-def _drop_down_since(mod):
+def _drop_down_since(mod, entry_at):
     """Rewrite the remote's record as state written before downSince existed."""
     session = mod.open_collector_state_session()
     try:
@@ -817,7 +828,8 @@ def test_legacy_down_record_without_down_since_is_capped(tmp_state):
     state_dir, outbox_dir = tmp_state
     mod = _load_mod_with_dirs(state_dir, outbox_dir)
 
-    emitted, attempts = _drive_dead_remote(mod, state_dir, outbox_dir, 6000, after_entry=_drop_down_since)
+    emitted, attempts = _drive_dead_remote(mod, state_dir, outbox_dir, 6000,
+                                           edit_state_at={0: _drop_down_since})
 
     assert [offset for offset, _ in emitted] == _CAPPED_DEFAULT_OFFSETS
     assert attempts == [-60, -30, *_CAPPED_DEFAULT_OFFSETS]
@@ -825,6 +837,63 @@ def test_legacy_down_record_without_down_since_is_capped(tmp_state):
         assert "down_since=unknown" in event["evidence"]
         assert "down_for_seconds=unknown" in event["evidence"]
         assert event["renotify"] is True
+
+
+# A collector without the cap (or one that read a 7200 s promote window)
+# scheduled the attempt after +1200 at the plain schedule's 3600 s step, so a
+# remote down at deploy can hold nextAttemptAt = entry + 4800. The capped
+# collector starts at the next poll, entry + 1230.
+_STALE_DEADLINE_OFFSET = 4800
+_UPGRADED_AT = 1200 + 30
+
+
+def _stale_deadline(*dropped_fields):
+    def edit(mod, entry_at):
+        session = mod.open_collector_state_session()
+        try:
+            payload, capability = mod._load_collector_state_for_cycle(session)
+            record = payload["remotes"][_REASSERT_REMOTE]
+            assert record["consecutiveFailures"] == 5
+            assert record["lastFailureAt"] == entry_at + 1200
+            record["nextAttemptAt"] = entry_at + _STALE_DEADLINE_OFFSET
+            for field in dropped_fields:
+                del record[field]
+            mod.save_collector_state(session, payload, capability)
+        finally:
+            session.close()
+    return edit
+
+
+@pytest.mark.parametrize(("dropped_fields", "best_effort", "expected_attempt"), [
+    # The last attempt is lastFailureAt (+1200): capped to +2100.
+    pytest.param((), False, 1200 + 900, id="last-attempt-known"),
+    pytest.param(("downSince",), False, 1200 + 900, id="legacy-no-down-since"),
+    # No record of the last attempt: capped to the first upgraded poll + 900.
+    pytest.param(("downSince", "lastFailureAt"), False, _UPGRADED_AT + 900, id="legacy-no-last-attempt"),
+    pytest.param((), True, 1200 + 900, id="best-effort-info-tier-off"),
+])
+def test_deadline_stored_before_the_cap_is_capped_after_upgrade(
+    tmp_state, dropped_fields, best_effort, expected_attempt,
+):
+    # Every tier-3 poll decision caps a stored nextAttemptAt at the last
+    # attempt + 900 s, so the promoting re-assertion, or a recovery, is not
+    # left waiting up to an hour for a deadline the old collector set. A
+    # best-effort remote with its info tier on is not capped: the plain
+    # schedule test above stores entry + 4800 itself and keeps it.
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+    bound = _UPGRADED_AT + 900 + 30
+
+    emitted, attempts = _drive_dead_remote(
+        mod, state_dir, outbox_dir, bound, best_effort=best_effort,
+        extra_env={"BOT_ERRORS_BEST_EFFORT_INFO_TIER": "0"} if best_effort else None,
+        edit_state_at={1200: _stale_deadline(*dropped_fields)},
+    )
+
+    assert [offset for offset in attempts if offset > 1200] == [expected_attempt]
+    assert expected_attempt <= bound
+    reasserted = [(offset, e["severity"], e.get("renotify")) for offset, e in emitted if offset > 1200]
+    assert reasserted == [(expected_attempt, "critical", True)]
 
 
 def test_best_effort_remote_is_not_reasserted_and_keeps_the_plain_schedule(tmp_state):

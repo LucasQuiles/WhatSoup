@@ -641,7 +641,8 @@ LADDER_REMOTE = "host-a:/srv/whatsoup/bot-errors"
 
 
 def _tier_shape(events: list[dict]) -> list[tuple[str, str]]:
-    # Order-independent: createdAt in outbox filenames is wall-clock seconds.
+    # Order-independent: these tests assert which events a cycle emits, not
+    # their order (events of one cycle share a createdAt second).
     return sorted((e["eventType"], e["severity"]) for e in events)
 
 

@@ -240,7 +240,7 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-runner.py` | Per-bot error runner: invokes the agent loop, captures failures, emits alert events to the local outbox. |
 | `bot-errors-emit.py` | Alert emission helper: builds alert event JSON (severity, dedupe key, evidence) and writes it to the local outbox. |
 | `bot-errors-health-check.py` | Daily health probe: inventories each instance/service, derives FAIL/WARN lines (auth-bond, queue age, DNS, tooling, config), emits a daily-health summary event. Largest script; hosts the auth-bond daily-layer derivation. |
-| `bot-errors-collector.py` | Hub-side relay collector: claims remote hosts' outboxes over ssh, relays events into the hub's incoming queue. Hosts the per-host claim loop. Per-remote `consecutiveFailures` drives one three-tier escalation ladder, each tier closing the one below it: `remote-claim-failed` (warning) on a single failed claim; `collector_remote_unreachable` (warning) at `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` (default 2), naming the remote, its failure count, last error class, and last-success age; and `relay_host_down` (critical) at `RELAY_BACKOFF_FAILURE_THRESHOLD` (backoff-schedule entry), re-asserted (marked `renotify`) on each later failed attempt, at most every 900 s, until its same-source recovery clear. A persistently uncollectable remote (spoke events aging unseen in its outbox) therefore escalates through the normal dispatcher incident path instead of silently stalling; see "Collector remote-claim escalation ladder" below. |
+| `bot-errors-collector.py` | Hub-side relay collector: claims remote hosts' outboxes over ssh, relays events into the hub's incoming queue. Hosts the per-host claim loop. Per-remote `consecutiveFailures` drives one three-tier escalation ladder, each tier closing the one below it: `remote-claim-failed` (warning) on a single failed claim; `collector_remote_unreachable` (warning) at `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` (default 2), naming the remote, its failure count, last error class, and last-success age; and `relay_host_down` (critical) at `RELAY_BACKOFF_FAILURE_THRESHOLD` (backoff-schedule entry), re-asserted (marked `renotify`) on each later failed attempt, with retries capped at a nominal 900 s, until its same-source recovery clear. A persistently uncollectable remote (spoke events aging unseen in its outbox) therefore escalates through the normal dispatcher incident path instead of silently stalling; see "Collector remote-claim escalation ladder" below. |
 | `bot-errors-dispatcher.py` | Hub-side delivery + suppression engine: dedupe keys, throttle/renotify, storm-collapse, forceNotify policy, WhatsApp + email-fallback delivery. |
 | `bot-errors-heartbeat-watchdog.py` | Independent five-minute watchdog of the hub lanes (`q_loop`, dispatcher, collector, daily health, queue backlog, local services/health, and unattended browser-debug resource trees). Stale per-host daily-health evidence reuses the collector's durable reachability receipt (diagnosis, failure count, last success, and Tailscale online/last-seen) without running a duplicate network probe. The only `forceNotify`-privileged source; browser-debug incidents are explicitly non-paging. |
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
@@ -618,20 +618,30 @@ episode.
 
 Every retry of a down remote is capped at 900 s from tier-3 entry: the backoff
 schedule's 300 and 900 s steps, then 900 s in place of 3600 s. Attempts land
-300, 1200 and 2100 s after entry and every 900 s after that, so the first
-re-assertion at or past any promote window comes within 900 s of it. The
+about 300, 1200 and 2100 s after entry and about every 900 s after that, so the
+first re-assertion at or past any promote window comes about 900 s after it at
+most. These timings are nominal: each interval is 900 s, plus up to one claim
+timeout (30 s by default, because the next attempt is timed from when the claim
+failed), plus up to one poll (30 s) before a poll reaches the deadline. The
 collector does not read `BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS`, so a value that
-differs between the two running services cannot shift its schedule. With the
-defaults and 30 s polls, counted from the first failed poll, a remote that stays
-down is asserted at about 1 minute (entry), 6, 21 and 36 minutes, then every
-15 minutes. The 36-minute re-assertion promotes and delivers one critical; if
-dispatcher latency makes it miss the window, the next one, 15 minutes later,
-promotes. With a 600 s window the critical comes at about 21 minutes, and with
-7200 s at about 126 minutes. The cap means a remote that comes back is seen
-within 15 minutes, and its recovery clears the critical one poll later
-(`recovery_successes`, default 2). The cost is one serial claim attempt (up to
-the claim timeout, plus the reachability probe) per down remote every
-15 minutes instead of hourly.
+differs between the two running services cannot shift its schedule. A remote
+already down when the capped collector starts keeps the deadline the previous
+collector stored, up to 3600 s ahead, so every tier-3 poll decision also holds
+that stored deadline to the last attempt plus 900 s (to the first poll plus
+900 s when the last attempt is not recorded).
+
+With the defaults and 30 s polls, counted from the first failed poll, a remote
+that stays down is asserted at about 1 minute (entry), 6, 21 and 36 minutes,
+then about every 15 minutes. The 36-minute re-assertion promotes and delivers
+one critical; if dispatcher latency makes it miss the window, the next one,
+about 15 minutes later, promotes. With a 600 s window the critical comes at
+about 21 minutes, and with 7200 s at about 126 minutes. The cap means a remote
+that comes back is seen within about 15 minutes, and its recovery clears the
+critical one poll later (`recovery_successes`, default 2). The cost is that a
+down remote is attempted every 15 minutes instead of hourly, and each attempt
+runs serially in the collection cycle: an SSH claim of up to the claim timeout,
+the reachability probe, and the writefail claim (also up to the claim timeout)
+unless the reachability diagnosis skips it.
 
 After promotion the re-assertions are suppressed duplicates of the open
 incident, so they never page by themselves; the dispatcher's still-open
