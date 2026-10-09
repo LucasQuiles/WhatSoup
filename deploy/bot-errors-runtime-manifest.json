@@ -31,7 +31,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "82015ffcfb7be8e179f5397152f53e81920682517c46d37a6cc4dbc5754c551a",
+      "sha256": "62051af7a49bfbcf53d6c3321d68f375ad2b54e5d1b17833d5946af08ada2bba",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "825376c7bf904ccd8913f2121053142fd12bb7a869626017a2c896554af7dd1f",
+      "sha256": "ef3ecc417380cb0fea2ff31d7d229da6fe95812c3c344a33dbadc6c89e48583b",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",

@@ -635,11 +635,14 @@ def degradation_causes_from_event(event: dict[str, Any]) -> list[str] | None:
     return causes
 
 # Pattern H — relay-host flap coalescing. The collector emits a relay_host_down
-# (warning) when a peer probe misses and a paired relay_host_recovered (info) when
-# it returns. Observed flaps recover in ~6 min — one missed probe interval, not an
+# (critical) when a remote enters the down state, re-asserts it on each later
+# failed attempt of the episode (one attempt lands just past
+# TRANSIENT_PROMOTE_SECONDS), and emits a paired same-source clear (info) when it
+# returns. Observed flaps recover in ~6 min — one missed probe interval, not an
 # outage — yet fan out per host (×N), paging a down AND an up for every blip.
 # With the gate on: relay_host_down classifies transient (held by Pattern D's
-# machinery, never surfaced unless it persists past TRANSIENT_PROMOTE_SECONDS), and
+# machinery; a re-assertion arriving past TRANSIENT_PROMOTE_SECONDS promotes it
+# and restores its critical severity, since nothing sweeps held records), and
 # a relay_host_recovered whose paired down was held-and-unsurfaced is suppressed
 # too — so a self-healed flap pages neither leg. If the down PROMOTED to a real
 # outage (or has a surfaced open incident), the recovery is meaningful and sends.

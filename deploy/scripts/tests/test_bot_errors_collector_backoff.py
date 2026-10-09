@@ -3,7 +3,9 @@
 TDD: written BEFORE implementation. Verifies:
 - consecutiveFailures threshold triggers backoff after 3 failures
 - SSH attempts are spaced per 5m/15m/60m schedule (not called inside window)
-- relay_host_down emitted exactly once at state ENTRY (across many cycles)
+- relay_host_down emitted once at state ENTRY and never inside a backoff
+  window; each later failed attempt of the down episode re-asserts it
+  (see the re-assertion tests at the end of this file)
 - relay_host_recovered emitted after consecutive successes, not after one flapping success
 - backoff state persists across library session save/load (no re-emit on restart)
 - per-attempt enqueue_meta_alert NOT called while host is in down state
@@ -13,6 +15,7 @@ TDD: written BEFORE implementation. Verifies:
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -47,7 +50,9 @@ _read_collector_state = _conftest._read_collector_state
 _load_mod_with_dirs = _conftest._load_mod_with_dirs
 _run_once_defaults = _conftest._run_once_defaults
 FakeCollectorClock = _conftest.FakeCollectorClock
-_patched_collector_clock = _conftest._patched_collector_clock
+# time_ns-aware: a down episode now mints several relay_host_down alerts for one
+# remote, and each needs its own event id (and so its own outbox filename).
+_patched_collector_clock = _conftest._patched_collector_clock_ns
 _all_outbox_events = _conftest._all_outbox_events
 _outbox_by_source = _conftest._outbox_by_source
 
@@ -258,9 +263,12 @@ def test_backoff_schedule_nextAttemptAt(tmp_state):
         # After a retry-fail, scheduleIndex moves to 1 → nextAttemptAt += 900
         assert rr.get("nextAttemptAt") == pytest.approx(clock.now + schedule[1], abs=2)
 
-        # No additional relay_host_down events (still exactly 1)
+        # Was "still exactly 1". The later failed attempt re-asserts
+        # relay_host_down (same source and remote) so the dispatcher can
+        # promote its held transient once the promote window has passed.
         evs = _outbox_by_source(outbox_dir)
-        assert len(evs.get("relay_host_down", [])) == 1
+        downs = evs.get("relay_host_down", [])
+        assert [(e["eventType"], e["severity"]) for e in downs] == [("alert", "critical"), ("alert", "critical")]
 
 
 def test_backoff_window_boundary_is_deterministic(tmp_state):
@@ -554,7 +562,7 @@ def test_skipped_backoff_not_counted_as_failure(tmp_state):
 
 
 # ---------------------------------------------------------------------------
-# Test 8: relay_host_down severity=warning, relay_host_recovered severity=info
+# Test 8: relay_host_down severity=critical, relay_host_recovered severity=info
 # ---------------------------------------------------------------------------
 
 def test_event_severities(tmp_state):
@@ -581,7 +589,9 @@ def test_event_severities(tmp_state):
 
         down_evs = _outbox_by_source(outbox_dir).get("relay_host_down", [])
         assert len(down_evs) == 1
-        assert down_evs[0]["severity"] == "warning"
+        # Was warning. The dispatcher holds it as a transient (Pattern H) and
+        # promotion restores this first severity.
+        assert down_evs[0]["severity"] == "critical"
 
         # Advance past window; first success is evidence, second clears recovery.
         state = _read_collector_state(mod)
@@ -682,3 +692,124 @@ def test_recovery_on_outbox_success_despite_writefail_failure(tmp_state):
         ]
         assert len(down_alerts) == 1
         assert _read_collector_state(mod)["remotes"][remote].get("consecutiveFailures", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Re-assertion across a down episode. The dispatcher holds relay_host_down as a
+# transient (Pattern H) and promotes it only when a LATER relay_host_down for
+# the same remote arrives BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS (default 1800)
+# after the first. So every later failed attempt re-asserts it, one attempt is
+# pulled forward to land 300 s past the promote window, and from that attempt
+# on the retry interval is capped at 900 s, so a host that comes back after the
+# critical is seen, and its critical cleared, within 15 minutes:
+#   schedule 300, 900  -> attempts at +300 and +1200 after tier-3 entry;
+#   schedule 3600      -> would land at +4800, 50 min past the window, so it is
+#                         pulled forward to +1800 + 300 = +2100;
+#   then every 900 s   -> +3000, +3900, +4800, +5700, ...
+# Inside a backoff window nothing is emitted (no SSH attempt is made).
+# A best-effort remote with its info tier on keeps the plain schedule: its
+# info observation is never held or promoted, so there is nothing to speed up.
+# ---------------------------------------------------------------------------
+
+_REASSERT_REMOTE = "host-a:/srv/whatsoup/bot-errors"
+_PROMOTE_ENV = "BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS"
+_CAPPED_DEFAULT_OFFSETS = [0, 300, 1200, 2100, 3000, 3900, 4800, 5700]
+
+
+def _drive_dead_remote(mod, state_dir, outbox_dir, seconds, *, best_effort=False, extra_env=None):
+    """Poll an always-failing remote every 30 s for `seconds` past tier-3 entry.
+
+    Entry is the third failed poll. Returns (emitted, attempts): emitted is
+    (offset_after_entry, event) for every relay_host_down alert or
+    observation; attempts is the sorted offsets of polls that made an SSH
+    attempt.
+    """
+    clock = FakeCollectorClock(3_000_000)
+    entry_at = clock.now + 60
+    best_effort_remotes = {_REASSERT_REMOTE} if best_effort else set()
+    emitted = []
+    attempts: set[int] = set()
+
+    def fail(h, script, args, timeout):
+        attempts.add(clock.now - entry_at)
+        raise RuntimeError("timeout")
+
+    with _env(state_dir, outbox_dir, extra=extra_env), \
+         patch.object(mod, "ssh_json_lines", side_effect=fail), \
+         patch.object(mod, "remote_failure_context", return_value=([], {})), \
+         _patched_collector_clock(mod, clock):
+        while clock.now <= entry_at + seconds:
+            before = {p.name for p in outbox_dir.glob("*.json")}
+            _run_once_defaults(mod, [_REASSERT_REMOTE], best_effort_remotes=best_effort_remotes)
+            for path in sorted(outbox_dir.glob("*.json")):
+                if path.name in before:
+                    continue
+                event = json.loads(path.read_text())
+                if event.get("source") == "relay_host_down" and event.get("eventType") != "clear":
+                    emitted.append((clock.now - entry_at, event))
+            clock.advance(30)
+    return emitted, sorted(attempts)
+
+
+@pytest.mark.parametrize(
+    "promote_env",
+    [
+        pytest.param(None, id="window-unset-uses-default"),
+        pytest.param("not-a-number", id="window-non-numeric-falls-back"),
+        pytest.param("0", id="window-zero-falls-back"),
+    ],
+)
+def test_down_episode_reasserts_relay_host_down_on_later_failed_attempts(tmp_state, promote_env):
+    # A missing or unusable promote window falls back to the dispatcher default.
+    state_dir, outbox_dir = tmp_state
+    extra = {_PROMOTE_ENV: promote_env} if promote_env is not None else None
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    emitted, attempts = _drive_dead_remote(mod, state_dir, outbox_dir, 6000, extra_env=extra)
+
+    assert [offset for offset, _ in emitted] == _CAPPED_DEFAULT_OFFSETS
+    assert attempts == [-60, -30, *_CAPPED_DEFAULT_OFFSETS]
+    assert all((e["eventType"], e["severity"]) == ("alert", "critical") for _, e in emitted)
+    entry = emitted[0][1]
+    assert "reasserted=true" not in entry["evidence"]
+    for offset, event in emitted[1:]:
+        assert "reasserted=true" in event["evidence"]
+        assert f"down_for_seconds={offset}" in event["evidence"]
+
+
+def test_reassertion_follows_the_dispatcher_promote_window(tmp_state):
+    # Window 600 s: the attempt after +300 is pulled forward from +1200 to
+    # +600 + 300 = +900, and from there the 900 s cap applies.
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    emitted, _ = _drive_dead_remote(mod, state_dir, outbox_dir, 4600, extra_env={_PROMOTE_ENV: "600"})
+
+    assert [offset for offset, _ in emitted] == [0, 300, 900, 1800, 2700, 3600, 4500]
+
+
+def test_best_effort_remote_is_not_reasserted_and_keeps_the_plain_schedule(tmp_state):
+    # A best-effort remote's relay_host_down is an info observation: the
+    # dispatcher never holds or promotes it, so re-asserting it would only add
+    # an info line per attempt for a host that is expected to sleep, and there
+    # is no critical whose recovery needs the shorter retry.
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    emitted, attempts = _drive_dead_remote(mod, state_dir, outbox_dir, 6000, best_effort=True)
+
+    assert [(offset, e["eventType"], e["severity"]) for offset, e in emitted] == [(0, "observation", "info")]
+    assert attempts == [-60, -30, 0, 300, 1200, 4800]
+
+
+def test_best_effort_remote_with_info_tier_off_is_reasserted_at_critical(tmp_state):
+    state_dir, outbox_dir = tmp_state
+    mod = _load_mod_with_dirs(state_dir, outbox_dir)
+
+    emitted, _ = _drive_dead_remote(
+        mod, state_dir, outbox_dir, 6000, best_effort=True,
+        extra_env={"BOT_ERRORS_BEST_EFFORT_INFO_TIER": "0"},
+    )
+
+    assert [offset for offset, _ in emitted] == _CAPPED_DEFAULT_OFFSETS
+    assert all(e["severity"] == "critical" for _, e in emitted)
