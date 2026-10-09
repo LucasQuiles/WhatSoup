@@ -1277,7 +1277,11 @@ def test_failed_diagnostic_keeps_emissions_latches_and_exit_code(
     assert _run_diagnostics(expected) == _diagnosed(2, 1, 0)
     assert _run_diagnostics(observed) == _unavailable(reason)
     assert _paging_outcome(observed) == _paging_outcome(expected)
-    assert _breach_page_facts(_paging_outcome(observed)) == _BREACH_PAGED
+    assert (
+        _breach_page_facts(_paging_outcome(expected))
+        == _breach_page_facts(_paging_outcome(observed))
+        == _BREACH_PAGED
+    )
 
 
 def test_lock_held_through_the_diagnostics_costs_at_most_the_budget(
@@ -1323,7 +1327,11 @@ def test_lock_held_through_the_diagnostics_costs_at_most_the_budget(
         _unavailable("diagnostic_budget_exceeded"), _unavailable("diagnostic_failed"),
     ]
     assert _paging_outcome(observed) == _paging_outcome(expected)
-    assert _breach_page_facts(_paging_outcome(observed)) == _BREACH_PAGED
+    assert (
+        _breach_page_facts(_paging_outcome(expected))
+        == _breach_page_facts(_paging_outcome(observed))
+        == _BREACH_PAGED
+    )
     # Absolute: the 2 s budget plus a margin for the last wait and scheduling.
     assert len(durations) == 1
     assert durations[0] <= 2.5
