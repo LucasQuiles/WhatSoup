@@ -15,9 +15,15 @@ delivery applies. The tests assert on what would reach the group:
 - a host that recovers after promotion delivers its recovery within 15
   minutes, and a multi-hour outage stays one incident that only the
   dispatcher's normal renotify pages again;
-- with relay-flap coalescing off, tier 3 pages critical at entry.
+- with relay-flap coalescing off, tier 3 pages critical at entry;
+- the critical lands within the dispatcher's promote window plus 900 s for
+  any window, since the collector no longer reads that setting;
+- re-assertions queued while the dispatcher is down open no flap storm when
+  its real ``flap_scan_outbox`` pass runs over them;
+- a record held at warning before deploy promotes at critical.
 
-Both modules share one simulated clock. Neutral fixtures only: host-a, host-b.
+Both modules share one simulated clock, which also drives every event
+timestamp. Neutral fixtures only: host-a, host-b.
 """
 from __future__ import annotations
 
@@ -72,7 +78,7 @@ TIMEOUT_DIAGNOSIS = {"reachabilityDiagnosis": "tailscale_online_ssh_timeout"}
 
 
 class _SimulatedTime:
-    """The real time module, except time() follows the scenario clock."""
+    """The real time module, except time() and gmtime() follow the scenario clock."""
 
     def __init__(self, clock: FakeCollectorClock) -> None:
         self._clock = clock
@@ -80,8 +86,21 @@ class _SimulatedTime:
     def time(self) -> float:
         return float(self._clock.now)
 
+    def gmtime(self, seconds: float | None = None) -> time.struct_time:
+        return time.gmtime(self._clock.now if seconds is None else seconds)
+
     def __getattr__(self, name: str):
         return getattr(time, name)
+
+
+class _InMemoryIncidentCycle:
+    """The ``incident`` argument flap_scan_outbox takes: a payload and a commit."""
+
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def commit(self) -> None:
+        pass
 
 
 def _load_dispatcher():
@@ -95,7 +114,7 @@ class _Ladder:
     """One remote, the real collector, and the dispatcher's decision path."""
 
     def __init__(self, tmp_path: Path, monkeypatch, *, policy: dict[str, str] | None = None,
-                 diagnostics: dict[str, str] | None = None) -> None:
+                 diagnostics: dict[str, str] | None = None, flap_scan: bool = False) -> None:
         self.state_dir = tmp_path / "bot-errors"
         self.outbox_dir = tmp_path / "outbox"
         self.state_dir.mkdir(mode=0o700)
@@ -107,15 +126,26 @@ class _Ladder:
         monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(self.state_dir))
         self.collector = _load_mod_with_dirs(self.state_dir, self.outbox_dir)
         self.dispatcher = _load_dispatcher()
-        # Start at wall time so collector createdAt stamps and the dispatcher's
-        # clock agree at the start; the scenario then advances simulated time.
         self.clock = FakeCollectorClock(int(time.time()))
         self.start = self.clock.now
         monkeypatch.setattr(self.dispatcher, "time", _SimulatedTime(self.clock))
+        # Storm alerts from the flap scan are sent directly, not queued.
+        self.storm_sends: list[str] = []
+        monkeypatch.setattr(self.dispatcher, "send_whatsapp",
+                            lambda text, *args, **kwargs: self.storm_sends.append(text))
         self.incident_state: dict = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
         self.delivered: list[dict] = []
         self.failing = True
         self.diagnostics = dict(diagnostics or {})
+        # With flap_scan on, each dispatcher pass first runs the real
+        # flap_scan_outbox over the outbox, then dispatches and removes the
+        # new events, as run_once does. While paused (the dispatcher is down)
+        # new events stay queued in the outbox.
+        self.flap_scan = flap_scan
+        self.paused = False
+        self.queued: list[Path] = []
+        self.dispatched_dir = tmp_path / "dispatched"
+        self.dispatched_dir.mkdir(mode=0o700)
 
     def _ssh(self, host, script, args, timeout):
         if self.failing:
@@ -138,6 +168,25 @@ class _Ladder:
             "summary": event["summary"],
         })
 
+    def _process(self, new_paths: list[Path]) -> None:
+        """One dispatcher pass over `new_paths`, in outbox filename order."""
+        if self.flap_scan:
+            # In-memory incident state stands in for the session cycle, so
+            # the scan reads and updates the same state _dispatch uses.
+            cycle = _InMemoryIncidentCycle(self.incident_state)
+            self.dispatcher.flap_scan_outbox(self.dispatcher.setup_dirs(), cycle)
+        for path in sorted(new_paths):
+            self._dispatch(json.loads(path.read_text()))
+            if self.flap_scan:
+                path.rename(self.dispatched_dir / path.name)
+
+    def resume(self) -> None:
+        """The dispatcher comes back and processes the queue in one pass."""
+        self.paused = False
+        queued, self.queued = self.queued, []
+        with _env(self.state_dir, self.outbox_dir):
+            self._process(queued)
+
     def poll_until(self, offset: int) -> None:
         """Poll every 30 s while the scenario offset is below `offset`."""
         with _env(self.state_dir, self.outbox_dir), \
@@ -147,15 +196,21 @@ class _Ladder:
             while self.clock.now - self.start < offset:
                 before = {p.name for p in self.outbox_dir.glob("*.json")}
                 _run_once_defaults(self.collector, [REMOTE])
-                for path in sorted(self.outbox_dir.glob("*.json")):
-                    if path.name not in before:
-                        self._dispatch(json.loads(path.read_text()))
+                new_paths = [p for p in self.outbox_dir.glob("*.json") if p.name not in before]
+                if self.paused:
+                    self.queued.extend(new_paths)
+                else:
+                    self._process(new_paths)
                 self.clock.advance(POLL_SECONDS)
 
     def shape(self) -> list[tuple[str, str, str]]:
-        # Sorted: two events of one cycle can land in either filename order
-        # (createdAt is wall-clock seconds), and their keys are independent.
+        # Sorted: events of one cycle share a createdAt second, and the
+        # outbox filename then orders them by source name, not by emission.
         return sorted((d["source"], d["eventType"], d["severity"]) for d in self.delivered)
+
+    def relay_down_events(self, directory: Path) -> list[dict]:
+        return [event for event in (json.loads(p.read_text()) for p in sorted(directory.glob("*.json")))
+                if event["source"] == "relay_host_down" and event["eventType"] == "alert"]
 
     def criticals(self) -> list[dict]:
         return [d for d in self.delivered if d["severity"] == "critical"]
@@ -174,8 +229,9 @@ def test_sustained_outage_delivers_one_critical_soon_after_the_promote_window(tm
 
     # Tiers 1 and 2 (outage-class diagnosis) are delivered as warnings and
     # closed with "superseded" clears; tier 3 is held at entry (+60 s) and at
-    # its re-assertions at +360 s and +1260 s, then promotes at +2160 s, the
-    # attempt pulled forward to 300 s past the 1800 s window.
+    # its re-assertions at +360 s and +1260 s, then promotes at +2160 s: with
+    # retries capped at 900 s from tier-3 entry, the third re-assertion is
+    # the first at or past the 1800 s window.
     assert ladder.shape() == [
         ("collector_remote_unreachable", "alert", "warning"),
         ("collector_remote_unreachable", "clear", "info"),
@@ -270,10 +326,10 @@ def test_host_back_five_minutes_after_the_critical_clears_within_fifteen(tmp_pat
     assert ladder.shape() == [("relay_host_down", "alert", "critical")]
     assert ladder.delivered[0]["offset"] == PROMOTED_AT
 
-    # After the promoting attempt the retry interval is capped at 900 s, so
-    # the next attempt is PROMOTED_AT + 900; it and the poll after it succeed,
-    # which meets recovery_successes (2). Before the cap the next attempt was
-    # an hour after the promoting one.
+    # Retries are capped at 900 s from tier-3 entry, so the next attempt is
+    # PROMOTED_AT + 900; it and the poll after it succeed, which meets
+    # recovery_successes (2). Without the cap the next attempt would come an
+    # hour after the promoting one.
     ladder.failing = False
     ladder.poll_until(back_at + 15 * 60)
 
@@ -326,6 +382,93 @@ def test_relay_flap_coalesce_off_pages_critical_at_tier3_entry(tmp_path, monkeyp
     # incident and are suppressed.
     assert ladder.shape() == [("relay_host_down", "alert", "critical")]
     assert ladder.delivered[0]["offset"] == TIER3_ENTRY
+
+
+# ---------------------------------------------------------------------------
+# The critical lands within one 900 s cap of the dispatcher's promote window,
+# whatever value the collector's own environment holds.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("dispatcher_window", "collector_env", "expected_offset"), [
+    pytest.param("600", "7200", TIER3_ENTRY + 1200, id="dispatcher-600s"),
+    pytest.param("1800", "7200", TIER3_ENTRY + 2100, id="dispatcher-1800s-collector-env-7200s"),
+    pytest.param("7200", "14400", TIER3_ENTRY + 7500, id="dispatcher-7200s-collector-env-14400s"),
+])
+def test_critical_lands_within_one_cap_of_the_dispatcher_promote_window(
+    tmp_path, monkeypatch, dispatcher_window, collector_env, expected_offset,
+):
+    # The dispatcher fixes its window at import. The collector process can
+    # hold a different value of the same setting (one service restarted after
+    # an edit, the other not); the schedule must not depend on it. Retries
+    # from tier-3 entry are +300, +1200, +2100, then every 900 s, so the
+    # first re-assertion at or past the window comes at most 900 s after it.
+    ladder = _Ladder(tmp_path, monkeypatch, policy={"BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS": dispatcher_window},
+                     diagnostics=TIMEOUT_DIAGNOSIS)
+    assert ladder.dispatcher.TRANSIENT_PROMOTE_SECONDS == int(dispatcher_window)
+    monkeypatch.setenv("BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS", collector_env)
+    bound = TIER3_ENTRY + int(dispatcher_window) + 900
+    ladder.poll_until(bound + POLL_SECONDS)
+
+    assert [(d["offset"], d["severity"]) for d in ladder.delivered] == [(expected_offset, "critical")]
+    assert expected_offset <= bound
+
+
+# ---------------------------------------------------------------------------
+# Re-assertions queued while the dispatcher is down open no flap storm.
+# ---------------------------------------------------------------------------
+
+def test_queued_reassertions_open_no_flap_storm_and_the_critical_still_promotes(tmp_path, monkeypatch):
+    # The dispatcher is down from the first failed poll until just after the
+    # fifth re-assertion. Its first pass runs the real flap_scan_outbox over
+    # tier-3 entry plus five re-assertions, all at one processing time. Only
+    # entry is a new occurrence; the re-assertions are marked renotify, so
+    # the scan records one trip for the key, not six, and opens no storm
+    # that would consolidate the outage alert.
+    ladder = _Ladder(tmp_path, monkeypatch, diagnostics=TIMEOUT_DIAGNOSIS, flap_scan=True)
+    ladder.paused = True
+    resume_at = TIER3_ENTRY + 3900 + POLL_SECONDS
+    ladder.poll_until(resume_at)
+    queued = ladder.relay_down_events(ladder.outbox_dir)
+    ladder.resume()
+
+    assert ladder.storm_sends == []
+    flap_state = ladder.incident_state.get("flapState", {})
+    assert [key for key, entry in flap_state.items() if entry.get("stormAt")] == []
+    assert len(queued) == 6
+    assert [event.get("renotify") is True for event in queued] == [False] + [True] * 5
+    relay_key = ladder.dispatcher.incident_key(queued[0])
+    assert flap_state[relay_key]["cumulativeCount"] == 1
+    assert ladder.delivered == []
+
+    # The hold clock starts at the dispatcher's first sight (resume_at), so
+    # the first re-assertion past the 1800 s window promotes: retries keep
+    # their 900 s cadence, at TIER3_ENTRY + 4800, + 5700 and + 6600.
+    ladder.poll_until(resume_at + 1800 + 900 + POLL_SECONDS)
+
+    assert [(d["offset"], d["severity"]) for d in ladder.delivered] == [(TIER3_ENTRY + 6600, "critical")]
+    assert TIER3_ENTRY + 6600 <= resume_at + 1800 + 900
+    assert ladder.storm_sends == []
+    assert flap_state[relay_key]["cumulativeCount"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A record held at warning before deploy promotes at critical.
+# ---------------------------------------------------------------------------
+
+def test_relay_record_held_at_warning_before_deploy_promotes_at_critical(tmp_path, monkeypatch):
+    # Before the ladder change relay_host_down was emitted at warning, so a
+    # record already held across the deploy carries firstSeverity "warning".
+    # Promotion takes the stronger of that and the promoting event's own
+    # severity, so the first critical re-assertion past the window pages.
+    ladder = _Ladder(tmp_path, monkeypatch, diagnostics=TIMEOUT_DIAGNOSIS)
+    ladder.poll_until(TIER3_ENTRY + POLL_SECONDS)
+    relay_key = ladder.dispatcher.incident_key(ladder.relay_down_events(ladder.outbox_dir)[0])
+    record = ladder.incident_state["transientState"][relay_key]
+    assert record["firstSeverity"] == "critical"
+    record["firstSeverity"] = "warning"
+    ladder.poll_until(45 * 60)
+
+    assert [(d["offset"], d["severity"]) for d in ladder.delivered] == [(PROMOTED_AT, "critical")]
 
 
 # ---------------------------------------------------------------------------

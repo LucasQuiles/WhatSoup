@@ -21,7 +21,8 @@ of the same source and remote in one real second (an alert/clear/alert
 sequence, or relay_host_down re-asserted across a down episode) use
 _patched_collector_clock_ns instead: the event id, and so the outbox filename,
 carries time_ns(), and an unmocked MagicMock returns the same value for every
-call, so two such events would share one filename.
+call, so two such events would share one filename. That clock also puts
+gmtime(), and so every event timestamp, on simulated time.
 """
 from __future__ import annotations
 
@@ -150,12 +151,16 @@ def _patched_collector_clock(mod, clock: FakeCollectorClock):
 
 @contextlib.contextmanager
 def _patched_collector_clock_ns(mod, clock: FakeCollectorClock):
-    """Like _patched_collector_clock, plus a monotonic time_ns() tied to the clock.
+    """The whole collector clock on simulated time: time(), time_ns() and gmtime().
 
     _emit_collector_outbox_event puts time_ns() first in the event id, which
     is the tail of the outbox filename, and _outbox_by_source() sorts by
     filename to recover emission order. The counter keeps ids distinct and in
     simulated-time order even for events minted in the same simulated second.
+
+    gmtime() with no argument follows the clock too, so createdAt, the other
+    ISO stamps and the outbox filename prefix advance with simulated time
+    rather than wall time.
     """
     counter = [0]
 
@@ -163,11 +168,14 @@ def _patched_collector_clock_ns(mod, clock: FakeCollectorClock):
         counter[0] += 1
         return int(clock.now * 1_000_000_000) + counter[0]
 
+    def _fake_gmtime(seconds: float | None = None) -> time.struct_time:
+        return time.gmtime(clock.now if seconds is None else seconds)
+
     with patch.object(mod, "time") as mock_time:
         mock_time.time.side_effect = clock.time
         mock_time.time_ns.side_effect = _fake_time_ns
         mock_time.strftime = time.strftime
-        mock_time.gmtime = time.gmtime
+        mock_time.gmtime = _fake_gmtime
         yield
 
 
