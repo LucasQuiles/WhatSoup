@@ -2269,10 +2269,15 @@ export class RuntimeFallbackCoordinator {
     // was scheduled for the old cadence, and leaving it would let the health
     // window (derived from the due instant / backoff) diverge from the actual
     // fire time. An unchanged backoff keeps the pending timer and its due instant.
+    // A pending timeout retry is not on the backoff cadence: a turn success
+    // that resets the backoff keeps it, or the flag would stay set with no
+    // retry behind it and the next timeout would get no re-probe.
     const backoffChanged = this.host.periodicUsabilityProbeBackoff !== previousBackoff;
+    const timeoutRetryPending = this.host.periodicUsabilityProbeTimeoutRetryArmed
+      && this.host.periodicUsabilityProbeTimer !== null;
     if (timeoutRetry) {
       this.scheduleNextPeriodicUsabilityProbe(PERIODIC_PROBE_TIMEOUT_RETRY_MS);
-    } else if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null)) {
+    } else if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null && !timeoutRetryPending)) {
       this.scheduleNextPeriodicUsabilityProbe();
     }
 

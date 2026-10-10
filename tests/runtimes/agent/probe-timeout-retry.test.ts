@@ -166,6 +166,27 @@ describe('AgentRuntime periodic probe — a timed-out probe retries once within 
     expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 5 * MINUTE + 66 * MINUTE);
   });
 
+  it('a turn success that resets the backoff keeps the pending retry: the timeout still gets its re-probe', () => {
+    const { state } = armedRuntime();
+    const t0 = systemClock.now();
+    queuedResults.push(TIMEOUT, TIMEOUT);
+
+    state.fallback.recordPrimaryModelUsability(CRED_FAIL, 'periodic'); // backoff 1, due t0 + 66m
+    vi.advanceTimersByTime(66 * MINUTE); // periodic probe times out: retry armed, backoff stays 1
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 71 * MINUTE);
+    vi.advanceTimersByTime(2 * MINUTE);
+    // The turn resets the backoff to 0. It must not move the pending retry
+    // to the normal cadence, or the flag stays set with no retry behind it.
+    state.recordTurnCapabilitySuccess(true);
+    expect(state.periodicUsabilityProbeBackoff).toBe(0);
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 71 * MINUTE);
+    vi.advanceTimersByTime(3 * MINUTE); // the retry fires and times out again
+    expect(probeCalls.map((c) => c.at)).toEqual([t0 + 66 * MINUTE, t0 + 71 * MINUTE]);
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 71 * MINUTE + 66 * MINUTE);
+  });
+
   it('a usable recovery probe recorded as manual clears the retry flag: the next timeout gets its own retry', () => {
     const { state } = armedRuntime();
     const t0 = systemClock.now();
