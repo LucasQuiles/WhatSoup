@@ -53,9 +53,11 @@ const MINUTE = 60_000;
 const START = 1_790_000_000_000;
 const EXPECTED = `sha256:${'a'.repeat(64)}`;
 const USABLE: PrimaryModelUsabilityResult = { status: 'usable', provider: 'claude-cli', model: null };
+const TIMEOUT: PrimaryModelUsabilityResult = { status: 'timeout', provider: 'claude-cli', model: null, reason: 'probe-timeout' };
 
 type ProbeTrigger = 'startup' | 'manual' | 'periodic';
 type IdentityState = RuntimeState & {
+  recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
   fallback: {
     schedulePrimaryModelUsabilityProbe(trigger: ProbeTrigger): void;
   };
@@ -105,11 +107,11 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     return { runtime, state, snapshot, identity, reasons };
   }
 
-  async function runProbe(state: IdentityState, trigger: ProbeTrigger): Promise<void> {
+  async function runProbe(state: IdentityState, trigger: ProbeTrigger, result = USABLE): Promise<void> {
     state.fallback.schedulePrimaryModelUsabilityProbe(trigger);
     await settle();
     expect(probeControl.resolvers).toHaveLength(1);
-    probeControl.resolvers.pop()!(USABLE);
+    probeControl.resolvers.pop()!(result);
     await settle();
   }
 
@@ -188,6 +190,20 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     vi.advanceTimersByTime(31 * MINUTE);
     expect(identity()).toMatchObject({ status: 'unverifiable', reason: 'stale-receipt', stale: true });
     expect(reasons()).toContain('credential_identity_unverifiable');
+  });
+
+  it('a turn success while a timeout retry is pending does not age the identity receipt early', async () => {
+    const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
+    const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
+    // Periodic probe times out: the retry is due in 5 min, and the identity
+    // receipt is stamped now. Its real deadline is the retry plus grace.
+    await runProbe(state, 'periodic', TIMEOUT);
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    vi.advanceTimersByTime(4 * MINUTE);
+    // The turn moves the usability checkedAt, not the identity receipt.
+    state.recordTurnCapabilitySuccess(true);
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    expect(reasons()).not.toContain('credential_identity_unverifiable');
   });
 
   it('req-03: the identity path never reaches the credential heal seam, on any outcome', async () => {
