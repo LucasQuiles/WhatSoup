@@ -55,6 +55,7 @@ import {
   buildPrimaryProbeAdapterDeps,
   calculatePeriodicProbeBackoff,
   calculatePeriodicProbeDelay,
+  PERIODIC_PROBE_TIMEOUT_RETRY_MS,
   formatPrimaryModelUsabilityEvidence,
 } from './primary-readiness-probe.ts';
 import {
@@ -234,6 +235,7 @@ export interface RuntimeFallbackPort {
   periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
   periodicUsabilityProbeBackoff: number;
   periodicUsabilityProbeDueAt: number | null;
+  periodicUsabilityProbeTimeoutRetryArmed: boolean;
   readonly shutdownRequested: boolean;
   fallbackProbeAttempts: number;
   fallbackLastProbeAt: number | null;
@@ -2215,13 +2217,13 @@ export class RuntimeFallbackCoordinator {
       .then(() => { this.host.verifyAccountIdentity?.(trigger); });
   }
 
-  scheduleNextPeriodicUsabilityProbe(): void {
+  scheduleNextPeriodicUsabilityProbe(delayOverrideMs?: number): void {
     // Never arm after shutdown began: a probe that resolves post-shutdown must
     // not resurrect the periodic loop (round-3 finding 1).
     if (this.host.shutdownRequested) return;
     if (this.host.periodicUsabilityProbeTimer) clearTimeout(this.host.periodicUsabilityProbeTimer);
     const now = Date.now();
-    const delay = calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, now);
+    const delay = delayOverrideMs ?? calculatePeriodicProbeDelay(this.host.periodicUsabilityProbeBackoff, this.host.primaryModelUsability?.checkedAt ?? null, now);
     // The due instant is the source of truth for the evidence freshness window
     // (runtime.modelUsabilityFreshnessMs): set it together with the timer so
     // cadence and window can never diverge.
@@ -2246,15 +2248,25 @@ export class RuntimeFallbackCoordinator {
       checkedAt: Date.now(),
       probeInFlight: false,
     };
+    // A first timeout re-probes once within minutes and leaves the backoff
+    // alone; a timeout on that retry backs off like any other failure.
+    const timeoutRetry = result.status === 'timeout'
+      && !this.host.periodicUsabilityProbeTimeoutRetryArmed
+      && (trigger === 'periodic' || this.host.periodicUsabilityProbeTimer !== null);
+    this.host.periodicUsabilityProbeTimeoutRetryArmed = timeoutRetry;
     const previousBackoff = this.host.periodicUsabilityProbeBackoff;
-    this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');
+    if (!timeoutRetry) {
+      this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');
+    }
     // A periodic result always re-arms. A manual/startup result re-arms only
     // when it CHANGED the backoff while a periodic timer is armed: the old timer
     // was scheduled for the old cadence, and leaving it would let the health
     // window (derived from the due instant / backoff) diverge from the actual
     // fire time. An unchanged backoff keeps the pending timer and its due instant.
     const backoffChanged = this.host.periodicUsabilityProbeBackoff !== previousBackoff;
-    if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null)) {
+    if (timeoutRetry) {
+      this.scheduleNextPeriodicUsabilityProbe(PERIODIC_PROBE_TIMEOUT_RETRY_MS);
+    } else if (trigger === 'periodic' || (backoffChanged && this.host.periodicUsabilityProbeTimer !== null)) {
       this.scheduleNextPeriodicUsabilityProbe();
     }
 

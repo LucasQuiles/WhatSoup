@@ -826,6 +826,7 @@ export class AgentRuntime implements Runtime {
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
   /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
   private periodicUsabilityProbeDueAt: number | null = null;
+  private periodicUsabilityProbeTimeoutRetryArmed = false;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -3016,6 +3017,8 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
       get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
       set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
+      get periodicUsabilityProbeTimeoutRetryArmed() { return runtime.periodicUsabilityProbeTimeoutRetryArmed; },
+      set periodicUsabilityProbeTimeoutRetryArmed(value) { runtime.periodicUsabilityProbeTimeoutRetryArmed = value; },
       get shutdownRequested() { return runtime.shutdownRequested; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
