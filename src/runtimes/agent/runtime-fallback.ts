@@ -2235,6 +2235,7 @@ export class RuntimeFallbackCoordinator {
   recordPrimaryModelUsability(
     result: PrimaryModelUsabilityResult,
     trigger: 'startup' | 'manual' | 'periodic',
+    source: 'probe' | 'turn-success' = 'probe',
   ): void {
     if (this.host.shutdownRequested) {
       // A probe started before shutdown resolved after it. Drop the result
@@ -2251,13 +2252,14 @@ export class RuntimeFallbackCoordinator {
     // A first timeout re-probes once within minutes and leaves the backoff
     // alone; a timeout on that retry backs off like any other failure, so a
     // provider that keeps timing out gets at most one retry per backoff cycle.
-    // Only probe results move the retry flag: a turn-success 'manual' record
-    // must not clear it, or a busy bot whose probes keep timing out would
-    // retry every 5 minutes forever.
+    // Every probe result moves the retry flag, whatever its trigger (a
+    // recovery probe and a manual probe both record as 'manual'). A turn
+    // success is not a probe and must not clear it, or a busy bot whose
+    // probes keep timing out would retry every 5 minutes forever.
     const timeoutRetry = result.status === 'timeout'
       && !this.host.periodicUsabilityProbeTimeoutRetryArmed
       && (trigger === 'periodic' || this.host.periodicUsabilityProbeTimer !== null);
-    if (trigger !== 'manual') this.host.periodicUsabilityProbeTimeoutRetryArmed = timeoutRetry;
+    if (source === 'probe') this.host.periodicUsabilityProbeTimeoutRetryArmed = timeoutRetry;
     const previousBackoff = this.host.periodicUsabilityProbeBackoff;
     if (!timeoutRetry) {
       this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');

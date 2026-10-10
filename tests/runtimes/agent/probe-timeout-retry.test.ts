@@ -65,6 +65,7 @@ type ProbeState = RuntimeState & {
   periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
   periodicUsabilityProbeBackoff: number;
   periodicUsabilityProbeDueAt: number | null;
+  recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
   fallback: {
     recordPrimaryModelUsability(result: PrimaryModelUsabilityResult, trigger: ProbeTrigger): void;
     schedulePrimaryModelUsabilityProbe(trigger: ProbeTrigger): void;
@@ -158,9 +159,38 @@ describe('AgentRuntime periodic probe — a timed-out probe retries once within 
 
     state.fallback.recordPrimaryModelUsability(TIMEOUT, 'periodic');
     vi.advanceTimersByTime(2 * MINUTE);
-    // Turn success records 'usable' with the 'manual' trigger.
-    state.fallback.recordPrimaryModelUsability(USABLE, 'manual');
+    state.recordTurnCapabilitySuccess(true);
     vi.advanceTimersByTime(3 * MINUTE); // retry fires and times out again
+    expect(probeCalls).toHaveLength(1);
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 5 * MINUTE + 66 * MINUTE);
+  });
+
+  it('a usable recovery probe recorded as manual clears the retry flag: the next timeout gets its own retry', () => {
+    const { state } = armedRuntime();
+    const t0 = systemClock.now();
+    queuedResults.push(TIMEOUT);
+
+    state.fallback.recordPrimaryModelUsability(TIMEOUT, 'periodic');
+    vi.advanceTimersByTime(2 * MINUTE);
+    // The fallback recovery commit records its probe evidence with the
+    // 'manual' trigger. It is a real probe result, so it ends the retry.
+    state.fallback.recordPrimaryModelUsability(USABLE, 'manual');
+    vi.advanceTimersByTime(3 * MINUTE); // the pending timer fires and times out
+    expect(probeCalls).toHaveLength(1);
+    expect(state.periodicUsabilityProbeBackoff).toBe(0);
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 10 * MINUTE);
+  });
+
+  it('a manual probe timeout that arms the short retry also sets the flag: a second timeout backs off', () => {
+    const { state } = armedRuntime();
+    const t0 = systemClock.now();
+    queuedResults.push(TIMEOUT, TIMEOUT);
+
+    state.fallback.scheduleNextPeriodicUsabilityProbe();
+    state.fallback.recordPrimaryModelUsability(TIMEOUT, 'manual');
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 5 * MINUTE);
+    vi.advanceTimersByTime(5 * MINUTE); // retry fires and times out again
     expect(probeCalls).toHaveLength(1);
     expect(state.periodicUsabilityProbeBackoff).toBe(1);
     expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 5 * MINUTE + 66 * MINUTE);
