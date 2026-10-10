@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "733b147cd6d3ab22a1afbc607b59069945f48c1abb4368000087c4bc10c39e5f",
+      "sha256": "5b093fa6c5e3da1bc807c98e5e5a83325e37c0bea4217e9e9f9756b1c0e8d4d4",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -770,7 +770,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "478cbf965021ce11f7d93e3d35a210fcc4f533f03c7fd8d97c50f3593d3137b8",
+      "sha256": "55b5510c40dd8159f7b814caafe680fc26c16fdd1298b730d1e9215ec09b4c1b",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -800,7 +800,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "e8ded92d38ca3c5544812cfa3b5e0276ed410b79f52f5258f05fffb4fbafe66b",
+      "sha256": "f2000451bdb02083841c9bdf113f2202c5bc2eec3b6395515dbe91bf4b16bc87",
       "mustContain": [
         "import { redactText } from './redaction-text.ts';",
         "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
