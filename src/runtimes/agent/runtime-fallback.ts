@@ -2249,11 +2249,15 @@ export class RuntimeFallbackCoordinator {
       probeInFlight: false,
     };
     // A first timeout re-probes once within minutes and leaves the backoff
-    // alone; a timeout on that retry backs off like any other failure.
+    // alone; a timeout on that retry backs off like any other failure, so a
+    // provider that keeps timing out gets at most one retry per backoff cycle.
+    // Only probe results move the retry flag: a turn-success 'manual' record
+    // must not clear it, or a busy bot whose probes keep timing out would
+    // retry every 5 minutes forever.
     const timeoutRetry = result.status === 'timeout'
       && !this.host.periodicUsabilityProbeTimeoutRetryArmed
       && (trigger === 'periodic' || this.host.periodicUsabilityProbeTimer !== null);
-    this.host.periodicUsabilityProbeTimeoutRetryArmed = timeoutRetry;
+    if (trigger !== 'manual') this.host.periodicUsabilityProbeTimeoutRetryArmed = timeoutRetry;
     const previousBackoff = this.host.periodicUsabilityProbeBackoff;
     if (!timeoutRetry) {
       this.host.periodicUsabilityProbeBackoff = calculatePeriodicProbeBackoff(previousBackoff, result.status === 'usable');

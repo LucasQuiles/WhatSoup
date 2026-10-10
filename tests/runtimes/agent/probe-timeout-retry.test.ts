@@ -151,6 +151,21 @@ describe('AgentRuntime periodic probe — a timed-out probe retries once within 
     expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 10 * MINUTE);
   });
 
+  it('a successful user turn during the retry does not re-arm another retry (no 5-minute loop)', () => {
+    const { state } = armedRuntime();
+    const t0 = systemClock.now();
+    queuedResults.push(TIMEOUT);
+
+    state.fallback.recordPrimaryModelUsability(TIMEOUT, 'periodic');
+    vi.advanceTimersByTime(2 * MINUTE);
+    // Turn success records 'usable' with the 'manual' trigger.
+    state.fallback.recordPrimaryModelUsability(USABLE, 'manual');
+    vi.advanceTimersByTime(3 * MINUTE); // retry fires and times out again
+    expect(probeCalls).toHaveLength(1);
+    expect(state.periodicUsabilityProbeBackoff).toBe(1);
+    expect(state.periodicUsabilityProbeDueAt).toBe(t0 + 5 * MINUTE + 66 * MINUTE);
+  });
+
   it('CONTROL: non-timeout failures keep the doubled cadence', () => {
     const { state } = armedRuntime();
     const t0 = systemClock.now();
