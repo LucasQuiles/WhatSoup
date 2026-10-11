@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -94,6 +95,8 @@ describe('writeAtomicPrivateFileIsolatedSync', () => {
     mkdirSync(dir, { mode: 0o700 });
     const target = join(dir, 'credential.key');
     writeFileSync(target, 'old', { mode: 0o644 });
+    // The create mode is masked by the process umask; set it so the test starts from a non-private mode under any umask.
+    chmodSync(target, 0o644);
 
     writeAtomicPrivateFileIsolatedSync(target, 'new', 'credential');
 
@@ -267,6 +270,8 @@ fs.fsyncSync = function (descriptor) {
     mkdirSync(outside, { recursive: true, mode: 0o700 });
     writeFileSync(target, 'original-target', { mode: 0o600 });
     writeFileSync(outsideTarget, 'outside-target', { mode: 0o640 });
+    // The create mode is masked by the process umask; set it so the mode check below holds under any umask.
+    chmodSync(outsideTarget, 0o640);
     const originalTargetBefore = statSync(target);
     const outsideTargetBefore = statSync(outsideTarget);
     const hookPath = writeHook(root, 'atomic-ancestor-exchange-hook.mjs', String.raw`
