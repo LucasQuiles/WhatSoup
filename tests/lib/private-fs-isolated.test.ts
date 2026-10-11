@@ -95,6 +95,8 @@ describe('writeAtomicPrivateFileIsolatedSync', () => {
     mkdirSync(dir, { mode: 0o700 });
     const target = join(dir, 'credential.key');
     writeFileSync(target, 'old', { mode: 0o644 });
+    // The create mode is masked by the process umask; set it so the test starts from a non-private mode under any umask.
+    chmodSync(target, 0o644);
 
     writeAtomicPrivateFileIsolatedSync(target, 'new', 'credential');
 
