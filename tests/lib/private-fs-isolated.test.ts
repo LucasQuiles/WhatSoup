@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -267,6 +268,8 @@ fs.fsyncSync = function (descriptor) {
     mkdirSync(outside, { recursive: true, mode: 0o700 });
     writeFileSync(target, 'original-target', { mode: 0o600 });
     writeFileSync(outsideTarget, 'outside-target', { mode: 0o640 });
+    // The create mode is masked by the process umask; set it so the mode check below holds under any umask.
+    chmodSync(outsideTarget, 0o640);
     const originalTargetBefore = statSync(target);
     const outsideTargetBefore = statSync(outsideTarget);
     const hookPath = writeHook(root, 'atomic-ancestor-exchange-hook.mjs', String.raw`
