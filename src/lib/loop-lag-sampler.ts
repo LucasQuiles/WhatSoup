@@ -81,6 +81,17 @@ export interface LoopLagSnapshot {
   discontinuityCount: number;
   lastEluUtilization: number | null;
   lastCpuDeltaMs: number | null;
+  /**
+   * Monotonic time (`now`) of the last observation that left the full window
+   * starved, or that ended a starved window, or of the stop() that emptied a
+   * starved window; null if none has. Health holds `event_loop_starvation`
+   * from it on the same clock, so a starved episode is seen whether or not a
+   * health read fell inside it, and a wall-clock step cannot move it.
+   */
+  lastStarvedMonotonicMs: number | null;
+  /** The window is partial because a discontinuity emptied it, and has not
+   * refilled since. A window emptied by start() or stop() does not count. */
+  refillingAfterDiscontinuity: boolean;
 }
 
 interface EluReading {
@@ -156,6 +167,9 @@ export class LoopLagSampler {
   private rawRing: RawLoopLagSample[] = [];
   private lastIntervalAtMs: number | null = null;
   private discontinuityCount = 0;
+  private lastStarvedMonotonicMs: number | null = null;
+  private windowWasStarved = false;
+  private windowResetByDiscontinuity = false;
   private prevElu: EluReading | null = null;
   private prevCpu: CpuReading | null = null;
   private lastEluUtilization: number | null = null;
@@ -190,6 +204,11 @@ export class LoopLagSampler {
       clearInterval(this.timer);
       this.timer = null;
     }
+    // Emptying the window ends a starved episode now, not at a later restart,
+    // and a window refilled after a restart does not follow a discontinuity.
+    if (this.windowWasStarved) this.lastStarvedMonotonicMs = this.now();
+    this.windowWasStarved = false;
+    this.windowResetByDiscontinuity = false;
     this.resetWindow();
     this.observerSpans = [];
     this.observerConsumedUpToMs = 0;
@@ -212,14 +231,21 @@ export class LoopLagSampler {
       intervalSampleCount: this.window.filter((sample) => sample.source === 'interval').length,
       snapshotSampleCount: this.window.filter((sample) => sample.source === 'snapshot').length,
       observerCostMs: this.window.reduce((total, sample) => total + sample.observerCostMs, 0),
-      locallyStarved:
-        this.window.length === LOOP_LAG_WINDOW_SAMPLES
-        && p95LagMs !== null
-        && p95LagMs > LOOP_LAG_STARVATION_THRESHOLD_MS,
+      locallyStarved: this.windowStarved(),
       discontinuityCount: this.discontinuityCount,
       lastEluUtilization: this.lastEluUtilization,
       lastCpuDeltaMs: this.lastCpuDeltaMs,
+      lastStarvedMonotonicMs: this.lastStarvedMonotonicMs,
+      refillingAfterDiscontinuity: this.windowResetByDiscontinuity
+        && this.window.length < LOOP_LAG_WINDOW_SAMPLES,
     };
+  }
+
+  /** Starved only on a full window whose p95 exceeds the threshold. */
+  private windowStarved(): boolean {
+    if (this.window.length !== LOOP_LAG_WINDOW_SAMPLES) return false;
+    const p95LagMs = this.percentile95(this.window.map((sample) => sample.lagMs));
+    return p95LagMs !== null && p95LagMs > LOOP_LAG_STARVATION_THRESHOLD_MS;
   }
 
   /** Bounded raw observation stream, oldest first. Survives window resets and stop(). */
@@ -399,6 +425,7 @@ export class LoopLagSampler {
     });
     if (discontinuity) {
       this.resetWindow();
+      this.windowResetByDiscontinuity = true;
       this.discontinuityCount = Math.min(
         Number.MAX_SAFE_INTEGER,
         this.discontinuityCount + 1,
@@ -407,6 +434,12 @@ export class LoopLagSampler {
       this.window.push({ lagMs, source, observerCostMs });
     }
     if (this.window.length > LOOP_LAG_WINDOW_SAMPLES) this.window.shift();
+    // The verdict changes only here, so stamping each observation that leaves
+    // the window starved, or ends a starved window (a discontinuity reset
+    // included), records the last starved instant to within one sample.
+    const windowStarved = this.windowStarved();
+    if (windowStarved || this.windowWasStarved) this.lastStarvedMonotonicMs = actualAtMs;
+    this.windowWasStarved = windowStarved;
     this.lastIntervalAtMs = source === 'interval'
       ? actualAtMs
       // A recorded snapshot consumed the overdue span; measure only residual

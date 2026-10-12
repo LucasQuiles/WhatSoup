@@ -18,7 +18,7 @@ import {
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
 import { hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
-import { systemClock } from '../lib/clock.ts';
+import { clockDriftHoldExtensionMs, systemClock } from '../lib/clock.ts';
 import { RECONNECT_RESET_REASONS } from '../lib/disconnect-classification.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import {
@@ -62,6 +62,7 @@ import {
 import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
+import { RECENT_DISCONNECT_DEGRADED_THRESHOLD } from '../core/health-reason-hold.ts';
 import {
   buildDisconnectDecisionRecord,
   decideDisconnectAction,
@@ -114,6 +115,20 @@ export interface ConnectionRecentDisconnects {
   lastReason: string | null;
   lastStatusCode: number | null;
   byReason: Record<string, number>;
+  /**
+   * Until when, on the monotonic clock (performance.now()), the latest churn
+   * holds, capped at now: now while it holds, else that instant. Null if
+   * there has been none. Whether churn exists is decided only by `count`, the
+   * wall-clock window above, when a disconnect is recorded; the monotonic
+   * clock only measures how long it holds: until the third-newest counted
+   * disconnect leaves the window, plus clockDriftHoldExtensionMs, and at
+   * least until the disconnect that completed it. Health holds
+   * `connection_churn` from it, so churn is seen whether or not a health read
+   * fell inside it. Only the Baileys manager sets it, on the live snapshot
+   * only: monotonic time means nothing to another process, so the persisted
+   * runtime state omits it.
+   */
+  lastChurnMonotonicMs?: number | null;
 }
 
 /**
@@ -128,6 +143,8 @@ export interface ConnectionOutboundFlood {
   destCount: number;
   worstDestHash: string | null;
   worstCount: number;
+  /** See OutboundFloodStats.lastFloodingMonotonicMs. Only the Baileys manager sets it. */
+  lastFloodingMonotonicMs?: number | null;
 }
 
 export interface ConnectionStateSnapshot {
@@ -609,7 +626,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private lastPongAt: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastStatusCode: number | null = null;
-  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null }> = [];
+  /** Each disconnect also carries its monotonic instant, for the health hold
+   * only. It is absent only for an entry this process did not record (none
+   * today: nothing reloads the window). */
+  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null; monotonicMs?: number }> = [];
+  /** When the latest churn stops holding (inclusive), on the monotonic clock, or null. */
+  private churnHeldUntilMonotonicMs: number | null = null;
   private lastDisconnectDiagnostic: unknown | null = null;
   private loggedOutAlertEmitted = false;
   private unclassified401ReconnectSpent = false;
@@ -1731,7 +1753,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reconnectReset: this.lastReconnectReset === null
         ? null
         : { reason: this.lastReconnectReset.reason, at: toIso(this.lastReconnectReset.at) },
-      recentDisconnects: this.getRecentDisconnectStats(),
+      recentDisconnects: this.getRecentDisconnectSnapshot(),
       outboundFlood: this.getOutboundFloodStats(),
       authBond,
       credentialLifecycle: this.getCredentialLifecycleSnapshot(authBond),
@@ -1783,13 +1805,31 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       destCount: stats.destCount,
       worstDestHash: stats.worstKey ? shortHash(stats.worstKey) : null,
       worstCount: stats.worstCount,
+      lastFloodingMonotonicMs: stats.lastFloodingMonotonicMs,
     };
   }
 
   private recordDisconnect(statusCode: number | null, reason: string): void {
     const now = Date.now();
-    this.recentDisconnects.push({ at: now, reason, statusCode });
+    // Read after the wall clock, so a pause between the two reads can only
+    // lengthen the hold.
+    const monotonicMs = performance.now();
+    this.recentDisconnects.push({ at: now, reason, statusCode, monotonicMs });
     this.pruneRecentDisconnects(now);
+    // Base's own count decides whether churn exists; the monotonic instants
+    // only time it. It holds until the third-newest counted disconnect leaves
+    // the window, extended for clock drift, and at least until now. A counted
+    // disconnect without a monotonic instant holds it one window from now.
+    const counted = this.recentDisconnects;
+    if (counted.length < RECENT_DISCONNECT_DEGRADED_THRESHOLD) return;
+    const windowMs = ConnectionManager.RECENT_DISCONNECT_WINDOW_MS;
+    const holdWindowMs = windowMs + clockDriftHoldExtensionMs(windowMs);
+    const thirdNewestMs = counted.at(-RECENT_DISCONNECT_DEGRADED_THRESHOLD)!.monotonicMs;
+    const allPaired = counted.every((event) => event.monotonicMs !== undefined);
+    const heldUntilMs = allPaired && thirdNewestMs !== undefined
+      ? Math.max(thirdNewestMs + holdWindowMs, monotonicMs)
+      : monotonicMs + holdWindowMs;
+    this.churnHeldUntilMonotonicMs = Math.max(this.churnHeldUntilMonotonicMs ?? heldUntilMs, heldUntilMs);
   }
 
   private pruneRecentDisconnects(now = Date.now()): void {
@@ -1811,6 +1851,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastReason: last?.reason ?? null,
       lastStatusCode: last?.statusCode ?? null,
       byReason,
+    };
+  }
+
+  /** The live snapshot: base's window plus the churn hold stamp. */
+  private getRecentDisconnectSnapshot(): ConnectionRecentDisconnects {
+    const heldUntilMs = this.churnHeldUntilMonotonicMs ?? null;
+    return {
+      ...this.getRecentDisconnectStats(),
+      lastChurnMonotonicMs: heldUntilMs === null ? null : Math.min(heldUntilMs, performance.now()),
     };
   }
 

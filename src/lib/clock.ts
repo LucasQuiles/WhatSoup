@@ -74,6 +74,20 @@ class FakeClock implements Clock {
 export const systemClock: Clock = new SystemClock();
 
 /**
+ * How much longer to hold a windowed condition that a wall-clock window
+ * (Date.now()) detected but the monotonic clock (performance.now()) times:
+ * 1% of the window, rounded up. The wall clock can drift from the monotonic
+ * clock while NTP slews it; macOS's adjtime slews at up to about 5000 ppm
+ * (0.5%) while it corrects an offset over 1 s. Without the extension a hold
+ * could end before the wall-clock window stops counting, by that drift.
+ * It only lengthens a hold, which fails closed. It must never decide whether
+ * the condition exists: the wall-clock count alone does that.
+ */
+export function clockDriftHoldExtensionMs(windowMs: number): number {
+  return Math.ceil(windowMs / 100);
+}
+
+/**
  * Factory for a fake clock, for use in tests.
  * @param initial - starting epoch-ms (default 0)
  */

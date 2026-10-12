@@ -137,7 +137,7 @@ function makeDeps(
 /** A runtime snapshot carrying the given degraded reasons and matching counters. */
 function ownershipSnapshot(
   degradedReasons: string[],
-  counts: { withoutOwner?: number; abandoned?: number; clearPending?: boolean } = {},
+  counts: { withoutOwner?: number; abandoned?: number; clearPending?: boolean; backoffScopes?: number } = {},
 ): { status: string; details: Record<string, unknown> } {
   return {
     status: degradedReasons.length > 0 ? 'degraded' : 'healthy',
@@ -156,7 +156,7 @@ function ownershipSnapshot(
       completedDeliveryIdentityAdmissions: { nextAction: null },
       active: true,
       recentCrashes: 0,
-      autoCompactActiveBackoffScopes: 0,
+      autoCompactActiveBackoffScopes: counts.backoffScopes ?? 0,
       providerExecution: { pressureActive: false },
       perChatSessionsWithoutOwner: counts.withoutOwner ?? 0,
       perChatRespawnAbandoned: counts.abandoned ?? 0,
@@ -230,8 +230,13 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     // reason that does NOT self-clear on repair would be a real silence hole.
     // Test-owned literals, compared for equality rather than containment.
     expect([...DIRECTLY_REPROBED_STATUS_REASONS].sort()).toEqual([
+      'connection_churn',
+      'durability_delivery_debt',
+      'event_loop_starvation',
+      'outbound_flood',
       'recovery_debt_blocking',
       'runtime.agent_respawn_failed_clear_pending',
+      'runtime.auto_compact_backoff',
       'runtime.completed_delivery_identity_debt',
       'runtime.per_chat_respawn_abandoned',
       'runtime.per_chat_session_without_owner',
@@ -334,6 +339,41 @@ describe('GET /health — per-chat ownership reasons across a repair', () => {
     // Both conditions clear from the runtime's point of view. The latch armed by
     // the silence-prone reason still stands and still keeps the instance
     // degraded — unchanged, pre-existing behaviour.
+    instance.setSnapshot(ownershipSnapshot([]));
+    const afterRepair = await instance.poll();
+    expect(afterRepair.status, 'a silence-prone reason must still latch').toBe('degraded');
+    expect(afterRepair.status_reasons).toContain('degradation_silence_unproven');
+  });
+
+  it('health does not latch an auto-compact backoff once its window ends', async () => {
+    // The runtime recomputes the backoff from its own cooldown deadlines on every
+    // snapshot, so the reason is visible for exactly as long as a window is open.
+    // A latch armed by it had no release channel: a backoff suppresses only new
+    // compactions, never turns, so a turn receipt proves nothing about it.
+    const instance = await openInstance('latch-auto-compact-backoff', ownershipSnapshot(['auto_compact_backoff'], { backoffScopes: 1 }));
+    const degraded = await instance.poll();
+    expect(degraded.status).toBe('degraded');
+    expect(degraded.status_reasons).toContain('runtime.auto_compact_backoff');
+    expect(degraded.degradation_causes).toContain('agent_auto_compact_backoff');
+
+    // The window ended: no scope is in backoff and the runtime reads healthy.
+    instance.setSnapshot(ownershipSnapshot([]));
+    const windowEnded = await instance.poll();
+    expect(windowEnded.status, 'an ended backoff must not stay latched degraded').toBe('healthy');
+    expect(windowEnded.status_reasons).not.toContain('degradation_silence_unproven');
+    expect(windowEnded.degradation_causes).not.toContain('degradation_silence_unproven');
+  });
+
+  it('a silence-prone reason alongside an auto-compact backoff still arms, so the fix removes no protection', async () => {
+    const instance = await openInstance(
+      'latch-backoff-mixed',
+      ownershipSnapshot(['auto_compact_backoff', 'turn_queue_halted'], { backoffScopes: 1 }),
+    );
+    const degraded = await instance.poll();
+    expect(degraded.status).toBe('degraded');
+    expect(degraded.status_reasons).toContain('runtime.auto_compact_backoff');
+    expect(degraded.status_reasons).toContain('runtime.turn_queue_halted');
+
     instance.setSnapshot(ownershipSnapshot([]));
     const afterRepair = await instance.poll();
     expect(afterRepair.status, 'a silence-prone reason must still latch').toBe('degraded');
