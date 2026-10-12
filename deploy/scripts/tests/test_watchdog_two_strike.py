@@ -455,7 +455,7 @@ _FLEET_NOT_ANSWERS = ["read", "refused", "request", "exhausted", "invalid", "rai
 @given(kind=st.sampled_from(_BOT_NOT_ANSWERS))
 def test_a_bot_confirm_read_that_is_not_an_answer_continues_the_window(kind):
     # Red on base: base restarts on the silent read.
-    _check_not_an_answer("bot", kind)
+    assert _check_not_an_answer("bot", kind) == "RESTART-AVOIDED"
 
 
 @_ZSH
@@ -463,7 +463,7 @@ def test_a_bot_confirm_read_that_is_not_an_answer_continues_the_window(kind):
 @given(kind=st.sampled_from(_FLEET_NOT_ANSWERS))
 def test_a_fleet_confirm_read_that_is_not_an_answer_continues_the_window(kind):
     # Red on base: base restarts on the silent read.
-    _check_not_an_answer("fleet", kind)
+    assert _check_not_an_answer("fleet", kind) == "RESTART-AVOIDED"
 
 
 def _check_not_an_answer(target: str, kind: str):
@@ -494,8 +494,8 @@ def _check_not_an_answer(target: str, kind: str):
         assert proc.returncode == 0, proc.stderr
         assert h.kicks(label) == 0 and h.bootstraps(label) == 0
         assert f"{label} answered on confirm read 2; restart avoided" in h.log_text()
-        assert h.final_log_state() == "RESTART-AVOIDED"
         assert "HEALTH-UNKNOWN" not in h.log_text() and "ERROR" not in h.log_text()
+        return h.final_log_state()
 
 
 def _decision_answer(exit_code: int, bot_name: str) -> tuple[str, int]:
