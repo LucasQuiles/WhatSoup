@@ -3,7 +3,8 @@
 The route copies selected critical alerts to the owner's direct chat and e-mail
 after the group send. Covered:
 - inert without its environment;
-- qualification: incident alerts only, critical only, routed sources only,
+- qualification: incident alerts only, critical or an escalated reminder (which
+  now routes at error when its sender sent a warning), routed sources only,
   first open and escalated reminders but not plain still-open renotifies;
 - one owner message per incident key per interval, with the floor recorded
   before the send, and old keys pruned;
