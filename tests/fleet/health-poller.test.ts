@@ -1087,12 +1087,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(poller.getStatus('remote-1')!.status).toBe('degraded');
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
 
     poller.stop();
   });
@@ -1151,14 +1146,12 @@ describe('HealthPoller', () => {
     poller.start();
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
 
     await vi.advanceTimersByTimeAsync(5_000);
+    // No cause list in the body: only the connected flag rides the alert, and
+    // the dispatcher pages a degraded event without causes. A null connection
+    // state does not prove the link up, so the flag is false.
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
       'health_body_degraded',
@@ -1166,6 +1159,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('health_body_degraded_polls=3'),
       'critical',
       undefined,
+      { degradationDiagnostics: { whatsappConnected: false } },
     );
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
@@ -1174,6 +1168,90 @@ describe('HealthPoller', () => {
       expect.stringContaining('connection_state=unknown'),
       'critical',
       undefined,
+      { degradationDiagnostics: { whatsappConnected: false } },
+    );
+
+    poller.stop();
+  });
+
+  it('sends the cause codes and connected flag as structured diagnostics with the degraded alert', async () => {
+    // The dispatcher's per-cause hold (#2409) cannot read the confined evidence
+    // text, so the codes must ride the alert as structured fields.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        degradation_causes: ['degradation_silence_unproven', 'a_cause_from_a_newer_release'],
+        whatsapp: { connected: true, connection: { state: 'connected' } },
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('degradation_causes=degradation_silence_unproven,a_cause_from_a_newer_release'),
+      'critical',
+      undefined,
+      {
+        degradationDiagnostics: {
+          // An unknown cause is never echoed; it becomes the fixed code the
+          // registry has no hold tier for, so the dispatcher still pages it.
+          degradationCauses: ['degradation_silence_unproven', 'unrecognized'],
+          whatsappConnected: true,
+        },
+      },
+    );
+
+    poller.stop();
+  });
+
+  it.each([
+    ['a disconnected connection state', { connected: true, connection: { state: 'disconnected' } }],
+    ['no connection state', { connected: true }],
+  ] as const)('sends connected=false when the connected flag sits beside %s', async (_label, whatsapp) => {
+    // The dispatcher may retire an open logout incident on a true flag alone,
+    // and the contradicting connection_state token is inside the digest.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        status: 'degraded',
+        degradation_causes: ['degradation_silence_unproven'],
+        whatsapp,
+      }),
+    });
+
+    const instances = makeInstances(
+      ['remote-1', makeInstance({ name: 'remote-1', healthPort: 9100 })],
+    );
+    const poller = new HealthPoller(() => instances, 'self', vi.fn().mockReturnValue({}), 5_000);
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(alertFns.emitAlert).toHaveBeenCalledWith(
+      'remote-1',
+      'health_body_degraded',
+      'whatsoup@remote-1 health is degraded',
+      expect.stringContaining('whatsapp_connected=true'),
+      'critical',
+      undefined,
+      {
+        degradationDiagnostics: {
+          degradationCauses: ['degradation_silence_unproven'],
+          whatsappConnected: false,
+        },
+      },
     );
 
     poller.stop();
@@ -1194,14 +1272,7 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.advanceTimersByTimeAsync(5_000);
 
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
     expect(poller.getStatus('remote-1')?.statusEvidence).toEqual(expect.arrayContaining([
       'degradation_class=operational_fallback',
       'degradation_causes=provider_fallback_active,primary_model_evidence_stale',
@@ -1233,6 +1304,12 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.advanceTimersByTimeAsync(5_000);
 
+    const fallbackPlusRecoveryDiagnostics = {
+      degradationDiagnostics: {
+        degradationCauses: ['provider_fallback_active', 'primary_model_unusable', 'turn_recovery_degraded'],
+        whatsappConnected: true,
+      },
+    };
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
       'health_body_degraded',
@@ -1240,6 +1317,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('degradation_class=undifferentiated'),
       'critical',
       undefined,
+      fallbackPlusRecoveryDiagnostics,
     );
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
@@ -1248,6 +1326,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('degradation_causes=provider_fallback_active,primary_model_unusable,turn_recovery_degraded'),
       'critical',
       undefined,
+      fallbackPlusRecoveryDiagnostics,
     );
 
     poller.stop();
@@ -1586,6 +1665,15 @@ describe('HealthPoller', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     await vi.advanceTimersByTimeAsync(5_000);
 
+    // An empty cause list sends no vector, so the dispatcher pages it; a
+    // disconnected body, or a connected flag beside any other transport
+    // state, sends connected=false, which the dispatcher pages too.
+    const expectedDiagnostics = {
+      ...('degradationCauses' in overrides
+        ? {}
+        : { degradationCauses: ['provider_fallback_active', 'primary_model_evidence_stale'] }),
+      whatsappConnected: !('whatsappConnected' in overrides) && !('connectionState' in overrides),
+    };
     expect(alertFns.emitAlert).toHaveBeenCalledWith(
       'remote-1',
       'health_body_degraded',
@@ -1593,6 +1681,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('degradation_class=undifferentiated'),
       'critical',
       undefined,
+      { degradationDiagnostics: expectedDiagnostics },
     );
 
     poller.stop();
@@ -1728,14 +1817,7 @@ describe('HealthPoller', () => {
       'warning',
       undefined,
     );
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'health_body_degraded',
-      expect.any(String),
-      expect.any(String),
-      'critical',
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'health_body_degraded');
     expect(alertFns.clearAlertSource).toHaveBeenCalledTimes(1);
     expect(alertFns.clearAlertSource).toHaveBeenCalledWith(
       'remote-1',
@@ -1773,15 +1855,9 @@ describe('HealthPoller', () => {
       expect.stringContaining('status_reasons=runtime.provider_fallback_active,event_loop_starvation'),
       'critical',
       undefined,
+      { degradationDiagnostics: { whatsappConnected: true } },
     );
-    expect(alertFns.emitAlert).not.toHaveBeenCalledWith(
-      'remote-1',
-      'provider_fallback_capacity',
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      expect.anything(),
-    );
+    expectNoAlertSource('remote-1', 'provider_fallback_capacity');
 
     poller.stop();
   });
@@ -4419,6 +4495,7 @@ describe('HealthPoller', () => {
       expect.stringContaining('health_body_degraded_polls=3'),
       'critical',
       undefined,
+      { degradationDiagnostics: { whatsappConnected: false } },
     );
     expect(poller.getStatus('remote-1')!.activeAlertSources).toEqual(['health_body_degraded']);
 

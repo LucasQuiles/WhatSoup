@@ -8,10 +8,18 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, strategies as st
+
+_TESTS = Path(__file__).resolve().parent
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
+
+from bot_errors_property_support import private_case, properties  # noqa: E402
 
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "reply-guarantee-observer.py"
@@ -59,7 +67,9 @@ def _create_schema(db: sqlite3.Connection, *, attempt_failure_class: bool = True
           source_inbound_seq INTEGER,
           status TEXT NOT NULL,
           is_terminal INTEGER NOT NULL,
-          replay_policy TEXT NOT NULL
+          replay_policy TEXT NOT NULL,
+          submitted_at TEXT,
+          echoed_at TEXT
         );
         CREATE TABLE turn_recovery_jobs (
           id INTEGER PRIMARY KEY,
@@ -68,6 +78,17 @@ def _create_schema(db: sqlite3.Connection, *, attempt_failure_class: bool = True
           state TEXT NOT NULL,
           next_attempt_at TEXT NOT NULL,
           claim_expires_at TEXT
+        );
+        CREATE TABLE messages (
+          pk INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_jid TEXT NOT NULL,
+          conversation_key TEXT NOT NULL,
+          sender_jid TEXT NOT NULL,
+          message_id TEXT UNIQUE,
+          content TEXT,
+          content_type TEXT NOT NULL DEFAULT 'text',
+          is_from_me INTEGER NOT NULL DEFAULT 0,
+          timestamp INTEGER NOT NULL
         );
         """
     )
@@ -91,6 +112,8 @@ def _insert_inbound(
     failure_class: str | None = None,
     continuity: str | None = None,
     message_id: str | None = None,
+    conversation_key: str | None = None,
+    chat_jid: str | None = None,
 ) -> None:
     db.execute(
         """
@@ -104,8 +127,8 @@ def _insert_inbound(
         (
             seq,
             message_id or f"message-{seq}",
-            f"private-conversation-{seq}",
-            f"private-jid-{seq}",
+            conversation_key or f"private-conversation-{seq}",
+            chat_jid or f"private-jid-{seq}",
             received_at,
             status,
             received_at if status in {"complete", "failed"} else None,
@@ -575,6 +598,1286 @@ def test_open_inbound_with_exhausted_recovery_is_an_active_breach(db_path: Path)
     assert result["state"] == "active-breach"
     assert result["counts"]["staleRecoveryJobs"] == 1
     assert result["counts"]["blockedOrExhaustedRecoveryJobs"] == 1
+
+
+# --- R46: progress diagnostics -------------------------------------------------
+# The observation, its counts and every latch stay exactly as before R46.
+# progressDiagnostics describes the staleOpenInbounds set with one statement,
+# run after every instance's base observation: staleRows, staleChats
+# (distinct chats with a stale row), and staleRowsWithRecentSend (stale rows
+# with an accepted send tied through outbound_ops.source_inbound_seq whose
+# send time, COALESCE(datetime(echoed_at), datetime(submitted_at)), is after
+# receipt, no later than now and within the threshold).
+# Only tests that pass against base 82da64ac5 carry `_pin_`.
+# An echoed send is also stored as a bot message in the chat. The fixtures
+# insert that echo, so a chat-wide bot-message rule would read it as a send.
+
+_PROGRESS_NOW = datetime(2026, 8, 15, 22, 0, tzinfo=UTC)
+_CHAT_KEY = "15550001111"
+_OTHER_CHAT_KEY = "15550002222"
+_THIRD_CHAT_KEY = "15550003333"
+_BOT_JID = "15550009999@s.whatsapp.net"
+# The runtime writes timestamps as "YYYY-MM-DD HH:MM:SS"; the ISO form with T
+# and Z compares differently as text.
+_CANONICAL = "%Y-%m-%d %H:%M:%S"
+_ISO = "%Y-%m-%dT%H:%M:%SZ"
+_NO_LATCHES = {"activeAlerted": False, "debtAlerted": False, "observerAlerted": False, "lastState": None}
+_ACTIVE_LATCHES = {
+    "reply-guarantee-active-breach": True,
+    "reply-guarantee-recovery-debt": False,
+    "reply-guarantee-observer": False,
+}
+
+
+def _diagnosed(rows: int, chats: int, recent: int) -> dict:
+    return {
+        "available": True,
+        "staleRows": rows,
+        "staleChats": chats,
+        "staleRowsWithRecentSend": recent,
+    }
+
+
+def _unavailable(reason: str) -> dict:
+    return {"available": False, "reason": reason}
+
+
+def _without_diagnostics(observation: dict) -> dict:
+    return {key: value for key, value in observation.items() if key != "progressDiagnostics"}
+
+
+def _ago_text(seconds: int, now: datetime = _PROGRESS_NOW, time_format: str = _CANONICAL) -> str:
+    return (now - timedelta(seconds=seconds)).strftime(time_format)
+
+
+def _ago_epoch(seconds: int, now: datetime = _PROGRESS_NOW) -> int:
+    return int((now - timedelta(seconds=seconds)).timestamp())
+
+
+def _insert_row(
+    db: sqlite3.Connection,
+    *,
+    seq: int,
+    age: int,
+    status: str = "processing",
+    conversation_key: str = _CHAT_KEY,
+    now: datetime = _PROGRESS_NOW,
+) -> None:
+    _insert_inbound(
+        db,
+        seq=seq,
+        received_at=_ago_text(age, now),
+        status=status,
+        conversation_key=conversation_key,
+        chat_jid=f"{conversation_key}@s.whatsapp.net",
+    )
+
+
+def _insert_send(
+    db: sqlite3.Connection,
+    *,
+    op_id: int,
+    seq: int | None,
+    status: str,
+    submitted_ago: int | None = None,
+    echoed_ago: int | None = None,
+    echo_message_ago: int | None = None,
+    is_terminal: int = 0,
+    conversation_key: str = _CHAT_KEY,
+    now: datetime = _PROGRESS_NOW,
+    time_format: str = _CANONICAL,
+) -> None:
+    """Insert one outbound op; a negative age lies in the future.
+
+    echo_message_ago also stores the op's echo as a bot message in the chat.
+    """
+    db.execute(
+        """
+        INSERT INTO outbound_ops (
+          id, source_inbound_seq, status, is_terminal, replay_policy, submitted_at, echoed_at
+        ) VALUES (?, ?, ?, ?, 'unsafe', ?, ?)
+        """,
+        (
+            op_id,
+            seq,
+            status,
+            is_terminal,
+            None if submitted_ago is None else _ago_text(submitted_ago, now, time_format),
+            None if echoed_ago is None else _ago_text(echoed_ago, now, time_format),
+        ),
+    )
+    if echo_message_ago is not None:
+        db.execute(
+            """
+            INSERT INTO messages (
+              chat_jid, conversation_key, sender_jid, message_id, content_type,
+              is_from_me, timestamp
+            ) VALUES (?, ?, ?, ?, 'text', 1, ?)
+            """,
+            (
+                f"{conversation_key}@s.whatsapp.net",
+                conversation_key,
+                _BOT_JID,
+                f"echo-{op_id}",
+                _ago_epoch(echo_message_ago, now),
+            ),
+        )
+
+
+def _insert_echoed_send(
+    db: sqlite3.Connection,
+    *,
+    op_id: int,
+    seq: int | None,
+    ago: int,
+    is_terminal: int = 0,
+    now: datetime = _PROGRESS_NOW,
+) -> None:
+    _insert_send(
+        db,
+        op_id=op_id,
+        seq=seq,
+        status="echoed",
+        submitted_ago=ago,
+        echoed_ago=ago,
+        echo_message_ago=ago,
+        is_terminal=is_terminal,
+        now=now,
+    )
+
+
+def _progress_db(root: Path) -> Path:
+    path = root / "instances" / "agent-a" / "bot.db"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as db:
+        _create_schema(db)
+    return path
+
+
+def _observe_progress(db_path: Path, now: datetime = _PROGRESS_NOW) -> dict:
+    return _observe_with(_load_module(), db_path, now)
+
+
+def _record_emissions(mod, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return _Completed()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    return commands
+
+
+def _active_breach_clears(commands: list[list[str]]) -> list[bool]:
+    """Return, in order, whether each active-breach emission was a --clear."""
+    return [
+        "--clear" in command
+        for command in commands
+        if command[command.index("--source") + 1] == "reply-guarantee-active-breach"
+    ]
+
+
+def _observe_and_emit(mod, db_path: Path, repo_root: Path, now: datetime) -> dict:
+    result = mod.observe_instances(db_path.parents[1], instance="agent-a", now=now, stale_seconds=900)
+    assert mod._emit(repo_root, result) is True
+    return result["instances"][0]
+
+
+def _observe_with(mod, db_path: Path, now: datetime = _PROGRESS_NOW) -> dict:
+    """Observe one instance through an already loaded module, so its monkeypatches apply.
+
+    observe_instances is the entry point that attaches progressDiagnostics.
+    """
+    result = mod.observe_instances(db_path.parents[1], instance=db_path.parent.name, now=now, stale_seconds=900)
+    return result["instances"][0]
+
+
+def _emission_projection(commands: list[list[str]]) -> list[tuple[str, str, bool, str | None]]:
+    """Project emissions onto what pages; --evidence embeds the diagnostics."""
+    return [
+        (
+            command[command.index("--instance") + 1],
+            command[command.index("--source") + 1],
+            "--clear" in command,
+            command[command.index("--severity") + 1] if "--severity" in command else None,
+        )
+        for command in commands
+    ]
+
+
+def _force_invalid_statement(mod, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mod, "_PROGRESS_DIAGNOSTICS_SQL", "SELECT no_such_column FROM outbound_ops")
+
+
+def _force_budget_abort(mod, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The deadline has passed before the statement starts, and the handler runs
+    # at the first check, so the statement is interrupted however small it is.
+    monkeypatch.setattr(mod, "DIAGNOSTIC_BUDGET_SECONDS", -1.0)
+    monkeypatch.setattr(mod, "DIAGNOSTIC_BUDGET_CHECK_OPCODES", 1)
+
+
+@properties
+@given(
+    ago=st.integers(min_value=0, max_value=900),
+    status=st.sampled_from(("submitted", "echoed")),
+    time_format=st.sampled_from((_CANONICAL, _ISO)),
+)
+@example(ago=900, status="submitted", time_format=_CANONICAL)
+@example(ago=0, status="echoed", time_format=_ISO)
+def test_stale_row_with_a_recent_tied_send_still_breaches(ago: int, status: str, time_format: str) -> None:
+    # Either accepted status counts, from now back to the threshold, in either
+    # timestamp form. The send is only diagnosed: the row pages as before R46.
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_row(db, seq=1, age=1500)
+            _insert_send(
+                db,
+                op_id=10,
+                seq=1,
+                status=status,
+                submitted_ago=ago,
+                echoed_ago=ago if status == "echoed" else None,
+                time_format=time_format,
+            )
+        result = _observe_progress(path)
+
+    assert result["state"] == "active-breach"
+    assert result["healthImpact"] == "operational"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 1)
+    assert _load_module()._desired_latches(result, _NO_LATCHES) == _ACTIVE_LATCHES
+    assert _CHAT_KEY not in str(result)
+
+
+@properties
+@given(ago=st.integers(min_value=901, max_value=1999))
+@example(ago=901)
+def test_tied_send_older_than_the_threshold_is_not_recent(ago: int) -> None:
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_row(db, seq=1, age=2000)
+            _insert_echoed_send(db, op_id=10, seq=1, ago=ago)
+        result = _observe_progress(path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+def test_reply_tied_to_another_inbound_is_not_recent(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+        _insert_row(db, seq=2, age=400, status="complete")
+        _insert_echoed_send(db, op_id=10, seq=2, ago=300)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+def test_future_dated_tied_send_is_not_recent(db_path: Path) -> None:
+    # Stamped two minutes ahead: after receipt and inside the window from
+    # below, so only the "no later than now" bound leaves it out.
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+        _insert_echoed_send(db, op_id=10, seq=1, ago=-120)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+def test_untied_queued_receipts_are_not_recent(db_path: Path) -> None:
+    # The shape of a production probe (2026-10-09), in seconds from the stale
+    # row's receipt: "Queued behind the current task" receipts at +0, +275,
+    # +423 and +652, echoed, is_terminal 0 and tied to no inbound
+    # (src/runtimes/agent/runtime.ts queuedTurnReceipts calls sendTracked with
+    # no source inbound); the previous turn's final reply, tied to that turn,
+    # at +444; nothing tied to the stale row or the row behind it.
+    stale_age = 1037
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=6, age=stale_age + 600, status="complete")
+        _insert_row(db, seq=7, age=stale_age)
+        _insert_row(db, seq=11, age=stale_age - 275, status="pending")
+        _insert_echoed_send(db, op_id=20, seq=None, ago=stale_age)
+        _insert_echoed_send(db, op_id=21, seq=None, ago=stale_age - 275)
+        _insert_echoed_send(db, op_id=22, seq=None, ago=stale_age - 423)
+        _insert_echoed_send(db, op_id=23, seq=None, ago=stale_age - 652)
+        _insert_echoed_send(db, op_id=24, seq=6, ago=stale_age - 444, is_terminal=1)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+    assert _CHAT_KEY not in str(result)
+
+
+def test_send_echoed_after_a_silence_counts_from_its_echo(db_path: Path) -> None:
+    # Submitted, then maybe_sent, then echoed: echo matching accepts a
+    # maybe_sent op (src/core/durability.ts selectOutboundForEchoMatch). The
+    # submission lies outside the window and the echo inside it, so the op
+    # counts only because echoed_at takes precedence.
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+        _insert_send(db, op_id=10, seq=1, status="echoed", submitted_ago=990, echoed_ago=30, echo_message_ago=30)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 1)
+
+
+def test_echoed_send_without_echoed_at_counts_from_submitted_at(db_path: Path) -> None:
+    # COALESCE(datetime(echoed_at), datetime(submitted_at)): with no echo time
+    # the submission time is used.
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+        _insert_send(db, op_id=10, seq=1, status="echoed", submitted_ago=300)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 1)
+
+
+def test_tied_send_stamped_before_receipt_is_not_recent(db_path: Path) -> None:
+    # A receipt written with a UTC offset sorts as stale under base's text
+    # comparison ("21:30:00-00:20" < "21:45:00") but is 21:50 UTC. The send at
+    # 21:47 is inside the window and before now, so only the after-receipt
+    # bound leaves it out. With the runtime's own format a stale receipt is
+    # older than the window, which then excludes earlier sends by itself.
+    with sqlite3.connect(db_path) as db:
+        _insert_inbound(
+            db,
+            seq=1,
+            received_at="2026-08-15 21:30:00-00:20",
+            status="processing",
+            conversation_key=_CHAT_KEY,
+            chat_jid=f"{_CHAT_KEY}@s.whatsapp.net",
+        )
+        _insert_send(db, op_id=10, seq=1, status="submitted", submitted_ago=780)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+@properties
+@given(status=st.sampled_from(("pending", "sending", "maybe_sent", "failed_permanent", "quarantined")))
+def test_tied_op_the_provider_did_not_accept_is_not_recent(status: str) -> None:
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_row(db, seq=1, age=1000)
+            _insert_send(db, op_id=10, seq=1, status=status, submitted_ago=300)
+        result = _observe_progress(path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+@properties
+@given(status=st.sampled_from(("submitted", "echoed")), stamp=st.sampled_from((None, "not-a-time")))
+@example(status="echoed", stamp=None)
+def test_accepted_tied_op_without_a_usable_time_is_not_recent(status: str, stamp: str | None) -> None:
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_row(db, seq=1, age=1000)
+            db.execute(
+                """
+                INSERT INTO outbound_ops (
+                  id, source_inbound_seq, status, is_terminal, replay_policy, submitted_at, echoed_at
+                ) VALUES (10, 1, ?, 0, 'unsafe', ?, ?)
+                """,
+                (status, stamp, stamp),
+            )
+        result = _observe_progress(path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+@properties
+@given(echoed_at=st.sampled_from(("not-a-time", "")))
+@example(echoed_at="not-a-time")
+def test_malformed_echoed_at_falls_back_to_submitted_at(echoed_at: str) -> None:
+    # The send time is the first of echoed_at and submitted_at that parses, so
+    # a malformed echo time does not hide a recent submission.
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_row(db, seq=1, age=1000)
+            db.execute(
+                """
+                INSERT INTO outbound_ops (
+                  id, source_inbound_seq, status, is_terminal, replay_policy, submitted_at, echoed_at
+                ) VALUES (10, 1, 'echoed', 0, 'unsafe', ?, ?)
+                """,
+                (_ago_text(300), echoed_at),
+            )
+        result = _observe_progress(path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 1)
+
+
+def test_pin_breach_then_a_queued_receipt_stays_latched_without_a_clear(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    commands = _record_emissions(mod, monkeypatch)
+    first_pass = _PROGRESS_NOW
+    second_pass = _PROGRESS_NOW + timedelta(seconds=60)
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000, now=first_pass)
+
+    assert _observe_and_emit(mod, db_path, tmp_path, first_pass)["state"] == "active-breach"
+    assert _active_breach_clears(commands) == [False]
+
+    with sqlite3.connect(db_path) as db:
+        # A nudge queued behind the stuck turn draws the untied receipt.
+        _insert_row(db, seq=2, age=31, status="pending", now=second_pass)
+        _insert_echoed_send(db, op_id=10, seq=None, ago=30, now=second_pass)
+    second = _observe_and_emit(mod, db_path, tmp_path, second_pass)
+
+    assert second["state"] == "active-breach"
+    assert second["counts"]["staleOpenInbounds"] == 1
+    assert _active_breach_clears(commands) == [False]
+
+
+def test_pin_breach_then_a_tied_reply_stays_latched_until_the_turn_is_terminal(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # As before R46, an open stale row stays a breach whatever it sends; the
+    # alert clears only when the turn is terminal.
+    mod = _load_module()
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    commands = _record_emissions(mod, monkeypatch)
+    first_pass = _PROGRESS_NOW
+    second_pass = _PROGRESS_NOW + timedelta(seconds=60)
+    third_pass = _PROGRESS_NOW + timedelta(seconds=120)
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000, now=first_pass)
+
+    assert _observe_and_emit(mod, db_path, tmp_path, first_pass)["state"] == "active-breach"
+    assert _active_breach_clears(commands) == [False]
+
+    with sqlite3.connect(db_path) as db:
+        _insert_echoed_send(db, op_id=10, seq=1, ago=30, now=second_pass)
+    second = _observe_and_emit(mod, db_path, tmp_path, second_pass)
+
+    assert second["state"] == "active-breach"
+    assert second["counts"]["staleOpenInbounds"] == 1
+    assert _active_breach_clears(commands) == [False]
+
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "UPDATE inbound_events SET processing_status = 'complete', completed_at = ? WHERE seq = 1",
+            (_ago_text(20, third_pass),),
+        )
+    third = _observe_and_emit(mod, db_path, tmp_path, third_pass)
+
+    assert third["state"] == "clear"
+    assert _active_breach_clears(commands) == [False, True]
+
+
+@properties
+@given(extra=st.integers(min_value=0, max_value=3))
+@example(extra=0)
+@example(extra=1)
+def test_stale_chats_counts_each_chat_with_a_stale_row_once(extra: int) -> None:
+    # One stale row in each of three chats, plus `extra` more in the first.
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            for seq, conversation_key in enumerate((_CHAT_KEY, _OTHER_CHAT_KEY, _THIRD_CHAT_KEY), start=1):
+                _insert_row(db, seq=seq, age=2000, conversation_key=conversation_key)
+            for seq in range(4, 4 + extra):
+                _insert_row(db, seq=seq, age=1500, status="pending")
+        result = _observe_progress(path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 3 + extra
+    assert result["progressDiagnostics"] == _diagnosed(3 + extra, 3, 0)
+
+
+def test_open_row_with_a_terminal_record_is_left_out_of_the_diagnostics(db_path: Path) -> None:
+    # The first row has a terminal record and a recent tied send. It is outside
+    # the stale set, so neither the row nor its send is counted.
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=2000)
+        db.execute(
+            """
+            INSERT INTO turn_terminal_records (
+              id, inbound_seq, inbound_seq_key, inbound_disposition,
+              delivery_kind, delivery_op_id, reply_guarantee_disarmed
+            ) VALUES (10, 1, 1, 'transferred_to_recovery_owner', 'enqueued', 99, 0)
+            """
+        )
+        _insert_echoed_send(db, op_id=10, seq=1, ago=30)
+        _insert_row(db, seq=2, age=1500, status="pending")
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == "active-breach"
+    assert result["counts"]["staleOpenInbounds"] == 1
+    assert result["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+@pytest.mark.parametrize(
+    ("row_age", "expected_state", "stale"),
+    [
+        (900, "clear", 0),
+        (901, "active-breach", 1),
+    ],
+)
+def test_pin_open_row_with_no_terminal_and_no_tied_send_breaches_after_the_threshold(
+    db_path: Path,
+    row_age: int,
+    expected_state: str,
+    stale: int,
+) -> None:
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=row_age)
+
+    result = _observe_progress(db_path)
+
+    assert result["state"] == expected_state
+    assert result["counts"]["staleOpenInbounds"] == stale
+
+
+@properties
+@given(
+    missing=st.sampled_from((
+        ("inbound_events", "conversation_key"),
+        ("outbound_ops", "submitted_at"),
+        ("outbound_ops", "echoed_at"),
+    )),
+)
+@example(missing=("inbound_events", "conversation_key"))
+def test_missing_diagnostic_column_leaves_the_observation_unchanged(missing: tuple[str, str]) -> None:
+    table, column = missing
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_row(db, seq=1, age=2000)
+            _insert_row(db, seq=2, age=1500, status="pending")
+        complete = _observe_progress(path)
+        with sqlite3.connect(path) as db:
+            db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        reduced = _observe_progress(path)
+
+    assert complete["progressDiagnostics"] == _diagnosed(2, 1, 0)
+    assert reduced["progressDiagnostics"] == _unavailable("diagnostic_columns_missing")
+    assert _without_diagnostics(reduced) == _without_diagnostics(complete)
+    assert reduced["state"] == "active-breach"
+    assert reduced["counts"]["staleOpenInbounds"] == 2
+
+
+def _insert_two_stale_rows(db_path: Path) -> list[str]:
+    """Insert two rows stale against any current clock; return the CLI argv."""
+    with sqlite3.connect(db_path) as db:
+        _insert_inbound(
+            db, seq=1, received_at="2026-08-01 00:00:00", status="processing",
+            conversation_key=_CHAT_KEY, chat_jid=f"{_CHAT_KEY}@s.whatsapp.net",
+        )
+        _insert_inbound(
+            db, seq=2, received_at="2026-08-01 00:05:00", status="pending",
+            conversation_key=_CHAT_KEY, chat_jid=f"{_CHAT_KEY}@s.whatsapp.net",
+        )
+    return [
+        "--data-root", str(db_path.parents[1]), "--instance", "agent-a",
+        "--emit", "--json", "--repo-root", str(db_path.parents[2]),
+    ]
+
+
+def _run_cli(mod, monkeypatch: pytest.MonkeyPatch, capsys, commands: list, argv: list[str], state_dir: Path):
+    """Run main from an empty latch state; return status, output, emissions, latches."""
+    del commands[:]
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(state_dir))
+    status = mod.main(argv)
+    output = json.loads(capsys.readouterr().out)
+    return status, output, _emission_projection(commands), mod._state_target_and_observation()[1].payload
+
+
+def _run_diagnostics(run) -> dict:
+    return run[1]["instances"][0]["progressDiagnostics"]
+
+
+def _paging_outcome(run) -> tuple:
+    """Everything a run pages, saves and exits with, without its progress diagnostics."""
+    status, output, emissions, latches = run
+    observation = _without_diagnostics(output["instances"][0])
+    return status, observation, output["state"], output["emissionSucceeded"], emissions, latches
+
+
+def _breach_page_facts(outcome: tuple) -> tuple:
+    """The facts every two-stale-row run must show: exit 0, one sent breach page, the latch armed."""
+    status, _observation, state, succeeded, emissions, latches = outcome
+    return (
+        status,
+        state,
+        succeeded is True,
+        [(source, clear) for _instance, source, clear, _severity in emissions],
+        latches["instances"]["agent-a"]["activeAlerted"] is True,
+    )
+
+
+_BREACH_PAGED = (0, "active-breach", True, [("reply-guarantee-active-breach", False)], True)
+
+
+@pytest.mark.parametrize(
+    ("force", "reason"),
+    [
+        (_force_invalid_statement, "diagnostic_failed"),
+        (_force_budget_abort, "diagnostic_budget_exceeded"),
+    ],
+)
+def test_failed_diagnostic_keeps_emissions_latches_and_exit_code(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    force,
+    reason: str,
+) -> None:
+    mod = _load_module()
+    commands = _record_emissions(mod, monkeypatch)
+    argv = _insert_two_stale_rows(db_path)
+    expected = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-expected")
+    force(mod, monkeypatch)
+
+    observed = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-observed")
+
+    assert _run_diagnostics(expected) == _diagnosed(2, 1, 0)
+    assert _run_diagnostics(observed) == _unavailable(reason)
+    assert _paging_outcome(observed) == _paging_outcome(expected)
+    assert (
+        _breach_page_facts(_paging_outcome(expected))
+        == _breach_page_facts(_paging_outcome(observed))
+        == _BREACH_PAGED
+    )
+
+
+def test_lock_held_through_the_diagnostics_costs_at_most_the_budget(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # A writer takes an exclusive lock after base's reads are done and holds
+    # it while the diagnostics run. In rollback-journal mode, which the runtime
+    # writes under before it enables WAL (src/core/database.ts), that lock
+    # blocks every read, so only the remaining-budget busy timeout ends the
+    # wait. The base result comes from a run with no lock.
+    mod = _load_module()
+    commands = _record_emissions(mod, monkeypatch)
+    argv = _insert_two_stale_rows(db_path)
+    expected = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-expected")
+    durations: list[float] = []
+    diagnose = mod._progress_diagnostics
+
+    def diagnose_under_a_write_lock(*args, **kwargs):
+        writer = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            assert writer.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+            writer.execute("BEGIN EXCLUSIVE")
+            started = time.monotonic()
+            try:
+                return diagnose(*args, **kwargs)
+            finally:
+                durations.append(time.monotonic() - started)
+                writer.execute("ROLLBACK")
+        finally:
+            writer.close()
+
+    monkeypatch.setattr(mod, "_progress_diagnostics", diagnose_under_a_write_lock)
+
+    observed = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-observed")
+
+    # diagnostic_failed is the outcome on an SQLite build without usleep,
+    # whose sub-second busy timeout gives up at once.
+    assert _run_diagnostics(expected) == _diagnosed(2, 1, 0)
+    assert _run_diagnostics(observed) in [
+        _unavailable("diagnostic_budget_exceeded"), _unavailable("diagnostic_failed"),
+    ]
+    assert _paging_outcome(observed) == _paging_outcome(expected)
+    assert (
+        _breach_page_facts(_paging_outcome(expected))
+        == _breach_page_facts(_paging_outcome(observed))
+        == _BREACH_PAGED
+    )
+    # Absolute: the 2 s budget plus a margin for the last wait and scheduling.
+    assert len(durations) == 1
+    assert durations[0] <= 2.5
+
+
+@pytest.mark.parametrize("locked_before", ["outbound_ops", "aggregate"])
+def test_lock_taken_after_a_slow_read_waits_only_for_the_remaining_budget(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    locked_before: str,
+) -> None:
+    # The read before the locked statement takes 1 s of the budget (the
+    # diagnostics' clock moves on by 1 s), then a writer takes an exclusive
+    # lock: before the second column read ("outbound_ops") or before the
+    # aggregate. The locked statement may wait only for the 1 s that remains.
+    # A busy timeout left over from the earlier statement would allow about
+    # 2 s of real waiting.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+    expected = _observe_with(mod, db_path)
+    slow_table = {"outbound_ops": "inbound_events", "aggregate": "outbound_ops"}[locked_before]
+    offset = [0.0]
+    real_clock = time.monotonic
+    diagnosing = [False]
+    writers: list[sqlite3.Connection] = []
+    durations: list[float] = []
+    columns = mod._columns
+    diagnose = mod._progress_diagnostics
+
+    def columns_then_lock(db, table):
+        observed_columns = columns(db, table)
+        if diagnosing[0] and table == slow_table and not writers:
+            offset[0] += 1.0
+            writer = sqlite3.connect(db_path, isolation_level=None)
+            writer.execute("BEGIN EXCLUSIVE")
+            writers.append(writer)
+        return observed_columns
+
+    def timed_diagnose(*args, **kwargs):
+        diagnosing[0] = True
+        started = real_clock()
+        try:
+            return diagnose(*args, **kwargs)
+        finally:
+            durations.append(real_clock() - started)
+            diagnosing[0] = False
+            for writer in writers:
+                writer.execute("ROLLBACK")
+                writer.close()
+
+    monkeypatch.setattr(mod, "time", type("ShiftedClock", (), {"monotonic": staticmethod(lambda: real_clock() + offset[0])}))
+    monkeypatch.setattr(mod, "_columns", columns_then_lock)
+    monkeypatch.setattr(mod, "_progress_diagnostics", timed_diagnose)
+
+    observed = _observe_with(mod, db_path)
+
+    assert len(writers) == 1
+    assert observed["progressDiagnostics"] in (
+        _unavailable("diagnostic_budget_exceeded"),
+        _unavailable("diagnostic_failed"),
+    )
+    assert _without_diagnostics(observed) == _without_diagnostics(expected)
+    # Real time: the 1 s that remains plus a margin; a leftover timeout gives
+    # about 2 s.
+    assert len(durations) == 1
+    assert durations[0] <= 1.5
+
+
+def _step_the_clock(mod, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make each clock read move on by more than the budget; the handler never runs."""
+    readings = iter(range(0, 3_000, 3))
+    monkeypatch.setattr(mod, "time", type("SteppingClock", (), {"monotonic": staticmethod(lambda: float(next(readings)))}))
+    monkeypatch.setattr(mod, "DIAGNOSTIC_BUDGET_CHECK_OPCODES", 1_000_000_000)
+
+
+def _diagnose_directly(mod, db_path: Path) -> dict:
+    db = sqlite3.connect(db_path)
+    try:
+        return mod._progress_diagnostics(
+            db,
+            now_text=_PROGRESS_NOW.strftime(_CANONICAL),
+            modifier="-900 seconds",
+            stale_open_inbounds=1,
+        )
+    finally:
+        db.close()
+
+
+def test_values_that_arrive_after_the_budget_are_discarded(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The statement completes, but the handler never ran (it checks only every
+    # N instructions) and the clock shows the budget spent, as after a long
+    # lock wait that ends just as the lock is released.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+    _step_the_clock(mod, monkeypatch)
+
+    assert _diagnose_directly(mod, db_path) == _unavailable("diagnostic_budget_exceeded")
+
+
+def test_column_read_that_ends_after_the_budget_reports_the_budget(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A diagnostic column is missing, but the read that finds it ends after the
+    # budget: the overdue outcome takes precedence over the missing column.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+        db.execute("ALTER TABLE outbound_ops DROP COLUMN echoed_at")
+    within_budget = _diagnose_directly(mod, db_path)
+    _step_the_clock(mod, monkeypatch)
+
+    assert within_budget == _unavailable("diagnostic_columns_missing")
+    assert _diagnose_directly(mod, db_path) == _unavailable("diagnostic_budget_exceeded")
+
+
+def test_diagnostics_never_delay_another_instance_base_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Two instances, each with one stale row. While agent-a's diagnostics run,
+    # the runtime finalises agent-b's stale row. Base reads agent-b before
+    # that write, since base has no diagnostics; so must R46. Reading it after
+    # would turn agent-b's breach into a clear and change what pages.
+    mod = _load_module()
+    commands = _record_emissions(mod, monkeypatch)
+    paths = {}
+    for name in ("agent-a", "agent-b"):
+        path = tmp_path / "instances" / name / "bot.db"
+        path.parent.mkdir(parents=True)
+        with sqlite3.connect(path) as db:
+            _create_schema(db)
+            _insert_inbound(
+                db, seq=1, received_at="2026-08-01 00:00:00", status="processing",
+                conversation_key=_CHAT_KEY, chat_jid=f"{_CHAT_KEY}@s.whatsapp.net",
+            )
+        paths[name] = path
+    argv = ["--data-root", str(tmp_path / "instances"), "--emit", "--json", "--repo-root", str(tmp_path)]
+    expected = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-expected")
+    diagnose = mod._progress_diagnostics
+    calls: list[int] = []
+
+    def finalise_agent_b_during_the_first_diagnostics(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            with sqlite3.connect(paths["agent-b"]) as writer:
+                writer.execute(
+                    "UPDATE inbound_events SET processing_status = 'complete', completed_at = received_at WHERE seq = 1"
+                )
+        return diagnose(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_progress_diagnostics", finalise_agent_b_during_the_first_diagnostics)
+
+    observed = _run_cli(mod, monkeypatch, capsys, commands, argv, tmp_path / "state-observed")
+
+    expected_status, expected_output, expected_emissions, expected_latches = expected
+    status, output, emissions, latches = observed
+    assert [item["instance"] for item in output["instances"]] == ["agent-a", "agent-b"]
+    assert [_without_diagnostics(item) for item in output["instances"]] == [
+        _without_diagnostics(item) for item in expected_output["instances"]
+    ]
+    assert output["instances"][1]["state"] == "active-breach"
+    assert output["instances"][1]["counts"]["staleOpenInbounds"] == 1
+    # agent-b's diagnostics run after the write and see the changed count.
+    assert output["instances"][1]["progressDiagnostics"] == _unavailable("diagnostic_count_changed")
+    assert status == expected_status == 0
+    assert output["state"] == expected_output["state"] == "active-breach"
+    assert emissions == expected_emissions
+    assert latches == expected_latches
+
+
+def test_diagnostic_budget_is_two_seconds() -> None:
+    # docs/reply-guarantee.md states this value.
+    assert _load_module().DIAGNOSTIC_BUDGET_SECONDS == 2.0
+
+
+def test_diagnostics_connection_is_read_only_when_it_closes_last(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A WAL database whose writer has gone, so the observer's connections are
+    # the only ones and the diagnostics connection closes last. Closing last,
+    # a read-write connection checkpoints the WAL into the database file and
+    # deletes the WAL; a read-only one changes neither. query_only must also
+    # be on before the diagnostics read.
+    mod = _load_module()
+    scratch = tmp_path / "scratch" / "bot.db"
+    scratch.parent.mkdir()
+    path = tmp_path / "instances" / "agent-a" / "bot.db"
+    path.parent.mkdir(parents=True)
+    writer = sqlite3.connect(scratch)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        _create_schema(writer)
+        _insert_row(writer, seq=1, age=1000)
+        writer.commit()
+        # Copied while the writer is open, as if it had stopped before its
+        # closing checkpoint.
+        for suffix in ("", "-wal", "-shm"):
+            shutil.copyfile(f"{scratch}{suffix}", f"{path}{suffix}")
+    finally:
+        writer.close()
+    database_bytes = path.read_bytes()
+    wal_bytes = Path(f"{path}-wal").read_bytes()
+    assert wal_bytes
+    query_only: list[tuple[int]] = []
+    diagnose = mod._progress_diagnostics
+
+    def record_query_only_then_diagnose(db, *args, **kwargs):
+        query_only.append(db.execute("PRAGMA query_only").fetchone())
+        return diagnose(db, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_progress_diagnostics", record_query_only_then_diagnose)
+
+    observed = _observe_with(mod, path)
+
+    assert observed["state"] == "active-breach"
+    assert observed["database"]["walSidecarPresent"] is True
+    assert observed["progressDiagnostics"] == _diagnosed(1, 1, 0)
+    assert query_only == [(1,)]
+    assert Path(f"{path}-wal").read_bytes() == wal_bytes
+    assert path.read_bytes() == database_bytes
+
+
+def test_wal_sidecar_is_read_before_the_diagnostics(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Base reads walSidecarPresent after its last count; R46 keeps that point,
+    # ahead of the diagnostics, so their time cannot change what it reports.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+    events: list[str] = []
+    sidecar_name = f"{db_path.name}-wal"
+
+    class _RecordingPath(type(db_path)):
+        def is_file(self) -> bool:
+            if self.name == sidecar_name:
+                events.append("walSidecarPresent")
+            return super().is_file()
+
+    diagnose = mod._progress_diagnostics
+
+    def recording_diagnose(*args, **kwargs):
+        events.append("progressDiagnostics")
+        return diagnose(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "Path", _RecordingPath)
+    monkeypatch.setattr(mod, "_progress_diagnostics", recording_diagnose)
+
+    observed = _observe_with(mod, db_path)
+
+    assert events == ["walSidecarPresent", "progressDiagnostics"]
+    assert observed["database"]["walSidecarPresent"] is False
+    assert observed["progressDiagnostics"] == _diagnosed(1, 1, 0)
+
+
+def test_budget_abort_removes_the_progress_handler(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+    expected = _observe_with(mod, db_path)
+    _force_budget_abort(mod, monkeypatch)
+
+    observed = _observe_with(mod, db_path)
+
+    assert expected["progressDiagnostics"] == _diagnosed(1, 1, 0)
+    assert observed["progressDiagnostics"] == _unavailable("diagnostic_budget_exceeded")
+    assert _without_diagnostics(observed) == _without_diagnostics(expected)
+    db = sqlite3.connect(db_path)
+    try:
+        assert mod._progress_diagnostics(
+            db,
+            now_text=_PROGRESS_NOW.strftime(_CANONICAL),
+            modifier="-900 seconds",
+            stale_open_inbounds=1,
+        ) == _unavailable("diagnostic_budget_exceeded")
+        # Left installed, the expired handler would interrupt this statement.
+        assert db.execute("SELECT COUNT(*) FROM inbound_events").fetchone() == (1,)
+        # The connection's own busy timeout (5 s) is back.
+        assert db.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+    finally:
+        db.close()
+
+
+_FAN_OUT_SENDS = 200_000
+
+
+class _RecordingConnection:
+    """Pass a connection through, recording each statement the progress handler stops."""
+
+    def __init__(self, db: sqlite3.Connection, interrupted: list[str]) -> None:
+        self._db = db
+        self._interrupted = interrupted
+        self._statement: str | None = None
+
+    def execute(self, sql: str, *params):
+        self._statement = sql
+        return self._db.execute(sql, *params)
+
+    def set_progress_handler(self, handler, n: int):
+        if handler is None:
+            return self._db.set_progress_handler(None, n)
+
+        def recording_handler():
+            stop = handler()
+            if stop:
+                self._interrupted.append(self._statement)
+            return stop
+
+        return self._db.set_progress_handler(recording_handler, n)
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+
+def test_large_tied_send_fan_out_completes_within_the_budget_or_reports_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One stale row with many tied echoed sends, all after receipt but older
+    # than the window, so the EXISTS probe walks every one of them on
+    # idx_outbound_ops_source before the one recent send, which has the
+    # highest id. The production indexes are created so the plan matches
+    # bot.db (src/core/database.ts:236-237).
+    mod = _load_module()
+    path = _progress_db(tmp_path)
+    old = _ago_text(1500)
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE INDEX idx_outbound_ops_status ON outbound_ops(status)")
+        db.execute("CREATE INDEX idx_outbound_ops_source ON outbound_ops(source_inbound_seq)")
+        _insert_row(db, seq=1, age=2000)
+        db.executemany(
+            """
+            INSERT INTO outbound_ops (
+              id, source_inbound_seq, status, is_terminal, replay_policy, submitted_at, echoed_at
+            ) VALUES (?, 1, 'echoed', 0, 'unsafe', ?, ?)
+            """,
+            ((op_id, old, old) for op_id in range(1, _FAN_OUT_SENDS + 1)),
+        )
+        _insert_send(db, op_id=_FAN_OUT_SENDS + 1, seq=1, status="echoed", submitted_ago=30, echoed_ago=30)
+    durations: list[float] = []
+    interrupted: list[str] = []
+    diagnose = mod._progress_diagnostics
+
+    def timed(db, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return diagnose(_RecordingConnection(db, interrupted), *args, **kwargs)
+        finally:
+            durations.append(time.monotonic() - started)
+
+    monkeypatch.setattr(mod, "_progress_diagnostics", timed)
+
+    observed = _observe_with(mod, path)
+
+    assert observed["state"] == "active-breach"
+    assert observed["counts"]["staleOpenInbounds"] == _base_stale_open_count(path) == 1
+    assert observed["progressDiagnostics"] in (
+        _diagnosed(1, 1, 1),
+        _unavailable("diagnostic_budget_exceeded"),
+    )
+    # Absolute: the 2 s budget plus one second for the last check interval
+    # and scheduling.
+    assert len(durations) == 1
+    assert durations[0] <= 3.0
+
+    # A budget far below the cost of the walk: the progress handler stops the
+    # aggregate part way, rather than the deadline check after it completes,
+    # and the observation is the same.
+    del interrupted[:]
+    monkeypatch.setattr(mod, "DIAGNOSTIC_BUDGET_SECONDS", 0.001)
+    aborted = _observe_with(mod, path)
+
+    assert aborted["progressDiagnostics"] == _unavailable("diagnostic_budget_exceeded")
+    assert interrupted == [mod._PROGRESS_DIAGNOSTICS_SQL]
+    assert _without_diagnostics(aborted) == _without_diagnostics(observed)
+
+
+def test_stale_count_change_between_the_reads_withholds_the_diagnostics(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A writer adds a stale row after staleOpenInbounds is read and before the
+    # diagnostic statement runs. The observation keeps the count it read; the
+    # diagnostics are withheld rather than describe a different set.
+    mod = _load_module()
+    with sqlite3.connect(db_path) as db:
+        _insert_row(db, seq=1, age=1000)
+    expected = _observe_with(mod, db_path)
+    diagnose = mod._progress_diagnostics
+
+    def write_then_diagnose(*args, **kwargs):
+        writer = sqlite3.connect(db_path)
+        try:
+            with writer:
+                _insert_row(writer, seq=2, age=1200, status="pending")
+        finally:
+            writer.close()
+        return diagnose(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_progress_diagnostics", write_then_diagnose)
+
+    observed = _observe_with(mod, db_path)
+
+    assert expected["progressDiagnostics"] == _diagnosed(1, 1, 0)
+    assert observed["progressDiagnostics"] == _unavailable("diagnostic_count_changed")
+    assert _without_diagnostics(observed) == _without_diagnostics(expected)
+    assert observed["counts"]["staleOpenInbounds"] == 1
+
+
+# --- R46: the observation matches base 82da64ac5 on generated databases -------
+
+_OPEN_STATUSES = ("pending", "processing", "turn_done")
+# Base's text comparison is kept, so the ISO form is generated alongside the
+# runtime's own.
+_RECEIPT_FORMATS = (_CANONICAL, _ISO)
+_GENERATED_ROW = st.tuples(
+    st.sampled_from((_CHAT_KEY, _OTHER_CHAT_KEY, _THIRD_CHAT_KEY)),
+    st.sampled_from((*_OPEN_STATUSES, "complete", "failed")),
+    st.sampled_from((0, 600, 899, 900, 901, 1500, 3599, 3600, 3601, 7200)),
+    st.booleans(),
+    st.sampled_from(_RECEIPT_FORMATS),
+)
+# (target seq, status, seconds ago). A target above the row count is an untied
+# send. Every send also stores its echo message, which a chat-wide rule reads.
+_GENERATED_SEND = st.tuples(
+    st.integers(min_value=1, max_value=8),
+    st.sampled_from(("submitted", "echoed", "maybe_sent", "quarantined")),
+    st.sampled_from((-120, 30, 300, 899, 901, 1500, 3600)),
+)
+_BASE_STATE = {True: "active-breach", False: "clear"}
+# Base 82da64ac5, deploy/scripts/reply-guarantee-observer.py:196-208, verbatim.
+_BASE_STALE_OPEN_INBOUNDS_SQL = """
+                SELECT COUNT(*)
+                FROM inbound_events i
+                WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+                  AND i.received_at < datetime(?, ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq = i.seq
+                  )
+                """
+
+
+def _base_stale_open_count(path: Path) -> int:
+    """Run base's own staleOpenInbounds query on the generated database.
+
+    Base 82da64ac5 then adds staleRecoveryJobs into active_count (:295), zero
+    here since no recovery jobs are generated; active_count > 0 is
+    active-breach (:301-302), and the active latch is state == "active-breach"
+    (:515).
+    """
+    db = sqlite3.connect(path)
+    try:
+        row = db.execute(
+            _BASE_STALE_OPEN_INBOUNDS_SQL,
+            (_PROGRESS_NOW.strftime("%Y-%m-%d %H:%M:%S"), "-900 seconds"),
+        ).fetchone()
+    finally:
+        db.close()
+    return int(row[0])
+
+
+def _insert_generated_case(
+    db: sqlite3.Connection,
+    rows: list[tuple[str, str, int, bool, str]],
+    sends: list[tuple[int, str, int]],
+) -> None:
+    for index, (conversation_key, status, age, has_terminal, receipt_format) in enumerate(rows):
+        seq = index + 1
+        _insert_inbound(
+            db,
+            seq=seq,
+            received_at=(_PROGRESS_NOW - timedelta(seconds=age)).strftime(receipt_format),
+            status=status,
+            conversation_key=conversation_key,
+            chat_jid=f"{conversation_key}@s.whatsapp.net",
+        )
+        if has_terminal:
+            db.execute(
+                """
+                INSERT INTO turn_terminal_records (
+                  id, inbound_seq, inbound_seq_key, inbound_disposition,
+                  delivery_kind, delivery_op_id, reply_guarantee_disarmed
+                ) VALUES (?, ?, ?, 'transferred_to_recovery_owner', 'enqueued', NULL, 0)
+                """,
+                (100 + seq, seq, seq),
+            )
+    for index, (target, status, ago) in enumerate(sends):
+        tied = target <= len(rows)
+        _insert_send(
+            db,
+            op_id=200 + index,
+            seq=target if tied else None,
+            status=status,
+            submitted_ago=ago,
+            echoed_ago=ago if status == "echoed" else None,
+            echo_message_ago=ago,
+            conversation_key=rows[target - 1][0] if tied else _CHAT_KEY,
+        )
+
+
+def test_diagnostic_statement_copies_the_base_stale_predicate() -> None:
+    predicate = _BASE_STALE_OPEN_INBOUNDS_SQL.split("SELECT COUNT(*)\n", 1)[1].rstrip()
+
+    assert predicate.lstrip().startswith("FROM inbound_events i")
+    assert predicate in _load_module()._PROGRESS_DIAGNOSTICS_SQL
+
+
+@properties
+@given(
+    rows=st.lists(_GENERATED_ROW, min_size=1, max_size=6),
+    sends=st.lists(_GENERATED_SEND, max_size=6),
+)
+# A recent untied echo in the stale row's chat.
+@example(rows=[(_CHAT_KEY, "processing", 1500, False, _CANONICAL)], sends=[(8, "echoed", 300)])
+# An open row with a terminal record ahead of a stale row in its chat.
+@example(
+    rows=[(_CHAT_KEY, "processing", 1500, True, _CANONICAL), (_CHAT_KEY, "pending", 1000, False, _CANONICAL)],
+    sends=[],
+)
+# A row an hour old, written in ISO form: base's text comparison leaves it out.
+@example(rows=[(_CHAT_KEY, "processing", 3600, False, _ISO)], sends=[])
+def test_observation_matches_base_sql_for_generated_rows(
+    rows: list[tuple[str, str, int, bool, str]],
+    sends: list[tuple[int, str, int]],
+) -> None:
+    with private_case() as (root, _patch):
+        path = _progress_db(root)
+        with sqlite3.connect(path) as db:
+            _insert_generated_case(db, rows, sends)
+        base_count = _base_stale_open_count(path)
+        result = _observe_progress(path)
+    latches = _load_module()._desired_latches(result, _NO_LATCHES)
+    diagnostics = result["progressDiagnostics"]
+
+    assert result["counts"]["staleOpenInbounds"] == base_count
+    assert result["state"] == _BASE_STATE[base_count > 0]
+    assert latches["reply-guarantee-active-breach"] is (base_count > 0)
+    assert diagnostics["available"] is True
+    assert diagnostics["staleRows"] == base_count
+    assert (diagnostics["staleChats"] > 0) is (base_count > 0)
+    assert diagnostics["staleChats"] <= diagnostics["staleRows"]
+    assert diagnostics["staleRowsWithRecentSend"] <= diagnostics["staleRows"]
 
 
 def test_active_breach_is_a_successful_observation_not_a_process_failure(

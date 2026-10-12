@@ -1003,7 +1003,7 @@
         "impactTier": "hold",
         "notification": "warning",
         "rootOwner": "whatsapp_transport_link",
-        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "clearPredicate": "cause absent from an accepted health body degradation vector: health holds it until 10 minutes after the window last held 3 disconnects, plus a clock-drift extension of 1% of the window (about 6 s), as the connection manager records it; with aligned clocks an isolated burst at 12:00 clears at 12:20:06",
         "requiresCorroborationBeforePaging": false
       },
       "outbound_flood": {
@@ -1011,7 +1011,7 @@
         "impactTier": "hold",
         "notification": "warning",
         "rootOwner": "whatsapp_transport_link",
-        "clearPredicate": "cause absent from the next accepted health body degradation vector",
+        "clearPredicate": "cause absent from an accepted health body degradation vector: health holds it until 5 minutes after a destination was last at the flood threshold, plus a clock-drift extension of 1% of the window (about 3 s), as the flood detector records it; with aligned clocks an isolated burst at 12:00 clears at 12:10:03",
         "requiresCorroborationBeforePaging": false
       },
       "event_loop_starved": {
@@ -1019,7 +1019,7 @@
         "impactTier": "hold",
         "notification": "warning",
         "rootOwner": "node_event_loop",
-        "clearPredicate": "corroborated starvation signal absent for a full sampling window",
+        "clearPredicate": "corroborated starvation signal absent: health holds the cause until 5 minutes after starvation was last detected (a starved or window-ending sample, or an evaluation that saw a new discontinuity or a window refilling after one)",
         "requiresCorroborationBeforePaging": true
       },
       "durability_debt": {

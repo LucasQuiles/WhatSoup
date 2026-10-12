@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -96,6 +97,10 @@ def fetch_loopback_health(port, path, headers, **kwargs):
     # No paging happens here; an absent emitter keeps any page off live outboxes.
     text = text.replace("__BOT_ERRORS_EMIT__", str(home / "absent-bot-errors-emit.py"))
     text = text.replace("__HEALTH_READER_PATH__", str(helper)).replace("__HEALTH_READER_SHA256__", digest)
+    # A silent read confirms before it restarts; a one-second window keeps these
+    # single-run cases inside the subprocess timeout without changing them.
+    text = re.sub(r"(?m)^CONFIRM_WINDOW_SECONDS=\d+$", "CONFIRM_WINDOW_SECONDS=1", text)
+    text = re.sub(r"(?m)^CONFIRM_STEP_SECONDS=\d+$", "CONFIRM_STEP_SECONDS=1", text)
     script = home / "watchdog"; script.write_text(text)
     if helper_mode == "missing": helper.unlink()
     if helper_mode == "mismatch": helper.write_text("raise RuntimeError('must never execute')\n")

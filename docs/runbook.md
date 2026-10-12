@@ -584,15 +584,171 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   degraded path, which checks every reason source) observes real EARLY-path
   reasons and its final verdict is `degraded`. Unhealthy verdicts and
   late-computed-only reasons (schema/durability/retention/pending-polls/fact
-  export/late runtime status — all directly probed each poll) never arm.
+  export/late runtime status — all directly probed each poll) never arm on
+  their own. Only an early reason the latch can hold opens the arm gate: a
+  never-latched reason (below), live or held, does not, and neither does a
+  first-walk `auth_bond_at_risk`. Beside one, a late reason arms nothing,
+  because it never latched alone. Base armed the late reasons in that case;
+  the change covers all six of base's own members
+  (`runtime.per_chat_session_without_owner`,
+  `runtime.per_chat_respawn_abandoned`,
+  `runtime.agent_respawn_failed_clear_pending`, `recovery_debt_blocking`,
+  `runtime.turn_finalization_debt` and
+  `runtime.completed_delivery_identity_debt`) as well as the newer ones.
 - **Never latched.** The directly re-probed reasons
   (`DIRECTLY_REPROBED_STATUS_REASONS`) never arm and never enter a latched set:
   the per-chat ownership reasons, `runtime.agent_respawn_failed_clear_pending`,
-  `recovery_debt_blocking`, `runtime.turn_finalization_debt`, and
-  `runtime.completed_delivery_identity_debt`. Each is recomputed from live or
-  durable state on every evaluation and fails closed while unreadable, so it
-  stays visible for as long as the condition lasts and clears on the first
-  poll after repair.
+  `recovery_debt_blocking`, `runtime.turn_finalization_debt`,
+  `runtime.completed_delivery_identity_debt`, `runtime.auto_compact_backoff`,
+  `durability_delivery_debt`, `event_loop_starvation`, `connection_churn`,
+  and `outbound_flood`. Each is recomputed from live or durable state on every
+  evaluation. The durable ones fail closed while unreadable (through
+  `recovery_debt_blocking`) and clear on the first poll after repair. The
+  auto-compact backoff clears when its cooldown window ends; a backoff never
+  blocks turns, so a turn could not have proven it. `durability_delivery_debt`
+  implies `recovery_debt_blocking`, but blocking can hold without it (a
+  continuity gap or unreadable runtime evidence, for example).
+- **Windowed reasons hold.** Starvation, churn and flood are rolling windows,
+  and a recurring fault can leave a window between detections. Each therefore
+  stays reported, with the same reason and cause, until a hold has passed
+  since the condition was last detected. It then clears with no turn
+  (`src/core/health-reason-hold.ts`). The producer records when the condition
+  last held as it computes it, so detection does not depend on when or how
+  often `/health` is read. Health also counts the evaluations at which it sees
+  the condition, or an unreadable input, itself. Each hold, and when the
+  reason clears:
+  - `connection_churn`, 10 minutes (the length of the disconnect window).
+    Churn exists while the window counts 3 disconnects, so it ends when the
+    third-newest counted one leaves the window. The reason clears 10 minutes
+    after that, plus a clock-drift extension of 1% of the window (6 s), or 10
+    minutes after the disconnect that completed it if that is later. A steady
+    flap with a period of 5 minutes or less reaches 3 in every cycle, and the
+    gaps between those stretches last at most 5 minutes, so it reads degraded
+    continuously from the third disconnect. The one exception is a forward
+    wall-clock step larger than 10 minutes minus twice the flap period: any
+    step for a period of 5 minutes, and just over 12 s for a period of 4.9
+    minutes. Base then counts 3 again only at the third disconnect after the
+    step. Until then the reason can read clear for up to five flap periods
+    minus 20 minutes 6 s: never for a period up to about 4 minutes, and about
+    4.4 minutes at a period of 4.9 minutes. Base's own churn reason is clear
+    for that time too.
+  - `outbound_flood`, 5 minutes (the flood detector's window). A destination
+    floods while the detector counts 20 sends to it, so its flood ends when
+    its twentieth-newest counted send leaves the window. The reason clears 5
+    minutes after that, plus a clock-drift extension of 1% of the window
+    (3 s), or 5 minutes after the send that completed the flood if that is
+    later, for whichever destination ends last. A flood that trips again
+    within those 5 minutes reads continuously.
+  - `event_loop_starvation`, 5 minutes (30 sampler windows and 60 fleet polls,
+    the same as the starvation warning's repeat). The reason clears 5 minutes
+    after the last detection: the last starved sample, the sample that ended a
+    starved window, or the last evaluation that saw a new discontinuity or a
+    window refilling after one.
+
+  Unreadable input counts as holding. A loop stall over 10 s empties the
+  20-sample loop-lag window. Starvation is therefore read only from a full
+  window with no new discontinuity since the previous evaluation, including
+  one before the first evaluation. A window refilling after a discontinuity,
+  or a new discontinuity, counts as starved from that evaluation. This
+  detection still depends on reads, because the hold starts at the
+  evaluation, not at the stall:
+  - Stalls over 10 s recurring within about 5 minutes of the previous
+    detection read degraded continuously.
+  - A 12 s stall every 7 minutes reads clear for about 2 minutes of each cycle.
+  - A full window reads starved while 2 or more of its 20 samples exceed
+    250 ms, since its 95th percentile is the second-largest sample.
+  - A partial window at startup, or after the sampler restarts, reads clear
+    as before.
+  - A stall just under 10 s that lands at most once per window is never seen,
+    as before.
+
+  Transports: the Baileys manager supplies both the disconnect window and the
+  flood snapshot with their last-held times. The SMS, Signal and iMessage
+  bridges supply an empty disconnect window (`emptyConnectionStateSnapshot`)
+  and never a flood snapshot. A missing disconnect window counts as churn. A
+  missing flood snapshot counts as a flood only once one has been seen, so the
+  bridges read clear.
+
+  Clock: whether churn or a flood exists is decided only by base's own
+  wall-clock count (the disconnect window's `count` and the flood detector's
+  per-destination count) when a disconnect or send is recorded. The monotonic
+  clock (`performance.now()`) only measures how long the hold lasts:
+  - Each recorded entry also carries its monotonic instant, read after the
+    wall clock, so a pause between the two reads can only lengthen a hold.
+  - A detected episode holds until its threshold-th newest counted entry
+    leaves the window on the monotonic clock, plus 1% of the window, and at
+    least until it was detected. The extension covers the wall clock drifting
+    from the monotonic clock while NTP slews it (macOS slews at up to about
+    5000 ppm). It only lengthens holds and never decides detection.
+  - A counted entry with no monotonic instant would hold the episode one
+    window, plus the extension, from detection. None exists today: nothing
+    reloads these windows from disk.
+  - A read at which base's `count` or `flooding` meets the threshold also
+    reports the reason and holds it for one hold from that read.
+
+  A wall-clock step does not shorten or stretch a hold already recorded. It
+  moves base's windows, and so detection, exactly as in base:
+  - Stepped back: stored disconnects and sends, including expired ones not
+    yet pruned, are now later than the wall clock, and base counts them until
+    the wall clock is one window past them. For a flood, later sends to the
+    same destination stay counted behind them. A new entry counted with them
+    completes an episode, as base's verdict would read. Between new entries,
+    only reads refresh the hold from base's verdict, so the reason clears one
+    hold after the last read that saw it meet the threshold, or one hold
+    after the producer's own held-until if that is later. With aligned clock
+    rates after a backward step, measured since the episode's counted entries
+    were recorded, a step of up to the drift extension (6 s for churn, 3 s
+    for a flood) never clears the reason before one hold after base's verdict
+    clears, however rarely health is read. After a larger step, sparse reads
+    can let it clear sooner, by at most the step minus the extension. With no
+    new entries it clears no later than the step plus the window plus the
+    drift extension plus the hold after the step. These bounds assume no
+    further steps or clock-rate divergence while those entries remain counted.
+    Concurrent drift adds to the backward displacement and can invalidate the
+    small-step guarantee; steps before an entry was recorded do not offset a
+    later backward step for that entry.
+  - Stepped forward: base drops the entries. An episode already detected
+    keeps its recorded hold. Entries the step dropped can no longer complete
+    an episode, so churn or a flood that base stops counting is not detected
+    either, exactly as base's count reads. An ongoing flap or flood can
+    therefore read clear after its recorded hold ends, until base counts the
+    threshold again from entries after the step. For a churn flap with a
+    period P, this needs a step larger than 10 minutes minus 2 times P (any
+    step at P = 5 minutes, just over 12 s at P = 4.9 minutes), and lasts up
+    to 5 times P minus 20 minutes 6 s: nothing for P up to about 4 minutes,
+    about 4.4 minutes at P = 4.9 minutes. Base's own reason is clear for that
+    time too.
+  - Host suspend: the monotonic clock may not advance while the host sleeps
+    (not verified on a host). A recorded hold then lasts longer in wall time,
+    which fails closed. Detection is unaffected, since it uses base's
+    wall-clock count.
+
+  The body's `event_loop.locally_starved` and the starvation warning keep the
+  sampler's raw verdict. The hold is in memory per process, so a restart
+  starts clean; monotonic time also starts again with the process, and
+  nothing monotonic is persisted.
+
+  One detection is new. An isolated stall over 10 s, at any time, now reads
+  `event_loop_starvation` (cause `event_loop_starved`) for the window refill
+  plus 5 minutes from the evaluation that sees it. Base read clear. The noise
+  is bounded:
+  - all three causes are hold-tier in the fault taxonomy, so BOT ERRORS holds
+    them and promotes only after 30 minutes;
+  - the watchdog never restarts on `degraded`;
+  - the fleet poller's `health_body_degraded` page opens and clears on its own
+    about 5 minutes later.
+- **First auth-tree walk.** `/health` reads the auth bond from a cache that is
+  empty until the first tree walk since process start publishes, and
+  connect-time credential writes supersede walks in flight (the walk finishes
+  and its result is discarded). Until then the bond
+  reads `unknown` and health reports `auth_failure.auth_bond_at_risk` as
+  before, but that reason does not arm or enter the latch while the first walk
+  is pending: at most the auth bond's stale-risk bound (four tree-cache max
+  ages, 120 s by default) after process start. A completed walk that finds a
+  problem, a transient read, a backup error, or a first walk that does not
+  complete within the bound latches as before.
+- **Log.** The `degradation silence latch set` line carries `reasons`, the
+  sorted latched reason codes, so a latch-only reading names what armed it.
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and updates the latched reason set: a
   full-visibility evaluation REPLACES the set with what it observed (a reason
@@ -694,9 +850,9 @@ transport and process liveness pass:
 **Final log states** (last line of
 `~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
 `OUTBOUND-POISON`, `CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
-`RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
+`RESTART-AVOIDED`, `RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
 upgrade-only ladder — `OUTBOUND-POISON` > `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
-`RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
+`RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `RESTART-AVOIDED` > `ERROR` >
 `CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
 masked by a restart outcome, a restart-worthy cycle never reports `ok`, a
 mixed bot/fleet cycle reports the most actionable restart outcome, and a
@@ -712,9 +868,142 @@ token/timestamp evidence could not be trusted; it exits the watchdog invocation
 with status `2`, never restarts, and never changes the credential marker. It
 also covers a loopback read that could not start: a connect-stage
 `EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
-read, or a bound health reader that is missing or fails its digest check.
-Ordinary connection refusal is still restart evidence, and so is a target that
-accepts the connection but does not answer within the read deadline. A job that is not loaded
+read, or a bound health reader that is missing or fails its digest check at
+the run's start or when a confirm window ends (below).
+Ordinary connection refusal, and every other connect- or request-stage
+failure, is still restart evidence on its first observation. A target that
+accepts the connection but does not answer gives a *silent* read: an OS-level
+failure while waiting for or reading the response (a timeout, a reset, or EOF
+before the status line), logged as `health endpoint unreachable: connection
+accepted, response timed out or was reset` (`fleet console unreachable: …` for
+the fleet console), or a read killed at the 8 s deadline, logged as `health
+read exceeded 8s` (`fleet console health read exceeded 8s`). A response cut
+short without an OS error (`http.client`'s `IncompleteRead`, or a short body
+that does not parse) is not silent; it stays `HEALTH-UNKNOWN`. A silent read is
+still restart evidence, but the watchdog confirms it in the same run before it
+acts:
+
+- The restart gates run first, in their usual order: a permanent launchd stop,
+  a pairing coordination lease, another watchdog's restart in progress (the
+  restart mutex) and the 5-minute cooldown. If one of them stops the restart,
+  nothing else happens, as before.
+- If every gate is open, the watchdog notes the job's launchd identity (its
+  load state and pid, from `launchctl print`; an unreadable identity still
+  runs the window, so a trusted answer can still cancel the restart), logs
+  `<label> silent read; confirming before restarting …`, releases the
+  restart mutex and re-reads that target every 15 s (`CONFIRM_STEP_SECONDS`)
+  until 90 s
+  (`CONFIRM_WINDOW_SECONDS`) have passed. The window ends with the first
+  read that finishes at or after 90 s, so on a steady clock a read is running
+  at that moment or starts then. Each read logs `<label> confirm read N: …`.
+- A trusted answer ends the window and cancels the restart: `<label> answered
+  on confirm read N; restart avoided: …` and the state `RESTART-AVOIDED`. A
+  trusted answer is an HTTP status below 400 from the fleet console, or a bot
+  body the decision block reads without a restart verdict (healthy,
+  credential-dead, credential-unknown or outbound-poison). That read's own
+  verdict is not acted on in this run: a credential-dead or outbound-poisoned
+  bot is reported by the next run whose main read answers.
+- Every other result continues the window and changes nothing else in the run:
+  another silent read, a refusal, `EADDRNOTAVAIL`, an unavailable or
+  unverifiable reader or token, an empty, oversized or untrusted body, a bot
+  restart verdict, or a fleet HTTP error status.
+- A `sleep` that fails ends the window at once: `<label> confirm window ended:
+  sleep failed (exit N) after M confirm reads; restart still due: …`. The
+  checks below follow as at any window's end.
+- When the window ends without a trusted answer, the watchdog logs `<label> no
+  trusted answer in 90s (N confirm reads); restart still due: …` and checks
+  two things before it restarts:
+  - The reader binding, exactly as at the run's start. A reader still
+    unverifiable then logs `HEALTH-UNKNOWN: health reader binding unavailable
+    or invalid` and ends the run there, as at its start: exit status `2`,
+    and nothing else is read or restarted in that run (after a bot window,
+    the fleet console is not read). The last line is `HEALTH-UNKNOWN` unless
+    the run had already noted a higher-ranked state (`CREDENTIAL-DEAD` or
+    `OUTBOUND-POISON` from the bot section, before a fleet window). This is
+    the only window-end result that ends the run.
+  - The job's launchd identity. "Unloaded" means launchctl's "could not find
+    service" status (exit 113, verified on macOS 26; other macOS versions in
+    the fleet are not verified, and a different not-found code there only
+    defers the restart, as unreadable). Any other failure,
+    including a missing domain's exit 112, or the 15 s limit, leaves the
+    identity unreadable. If it was unreadable at the silent read, it is not
+    read again and the run logs `<label> restart deferred: job identity
+    unreadable at the silent read: …`. Otherwise it is read again: if
+    unreadable now, the run logs `<label> restart deferred: job identity
+    unreadable at the window's end: …`. A job unloaded, loaded or running a
+    different pid since the silent read logs `<label> restart deferred: job
+    changed during the confirm window (at the silent read: …; now: …)`. Each
+    of these records `RESTART-SUPPRESSED` and restarts nothing for that
+    target; the rest of the run goes on (after a bot window the fleet
+    console is still read and can be restarted), and the next run decides
+    from its own read. Load state and pid cannot show a reload that ends
+    with the same pid, or two job generations that both show no pid; such a
+    job counts as unchanged.
+
+  Otherwise it restarts through the same path as any other restart. Every gate
+  above is checked again at that moment. A job unloaded at both ends may be
+  bootstrapped, as at the silent read. A job loaded at both ends may only be
+  kickstarted: if the restart's own `launchctl print` fails when it acts,
+  for any reason and not only "not found", the run logs `<label> restart
+  deferred: job not confirmed loaded after the window check: …`
+  (`RESTART-SUPPRESSED`) and bootstraps nothing. Like the other deferrals,
+  it keeps nothing and arms no cooldown; the next run decides from its own
+  read. A gate that closed during the window (another watchdog's restart
+  starting the cooldown, a pairing lease, a permanent stop) stops the restart
+  as it would stop any restart. Another watchdog's restart or a permanent
+  stop also changes the job's pid, so it usually shows as `restart deferred`
+  instead of the gate's own line; either way that target is not restarted.
+
+  One race remains after the window-end check, as base has over its own gate
+  pass: an outside `launchctl bootstrap` or reload during the second gate
+  pass can lead to a kickstart of a job that has just started or of a new
+  pid. That pass usually takes milliseconds; its permanent-stop query is
+  limited to 15 s, but the restart's own `launchctl print` in
+  `ensure_loaded` has no time limit, so the window has no strict bound. A
+  successful restart by another watchdog whose cooldown stamp was written
+  cannot cause it: that watchdog writes the stamp before it releases the
+  restart mutex, and this pass checks the cooldown after taking it. Another
+  watchdog's restart that wrote no stamp (a failed stamp write after its
+  kickstart, or a failed or timed-out kickstart) leaves the cooldown open,
+  so it can.
+
+Nothing is kept between runs: every restart is still the watchdog's own decision
+on a read in the same run, through the gates as they stand at that moment.
+Compared with restarting at once:
+
+- A restart comes later, or not at all when the target answers within the
+  window. On a steady clock the window lasts at most 90 s plus one 8 s read
+  deadline. It is measured by the clock, with at most six confirm reads: a
+  forward clock step shortens it, and a backward one lengthens it up to six
+  full 15 s steps and 8 s reads, about 138 s. `launchctl print` for the job's
+  identity at both ends and for the second gate pass (15 s limit each) and the
+  binding check (8 s) add to that, so a restart comes at most about 191 s
+  later than an immediate restart, and about 90 to 100 s later when nothing
+  hangs. These figures count the timed reads, the `launchctl print` queries
+  and the binding check only. The per-read token and decision steps, and the
+  restart path's own `launchctl print` in `ensure_loaded` (as at base), have
+  no deadline. Counting the bounded steps alone, a run with a bot and a fleet
+  window takes at most about 500 s, inside the invocation lock's 600 s.
+- An avoided restart arms no cooldown, so a restart-worthy read in the next 5
+  minutes (a refusal, an HTTP error, a silent read confirmed silent) is not
+  held back by the cooldown an immediate restart would have armed.
+- A deferred restart (`restart deferred: …`) arms no cooldown either, so the
+  next run may act on a respawned or reloaded job sooner than the 5-minute
+  cooldown of an immediate restart would have allowed.
+- A watchdog killed during a window (an unload, a reboot, a crash) performs no
+  restart for that read. The next run decides again from its own read.
+- A job whose identity changed or could not be read, or that was loaded at
+  both ends and is not confirmed loaded when the restart acts, gets no
+  restart from that read; the rest of the run goes on. A reader that no longer
+  verifies at the window's end ends the run.
+
+Every recorded restart of a live target followed a silence of 20.5 to 83.2 s.
+On a steady clock the last confirm read starts about 82 to 90 s after the
+window opens (the window less one read deadline, up to the window). Before
+the window opened, the silence had already lasted the silent read's own wait:
+5 s for a reader timeout, 8 s at the deadline, none for a reset or EOF.
+
+A job that is not loaded
 is bootstrapped only on the restart path, and a successful bootstrap is not
 followed by a kickstart.
 `ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker
@@ -722,6 +1011,41 @@ path when no stronger credential, health-evidence, or restart outcome applies.
 
 **Operator notes:**
 
+- `RESTART-AVOIDED` → a silent read would have restarted the target, but a
+  confirm read in the same run got a trusted answer; nothing was restarted.
+  Limits of the rule:
+  - A target whose silences always end within the 90 s window is never
+    restarted, where the watchdog used to restart it on each silent read
+    (subject to the cooldown). This is intended: each answer shows the target
+    serving. The `restart avoided` lines in the watchdog log are where to see
+    it; nothing alerts on them.
+  - Each silent target adds about 90 to 100 s to a run, at most about 191 s,
+    and the bot and the fleet console can both read silent in one run (the
+    fleet console is read after the bot section, as before). That can exceed
+    the 120 s `StartInterval`: launchd never runs two instances of one job, so
+    the next run then starts late. The invocation lock is reclaimed as stale
+    only after 600 s, and the restart mutex is not held during the window.
+- `<label> restart deferred: job changed during the confirm window` (state
+  `RESTART-SUPPRESSED`) → the job was unloaded, loaded or respawned while a
+  silent read was being confirmed, for example by an operator, a release
+  activation, another watchdog's restart, a crash and launchd respawn, or a
+  stop with exit code 78. That target was not restarted; the rest of the run
+  went on (after a bot window the fleet console is still read and may be
+  restarted), and the next run reads the job afresh.
+- `<label> restart deferred: job identity unreadable at the silent read` (or
+  `at the window's end`; state `RESTART-SUPPRESSED`) → `launchctl print`
+  failed for that job, other than reporting it not found, or took longer than
+  15 s, so the watchdog could not tell which job it would restart. That
+  target was not restarted; the rest of the run went on, and the next run
+  reads the job afresh. If it repeats, look at launchd itself.
+- `<label> restart deferred: job not confirmed loaded after the window check`
+  (state `RESTART-SUPPRESSED`) → the job was loaded at both ends of the
+  confirm window, but the restart's own `launchctl print` failed when it
+  acted: the job was booted out after the check (for example by an
+  operator), or launchctl failed for another reason. The watchdog does not
+  bootstrap a job that was loaded when its silent read was taken. That
+  target was not restarted, nothing is kept and no cooldown is armed; the
+  next run decides.
 - `OUTBOUND-POISON` → preserve the first outbound failure and durable turn
   evidence, then reconcile delivery ownership before a controlled restart.
   The watchdog accepts only the exact connected agent poison shape and does
@@ -1847,7 +2171,7 @@ contains only audit counts plus created/existing/unresolved/ambiguous ledger cou
 
 After recording, authenticated `/health` reports the normalized recovery-debt projection separately
 from current service status. A readable retained continuity gap does not flip an otherwise healthy
-service to degraded. A blocking episode (`recovery_debt_blocking`,
+service to degraded. A blocking episode (`recovery_debt_blocking`, `durability_delivery_debt`,
 `runtime.turn_finalization_debt`, `runtime.completed_delivery_identity_debt`) does not arm the
 silence latch: those reasons are recomputed from durable state on every poll, so status returns to
 `healthy` on the first poll whose evidence reads non-blocking, without a restart, while unreadable
@@ -2729,7 +3053,7 @@ machine-readable disposition registry for sources that participate in fault clas
 
 | Source | Producer owner | Policy / proof owner |
 |---|---|---|
-| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges |
+| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges. A `health_body_degraded` alert carries `diagnostics.degradationCauses` (fixed registry codes; an unknown cause becomes `unrecognized`) and `diagnostics.whatsappConnected`, because its evidence text is confined to a digest. `whatsappConnected` is true only when the connection state is also `connected`. The dispatcher holds the event at warning tier only when the instance is connected and every cause is hold-tier in the registry. Promotion is event-driven: the first alert on the same key at least `TRANSIENT_PROMOTE_SECONDS` (default 1800 s) after the first hold pages. The poller re-sends a still-degraded instance at most every 15 minutes, so a lasting hold-tier degradation nominally pages after 30 to 45 minutes; delivery delay, a maintenance window, inhibition or an intervening clear can stretch that, and nothing promotes a held event if re-sends stop. An alert that retires an open logout or bond-loss incident skips the transient hold, and when it is sent its page names the closed incident in a `closes_incident` line; duplicate suppression and cooldown still apply to it. An event without these fields pages at once |
 | `recovery_debt_attention` | `src/fleet/health-poller.ts` | Informational, non-paging operator debt lifecycle, emitted under the same instance silence and 15-minute throttle as other poller alerts; clear only from a fresh readable `open=false` sample and never restart or heal from this source alone. |
 | `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
@@ -3016,7 +3340,7 @@ WhatSoup can run in a Docker container as an alternative to the systemd/launchd 
 docker compose build
 ```
 
-The multi-stage build installs dependencies, builds the console frontend, and produces a slim runtime image (~300MB) based on `node:24-slim`.
+The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
 
 ### Configure
 

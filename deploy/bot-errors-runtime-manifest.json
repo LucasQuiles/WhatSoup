@@ -31,7 +31,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-collector.py",
-      "sha256": "ff377b16f731bb4e89f724ad41e24c7dc97da77605297a3803e6aa0e4a081373",
+      "sha256": "9708d98e12c1bb9f48eb8fef9158a3f453a1e3d00151c2dff0c5cafb6b667653",
       "mustContain": [
         "append_private_jsonl",
         "refusing to use private directory through symlink",
@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "1756397c840a64825944e9e8561f99f7652cc1eb4a5dfbc4b55819fcbcb80edb",
+      "sha256": "1c4d9abb16142aec893b84406102a3651fe8cf8089a3cf0bdef0fcd16dfc8cd1",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -770,7 +770,7 @@
     },
     {
       "path": "deploy/scripts/reply-guarantee-observer.py",
-      "sha256": "478cbf965021ce11f7d93e3d35a210fcc4f533f03c7fd8d97c50f3593d3137b8",
+      "sha256": "55b5510c40dd8159f7b814caafe680fc26c16fdd1298b730d1e9215ec09b4c1b",
       "mustContain": [
         "sqlite-uri-mode-ro",
         "reply-guarantee-active-breach",
@@ -800,7 +800,7 @@
     },
     {
       "path": "src/lib/bot-errors-outbox.ts",
-      "sha256": "e8ded92d38ca3c5544812cfa3b5e0276ed410b79f52f5258f05fffb4fbafe66b",
+      "sha256": "f2000451bdb02083841c9bdf113f2202c5bc2eec3b6395515dbe91bf4b16bc87",
       "mustContain": [
         "import { redactText } from './redaction-text.ts';",
         "export { redactText as redactBotErrorsText } from './redaction-text.ts';",
@@ -858,7 +858,7 @@
     },
     {
       "path": "src/lib/fault-taxonomy-registry.json",
-      "sha256": "3e848ee95660a3890af5e45237d076a967fb924db78f10da6ab5be41db574872",
+      "sha256": "eeac03eaec87a8aebd6c382037a333726f79a3b018888c9799f4cc6a228f1b58",
       "mustContain": [
         "whatsoup-fault-taxonomy-registry-v3",
         "runtimeAgentHealthSignals",
@@ -909,7 +909,7 @@
     },
     {
       "path": "deploy/scripts/lib/owner_route.py",
-      "sha256": "3b9cffa44a973edc558b879c4f3a06f5e9762d82b87620fc2954c3a3bd3e67cd",
+      "sha256": "0ae69be6c1f20fbfbb638ec6e55fd4165d1947b74d21bad5880ef518de523eb4",
       "mustContain": [
         "def route_owner_critical(",
         "def qualifies(",
