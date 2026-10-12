@@ -123,6 +123,13 @@ export interface AuthBondTreeProvenance {
   readonly nextRefreshEligibleInMs: number | null;
   /** Walks STARTED since construction, including ones that did not publish. */
   readonly refreshAttemptCount: number;
+  /**
+   * No walk has published since construction and the stale-risk bound has not
+   * passed since then. `unknown` here means "not looked at yet", which the first
+   * completed walk settles, so /health keeps it out of the silence latch. Past
+   * the bound it is the same absence of evidence a stale digest reports.
+   */
+  readonly firstWalkPending: boolean;
 }
 
 export type TreeRefreshKind = 'none' | 'fresh' | 'incomplete' | 'failed' | 'superseded';
@@ -754,6 +761,8 @@ export class AuthBondGuard {
   private readonly treeCacheMaxAgeMs: number;
   private readonly treeStaleRiskMs: number;
   private readonly treeRefreshMinIntervalMs: number;
+  /** Monotonic construction time: the start of the first-walk window. */
+  private readonly constructedAtMs: number;
   private lastRefreshStartedAtMs: number | null = null;
   private treeObservation: AuthBondTreeObservation | null = null;
   private treeRefresh: Promise<void> | null = null;
@@ -841,6 +850,7 @@ export class AuthBondGuard {
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.treeCacheMaxAgeMs = Math.max(0, options.treeCacheMaxAgeMs ?? DEFAULT_TREE_CACHE_MAX_AGE_MS);
     this.treeStaleRiskMs = this.treeCacheMaxAgeMs * TREE_STALE_RISK_MULTIPLE;
+    this.constructedAtMs = this.monotonicNow();
     this.treeRefreshMinIntervalMs = Math.max(
       0,
       options.treeRefreshMinIntervalMs ?? DEFAULT_TREE_REFRESH_MIN_INTERVAL_MS,
@@ -911,6 +921,10 @@ export class AuthBondGuard {
           ? null
           : Math.max(0, this.successorDueAtMs - this.monotonicNow()),
         refreshAttemptCount: this.treeRefreshAttempts,
+        // Same bound as `auth_tree_stale`: past it, refreshes are failing or
+        // starved, so a never-completed first walk is no longer "pending".
+        firstWalkPending: observation === null
+          && this.monotonicNow() - this.constructedAtMs < this.treeStaleRiskMs,
       },
       unknownReason,
     );

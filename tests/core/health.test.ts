@@ -102,9 +102,11 @@ import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
 import type { HealthDeps } from '../../src/core/health.ts';
 import { HEALTH_DEGRADATION_CAUSE_REASON_TWINS, NO_REASON_TWIN } from '../../src/core/health.ts';
 import type { StartupNotificationHealth } from '../../src/core/startup-notification-controller.ts';
-import type { ConnectionManager } from '../../src/transport/connection.ts';
+import { ConnectionManager, type ConnectionRecentDisconnects } from '../../src/transport/connection.ts';
 import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
 import { systemClock } from '../../src/lib/clock.ts';
+import { LOOP_LAG_WINDOW_SAMPLES } from '../../src/lib/loop-lag-sampler.ts';
+import { OutboundFloodDetector } from '../../src/transport/outbound-flood-detector.ts';
 import { getShadowGateRecorder, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
 import { SHADOW_GATE_COUNT_KEYS } from '../../src/core/shadow-gate-events.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -957,6 +959,8 @@ describe('GET /health', () => {
           lastPongAt: null,
           lastDisconnectReason: 'loggedOut',
           lastStatusCode: 401,
+          // Required by the snapshot type; a missing window reads as churn.
+          recentDisconnects: { windowMs: 600_000, count: 0, lastAt: null, lastReason: null, lastStatusCode: null, byReason: {} },
         }),
       } as unknown as ConnectionManager,
     })));
@@ -1713,6 +1717,8 @@ describe('GET /health', () => {
           lastPongAt: null,
           lastDisconnectReason: null,
           lastStatusCode: null,
+          // Required by the snapshot type; a missing window reads as churn.
+          recentDisconnects: { windowMs: 600_000, count: 0, lastAt: null, lastReason: null, lastStatusCode: null, byReason: {} },
           authBond: makeAuthBond({
             status: 'invalid',
             issues: ['creds_json_empty'],
@@ -7701,20 +7707,18 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
   let db: Database;
   let prevToken: string | undefined;
 
-  let clockOffsetMs = 0;
-  let clockNowSpy: ReturnType<typeof vi.spyOn> | null = null;
-
   beforeEach(() => {
     prevToken = process.env.WHATSOUP_HEALTH_TOKEN;
     process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
     db = makeDb();
-    clockOffsetMs = 0;
-    clockNowSpy = vi.spyOn(systemClock, 'now').mockImplementation(() => Date.now() + clockOffsetMs);
+    // Only the two clocks are faked, Date (the wall clock) and performance (the
+    // monotonic clock): every clock read agrees and moves only with
+    // advanceClock or stepWallClock, while the HTTP server's timers stay real.
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] });
   });
 
   afterEach(() => {
-    clockNowSpy?.mockRestore();
-    clockNowSpy = null;
+    vi.useRealTimers();
     db.close();
     if (prevToken === undefined) delete process.env.WHATSOUP_HEALTH_TOKEN;
     else process.env.WHATSOUP_HEALTH_TOKEN = prevToken;
@@ -7747,12 +7751,12 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     };
   }
 
-  // Agent-instance harness: one mutable non-turn degradation signal
-  // (enrichment runtime), mutable turn-capability evidence, a mutable
-  // fallback-state snapshot (default: on primary 'claude-cli', no window),
-  // and a mutable connection flag (false → 'connection_disconnected',
-  // status unhealthy).
-  async function buildLatchHarness(): Promise<{
+  // Agent-instance harness (or a chat instance, by option): one mutable
+  // non-turn degradation signal (enrichment runtime), mutable turn-capability
+  // evidence, a mutable fallback-state snapshot (default: on primary
+  // 'claude-cli', no window), and a mutable connection flag (false →
+  // 'connection_disconnected', status unhealthy).
+  async function buildLatchHarness(options: { instanceType?: 'agent' | 'chat' } = {}): Promise<{
     server: ReturnType<typeof createServer>;
     port: number;
     setRuntimeDegraded: (v: boolean) => void;
@@ -7760,7 +7764,46 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     setFallbackState: (s: { effectiveProvider: string; fallbackActiveUntil: number | null } | null) => void;
     setConnected: (v: boolean) => void;
     setRuntimeSnapshot: (status: 'healthy' | 'degraded', degradedReasons: string[] | null) => void;
+    setChatQueue: (queuedChats: number) => void;
+    setAuthBond: (bond: Record<string, unknown> | null) => void;
+    setConnectionExtras: (extras: Record<string, unknown>) => void;
+    setLoopStarved: (starved: boolean) => void;
+    stallLoop: () => void;
+    refillLoop: (samples: number) => void;
+    recordDisconnect: () => void;
+    recordSends: (count: number, dest?: string) => void;
+    setDeliveryDebt: (stale: boolean) => void;
+    setRetentionFailed: (failed: boolean) => void;
+    setBeforeConnectionRead: (hook: (() => void) | null) => void;
   }> {
+    let authBond: Record<string, unknown> | null = null;
+    let connectionExtras: Record<string, unknown> = {};
+    let beforeConnectionRead: (() => void) | null = null;
+    // The sampler's verdict contract (src/lib/loop-lag-sampler.ts): starved
+    // only on a full 20-sample window; a stall over 10 s empties the window
+    // and counts one discontinuity. `starved` is the lag of the samples that
+    // do arrive. Like the sampler, every starved sample stamps
+    // lastStarvedMonotonicMs on the monotonic clock, and so does the sample
+    // that ends a starved window.
+    const loop = {
+      sampleCount: LOOP_LAG_WINDOW_SAMPLES,
+      starved: false,
+      discontinuityCount: 0,
+      lastStarvedMonotonicMs: null as number | null,
+    };
+    const windowStarved = (): boolean => loop.sampleCount === LOOP_LAG_WINDOW_SAMPLES && loop.starved;
+    // The connection manager's own record and prune-on-read code on a bare
+    // instance with no socket, and the real flood detector, both on the
+    // frozen clocks.
+    const disconnects = Object.create(ConnectionManager.prototype) as {
+      recentDisconnects: unknown[];
+      recordDisconnect(statusCode: number | null, reason: string): void;
+      getRecentDisconnectSnapshot(): ConnectionRecentDisconnects;
+    };
+    disconnects.recentDisconnects = [];
+    const floodDetector = new OutboundFloodDetector();
+    let deliveryDebt = false;
+    let retentionFailed = false;
     let runtimeDegraded = false;
     let tc: Record<string, unknown> | null = null;
     let fallback: { effectiveProvider: string; fallbackActiveUntil: number | null } | null =
@@ -7768,9 +7811,20 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     let connected = true;
     let runtimeStatus: 'healthy' | 'degraded' = 'healthy';
     let runtimeReasons: string[] | null = null;
+    let chatQueue: { activeChats: number; queuedChats: number } | null = null;
     const deps = makeDeps(db, {
-      instanceType: 'agent',
+      instanceType: options.instanceType ?? 'agent',
       getEnrichmentStats: () => ({ lastRun: null, unprocessed: 0, runtimeDegraded }),
+      getDatabaseRetentionHealth: () => ({
+        running: false,
+        state: retentionFailed ? 'failed' : 'succeeded',
+        consecutiveFailures: retentionFailed ? 1 : 0,
+        failureCode: retentionFailed ? 'retention_failed' : null,
+        lastRunAt: null,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastResult: null,
+      }),
       connectionManager: {
         botJid: '15551230004@s.whatsapp.net',
         botLid: null,
@@ -7778,18 +7832,90 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
         sendMedia: vi.fn().mockResolvedValue({ waMessageId: null }),
         connect: vi.fn().mockResolvedValue(undefined),
         disconnect: vi.fn().mockResolvedValue(undefined),
-        getConnectionState: () => emptyConnectionStateSnapshot({
-          connected,
-          stateChangedAt: '2026-07-29T00:00:00.000Z',
-          lastDisconnectReason: null,
-        }),
+        getConnectionState: () => {
+          beforeConnectionRead?.();
+          const flood = floodDetector.stats();
+          return {
+            ...emptyConnectionStateSnapshot({
+              connected,
+              stateChangedAt: '2026-07-29T00:00:00.000Z',
+              lastDisconnectReason: null,
+            }),
+            recentDisconnects: disconnects.getRecentDisconnectSnapshot(),
+            outboundFlood: {
+              windowMs: flood.windowMs,
+              threshold: flood.threshold,
+              flooding: flood.flooding,
+              destCount: flood.destCount,
+              worstDestHash: flood.worstKey === null ? null : 'abc123def456',
+              worstCount: flood.worstCount,
+              lastFloodingMonotonicMs: flood.lastFloodingMonotonicMs,
+            },
+            ...(authBond === null ? {} : { authBond }),
+            ...connectionExtras,
+          };
+        },
       } as unknown as ConnectionManager,
+      // A modelled window in place of the real sampler, so no case depends on
+      // this host's actual loop lag.
+      loopLagSampler: {
+        start: vi.fn(),
+        stop: vi.fn(),
+        snapshot: () => {
+          if (windowStarved()) loop.lastStarvedMonotonicMs = performance.now();
+          return {
+            sampleCount: loop.sampleCount,
+            p95LagMs: loop.sampleCount === 0 ? null : loop.starved ? 1_008 : 2,
+            locallyStarved: windowStarved(),
+            discontinuityCount: loop.discontinuityCount,
+            lastStarvedMonotonicMs: loop.lastStarvedMonotonicMs,
+            // The modelled sampler never restarts, so a partial window after
+            // any discontinuity is still refilling from it.
+            refillingAfterDiscontinuity: loop.sampleCount < LOOP_LAG_WINDOW_SAMPLES && loop.discontinuityCount > 0,
+            minLagMs: null,
+            medianLagMs: null,
+            maxLagMs: null,
+            intervalSampleCount: loop.sampleCount,
+            snapshotSampleCount: 0,
+            lastEluUtilization: null,
+            lastCpuDeltaMs: null,
+            observerCostMs: 0,
+          };
+        },
+        beginObserverSpan: vi.fn().mockReturnValue(() => {}),
+        recordObserverSpan: vi.fn(),
+        rawSamples: vi.fn().mockReturnValue([]),
+        rawSamplePage: vi.fn().mockReturnValue({
+          oldestSequence: null,
+          latestSequence: null,
+          nextAfter: 0,
+          truncated: false,
+          gap: null,
+          samples: [],
+        }),
+      } as unknown as HealthDeps['loopLagSampler'],
+      // One uncorroborated maybe_sent delivery older than the 30-minute stale
+      // bound while deliveryDebt is set; a clean ledger otherwise.
+      durability: {
+        getHealthStats: () => ({
+          oldestMaybeSentAt: null,
+          deliveryAmbiguity: {
+            readable: true,
+            uncorroboratedAmbiguous: deliveryDebt ? 1 : 0,
+            corroboratedRetained: 0,
+            oldestUncorroboratedAt: deliveryDebt
+              ? new Date(Date.now() - 31 * 60_000).toISOString().slice(0, 19).replace('T', ' ')
+              : null,
+          },
+        }),
+      } as unknown as NonNullable<HealthDeps['durability']>,
       runtime: {
         getHealthSnapshot: () => ({
           status: runtimeStatus,
           details: {
             ...(tc === null ? {} : { turnCapability: tc }),
             ...(runtimeReasons === null ? {} : { degradedReasons: runtimeReasons }),
+            ...(chatQueue === null ? {} : { queue: chatQueue }),
           },
         }),
         getFallbackState: () => (fallback === null ? null : {
@@ -7812,6 +7938,32 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
         runtimeStatus = status;
         runtimeReasons = degradedReasons;
       },
+      // A chat runtime reports degraded while chats queue (src/runtimes/chat).
+      setChatQueue: (queuedChats: number) => {
+        chatQueue = { activeChats: 1, queuedChats };
+        runtimeStatus = queuedChats > 0 ? 'degraded' : 'healthy';
+      },
+      setAuthBond: (bond: Record<string, unknown> | null) => { authBond = bond; },
+      setConnectionExtras: (extras: Record<string, unknown>) => { connectionExtras = extras; },
+      setLoopStarved: (starved: boolean) => {
+        if (windowStarved() && !starved) loop.lastStarvedMonotonicMs = performance.now();
+        loop.starved = starved;
+      },
+      stallLoop: () => {
+        if (windowStarved()) loop.lastStarvedMonotonicMs = performance.now();
+        loop.sampleCount = 0;
+        loop.discontinuityCount += 1;
+      },
+      refillLoop: (samples: number) => {
+        loop.sampleCount = Math.min(LOOP_LAG_WINDOW_SAMPLES, loop.sampleCount + samples);
+      },
+      recordDisconnect: () => disconnects.recordDisconnect(440, 'connectionReplaced'),
+      recordSends: (count: number, dest = FLOOD_DEST) => {
+        for (let sent = 0; sent < count; sent += 1) floodDetector.record(dest);
+      },
+      setDeliveryDebt: (stale: boolean) => { deliveryDebt = stale; },
+      setRetentionFailed: (failed: boolean) => { retentionFailed = failed; },
+      setBeforeConnectionRead: (hook: (() => void) | null) => { beforeConnectionRead = hook; },
     };
   }
 
@@ -7827,14 +7979,29 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     expect(json.degradation_causes).not.toContain('degradation_silence_unproven');
   }
 
-  // Deterministic clock: latch stamps read systemClock.now(), which this
-  // suite spies to real time plus a controlled offset. advanceClock replaces
-  // real sleeps — it moves the stamp clock forward instantly — and
-  // harnessNow() builds receipt timestamps on the same offset clock, so every
-  // strictly-newer comparison is decided by the offset, never by a wall-clock
-  // race. The spy is installed per test (beforeEach) and restored (afterEach).
-  const advanceClock = (ms: number): void => { clockOffsetMs += ms; };
-  const harnessNow = (): number => Date.now() + clockOffsetMs;
+  // Deterministic clocks: Date and performance are frozen per test
+  // (beforeEach), so latch stamps, hold marks and receipt timestamps move only
+  // here, and real elapsed time never decides a strictly-newer or
+  // hold-boundary check. advanceClock is time passing: both clocks move.
+  // stepWallClock moves only the wall clock, as a host clock step does.
+  const advanceClock = (ms: number): void => { vi.advanceTimersByTime(ms); };
+  const stepWallClock = (ms: number): void => { vi.setSystemTime(Date.now() + ms); };
+  const harnessNow = (): number => Date.now();
+
+  // Test-owned windows and holds; tests/core/health-reason-hold.test.ts pins
+  // the holds to the source constants and the windows to their producers.
+  const MINUTE_MS = 60_000;
+  const CHURN_WINDOW_MS = 10 * 60_000;
+  const FLOOD_WINDOW_MS = 5 * 60_000;
+  const STARVATION_HOLD_MS = 5 * 60_000;
+  const CHURN_HOLD_MS = 10 * 60_000;
+  const FLOOD_HOLD_MS = 5 * 60_000;
+  // The producers extend each hold by 1% of its window for clock drift.
+  const CHURN_DRIFT_MS = 6_000;
+  const FLOOD_DRIFT_MS = 3_000;
+  const FLOOD_THRESHOLD = 20;
+  const FLOOD_DEST = '15551230009@s.whatsapp.net';
+  const SECOND_FLOOD_DEST = '15551230010@s.whatsapp.net';
 
   // Seed a turn-class latch (every latched reason turn-provable).
   async function seedTurnClassLatch(h: Awaited<ReturnType<typeof buildLatchHarness>>): Promise<void> {
@@ -8303,6 +8470,998 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const third = JSON.parse((await healthReq(h.port)).body);
       expectLatched(third);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // An auto-compact backoff is recomputed by the runtime on every snapshot and
+  // suppresses only new compactions, never turns. Latching it gave the latch a
+  // reason no turn receipt can prove, so a live agent instance that served
+  // normally read degradation_silence_unproven until its process restarted.
+  it('an auto-compact backoff episode, then a fresh primary turn: health reads healthy', async () => {
+    const h = await buildLatchHarness();
+    try {
+      h.setRuntimeSnapshot('degraded', ['auto_compact_backoff']);
+      const first = JSON.parse((await healthReq(h.port)).body);
+      expect(first.status).toBe('degraded');
+      expect(first.status_reasons).toContain('runtime.auto_compact_backoff');
+
+      // The backoff window ends, then the instance serves a primary-route turn.
+      h.setRuntimeSnapshot('healthy', null);
+      await healthReq(h.port);
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const afterTurn = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(afterTurn);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a backoff-only evaluation does not replace a turn-class latch with a set no turn can prove', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      // A full-visibility evaluation replaces the latched set with the reasons
+      // it observes. When the backoff is the ONLY reason, latching it would
+      // swap a provable set for an unprovable one.
+      h.setRuntimeSnapshot('degraded', ['auto_compact_backoff']);
+      const second = JSON.parse((await healthReq(h.port)).body);
+      expect(second.status).toBe('degraded');
+      expect(second.status_reasons).toContain('runtime.auto_compact_backoff');
+      expect(second.status_reasons).not.toContain('turn_capability_degraded');
+
+      // Window over: the turn-class latch still stands, because nothing has
+      // proven the turn pipeline yet...
+      h.setRuntimeSnapshot('healthy', null);
+      const third = JSON.parse((await healthReq(h.port)).body);
+      expectLatched(third);
+
+      // ...and a fresh primary receipt proves it and releases.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const fourth = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(fourth);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a primary receipt that arrives DURING a backoff releases a turn-class latch once the window ends', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      h.setRuntimeSnapshot('degraded', ['auto_compact_backoff']);
+      const windowOpen = JSON.parse((await healthReq(h.port)).body);
+      expect(windowOpen.status_reasons).toContain('runtime.auto_compact_backoff');
+
+      // A primary-route turn completes while the window is still open. The
+      // backoff is reported, so no release is attempted on this evaluation.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const receiptInWindow = JSON.parse((await healthReq(h.port)).body);
+      expect(receiptInWindow.status).toBe('degraded');
+      expect(receiptInWindow.status_reasons).toEqual(['runtime.auto_compact_backoff']);
+
+      // The window ends. Backoff-only evaluations never advanced the latch
+      // point, so the receipt from inside the window is newer than it and
+      // releases the latch with no further turn.
+      h.setRuntimeSnapshot('healthy', null);
+      const windowEnded = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(windowEnded);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // Never worse than base: every literal the agent runtime can put in
+  // degradedReasons (getHealthSnapshot, both session-scope branches, plus the
+  // account-identity reasons) is classified here on purpose. Directly
+  // re-probed reasons never arm the latch; the fallback-window reason, provable
+  // by construction of the release guard, latches and releases on a fresh
+  // primary receipt; every other reason latches and a turn does not release it.
+  // Test-owned literals: moving any reason between the sets fails its row, so
+  // a membership change has to be a deliberate edit to this table. The
+  // completeness test below fails when the runtime gains a reason this table
+  // does not classify.
+  const RELEASED_STATE = { status: 'healthy', silenceReason: false, silenceCause: false };
+  const LATCHED_STATE = { status: 'degraded', silenceReason: true, silenceCause: true };
+  const runtimeReasonLatchTable = [
+    { reason: 'auto_compact_backoff', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'turn_finalization_debt', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'completed_delivery_identity_debt', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'per_chat_session_without_owner', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'per_chat_respawn_abandoned', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'agent_respawn_failed_clear_pending', kind: 'directly re-probed', afterClear: RELEASED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'provider_fallback_active', kind: 'turn-provable', afterClear: LATCHED_STATE, afterReceipt: RELEASED_STATE },
+    { reason: 'session_inactive', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'recent_crashes', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'turn_queue_halted', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'outbound_queue_poisoned', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'provider_execution_pressure', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'poll_persistence_failure', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'offline_decision_retry_exhausted', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'credential_identity_mismatch', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+    { reason: 'credential_identity_unverifiable', kind: 'latched', afterClear: LATCHED_STATE, afterReceipt: LATCHED_STATE },
+  ];
+
+  it('the runtime-reason table classifies every runtime reason the cause registry names', () => {
+    // The registry's runtime.* twins are exactly the runtime's degradedReasons
+    // literals: tests/core/health-cause-reason-twins.test.ts fails on a pushed
+    // literal no cause names and on a twin the emitting source lacks. A new runtime
+    // reason therefore fails here until it is given a row above.
+    const registered = [...new Set(
+      Object.values(HEALTH_DEGRADATION_CAUSE_REASON_TWINS)
+        .flatMap((twins) => (twins === NO_REASON_TWIN ? [] : [...twins]))
+        .filter((reason) => reason.startsWith('runtime.')),
+    )].sort();
+    expect(registered.length, 'no runtime reason twins found; the registry read is broken').toBeGreaterThanOrEqual(16);
+    expect(runtimeReasonLatchTable.map(({ reason }) => `runtime.${reason}`).sort()).toEqual(registered);
+  });
+
+  function latchState(json: Record<string, unknown>): typeof RELEASED_STATE {
+    return {
+      status: json.status as string,
+      silenceReason: (json.status_reasons as string[]).includes('degradation_silence_unproven'),
+      silenceCause: (json.degradation_causes as string[]).includes('degradation_silence_unproven'),
+    };
+  }
+
+  it.each(runtimeReasonLatchTable)(
+    'runtime.$reason ($kind) across an episode, its clear and a fresh primary receipt',
+    async ({ reason, afterClear, afterReceipt }) => {
+      const h = await buildLatchHarness();
+      try {
+        h.setRuntimeSnapshot('degraded', [reason]);
+        const episode = JSON.parse((await healthReq(h.port)).body);
+        // No reason base reports is dropped: it is visible while it holds.
+        expect(episode.status).toBe('degraded');
+        expect(episode.status_reasons).toContain(`runtime.${reason}`);
+
+        h.setRuntimeSnapshot('healthy', null);
+        const cleared = JSON.parse((await healthReq(h.port)).body);
+        expect(latchState(cleared)).toEqual(afterClear);
+
+        advanceClock(1000);
+        h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+        const receipted = JSON.parse((await healthReq(h.port)).body);
+        expect(latchState(receipted)).toEqual(afterReceipt);
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  // Start path. /health reads the auth-bond cache, which is empty until the
+  // first tree walk since process start publishes; connect-time credential
+  // writes supersede walks in flight. Until then the bond reads `unknown` with
+  // the single issue auth_tree_unobserved, the class is auth_bond_at_risk, and
+  // that reason armed a latch no turn can prove: a freshly restarted instance
+  // read latch-only while it served turns. The reason is still REPORTED while
+  // the first walk is pending; it only stays out of the latch.
+  function treeProvenance(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      source: 'cached',
+      ageMs: 1_000,
+      refreshInFlight: false,
+      refreshCount: 1,
+      lastInvalidationReason: null,
+      lastRefreshKind: 'fresh',
+      lastRefreshReason: null,
+      refreshScheduled: false,
+      nextRefreshEligibleInMs: null,
+      refreshAttemptCount: 1,
+      firstWalkPending: false,
+      ...overrides,
+    };
+  }
+  const NEVER_WALKED = { source: 'absent', ageMs: null, refreshInFlight: true, refreshCount: 0, lastRefreshKind: 'none', refreshAttemptCount: 1 };
+  const firstWalkPendingBond = (): Record<string, unknown> => makeAuthBond({
+    status: 'unknown',
+    issues: ['auth_tree_unobserved'],
+    treeHash: null,
+    treeProvenance: treeProvenance({ ...NEVER_WALKED, firstWalkPending: true }),
+  });
+  const walkedCleanBond = (): Record<string, unknown> => makeAuthBond({ treeProvenance: treeProvenance() });
+
+  it('a boot poll before the first auth-tree walk, the walk, then a primary turn: never latch-only', async () => {
+    const h = await buildLatchHarness();
+    try {
+      h.setAuthBond(firstWalkPendingBond());
+      const boot = JSON.parse((await healthReq(h.port)).body);
+      // Reported exactly as base while pending.
+      expect(boot.status).toBe('degraded');
+      expect(boot.status_reasons).toContain('auth_failure.auth_bond_at_risk');
+      expect(boot.status_reasons).not.toContain('degradation_silence_unproven');
+
+      // The first walk publishes a clean tree.
+      h.setAuthBond(walkedCleanBond());
+      const walked = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(walked);
+
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const afterTurn = JSON.parse((await healthReq(h.port)).body);
+      expectReleased(afterTurn);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // Never worse than base: every at-risk verdict that is not "first walk still
+  // pending" latches exactly as before, and a turn does not release it.
+  const authBondLatchTable = [
+    {
+      name: 'the first walk completes and finds the tree at risk',
+      steps: [
+        firstWalkPendingBond(),
+        makeAuthBond({ issues: ['auth_mode_chmod_failed:creds.json:EPERM'], treeProvenance: treeProvenance() }),
+      ],
+    },
+    {
+      name: 'the first walk never completes within the stale-risk bound',
+      steps: [
+        firstWalkPendingBond(),
+        makeAuthBond({
+          status: 'unknown',
+          issues: ['auth_tree_unobserved'],
+          treeHash: null,
+          treeProvenance: treeProvenance({ ...NEVER_WALKED, firstWalkPending: false }),
+        }),
+      ],
+    },
+    {
+      name: 'a backup capture error while the first walk is pending',
+      steps: [
+        makeAuthBond({
+          status: 'unknown',
+          issues: ['auth_tree_unobserved'],
+          treeHash: null,
+          treeProvenance: treeProvenance({ ...NEVER_WALKED, firstWalkPending: true }),
+          backup: { lastCaptureError: 'capture failed: disk full' },
+        }),
+      ],
+    },
+    {
+      name: 'a backup restore error while the first walk is pending',
+      steps: [
+        makeAuthBond({
+          status: 'unknown',
+          issues: ['auth_tree_unobserved'],
+          treeHash: null,
+          treeProvenance: treeProvenance({ ...NEVER_WALKED, firstWalkPending: true }),
+          backup: { lastRestoreError: 'restore failed: verification mismatch' },
+        }),
+      ],
+    },
+    {
+      name: 'a published walk that aged past the stale-risk bound',
+      steps: [
+        makeAuthBond({
+          status: 'unknown',
+          issues: ['auth_tree_stale:130000'],
+          treeProvenance: treeProvenance({ source: 'stale', ageMs: 130_000 }),
+        }),
+      ],
+    },
+    {
+      name: 'a transient credential read after a completed walk',
+      steps: [
+        makeAuthBond({
+          status: 'invalid',
+          issues: ['creds_json_read_transient:EAGAIN'],
+          treeProvenance: treeProvenance(),
+          transientReadPersistent: false,
+        }),
+      ],
+    },
+    {
+      name: 'a transient credential read while the first walk is pending',
+      steps: [
+        makeAuthBond({
+          status: 'invalid',
+          issues: ['creds_json_read_transient:EAGAIN'],
+          treeHash: null,
+          treeProvenance: treeProvenance({ ...NEVER_WALKED, firstWalkPending: true }),
+          transientReadPersistent: false,
+        }),
+      ],
+    },
+  ];
+
+  it.each(authBondLatchTable)('auth bond: $name latches as base', async ({ steps }) => {
+    const h = await buildLatchHarness();
+    try {
+      for (const bond of steps) {
+        h.setAuthBond(bond);
+        const episode = JSON.parse((await healthReq(h.port)).body);
+        expect(episode.status).toBe('degraded');
+        expect(episode.status_reasons).toContain('auth_failure.auth_bond_at_risk');
+      }
+
+      h.setAuthBond(walkedCleanBond());
+      const cleared = JSON.parse((await healthReq(h.port)).body);
+      expect(latchState(cleared)).toEqual(LATCHED_STATE);
+
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const receipted = JSON.parse((await healthReq(h.port)).body);
+      expect(latchState(receipted)).toEqual(LATCHED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('the latch-set log line names the latched reason codes, sorted', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      // A re-probed reason in the same evaluation is reported but not latched,
+      // so it must not appear in the logged set either.
+      h.setRuntimeSnapshot('degraded', ['turn_queue_halted', 'auto_compact_backoff', 'recent_crashes']);
+      const armed = JSON.parse((await healthReq(h.port)).body);
+      expect(armed.status).toBe('degraded');
+
+      const latchSetLines = healthLogger.info.mock.calls
+        .slice(callsBefore)
+        .filter((call) => call[1] === 'degradation silence latch set');
+      expect(latchSetLines).toHaveLength(1);
+      expect(latchSetLines[0]![0]).toEqual({
+        instance: expect.any(String),
+        reasons: ['runtime.recent_crashes', 'runtime.turn_queue_halted'],
+      });
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // Early reasons recomputed from live or durable state on every evaluation.
+  // Each used to enter the latch, and none is turn-provable, so once the
+  // condition cleared the instance read latch-only until restart: a live agent
+  // instance did after a single starved health read. They now never enter the
+  // latch and never open its arm gate. The three windowed ones (starvation,
+  // churn, flood) stay reported until a hold has passed since the condition
+  // last held, as the producer records it, so detection does not depend on
+  // when /health is read; delivery debt has no hold. The holds run on the
+  // monotonic clock. Every boundary below is exact: the frozen clocks make
+  // real elapsed time irrelevant.
+  type LatchHarness = Awaited<ReturnType<typeof buildLatchHarness>>;
+  async function poll(h: LatchHarness): Promise<Record<string, unknown>> {
+    return JSON.parse((await healthReq(h.port)).body) as Record<string, unknown>;
+  }
+  // Held, not latched: the reason itself is reported, never the silence reason.
+  function expectHeld(json: Record<string, unknown>, reason: string): void {
+    expect(json.status).toBe('degraded');
+    expect(json.status_reasons).toContain(reason);
+    expect(json.status_reasons).not.toContain('degradation_silence_unproven');
+  }
+  function disconnectCount(json: Record<string, unknown>): number {
+    const whatsapp = json.whatsapp as { connection: { recent_disconnects: { count: number } } };
+    return whatsapp.connection.recent_disconnects.count;
+  }
+  function latchSetReasons(callsBefore: number): string[][] {
+    return healthLogger.info.mock.calls
+      .slice(callsBefore)
+      .filter((call) => call[1] === 'degradation silence latch set')
+      .map((call) => (call[0] as { reasons: string[] }).reasons);
+  }
+
+  const reprobedEarlyReasonTable: Array<{
+    reason: string;
+    holdMs: number;
+    begin: (h: LatchHarness) => void;
+    // Ends the live condition and returns how long ago it last held: negative
+    // while a producer's drift-extended held-until is still ahead.
+    end: (h: LatchHarness) => number;
+  }> = [
+    {
+      reason: 'event_loop_starvation',
+      holdMs: STARVATION_HOLD_MS,
+      begin: (h) => h.setLoopStarved(true),
+      // A full window of on-time samples, with no discontinuity.
+      end: (h) => { h.setLoopStarved(false); return 0; },
+    },
+    {
+      reason: 'connection_churn',
+      holdMs: CHURN_HOLD_MS,
+      // Three disconnects hold churn until they leave the window, inclusive,
+      // plus the drift extension.
+      begin: (h) => {
+        for (let n = 0; n < 3; n += 1) h.recordDisconnect();
+      },
+      end: () => { advanceClock(CHURN_WINDOW_MS + 1); return 1 - CHURN_DRIFT_MS; },
+    },
+    {
+      reason: 'outbound_flood',
+      holdMs: FLOOD_HOLD_MS,
+      begin: (h) => h.recordSends(FLOOD_THRESHOLD),
+      end: () => { advanceClock(FLOOD_WINDOW_MS + 1); return 1 - FLOOD_DRIFT_MS; },
+    },
+    {
+      reason: 'durability_delivery_debt',
+      holdMs: 0,
+      begin: (h) => h.setDeliveryDebt(true),
+      end: (h) => { h.setDeliveryDebt(false); return 0; },
+    },
+  ];
+
+  it.each(reprobedEarlyReasonTable)(
+    '$reason alone never strands the latch: healthy with no turn once its hold ($holdMs ms) has passed',
+    async ({ reason, holdMs, begin, end }) => {
+      const h = await buildLatchHarness();
+      try {
+        begin(h);
+        // Reported exactly as base while it holds.
+        expectHeld(await poll(h), reason);
+
+        const sinceLastHeldMs = end(h);
+        const cleared = await poll(h);
+        if (holdMs > 0) {
+          // Still reported once the live condition has ended, as the reason
+          // itself and never as the silence reason, until exactly one hold
+          // after the condition last held.
+          expectHeld(cleared, reason);
+          advanceClock(holdMs - sinceLastHeldMs - 1);
+          expectHeld(await poll(h), reason);
+          advanceClock(1);
+          expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+        } else {
+          expect(latchState(cleared)).toEqual(RELEASED_STATE);
+        }
+
+        advanceClock(1000);
+        h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+        expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  it('recurring loop stalls over 10 s keep event_loop_starvation reported; it clears a hold after the last unreadable poll, with no turn', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // On-time samples between stalls: a full window reads clear.
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      let lastDetectionAtMs = 0;
+      // A stall every 30 s for 6 minutes, longer than the hold, polled every
+      // 5 s while 10 samples arrive per poll interval.
+      for (let stall = 0; stall < 12; stall += 1) {
+        h.stallLoop();
+        // A discontinuity since the last poll: the emptied window is unreadable.
+        expectHeld(await poll(h), 'event_loop_starvation');
+        for (let step = 1; step <= 5; step += 1) {
+          advanceClock(5_000);
+          h.refillLoop(10);
+          // Step 1 reads a partial window after the reset (unreadable, so the
+          // condition holds); later steps read a full clean window, reported
+          // from the hold.
+          if (step === 1) lastDetectionAtMs = harnessNow();
+          expectHeld(await poll(h), 'event_loop_starvation');
+        }
+        advanceClock(5_000);
+      }
+
+      advanceClock(lastDetectionAtMs + STARVATION_HOLD_MS - 1 - harnessNow());
+      expectHeld(await poll(h), 'event_loop_starvation');
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it.each([
+    { period: '4 minutes', periodMs: 4 * MINUTE_MS, churnAtMinute8: true },
+    { period: '4.9 minutes', periodMs: 4.9 * MINUTE_MS, churnAtMinute8: false },
+  ])(
+    'a connection flapping every $period reads connection_churn at sparse polls (minutes 8, 19, 31) and clears exactly one hold after it last held',
+    async ({ periodMs, churnAtMinute8 }) => {
+      const h = await buildLatchHarness();
+      try {
+        const startMs = harnessNow();
+        const at = (offsetMs: number): void => advanceClock(startMs + offsetMs - harnessNow());
+        const flaps: number[] = [];
+        for (let t = 0; t <= 31 * MINUTE_MS; t += periodMs) flaps.push(t);
+        const polls = [8, 19, 31].map((minute) => minute * MINUTE_MS);
+        // A disconnect and a poll at the same instant: the disconnect first.
+        const timeline = [
+          ...flaps.map((t) => ({ t, flap: true })),
+          ...polls.map((t) => ({ t, flap: false })),
+        ].sort((a, b) => a.t - b.t || Number(b.flap) - Number(a.flap));
+        let polledBelowThreshold = false;
+        for (const { t, flap } of timeline) {
+          at(t);
+          if (flap) {
+            h.recordDisconnect();
+            continue;
+          }
+          const json = await poll(h);
+          if (t === 8 * MINUTE_MS && !churnAtMinute8) {
+            // Only two disconnects so far: no churn yet.
+            expect(latchState(json)).toEqual(RELEASED_STATE);
+            continue;
+          }
+          polledBelowThreshold ||= disconnectCount(json) < 3;
+          expectHeld(json, 'connection_churn');
+        }
+        expect(polledBelowThreshold, 'every poll saw 3 in the window; the case tests nothing').toBe(true);
+
+        // Churn last held until the third-newest disconnect left the window,
+        // plus the drift extension.
+        const lastHeldMs = flaps[flaps.length - 3]! + CHURN_WINDOW_MS + CHURN_DRIFT_MS;
+        at(lastHeldMs + CHURN_HOLD_MS - 1);
+        expectHeld(await poll(h), 'connection_churn');
+        at(lastHeldMs + CHURN_HOLD_MS);
+        expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  it('a starved episode that begins and ends between two polls is reported at the next poll within the hold', async () => {
+    const h = await buildLatchHarness();
+    try {
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      advanceClock(MINUTE_MS);
+      h.setLoopStarved(true);
+      advanceClock(MINUTE_MS);
+      h.setLoopStarved(false);
+      const endedAtMs = harnessNow();
+      advanceClock(2 * MINUTE_MS);
+      expectHeld(await poll(h), 'event_loop_starvation');
+      advanceClock(endedAtMs + STARVATION_HOLD_MS - 1 - harnessNow());
+      expectHeld(await poll(h), 'event_loop_starvation');
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a flood that begins and ends between two polls is reported at the next poll within the hold', async () => {
+    const h = await buildLatchHarness();
+    try {
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      advanceClock(MINUTE_MS);
+      h.recordSends(FLOOD_THRESHOLD);
+      // The burst floods until its sends leave the window, inclusive, plus the
+      // drift extension.
+      const endedAtMs = harnessNow() + FLOOD_WINDOW_MS + FLOOD_DRIFT_MS;
+      advanceClock(7 * MINUTE_MS);
+      expectHeld(await poll(h), 'outbound_flood');
+      advanceClock(endedAtMs + FLOOD_HOLD_MS - 1 - harnessNow());
+      expectHeld(await poll(h), 'outbound_flood');
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // Wall clock steps. A step does not move a hold already recorded on the
+  // monotonic clock; it moves base's own wall-clock windows (count,
+  // flooding), which alone decide whether churn or a flood exists.
+  const windowedStepTable: Array<{
+    reason: string;
+    windowMs: number;
+    holdMs: number;
+    driftMs: number;
+    begin: (h: LatchHarness) => void;
+  }> = [
+    {
+      reason: 'connection_churn',
+      windowMs: CHURN_WINDOW_MS,
+      holdMs: CHURN_HOLD_MS,
+      driftMs: CHURN_DRIFT_MS,
+      begin: (h) => {
+        for (let n = 0; n < 3; n += 1) h.recordDisconnect();
+      },
+    },
+    {
+      reason: 'outbound_flood',
+      windowMs: FLOOD_WINDOW_MS,
+      holdMs: FLOOD_HOLD_MS,
+      driftMs: FLOOD_DRIFT_MS,
+      begin: (h) => h.recordSends(FLOOD_THRESHOLD),
+    },
+  ];
+
+  it.each(windowedStepTable)(
+    '$reason that has cleared stays healthy at every poll after the wall clock steps back an hour',
+    async ({ reason, windowMs, holdMs, driftMs, begin }) => {
+      const h = await buildLatchHarness();
+      try {
+        begin(h);
+        expectHeld(await poll(h), reason);
+        advanceClock(windowMs + driftMs + holdMs + MINUTE_MS);
+        expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+
+        stepWallClock(-60 * MINUTE_MS);
+        for (let minute = 0; minute <= 70; minute += 1) {
+          expect(latchState(await poll(h)), `minute ${minute} after the step`).toEqual(RELEASED_STATE);
+          advanceClock(MINUTE_MS);
+        }
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  it.each(windowedStepTable)(
+    '$reason stays held through a forward wall step until one hold after its held-until',
+    async ({ reason, windowMs, holdMs, driftMs, begin }) => {
+      const h = await buildLatchHarness();
+      try {
+        begin(h);
+        expectHeld(await poll(h), reason);
+        // Base's wall-clock window drops the entries; the recorded hold does not.
+        stepWallClock(60 * MINUTE_MS);
+        expectHeld(await poll(h), reason);
+        advanceClock(windowMs + driftMs + holdMs - 1);
+        expectHeld(await poll(h), reason);
+        advanceClock(1);
+        expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  // A new episode after a backward step, read only once its window has
+  // emptied, is held until one hold after its own held-until. The poller
+  // reads right after the step, as it would every 5 s.
+  it('a new churn episode after the wall clock steps back is held until one hold after its own held-until', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // 12:00: three disconnects, held until 12:10; healthy at 12:21.
+      for (let n = 0; n < 3; n += 1) h.recordDisconnect();
+      expectHeld(await poll(h), 'connection_churn');
+      advanceClock(21 * MINUTE_MS);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      // Stepped back to 11:21; three new disconnects at 11:25.
+      stepWallClock(-60 * MINUTE_MS);
+      await poll(h);
+      advanceClock(4 * MINUTE_MS);
+      for (let n = 0; n < 3; n += 1) h.recordDisconnect();
+      // 11:36: the new episode's window has emptied; it held until 11:35 plus
+      // the drift extension.
+      advanceClock(11 * MINUTE_MS);
+      const emptied = await poll(h);
+      expect(disconnectCount(emptied)).toBe(0);
+      expectHeld(emptied, 'connection_churn');
+      advanceClock(9 * MINUTE_MS + CHURN_DRIFT_MS - 1);
+      expectHeld(await poll(h), 'connection_churn');
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a new flood to another destination after the wall clock steps back is held until one hold after its own held-until', async () => {
+    const h = await buildLatchHarness();
+    try {
+      // 12:00: a burst, flooding until 12:05; healthy at 12:11.
+      h.recordSends(FLOOD_THRESHOLD);
+      expectHeld(await poll(h), 'outbound_flood');
+      advanceClock(11 * MINUTE_MS);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      // Stepped back to 11:11; a burst to another destination at 11:15.
+      stepWallClock(-60 * MINUTE_MS);
+      await poll(h);
+      advanceClock(4 * MINUTE_MS);
+      h.recordSends(FLOOD_THRESHOLD, SECOND_FLOOD_DEST);
+      // 11:21: its sends have left the window; it flooded until 11:20 plus
+      // the drift extension.
+      advanceClock(6 * MINUTE_MS);
+      expectHeld(await poll(h), 'outbound_flood');
+      advanceClock(4 * MINUTE_MS + FLOOD_DRIFT_MS - 1);
+      expectHeld(await poll(h), 'outbound_flood');
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // Base's count alone decides whether churn or a flood exists; the
+  // monotonic clock only times the hold. With no step the two clocks still
+  // disagree: Date.now() truncates to whole milliseconds while
+  // performance.now() does not (a fractional tick moves only the latter), and
+  // a pause can separate the two reads inside one record.
+  const clockDisagreementTable = [
+    {
+      reason: 'connection_churn',
+      windowMs: CHURN_WINDOW_MS,
+      holdMs: CHURN_HOLD_MS,
+      driftMs: CHURN_DRIFT_MS,
+      record: (h: LatchHarness, count: number) => { for (let n = 0; n < count; n += 1) h.recordDisconnect(); },
+      total: 3,
+      baseHolds: (json: Record<string, unknown>) => disconnectCount(json) >= 3,
+    },
+    {
+      reason: 'outbound_flood',
+      windowMs: FLOOD_WINDOW_MS,
+      holdMs: FLOOD_HOLD_MS,
+      driftMs: FLOOD_DRIFT_MS,
+      record: (h: LatchHarness, count: number) => h.recordSends(count),
+      total: FLOOD_THRESHOLD,
+      baseHolds: (json: Record<string, unknown>) =>
+        (json.whatsapp as { connection: { outbound_flood: { flooding: boolean } } }).connection.outbound_flood.flooding,
+    },
+  ];
+
+  it.each(clockDisagreementTable)(
+    '$reason that base counted, 0.8 ms over one window on the monotonic clock, is held from the first poll after',
+    async ({ reason, windowMs, holdMs, driftMs, record, total, baseHolds }) => {
+      const h = await buildLatchHarness();
+      try {
+        // (wall, monotonic) offsets: (0, 0.1), then (W/2, W/2 + 0.5), then (W, W + 0.9).
+        advanceClock(0.1);
+        record(h, 1);
+        advanceClock(windowMs / 2 + 0.4);
+        record(h, total - 2);
+        advanceClock(windowMs / 2 + 0.4);
+        record(h, 1);
+        advanceClock(1);
+        const first = await poll(h);
+        expect(baseHolds(first)).toBe(false);
+        expectHeld(first, reason);
+        // Held until one hold after the oldest entry (monotonic 0.1) left the
+        // window plus the drift extension; the first poll is at W + 1.9.
+        advanceClock(holdMs + driftMs - 2);
+        expectHeld(await poll(h), reason);
+        advanceClock(2);
+        expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  // The first clock read inside `record` returns, then `pauseMs` pass before
+  // the next read of either clock.
+  function withPauseAfterFirstClockRead(pauseMs: number, record: () => void): void {
+    const dateNow = Date.now.bind(Date);
+    const perfNow = performance.now.bind(performance);
+    let paused = false;
+    const pauseAfter = (valueMs: number): number => {
+      if (!paused) {
+        paused = true;
+        advanceClock(pauseMs);
+      }
+      return valueMs;
+    };
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => pauseAfter(dateNow()));
+    const perfSpy = vi.spyOn(performance, 'now').mockImplementation(() => pauseAfter(perfNow()));
+    try {
+      record();
+    } finally {
+      dateSpy.mockRestore();
+      perfSpy.mockRestore();
+    }
+    expect(paused, 'record read no clock').toBe(true);
+  }
+
+  it.each(clockDisagreementTable)(
+    '$reason completed by an entry with a 2 s pause between its wall and monotonic reads is held from the first poll after',
+    async ({ reason, windowMs, holdMs, driftMs, record, total, baseHolds }) => {
+      const h = await buildLatchHarness();
+      try {
+        // (wall, monotonic): (0, 0), (W/2, W/2), then (W, W + 2000).
+        record(h, 1);
+        advanceClock(windowMs / 2);
+        record(h, total - 2);
+        advanceClock(windowMs / 2);
+        withPauseAfterFirstClockRead(2_000, () => record(h, 1));
+        advanceClock(1);
+        const first = await poll(h);
+        expect(baseHolds(first)).toBe(false);
+        expectHeld(first, reason);
+        // Held until one hold after the oldest entry left the window plus the
+        // drift extension; the first poll is at W + 2001.
+        advanceClock(driftMs + holdMs - 2_002);
+        expectHeld(await poll(h), reason);
+        advanceClock(1);
+        expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      } finally {
+        await new Promise<void>((resolve) => h.server.close(() => resolve()));
+      }
+    },
+  );
+
+  // The handler's earlier work takes time before the connection read. The
+  // hold reads the clock after the producers do, so a stamp is never later
+  // than its now, and the hold runs from the held-until on that clock.
+  it('a poll that reads the connection just after churn\'s held-until clears exactly one hold after it, on the producer\'s clock', async () => {
+    const h = await buildLatchHarness();
+    try {
+      for (let n = 0; n < 3; n += 1) h.recordDisconnect();
+      const heldUntilMs = harnessNow() + CHURN_WINDOW_MS + CHURN_DRIFT_MS;
+      const skewMs = 5;
+      h.setBeforeConnectionRead(() => advanceClock(skewMs));
+      // Each poll starts skewMs before it reads the connection.
+      const pollReadingAt = async (readAtMs: number): Promise<Record<string, unknown>> => {
+        advanceClock(readAtMs - skewMs - harnessNow());
+        return poll(h);
+      };
+      // Starts before the held-until and reads the connection after it. Each
+      // later poll starts no earlier than the previous one read.
+      expectHeld(await pollReadingAt(heldUntilMs + skewMs - 1), 'connection_churn');
+      expectHeld(await pollReadingAt(heldUntilMs + CHURN_HOLD_MS - skewMs), 'connection_churn');
+      expect(latchState(await pollReadingAt(heldUntilMs + CHURN_HOLD_MS))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  // Only a reason the latch can hold opens its arm gate. A directly re-probed
+  // reason, held or live, beside a late reason arms nothing: the late reason
+  // never latched alone, and keeping a reason out of the latch must not turn
+  // it into an arming trigger.
+  it('held churn after a reconnect beside database_retention_failed arms no latch; healthy once both clear', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      h.setConnected(false);
+      h.recordDisconnect();
+      h.recordDisconnect();
+      advanceClock(9 * MINUTE_MS);
+      h.recordDisconnect();
+      expect((await poll(h)).status).toBe('unhealthy');
+      // Two minutes later the first two have left the window: churn is held.
+      advanceClock(2 * MINUTE_MS);
+      h.setConnected(true);
+      h.setRetentionFailed(true);
+      const both = await poll(h);
+      expectHeld(both, 'connection_churn');
+      expect(both.status_reasons).toContain('database_retention_failed');
+      expect(disconnectCount(both)).toBe(1);
+
+      h.setRetentionFailed(false);
+      advanceClock(CHURN_HOLD_MS);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      expect(latchSetReasons(callsBefore)).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('starvation held from a discontinuity beside the chat runtime\'s late runtime_degraded arms no latch', async () => {
+    const h = await buildLatchHarness({ instanceType: 'chat' });
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      // One stall over 10 s, refilled clean before the next poll.
+      h.stallLoop();
+      h.refillLoop(LOOP_LAG_WINDOW_SAMPLES);
+      h.setChatQueue(2);
+      const both = await poll(h);
+      expectHeld(both, 'event_loop_starvation');
+      expect(both.status_reasons).toContain('runtime_degraded');
+
+      h.setChatQueue(0);
+      advanceClock(STARVATION_HOLD_MS);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      expect(latchSetReasons(callsBefore)).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('recovery_debt_blocking beside a late reason arms no latch', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      h.setDeliveryDebt(true);
+      h.setRetentionFailed(true);
+      const both = await poll(h);
+      expect(both.status_reasons).toEqual(
+        expect.arrayContaining(['recovery_debt_blocking', 'database_retention_failed']),
+      );
+
+      h.setDeliveryDebt(false);
+      h.setRetentionFailed(false);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      expect(latchSetReasons(callsBefore)).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a latch-worthy early reason beside a late reason still arms on both, as base', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      h.setTurnCapability(degradedTurnCapability());
+      h.setRetentionFailed(true);
+      expect((await poll(h)).status).toBe('degraded');
+      expect(latchSetReasons(callsBefore)).toEqual([['database_retention_failed', 'turn_capability_degraded']]);
+
+      h.setTurnCapability(null);
+      h.setRetentionFailed(false);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a connection snapshot without its disconnect window reads connection_churn held, not clear', async () => {
+    const h = await buildLatchHarness();
+    try {
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      h.setConnectionExtras({ recentDisconnects: undefined });
+      expectHeld(await poll(h), 'connection_churn');
+      // Every unreadable poll refreshes the hold.
+      advanceClock(CHURN_HOLD_MS);
+      expectHeld(await poll(h), 'connection_churn');
+
+      h.setConnectionExtras({});
+      expectHeld(await poll(h), 'connection_churn');
+      advanceClock(CHURN_HOLD_MS);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('a flood snapshot that goes missing after being supplied reads outbound_flood held; one never supplied reads clear', async () => {
+    // A transport with no flood detector (the SMS bridge) never supplies one.
+    const never = await buildLatchHarness();
+    try {
+      never.setConnectionExtras({ outboundFlood: undefined });
+      expect(latchState(await poll(never))).toEqual(RELEASED_STATE);
+      expect(latchState(await poll(never))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => never.server.close(() => resolve()));
+    }
+
+    const h = await buildLatchHarness();
+    try {
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      h.setConnectionExtras({ outboundFlood: undefined });
+      expectHeld(await poll(h), 'outbound_flood');
+
+      h.setConnectionExtras({});
+      advanceClock(FLOOD_HOLD_MS);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('starvation beside a turn-provable reason arms on the provable reason only, and a turn releases it', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      h.setLoopStarved(true);
+      h.setTurnCapability(degradedTurnCapability());
+      const episode = await poll(h);
+      expect(episode.status_reasons).toEqual(
+        expect.arrayContaining(['event_loop_starvation', 'turn_capability_degraded']),
+      );
+      const latchSetLines = healthLogger.info.mock.calls
+        .slice(callsBefore)
+        .filter((call) => call[1] === 'degradation silence latch set');
+      expect(latchSetLines).toHaveLength(1);
+      expect((latchSetLines[0]![0] as { reasons: string[] }).reasons).toEqual(['turn_capability_degraded']);
+
+      h.setLoopStarved(false);
+      h.setTurnCapability(null);
+      // Starvation is still held, so the turn reason's latch waits beneath it.
+      const cleared = await poll(h);
+      expectHeld(cleared, 'event_loop_starvation');
+      expect(cleared.status_reasons).not.toContain('turn_capability_degraded');
+      advanceClock(STARVATION_HOLD_MS);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      const receipted = JSON.parse((await healthReq(h.port)).body);
+      expect(latchState(receipted)).toEqual(RELEASED_STATE);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }

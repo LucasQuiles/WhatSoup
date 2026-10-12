@@ -73,6 +73,7 @@ import {
   buildLoopLagSamplesResponse,
   parseLoopLagSamplesQuery,
 } from './loop-lag-samples-endpoint.ts';
+import { RECENT_DISCONNECT_DEGRADED_THRESHOLD, WindowedReasonHolds } from './health-reason-hold.ts';
 import type { ConsolidationHealth } from './memory-consolidation-contract.ts';
 import type { DatabaseRetentionHealth } from './database-retention.ts';
 import type { StartupNotificationHealth } from './startup-notification-controller.ts';
@@ -250,7 +251,9 @@ export interface DegradationLatchEntry {
  * (enrichment, memory, durability, flood/churn, auth-bond, the other
  * `runtime.*` specifics) are NOT proven recovered by a turn, so a latch
  * carrying any of them never releases on a turn receipt — a turn proves the
- * turn pipeline only. The task-21 identity reasons
+ * turn pipeline only. Those recomputed from live or durable state on every
+ * evaluation never enter a latch at all (DIRECTLY_REPROBED_STATUS_REASONS
+ * below). The task-21 identity reasons
  * (`runtime.credential_identity_mismatch` / `_unverifiable`) are deliberately
  * absent: a turn proves the credential works, not whose it is. Named and
  * exported so review can adjust membership without touching the release
@@ -314,13 +317,32 @@ export const TURN_PROVABLE_STATUS_REASONS: ReadonlySet<string> = new Set([
  *     snapshot from the durable completed-delivery identity admissions; it
  *     clears when the blocking count reaches zero, and an unreadable count
  *     fails closed under recovery_debt_blocking the same way.
+ *   - `runtime.auto_compact_backoff` is recomputed on every snapshot from the
+ *     runtime's own auto-compact state: a scope counts while its rapid re-arm
+ *     count is positive and its cooldown deadline is still ahead of the clock.
+ *     It is therefore visible on every poll for exactly as long as a backoff
+ *     window is open and gone when the window ends. A backoff suppresses only
+ *     new compactions, never turns, so a turn proves nothing about it; another
+ *     ineffective compaction re-enters backoff and the reason returns on the
+ *     next poll.
+ *   - `event_loop_starvation`, `connection_churn` and `outbound_flood` are
+ *     rolling-window verdicts: the loop-lag sampler's 20 samples, 10 minutes
+ *     of disconnects and the flood detector's 5 minutes. A recurring fault
+ *     can leave a window between detections, so each stays reported until a
+ *     hold has passed since the condition last held, as its producer records
+ *     it whether or not health was reading, and an unreadable window or a
+ *     missing input counts as holding (health-reason-hold.ts). The hold ends
+ *     on its own; no latch is needed.
+ *   - `durability_delivery_debt` is recomputed on every evaluation from the
+ *     durable delivery-ambiguity read, with no hold. It implies
+ *     recovery_debt_blocking (deliveryBlocking); blocking can hold without it.
  *
  * Why these need it: none is in TURN_PROVABLE_STATUS_REASONS above — a turn
  * in an unrelated chat proves nothing about a per-chat ownership map or a
- * durable recovery ledger — so a latch carrying one could never be released
- * by the only release channel that exists, and the instance would report
- * degraded until process restart even after the runtime had repaired itself
- * and its own snapshot read healthy. */
+ * durable recovery ledger — so a latch carrying one could never be released,
+ * and the instance would read degraded until restart after its own repair.
+ * None opens the latch's arm gate either (isLatchable in the health handler),
+ * so none can arm a latch for a late reason seen beside it. */
 export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'runtime.agent_respawn_failed_clear_pending',
   'runtime.per_chat_session_without_owner',
@@ -328,6 +350,11 @@ export const DIRECTLY_REPROBED_STATUS_REASONS: ReadonlySet<string> = new Set([
   'recovery_debt_blocking',
   'runtime.turn_finalization_debt',
   'runtime.completed_delivery_identity_debt',
+  'runtime.auto_compact_backoff',
+  'event_loop_starvation',
+  'connection_churn',
+  'outbound_flood',
+  'durability_delivery_debt',
 ]);
 
 /** The primary route the latch release compares a receipt against: the
@@ -886,7 +913,6 @@ function agentRuntimeDetailsForHealth(
 }
 
 export const ENRICHMENT_STALE_MS = 10 * MS_PER_MINUTE; // 10 minutes
-const RECENT_DISCONNECT_DEGRADED_THRESHOLD = 3;
 // #1433 / B21-D — a post-first-turn error in one of these TRANSIENT, self-clearing
 // classes is benign-by-default: `empty-output` (the model returned one empty turn
 // and typically recovers on the next) plus the W1-T6-backfilled `transient-network`
@@ -1202,6 +1228,23 @@ function classifyAuthFailure(connectionState: ConnectionStateSnapshot): AuthFail
   return 'none';
 }
 
+/** #2280 start path: the at-risk verdict that means ONLY "the first auth-tree
+ * walk since process start has not published yet" (the producer's
+ * `firstWalkPending`, bounded by its stale-risk bound): status 'unknown', the
+ * single issue auth_tree_unobserved, and no backup capture or restore error.
+ * The reason is still reported, but it must not arm or enter the silence
+ * latch: the first completed walk settles it either way and no turn proves it.
+ * A published walk, a transient read, a harden finding, a backup error or the
+ * bound passing keeps base behaviour. */
+export function isAuthBondFirstWalkPending(authBond: ConnectionStateSnapshot['authBond']): boolean {
+  return authBond?.treeProvenance?.firstWalkPending === true
+    && authBond.status === 'unknown'
+    && authBond.issues.length === 1
+    && authBond.issues[0] === 'auth_tree_unobserved'
+    && authBond.backup.lastCaptureError === null
+    && authBond.backup.lastRestoreError === null;
+}
+
 function classifyDisconnect(connectionState: ConnectionStateSnapshot): DisconnectClass {
   if (isFullyConnected(connectionState)) return 'none';
   const statusCode = connectionState.lastStatusCode ?? undefined;
@@ -1342,6 +1385,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
   // server instance: module scope would leak degradation across server
   // lifetimes that share an instance name (observed as cross-test pollution).
   const recentlyDegraded = new Map<string, DegradationLatchEntry>();
+  // Bounded hold for the windowed reasons, scoped per server like the latch.
+  const windowedReasonHolds = new WindowedReasonHolds();
   // Shared by requireAuth and hasHealthAuth — one scoped, cached resolution
   // path for every protected route on this server (see HealthAuthState).
   const healthAuth: HealthAuthState = { instanceName: deps.instanceName };
@@ -2073,6 +2118,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // this reflects lag accumulated up to the moment the request arrived, not
       // lag this handler's own (synchronous) work might introduce.
       const loopLag = loopLagSampler.snapshot();
+      // Read once per evaluation, on the holds' monotonic clock. The reason and its
+      // cause use the held value; the body's locally_starved and the warning keep the raw verdict.
+      const reasonHoldNowMs = performance.now();
+      const eventLoopStarvationHeld = windowedReasonHolds.starvation(loopLag, reasonHoldNowMs);
       const loopLagRawPage = loopLagSampler.rawSamplePage({ limit: 1 });
       if (loopLag.locallyStarved) {
         const warningNowMs = loopLagWarningNow();
@@ -2131,16 +2180,31 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const connectionState = readHealthConnectionState(deps.connectionManager);
       const authBond = formatAuthBond(connectionState);
       const authFailureClass = classifyAuthFailure(connectionState);
+      // Reported as base, kept out of the silence latch (latch maintenance).
+      const authBondFirstWalkPending = authFailureClass === 'auth_bond_at_risk'
+        && isAuthBondFirstWalkPending(connectionState.authBond);
+      // #2280: a reason the latch may hold; only these open its arm gate. Not
+      // the silence or floor literals, a directly re-probed reason (no release
+      // channel could clear it; see DIRECTLY_REPROBED_STATUS_REASONS), or a
+      // first-walk auth_bond_at_risk.
+      const isLatchable = (reason: string): boolean => reason !== 'degradation_silence_unproven'
+        && reason !== 'unclassified'
+        && !DIRECTLY_REPROBED_STATUS_REASONS.has(reason)
+        && !(authBondFirstWalkPending && reason === 'auth_failure.auth_bond_at_risk');
       const disconnectClass = classifyDisconnect(connectionState);
 
       const isConnected = isFullyConnected(connectionState);
       const exposeDisconnectMetadata = !isConnected;
       const recentDisconnects = connectionState.recentDisconnects ?? emptyRecentDisconnects();
-      const connectionChurnIsDegraded =
-        isConnected && recentDisconnects.count >= RECENT_DISCONNECT_DEGRADED_THRESHOLD;
+      // Both holds observe before the connected gate, so they see every detection,
+      // on a monotonic clock read after the producers' own.
+      const connectionHoldNowMs = performance.now();
+      const connectionChurnHeld = windowedReasonHolds.churn(connectionState.recentDisconnects, connectionHoldNowMs);
+      const connectionChurnIsDegraded = isConnected && connectionChurnHeld;
       // PR-G — an active outbound flood degrades health so fleet pollers see it.
       const outboundFlood = connectionState.outboundFlood ?? null;
-      const outboundFloodIsDegraded = isConnected && (outboundFlood?.flooding ?? false);
+      const outboundFloodHeld = windowedReasonHolds.flood(connectionState.outboundFlood, connectionHoldNowMs);
+      const outboundFloodIsDegraded = isConnected && outboundFloodHeld;
       const isRecoveringConnection =
         connectionState.state === 'connecting'
         || connectionState.state === 'reconnecting'
@@ -2316,12 +2380,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // latched reason set; a short-circuit branch (auth / not-connected /
       // runtime-unhealthy) never evaluated the other sources and must UNION.
       let wentThroughDegradedPath = false;
-      // #2280: real EARLY-path reasons observed on the degraded evaluation
-      // path, captured at that point — the ONLY source that may ARM a new
-      // latch. Late-source-only reasons never arm (they are directly probed
-      // every evaluation, not silence-prone, so a transient late blip must
-      // clear to healthy on the next poll); the unhealthy short-circuit
-      // branches never arm either.
+      // #2280: true when the degraded evaluation path observed an EARLY-path
+      // reason the latch may hold (isLatchable), captured at that point: the
+      // gate for ARMING a new latch. The unhealthy short-circuit branches never
+      // arm. Late-source reasons do not open the gate (they are directly
+      // probed every evaluation, not silence-prone, so a transient late blip
+      // must clear to healthy on the next poll), and neither does an early
+      // reason kept out of the latch: beside one, a late reason never latched
+      // alone, and keeping a reason out must not make it an arming trigger.
       let latchArmEligible = false;
       // #2280: a release earlier in THIS evaluation is provisional — if a
       // late-computed reason turns up before emit, latch maintenance RESTORES
@@ -2361,7 +2427,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           statusReasons.push(...(reasons.length > 0 ? reasons.map((reason) => `runtime.${reason}`) : ['agent_runtime_degraded']));
         }
         if (turnCapabilityIsDegraded) statusReasons.push('turn_capability_degraded');
-        if (loopLag.locallyStarved) statusReasons.push('event_loop_starvation');
+        if (eventLoopStarvationHeld) statusReasons.push('event_loop_starvation');
         if (recoveryDebt.service_blocking) statusReasons.push('recovery_debt_blocking');
         if (durabilityDebtIsDegraded) statusReasons.push('durability_delivery_debt');
         // #2280: silence from child processes is not proof of recovery.
@@ -2379,8 +2445,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // cause section's fallbackWindowActive keeps its wall-clock check for
         // reporting; it has no release authority.)
         wentThroughDegradedPath = true;
-        latchArmEligible = statusReasons.length > 0;
-        if (!latchArmEligible) {
+        latchArmEligible = statusReasons.some(isLatchable);
+        // Release is still attempted only on an evaluation with no early reason.
+        if (statusReasons.length === 0) {
           const primaryRoute =
             fallbackState !== null && fallbackState.fallbackActiveUntil === null
               ? {
@@ -2719,7 +2786,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (memoryConsolidationIsDegraded) addDegradationCause('memory_consolidation_degraded');
       if (connectionChurnIsDegraded) addDegradationCause('connection_churn');
       if (outboundFloodIsDegraded) addDegradationCause('outbound_flood');
-      if (loopLag.locallyStarved) addDegradationCause('event_loop_starved');
+      if (eventLoopStarvationHeld) addDegradationCause('event_loop_starved');
       if (durabilityDebtIsDegraded) addDegradationCause('durability_debt');
       if (durabilityEvidenceUnreadable) addDegradationCause('durability_evidence_unreadable');
       if (databaseRetentionFailed) addDegradationCause('database_retention_failed');
@@ -2861,27 +2928,20 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       //   RESTORE (release earlier this evaluation + late reasons): the
       //     provisional release comes back as the prior set ∪ the observed
       //     reasons, advanced point — never a new arm.
-      //   ARM (no latch): only from real EARLY-path reasons on the
-      //     full-visibility degraded path (latchArmEligible), and only when
-      //     the FINAL verdict is degraded. Late-source-only reasons never
-      //     arm — they are directly probed every evaluation, not
+      //   ARM (no latch): only when the full-visibility degraded path saw a
+      //     latchable EARLY-path reason (latchArmEligible), and only when the
+      //     FINAL verdict is degraded. Late-source reasons never arm on their
+      //     own — they are directly probed every evaluation, not
       //     silence-prone, so a transient late blip clears to healthy on the
-      //     next poll. An unhealthy final verdict never arms either
+      //     next poll — nor beside an early reason the latch cannot hold. An
+      //     unhealthy final verdict never arms either
       //     (unhealthy verdicts advance/restore only): arming there would
       //     contradict that scoping, and when a late reassignment like
       //     schema_future replaced the reason list the armed set would even
       //     have lost the early evidence. The silence window this leaves —
       //     early-degraded evidence on an unhealthy-verdict evaluation arms
       //     nothing — is exactly base behavior for every unhealthy verdict.
-      const realReasons = statusReasons.filter(
-        (reason) => reason !== 'degradation_silence_unproven'
-          && reason !== 'unclassified'
-          // Directly re-probed reasons never arm and are never latched: no
-          // release channel could ever clear them, so latching one pins the
-          // instance degraded past its own repair. See
-          // DIRECTLY_REPROBED_STATUS_REASONS.
-          && !DIRECTLY_REPROBED_STATUS_REASONS.has(reason),
-      );
+      const realReasons = statusReasons.filter(isLatchable);
       if (realReasons.length > 0) {
         const existingLatch = recentlyDegraded.get(deps.instanceName);
         if (existingLatch !== undefined) {
@@ -2895,11 +2955,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             reasons: new Set([...releasedLatchReasons, ...realReasons]),
           });
         } else if (latchArmEligible && status === 'degraded') {
-          log.info({ instance: deps.instanceName }, 'degradation silence latch set');
-          recentlyDegraded.set(deps.instanceName, {
-            latchedAtMs: systemClock.now(),
-            reasons: new Set(realReasons),
-          });
+          const reasons = new Set(realReasons);
+          // Bounded reason codes only (no chat or account identity), so a
+          // latch-only incident names the reason that armed it.
+          log.info({ instance: deps.instanceName, reasons: [...reasons].sort() }, 'degradation silence latch set');
+          recentlyDegraded.set(deps.instanceName, { latchedAtMs: systemClock.now(), reasons });
         }
       } else if (releasedLatchReasons !== null) {
         log.info({ instance: deps.instanceName }, 'degradation silence latch released: fresh primary-turn receipt');

@@ -1533,6 +1533,12 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     expect(persistedText).not.toContain(testAuthDir);
     expect(persistedText).not.toContain(testStateRoot);
     expect(persistedText).not.toContain(testDataRoot);
+    // The churn hold stamp is monotonic time, meaningless to another process:
+    // the live snapshot carries it, the persisted window keeps base's shape.
+    expect(manager.getConnectionState().recentDisconnects).toHaveProperty('lastChurnMonotonicMs');
+    expect(Object.keys(persisted.connection.recentDisconnects).sort()).toEqual(
+      ['byReason', 'count', 'lastAt', 'lastReason', 'lastStatusCode', 'windowMs'],
+    );
 
     await manager.shutdown();
   });

@@ -584,15 +584,171 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   degraded path, which checks every reason source) observes real EARLY-path
   reasons and its final verdict is `degraded`. Unhealthy verdicts and
   late-computed-only reasons (schema/durability/retention/pending-polls/fact
-  export/late runtime status — all directly probed each poll) never arm.
+  export/late runtime status — all directly probed each poll) never arm on
+  their own. Only an early reason the latch can hold opens the arm gate: a
+  never-latched reason (below), live or held, does not, and neither does a
+  first-walk `auth_bond_at_risk`. Beside one, a late reason arms nothing,
+  because it never latched alone. Base armed the late reasons in that case;
+  the change covers all six of base's own members
+  (`runtime.per_chat_session_without_owner`,
+  `runtime.per_chat_respawn_abandoned`,
+  `runtime.agent_respawn_failed_clear_pending`, `recovery_debt_blocking`,
+  `runtime.turn_finalization_debt` and
+  `runtime.completed_delivery_identity_debt`) as well as the newer ones.
 - **Never latched.** The directly re-probed reasons
   (`DIRECTLY_REPROBED_STATUS_REASONS`) never arm and never enter a latched set:
   the per-chat ownership reasons, `runtime.agent_respawn_failed_clear_pending`,
-  `recovery_debt_blocking`, `runtime.turn_finalization_debt`, and
-  `runtime.completed_delivery_identity_debt`. Each is recomputed from live or
-  durable state on every evaluation and fails closed while unreadable, so it
-  stays visible for as long as the condition lasts and clears on the first
-  poll after repair.
+  `recovery_debt_blocking`, `runtime.turn_finalization_debt`,
+  `runtime.completed_delivery_identity_debt`, `runtime.auto_compact_backoff`,
+  `durability_delivery_debt`, `event_loop_starvation`, `connection_churn`,
+  and `outbound_flood`. Each is recomputed from live or durable state on every
+  evaluation. The durable ones fail closed while unreadable (through
+  `recovery_debt_blocking`) and clear on the first poll after repair. The
+  auto-compact backoff clears when its cooldown window ends; a backoff never
+  blocks turns, so a turn could not have proven it. `durability_delivery_debt`
+  implies `recovery_debt_blocking`, but blocking can hold without it (a
+  continuity gap or unreadable runtime evidence, for example).
+- **Windowed reasons hold.** Starvation, churn and flood are rolling windows,
+  and a recurring fault can leave a window between detections. Each therefore
+  stays reported, with the same reason and cause, until a hold has passed
+  since the condition was last detected. It then clears with no turn
+  (`src/core/health-reason-hold.ts`). The producer records when the condition
+  last held as it computes it, so detection does not depend on when or how
+  often `/health` is read. Health also counts the evaluations at which it sees
+  the condition, or an unreadable input, itself. Each hold, and when the
+  reason clears:
+  - `connection_churn`, 10 minutes (the length of the disconnect window).
+    Churn exists while the window counts 3 disconnects, so it ends when the
+    third-newest counted one leaves the window. The reason clears 10 minutes
+    after that, plus a clock-drift extension of 1% of the window (6 s), or 10
+    minutes after the disconnect that completed it if that is later. A steady
+    flap with a period of 5 minutes or less reaches 3 in every cycle, and the
+    gaps between those stretches last at most 5 minutes, so it reads degraded
+    continuously from the third disconnect. The one exception is a forward
+    wall-clock step larger than 10 minutes minus twice the flap period: any
+    step for a period of 5 minutes, and just over 12 s for a period of 4.9
+    minutes. Base then counts 3 again only at the third disconnect after the
+    step. Until then the reason can read clear for up to five flap periods
+    minus 20 minutes 6 s: never for a period up to about 4 minutes, and about
+    4.4 minutes at a period of 4.9 minutes. Base's own churn reason is clear
+    for that time too.
+  - `outbound_flood`, 5 minutes (the flood detector's window). A destination
+    floods while the detector counts 20 sends to it, so its flood ends when
+    its twentieth-newest counted send leaves the window. The reason clears 5
+    minutes after that, plus a clock-drift extension of 1% of the window
+    (3 s), or 5 minutes after the send that completed the flood if that is
+    later, for whichever destination ends last. A flood that trips again
+    within those 5 minutes reads continuously.
+  - `event_loop_starvation`, 5 minutes (30 sampler windows and 60 fleet polls,
+    the same as the starvation warning's repeat). The reason clears 5 minutes
+    after the last detection: the last starved sample, the sample that ended a
+    starved window, or the last evaluation that saw a new discontinuity or a
+    window refilling after one.
+
+  Unreadable input counts as holding. A loop stall over 10 s empties the
+  20-sample loop-lag window. Starvation is therefore read only from a full
+  window with no new discontinuity since the previous evaluation, including
+  one before the first evaluation. A window refilling after a discontinuity,
+  or a new discontinuity, counts as starved from that evaluation. This
+  detection still depends on reads, because the hold starts at the
+  evaluation, not at the stall:
+  - Stalls over 10 s recurring within about 5 minutes of the previous
+    detection read degraded continuously.
+  - A 12 s stall every 7 minutes reads clear for about 2 minutes of each cycle.
+  - A full window reads starved while 2 or more of its 20 samples exceed
+    250 ms, since its 95th percentile is the second-largest sample.
+  - A partial window at startup, or after the sampler restarts, reads clear
+    as before.
+  - A stall just under 10 s that lands at most once per window is never seen,
+    as before.
+
+  Transports: the Baileys manager supplies both the disconnect window and the
+  flood snapshot with their last-held times. The SMS, Signal and iMessage
+  bridges supply an empty disconnect window (`emptyConnectionStateSnapshot`)
+  and never a flood snapshot. A missing disconnect window counts as churn. A
+  missing flood snapshot counts as a flood only once one has been seen, so the
+  bridges read clear.
+
+  Clock: whether churn or a flood exists is decided only by base's own
+  wall-clock count (the disconnect window's `count` and the flood detector's
+  per-destination count) when a disconnect or send is recorded. The monotonic
+  clock (`performance.now()`) only measures how long the hold lasts:
+  - Each recorded entry also carries its monotonic instant, read after the
+    wall clock, so a pause between the two reads can only lengthen a hold.
+  - A detected episode holds until its threshold-th newest counted entry
+    leaves the window on the monotonic clock, plus 1% of the window, and at
+    least until it was detected. The extension covers the wall clock drifting
+    from the monotonic clock while NTP slews it (macOS slews at up to about
+    5000 ppm). It only lengthens holds and never decides detection.
+  - A counted entry with no monotonic instant would hold the episode one
+    window, plus the extension, from detection. None exists today: nothing
+    reloads these windows from disk.
+  - A read at which base's `count` or `flooding` meets the threshold also
+    reports the reason and holds it for one hold from that read.
+
+  A wall-clock step does not shorten or stretch a hold already recorded. It
+  moves base's windows, and so detection, exactly as in base:
+  - Stepped back: stored disconnects and sends, including expired ones not
+    yet pruned, are now later than the wall clock, and base counts them until
+    the wall clock is one window past them. For a flood, later sends to the
+    same destination stay counted behind them. A new entry counted with them
+    completes an episode, as base's verdict would read. Between new entries,
+    only reads refresh the hold from base's verdict, so the reason clears one
+    hold after the last read that saw it meet the threshold, or one hold
+    after the producer's own held-until if that is later. With aligned clock
+    rates after a backward step, measured since the episode's counted entries
+    were recorded, a step of up to the drift extension (6 s for churn, 3 s
+    for a flood) never clears the reason before one hold after base's verdict
+    clears, however rarely health is read. After a larger step, sparse reads
+    can let it clear sooner, by at most the step minus the extension. With no
+    new entries it clears no later than the step plus the window plus the
+    drift extension plus the hold after the step. These bounds assume no
+    further steps or clock-rate divergence while those entries remain counted.
+    Concurrent drift adds to the backward displacement and can invalidate the
+    small-step guarantee; steps before an entry was recorded do not offset a
+    later backward step for that entry.
+  - Stepped forward: base drops the entries. An episode already detected
+    keeps its recorded hold. Entries the step dropped can no longer complete
+    an episode, so churn or a flood that base stops counting is not detected
+    either, exactly as base's count reads. An ongoing flap or flood can
+    therefore read clear after its recorded hold ends, until base counts the
+    threshold again from entries after the step. For a churn flap with a
+    period P, this needs a step larger than 10 minutes minus 2 times P (any
+    step at P = 5 minutes, just over 12 s at P = 4.9 minutes), and lasts up
+    to 5 times P minus 20 minutes 6 s: nothing for P up to about 4 minutes,
+    about 4.4 minutes at P = 4.9 minutes. Base's own reason is clear for that
+    time too.
+  - Host suspend: the monotonic clock may not advance while the host sleeps
+    (not verified on a host). A recorded hold then lasts longer in wall time,
+    which fails closed. Detection is unaffected, since it uses base's
+    wall-clock count.
+
+  The body's `event_loop.locally_starved` and the starvation warning keep the
+  sampler's raw verdict. The hold is in memory per process, so a restart
+  starts clean; monotonic time also starts again with the process, and
+  nothing monotonic is persisted.
+
+  One detection is new. An isolated stall over 10 s, at any time, now reads
+  `event_loop_starvation` (cause `event_loop_starved`) for the window refill
+  plus 5 minutes from the evaluation that sees it. Base read clear. The noise
+  is bounded:
+  - all three causes are hold-tier in the fault taxonomy, so BOT ERRORS holds
+    them and promotes only after 30 minutes;
+  - the watchdog never restarts on `degraded`;
+  - the fleet poller's `health_body_degraded` page opens and clears on its own
+    about 5 minutes later.
+- **First auth-tree walk.** `/health` reads the auth bond from a cache that is
+  empty until the first tree walk since process start publishes, and
+  connect-time credential writes supersede walks in flight (the walk finishes
+  and its result is discarded). Until then the bond
+  reads `unknown` and health reports `auth_failure.auth_bond_at_risk` as
+  before, but that reason does not arm or enter the latch while the first walk
+  is pending: at most the auth bond's stale-risk bound (four tree-cache max
+  ages, 120 s by default) after process start. A completed walk that finds a
+  problem, a transient read, a backup error, or a first walk that does not
+  complete within the bound latches as before.
+- **Log.** The `degradation silence latch set` line carries `reasons`, the
+  sorted latched reason codes, so a latch-only reading names what armed it.
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and updates the latched reason set: a
   full-visibility evaluation REPLACES the set with what it observed (a reason
@@ -2015,7 +2171,7 @@ contains only audit counts plus created/existing/unresolved/ambiguous ledger cou
 
 After recording, authenticated `/health` reports the normalized recovery-debt projection separately
 from current service status. A readable retained continuity gap does not flip an otherwise healthy
-service to degraded. A blocking episode (`recovery_debt_blocking`,
+service to degraded. A blocking episode (`recovery_debt_blocking`, `durability_delivery_debt`,
 `runtime.turn_finalization_debt`, `runtime.completed_delivery_identity_debt`) does not arm the
 silence latch: those reasons are recomputed from durable state on every poll, so status returns to
 `healthy` on the first poll whose evidence reads non-blocking, without a restart, while unreadable
