@@ -4,9 +4,11 @@ The rendered watchdog runs the REAL pinned health reader under the REAL
 run_with_timeout against real loopback sockets. The reader's own socket timeout
 has to expire before the outer wall deadline kills it; otherwise a wedged bot
 or fleet console becomes HEALTH-UNKNOWN every cycle and is never restarted
-(main's `curl --max-time 8` restarted it). Shell-level timeouts are rendered
-constants, so most cases shrink them to keep the suite fast; one case runs the
-shipped values.
+(main's `curl --max-time 8` restarted it). Such a read is SILENT, so the run
+confirms it with re-reads for the confirm window before it restarts, in the
+same run. Shell-level timeouts and the confirm window are rendered constants,
+so the cases shrink them to keep the suite fast; one case runs the shipped
+read timeouts.
 """
 from __future__ import annotations
 
@@ -79,6 +81,56 @@ def _silent_server():
 
 
 @contextmanager
+def _silent_then_answering_server(body: str, silent_connections: int):
+    """Hold the first connections open without a byte, then answer each request."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    held: list[socket.socket] = []
+    stop = threading.Event()
+    payload = body.encode("utf-8")
+    response = (b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(payload)).encode("ascii")
+                + b"\r\nConnection: close\r\n\r\n" + payload)
+
+    def accept_forever():
+        listener.settimeout(0.2)
+        accepted = 0
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except (TimeoutError, OSError):
+                continue
+            accepted += 1
+            if accepted <= silent_connections:
+                held.append(connection)
+                continue
+            connection.settimeout(2)
+            try:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                connection.sendall(response)
+            except OSError:
+                pass
+            finally:
+                connection.close()
+
+    thread = threading.Thread(target=accept_forever, daemon=True)
+    thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        for connection in held:
+            connection.close()
+        listener.close()
+
+
+@contextmanager
 def _answering_server(body: str):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -125,6 +177,11 @@ def _run(tmp_path: Path, bot_port: int, fleet_port: int, *, timeouts: tuple[int,
         read_timeout, deadline = timeouts
         text = re.sub(r"(?m)^HEALTH_READ_TIMEOUT_SECONDS=\d+$", f"HEALTH_READ_TIMEOUT_SECONDS={read_timeout}", text)
         text = re.sub(r"(?m)^HEALTH_READ_DEADLINE_SECONDS=\d+$", f"HEALTH_READ_DEADLINE_SECONDS={deadline}", text)
+    # A silent read confirms before it restarts. A two-second window (one or
+    # two confirm reads) keeps these real-socket cases short; the shipped
+    # window is exercised with a stubbed sleep in test_watchdog_two_strike.py.
+    text = re.sub(r"(?m)^CONFIRM_WINDOW_SECONDS=\d+$", "CONFIRM_WINDOW_SECONDS=2", text)
+    text = re.sub(r"(?m)^CONFIRM_STEP_SECONDS=\d+$", "CONFIRM_STEP_SECONDS=1", text)
     script = home / "watchdog"
     script.write_text(text)
     started = time.monotonic()
@@ -139,6 +196,29 @@ def _kickstarts(calls: str, label: str) -> int:
     return sum("kickstart -k" in row and row.endswith(label) for row in calls.splitlines())
 
 
+def _confirm_reads(log: str, label: str) -> list[str]:
+    return [line for line in log.splitlines() if f"{label} confirm read " in line]
+
+
+def _assert_confirmed_then_restarted(log: str, label: str, reader_exit: int):
+    """At least one confirm read, numbered in order, each with `reader_exit`,
+    between the window's opening line and the restart that follows it."""
+    lines = log.splitlines()
+
+    def first(fragment: str) -> int:
+        return next(i for i, line in enumerate(lines) if fragment in line)
+
+    confirms = [i for i, line in enumerate(lines) if f"{label} confirm read " in line]
+    assert confirms, log
+    for number, i in enumerate(confirms, start=1):
+        assert f"{label} confirm read {number}: " in lines[i], log
+        assert lines[i].endswith(f"(reader exit {reader_exit})"), log
+    opened = first(f"{label} silent read; confirming before restarting")
+    due = first(f"{label} no trusted answer in ")
+    acted = first(f"restarting {label}: ")
+    assert opened < confirms[0] and confirms[-1] < due < acted, log
+
+
 @properties
 @given(bot_hangs=st.booleans(), fleet_hangs=st.booleans())
 def test_hung_target_is_restarted_not_unknown(bot_hangs, fleet_hangs):
@@ -150,6 +230,8 @@ def test_hung_target_is_restarted_not_unknown(bot_hangs, fleet_hangs):
     assert "HEALTH-UNKNOWN" not in log
     assert _kickstarts(calls, _BOT_LABEL) == int(bot_hangs)
     assert _kickstarts(calls, _FLEET_LABEL) == int(fleet_hangs)
+    assert bool(_confirm_reads(log, _BOT_LABEL)) == bot_hangs
+    assert bool(_confirm_reads(log, _FLEET_LABEL)) == fleet_hangs
     expected_final = "RESTARTED" if bot_hangs or fleet_hangs else "ok"
     assert log.splitlines()[-1].endswith(expected_final)
 
@@ -159,20 +241,56 @@ def test_hung_bot_is_restarted_with_the_shipped_timeouts(tmp_path):
         proc, calls, log, elapsed = _run(tmp_path, silent, fleet_ok, timeouts=None)
     assert proc.returncode == 0, (proc.stderr, log)
     assert _kickstarts(calls, _BOT_LABEL) == 1
-    assert "health endpoint unreachable" in log
-    assert elapsed < 7.5, "the reader's own timeout must answer before the wall deadline"
+    assert "health endpoint unreachable: connection accepted" in log
+    # Every read, confirm reads included, ended by the reader's own timeout.
+    confirms = _confirm_reads(log, _BOT_LABEL)
+    assert confirms and all(line.endswith("(reader exit 8)") for line in confirms), confirms
+    assert "health read exceeded" not in log and "HEALTH-UNKNOWN" not in log
+    assert elapsed < 7.5 * (1 + len(confirms)) + 2, "the reader's own timeout must answer before the wall deadline"
 
 
 def test_reader_killed_at_the_wall_deadline_is_restarted(tmp_path):
     # A reader that has not finished by the wall deadline yields no evidence of
     # its own; like main's `curl --max-time`, an incomplete read is restart
-    # evidence for that target.
+    # evidence for that target, confirmed like any silent read.
     with _silent_server() as silent, _answering_server("ok") as fleet_ok:
         proc, calls, log, _ = _run(tmp_path, silent, fleet_ok, timeouts=(4, 1))
     assert proc.returncode == 0, (proc.stderr, log)
     assert _kickstarts(calls, _BOT_LABEL) == 1
     assert "HEALTH-UNKNOWN" not in log
     assert "health read exceeded" in log
+    _assert_confirmed_then_restarted(log, _BOT_LABEL, 124)
+    assert log.splitlines()[-1].endswith("RESTARTED")
+
+
+def test_fleet_reader_killed_at_the_wall_deadline_is_restarted(tmp_path):
+    # The fleet's wall-deadline (exit 124) branch: a silent read of the fleet
+    # label, confirmed and then restarted, never the bot.
+    with _silent_server() as silent, _answering_server(_OK_BODY) as bot_ok:
+        proc, calls, log, _ = _run(tmp_path, bot_ok, silent, timeouts=(4, 1))
+    assert proc.returncode == 0, (proc.stderr, log)
+    assert _kickstarts(calls, _FLEET_LABEL) == 1
+    assert _kickstarts(calls, _BOT_LABEL) == 0
+    assert "fleet console health read exceeded" in log
+    _assert_confirmed_then_restarted(log, _FLEET_LABEL, 124)
+    assert "HEALTH-UNKNOWN" not in log
+    assert log.splitlines()[-1].endswith("RESTARTED")
+
+
+@pytest.mark.parametrize("target", ["bot", "fleet"])
+def test_target_answering_within_the_confirm_window_is_not_restarted(tmp_path, target):
+    # Red on base: base restarts on the first silent read. Real sockets: the
+    # first connection is held silent, the next one answers.
+    body = _OK_BODY if target == "bot" else "ok"
+    with _silent_then_answering_server(body, silent_connections=1) as flaky, \
+            _answering_server(_OK_BODY) as bot_ok, _answering_server("ok") as fleet_ok:
+        proc, calls, log, _ = _run(tmp_path, flaky if target == "bot" else bot_ok,
+                                   flaky if target == "fleet" else fleet_ok, timeouts=(1, 3))
+    label = _BOT_LABEL if target == "bot" else _FLEET_LABEL
+    assert proc.returncode == 0, (proc.stderr, log)
+    assert "kickstart" not in calls and "bootstrap" not in calls
+    assert f"{label} answered on confirm read 1; restart avoided" in log
+    assert log.splitlines()[-1].endswith("RESTART-AVOIDED")
 
 
 def test_shipped_reader_timeout_is_strictly_below_the_wall_deadline():

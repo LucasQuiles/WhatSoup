@@ -523,10 +523,17 @@ python3 deploy/scripts/render-watchdog.py render \
 
 The render receipt reports `health_reader_path` and `health_reader_sha256`.
 Before its first health read, each watchdog cycle verifies the reader digest
-and executes those verified bytes. A missing, changed, or invalid reader
-produces `HEALTH-UNKNOWN` and exit 2 without authorizing any service action,
-and that cycle reaches no credential verdict, so credential paging state is
-left unchanged.
+and executes those verified bytes. A missing, changed, or invalid reader at
+that point produces `HEALTH-UNKNOWN` and exit 2 without authorizing any
+service action, and that cycle reaches no credential verdict, so credential
+paging state is left unchanged. Every later read also executes only bytes it
+has just verified. On a confirm read (below) an unverifiable reader only
+continues the window, and the binding is checked again, as at the start,
+before a restart at the window's end: a reader still unverifiable then ends
+the run there, as at the start, with exit 2, and nothing else is read or
+restarted in that run. Its last line is `HEALTH-UNKNOWN` unless the run had
+already noted a higher-ranked state (`CREDENTIAL-DEAD` or `OUTBOUND-POISON`
+from the bot section, before a fleet window).
 
 The shared reader makes one direct IPv4 loopback connection, without proxies,
 redirects, or a separate connectivity probe. The watchdog keeps its private
@@ -545,11 +552,106 @@ Review the final watchdog status and the per-target log lines together. The
 reader's socket timeout (`HEALTH_READ_TIMEOUT_SECONDS`, 5 s) is deliberately
 below the eight-second process deadline (`HEALTH_READ_DEADLINE_SECONDS`), so a
 target that accepts the connection but never answers yields a typed transport
-failure and is restarted (`health endpoint unreachable` / `fleet console
-unreachable`), as `curl --max-time 8` did. A read killed at the deadline with no
-output (for example a trickling response) is also restart evidence, logged as
-`health read exceeded 8s`; a hang and a slow response are indistinguishable at
-that point, and the previous curl contract restarted both. Any other malformed
+failure and is restart evidence (`health endpoint unreachable: connection
+accepted, response timed out or was reset` / `fleet console unreachable: …`),
+as `curl --max-time 8` was. A read killed at the deadline with no output (for
+example a trickling response) is also restart evidence, logged as `health read
+exceeded 8s`; a hang and a slow response are indistinguishable at that point,
+and the previous curl contract restarted both. These two are *silent* reads,
+and the watchdog confirms them in the same run before it restarts:
+
+- The restart gates run first, in their usual order (permanent launchd stop,
+  pairing lease, restart mutex, 5-minute cooldown). A closed gate suppresses
+  the restart at once, as before, with no confirm read.
+- With every gate open, the watchdog notes the job's launchd identity (its
+  load state and pid; an unreadable identity still runs the window, so a
+  trusted answer can still cancel the restart), releases the restart mutex
+  and re-reads that
+  target every 15 s (`CONFIRM_STEP_SECONDS`) until 90 s
+  (`CONFIRM_WINDOW_SECONDS`) have passed. The window ends with the first read
+  that finishes at or after 90 s, so on a steady clock a read is running at
+  that moment or starts then. Each read logs `<label> confirm read N: …`.
+- A trusted answer (an HTTP status below 400 from the fleet console, or a bot
+  body the decision block reads without a restart verdict) cancels the
+  restart: `<label> answered on confirm read N; restart avoided: …`, state
+  `RESTART-AVOIDED`. That answer's own credential or outbound-poison verdict
+  is acted on by the next run whose main read answers.
+- Every other result (silent again, refused, `EADDRNOTAVAIL`, an unavailable or
+  unverifiable reader or token, an empty, oversized or untrusted body, a bot
+  restart verdict, a fleet HTTP error) continues the window and changes
+  nothing else in the run. A `sleep` that fails ends the window at once
+  (`<label> confirm window ended: sleep failed …`).
+- Without a trusted answer, the restart runs when the window ends only if the
+  reader binding still verifies (otherwise the run ends there, exit 2) and
+  the job's identity was readable at both ends and is unchanged. "Unloaded"
+  means launchctl's "could not find service" status (exit 113, verified on
+  macOS 26; other macOS versions in the fleet are not verified, and a
+  different not-found code there only defers the restart, as unreadable);
+  any other failure, including a missing domain's exit 112, or
+  the 15 s limit, logs `<label> restart deferred: job identity unreadable …`
+  (an identity unreadable at the silent read is not read again). A job
+  unloaded, loaded or running a different pid since logs `<label> restart
+  deferred: job changed during the confirm window …`. Both record
+  `RESTART-SUPPRESSED` and leave that target to the next run's own read; the
+  rest of the run goes on, so after a bot window the fleet console is still
+  read and can be restarted. Load state and pid cannot show a reload that
+  ends with the same pid, or two job generations that both show no pid. The
+  restart then takes the normal restart path: every gate is checked again. A
+  job unloaded at both ends may be bootstrapped; a job loaded at both ends
+  may only be kickstarted, and if the restart's own `launchctl print` then
+  fails, for any reason and not only "not found", the run logs `<label>
+  restart deferred: job not confirmed loaded after the window check …`
+  (`RESTART-SUPPRESSED`) and bootstraps nothing; like the other deferrals it
+  keeps nothing and arms no cooldown. A gate that closed during the window
+  stops the restart. Another watchdog's restart or a permanent stop also
+  changes the job's pid, so it usually shows as `restart deferred` instead of
+  the gate's own line; either way that target is not restarted.
+
+One race remains after the window-end check, as base has over its own gate
+pass: an outside `launchctl bootstrap` or reload during the second gate pass
+can lead to a kickstart of a job that has just started or of a new pid. That
+pass usually takes milliseconds; its permanent-stop query is limited to
+15 s, but `ensure_loaded`'s own `launchctl print` has no time limit, so the
+window has no strict bound. A successful restart by another watchdog whose
+cooldown stamp was written cannot cause it: that watchdog writes the stamp
+before it releases the restart mutex, and this pass checks the cooldown after
+taking it. Another watchdog's restart that wrote no stamp (a failed stamp
+write after its kickstart, or a failed or timed-out kickstart) leaves the
+cooldown open, so it can.
+
+Nothing is kept between runs. A restart comes later than it would have, or
+not at all for that target when it answered within the window, its identity
+changed or could not be read, or a job loaded at both ends was not confirmed
+loaded when the restart acted; only a reader that no longer verifies ends
+the run.
+On a steady clock the window lasts at most 90 s plus one 8 s read deadline; a
+forward clock step shortens it, and a backward one lengthens it up to six
+full steps and reads, about 138 s. With the `launchctl print` identity and
+gate checks (15 s limit each) and the binding check (8 s) around it, a
+restart comes at most about 191 s later than an immediate restart, and about
+90 to 100 s later when nothing hangs. These figures count the timed reads,
+the `launchctl print` queries and the binding check only: the per-read token
+and decision steps, and `ensure_loaded`'s own `launchctl print` (as at base),
+have no deadline. Counting the bounded steps alone, a run with a bot and a
+fleet window takes at most about 500 s, inside the invocation lock's 600 s. A
+watchdog killed during a window performs no restart for that read; the next
+run decides again from its own read. An avoided restart arms no cooldown, so
+a restart-worthy read in the next 5 minutes is not held back by the cooldown
+an immediate restart would have armed. A deferred restart arms none either,
+so the next run may act on a respawned or reloaded job sooner than that
+cooldown would have allowed. Every recorded restart of a live target followed
+a silence of 20.5 to 83.2 s. On a steady clock the last confirm read starts
+about 82 to 90 s after the window opens; before the window opened, the
+silence had already lasted the silent read's own wait (5 s for a reader
+timeout, 8 s at the deadline, none for a reset or EOF). A target whose
+silences always end within the window is never restarted (the `restart
+avoided` lines in the watchdog log show it; nothing alerts on them). Each
+silent target adds about 90 to 100 s to a run, at most about 191 s, and the
+bot and the fleet console can both be silent in one run (the fleet console is
+still read after the bot section). That can exceed the 120 s
+`StartInterval`: launchd never runs two instances of one job, so the next run
+then starts late.
+Any other malformed
 or incomplete reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
 the watchdog against the new manifest digest. Keep the previous script and its
 matching release tree available for rollback; installing either alone leaves
