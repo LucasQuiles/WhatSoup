@@ -60,8 +60,11 @@ export const OUTBOUND_FLOOD_HOLD_MS = 5 * MS_PER_MINUTE;
 
 class ReasonHold {
   private lastHeldAtMs: number | null = null;
+  private readonly holdMs: number;
 
-  constructor(private readonly holdMs: number) {}
+  constructor(holdMs: number) {
+    this.holdMs = holdMs;
+  }
 
   /** True until holdMs has passed since the condition last held: now when
    * `holdsNow`, or the producer's stamp. */
