@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,13 @@ REQUIRED_COLUMNS = {
         "claim_expires_at",
     },
 }
+# R46: columns read only by the progress diagnostics. They are deliberately not
+# REQUIRED_COLUMNS: without them the observation is unchanged and
+# progressDiagnostics reports DIAGNOSTIC_COLUMNS_MISSING.
+DIAGNOSTIC_COLUMNS = {
+    "inbound_events": {"conversation_key"},
+    "outbound_ops": {"submitted_at", "echoed_at"},
+}
 CONTEXT_HINTS = [
     "Verify the probe is running as the target user; direct SSH, GUI Terminal, launchd, and wrappers can expose different HOME and credential contexts.",
     "On macOS inspect the GUI launchd domain with launchctl print gui/$(id -u) and confirm the service WorkingDirectory and effective user.",
@@ -96,6 +105,190 @@ _UNRESOLVED_CONTINUITY_CANDIDATES_SQL = """
                   AND NOT EXISTS (
                     SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = i.seq
                   )"""
+
+# R46 progress diagnostics. They are additions only: staleOpenInbounds, the
+# state, every alert latch and the exit code come from the pre-R46 queries
+# below and never read these values.
+DIAGNOSTIC_COLUMNS_MISSING = "diagnostic_columns_missing"
+DIAGNOSTIC_FAILED = "diagnostic_failed"
+DIAGNOSTIC_COUNT_CHANGED = "diagnostic_count_changed"
+DIAGNOSTIC_BUDGET_EXCEEDED = "diagnostic_budget_exceeded"
+# Wall-clock budget for the diagnostics of one instance, counted from before
+# their first read, so lock waits count against it. A healthy run costs one
+# indexed probe per stale row, a few milliseconds. The diagnostics run after
+# every instance's base observation and before anything is printed or
+# emitted. Each conclusive instance adds up to about the budget plus one
+# progress-check interval, about 2 s, and instances run one after another.
+# Every emission waits for all of them, so a host with ten conclusive
+# instances can hold its alerts back by about 20 s of the 60 s observer
+# cadence (whatsoup-reply-guarantee.timer).
+DIAGNOSTIC_BUDGET_SECONDS = 2.0
+# SQLite VM instructions between budget checks.
+DIAGNOSTIC_BUDGET_CHECK_OPCODES = 1000
+
+# One statement, so one read snapshot. The stale CTE is the staleOpenInbounds
+# predicate copied verbatim. staleRowsWithRecentSend counts stale rows with an
+# accepted send tied to them through outbound_ops.source_inbound_seq whose send
+# time is after receipt, no later than now and within the stale threshold. The
+# send time is the first of echoed_at and submitted_at that parses as a time,
+# so a malformed echoed_at does not hide a valid submitted_at. Untied sends
+# (the queued-task receipt, startup, admin and health notices) never count.
+# outbound_ops records no message role, so a command reply sent through the
+# chat queue while a turn is active is tied to that turn and counts; that is
+# one reason these values never page.
+# The EXISTS probe stops at the first match on idx_outbound_ops_source; the
+# unary + keeps the planner off idx_outbound_ops_status.
+# Parameters: now, modifier, now, now, modifier.
+_PROGRESS_DIAGNOSTICS_SQL = """
+                WITH stale AS (
+                SELECT i.seq, i.conversation_key, i.received_at
+                FROM inbound_events i
+                WHERE i.processing_status IN ('pending', 'processing', 'turn_done')
+                  AND i.received_at < datetime(?, ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq = i.seq
+                  )
+                )
+                SELECT
+                  COUNT(*),
+                  COUNT(DISTINCT s.conversation_key),
+                  COUNT(CASE WHEN EXISTS (
+                    SELECT 1 FROM outbound_ops o
+                    WHERE o.source_inbound_seq = s.seq
+                      AND +o.status IN ('submitted', 'echoed')
+                      AND COALESCE(datetime(o.echoed_at), datetime(o.submitted_at)) > datetime(s.received_at)
+                      AND COALESCE(datetime(o.echoed_at), datetime(o.submitted_at)) <= datetime(?)
+                      AND COALESCE(datetime(o.echoed_at), datetime(o.submitted_at)) >= datetime(?, ?)
+                  ) THEN 1 END)
+                FROM stale s"""
+
+
+def _progress_diagnostics(
+    db: sqlite3.Connection,
+    *,
+    now_text: str,
+    modifier: str,
+    stale_open_inbounds: int,
+) -> dict[str, Any]:
+    """Describe the staleOpenInbounds set; never affects paging.
+
+    staleRows must equal staleOpenInbounds, which the base observation read
+    earlier; otherwise the stale set changed between the two reads and the
+    diagnostics are withheld. That is a count check only: a write that leaves
+    the count unchanged is not detected. staleChats is the number of distinct
+    chats with a stale row. It makes no claim about queue position: in single
+    and shared scope one queue serves every chat.
+    """
+    deadline = time.monotonic() + DIAGNOSTIC_BUDGET_SECONDS
+
+    def over_budget() -> bool:
+        # True makes SQLite interrupt the running statement. The handler only
+        # reads the clock. CPython's sqlite3 clears any exception raised inside
+        # a progress handler and ends the statement as interrupted, so a
+        # KeyboardInterrupt that arrives while the handler runs is not
+        # re-raised; the diagnostics report unavailable and the run goes on.
+        # OUT-OF-MODEL: the service stops the observer with SIGTERM, which
+        # Python does not turn into an exception.
+        return time.monotonic() > deadline
+
+    def wait_for_locks_only_within_the_budget() -> None:
+        # A lock wait is not VM work, so the progress handler cannot end it;
+        # a busy timeout of the remaining budget does.
+        remaining_ms = math.ceil((deadline - time.monotonic()) * 1000)
+        db.execute(f"PRAGMA busy_timeout={max(remaining_ms, 0)}")
+
+    # The catch is deliberately broad: whatever goes wrong here, the caller
+    # keeps the observation it already built, so a diagnostic can never turn an
+    # observation inconclusive, raise, or change the exit code.
+    columns_missing = False
+    try:
+        (saved_busy_timeout,) = db.execute("PRAGMA busy_timeout").fetchone()
+        db.set_progress_handler(over_budget, DIAGNOSTIC_BUDGET_CHECK_OPCODES)
+        try:
+            for table, required in DIAGNOSTIC_COLUMNS.items():
+                wait_for_locks_only_within_the_budget()
+                if required - _columns(db, table):
+                    columns_missing = True
+                    break
+            if not columns_missing:
+                wait_for_locks_only_within_the_budget()
+                stale_rows, stale_chats, recent = db.execute(
+                    _PROGRESS_DIAGNOSTICS_SQL,
+                    (now_text, modifier, now_text, now_text, modifier),
+                ).fetchone()
+        finally:
+            db.set_progress_handler(None, 0)
+            db.execute(f"PRAGMA busy_timeout={int(saved_busy_timeout)}")
+    except Exception:  # noqa: BLE001 - see the comment above the try
+        over = time.monotonic() > deadline
+        return {"available": False, "reason": DIAGNOSTIC_BUDGET_EXCEEDED if over else DIAGNOSTIC_FAILED}
+    # Checked first: anything that ends after the budget is spent, a missing
+    # column included, reports the budget, and values read late are discarded.
+    if time.monotonic() > deadline:
+        return {"available": False, "reason": DIAGNOSTIC_BUDGET_EXCEEDED}
+    if columns_missing:
+        return {"available": False, "reason": DIAGNOSTIC_COLUMNS_MISSING}
+    if stale_rows != stale_open_inbounds:
+        return {"available": False, "reason": DIAGNOSTIC_COUNT_CHANGED}
+    return {
+        "available": True,
+        "staleRows": stale_rows,
+        "staleChats": stale_chats,
+        "staleRowsWithRecentSend": recent,
+    }
+
+
+def _diagnose_instance(
+    db_path: Path,
+    *,
+    now_text: str,
+    modifier: str,
+    stale_open_inbounds: int,
+) -> dict[str, Any]:
+    """Diagnose one instance on a connection of its own, opened as base opens its.
+
+    Base's connection is closed by now. This one is read-only with the same URI
+    flags, path checks and query_only setting, and it closes before return.
+    """
+    try:
+        if db_path.is_symlink() or not db_path.is_file():
+            return {"available": False, "reason": DIAGNOSTIC_FAILED}
+        db = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=5)
+        try:
+            db.execute("PRAGMA query_only=ON")
+            return _progress_diagnostics(
+                db,
+                now_text=now_text,
+                modifier=modifier,
+                stale_open_inbounds=stale_open_inbounds,
+            )
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - diagnostics never raise; see _progress_diagnostics
+        return {"available": False, "reason": DIAGNOSTIC_FAILED}
+
+
+def _attach_progress_diagnostics(
+    observations: list[dict[str, Any]],
+    candidates: list[tuple[str, Path]],
+    *,
+    now: datetime,
+    stale_seconds: int,
+) -> None:
+    """Add progressDiagnostics to each conclusive observation, in base's order."""
+    # The same values observe_database computes, so the stale predicate
+    # matches the count it read.
+    now_text = _utc_sqlite(now)
+    modifier = f"-{stale_seconds} seconds"
+    for observation, (_name, db_path) in zip(observations, candidates):
+        if observation["state"] == "inconclusive":
+            continue
+        observation["progressDiagnostics"] = _diagnose_instance(
+            db_path,
+            now_text=now_text,
+            modifier=modifier,
+            stale_open_inbounds=observation["counts"]["staleOpenInbounds"],
+        )
 
 
 def _utc_sqlite(now: datetime) -> str:
@@ -408,6 +601,9 @@ def observe_instances(
             observe_database(path, instance=name, now=now, stale_seconds=stale_seconds)
             for name, path in candidates
         ]
+        # R46: only after every instance's base observation, so the
+        # diagnostics never delay a base read; observations follow candidates.
+        _attach_progress_diagnostics(observations, candidates, now=now, stale_seconds=stale_seconds)
     state = max((item["state"] for item in observations), key=STATE_PRECEDENCE.__getitem__)
     return {
         "check": "reply-guarantee-observer",

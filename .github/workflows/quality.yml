@@ -80,6 +80,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build Docker deployment image
+        timeout-minutes: 10
+        run: docker build --file docker/Dockerfile --tag whatsoup-ci .
+
       - name: Refresh PR base snapshot
         run: |
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
