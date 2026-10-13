@@ -4,6 +4,8 @@ This directory tracks security findings that belong to the WhatSoup application 
 
 Handoff index (each linked record owns its status and remaining acceptance work):
 
+- [2026-10-12-security-safety-privacy-audit.md](2026-10-12-security-safety-privacy-audit.md) - Source-baseline audit scope, disclosure gate, evidence limits, control-group results, and closure contract.
+- [security-intelligence-process.md](security-intelligence-process.md) - Versioned source register, asset applicability record, untrusted-feed rules, and the proposed integration with existing incident and notification paths. This document does not activate a recurring task.
 - [2026-05-09-env-secret-exposure.md](2026-05-09-env-secret-exposure.md#phase-status) - Process-environment secret exposure. The Phase Status table owns accepted source migrations, deployment verification and remaining wrapper/fallback removal. Merged source alone does not close the handoff. [The kickoff](2026-05-09-env-secret-exposure-kickoff.md) retains migration constraints and acceptance criteria.
 - [2026-07-23-provider-data-policy.md](2026-07-23-provider-data-policy.md) - Provider-route classification and checkpoint admission are implemented in the Task 3 candidate; restricted-provider payload isolation and the cross-repository producer contract remain blocked.
 - [2026-07-23-fleet-audit-status.md](2026-07-23-fleet-audit-status.md) - Exact source objects, evidence anchors, defect disposition, publication constraints, and residual cross-repository gates for Tasks 2, 3, 4, and 6.
