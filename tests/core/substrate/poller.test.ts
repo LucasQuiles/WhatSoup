@@ -1038,6 +1038,47 @@ describe('TriggerPoller — agent_job dispatch', () => {
       .toMatchObject({ count: 1 });
   });
 
+  it('contains a dispatcher result accessor throw before durable finalization', async () => {
+    const { messenger, calls } = makeMessenger();
+    const secret = `AGENT_JOB_PROXY_ACCESSOR_SECRET_${'p'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => new Proxy({ dispatched: false }, {
+        get(target, property, receiver) {
+          if (property === 'dispatched') throw new Error(secret);
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message, error_kind FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{
+      output_summary: string; output_json: string; error_message: string | null; error_kind: string;
+    }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — unavailable',
+      error_message: 'agent-job dispatcher threw',
+      error_kind: 'agent_job_dispatch_threw',
+    });
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).not.toContain(secret);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
+  });
+
   it('repeated cron dispatch failures alert every fire and never silently auto-pause', async () => {
     // A once-daily invoicing job must FAIL LOUD: a cron trigger always reschedules
     // to the next tick, so each failed fire emits its own operator alert. It must

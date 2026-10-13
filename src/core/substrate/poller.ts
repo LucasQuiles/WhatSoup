@@ -1569,12 +1569,20 @@ export class TriggerPoller {
         errorMessage: 'no agentJobDispatch injected; this poller instance cannot run agent turns',
       };
     }
-    let result: AgentJobDispatchResult;
+    let dispatched: boolean;
     try {
-      result = this.agentJobDispatch({
+      const result = this.agentJobDispatch({
         beadId: t.bead_id, triggerId: t.id, occurrenceId,
         prompt, title: bead.title, reportChatJid: t.report_chat_jid,
       });
+      if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+        throw new TypeError('invalid agent job dispatcher result');
+      }
+      const resultDispatched = result.dispatched;
+      if (typeof resultDispatched !== 'boolean') {
+        throw new TypeError('invalid agent job dispatcher result');
+      }
+      dispatched = resultDispatched;
     } catch {
       log.warn(
         { triggerId: t.id, occurrenceId, classification: 'agent_job_dispatch_threw' },
@@ -1588,7 +1596,7 @@ export class TriggerPoller {
         errorMessage: 'agent-job dispatcher threw',
       };
     }
-    if (!result.dispatched) {
+    if (!dispatched) {
       log.warn(
         { triggerId: t.id, occurrenceId, classification: 'agent_job_enqueue_rejected' },
         'agent job dispatcher rejected enqueue',
