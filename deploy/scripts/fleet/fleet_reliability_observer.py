@@ -772,6 +772,8 @@ def load_config(path):
             or not Path(host["probe_command"][0]).is_absolute()
         ):
             raise supervisor.StateError("config_invalid")
+    if len({host["host"] for host in config["hosts"]}) != len(config["hosts"]):
+        raise supervisor.StateError("config_invalid")
     destination = config.get("instance")
     if (
         destination is not None

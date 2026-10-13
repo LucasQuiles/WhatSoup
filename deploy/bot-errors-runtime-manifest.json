@@ -966,7 +966,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_reliability_observer.py",
-      "sha256": "e7e26f158bea79191327e7bff83372a6a6d0655c327c4b1cefaf55434808d2bb",
+      "sha256": "7ffd7f04ee0a39108e2c2f9f94c5844fad0bf6251cf2bc0b3e809976eaa0c49c",
       "mustContain": [
         "schema_version",
         "retired_checks",

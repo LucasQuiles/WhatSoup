@@ -364,6 +364,32 @@ def test_preflight_rejects_empty_fleet_without_valid_deadman_destination(instanc
             observer.load_config(config)
 
 
+@given(name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=24))
+@example(name="same-host")
+def test_preflight_rejects_duplicate_host_rows_that_would_double_count_a_cycle(name):
+    observer = load_module("fleet_duplicate_hosts", FLEET / "fleet_reliability_observer.py")
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        config = root / "config.json"
+        value = {
+            "state_dir": str(root / "state"),
+            "emitter_command": ["/synthetic/emitter"],
+            "delivery_command": ["/synthetic/delivery"],
+            "hosts": [
+                {"host": name, "instance": "first-bot", "probe_command": ["/synthetic/probe"]},
+                {"host": name + "-other", "instance": "second-bot", "probe_command": ["/synthetic/probe"]},
+            ],
+        }
+        config.write_text(json.dumps(value))
+        config.chmod(0o600)
+        assert len(observer.load_config(config)["hosts"]) == 2
+        value["hosts"][1]["host"] = name
+        config.write_text(json.dumps(value))
+        with pytest.raises(observer.supervisor.StateError, match="config_invalid"):
+            observer.load_config(config)
+        assert not (root / "state").exists()
+
+
 @pytest.mark.parametrize("mode", ["render", "install"])
 def test_installer_stops_at_failed_configuration_preflight(tmp_path, mode):
     body = '''printf '%s\\n' "$*" >> "$CALLS"

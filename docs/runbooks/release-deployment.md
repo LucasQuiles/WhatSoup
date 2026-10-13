@@ -807,7 +807,8 @@ bash deploy/scripts/install-fleet-reliability-observer.sh render \
 ```
 
 The private observer config names `state_dir`, `emitter_command`,
-`delivery_command`, and each host's absolute `probe_command`. Each probe
+`delivery_command`, and each host's absolute `probe_command`. Host identifiers
+must be unique so a cycle cannot count the same host twice. Each probe
 command invokes `fleet_probe.py --targets /absolute/private/targets.json
 --target <synthetic-target>`. Keep the config mode `0600` and state directory
 mode `0700`. An empty `hosts` list requires a valid top-level `instance` for
