@@ -786,6 +786,8 @@ of the default observer or deadman schedule.
 
 The optional service supervisor records malformed or truncated HTTP framing as
 an `invalid_response` liveness failure, so that fault does not abort the cycle.
+An operating-system error during the response read, including a connection
+reset after headers arrive, is recorded as `unavailable`.
 Process cleanup across the observer, transport and independently started MCP
 process remains a separate continuity obligation. In particular, a per-request
 MCP timeout does not establish a deadline for the complete multi-request probe.

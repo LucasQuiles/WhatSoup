@@ -229,6 +229,52 @@ def test_liveness_handles_a_truncated_chunked_response(supervisor, truncated):
         thread.join(timeout=2)
 
 
+@pytest.mark.parametrize("reset", [False, True], ids=["complete", "body-read-reset"])
+def test_liveness_handles_a_reset_during_response_read(supervisor, reset, monkeypatch):
+    import http.client
+    import socket
+    import socketserver
+    import struct
+    import threading
+
+    reading_body = threading.Event()
+    read = http.client.HTTPResponse.read
+
+    def read_body(response, amount=None):
+        reading_body.set()
+        return read(response, amount)
+
+    monkeypatch.setattr(http.client.HTTPResponse, "read", read_body)
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.settimeout(2)
+            self.request.recv(8192)
+            body = b'{"status":"ok"}'
+            length = 8192 if reset else len(body)
+            self.request.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: " + str(length).encode()
+                + b"\r\nConnection: close\r\n\r\n" + body
+            )
+            if reset:
+                # Synchronize the real socket reset with body reading, not a timer.
+                assert reading_body.wait(timeout=2)
+                self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+        server.timeout = 2
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            result = supervisor.probe_liveness(f"http://127.0.0.1:{server.server_address[1]}/live", 2)
+            assert reading_body.is_set()
+            assert result["ok"] is (not reset)
+            assert result["code"] == ("unavailable" if reset else "ok")
+        finally:
+            thread.join(timeout=3)
+            assert not thread.is_alive()
+
+
 def test_budget_alert_also_clears_when_broker_recovers(supervisor, config):
     events = []
     for now in [0, 30, 60, 181, 211, 241, 362, 392, 422]:
