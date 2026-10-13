@@ -60,7 +60,14 @@ vi.mock('../../../../src/lib/keyring.ts', () => ({
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';
-import { PineconeMemory, MemoryRecord, decayScore, applyDecay, getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import {
+  PineconeMemory,
+  MemoryRecord,
+  decayScore,
+  applyDecay,
+  getPineconeReadiness,
+  _testing as pineconeTesting,
+} from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import * as configModule from '../../../../src/config.ts';
 import { OPERATOR_PINECONE_PROJECT_ID } from '../../../../src/lib/pinecone-project-guard.ts';
 
@@ -690,6 +697,24 @@ describe('PineconeMemory', () => {
           ],
         },
       ]]);
+    });
+
+    it('rechecks direct-memory admission before retrying the provider', async () => {
+      const beforeProviderAttempt = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('write tombstoned'));
+      mockUpsertRecords.mockRejectedValueOnce(new Error('transient provider failure'));
+
+      try {
+        await expect(memory.upsertDirectMemory([makeMemoryRecord()], {
+          beforeProviderAttempt,
+        })).rejects.toMatchObject({ code: 'PINECONE_UNAVAILABLE' });
+
+        expect(beforeProviderAttempt).toHaveBeenCalledTimes(2);
+        expect(mockUpsertRecords).toHaveBeenCalledTimes(1);
+      } finally {
+        pineconeTesting.reset();
+      }
     });
 
     it('blocks upsert for non-q instances without a project guard', async () => {

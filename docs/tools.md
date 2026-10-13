@@ -3360,6 +3360,13 @@ Persist a durable memory about the current conversation into the instance's conf
 
 **Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied. Before the provider upsert, WhatSoup records content-free lifecycle provenance for the existing deterministic record ID (`memory_type` plus the legacy short hash of conversation, type, and text), configured index and default namespace. That ID is a protected sensitive fingerprint used to reconcile existing direct writes; it is not cryptographically opaque and must not be exposed as a content privacy boundary. A later accepted erasure tombstone blocks both the first provider attempt and PineconeMemory's one retry.
 
+The code boundary is enforced by `npm run guard:security-boundaries`. Direct
+memory writes must use `upsertDirectMemory` with a required
+`beforeProviderAttempt` callback; raw provider upserts stay in the Pinecone
+adapter, and `memory_write` registration stays in the composition root with a
+required lifecycle authority. The guard and its planted bypass tests run in the
+branch, release, and hosted quality pipelines.
+
 Although the wire-schema enum still includes `self_fact`, this handler rejects
 that value. Global self-identity memory must come from a trusted path; conversation
 input cannot use this tool to author it.

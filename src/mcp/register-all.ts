@@ -290,9 +290,13 @@ export function registerAllTools(
   // The resolver covers a configured keyring service before its env fallback.
   // Registration only exposes writing when a credential is presently usable;
   // erasure remains available above so an outage cannot hide reconciliation.
-  if (config.pineconeIndex && resolveApiKey({ service: memWriteApiKeyService, envVar: memWriteApiKeyEnv })) {
+  if (
+    remoteMemoryLifecycle
+    && config.pineconeIndex
+    && resolveApiKey({ service: memWriteApiKeyService, envVar: memWriteApiKeyEnv })
+  ) {
     runModule('memory-write', false, (register) =>
-      memoryWriteTools.registerMemoryWriteTools(register, undefined, undefined, remoteMemoryLifecycle, false),
+      memoryWriteTools.registerMemoryWriteTools(register, remoteMemoryLifecycle, undefined, undefined, false),
     );
   }
 

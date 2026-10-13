@@ -17,13 +17,14 @@ vi.mock('../../../src/logger.ts', async () => {
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
+import { memoryWriteLifecycleStub } from '../../helpers/memory-write-lifecycle.ts';
 
-function setup(opts: { upsert?: MemoryWriter['upsert']; clock?: ReturnType<typeof fakeClock> } = {}) {
+function setup(opts: { upsert?: MemoryWriter['upsertDirectMemory']; clock?: ReturnType<typeof fakeClock> } = {}) {
   const tools: ToolDeclaration[] = [];
   const register = (t: ToolDeclaration) => tools.push(t);
   const upsert = vi.fn(opts.upsert ?? (async () => {}));
-  const writer: MemoryWriter = { upsert };
-  registerMemoryWriteTools(register, () => writer, opts.clock);
+  const writer: MemoryWriter = { upsertDirectMemory: upsert };
+  registerMemoryWriteTools(register, memoryWriteLifecycleStub(), () => writer, opts.clock);
   const tool = tools.find((t) => t.name === 'memory_write')!;
   return { tool, upsert };
 }
@@ -49,7 +50,7 @@ describe('memory_write tool', () => {
       const tools: ToolDeclaration[] = [];
       let stateDuringProviderCall: string | undefined;
       const writer: MemoryWriter = {
-        upsert: async () => {
+        upsertDirectMemory: async () => {
           stateDuringProviderCall = (db.raw.prepare(
             'SELECT state FROM remote_memory_lifecycle',
           ).get() as { state: string } | undefined)?.state;
@@ -58,10 +59,10 @@ describe('memory_write tool', () => {
 
       (registerMemoryWriteTools as unknown as (
         register: (tool: ToolDeclaration) => void,
+        lifecycle: RemoteMemoryLifecycle,
         writerFactory: () => MemoryWriter,
         clock: ReturnType<typeof fakeClock>,
-        lifecycle: RemoteMemoryLifecycle,
-      ) => void)((tool) => tools.push(tool), () => writer, fakeClock(1_700_000_000_000), lifecycle);
+      ) => void)((tool) => tools.push(tool), lifecycle, () => writer, fakeClock(1_700_000_000_000));
       const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
 
       const result = await tool.handler(
@@ -85,15 +86,15 @@ describe('memory_write tool', () => {
         accountId: 'test-bot', indexName: 'test-memory-index', now: () => 1_700_000_000_000,
       });
       const tools: ToolDeclaration[] = [];
-      const writer: MemoryWriter = { upsert: async () => {} };
+      const writer: MemoryWriter = { upsertDirectMemory: async () => {} };
       vi.spyOn(lifecycle, 'markWriteFinalized').mockImplementationOnce(() => {
         throw new Error('local receipt finalization failed');
       });
       registerMemoryWriteTools(
         (tool) => tools.push(tool),
+        lifecycle,
         () => writer,
         fakeClock(1_700_000_000_000),
-        lifecycle,
       );
       const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
 
@@ -129,8 +130,8 @@ describe('memory_write tool', () => {
       const upsertBegan = new Promise<void>((resolve) => { beginUpsert = resolve; });
       const release = new Promise<void>((resolve) => { releaseUpsert = resolve; });
       const writer: MemoryWriter = {
-        upsert: async (_records, context) => {
-          await context?.beforeProviderAttempt?.();
+        upsertDirectMemory: async (_records, context) => {
+          await context.beforeProviderAttempt();
           beginUpsert();
           await release;
           remoteRecordPresent = true;
@@ -138,9 +139,9 @@ describe('memory_write tool', () => {
       };
       registerMemoryWriteTools(
         (tool) => tools.push(tool),
+        lifecycle,
         () => writer,
         fakeClock(now),
-        lifecycle,
       );
       const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
 
@@ -208,19 +209,19 @@ describe('memory_write tool', () => {
       const tools: ToolDeclaration[] = [];
       let providerAttempts = 0;
       const writer: MemoryWriter = {
-        upsert: async (_records, context) => {
-          await context?.beforeProviderAttempt?.();
+        upsertDirectMemory: async (_records, context) => {
+          await context.beforeProviderAttempt();
           providerAttempts += 1;
           lifecycle.requestErase({ scope: 'conversation', conversationKey: '12345@s.whatsapp.net' });
-          await context?.beforeProviderAttempt?.();
+          await context.beforeProviderAttempt();
           providerAttempts += 1;
         },
       };
       registerMemoryWriteTools(
         (tool) => tools.push(tool),
+        lifecycle,
         () => writer,
         fakeClock(1_700_000_000_000),
-        lifecycle,
       );
       const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
 
@@ -248,10 +249,10 @@ describe('memory_write tool', () => {
       });
       (registerMemoryWriteTools as unknown as (
         register: (tool: ToolDeclaration) => void,
+        lifecycle: RemoteMemoryLifecycle,
         writerFactory: () => MemoryWriter,
         clock: ReturnType<typeof fakeClock>,
-        lifecycle: RemoteMemoryLifecycle,
-      ) => void)((tool) => tools.push(tool), () => ({ upsert: async () => {} }), fakeClock(), lifecycle);
+      ) => void)((tool) => tools.push(tool), lifecycle, () => ({ upsertDirectMemory: async () => {} }), fakeClock());
 
       expect(tools.find((tool) => tool.name === 'erase_remote_memory')).toMatchObject({
         scope: 'global',
@@ -278,7 +279,12 @@ describe('memory_write tool', () => {
         senderJid: 'phil@s.whatsapp.net',
         memoryType: 'preference',
       });
-      registerMemoryWriteTools((tool) => tools.push(tool), () => ({ upsert: async () => {} }), fakeClock(), lifecycle);
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        lifecycle,
+        () => ({ upsertDirectMemory: async () => {} }),
+        fakeClock(),
+      );
       const erase = tools.find((tool) => tool.name === 'erase_remote_memory')!;
 
       await expect(erase.handler({ scope: 'account' }, { tier: 'global' })).resolves.toMatchObject({
@@ -308,7 +314,7 @@ describe('memory_write tool', () => {
       chatSession(),
     );
     expect(upsert).toHaveBeenCalledTimes(1);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records).toHaveLength(1);
     const r = records[0];
     expect(r.text).toBe('Phil prefers email over calls');
@@ -326,7 +332,7 @@ describe('memory_write tool', () => {
     expect(res).not.toHaveProperty('id');
     expect(upsert.mock.calls[0]?.[1]).toEqual({
       operationId: (res as { operation_id: string }).operation_id,
-      operation: 'memory_write',
+      beforeProviderAttempt: expect.any(Function),
     });
   });
 
@@ -344,7 +350,7 @@ describe('memory_write tool', () => {
       chatSession(),
     );
 
-    const r = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0];
+    const r = upsert.mock.calls[0]![0][0];
     expect(
       { createdAt: r.createdAt, updatedAt: r.updatedAt },
       'record timestamps came from the wall clock, so the injected Clock is not actually consulted',
@@ -379,7 +385,7 @@ describe('memory_write tool', () => {
       { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact', senderJid: 'spoofed@evil' } as Record<string, unknown>,
       chatSession({ actorJid: 'real@s.whatsapp.net' }),
     );
-    const r = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0];
+    const r = upsert.mock.calls[0]![0][0];
     expect(r.senderJid).toBe('real@s.whatsapp.net');
   });
 
@@ -388,8 +394,8 @@ describe('memory_write tool', () => {
     const args = { chatJid: '12345@s.whatsapp.net', text: 'same fact', memory_type: 'user_fact' as const };
     await tool.handler(args, chatSession());
     await tool.handler(args, chatSession());
-    const id1 = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0].id;
-    const id2 = (upsert.mock.calls[1] as [MemoryRecord[]])[0][0].id;
+    const id1 = upsert.mock.calls[0]![0][0].id;
+    const id2 = upsert.mock.calls[1]![0][0].id;
     expect(id1).toBe(id2);
     expect(id1.startsWith('user_fact_')).toBe(true);
   });
@@ -415,7 +421,7 @@ describe('memory_write tool', () => {
     );
 
     expect(upsert).toHaveBeenCalledTimes(1);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records).toHaveLength(1);
     const r = records[0];
     expect(r).toMatchObject({
@@ -480,11 +486,11 @@ describe('memory_write tool', () => {
 
   it('uses the default Pinecone writer factory when no test writer is injected', async () => {
     const tools: ToolDeclaration[] = [];
-    const upsertSpy = vi.spyOn(PineconeMemory.prototype, 'upsert').mockResolvedValue(undefined);
+    const upsertSpy = vi.spyOn(PineconeMemory.prototype, 'upsertDirectMemory').mockResolvedValue(undefined);
     const originalApiKey = process.env.PINECONE_API_KEY;
     process.env.PINECONE_API_KEY = 'test-pinecone-key';
     try {
-      registerMemoryWriteTools((t) => tools.push(t));
+      registerMemoryWriteTools((t) => tools.push(t), memoryWriteLifecycleStub());
       const tool = tools.find((t) => t.name === 'memory_write')!;
 
       const res = await tool.handler(
@@ -495,7 +501,7 @@ describe('memory_write tool', () => {
       expect(upsertSpy).toHaveBeenCalledTimes(1);
       const [records, operation] = upsertSpy.mock.calls[0] as [
         MemoryRecord[],
-        { operationId: string; operation: 'memory_write' },
+        { operationId: string; beforeProviderAttempt: () => void | Promise<void> },
       ];
       expect(records[0]).toMatchObject({
         chatJid: '12345@s.whatsapp.net',
@@ -505,7 +511,7 @@ describe('memory_write tool', () => {
       });
       expect(operation).toEqual({
         operationId: (res as { operation_id: string }).operation_id,
-        operation: 'memory_write',
+        beforeProviderAttempt: expect.any(Function),
       });
       expect(res).toMatchObject({
         operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
@@ -545,7 +551,7 @@ describe('memory_write tool', () => {
     );
 
     expect(isToolErrorPayload(res)).toBe(false);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records[0]).toMatchObject({
       chatJid: '12345',
       senderJid: 'phil@s.whatsapp.net',
@@ -610,7 +616,7 @@ describe('memory_write — conversation-bound sessions (per-chat actor socket)',
       boundSession({ conversationKey: 'diverged-top-level' }),
     );
     expect(isToolErrorPayload(res)).toBe(false);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records[0].chatJid).toBe('12345'); // binding key — not params.chatJid, not the diverged mirror
     expect(records[0].senderJid).toBe('phil@s.whatsapp.net');
   });

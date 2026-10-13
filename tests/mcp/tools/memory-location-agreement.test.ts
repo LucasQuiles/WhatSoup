@@ -124,6 +124,7 @@ vi.mock('../../../src/lib/keyring.ts', () => ({
 }));
 
 import { registerMemoryWriteTools } from '../../../src/mcp/tools/memory-write.ts';
+import { memoryWriteLifecycleStub } from '../../helpers/memory-write-lifecycle.ts';
 import { registerKnowledgeTools, type KnowledgeSearchDeps } from '../../../src/mcp/tools/knowledge.ts';
 import { GroupMembershipCache } from '../../../src/core/memory-scope.ts';
 import { Database } from '../../../src/core/database.ts';
@@ -179,7 +180,7 @@ function membershipOf(members: string[]): GroupMembershipCache {
 function registerTools(deps: KnowledgeSearchDeps = { identities: () => identities }) {
   const tools: ToolDeclaration[] = [];
   const register = (tool: ToolDeclaration) => tools.push(tool);
-  registerMemoryWriteTools(register);
+  registerMemoryWriteTools(register, memoryWriteLifecycleStub());
   registerKnowledgeTools(['mw-mind'], register, undefined, deps);
   const memoryWrite = tools.find((tool) => tool.name === 'memory_write');
   const knowledgeSearch = tools.find((tool) => tool.name === 'knowledge_search');

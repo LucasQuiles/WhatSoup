@@ -36,16 +36,24 @@ import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 export interface MemoryWriteOperationContext {
   operationId?: string;
   traceId?: string;
-  operation?: 'upsert' | 'memory_write';
-  beforeProviderAttempt?: () => void | Promise<void>;
+  beforeProviderAttempt: () => void | Promise<void>;
 }
 
 export interface MemoryWriter {
-  upsert(
+  upsertDirectMemory(
     records: MemoryRecord[],
-    context?: MemoryWriteOperationContext,
+    context: MemoryWriteOperationContext,
   ): Promise<void>;
 }
+
+export type MemoryWriteLifecycle = Pick<
+  RemoteMemoryLifecycle,
+  | 'registerWrite'
+  | 'assertWriteAdmission'
+  | 'markWriteFinalized'
+  | 'markWriteAmbiguous'
+  | 'requestErase'
+>;
 
 const MEMORY_TYPES = ['user_fact', 'group_context', 'preference', 'correction', 'self_fact'] as const;
 
@@ -93,15 +101,15 @@ function stableId(chatKey: string, memoryType: string, text: string): string {
  * Register the `memory_write` tool.
  *
  * @param register   registry register callback
+ * @param lifecycle  required authority for write admission, receipts, and erasure
  * @param makeWriter optional writer factory (defaults to a live PineconeMemory) — injectable for tests
  */
 export function registerMemoryWriteTools(
   register: (tool: ToolDeclaration) => void,
+  lifecycle: MemoryWriteLifecycle,
   makeWriter: () => MemoryWriter = () => new PineconeMemory(),
   // Injectable so record timestamps can be driven to a known instant (#2200).
-  // Optional and defaulted, so this slice changes no existing call site.
   clock: Clock = systemClock,
-  lifecycle?: RemoteMemoryLifecycle,
   registerEraseTool = true,
 ): void {
   let writer: MemoryWriter | null = null;
@@ -167,20 +175,20 @@ export function registerMemoryWriteTools(
       });
       const now = clock.nowIso();
       const stableRecordId = stableId(rawChat, memoryType, p.text);
-      const registration = lifecycle?.registerWrite({
+      const registration = lifecycle.registerWrite({
         remoteRecordId: stableRecordId,
         conversationKey: rawChat,
         senderJid,
         memoryType,
       });
-      if (registration && !registration.admitted) {
+      if (!registration.admitted) {
         return errorResult('memory_write was refused because this record is pending erasure');
       }
       const record: MemoryRecord = {
         // Preserve the existing provider record identity. The lifecycle ledger
         // consumes this exact ID so delete/retry work can reconcile records
         // written before this lifecycle existed.
-        id: registration?.remoteRecordId ?? stableRecordId,
+        id: registration.remoteRecordId,
         text: p.text,
         chatJid: rawChat,
         senderJid,
@@ -198,14 +206,11 @@ export function registerMemoryWriteTools(
       };
 
       try {
-        await getWriter().upsert([record], {
+        await getWriter().upsertDirectMemory([record], {
           operationId: operation.operationId,
-          operation: 'memory_write',
-          beforeProviderAttempt: lifecycle
-            ? () => lifecycle.assertWriteAdmission(record.id)
-            : undefined,
+          beforeProviderAttempt: () => lifecycle.assertWriteAdmission(record.id),
         });
-        if (lifecycle && !lifecycle.markWriteFinalized(record.id)) {
+        if (!lifecycle.markWriteFinalized(record.id)) {
           lifecycle.markWriteAmbiguous(record.id);
           return toolError({
             error: 'memory_write completed remotely but erasure was accepted before local finalization',
@@ -215,7 +220,7 @@ export function registerMemoryWriteTools(
           });
         }
       } catch (err) {
-        lifecycle?.markWriteAmbiguous(record.id);
+        lifecycle.markWriteAmbiguous(record.id);
         const failure = classifyMemoryOperationFailure(err);
         return toolError({
           error: 'memory_write failed',
@@ -233,12 +238,12 @@ export function registerMemoryWriteTools(
     },
   });
 
-  if (lifecycle && registerEraseTool) registerRemoteMemoryEraseTool(register, lifecycle);
+  if (registerEraseTool) registerRemoteMemoryEraseTool(register, lifecycle);
 }
 
 export function registerRemoteMemoryEraseTool(
   register: (tool: ToolDeclaration) => void,
-  lifecycle: RemoteMemoryLifecycle,
+  lifecycle: MemoryWriteLifecycle,
 ): void {
   register({
     name: 'erase_remote_memory',

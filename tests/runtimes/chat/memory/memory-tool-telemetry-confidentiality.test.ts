@@ -16,6 +16,7 @@ import type {
   SessionContext,
   ToolDeclaration,
 } from '../../../../src/mcp/types.ts';
+import { memoryWriteLifecycleStub } from '../../../helpers/memory-write-lifecycle.ts';
 
 const PRIVATE_MARKERS = [
   'SYNTHETIC_PRIVATE_TOOL_CHAT_MARKER',
@@ -31,7 +32,7 @@ const PRIVATE_MARKERS = [
 
 function registerTool(writer: MemoryWriter): ToolDeclaration {
   const tools: ToolDeclaration[] = [];
-  registerMemoryWriteTools((tool) => tools.push(tool), () => writer);
+  registerMemoryWriteTools((tool) => tools.push(tool), memoryWriteLifecycleStub(), () => writer);
   return tools.find((tool) => tool.name === 'memory_write')!;
 }
 
@@ -57,7 +58,7 @@ describe('memory tool telemetry confidentiality', () => {
     vi.clearAllMocks();
     const successUpsert = vi.fn().mockResolvedValue(undefined);
     const success = await registerTool({
-      upsert: successUpsert,
+      upsertDirectMemory: successUpsert,
     }).handler(privateParams, privateSession);
 
     const failureUpsert = vi.fn().mockRejectedValue(
@@ -72,7 +73,7 @@ describe('memory tool telemetry confidentiality', () => {
       ),
     );
     const failure = await registerTool({
-      upsert: failureUpsert,
+      upsertDirectMemory: failureUpsert,
     }).handler(privateParams, privateSession);
 
     expect(success).toEqual({
@@ -94,11 +95,11 @@ describe('memory tool telemetry confidentiality', () => {
       .operation_id;
     expect(successUpsert.mock.calls[0]?.[1]).toEqual({
       operationId: successOperationId,
-      operation: 'memory_write',
+      beforeProviderAttempt: expect.any(Function),
     });
     expect(failureUpsert.mock.calls[0]?.[1]).toEqual({
       operationId: failureOperationId,
-      operation: 'memory_write',
+      beforeProviderAttempt: expect.any(Function),
     });
 
     const serializedObservation = JSON.stringify({

@@ -1140,6 +1140,20 @@ export class PineconeMemory {
     }
   }
 
+  async upsertDirectMemory(
+    records: MemoryRecord[],
+    context: {
+      operationId?: string;
+      traceId?: string;
+      beforeProviderAttempt: () => void | Promise<void>;
+    },
+  ): Promise<void> {
+    return this.upsert(records, {
+      ...context,
+      operation: 'memory_write',
+    });
+  }
+
   async upsert(
     records: MemoryRecord[],
     contextInput: {
