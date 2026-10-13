@@ -100,7 +100,7 @@ def probe_liveness(url: str, timeout: float = 5) -> dict:
         result["code"] = (
             "timeout" if isinstance(exc.reason, TimeoutError) else "unavailable"
         )
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, http.client.HTTPException):
         result["code"] = "invalid_response"
     result["latency_ms"] = round((time.monotonic() - start) * 1000, 2)
     return result

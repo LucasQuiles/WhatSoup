@@ -194,6 +194,41 @@ def test_state_files_are_private(supervisor, config):
     assert os.stat(path).st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("truncated", [False, True], ids=["complete", "truncated-chunk"])
+def test_liveness_handles_a_truncated_chunked_response(supervisor, truncated):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if truncated:
+                self.wfile.write(b"20\r\n{\"status\":")
+            else:
+                body = b'{"status":"ok"}'
+                self.wfile.write(f"{len(body):x}\r\n".encode() + body + b"\r\n0\r\n\r\n")
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = supervisor.probe_liveness(f"http://127.0.0.1:{server.server_port}/live", 1)
+        assert result["ok"] is (not truncated)
+        assert result["code"] == ("invalid_response" if truncated else "ok")
+        assert result["latency_ms"] >= 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_budget_alert_also_clears_when_broker_recovers(supervisor, config):
     events = []
     for now in [0, 30, 60, 181, 211, 241, 362, 392, 422]:

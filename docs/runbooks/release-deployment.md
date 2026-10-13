@@ -784,6 +784,12 @@ tools. A legacy capability probe can read a mailbox resource only when its
 private config explicitly sets `legacy_sent_items_probe: true`; it is not part
 of the default observer or deadman schedule.
 
+The optional service supervisor records malformed or truncated HTTP framing as
+an `invalid_response` liveness failure, so that fault does not abort the cycle.
+Process cleanup across the observer, transport and independently started MCP
+process remains a separate continuity obligation. In particular, a per-request
+MCP timeout does not establish a deadline for the complete multi-request probe.
+
 Instance health tokens use the shared reader's precedence: per-instance
 `BOT_ERRORS_HEALTH_TOKEN_<INSTANCE>`, then `WHATSOUP_HEALTH_TOKEN`, then the
 instance's `tokens.env`. An existing launchd plist token is a compatibility

@@ -975,7 +975,7 @@
     },
     {
       "path": "deploy/scripts/fleet/reliability_supervisor.py",
-      "sha256": "5fa05d70b855d5fb25707c8f08cfb8300e1db86afacfd8a0925b537ec8223790",
+      "sha256": "5e0674bb86a166e3944cd2599f8e69f080046151c49c7cac9a43a9ff65abceb5",
       "mustContain": [
         "legacy_sent_items_probe",
         "resolve_alert_delivery"
