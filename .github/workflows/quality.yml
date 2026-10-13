@@ -80,9 +80,75 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Container input policy and snapshot availability
+        run: npm run guard:node-pin-consistency -- --verify-container-snapshot
+
       - name: Build Docker deployment image
         timeout-minutes: 10
-        run: docker build --file docker/Dockerfile --tag whatsoup-ci .
+        env:
+          # Buildx otherwise emits `{}` for buildx.build.provenance, which
+          # cannot establish the receipt's requested source/build details.
+          BUILDX_METADATA_PROVENANCE: max
+        run: |
+          set -euo pipefail
+          container_dir="$RUNNER_TEMP/whatsoup-container"
+          mkdir -p "$container_dir"
+          expected_builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
+          docker buildx create --name whatsoup-ci-builder --driver docker-container --use --bootstrap
+          builder="$(docker buildx inspect whatsoup-ci-builder --format '{{.Name}}|{{.Driver}}')"
+          if [ "$builder" != "$expected_builder" ]; then
+            echo "::error::Buildx builder differs from reviewed policy: expected $expected_builder, got $builder"
+            exit 1
+          fi
+          builder_name="${builder%%|*}"
+          docker buildx build \
+            --builder "$builder_name" \
+            --file docker/Dockerfile \
+            --tag whatsoup-ci \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "$container_dir/build-metadata.json" \
+            --output type=oci,dest="$container_dir/whatsoup-image.oci.tar" \
+            .
+
+      - name: Generate container SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
+        with:
+          image: oci-archive:${{ runner.temp }}/whatsoup-container/whatsoup-image.oci.tar
+          format: spdx-json
+          output-file: ${{ runner.temp }}/whatsoup-container/whatsoup-image.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Verify container build receipt
+        run: |
+          set -euo pipefail
+          container_dir="$RUNNER_TEMP/whatsoup-container"
+          builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
+          bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
+            --metadata "$container_dir/build-metadata.json" \
+            --sbom "$container_dir/whatsoup-image.spdx.json" \
+            --image "$container_dir/whatsoup-image.oci.tar" \
+            --source "$GITHUB_SHA" \
+            --builder "$builder" \
+            --verify-oci-attestations \
+            --output "$container_dir/container-build-receipt.json"
+          bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
+            --metadata "$container_dir/build-metadata.json" \
+            --sbom "$container_dir/whatsoup-image.spdx.json" \
+            --image "$container_dir/whatsoup-image.oci.tar" \
+            --source "$GITHUB_SHA" \
+            --builder "$builder" \
+            --verify-oci-attestations \
+            --receipt "$container_dir/container-build-receipt.json"
+
+      - name: Upload container build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: container-build-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/whatsoup-container
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Refresh PR base snapshot
         run: |
@@ -277,9 +343,6 @@ jobs:
       - name: Publication guard
         run: npm run guard:publication:all
 
-      - name: Node pin consistency guard
-        run: npm run guard:node-pin-consistency
-
       - name: Source runtime drift guard
         run: npm run guard:source-runtime-drift
 
@@ -469,6 +532,58 @@ jobs:
             tests/browser/__screenshots__
             tests/browser-motion/__screenshots__
           if-no-files-found: ignore
+
+  attest-container-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Download checked container evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: container-build-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/whatsoup-container
+
+      - name: Reverify downloaded container evidence
+        run: |
+          set -euo pipefail
+          container_dir="$RUNNER_TEMP/whatsoup-container"
+          builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
+          bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
+            --metadata "$container_dir/build-metadata.json" \
+            --sbom "$container_dir/whatsoup-image.spdx.json" \
+            --image "$container_dir/whatsoup-image.oci.tar" \
+            --source "$GITHUB_SHA" \
+            --builder "$builder" \
+            --verify-oci-attestations \
+            --receipt "$container_dir/container-build-receipt.json"
+
+      - name: Attest container image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
+        with:
+          subject-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.oci.tar
+
+      - name: Attest container image SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
+        with:
+          subject-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.oci.tar
+          sbom-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.spdx.json
 
   compatibility:
     name: quality (25.x)

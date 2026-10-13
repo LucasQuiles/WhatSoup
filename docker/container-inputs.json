@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "baseImage": "node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d",
+  "builder": {
+    "name": "whatsoup-ci-builder",
+    "driver": "docker-container"
+  },
+  "apt": {
+    "snapshot": "20261001T000000Z",
+    "sources": [
+      "https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main",
+      "https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main"
+    ]
+  }
+}

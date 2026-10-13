@@ -1,6 +1,16 @@
+# ── Stage 0: Immutable Node and Debian package inputs ──────────────────────────
+# Node version pinned to match .nvmrc and package.json#volta.node. The digest and
+# snapshot policy are verified by scripts/check-node-pin-consistency.ts.
+FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
+
+RUN printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
+      > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/debian.sources
+
 # ── Stage 1: Install production dependencies ──────────────────────────────────
-# Node version pinned to match .nvmrc and package.json#volta.node.
-FROM node:24.15.0-slim AS deps
+FROM base AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git \
@@ -31,8 +41,7 @@ RUN npm run build
 # Output lands at /app/dist (vite.config.ts: outDir: '../dist')
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-# Node version pinned to match .nvmrc and package.json#volta.node.
-FROM node:24.15.0-slim AS runtime
+FROM base AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tini \

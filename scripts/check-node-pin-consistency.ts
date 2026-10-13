@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,6 +8,7 @@ export type NodePinSource =
   | 'package.json#volta.node'
   | 'package.json#engines.node'
   | 'docker/Dockerfile'
+  | 'docker/container-inputs.json'
   | 'deploy/whatsoup'
   | 'deploy/whatsoup-auth'
   | 'deploy/whatsoup-fleet'
@@ -35,6 +37,28 @@ export interface NodePinDrift {
 export interface NodePinOptions {
   cwd?: string;
 }
+
+interface DockerNodePinReading extends NodePinReading {
+  digest: string | null;
+}
+
+interface ContainerInputPolicy {
+  schemaVersion: number;
+  baseImage: string;
+  builder: {
+    name: string;
+    driver: string;
+  };
+  apt: {
+    snapshot: string;
+    sources: string[];
+  };
+}
+
+const CONTAINER_INPUT_POLICY_PATH = 'docker/container-inputs.json';
+const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const NODE_IMAGE_PATTERN = /^node:(\d+\.\d+\.\d+)-slim@(sha256:[a-f0-9]{64})$/;
+const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{8}T\d{6}Z$/;
 
 const HARDCODED_NODE_PATH_PATTERN =
   /\/\.nvm\/versions\/node\/v(\d+\.\d+\.\d+)\/bin\/node/;
@@ -98,11 +122,11 @@ function readPackageJsonPins(cwd: string): NodePinReading[] {
   return readings;
 }
 
-function readDockerfilePins(cwd: string): NodePinReading[] {
+function readDockerfilePins(cwd: string): DockerNodePinReading[] {
   const filePath = path.join(cwd, 'docker/Dockerfile');
   const text = readFileSync(filePath, 'utf8');
-  const readings: NodePinReading[] = [];
-  const fromLine = /^FROM\s+node:(\S+?)(?:-slim|-alpine|-bookworm)?\s+AS\s+\S+/gim;
+  const readings: DockerNodePinReading[] = [];
+  const fromLine = /^FROM\s+node:(\d+\.\d+\.\d+)(?:-slim|-alpine|-bookworm)?(@sha256:([a-f0-9]{64}))?\s+AS\s+\S+/gim;
   let match: RegExpExecArray | null;
   while ((match = fromLine.exec(text)) !== null) {
     readings.push({
@@ -110,6 +134,7 @@ function readDockerfilePins(cwd: string): NodePinReading[] {
       filePath,
       version: match[1] ?? null,
       raw: match[0] ?? '',
+      digest: match[3] ?? null,
     });
   }
   if (readings.length === 0) {
@@ -118,9 +143,171 @@ function readDockerfilePins(cwd: string): NodePinReading[] {
       filePath,
       version: null,
       raw: '',
+      digest: null,
     });
   }
   return readings;
+}
+
+function containerInputIssue(
+  cwd: string,
+  source: 'docker/Dockerfile' | 'docker/container-inputs.json',
+  reason: string,
+): NodePinDrift['missing'][number] {
+  return {
+    source,
+    filePath: path.join(cwd, source),
+    reason,
+  };
+}
+
+function readContainerInputPolicy(cwd: string):
+  | { policy: ContainerInputPolicy; issue: null }
+  | { policy: null; issue: NodePinDrift['missing'][number] } {
+  const filePath = path.join(cwd, CONTAINER_INPUT_POLICY_PATH);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+  } catch {
+    return {
+      policy: null,
+      issue: containerInputIssue(cwd, 'docker/container-inputs.json', 'missing or invalid container input policy'),
+    };
+  }
+  if (
+    !parsed
+    || typeof parsed !== 'object'
+    || !Number.isInteger((parsed as { schemaVersion?: unknown }).schemaVersion)
+    || typeof (parsed as { baseImage?: unknown }).baseImage !== 'string'
+    || !(parsed as { builder?: unknown }).builder
+    || typeof (parsed as { builder: { name?: unknown } }).builder.name !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test((parsed as { builder: { name: string } }).builder.name)
+    || (parsed as { builder: { driver?: unknown } }).builder.driver !== 'docker-container'
+    || !(parsed as { apt?: unknown }).apt
+    || typeof (parsed as { apt: { snapshot?: unknown } }).apt.snapshot !== 'string'
+    || !Array.isArray((parsed as { apt: { sources?: unknown } }).apt.sources)
+    || !(parsed as { apt: { sources: unknown[] } }).apt.sources.every((source) => typeof source === 'string')
+  ) {
+    return {
+      policy: null,
+      issue: containerInputIssue(cwd, 'docker/container-inputs.json', 'invalid container input policy shape'),
+    };
+  }
+  return { policy: parsed as ContainerInputPolicy, issue: null };
+}
+
+function dockerExternalImageRefs(text: string): string[] {
+  const instructions = [...text.matchAll(/^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?\s*$/gim)];
+  const stageAliases = new Set(
+    instructions
+      .map((match) => match[2]?.toLowerCase())
+      .filter((alias): alias is string => Boolean(alias)),
+  );
+  return instructions
+    .map((match) => match[1] ?? '')
+    .filter((image) => image !== 'scratch' && !stageAliases.has(image.toLowerCase()));
+}
+
+function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
+  const policyResult = readContainerInputPolicy(cwd);
+  if (!policyResult.policy) return [policyResult.issue];
+
+  const { policy } = policyResult;
+  const policyIssues: NodePinDrift['missing'] = [];
+  const expectedImage = NODE_IMAGE_PATTERN.exec(policy.baseImage);
+  if (!expectedImage || !SHA256_DIGEST_PATTERN.test(expectedImage[2] ?? '')) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/container-inputs.json',
+      'base image must use node:<version>-slim@sha256:<digest>',
+    ));
+  }
+  if (!SNAPSHOT_TIMESTAMP_PATTERN.test(policy.apt.snapshot)) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/container-inputs.json',
+      'APT snapshot must be a UTC timestamp in YYYYMMDDTHHMMSSZ form',
+    ));
+  }
+
+  const expectedSources = [
+    `https://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ bookworm main`,
+    `https://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ bookworm-security main`,
+  ];
+  if (
+    policy.apt.sources.length !== expectedSources.length
+    || policy.apt.sources.some((source, index) => source !== expectedSources[index])
+  ) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/container-inputs.json',
+      'APT sources must use the approved Debian snapshot',
+    ));
+  }
+
+  const dockerfilePath = path.join(cwd, 'docker/Dockerfile');
+  const dockerfile = readFileSync(dockerfilePath, 'utf8');
+  for (const image of dockerExternalImageRefs(dockerfile)) {
+    if (!image.includes('@sha256:')) {
+      policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'base image is not pinned by digest'));
+      continue;
+    }
+    if (image !== policy.baseImage) {
+      policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'base image does not match docker/container-inputs.json'));
+    }
+  }
+  if (!dockerfile.includes('rm -f /etc/apt/sources.list.d/debian.sources')) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/Dockerfile',
+      'Dockerfile does not remove the mutable Debian package source',
+    ));
+  }
+  if (expectedSources.some((source) => !dockerfile.includes(source))) {
+    policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'APT source does not match docker/container-inputs.json'));
+  }
+  return policyIssues;
+}
+
+function verifyContainerSnapshotAvailability(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): NodePinDrift['missing'] {
+  const policyResult = readContainerInputPolicy(cwd);
+  if (!policyResult.policy || !SNAPSHOT_TIMESTAMP_PATTERN.test(policyResult.policy.apt.snapshot)) {
+    return [];
+  }
+
+  const snapshot = policyResult.policy.apt.snapshot;
+  const releases = [
+    `https://snapshot.debian.org/archive/debian/${snapshot}/dists/bookworm/Release`,
+    `https://snapshot.debian.org/archive/debian-security/${snapshot}/dists/bookworm-security/Release`,
+  ];
+  const issues: NodePinDrift['missing'] = [];
+  for (const release of releases) {
+    try {
+      execFileSync('curl', [
+        '--fail',
+        '--silent',
+        '--show-error',
+        '--location',
+        '--max-time',
+        '30',
+        release,
+      ], {
+        env,
+        stdio: 'ignore',
+        timeout: 35_000,
+      });
+    } catch {
+      issues.push(containerInputIssue(
+        cwd,
+        'docker/container-inputs.json',
+        `APT snapshot release metadata is unavailable: ${release}`,
+      ));
+    }
+  }
+  return issues;
 }
 
 function readWrapperPin(
@@ -169,6 +356,7 @@ export function collectNodePinReadings(
 }
 
 export function findNodePinDrift(options: NodePinOptions = {}): NodePinDrift {
+  const cwd = options.cwd ?? process.cwd();
   const readings = collectNodePinReadings(options);
   const nvmrc = readings.find((r) => r.source === '.nvmrc');
   if (!nvmrc || !nvmrc.version) {
@@ -177,6 +365,7 @@ export function findNodePinDrift(options: NodePinOptions = {}): NodePinDrift {
     );
   }
   const canonical = nvmrc.version;
+  const dockerReadings = readDockerfilePins(cwd);
 
   const mismatches: NodePinReading[] = [];
   const missing: NodePinDrift['missing'] = [];
@@ -227,6 +416,18 @@ export function findNodePinDrift(options: NodePinOptions = {}): NodePinDrift {
     if (r.version !== canonical) mismatches.push(r);
   }
 
+  for (const reading of dockerReadings) {
+    if (reading.version !== null && reading.digest === null) {
+      missing.push({
+        source: reading.source,
+        filePath: reading.filePath,
+        reason: 'base image is not pinned by digest',
+      });
+    }
+  }
+
+  missing.push(...findContainerInputDrift(cwd));
+
   return { canonical, mismatches, missing };
 }
 
@@ -261,15 +462,21 @@ export function run(
     }
   }
   const drift = findNodePinDrift({ cwd });
-  if (drift.mismatches.length > 0 || drift.missing.length > 0) {
-    printDrift(drift);
+  const result: NodePinDrift = {
+    ...drift,
+    missing: _argv.includes('--verify-container-snapshot')
+      ? [...drift.missing, ...verifyContainerSnapshotAvailability(cwd, env)]
+      : drift.missing,
+  };
+  if (result.mismatches.length > 0 || result.missing.length > 0) {
+    printDrift(result);
     process.exitCode = 1;
   } else {
     console.log(
       `node-pin consistency check passed (canonical=${drift.canonical})`,
     );
   }
-  return drift;
+  return result;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

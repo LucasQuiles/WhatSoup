@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,8 @@ import {
 } from '../../scripts/check-node-pin-consistency.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+const TEST_DOCKER_DIGEST = 'a'.repeat(64);
+const TEST_SNAPSHOT = '20261001T000000Z';
 
 /**
  * Build a minimal repo fixture with the four pin surfaces (nvmrc, package.json,
@@ -22,6 +24,9 @@ function makeFixture(opts: {
   voltaNode?: string;
   enginesNode?: string;
   dockerVersion?: string;
+  dockerDigest?: string | null;
+  aptSnapshot?: string;
+  aptSource?: 'approved' | 'mutable' | 'unavailable';
   wrapperVersion?: string | 'reads-nvmrc' | 'none';
   wrappers?: (
     | 'deploy/whatsoup'
@@ -37,6 +42,11 @@ function makeFixture(opts: {
   const voltaNode = opts.voltaNode ?? '24.15.0';
   const enginesNode = opts.enginesNode ?? '>=24.0.0 <26';
   const dockerVersion = opts.dockerVersion ?? '24.15.0';
+  const dockerDigest = opts.dockerDigest === undefined
+    ? TEST_DOCKER_DIGEST
+    : opts.dockerDigest;
+  const aptSnapshot = opts.aptSnapshot ?? TEST_SNAPSHOT;
+  const aptSource = opts.aptSource ?? 'approved';
   const wrapperVersion = opts.wrapperVersion ?? 'reads-nvmrc';
   const wrappers = opts.wrappers ?? [
     'deploy/whatsoup',
@@ -63,9 +73,48 @@ function makeFixture(opts: {
   );
 
   mkdirSync(path.join(dir, 'docker'), { recursive: true });
+  const approvedDebianSource = `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`;
+  const approvedDebianSecuritySource = `https://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`;
+  const sourceUrl = aptSource === 'mutable'
+    ? 'http://deb.debian.org/debian/'
+    : aptSource === 'unavailable'
+      ? `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`
+      : approvedDebianSource;
+  const securitySourceUrl = aptSource === 'approved'
+    ? approvedDebianSecuritySource
+    : sourceUrl;
   writeFileSync(
     path.join(dir, 'docker/Dockerfile'),
-    `FROM node:${dockerVersion}-slim AS deps\nFROM node:${dockerVersion}-slim AS runtime\n`,
+    [
+      `FROM node:${dockerVersion}-slim${dockerDigest === null ? '' : `@sha256:${dockerDigest}`} AS base`,
+      'RUN printf \'%s\\n\' \\',
+      `  'deb [check-valid-until=no] ${sourceUrl} bookworm main' \\,`,
+      `  'deb [check-valid-until=no] ${securitySourceUrl} bookworm-security main' \\,`,
+      '  > /etc/apt/sources.list \\',
+      '  && rm -f /etc/apt/sources.list.d/debian.sources',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  writeFileSync(
+    path.join(dir, 'docker/container-inputs.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      baseImage: `node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST}`,
+      builder: {
+        name: 'whatsoup-ci-builder',
+        driver: 'docker-container',
+      },
+      apt: {
+        snapshot: aptSnapshot,
+        sources: [
+          `${approvedDebianSource} bookworm main`,
+          `${approvedDebianSecuritySource} bookworm-security main`,
+        ],
+      },
+    }, null, 2)}\n`,
     'utf8',
   );
 
@@ -158,6 +207,73 @@ describe('node-pin consistency check', () => {
     for (const m of dockerMismatches) {
       expect(m.version).toBe('24.14.0');
     }
+  });
+
+  it('rejects a Dockerfile base that omits an immutable image digest', () => {
+    const dir = makeFixture({ dockerDigest: null });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: path.join(dir, 'docker/Dockerfile'),
+      reason: 'base image is not pinned by digest',
+    });
+  });
+
+  it('rejects a base digest changed from the reviewed container-input policy', () => {
+    const dir = makeFixture({ dockerDigest: 'b'.repeat(64) });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: path.join(dir, 'docker/Dockerfile'),
+      reason: 'base image does not match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects mutable package sources outside the approved snapshot policy', () => {
+    const dir = makeFixture({ aptSource: 'mutable' });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: path.join(dir, 'docker/Dockerfile'),
+      reason: 'APT source does not match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects a package snapshot whose immutable identifier is unavailable', () => {
+    const dir = makeFixture({
+      aptSnapshot: 'not-a-snapshot',
+      aptSource: 'unavailable',
+    });
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: path.join(dir, 'docker/container-inputs.json'),
+      reason: 'APT snapshot must be a UTC timestamp in YYYYMMDDTHHMMSSZ form',
+    });
+  });
+
+  it('fails closed when requested snapshot release metadata cannot be retrieved', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({});
+    const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
+    const curlPath = path.join(binDir, 'curl');
+    writeFileSync(curlPath, '#!/bin/sh\nexit 22\n', 'utf8');
+    chmodSync(curlPath, 0o755);
+
+    run(['--verify-container-snapshot'], dir, { PATH: binDir });
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('APT snapshot release metadata is unavailable'),
+    );
   });
 
   it('flags a volta.node pinned to a non-canonical version', () => {

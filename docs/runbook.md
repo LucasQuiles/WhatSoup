@@ -3340,7 +3340,40 @@ WhatSoup can run in a Docker container as an alternative to the systemd/launchd 
 docker compose build
 ```
 
-The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on the reviewed Node tag and digest in `docker/container-inputs.json`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+
+### Build input updates and evidence
+
+`docker/container-inputs.json` is the reviewed source of truth for the Node image tag and
+digest, Buildx builder name and driver, and Debian snapshot. `docker/Dockerfile` must match it exactly:
+the readable image tag remains alongside its immutable digest, and the package sources use
+only the declared snapshot. Check the static policy before a build:
+
+```bash
+npm run guard:node-pin-consistency
+```
+
+CI also checks that both Debian snapshot `Release` files remain available before it builds.
+Run the network check when the environment can reach the snapshot service:
+
+```bash
+npm run guard:node-pin-consistency -- --verify-container-snapshot
+```
+
+To update inputs, verify a new Node tag-to-digest mapping and the Debian snapshot metadata,
+then update the policy and Dockerfile together. Run the guard, a clean Linux container build,
+and the focused receipt tests in the same change. Review inputs at least monthly and whenever
+a relevant Node or Debian security update is published; immutable references make a reviewed
+build reproducible, but they do not update themselves.
+
+The Quality workflow creates the policy's named `docker-container` builder, exports the image as an OCI archive, verifies that the archive retains
+BuildKit SLSA provenance and SPDX SBOM predicates, generates a separate SPDX SBOM, and binds
+the source revision, expected builder, image digest, metadata, and SBOM hashes in a receipt.
+Pull requests produce unsigned evidence only. After a trusted `main` build succeeds, the
+separate attestation job rechecks the archived evidence and signs provenance and SBOM
+attestations for that archive. A local Docker or compatible container engine is still needed
+to establish local build proof; a missing engine is an inconclusive result, not a successful
+build.
 
 ### Configure
 
