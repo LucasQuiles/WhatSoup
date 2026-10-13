@@ -44,6 +44,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { systemClock } from '../../lib/clock.ts';
+import { SIGNAL } from '../../lib/signals.ts';
 import {
   dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
   TriggerBudgetError, TRIGGER_BUDGETS,
@@ -550,7 +551,7 @@ export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<Isola
     const terminate = (result: IsolatedSqliteResult): void => {
       if (terminal) return;
       terminal = result;
-      try { child.kill('SIGKILL'); } catch { /* close/error settles the result */ }
+      try { child.kill(SIGNAL.KILL); } catch { /* close/error settles the result */ }
     };
     deadline = setTimeout(() => {
       terminate({ kind: 'resource_exhausted', limit: 'wall_time' });
