@@ -35,7 +35,7 @@ export class PlannedStopTurnLossError extends Error {
  * reset/kill teardown owns, so their undispatched turns were not taken.
  */
 export class PlannedStopQueueCloseError extends AggregateError {
-  constructor(failures: readonly unknown[]) {
+  constructor(failures: ReadonlyArray<unknown>) {
     super(failures, `planned stop could not close ${failures.length} runtime turn queue(s)`);
     this.name = 'PlannedStopQueueCloseError';
   }
