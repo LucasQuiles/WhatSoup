@@ -35,6 +35,9 @@ jobs:
       # commit so configSource records verified remote context rather than a
       # caller-supplied local VCS hint.
       SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      # Only pull requests can select a fork source. Push and merge-group builds
+      # retain docker/container-inputs.json's reviewed canonical repository.
+      SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}
     # Generous cap so it only kills a genuinely hung run, not a slow-but-live
     # one (the authority job runs the full suite + coverage and can take ~40min).
     # Without this a hung run rides to the 6h GitHub default.
@@ -142,7 +145,15 @@ jobs:
             exit 1
           fi
           builder_name="${builder%%|*}"
-          source_repository="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)')"
+          if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
+            source_repository="$SOURCE_REPOSITORY"
+          else
+            source_repository="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)')"
+          fi
+          if ! node -e 'const source = process.argv[1]; process.exit(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(source) ? 0 : 1)' "$source_repository"; then
+            echo '::error::container source repository must be a canonical GitHub HTTPS clone URL'
+            exit 1
+          fi
           provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           docker buildx build \
             --builder "$builder_name" \
@@ -171,12 +182,18 @@ jobs:
           builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
           buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
           buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
+          if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
+            source_repository="$SOURCE_REPOSITORY"
+          else
+            source_repository="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)')"
+          fi
           provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
             --sbom "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
             --source "$SOURCE_REVISION" \
+            --source-repository "$source_repository" \
             --builder "$builder" \
             --buildx-version "$buildx_version" \
             --buildkit-version "$buildkit_version" \
@@ -187,6 +204,7 @@ jobs:
             --sbom "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
             --source "$SOURCE_REVISION" \
+            --source-repository "$source_repository" \
             --builder "$builder" \
             --buildx-version "$buildx_version" \
             --buildkit-version "$buildkit_version" \

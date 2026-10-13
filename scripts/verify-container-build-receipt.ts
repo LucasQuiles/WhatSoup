@@ -29,6 +29,7 @@ export interface ContainerBuildReceiptInput {
   sbomPath: string;
   imagePath: string;
   sourceRevision: string;
+  sourceRepository?: string;
   builder: string;
   buildxVersion: string;
   buildkitVersion: string;
@@ -190,6 +191,14 @@ function expectedBuildkitVersion(policy: ContainerInputPolicy): string {
   const match = /^moby\/buildkit:(v\d+\.\d+\.\d+)@sha256:[a-f0-9]{64}$/.exec(policy.buildx.buildkitImage);
   if (!match?.[1]) throw new Error('container input policy has an invalid BuildKit image version');
   return match[1];
+}
+
+function selectedSourceRepository(policy: ContainerInputPolicy, sourceRepository?: string): string {
+  const selected = sourceRepository ?? policy.sourceRepository;
+  if (!SOURCE_REPOSITORY_PATTERN.test(selected)) {
+    throw new Error('selected source repository must be a canonical GitHub HTTPS clone URL');
+  }
+  return selected;
 }
 
 function readOciArchiveEntry(archivePath: string, entry: string): Buffer {
@@ -363,6 +372,7 @@ function assertInput(input: ContainerBuildReceiptInput): {
   metadata: BuildMetadata;
   sbom: SbomDocument;
   policy: ContainerInputPolicy;
+  sourceRepository: string;
   oci: OciVerificationResult;
 } {
   if (!COMMIT_PATTERN.test(input.sourceRevision)) throw new Error(`source revision must be a full 40-hex commit: ${input.sourceRevision}`);
@@ -377,6 +387,7 @@ function assertInput(input: ContainerBuildReceiptInput): {
   const sbom = parseJson<SbomDocument>(input.sbomPath, 'SBOM');
   if (typeof sbom.spdxVersion !== 'string' || sbom.spdxVersion.length === 0) throw new Error('SBOM must be SPDX JSON');
   const policy = loadPolicy(input.repoRoot);
+  const sourceRepository = selectedSourceRepository(policy, input.sourceRepository);
   if (input.builder !== expectedBuilderIdentity(policy)) throw new Error('builder identity does not match docker/container-inputs.json');
   if (input.buildxVersion !== policy.buildx.version) throw new Error('Buildx version does not match docker/container-inputs.json');
   if (input.buildkitVersion !== expectedBuildkitVersion(policy)) throw new Error('BuildKit version does not match docker/container-inputs.json');
@@ -386,7 +397,7 @@ function assertInput(input: ContainerBuildReceiptInput): {
   }
   const oci = verifyOciArchiveAttestations(input.imagePath, metadata['containerimage.digest'], {
     sourceRevision: input.sourceRevision,
-    sourceRepository: policy.sourceRepository,
+    sourceRepository,
     provenanceBuilderId: input.provenanceBuilderId,
     baseImageDependency: policy.baseImageDependency,
     baseImageResolvedDigest: policy.baseImageResolvedDigest,
@@ -394,15 +405,15 @@ function assertInput(input: ContainerBuildReceiptInput): {
     sbomGeneratorResolvedDigest: policy.sbom.resolvedDigest,
     buildxProvenance: metadata['buildx.build.provenance'],
   });
-  return { metadata, sbom, policy, oci };
+  return { metadata, sbom, policy, sourceRepository, oci };
 }
 
 export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): ContainerBuildReceipt {
-  const { metadata, policy, oci } = assertInput(input);
+  const { metadata, policy, sourceRepository, oci } = assertInput(input);
   return {
     schemaVersion: 3,
     sourceRevision: input.sourceRevision,
-    sourceRepository: policy.sourceRepository,
+    sourceRepository,
     platform: PLATFORM,
     builder: input.builder,
     provenanceBuilderId: input.provenanceBuilderId,
@@ -438,6 +449,7 @@ interface ParsedArgs {
   sbomPath: string;
   imagePath: string;
   sourceRevision: string;
+  sourceRepository?: string;
   builder: string;
   buildxVersion: string;
   buildkitVersion: string;
@@ -453,7 +465,7 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
-    if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)');
+    if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)');
     values.set(flag, value);
     index += 1;
   }
@@ -467,7 +479,7 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
   if (Boolean(outputPath) === Boolean(receiptPath)) throw new Error('provide exactly one of --output or --receipt');
   return {
     metadataPath: required('--metadata'), sbomPath: required('--sbom'), imagePath: required('--image'),
-    sourceRevision: required('--source'), builder: required('--builder'), buildxVersion: required('--buildx-version'),
+    sourceRevision: required('--source'), sourceRepository: values.get('--source-repository'), builder: required('--builder'), buildxVersion: required('--buildx-version'),
     buildkitVersion: required('--buildkit-version'), provenanceBuilderId: required('--provenance-builder-id'),
     repoRoot: values.get('--repo-root') ?? cwd, outputPath, receiptPath, githubOutputPath: values.get('--github-output'),
   };
@@ -477,7 +489,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
   const args = parseArgs(argv, cwd);
   const input: ContainerBuildReceiptInput = {
     repoRoot: args.repoRoot, metadataPath: args.metadataPath, sbomPath: args.sbomPath, imagePath: args.imagePath,
-    sourceRevision: args.sourceRevision, builder: args.builder, buildxVersion: args.buildxVersion,
+    sourceRevision: args.sourceRevision, sourceRepository: args.sourceRepository, builder: args.builder, buildxVersion: args.buildxVersion,
     buildkitVersion: args.buildkitVersion, provenanceBuilderId: args.provenanceBuilderId,
   };
   const receipt = createContainerBuildReceipt(input);

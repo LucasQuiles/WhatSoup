@@ -40,6 +40,7 @@ function makeReceiptInput(options: {
   builder?: string;
   buildxVersion?: string;
   buildkitVersion?: string;
+  sourceRepository?: string;
   ociSourceRevision?: string;
   ociSourceRepository?: string;
   ociProvenanceBuilderId?: string;
@@ -52,7 +53,7 @@ function makeReceiptInput(options: {
   const imagePath = path.join(dir, 'image.tar');
   const oci = writeOciArchive(imagePath, {
     sourceRevision: options.ociSourceRevision ?? SOURCE_REVISION,
-    sourceRepository: options.ociSourceRepository,
+    sourceRepository: options.ociSourceRepository ?? options.sourceRepository,
     provenanceBuilderId: options.ociProvenanceBuilderId,
     baseImageDigest: options.ociBaseImageDigest,
     sbomGeneratorDigest: options.ociSbomGeneratorDigest,
@@ -68,6 +69,7 @@ function makeReceiptInput(options: {
     sbomPath,
     imagePath,
     sourceRevision: SOURCE_REVISION,
+    sourceRepository: options.sourceRepository,
     builder: options.builder ?? 'whatsoup-ci-builder|docker-container',
     buildxVersion: options.buildxVersion ?? 'v0.38.0',
     buildkitVersion: options.buildkitVersion ?? 'v0.33.1',
@@ -249,6 +251,7 @@ describe('container build evidence CI contract', () => {
     const receipt = createContainerBuildReceipt(input);
 
     expect(receipt.sourceRevision).toBe(input.sourceRevision);
+    expect(receipt.sourceRepository).toBe(SOURCE_REPOSITORY);
     expect(receipt.buildxVersion).toBe('v0.38.0');
     expect(receipt.buildkitImage).toBe(
       'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
@@ -266,6 +269,44 @@ describe('container build evidence CI contract', () => {
     expect(receipt.sbomFormat).toBe('SPDX');
     expect(receipt.provenance).toBe('in-toto/slsa-v1');
     expect(() => verifyContainerBuildReceipt(receipt, input)).not.toThrow();
+  });
+
+  it('binds a reviewed fork pull-request repository to its matching SLSA config source', () => {
+    const forkRepository = 'https://github.com/contributor/WhatSoup.git';
+    const input = makeReceiptInput({ sourceRepository: forkRepository });
+    const receipt = createContainerBuildReceipt(input);
+
+    expect(receipt.sourceRepository).toBe(forkRepository);
+    expect(() => verifyContainerBuildReceipt(receipt, input)).not.toThrow();
+  });
+
+  it('retains the policy repository when push or merge receipt input omits a source repository', () => {
+    const receipt = createContainerBuildReceipt(makeReceiptInput());
+
+    expect(receipt.sourceRepository).toBe(SOURCE_REPOSITORY);
+  });
+
+  it('rejects SLSA config source from a different repository than the selected fork', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      sourceRepository: 'https://github.com/contributor/WhatSoup.git',
+      ociSourceRepository: SOURCE_REPOSITORY,
+    }))).toThrow('SLSA config source repository does not match the reviewed remote context');
+  });
+
+  it('rejects a selected source repository outside canonical GitHub HTTPS clone URLs', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      sourceRepository: 'https://github.example/contributor/WhatSoup.git',
+      ociSourceRepository: 'https://github.example/contributor/WhatSoup.git',
+    }))).toThrow('selected source repository must be a canonical GitHub HTTPS clone URL');
+  });
+
+  it('selects the pull-request head clone URL while retaining policy input for other GitHub events', () => {
+    expect(qualityWorkflow).toContain(
+      "SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}",
+    );
+    expect(qualityWorkflow).toContain('source_repository="$SOURCE_REPOSITORY"');
+    expect(qualityWorkflow).toContain('source_repository="$(node -e \'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)\')"');
+    expect(qualityWorkflow).toContain('--source-repository "$source_repository"');
   });
 
   it('refuses an empty Buildx provenance placeholder', () => {

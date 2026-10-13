@@ -3386,8 +3386,10 @@ The Quality workflow downloads the policy's pinned Buildx Linux asset with a bou
 checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, and
 creates its named `docker-container` builder from the policy's pinned BuildKit image. It builds
 for the policy's explicit platform and sends the policy's digest-pinned SBOM generator to BuildKit.
-It builds from the policy's Git repository at an exact full commit SHA, rather than a local checkout, so
-BuildKit records a verified `configSource` revision. The receipt verifies OCI descriptor sizes
+For a pull request it builds from GitHub's authoritative head clone URL at the exact full head SHA;
+push and merge-group builds retain the policy's canonical Git repository and event SHA. The selected
+source must be an `https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
+so BuildKit records a verified `configSource` revision rather than a local checkout hint. The receipt verifies OCI descriptor sizes
 and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
 parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the
 runnable manifest digest; checks the source repository, Dockerfile path, source revision,
