@@ -710,6 +710,7 @@ export function treeLookupResponses(options: {
   }
   for (const [oid, type] of options.objectTypes ?? []) {
     responses[responseKey(['cat-file', '-t', '--', oid])] = { stdout: `${type}\n` };
+    responses[responseKey(['cat-file', '-s', '--', oid])] ??= { stdout: '0\n' };
   }
   return responses;
 }

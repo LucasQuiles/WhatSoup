@@ -1545,24 +1545,20 @@ function createExactTreeReader(cwd: string): ExactTreeReader {
       }
       return cached;
     }
-    const type = treeAsciiLine(treeGitBytes(
-      ["cat-file", "-t", "--", oid],
-      64,
-    ));
-    if (type !== "tree") throw treeEntryError("ci.input.tree-entry-identity-mismatch");
-    let byteLength: number;
-    try {
-      byteLength = parseBoundedInteger(
-        treeGitBytes(
-          ["cat-file", "-s", "--", oid],
-          64,
-        ),
-        "ci.input.tree-entry-malformed",
-      );
-    } catch (error) {
-      if (error instanceof ExactGitInputError) throw error;
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
+    const [row] = readObjectBatch(
+      cwd,
+      [oid],
+      "check",
+      TREE_GIT_CODES,
+      "ci.input.tree-entry-malformed",
+      1_024,
+      remainingTimeout(),
+    );
+    if (row!.kind === "missing") throw treeEntryError("ci.input.tree-entry-unavailable");
+    if (row!.type !== "tree") throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+    // Preserve the former size-read charge within the shared deadline.
+    remainingTimeout();
+    const byteLength = row!.size;
     if (
       byteLength > MAX_EXACT_SINGLE_TREE_BYTES
       || byteLength > MAX_EXACT_AGGREGATE_TREE_BYTES - aggregateTreeBytes
@@ -1665,12 +1661,27 @@ function createExactTreeReader(cwd: string): ExactTreeReader {
   };
 
   const rereadTrees = (): void => {
-    for (const tree of trees.values()) {
-      const reread = treeGitBytes(
-        ["cat-file", "tree", "--", tree.oid],
-        Math.max(1_024, tree.byteLength + 1),
-      );
-      if (!reread.equals(tree.bytes)) {
+    const loaded = [...trees.values()];
+    if (loaded.length === 0) return;
+    const rows = readObjectBatch(
+      cwd,
+      loaded.map((tree) => tree.oid).sort(),
+      "content",
+      TREE_GIT_CODES,
+      "ci.input.tree-entry-malformed",
+      loaded.reduce((total, tree) => total + tree.byteLength + 128, 1_024),
+      remainingTimeout(),
+    );
+    const byOid = new Map(rows.map((row) => [row.oid, row]));
+    for (let index = 0; index < loaded.length; index += 1) {
+      // Keep the original charge and comparison order despite the sorted batch.
+      if (index > 0) remainingTimeout();
+      const tree = loaded[index]!;
+      const reread = byOid.get(tree.oid)!;
+      if (reread.kind === "missing" || reread.type === "blob") {
+        throw treeEntryError("ci.input.tree-entry-unavailable");
+      }
+      if (reread.type !== "tree" || !reread.bytes!.equals(tree.bytes)) {
         throw treeEntryError("ci.input.tree-entry-identity-mismatch");
       }
     }
