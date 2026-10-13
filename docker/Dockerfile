@@ -7,7 +7,7 @@ RUN printf '%s\n' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
       'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
       > /etc/apt/sources.list \
-    && rm -f /etc/apt/sources.list.d/debian.sources
+    && rm -rf /etc/apt/sources.list.d/*
 
 # ── Stage 1: Install production dependencies ──────────────────────────────────
 FROM base AS deps

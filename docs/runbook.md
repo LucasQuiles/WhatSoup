@@ -3345,7 +3345,9 @@ The multi-stage build installs production dependencies and applies the required 
 ### Build input updates and evidence
 
 `docker/container-inputs.json` is the reviewed source of truth for the Node image tag and
-digest, Buildx builder name and driver, and Debian snapshot. `docker/Dockerfile` must match it exactly:
+digest, Buildx client version, Linux release asset and SHA-256, BuildKit image, builder name
+and driver, and Debian snapshot.
+`docker/Dockerfile` must match it exactly:
 the readable image tag remains alongside its immutable digest, and the package sources use
 only the declared snapshot. Check the static policy before a build:
 
@@ -3360,15 +3362,19 @@ Run the network check when the environment can reach the snapshot service:
 npm run guard:node-pin-consistency -- --verify-container-snapshot
 ```
 
-To update inputs, verify a new Node tag-to-digest mapping and the Debian snapshot metadata,
-then update the policy and Dockerfile together. Run the guard, a clean Linux container build,
-and the focused receipt tests in the same change. Review inputs at least monthly and whenever
-a relevant Node or Debian security update is published; immutable references make a reviewed
-build reproducible, but they do not update themselves.
+To update inputs, verify a new Node tag-to-digest mapping, Buildx Linux release asset and
+SHA-256, BuildKit image digest, and the Debian snapshot metadata, then update the policy,
+Dockerfile, and CI setup together. Run the guard, a clean Linux container build, and the focused receipt tests in the
+same change. Review inputs at least monthly and whenever a relevant Node, Docker, BuildKit,
+or Debian security update is published; immutable references make a reviewed build
+reproducible, but they do not update themselves.
 
-The Quality workflow creates the policy's named `docker-container` builder, exports the image as an OCI archive, verifies that the archive retains
-BuildKit SLSA provenance and SPDX SBOM predicates, generates a separate SPDX SBOM, and binds
-the source revision, expected builder, image digest, metadata, and SBOM hashes in a receipt.
+The Quality workflow downloads the policy's pinned Buildx Linux asset with a bounded request,
+checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, creates its named
+`docker-container` builder from the policy's pinned BuildKit image, exports the image as an
+OCI archive, verifies that the archive retains BuildKit SLSA provenance and SPDX SBOM
+predicates, generates a separate SPDX SBOM, and binds the source revision, expected builder,
+Buildx version, image digest, metadata, and SBOM hashes in a receipt.
 Pull requests produce unsigned evidence only. After a trusted `main` build succeeds, the
 separate attestation job rechecks the archived evidence and signs provenance and SBOM
 attestations for that archive. A local Docker or compatible container engine is still needed

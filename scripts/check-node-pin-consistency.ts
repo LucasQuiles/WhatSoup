@@ -49,6 +49,12 @@ interface ContainerInputPolicy {
     name: string;
     driver: string;
   };
+  buildx: {
+    version: string;
+    asset: string;
+    sha256: string;
+    buildkitImage: string;
+  };
   apt: {
     snapshot: string;
     sources: string[];
@@ -59,6 +65,9 @@ const CONTAINER_INPUT_POLICY_PATH = 'docker/container-inputs.json';
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const NODE_IMAGE_PATTERN = /^node:(\d+\.\d+\.\d+)-slim@(sha256:[a-f0-9]{64})$/;
 const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{8}T\d{6}Z$/;
+const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
+const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
+const APT_SOURCE_DEFINITION_PATTERN = /(?:^|['"\s])((?:deb|deb-src)(?:\s+\[[^\]\r\n]+\])?\s+[^\s'"]+\s+[^\s'"]+(?:\s+[^\s'"]+)*)(?=['"\\,;]|\s*$)/g;
 
 const HARDCODED_NODE_PATH_PATTERN =
   /\/\.nvm\/versions\/node\/v(\d+\.\d+\.\d+)\/bin\/node/;
@@ -183,6 +192,16 @@ function readContainerInputPolicy(cwd: string):
     || typeof (parsed as { builder: { name?: unknown } }).builder.name !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test((parsed as { builder: { name: string } }).builder.name)
     || (parsed as { builder: { driver?: unknown } }).builder.driver !== 'docker-container'
+    || !(parsed as { buildx?: unknown }).buildx
+    || typeof (parsed as { buildx: { version?: unknown } }).buildx.version !== 'string'
+    || !BUILDX_VERSION_PATTERN.test((parsed as { buildx: { version: string } }).buildx.version)
+    || typeof (parsed as { buildx: { asset?: unknown } }).buildx.asset !== 'string'
+    || (parsed as { buildx: { asset: string; version: string } }).buildx.asset
+      !== `buildx-${(parsed as { buildx: { version: string } }).buildx.version}.linux-amd64`
+    || typeof (parsed as { buildx: { sha256?: unknown } }).buildx.sha256 !== 'string'
+    || !SHA256_DIGEST_PATTERN.test((parsed as { buildx: { sha256: string } }).buildx.sha256)
+    || typeof (parsed as { buildx: { buildkitImage?: unknown } }).buildx.buildkitImage !== 'string'
+    || !BUILDKIT_IMAGE_PATTERN.test((parsed as { buildx: { buildkitImage: string } }).buildx.buildkitImage)
     || !(parsed as { apt?: unknown }).apt
     || typeof (parsed as { apt: { snapshot?: unknown } }).apt.snapshot !== 'string'
     || !Array.isArray((parsed as { apt: { sources?: unknown } }).apt.sources)
@@ -206,6 +225,50 @@ function dockerExternalImageRefs(text: string): string[] {
   return instructions
     .map((match) => match[1] ?? '')
     .filter((image) => image !== 'scratch' && !stageAliases.has(image.toLowerCase()));
+}
+
+function activeDockerfileLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('#'));
+}
+
+function activeDockerfileRunLines(lines: string[]): string[] {
+  const runLines: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (!/^\s*RUN\s+/i.test(line)) continue;
+    runLines.push(line);
+    const heredocDelimiter = /<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?/.exec(line)?.[1];
+    if (heredocDelimiter) {
+      while (index + 1 < lines.length) {
+        index += 1;
+        const heredocLine = lines[index] ?? '';
+        runLines.push(heredocLine);
+        if (heredocLine.trim() === heredocDelimiter) break;
+      }
+      continue;
+    }
+    while (lineEndsWithContinuation(lines[index] ?? '') && index + 1 < lines.length) {
+      index += 1;
+      runLines.push(lines[index] ?? '');
+    }
+  }
+  return runLines;
+}
+
+function lineEndsWithContinuation(line: string): boolean {
+  return /\\\s*$/.test(line);
+}
+
+function activeAptSourceDefinitions(runLines: string[]): string[] {
+  const definitions: string[] = [];
+  for (const line of runLines) {
+    const shellLine = line.replace(/^\s*RUN\s+/i, '');
+    if (shellLine.trimStart().startsWith('#')) continue;
+    for (const match of line.matchAll(APT_SOURCE_DEFINITION_PATTERN)) {
+      definitions.push(match[1] ?? '');
+    }
+  }
+  return definitions;
 }
 
 function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
@@ -247,6 +310,8 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
 
   const dockerfilePath = path.join(cwd, 'docker/Dockerfile');
   const dockerfile = readFileSync(dockerfilePath, 'utf8');
+  const activeLines = activeDockerfileLines(dockerfile);
+  const activeRunLines = activeDockerfileRunLines(activeLines);
   for (const image of dockerExternalImageRefs(dockerfile)) {
     if (!image.includes('@sha256:')) {
       policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'base image is not pinned by digest'));
@@ -256,15 +321,34 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
       policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'base image does not match docker/container-inputs.json'));
     }
   }
-  if (!dockerfile.includes('rm -f /etc/apt/sources.list.d/debian.sources')) {
+  const sourceListDReferences = activeLines.flatMap((line) => (
+    [...line.matchAll(/\/etc\/apt\/sources\.list\.d(?:\/[^\s'"]*)?/g)].map((match) => match[0] ?? '')
+  ));
+  const clearsSourcesListD = activeLines.some((line) => (
+    /rm\s+-rf\s+\/etc\/apt\/sources\.list\.d\/\*(?:\s|$)/.test(line)
+  ));
+  if (
+    !clearsSourcesListD
+    || sourceListDReferences.length !== 1
+    || sourceListDReferences[0] !== '/etc/apt/sources.list.d/*'
+  ) {
     policyIssues.push(containerInputIssue(
       cwd,
       'docker/Dockerfile',
-      'Dockerfile does not remove the mutable Debian package source',
+      'Dockerfile does not fully clear inherited APT source descriptors',
     ));
   }
-  if (expectedSources.some((source) => !dockerfile.includes(source))) {
-    policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'APT source does not match docker/container-inputs.json'));
+  const expectedDefinitions = expectedSources.map((source) => `deb [check-valid-until=no] ${source}`);
+  const actualDefinitions = activeAptSourceDefinitions(activeRunLines);
+  if (
+    actualDefinitions.length !== expectedDefinitions.length
+    || actualDefinitions.some((definition, index) => definition !== expectedDefinitions[index])
+  ) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/Dockerfile',
+      'APT source definitions must exactly match docker/container-inputs.json',
+    ));
   }
   return policyIssues;
 }

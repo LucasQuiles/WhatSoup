@@ -88,10 +88,10 @@ function makeFixture(opts: {
     [
       `FROM node:${dockerVersion}-slim${dockerDigest === null ? '' : `@sha256:${dockerDigest}`} AS base`,
       'RUN printf \'%s\\n\' \\',
-      `  'deb [check-valid-until=no] ${sourceUrl} bookworm main' \\,`,
-      `  'deb [check-valid-until=no] ${securitySourceUrl} bookworm-security main' \\,`,
+      `  'deb [check-valid-until=no] ${sourceUrl} bookworm main' \\`,
+      `  'deb [check-valid-until=no] ${securitySourceUrl} bookworm-security main' \\`,
       '  > /etc/apt/sources.list \\',
-      '  && rm -f /etc/apt/sources.list.d/debian.sources',
+      '  && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
       'FROM base AS runtime',
       '',
@@ -106,6 +106,12 @@ function makeFixture(opts: {
       builder: {
         name: 'whatsoup-ci-builder',
         driver: 'docker-container',
+      },
+      buildx: {
+        version: 'v0.38.0',
+        asset: 'buildx-v0.38.0.linux-amd64',
+        sha256: `sha256:${'c'.repeat(64)}`,
+        buildkitImage: `moby/buildkit:v0.33.1@sha256:${'b'.repeat(64)}`,
       },
       apt: {
         snapshot: aptSnapshot,
@@ -233,6 +239,22 @@ describe('node-pin consistency check', () => {
     });
   });
 
+  it('requires reviewed Buildx and BuildKit identities in the container input policy', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+    policy.buildx = { version: 'latest', buildkitImage: 'moby/buildkit:latest' };
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'invalid container input policy shape',
+    });
+  });
+
   it('rejects mutable package sources outside the approved snapshot policy', () => {
     const dir = makeFixture({ aptSource: 'mutable' });
 
@@ -241,7 +263,110 @@ describe('node-pin consistency check', () => {
     expect(drift.missing).toContainEqual({
       source: 'docker/Dockerfile',
       filePath: path.join(dir, 'docker/Dockerfile'),
-      reason: 'APT source does not match docker/container-inputs.json',
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects an additive mutable source even when the approved source lines remain', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN printf '%s\\n' 'deb https://deb.debian.org/debian bookworm main' >> /etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects approved source text that appears only in comments', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      `# deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main`,
+      `# deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main`,
+      'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects approved source text in a continued shell comment', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      'RUN \\',
+      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
+      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
+      '  : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects approved source text in a non-RUN Dockerfile instruction', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(dockerfilePath, [
+      `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
+      `LABEL source_one="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main"`,
+      `LABEL source_two="deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main"`,
+      'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
+      'FROM base AS deps',
+      'FROM base AS runtime',
+      '',
+    ].join('\n'), 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'APT source definitions must exactly match docker/container-inputs.json',
+    });
+  });
+
+  it('rejects a source descriptor reintroduced after clearing inherited descriptors', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN printf '%s\\n' 'deb https://deb.debian.org/debian bookworm main' > /etc/apt/sources.list.d/extra.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile does not fully clear inherited APT source descriptors',
     });
   });
 

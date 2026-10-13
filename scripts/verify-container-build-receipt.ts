@@ -11,6 +11,12 @@ interface ContainerInputPolicy {
     name: string;
     driver: string;
   };
+  buildx: {
+    version: string;
+    asset: string;
+    sha256: string;
+    buildkitImage: string;
+  };
 }
 
 interface BuildMetadata {
@@ -29,12 +35,17 @@ export interface ContainerBuildReceiptInput {
   imagePath: string;
   sourceRevision: string;
   builder: string;
+  buildxVersion: string;
+  buildkitVersion: string;
 }
 
 export interface ContainerBuildReceipt {
   schemaVersion: 1;
   sourceRevision: string;
   builder: string;
+  buildxVersion: string;
+  buildkitImage: string;
+  buildkitVersion: string;
   baseImage: string;
   imageDigest: string;
   imageArchiveSha256: string;
@@ -47,6 +58,8 @@ export interface ContainerBuildReceipt {
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const BUILDER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
+const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
 
 interface OciIndexDescriptor {
   digest?: unknown;
@@ -98,6 +111,11 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     || !policy.builder
     || !BUILDER_NAME_PATTERN.test(policy.builder.name)
     || policy.builder.driver !== 'docker-container'
+    || !policy.buildx
+    || !BUILDX_VERSION_PATTERN.test(policy.buildx.version)
+    || policy.buildx.asset !== `buildx-${policy.buildx.version}.linux-amd64`
+    || !SHA256_PATTERN.test(policy.buildx.sha256)
+    || !BUILDKIT_IMAGE_PATTERN.test(policy.buildx.buildkitImage)
   ) {
     throw new Error(`container input policy has an invalid base image or builder: ${policyPath}`);
   }
@@ -106,6 +124,12 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
 
 function expectedBuilderIdentity(policy: ContainerInputPolicy): string {
   return `${policy.builder.name}|${policy.builder.driver}`;
+}
+
+function expectedBuildkitVersion(policy: ContainerInputPolicy): string {
+  const match = /^moby\/buildkit:(v\d+\.\d+\.\d+)@sha256:[a-f0-9]{64}$/.exec(policy.buildx.buildkitImage);
+  if (!match?.[1]) throw new Error('container input policy has an invalid BuildKit image version');
+  return match[1];
 }
 
 function hasNonEmptyProvenance(value: unknown): boolean {
@@ -141,6 +165,12 @@ function assertInput(input: ContainerBuildReceiptInput): {
   const policy = loadPolicy(input.repoRoot);
   if (input.builder !== expectedBuilderIdentity(policy)) {
     throw new Error('builder identity does not match docker/container-inputs.json');
+  }
+  if (input.buildxVersion !== policy.buildx.version) {
+    throw new Error('Buildx version does not match docker/container-inputs.json');
+  }
+  if (input.buildkitVersion !== expectedBuildkitVersion(policy)) {
+    throw new Error('BuildKit version does not match docker/container-inputs.json');
   }
   return { metadata, sbom, policy };
 }
@@ -228,6 +258,9 @@ export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): 
     schemaVersion: 1,
     sourceRevision: input.sourceRevision,
     builder: input.builder,
+    buildxVersion: input.buildxVersion,
+    buildkitImage: policy.buildx.buildkitImage,
+    buildkitVersion: input.buildkitVersion,
     baseImage: policy.baseImage,
     imageDigest: metadata['containerimage.digest'] as string,
     imageArchiveSha256: sha256File(input.imagePath),
@@ -254,6 +287,8 @@ interface ParsedArgs {
   imagePath: string;
   sourceRevision: string;
   builder: string;
+  buildxVersion: string;
+  buildkitVersion: string;
   repoRoot: string;
   outputPath?: string;
   receiptPath?: string;
@@ -271,7 +306,7 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
     }
     const value = argv[index + 1];
     if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) {
-      throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID [--repo-root PATH] (--output PATH | --receipt PATH)');
+      throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION [--repo-root PATH] (--output PATH | --receipt PATH)');
     }
     values.set(flag, value);
     index += 1;
@@ -292,6 +327,8 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
     imagePath: required('--image'),
     sourceRevision: required('--source'),
     builder: required('--builder'),
+    buildxVersion: required('--buildx-version'),
+    buildkitVersion: required('--buildkit-version'),
     repoRoot: values.get('--repo-root') ?? cwd,
     outputPath,
     receiptPath,
@@ -308,6 +345,8 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
     imagePath: args.imagePath,
     sourceRevision: args.sourceRevision,
     builder: args.builder,
+    buildxVersion: args.buildxVersion,
+    buildkitVersion: args.buildkitVersion,
   };
   const receipt = createContainerBuildReceipt(input);
   if (args.verifyOciAttestations) verifyOciArchiveAttestations(input.imagePath, receipt.imageDigest);

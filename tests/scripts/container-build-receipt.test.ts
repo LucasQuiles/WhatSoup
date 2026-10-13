@@ -13,11 +13,18 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const qualityWorkflow = readFileSync(path.join(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+const containerInputs = JSON.parse(
+  readFileSync(path.join(repoRoot, 'docker/container-inputs.json'), 'utf8'),
+) as {
+  buildx?: { version?: string; asset?: string; sha256?: string; buildkitImage?: string };
+};
 const tmp = trackTmpDirs('container-build-receipt-');
 
 function makeReceiptInput(options: {
   provenance?: unknown;
   builder?: string;
+  buildxVersion?: string;
+  buildkitVersion?: string;
 } = {}) {
   const dir = tmp.make('evidence');
   const metadataPath = path.join(dir, 'build-metadata.json');
@@ -36,6 +43,8 @@ function makeReceiptInput(options: {
     imagePath,
     sourceRevision: 'b'.repeat(40),
     builder: options.builder ?? 'whatsoup-ci-builder|docker-container',
+    buildxVersion: options.buildxVersion ?? 'v0.38.0',
+    buildkitVersion: options.buildkitVersion ?? 'v0.33.1',
   };
 }
 
@@ -75,7 +84,22 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('--sbom=true');
     expect(qualityWorkflow).toContain('BUILDX_METADATA_PROVENANCE: max');
     expect(qualityWorkflow).toContain('--output type=oci');
-    expect(qualityWorkflow).toContain('docker buildx create --name whatsoup-ci-builder --driver docker-container --use --bootstrap');
+    expect(containerInputs.buildx).toEqual({
+      version: 'v0.38.0',
+      asset: 'buildx-v0.38.0.linux-amd64',
+      sha256: 'sha256:4fe4cc38adf48169132749b6ca22a990928db0118e3407584ee553723115d287',
+      buildkitImage: 'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
+    });
+    expect(qualityWorkflow).toContain('scripts/install-pinned-buildx.ts');
+    expect(qualityWorkflow).toContain('DOCKER_CONFIG=$docker_config');
+    expect(qualityWorkflow).toContain('docker buildx create');
+    expect(qualityWorkflow).toContain('--name "$builder_name"');
+    expect(qualityWorkflow).toContain('--driver "$builder_driver"');
+    expect(qualityWorkflow).toContain('--driver-opt "image=$buildkit_image"');
+    expect(qualityWorkflow).toContain('docker buildx version | awk \'{print $2}\'');
+    expect(qualityWorkflow).toContain('docker buildx inspect whatsoup-ci-builder --bootstrap');
+    expect(qualityWorkflow).toContain('Build[Kk]it(:| version:)');
+    expect(qualityWorkflow).not.toContain('docker/setup-buildx-action@');
     expect(qualityWorkflow).not.toContain('--load');
     expect(qualityWorkflow).not.toContain('docker image save whatsoup-ci');
     expect(qualityWorkflow).toContain('--metadata-file');
@@ -98,6 +122,11 @@ describe('container build evidence CI contract', () => {
     const receipt = createContainerBuildReceipt(input);
 
     expect(receipt.sourceRevision).toBe(input.sourceRevision);
+    expect(receipt.buildxVersion).toBe('v0.38.0');
+    expect(receipt.buildkitImage).toBe(
+      'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
+    );
+    expect(receipt.buildkitVersion).toBe('v0.33.1');
     expect(receipt.imageDigest).toBe(`sha256:${'a'.repeat(64)}`);
     expect(receipt.sbomFormat).toBe('SPDX');
     expect(receipt.provenance).toBe('buildx.build.provenance');
@@ -113,6 +142,18 @@ describe('container build evidence CI contract', () => {
   it('refuses a builder identity outside the reviewed policy', () => {
     expect(() => createContainerBuildReceipt(makeReceiptInput({ builder: 'unreviewed|docker' }))).toThrow(
       'builder identity does not match docker/container-inputs.json',
+    );
+  });
+
+  it('refuses a Buildx client version outside the reviewed policy', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({ buildxVersion: 'v0.0.0' }))).toThrow(
+      'Buildx version does not match docker/container-inputs.json',
+    );
+  });
+
+  it('refuses an effective BuildKit server version outside the reviewed policy', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({ buildkitVersion: 'v0.0.0' }))).toThrow(
+      'BuildKit version does not match docker/container-inputs.json',
     );
   });
 
