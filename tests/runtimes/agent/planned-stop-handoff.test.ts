@@ -49,7 +49,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
-import type { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
+import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 
 // ─── Hoisted provider-boundary doubles (scheduled-turn-lifecycle pattern) ───
 
@@ -347,6 +347,7 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { runShutdownSequence, shutdownExitCode } from '../../../src/main-shutdown-policy.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
+import { PlannedStopQueueCloseError } from '../../../src/runtimes/agent/planned-stop-drain.ts';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -668,6 +669,54 @@ describe('planned stop handoff (#3703)', () => {
     expect(outcome.complete).toBe(true);
     expect(log.info.mock.calls.map((call) => call[1])).toContain('shutdown complete');
     expect(shutdownExitCode('SIGTERM', outcome)).toBe(0);
+  });
+
+  it('T4 queue-close: a queue no teardown owns that fails to close makes the stop fail, and turns already taken are still finalized', async () => {
+    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+    await arriveInFlight(a.runtime, a.engine, 'wamid-t4q-head', 't4q head question');
+    const follower = await arriveQueuedBehind(a.runtime, a.engine, 'wamid-t4q-follower', 't4q follower question');
+    // A later per-chat queue whose close fails once, with no reset/kill teardown owning it.
+    const failing = new TurnQueue();
+    vi.spyOn(failing, 'closeAndTakePendingTurns').mockImplementationOnce(() => {
+      throw new Error('injected: queue close failed');
+    });
+    (a.runtime as unknown as { perChatTurnQueues: Map<string, TurnQueue> })
+      .perChatTurnQueues.set('t4q-unowned', failing);
+
+    const error = await a.runtime.shutdown().then(() => null, (err: unknown) => err);
+
+    // The follower was taken from the earlier queue and finalized, not dropped.
+    expect(status(follower)).toBe('failed');
+    expect(terminalRows(follower)).toHaveLength(1);
+    expect(terminalRows(follower)[0]!.inbound_disposition).toBe('failed_terminal');
+    // The close failure is reported; it is not absorbed as a teardown-owned queue.
+    expect(error).toBeInstanceOf(AggregateError);
+    const failures = (error as AggregateError).errors;
+    expect(failures.some((failure) => failure instanceof PlannedStopQueueCloseError)).toBe(true);
+  });
+
+  it('T4 queue-close control: the same close failure with nothing in flight still makes the stop incomplete', async () => {
+    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+    const failing = new TurnQueue();
+    vi.spyOn(failing, 'closeAndTakePendingTurns').mockImplementationOnce(() => {
+      throw new Error('injected: queue close failed');
+    });
+    (a.runtime as unknown as { perChatTurnQueues: Map<string, TurnQueue> })
+      .perChatTurnQueues.set('t4q-unowned', failing);
+    const log = { info: vi.fn(), error: vi.fn() };
+
+    const outcome = await runShutdownSequence({
+      auxiliaries: [],
+      shutdownRuntime: () => a.runtime.shutdown(),
+      shutdownTransport: () => {},
+      markCleanExit: () => ({ persisted: true as const }),
+      log,
+    });
+
+    expect(outcome.complete).toBe(false);
+    expect(outcome.failedPhase).toBe('runtime');
+    expect(log.info.mock.calls.map((call) => call[1])).not.toContain('shutdown complete');
+    expect(shutdownExitCode('SIGTERM', outcome)).toBe(1);
   });
 
   // ─── T5: exactly-once across two starts ───

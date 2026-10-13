@@ -1304,19 +1304,31 @@ async awaitRejectedRuntimeTurnFinalizations(): Promise<void> {
 /**
  * #3703: close every runtime TurnQueue and take its undispatched turns, so a
  * planned stop can drain the dispatched turns without starting new ones. The
- * taken turns must be handed back to finalizeActiveRuntimeTurnsForShutdown().
- * A queue owned by a reset/kill teardown is left for that path.
+ * taken turns must be handed back to finalizeActiveRuntimeTurnsForShutdown(),
+ * even when `closeFailures` is not empty. A queue owned by a reset/kill
+ * teardown is left for that lifecycle, which shutdown joins before it
+ * finalizes. Any other close failure is returned, never treated as teardown.
  */
-takePendingTurnsForPlannedStop(): QueuedTurn[] {
-  const taken: QueuedTurn[] = [];
+takePendingTurnsForPlannedStop(): {
+  readonly turns: readonly QueuedTurn[];
+  readonly closeFailures: readonly unknown[];
+} {
+  const turns: QueuedTurn[] = [];
+  const closeFailures: unknown[] = [];
   for (const queue of [this.host.turnQueue, ...this.host.perChatTurnQueues.values()]) {
+    if (this.isTeardownOwnedQueue(queue)) continue;
     try {
-      taken.push(...queue.closeAndTakePendingTurns());
-    } catch {
-      // Teardown-owned queue: finalized by its own lifecycle, joined below.
+      turns.push(...queue.closeAndTakePendingTurns());
+    } catch (error) {
+      closeFailures.push(error);
     }
   }
-  return taken;
+  return { turns, closeFailures };
+}
+
+private isTeardownOwnedQueue(queue: TurnQueue): boolean {
+  return this.globalTeardown?.transaction.queue === queue
+    || [...this.perChatTeardowns.values()].some((state) => state.transaction.queue === queue);
 }
 
 /** #3703: true while any runtime TurnQueue still holds a turn. */

@@ -30,6 +30,17 @@ export class PlannedStopTurnLossError extends Error {
   }
 }
 
+/**
+ * Content-free failure: the stop could not close runtime TurnQueues that no
+ * reset/kill teardown owns, so their undispatched turns were not taken.
+ */
+export class PlannedStopQueueCloseError extends AggregateError {
+  constructor(failures: readonly unknown[]) {
+    super(failures, `planned stop could not close ${failures.length} runtime turn queue(s)`);
+    this.name = 'PlannedStopQueueCloseError';
+  }
+}
+
 /** Wait until `busy()` is false or `deadlineAt` passes. Resolves `true` when drained. */
 export async function waitForPlannedStopDrain(
   busy: () => boolean,

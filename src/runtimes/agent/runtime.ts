@@ -135,7 +135,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { PLANNED_STOP_DRAIN_MS, PlannedStopTurnLossError, waitForPlannedStopDrain } from './planned-stop-drain.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, PlannedStopTurnLossError, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -8107,9 +8107,13 @@ export class AgentRuntime implements Runtime {
     // dispatched during the drain; dispatched turns get a bounded window to
     // finish. Everything still held afterwards is finalized below, and any
     // journaled loss makes this shutdown fail instead of report clean.
-    const heldPendingTurns = this.plannedStopDrainMs > 0
+    const { turns: heldPendingTurns, closeFailures } = this.plannedStopDrainMs > 0
       ? this.runtimeTurnCoordinator.takePendingTurnsForPlannedStop()
-      : [];
+      : { turns: [], closeFailures: [] };
+    if (closeFailures.length > 0) {
+      log.error({ closeFailures: closeFailures.length }, 'planned stop could not close runtime turn queues');
+      shutdownFailures.push(new PlannedStopQueueCloseError(closeFailures));
+    }
     if (this.plannedStopDrainMs > 0 && this.runtimeTurnCoordinator.hasActiveRuntimeTurns()) {
       const drained = await waitForPlannedStopDrain(
         () => this.runtimeTurnCoordinator.hasActiveRuntimeTurns(),
