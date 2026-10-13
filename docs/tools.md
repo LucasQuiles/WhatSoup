@@ -431,12 +431,12 @@ Create an agent job bead and schedule trigger. Admin only.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| prompt | string | required | Agent job prompt/body. |
-| title | string | optional | Bead title; defaults to the first 80 prompt characters. |
+| prompt | string | required | Agent job prompt/body; at most 4,096 UTF-8 bytes. |
+| title | string | optional | Bead title; at most 256 UTF-8 bytes; defaults to the first 80 prompt characters. |
 | schedule | object | required | Schedule spec with `kind`, plus `expr`/`tz` for cron or `fire_at` (unix epoch seconds) for one-shot time. A ms-range `fire_at` is auto-normalized to seconds; a value implausible in either unit is rejected (#1757). |
-| report_chat | string | required | JID that receives the trigger report. |
+| report_chat | string | required | JID that receives the trigger report; at most 512 UTF-8 bytes. |
 | terminal_at | number | optional | Requested terminal timestamp. |
-| metadata | object | optional | Additional bead metadata. |
+| metadata | object | optional | Additional bead metadata; JSON-serializable, at most 4,096 UTF-8 bytes, eight levels deep, and 64 items per object or array. |
 
 ---
 
@@ -453,14 +453,18 @@ Create a watch bead and poll trigger. Admin only. TTL defaults and caps come fro
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| title | string | optional | Bead title; defaults to `watch:<source>`. |
+| title | string | optional | Bead title; at most 256 UTF-8 bytes; defaults to `watch:<source>`. |
 | source | `"poll.email"` \| `"poll.url"` \| `"poll.file"` \| `"poll.sqlite"` \| `"poll.pinecone"` \| `"event.message"` | required | Trigger source kind. `poll.shell` was REMOVED (no executor). `poll.url` requires `advanced.enableUrlWatch` (off by default). `poll.email` persists but its executor is not wired; `event.message` persists as a reserved scaffold with no next fire time and is never polled. |
-| criteria | object | required | Trigger criteria/spec payload. |
+| criteria | object | required | Trigger criteria/spec payload; JSON-serializable, at most 8,192 UTF-8 bytes, eight levels deep, and 64 items per object or array. Per-kind limits are in the personal-line-watch runbook. |
 | interval_seconds | number | optional | Poll interval. |
 | ttl_hours | number | optional | Requested TTL, clamped by policy. |
-| report_chat | string | required | JID that receives the trigger report. |
+| report_chat | string | required | JID that receives the trigger report; at most 512 UTF-8 bytes. |
 | on_terminal | `"notify"` \| `"silent"` \| `"reopen_bead"` | optional | Terminal behavior. |
-| dedupe_key | string | optional | Trigger dedupe key. |
+| dedupe_key | string | optional | Trigger dedupe key; at most 256 UTF-8 bytes. |
+
+`create_watch` and `create_agent_job` reject a limit breach before creating either a bead or a trigger. Their persisted rows are revalidated at execution, so manually inserted legacy records that no longer meet the contract fail closed. Limits measure UTF-8 bytes, not JavaScript character count.
+
+The shared trigger budget also limits every spec to 8,192 serialized bytes, eight nesting levels, and 64 object or array items. Regexes are at most 512 bytes and must compile with RE2; selectors are at most 512 bytes and use the bounded structural subset. SQLite permits a single non-recursive `SELECT`/`WITH` statement of at most 4,096 bytes, 32 JSON-scalar binds (1,024 bytes each and 4,096 bytes total), 10,000 rows, and a 30-second isolated-worker deadline. Its durable result is only `{rowCount}`. `poll.pinecone.top_k` is at most 100; no current trigger kind has a provider-token or currency-spend path. A resource breach records the redacted `resource_exhausted` failure. Failed runs cool down and pause after at most five consecutive failures; a stale, completed, or outcome-unknown occurrence is reconciled rather than replayed.
 
 ---
 

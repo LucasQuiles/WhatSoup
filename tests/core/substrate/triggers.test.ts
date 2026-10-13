@@ -29,6 +29,52 @@ describe('triggers core', () => {
     expect(() => validateTriggerSpec('poll.email', {})).toThrow();
   });
 
+  it('rejects an over-budget SQLite statement before persistence while accepting the exact byte boundary', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'sql budget', ownerJid: 'mw', actor: 'user' });
+    const sqlAtLimit = `SELECT 1 /*${'x'.repeat(4_096 - 'SELECT 1 /**/'.length)}*/`;
+    const sqlOverLimit = `${sqlAtLimit}x`;
+    expect(Buffer.byteLength(sqlAtLimit, 'utf8')).toBe(4_096);
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: sqlAtLimit, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net', actor: 'user',
+    })).not.toThrow();
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.sqlite',
+      spec: { sql: sqlOverLimit, fire_when: 'rows_returned' },
+      reportChatJid: 'admin@s.whatsapp.net', actor: 'user',
+    })).toThrow(/resource budget/i);
+    expect(listTriggers(db.raw, { kind: 'poll.sqlite' })).toHaveLength(1);
+  });
+
+  it('rejects regex forms whose execution cost cannot be bounded', () => {
+    expect(() => validateTriggerSpec('poll.email', {
+      source: 'gmail', subject_regex: '(?<=a)b',
+    })).toThrow(/regex/i);
+    expect(() => validateTriggerSpec('poll.email', {
+      source: 'gmail', subject_regex: '^invoice-[0-9]+$',
+    })).not.toThrow();
+  });
+
+  it('measures report targets in UTF-8 bytes, accepting the exact boundary and rejecting one more code point', () => {
+    const bead = createBead(db.raw, { kind: 'watch', title: 'utf8 report target', ownerJid: 'mw', actor: 'user' });
+    const exact = '😀'.repeat(128);
+    const over = `${exact}😀`;
+    expect(Buffer.byteLength(exact, 'utf8')).toBe(512);
+    expect(Buffer.byteLength(over, 'utf8')).toBe(516);
+
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: exact, actor: 'user',
+    })).not.toThrow();
+    expect(() => createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: over, actor: 'user',
+    })).toThrow(/resource budget/i);
+  });
+
   it('createTrigger writes row + trigger_created event', () => {
     const bead = createBead(db.raw, { kind: 'agent_job', title: 'daily', ownerJid: 'mw', actor: 'user' });
     const t = createTrigger(db.raw, {

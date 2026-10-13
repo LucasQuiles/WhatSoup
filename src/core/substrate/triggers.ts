@@ -1,6 +1,7 @@
 // src/core/substrate/triggers.ts
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { z } from 'zod';
+import RE2 from 're2';
 import { clampTtl } from './time.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { writeBeadEvent } from './events.ts';
@@ -8,6 +9,9 @@ import type { TriggerKind, TriggerRow, TriggerStatus, OnTerminal } from './types
 import { nextCronRun } from '../cron.ts';
 import { createChildLogger } from '../../logger.ts';
 import { queryAll, queryOne } from '../../lib/db-query.ts';
+import { TRIGGER_BUDGETS } from './trigger-budgets.ts';
+
+export { TRIGGER_BUDGETS } from './trigger-budgets.ts';
 
 const log = createChildLogger('substrate.triggers');
 
@@ -17,6 +21,203 @@ const log = createChildLogger('substrate.triggers');
 // overlap near the ceiling: anything above it is unambiguously mis-unit, not
 // a plausible seconds timestamp.
 export const MAX_REASONABLE_FIRE_AT_SEC = 4_102_444_800; // 2100-01-01T00:00:00Z
+
+/** A content-free admission error safe to persist as a resource disposition. */
+export class TriggerBudgetError extends Error {
+  readonly budget: string;
+
+  constructor(budget: string) {
+    super(`trigger resource budget exceeded: ${budget}`);
+    this.name = 'TriggerBudgetError';
+    this.budget = budget;
+  }
+}
+
+function budgetError(budget: string): never {
+  throw new TriggerBudgetError(budget);
+}
+
+export function assertTriggerTextBudget(value: string, budget: string, maxBytes: number): void {
+  if (Buffer.byteLength(value, 'utf8') > maxBytes) budgetError(budget);
+}
+
+function boundedText(schema: z.ZodString, maxBytes: number, budget: string) {
+  return schema.refine((value) => Buffer.byteLength(value, 'utf8') <= maxBytes, {
+    message: `${budget} exceeds its UTF-8 byte budget`,
+  });
+}
+
+/**
+ * Bounds an untrusted JSON-shaped value before validation or persistence. The
+ * canonical serialized-byte check below catches punctuation and object-key
+ * overhead; this walk prevents deeply nested/over-wide inputs from turning that
+ * check itself into an allocation or recursion sink.
+ */
+export function assertTriggerValueBudget(
+  value: unknown,
+  budget = 'spec',
+  maxBytes: number = TRIGGER_BUDGETS.maxSpecBytes,
+): void {
+  const seen = new WeakSet<object>();
+  let scalarBytes = 0;
+  const visit = (candidate: unknown, depth: number): void => {
+    if (depth > TRIGGER_BUDGETS.maxSpecDepth) budgetError(`${budget}.depth`);
+    if (candidate === null || typeof candidate === 'boolean') return;
+    if (typeof candidate === 'number') {
+      if (!Number.isFinite(candidate)) budgetError(`${budget}.number`);
+      return;
+    }
+    if (typeof candidate === 'string') {
+      scalarBytes += Buffer.byteLength(candidate, 'utf8');
+      if (scalarBytes > maxBytes) budgetError(`${budget}.bytes`);
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      if (candidate.length > TRIGGER_BUDGETS.maxCollectionItems) budgetError(`${budget}.items`);
+      for (const entry of candidate) visit(entry, depth + 1);
+      return;
+    }
+    if (typeof candidate !== 'object' || candidate === null) budgetError(`${budget}.type`);
+    if (seen.has(candidate)) budgetError(`${budget}.cycle`);
+    seen.add(candidate);
+    const proto = Object.getPrototypeOf(candidate);
+    if (proto !== Object.prototype && proto !== null) budgetError(`${budget}.type`);
+    const entries = Object.entries(candidate as Record<string, unknown>);
+    if (entries.length > TRIGGER_BUDGETS.maxCollectionItems) budgetError(`${budget}.items`);
+    for (const [key, entry] of entries) {
+      // JSON persistence omits undefined object properties. Keep that existing
+      // compatibility behavior, while arrays and SQLite binds still reject an
+      // undefined element through their own schemas below.
+      if (entry === undefined) continue;
+      scalarBytes += Buffer.byteLength(key, 'utf8');
+      if (scalarBytes > maxBytes) budgetError(`${budget}.bytes`);
+      visit(entry, depth + 1);
+    }
+  };
+  visit(value, 0);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    budgetError(`${budget}.serializable`);
+  }
+  if (typeof serialized !== 'string' || Buffer.byteLength(serialized, 'utf8') > maxBytes) {
+    budgetError(`${budget}.serialized_bytes`);
+  }
+}
+
+function assertOptionalText(record: Record<string, unknown>, key: string, budget: string, maxBytes: number): void {
+  const value = record[key];
+  if (typeof value === 'string') assertTriggerTextBudget(value, budget, maxBytes);
+}
+
+function assertKnownTriggerTextBudgets(kind: TriggerKind, value: unknown): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return;
+  const spec = value as Record<string, unknown>;
+  switch (kind) {
+    case 'schedule.cron':
+      assertOptionalText(spec, 'expr', 'cron.expr', TRIGGER_BUDGETS.maxCronBytes);
+      assertOptionalText(spec, 'tz', 'cron.tz', TRIGGER_BUDGETS.maxTimezoneBytes);
+      return;
+    case 'poll.email':
+      assertOptionalText(spec, 'sender', 'email.sender', TRIGGER_BUDGETS.maxTextBytes);
+      assertOptionalText(spec, 'label', 'email.label', TRIGGER_BUDGETS.maxTextBytes);
+      assertOptionalText(spec, 'subject_regex', 'regex', TRIGGER_BUDGETS.maxRegexBytes);
+      assertOptionalText(spec, 'body_regex', 'regex', TRIGGER_BUDGETS.maxRegexBytes);
+      return;
+    case 'poll.url':
+      assertOptionalText(spec, 'url', 'url', TRIGGER_BUDGETS.maxUrlBytes);
+      assertOptionalText(spec, 'selector', 'selector', TRIGGER_BUDGETS.maxSelectorBytes);
+      return;
+    case 'poll.file':
+      assertOptionalText(spec, 'path', 'file.path', TRIGGER_BUDGETS.maxFilePathBytes);
+      return;
+    case 'poll.sqlite':
+      assertOptionalText(spec, 'sql', 'sqlite.sql', TRIGGER_BUDGETS.maxSqlBytes);
+      return;
+    case 'poll.pinecone':
+      assertOptionalText(spec, 'index', 'pinecone.index', TRIGGER_BUDGETS.maxPineconeIndexBytes);
+      assertOptionalText(spec, 'namespace', 'pinecone.namespace', TRIGGER_BUDGETS.maxPineconeNamespaceBytes);
+      assertOptionalText(spec, 'query', 'pinecone.query', TRIGGER_BUDGETS.maxPineconeQueryBytes);
+      return;
+    case 'poll.shell': {
+      assertOptionalText(spec, 'cwd', 'shell.cwd', TRIGGER_BUDGETS.maxFilePathBytes);
+      assertOptionalText(spec, 'regex', 'regex', TRIGGER_BUDGETS.maxRegexBytes);
+      const argv = spec['argv'];
+      if (Array.isArray(argv)) {
+        for (const entry of argv) {
+          if (typeof entry === 'string') assertTriggerTextBudget(entry, 'shell.argv', TRIGGER_BUDGETS.maxTextBytes);
+        }
+      }
+      return;
+    }
+    case 'event.message':
+      assertOptionalText(spec, 'value', 'message.value', TRIGGER_BUDGETS.maxTextBytes);
+      assertOptionalText(spec, 'chat_jid', 'message.chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes);
+      return;
+    case 'schedule.at_time':
+      return;
+  }
+}
+
+function isBoundedRe2Pattern(value: string): boolean {
+  if (Buffer.byteLength(value, 'utf8') > TRIGGER_BUDGETS.maxRegexBytes) return false;
+  try {
+    // RE2 rejects look-around and backreferences and has no catastrophic
+    // backtracking. It is the canonical engine for untrusted patterns here.
+    new RE2(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isBoundedSelector(value: string): boolean {
+  if (Buffer.byteLength(value, 'utf8') > TRIGGER_BUDGETS.maxSelectorBytes) return false;
+  // css-select can traverse recursively for content-sensitive pseudos. URL
+  // watches intentionally admit a compatibility-friendly structural subset:
+  // tags, ids, classes, attributes, and ordinary child/sibling/descendant
+  // combinators. Pseudos that inspect nested content or apply a subselector
+  // are rejected instead of relying on an unbounded evaluator.
+  if (/:\s*(?:has|contains|matches|not|is|where)\s*\(/i.test(value)) return false;
+  let bracketDepth = 0;
+  let combinators = 0;
+  for (const character of value) {
+    if (character === '[') bracketDepth++;
+    if (character === ']') {
+      bracketDepth--;
+      if (bracketDepth < 0) return false;
+    }
+    if (character === '>' || character === '+' || character === '~' || character === ',') combinators++;
+    if (combinators > TRIGGER_BUDGETS.maxSelectorCombinators) return false;
+  }
+  if (bracketDepth !== 0) return false;
+  return !/[{};]/u.test(value);
+}
+
+function assertSqliteBindBudget(binds: unknown): void {
+  if (binds === undefined) return;
+  const values = Array.isArray(binds)
+    ? binds
+    : (typeof binds === 'object' && binds !== null && Object.getPrototypeOf(binds) === Object.prototype
+      ? Object.values(binds as Record<string, unknown>)
+      : budgetError('sqlite.binds.type'));
+  if (values.length > TRIGGER_BUDGETS.maxSqliteBinds) budgetError('sqlite.binds.count');
+  let total = 0;
+  if (!Array.isArray(binds)) {
+    for (const key of Object.keys(binds as Record<string, unknown>)) {
+      assertTriggerTextBudget(key, 'sqlite.binds.key_bytes', TRIGGER_BUDGETS.maxSqliteBindBytes);
+    }
+  }
+  for (const value of values) {
+    if (value !== null && typeof value !== 'string' && typeof value !== 'number') budgetError('sqlite.binds.type');
+    if (typeof value === 'number' && !Number.isFinite(value)) budgetError('sqlite.binds.number');
+    const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
+    if (bytes > TRIGGER_BUDGETS.maxSqliteBindBytes) budgetError('sqlite.binds.value_bytes');
+    total += bytes;
+    if (total > TRIGGER_BUDGETS.maxSqliteBindPayloadBytes) budgetError('sqlite.binds.payload_bytes');
+  }
+}
 
 /**
  * `fire_at` is caller-supplied and unit-ambiguous (epoch-seconds vs.
@@ -50,8 +251,10 @@ export function normalizeFireAtSeconds(fireAt: number): number {
  * Defense-in-depth for admin-gated specs (#1096, QR-026).
  */
 export function isSafeSqliteSql(sql: string): boolean {
+  if (Buffer.byteLength(sql, 'utf8') > TRIGGER_BUDGETS.maxSqlBytes) return false;
   // Strip one optional trailing semicolon; any remaining ';' implies 2+ statements.
   const trimmed = sql.trim().replace(/;\s*$/, '');
+  if (!/^(?:select\b|with\b)/i.test(trimmed)) return false;
   if (trimmed.includes(';')) return false;
   if (/\b(attach|detach|pragma)\b/i.test(trimmed)) return false;
   // QR-026: a recursive CTE runs unbounded CPU under query_only (writes blocked, compute
@@ -64,55 +267,70 @@ export function isSafeSqliteSql(sql: string): boolean {
   return true;
 }
 
-const CronSpec    = z.object({ expr: z.string().min(1), tz: z.string().optional() });
-const AtTimeSpec  = z.object({ fire_at: z.number().int().positive() });
+const BoundedRegex = boundedText(z.string(), TRIGGER_BUDGETS.maxRegexBytes, 'regex').refine(isBoundedRe2Pattern, {
+  message: 'regex must compile with RE2 and fit the trigger regex budget',
+});
+const BoundedSelector = boundedText(z.string(), TRIGGER_BUDGETS.maxSelectorBytes, 'selector').refine(isBoundedSelector, {
+  message: 'selector must be a bounded structural CSS selector without nested content pseudos',
+});
+const CronSpec    = z.object({
+  expr: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxCronBytes, 'cron.expr'),
+  tz: boundedText(z.string(), TRIGGER_BUDGETS.maxTimezoneBytes, 'cron.tz').optional(),
+}).strict();
+const AtTimeSpec  = z.object({ fire_at: z.number().int().positive() }).strict();
 const EmailSpec   = z.object({
   source: z.enum(['gmail','m365']),
-  sender: z.string().optional(),
-  subject_regex: z.string().optional(),
-  label: z.string().optional(),
-  body_regex: z.string().optional(),
-});
+  sender: boundedText(z.string(), TRIGGER_BUDGETS.maxTextBytes, 'email.sender').optional(),
+  subject_regex: BoundedRegex.optional(),
+  label: boundedText(z.string(), TRIGGER_BUDGETS.maxTextBytes, 'email.label').optional(),
+  body_regex: BoundedRegex.optional(),
+}).strict();
 const UrlSpec     = z.object({
-  url: z.string().url(),
-  selector: z.string().optional(),
+  url: boundedText(z.string().url(), TRIGGER_BUDGETS.maxUrlBytes, 'url'),
+  selector: BoundedSelector.optional(),
   hash_mode: z.enum(['text','selector','headers']),
-});
+}).strict();
 const FileSpec    = z.object({
-  path: z.string().min(1),
+  path: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxFilePathBytes, 'file.path'),
   watch: z.enum(['exists','mtime','content_hash']),
-});
+}).strict();
 const SqliteSpec  = z.object({
-  sql: z.string().min(1).refine(isSafeSqliteSql, {
+  sql: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxSqlBytes, 'sqlite.sql').refine(isSafeSqliteSql, {
     message: 'sql must be a single statement with no ATTACH/DETACH/PRAGMA',
   }),
   // Prefer an array for positional `?` binds (reliable order). A legacy object
   // is still accepted for back-compat, but is unsafe for 2+ integer-like keys.
-  binds: z.union([z.array(z.unknown()), z.record(z.unknown())]).optional(),
+  binds: z.union([
+    z.array(z.union([boundedText(z.string(), TRIGGER_BUDGETS.maxSqliteBindBytes, 'sqlite.binds.value'), z.number().finite(), z.null()])).max(TRIGGER_BUDGETS.maxSqliteBinds),
+    z.record(z.union([boundedText(z.string(), TRIGGER_BUDGETS.maxSqliteBindBytes, 'sqlite.binds.value'), z.number().finite(), z.null()])).refine(
+      (binds) => Object.keys(binds).length <= TRIGGER_BUDGETS.maxSqliteBinds,
+      { message: 'too many SQLite binds' },
+    ),
+  ]).optional(),
   fire_when: z.enum(['rows_returned','rowcount_changed']),
-});
+}).strict();
 const PineconeSpec = z.object({
-  index: z.string().min(1),
-  namespace: z.string(),
-  query: z.string().min(1),
-  top_k: z.number().int().positive().optional(),
+  index: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxPineconeIndexBytes, 'pinecone.index'),
+  namespace: boundedText(z.string(), TRIGGER_BUDGETS.maxPineconeNamespaceBytes, 'pinecone.namespace'),
+  query: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxPineconeQueryBytes, 'pinecone.query'),
+  top_k: z.number().int().positive().max(TRIGGER_BUDGETS.maxPineconeTopK).optional(),
   threshold: z.number().min(0).max(1).optional(),
-});
+}).strict();
 // poll.shell is REMOVED FROM CREATION (dropped from the create_watch enum) but
 // RETAINED INTERNALLY here for legacy fail-closed handling: a row persisted
 // before removal still validates so the poller can reject it cleanly
 // (errorKind 'shell_watch_removed') rather than crashing on an unknown kind.
 const ShellSpec   = z.object({
-  argv: z.array(z.string()).min(1),
-  cwd: z.string().optional(),
+  argv: z.array(boundedText(z.string(), TRIGGER_BUDGETS.maxTextBytes, 'shell.argv')).min(1).max(TRIGGER_BUDGETS.maxCollectionItems),
+  cwd: boundedText(z.string(), TRIGGER_BUDGETS.maxFilePathBytes, 'shell.cwd').optional(),
   fire_when: z.enum(['exit_zero','stdout_nonempty','stdout_regex']),
-  regex: z.string().optional(),
-});
+  regex: BoundedRegex.optional(),
+}).strict();
 const MessageSpec = z.object({
   match: z.enum(['sender_jid','regex','mention']),
-  value: z.string().min(1),
-  chat_jid: z.string().optional(),
-});
+  value: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxTextBytes, 'message.value'),
+  chat_jid: boundedText(z.string(), TRIGGER_BUDGETS.maxReportTargetBytes, 'message.chat_jid').optional(),
+}).strict();
 
 const SPEC_REGISTRY: Record<TriggerKind, z.ZodType> = {
   'schedule.cron':    CronSpec,
@@ -129,7 +347,17 @@ const SPEC_REGISTRY: Record<TriggerKind, z.ZodType> = {
 export function validateTriggerSpec(kind: TriggerKind, spec: unknown): unknown {
   const schema = SPEC_REGISTRY[kind];
   if (!schema) throw new Error(`unknown trigger kind: ${kind}`);
-  return schema.parse(spec);
+  assertTriggerValueBudget(spec);
+  assertKnownTriggerTextBudgets(kind, spec);
+  if (kind === 'poll.sqlite' && typeof spec === 'object' && spec !== null) {
+    assertSqliteBindBudget((spec as { binds?: unknown }).binds);
+  }
+  const validated = schema.parse(spec);
+  const serialized = JSON.stringify(validated);
+  if (Buffer.byteLength(serialized, 'utf8') > TRIGGER_BUDGETS.maxSpecBytes) {
+    budgetError('spec.serialized_bytes');
+  }
+  return validated;
 }
 
 export interface CreateTriggerArgs {
@@ -175,6 +403,13 @@ function computeNextFireAt(
 }
 
 export function prepareTrigger(args: CreateTriggerArgs, clock: Clock = systemClock): PreparedTrigger {
+  assertTriggerTextBudget(args.reportChatJid, 'report_target.bytes', TRIGGER_BUDGETS.maxReportTargetBytes);
+  if (args.dedupeKey != null) {
+    assertTriggerTextBudget(args.dedupeKey, 'dedupe_key.bytes', TRIGGER_BUDGETS.maxDedupeKeyBytes);
+  }
+  if (args.intervalSeconds != null && (!Number.isInteger(args.intervalSeconds) || args.intervalSeconds <= 0)) {
+    budgetError('interval_seconds');
+  }
   const validated = validateTriggerSpec(args.kind, args.spec);
   const now = clock.nowUnixSec();
   const terminalAt = args.kind.startsWith('poll.')

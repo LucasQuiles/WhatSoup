@@ -1611,13 +1611,22 @@ policy belongs to a capability-aware later slice. `trigger_runs` is byte-unchang
 ### 8.2 Bounded concurrency and hang isolation
 
 Non-side-effecting probe kinds (`poll.sqlite`, `poll.pinecone`, `poll.file`, `poll.url`) run
-through a bounded pool (`maxConcurrentExecutors`, default 4); every side-effecting kind
+through a bounded pool (`maxConcurrentExecutors`, default and hard ceiling 4); every side-effecting kind
 (`poll.shell`, `schedule.*`, `event.message`) stays strictly serial. Probes carry a
 per-execution timeout (`executionTimeoutSeconds`, default 300s) finalized as the bounded class
 `execution_timeout` — abandoning a read-only probe is always safe, and the finalize state
 guard makes any late write from the abandoned execution a no-op. The run loop awaits each tick
 under `tickBudgetSeconds` (default 600s) and re-arms the timer past stragglers, which keep
 running detached and finalize under their lease.
+
+`poll.sqlite` has a stricter execution boundary. A validated query is sent over bounded JSON
+stdin to a short-lived read-only child process for the `main` database location. The parent owns
+the hard deadline and resolves only after the child closes, so a deadline kills and reaps the
+process instead of racing a Promise around same-thread `DatabaseSync`. The child returns only a
+bounded `{rowCount}` value; SQL text, binds, and rows do not enter `trigger_runs`. Its 10,000-row,
+2,048-byte row/materialization, IPC, and 30-second limits return the durable redacted class
+`resource_exhausted`. A normal query failure remains the distinct `sql_error` class; an absent
+durable database location is `sqlite_worker_unavailable`.
 
 ### 8.3 Independent liveness observation
 

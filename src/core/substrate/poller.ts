@@ -38,12 +38,14 @@
 // rather than crashing.
 
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
-import { basename, resolve, sep } from 'node:path';
+import { basename, isAbsolute, resolve, sep } from 'node:path';
 import { realpathSync, statSync, createReadStream } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { systemClock } from '../../lib/clock.ts';
 import {
-  dueTriggers, validateTriggerSpec, isSafeSqliteSql,
+  dueTriggers, validateTriggerSpec, isSafeSqliteSql, TriggerBudgetError, TRIGGER_BUDGETS,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from './triggers.ts';
 import { TERMINAL, countOverdueProposals } from './beads.ts';
@@ -68,20 +70,16 @@ const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_BATCH_SIZE = 50;
 /**
  * Hard cap on rows a single poll.sqlite execution may materialize (QR-026).
- * `query_only` bounds writes but not CPU/heap; a read-only recursive CTE passes
- * `isSafeSqliteSql` and would otherwise let `.all()` materialize unboundedly,
- * OOM-crashing / freezing the synchronous DatabaseSync (whole-process DoS). We
- * iterate and fail past this cap. NOTE: node:sqlite exposes no interrupt/step
- * limit and DatabaseSync blocks the event loop, so a CPU-spin yielding FEW rows
- * is NOT bounded by this — full containment needs out-of-process execution.
+ * The isolated child iterates and returns a bounded scalar response only; it
+ * stops at this cap before materializing query rows in the poller process.
  */
-export const MAX_SQLITE_ROWS = 10_000;
+export const MAX_SQLITE_ROWS = TRIGGER_BUDGETS.maxSqliteRows;
 /** Cooldown applied when a kind is not yet implemented — avoids tight loops. */
 const NOT_IMPLEMENTED_COOLDOWN_SEC = 3_600;
 /** Cooldown applied after a transient failure so the poller does not spin. */
 const FAILED_RETRY_COOLDOWN_SEC = 60;
 /** Auto-pause a trigger after this many consecutive failed runs. */
-const MAX_CONSECUTIVE_FAILURES = 5;
+const MAX_CONSECUTIVE_FAILURES = TRIGGER_BUDGETS.maxConsecutiveFailures;
 /**
  * #1745 — auto-RETIRE a trigger after this many consecutive notification sends
  * rejected with a PERMANENT per-target authz error. Deliberately smaller than
@@ -89,7 +87,24 @@ const MAX_CONSECUTIVE_FAILURES = 5;
  * group) never self-heals by retrying the SAME chat, so every further fire is
  * guaranteed-undeliverable and pure waste — the days-long incident loop.
  */
-const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = 3;
+const MAX_CONSECUTIVE_FORBIDDEN_REJECTS = TRIGGER_BUDGETS.maxConsecutiveForbiddenRejects;
+
+/**
+ * Poller options may make a safety response stricter for a test or a specific
+ * instance, but may never raise or disable the global resource ceiling.
+ */
+function boundedPollerOption(
+  value: number | undefined,
+  fallback: number,
+  ceiling: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < 1 || resolved > ceiling) {
+    throw new TriggerBudgetError(`poller.${name}`);
+  }
+  return resolved;
+}
 
 /**
  * #1745 — classify a notification-send rejection as a PERMANENT per-target
@@ -360,6 +375,12 @@ export interface TriggerPollerOptions {
    * stale next_fire_at is reported as recurring-overdue. Default 900s.
    */
   recurringOverdueGraceSeconds?: number;
+  /**
+   * Test seam for the isolated SQLite executor. Production always uses the
+   * default child-process implementation below; this is never a same-thread
+   * fallback.
+   */
+  sqliteExecutor?: IsolatedSqliteExecutor;
 }
 
 interface SqliteSpec {
@@ -407,6 +428,9 @@ const TRIGGER_REASONS = [
   'event_message_not_polled',
   'not_implemented',
   'unsafe_sql',
+  'resource_exhausted',
+  'sqlite_worker_unavailable',
+  'sql_error',
   'index_not_allowed',
   'pinecone_unavailable',
   'path_not_allowed',
@@ -423,6 +447,161 @@ interface ExecuteOutcome {
   outputJson: Record<string, unknown>;
   errorKind?: string;
   errorMessage?: string;
+}
+
+export interface IsolatedSqliteRequest {
+  databasePath: string;
+  sql: string;
+  binds: Array<null | number | string>;
+  maxRows: number;
+  timeoutMs: number;
+}
+
+export type IsolatedSqliteResult =
+  | { kind: 'ok'; rowCount: number }
+  | { kind: 'sql_error' }
+  | { kind: 'resource_exhausted'; limit: 'sql' | 'binds' | 'rows' | 'output' | 'wall_time' | 'stdin' | 'stdout' | 'stderr' }
+  | { kind: 'unavailable'; reason: 'location' | 'spawn' | 'protocol' | 'exit' };
+
+export type IsolatedSqliteExecutor = (request: IsolatedSqliteRequest) => Promise<IsolatedSqliteResult>;
+
+const SQLITE_WORKER_PATH = fileURLToPath(new URL('./sqlite-trigger-worker.ts', import.meta.url));
+
+function sqliteRequestResourceLimit(request: IsolatedSqliteRequest): 'sql' | 'binds' | 'rows' | 'wall_time' | null {
+  if (Buffer.byteLength(request.sql, 'utf8') > TRIGGER_BUDGETS.maxSqlBytes) return 'sql';
+  if (!Number.isInteger(request.maxRows) || request.maxRows <= 0 || request.maxRows > TRIGGER_BUDGETS.maxSqliteRows) return 'rows';
+  if (!Number.isInteger(request.timeoutMs) || request.timeoutMs <= 0 || request.timeoutMs > TRIGGER_BUDGETS.maxSqliteWallTimeMs) return 'wall_time';
+  if (request.binds.length > TRIGGER_BUDGETS.maxSqliteBinds) return 'binds';
+  let bindBytes = 0;
+  for (const bind of request.binds) {
+    const bytes = Buffer.byteLength(JSON.stringify(bind), 'utf8');
+    if (bytes > TRIGGER_BUDGETS.maxSqliteBindBytes) return 'binds';
+    bindBytes += bytes;
+    if (bindBytes > TRIGGER_BUDGETS.maxSqliteBindPayloadBytes) return 'binds';
+  }
+  return null;
+}
+
+/**
+ * Executes a validated read-only query in a child process and resolves only
+ * after that child exits. No SQL, bind, or response bytes are returned on any
+ * failure path. This gives the timeout a real process boundary to terminate;
+ * a Promise race around DatabaseSync on this process would not.
+ */
+export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<IsolatedSqliteResult> {
+  if (!isAbsolute(request.databasePath)) {
+    return Promise.resolve({ kind: 'unavailable', reason: 'location' });
+  }
+  if (request.binds.some((bind) => bind !== null && typeof bind !== 'string' && (typeof bind !== 'number' || !Number.isFinite(bind)))) {
+    return Promise.resolve({ kind: 'unavailable', reason: 'protocol' });
+  }
+  const resourceLimit = sqliteRequestResourceLimit(request);
+  if (resourceLimit) return Promise.resolve({ kind: 'resource_exhausted', limit: resourceLimit });
+  let payload: string;
+  try {
+    payload = JSON.stringify({
+      databasePath: request.databasePath,
+      sql: request.sql,
+      binds: request.binds,
+      maxRows: request.maxRows,
+      maxOutputBytes: TRIGGER_BUDGETS.maxSqliteOutputBytes,
+    });
+  } catch {
+    return Promise.resolve({ kind: 'unavailable', reason: 'protocol' });
+  }
+  if (Buffer.byteLength(payload, 'utf8') > TRIGGER_BUDGETS.maxWorkerStdinBytes) {
+    return Promise.resolve({ kind: 'resource_exhausted', limit: 'stdin' });
+  }
+
+  return new Promise((resolveResult) => {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(process.execPath, [
+        '--disable-warning=ExperimentalWarning',
+        '--experimental-strip-types',
+        SQLITE_WORKER_PATH,
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        // The worker needs no application credentials or provider settings.
+        env: { PATH: process.env.PATH ?? '' },
+      });
+    } catch {
+      resolveResult({ kind: 'unavailable', reason: 'spawn' });
+      return;
+    }
+
+    let settled = false;
+    const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let terminal: IsolatedSqliteResult | null = null;
+    let deadline: ReturnType<typeof setTimeout> | null = null;
+    const finish = (result: IsolatedSqliteResult): void => {
+      if (settled) return;
+      settled = true;
+      if (deadline !== null) clearTimeout(deadline);
+      resolveResult(result);
+    };
+    const terminate = (result: IsolatedSqliteResult): void => {
+      if (terminal) return;
+      terminal = result;
+      try { child.kill('SIGKILL'); } catch { /* close/error settles the result */ }
+    };
+    deadline = setTimeout(() => {
+      terminate({ kind: 'resource_exhausted', limit: 'wall_time' });
+    }, request.timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > TRIGGER_BUDGETS.maxWorkerStdoutBytes) {
+        terminate({ kind: 'resource_exhausted', limit: 'stdout' });
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > TRIGGER_BUDGETS.maxWorkerStderrBytes) {
+        terminate({ kind: 'resource_exhausted', limit: 'stderr' });
+      }
+    });
+    child.on('error', () => {
+      finish(terminal ?? { kind: 'unavailable', reason: 'spawn' });
+    });
+    child.on('close', (code) => {
+      if (terminal) {
+        finish(terminal);
+        return;
+      }
+      if (code !== 0) {
+        finish({ kind: 'unavailable', reason: 'exit' });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(stdoutChunks).toString('utf8')) as { status?: unknown; rowCount?: unknown; limit?: unknown };
+        const rowCount = parsed.rowCount;
+        if (parsed.status === 'ok' && typeof rowCount === 'number' && Number.isInteger(rowCount) && rowCount >= 0) {
+          finish({ kind: 'ok', rowCount });
+          return;
+        }
+        if (parsed.status === 'resource_exhausted' && (parsed.limit === 'rows' || parsed.limit === 'output')) {
+          finish({ kind: 'resource_exhausted', limit: parsed.limit });
+          return;
+        }
+        if (parsed.status === 'sql_error') {
+          finish({ kind: 'sql_error' });
+          return;
+        }
+        if (parsed.status === 'unavailable') {
+          finish({ kind: 'unavailable', reason: 'location' });
+          return;
+        }
+      } catch { /* protocol failures stay content-free */ }
+      finish({ kind: 'unavailable', reason: 'protocol' });
+    });
+    child.stdin.on('error', () => terminate({ kind: 'unavailable', reason: 'spawn' }));
+    child.stdin.end(payload);
+  });
 }
 
 interface PostCommitActions {
@@ -525,6 +704,7 @@ export class TriggerPoller {
   private readonly maxConcurrentExecutors: number;
   private readonly tickBudgetSeconds: number;
   private readonly executionTimeoutSeconds: number;
+  private readonly sqliteExecutor: IsolatedSqliteExecutor;
   private readonly livenessObserver: TriggerLivenessObserver;
 
   constructor(db: DatabaseSync, messenger: Messenger, opts: TriggerPollerOptions = {}) {
@@ -535,8 +715,18 @@ export class TriggerPoller {
     this.nowFn = opts.now ?? systemClock.nowUnixSec;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
-    this.maxConsecutiveFailures = opts.maxConsecutiveFailures ?? MAX_CONSECUTIVE_FAILURES;
-    this.maxConsecutiveForbiddenRejects = opts.maxConsecutiveForbiddenRejects ?? MAX_CONSECUTIVE_FORBIDDEN_REJECTS;
+    this.maxConsecutiveFailures = boundedPollerOption(
+      opts.maxConsecutiveFailures,
+      MAX_CONSECUTIVE_FAILURES,
+      TRIGGER_BUDGETS.maxConsecutiveFailures,
+      'max_consecutive_failures',
+    );
+    this.maxConsecutiveForbiddenRejects = boundedPollerOption(
+      opts.maxConsecutiveForbiddenRejects,
+      MAX_CONSECUTIVE_FORBIDDEN_REJECTS,
+      TRIGGER_BUDGETS.maxConsecutiveForbiddenRejects,
+      'max_consecutive_forbidden_rejects',
+    );
     this.notificationThrottleMinIntervalSec = opts.notificationThrottleMinIntervalSec ?? NOTIFICATION_THROTTLE_MIN_INTERVAL_SEC;
     this.pineconeAllowedIndexes = new Set(opts.pineconeAllowedIndexes ?? []);
     this.pineconeSearch = opts.pineconeSearch ?? null;
@@ -690,9 +880,15 @@ export class TriggerPoller {
     this.occurrenceLeaseTtlSeconds = opts.occurrenceLeaseTtlSeconds ?? 900;
     this.occurrenceLeaseOwner = opts.occurrenceLeaseOwner
       ?? `pid:${process.pid}:${randomBytes(4).toString('hex')}`;
-    this.maxConcurrentExecutors = opts.maxConcurrentExecutors ?? 4;
+    this.maxConcurrentExecutors = boundedPollerOption(
+      opts.maxConcurrentExecutors,
+      TRIGGER_BUDGETS.maxConcurrentPerTick,
+      TRIGGER_BUDGETS.maxConcurrentPerTick,
+      'max_concurrent_executors',
+    );
     this.tickBudgetSeconds = opts.tickBudgetSeconds ?? 600;
     this.executionTimeoutSeconds = opts.executionTimeoutSeconds ?? 300;
+    this.sqliteExecutor = opts.sqliteExecutor ?? runIsolatedSqlite;
     this.livenessObserver = new TriggerLivenessObserver(this.db, {
       instance: opts.instance,
       intervalMs: opts.observerIntervalMs,
@@ -1146,8 +1342,7 @@ export class TriggerPoller {
     // json_extract on the JSON path is required here, NOT a `LIKE
     // '%deliveredWaMessageId%'` substring scan: the substring form matches the
     // KEY name anywhere in the column text — so it false-positives on arbitrary
-    // operator-query row data serialised under $.sampleRow (e.g. a watch over a
-    // table whose rows contain that text) and on a literal-null value — wrongly
+    // legacy output data (or a literal-null value) and wrongly
     // treating a never-delivered run as delivered and silently throttling future
     // notifications. json_extract(...) IS NOT NULL keys on the real value.
     const row = this.stmtLastDeliveredRun
@@ -1211,6 +1406,16 @@ export class TriggerPoller {
     try {
       spec = validateTriggerSpec(kind, spec);
     } catch (err) {
+      if (err instanceof TriggerBudgetError) {
+        return {
+          status: 'failed',
+          fired: false,
+          outputSummary: 'trigger resource budget exceeded',
+          outputJson: { kind, reason: 'resource_exhausted' satisfies TriggerReason },
+          errorKind: 'resource_exhausted',
+          errorMessage: 'persisted trigger exceeded the current resource budget',
+        };
+      }
       return {
         status: 'failed',
         fired: false,
@@ -1351,7 +1556,7 @@ export class TriggerPoller {
     };
   }
 
-  private executeSqlite(t: TriggerRow, spec: SqliteSpec): ExecuteOutcome {
+  private async executeSqlite(t: TriggerRow, spec: SqliteSpec): Promise<ExecuteOutcome> {
     // Runtime guard for specs persisted before validation existed (#1096):
     // query_only does not block ATTACH/cross-DB reads, so reject them here too.
     if (!isSafeSqliteSql(spec.sql)) {
@@ -1364,55 +1569,65 @@ export class TriggerPoller {
         errorMessage: 'poll.sqlite rejects ATTACH/DETACH/PRAGMA and multi-statement SQL',
       };
     }
-    let rows: Record<string, unknown>[];
-    let capExceeded = false;
+    let databasePath: string | null = null;
     try {
-      // Operator-stored SQL runs against the live bot.db. Bound the blast
-      // radius of a compromised or confused-deputy spec by flipping the
-      // connection to read-only for the duration of this query. The OFF
-      // restoration MUST be in finally so the poller's own follow-up writes
-      // (UPDATE bead_triggers, INSERT trigger_runs) still succeed.
-      this.db.exec('PRAGMA query_only = ON');
-      try {
-        const stmt = this.db.prepare(spec.sql);
-        const bindArgs = spec.binds ? toBindArgs(spec.binds) : [];
-        // QR-026: iterate with a hard row cap instead of `.all()`. A runaway
-        // recursive CTE is bounded at MAX_SQLITE_ROWS pulls (breaking the
-        // iterator stops the query) rather than materializing unboundedly and
-        // OOM-crashing the process.
-        rows = [];
-        for (const row of stmt.iterate(...bindArgs)) {
-          if (rows.length >= MAX_SQLITE_ROWS) { capExceeded = true; break; }
-          rows.push(row as Record<string, unknown>);
-        }
-      } finally {
-        this.db.exec('PRAGMA query_only = OFF');
+      const location = this.db.location('main');
+      if (typeof location === 'string' && location.length > 0 && location !== ':memory:' && isAbsolute(location)) {
+        databasePath = location;
       }
-    } catch (err) {
+    } catch {
+      // The unavailable disposition below intentionally reveals no database path.
+    }
+    if (!databasePath) {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'isolated SQLite worker unavailable',
+        outputJson: { reason: 'sqlite_worker_unavailable' satisfies TriggerReason },
+        errorKind: 'sqlite_worker_unavailable',
+        errorMessage: 'main database location is unavailable for isolated execution',
+      };
+    }
+    const bindArgs = (spec.binds ? toBindArgs(spec.binds) : []) as Array<null | number | string>;
+    const result = await this.sqliteExecutor({
+      databasePath,
+      sql: spec.sql,
+      binds: bindArgs,
+      maxRows: TRIGGER_BUDGETS.maxSqliteRows,
+      timeoutMs: Math.min(this.executionTimeoutSeconds * 1_000, TRIGGER_BUDGETS.maxSqliteWallTimeMs),
+    });
+    if (result.kind === 'resource_exhausted') {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'SQLite execution exhausted a resource budget',
+        outputJson: { reason: 'resource_exhausted' satisfies TriggerReason, resource: 'sqlite', limit: result.limit },
+        errorKind: 'resource_exhausted',
+        errorMessage: 'isolated SQLite execution exceeded its resource budget',
+      };
+    }
+    if (result.kind === 'unavailable') {
+      return {
+        status: 'failed',
+        fired: false,
+        outputSummary: 'isolated SQLite worker unavailable',
+        outputJson: { reason: 'sqlite_worker_unavailable' satisfies TriggerReason },
+        errorKind: 'sqlite_worker_unavailable',
+        errorMessage: `isolated SQLite worker unavailable (${result.reason})`,
+      };
+    }
+    if (result.kind === 'sql_error') {
       return {
         status: 'failed',
         fired: false,
         outputSummary: 'SQL execution failed',
-        outputJson: { sql: spec.sql },
+        outputJson: { reason: 'sql_error' satisfies TriggerReason },
         errorKind: 'sql_error',
-        errorMessage: errorMessage(err),
-      };
-    }
-    if (capExceeded) {
-      // The query produced more than MAX_SQLITE_ROWS rows — almost certainly an
-      // unbounded/recursive or misconfigured spec. Fail (the circuit breaker will
-      // pause it after repeated failures) rather than acting on a truncated set.
-      return {
-        status: 'failed',
-        fired: false,
-        outputSummary: `SQL exceeded the ${MAX_SQLITE_ROWS}-row cap — rejected`,
-        outputJson: { rowCap: MAX_SQLITE_ROWS, sql: spec.sql },
-        errorKind: 'row_cap_exceeded',
-        errorMessage: `poll.sqlite result exceeded ${MAX_SQLITE_ROWS} rows — query rejected to bound DoS risk (unbounded/recursive query?)`,
+        errorMessage: 'isolated SQLite query failed',
       };
     }
 
-    const rowCount = rows.length;
+    const rowCount = result.rowCount;
 
     if (spec.fire_when === 'rows_returned') {
       return {
@@ -1421,7 +1636,7 @@ export class TriggerPoller {
         outputSummary: rowCount > 0
           ? `SQL returned ${rowCount} row${rowCount === 1 ? '' : 's'}`
           : 'SQL returned 0 rows',
-        outputJson: { rowCount, sampleRow: rows[0] ?? null },
+        outputJson: { rowCount },
       };
     }
 
@@ -1459,8 +1674,8 @@ export class TriggerPoller {
    * (fail-closed). The Pinecone client is injected; when absent we fail with
    * `pinecone_unavailable` rather than silently noop. `outputJson` is reduced
    * to scalars (`matchCount`, `topScore`) — record bodies never enter the
-   * poller (the search fn returns only scores), parity with the SQL
-   * `sampleRow` redaction posture.
+   * poller (the search fn returns only scores), matching the SQL
+   * rowCount-only result protocol.
    */
   private async executePinecone(spec: PineconeTriggerSpec): Promise<ExecuteOutcome> {
     if (!this.pineconeAllowedIndexes.has(spec.index)) {
@@ -1723,7 +1938,7 @@ export class TriggerPoller {
    *
    * `outputJson` is reduced to scalars/booleans (`hashChanged` + the opaque
    * digest used for the next comparison) — the fetched body NEVER enters
-   * output_json (parity with the SQL `sampleRow` / pinecone redaction posture).
+   * output_json, matching the SQL rowCount-only and Pinecone scalar protocols.
    */
   private async executeUrl(t: TriggerRow, spec: UrlTriggerSpec): Promise<ExecuteOutcome> {
     if (!this.enableUrlWatch) {

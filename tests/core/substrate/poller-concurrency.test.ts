@@ -53,6 +53,19 @@ describe('TriggerPoller — hang isolation and bounded concurrency (#2566 slice 
   beforeEach(() => { path = tmpFile(); db = new Database(path); db.open(); });
   afterEach(() => { db.close(); if (existsSync(path)) unlinkSync(path); });
 
+  it('rejects caller-provided concurrency and failure ceilings above the trigger budget', () => {
+    const { messenger } = makeMessenger();
+    expect(() => new TriggerPoller(db.raw, messenger, {
+      maxConcurrentExecutors: 5,
+    })).toThrow(/resource budget/i);
+    expect(() => new TriggerPoller(db.raw, messenger, {
+      maxConsecutiveFailures: 6,
+    })).toThrow(/resource budget/i);
+    expect(() => new TriggerPoller(db.raw, messenger, {
+      maxConsecutiveForbiddenRejects: 4,
+    })).toThrow(/resource budget/i);
+  });
+
   it('F1: a hung executor does not block an unrelated due trigger in the same tick', async () => {
     const { messenger } = makeMessenger();
     const a = makeProbeTrigger(db, 1_000_000_000, 'hung');
