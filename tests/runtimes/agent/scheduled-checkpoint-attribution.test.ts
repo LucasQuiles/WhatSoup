@@ -586,6 +586,35 @@ describe('scheduled turn checkpoint attribution and resume-failure visibility (#
     });
   });
 
+  it('M1 (group): a group\'s scheduled turn leaves the group checkpoint on the group\'s own session', async () => {
+    // Production 2026-10-12: a group's '<groupJid>::scheduled-agent-job' turn wrote its
+    // session id and pid into the group's '<group>_at_g.us' checkpoint, so the
+    // reconciler refused the group's resident row and its idle suspend failed.
+    const groupJid = 'test-group-alpha@g.us';
+    const groupKey = toConversationKey(groupJid);
+    const seq = engine.journalInbound('msg-m1-group', groupKey, groupJid, 'agent');
+    void runtime.handleMessage(makeMsg({
+      messageId: 'msg-m1-group', chatJid: groupJid, senderJid: '15550007009@s.whatsapp.net',
+      isGroup: true, inboundSeq: seq,
+    }));
+    const interactiveTurn = await waitForInFlightTurn((t) => t.includes('interactive question'));
+    interactiveTurn.emit({ type: 'result', text: 'On it.' });
+    await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 4_000 });
+    const interactive = interactiveSessionFor(groupJid);
+
+    const { session: scheduled } = await driveScheduledToComplete(groupJid);
+    expect(scheduled.persistenceKey).toBe(`${groupJid}::scheduled-agent-job`);
+    expect(scheduled.identity.sessionId).not.toBe(interactive.identity.sessionId);
+    expect(scheduled.identity.pid).not.toBe(interactive.identity.pid);
+
+    expect(checkpoint(groupKey)).toMatchObject({
+      session_id: interactive.identity.sessionId,
+      claude_pid: interactive.identity.pid,
+      session_status: 'active',
+      completed_inbound_seq: seq,
+    });
+  });
+
   it('M2: after a scheduled turn, a DM restart proactively resumes the chat\'s own session', async () => {
     await driveInteractiveToComplete(dmJid, 'msg-m2-interactive');
     const interactive = interactiveSessionFor(dmJid);
