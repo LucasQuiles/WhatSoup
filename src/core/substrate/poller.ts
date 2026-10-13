@@ -240,7 +240,10 @@ export interface AgentJobContext {
 /** Result of an agent-job dispatch attempt. `dispatched:false` fails CLOSED. */
 export interface AgentJobDispatchResult {
   dispatched: boolean;
-  /** Optional detail (queue depth, rejection reason) recorded on the run. */
+  /**
+   * Opaque dispatcher-local detail. The poller never logs, notifies, or
+   * persists it because a dispatcher controls the string's size and content.
+   */
   detail?: string;
 }
 
@@ -1572,29 +1575,36 @@ export class TriggerPoller {
         beadId: t.bead_id, triggerId: t.id, occurrenceId,
         prompt, title: bead.title, reportChatJid: t.report_chat_jid,
       });
-    } catch (err) {
+    } catch {
+      log.warn(
+        { triggerId: t.id, occurrenceId, classification: 'agent_job_dispatch_threw' },
+        'agent job dispatcher threw',
+      );
       return {
         status: 'failed', fired: true,
-        outputSummary: `agent job dispatch FAILED — ${errorMessage(err)}`,
+        outputSummary: 'agent job dispatch FAILED — unavailable',
         outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_dispatch_threw' },
         errorKind: 'agent_job_dispatch_threw',
-        errorMessage: errorMessage(err),
+        errorMessage: 'agent-job dispatcher threw',
       };
     }
     if (!result.dispatched) {
-      const detail = result.detail ?? 'turn queue rejected the job (queue full?)';
+      log.warn(
+        { triggerId: t.id, occurrenceId, classification: 'agent_job_enqueue_rejected' },
+        'agent job dispatcher rejected enqueue',
+      );
       return {
         status: 'failed', fired: true,
-        outputSummary: `agent job dispatch FAILED — ${detail}`,
+        outputSummary: 'agent job dispatch FAILED — enqueue rejected',
         outputJson: { kind: t.kind, agentJob: true, reason: 'agent_job_enqueue_rejected' },
         errorKind: 'agent_job_enqueue_rejected',
-        errorMessage: detail,
+        errorMessage: 'agent-job dispatcher rejected enqueue',
       };
     }
     return {
       status: 'ok', fired: false,
-      outputSummary: 'agent job dispatched — turn enqueued',
-      outputJson: { kind: t.kind, agentJob: true, detail: result.detail ?? null },
+      outputSummary: 'agent job dispatched — accepted',
+      outputJson: { kind: t.kind, agentJob: true, dispatch: 'accepted' },
     };
   }
 

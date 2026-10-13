@@ -853,6 +853,39 @@ describe('TriggerPoller — agent_job dispatch', () => {
     expect(refreshed.next_fire_at).toBeGreaterThan(1_000_000_001);
   });
 
+  it('does not persist a dispatcher success detail or create a second occurrence', async () => {
+    const { messenger } = makeMessenger();
+    const secret = `AGENT_JOB_SUCCESS_DETAIL_SECRET_${'s'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => ({ dispatched: true, detail: secret }),
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{ output_summary: string; output_json: string; error_message: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatched — accepted',
+      output_json: '{"kind":"schedule.cron","agentJob":true,"dispatch":"accepted"}',
+      error_message: null,
+    });
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(Buffer.byteLength(JSON.stringify(runs[0]), 'utf8')).toBeLessThan(512);
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
+  });
+
   it('fails closed before dispatch when a restored agent-job title or body exceeds its budget', async () => {
     const { messenger, calls } = makeMessenger();
     const dispatched = vi.fn(() => ({ dispatched: true }));
@@ -925,10 +958,84 @@ describe('TriggerPoller — agent_job dispatch', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].text).toContain('FAILED');
-    expect(calls[0].text).toContain('queue full');
-    const runs = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).all(t.id) as Array<{ status: string; error_kind: string }>;
+    expect(calls[0].text).not.toContain('queue full');
+    const runs = db.raw.prepare(
+      'SELECT status, error_kind, output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{
+      status: string; error_kind: string; output_summary: string; output_json: string; error_message: string | null;
+    }>;
     expect(runs[0].status).toBe('failed');
     expect(runs[0].error_kind).toBe('agent_job_enqueue_rejected');
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — enqueue rejected',
+      error_message: 'agent-job dispatcher rejected enqueue',
+    });
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ agentJob: true, reason: 'agent_job_enqueue_rejected' });
+  });
+
+  it('does not persist a dispatcher rejection detail or retry the claimed occurrence', async () => {
+    const { messenger } = makeMessenger();
+    const secret = `AGENT_JOB_REJECTION_DETAIL_SECRET_${'r'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => ({ dispatched: false, detail: secret }),
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{ output_summary: string; output_json: string; error_message: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(Buffer.byteLength(JSON.stringify(runs[0]), 'utf8')).toBeLessThan(512);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — enqueue rejected',
+      error_message: 'agent-job dispatcher rejected enqueue',
+    });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
+  });
+
+  it('does not persist a thrown dispatcher error text or retry the claimed occurrence', async () => {
+    const { messenger } = makeMessenger();
+    const secret = `AGENT_JOB_THROW_DETAIL_SECRET_${'t'.repeat(12_000)}`;
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'job', body: 'do the thing', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: () => { throw new Error(secret); },
+    });
+
+    await poller.tickOnce();
+    await poller.tickOnce();
+
+    const runs = db.raw.prepare(
+      'SELECT output_summary, output_json, error_message FROM trigger_runs WHERE trigger_id = ?',
+    ).all(t.id) as Array<{ output_summary: string; output_json: string; error_message: string | null }>;
+    expect(runs).toHaveLength(1);
+    expect(JSON.stringify(runs[0])).not.toContain(secret);
+    expect(Buffer.byteLength(JSON.stringify(runs[0]), 'utf8')).toBeLessThan(512);
+    expect(runs[0]).toMatchObject({
+      output_summary: 'agent job dispatch FAILED — unavailable',
+      error_message: 'agent-job dispatcher threw',
+    });
+    expect(JSON.parse(runs[0].output_json)).toMatchObject({ agentJob: true, reason: 'agent_job_dispatch_threw' });
+    expect(db.raw.prepare('SELECT COUNT(*) AS count FROM trigger_occurrences WHERE trigger_id = ?').get(t.id))
+      .toMatchObject({ count: 1 });
   });
 
   it('repeated cron dispatch failures alert every fire and never silently auto-pause', async () => {
