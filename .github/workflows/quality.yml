@@ -29,15 +29,6 @@ jobs:
   quality:
     name: quality (24.x)
     runs-on: ubuntu-latest
-    env:
-      # GitHub's pull-request SHA is a generated merge commit that is not a
-      # fetchable Git object. BuildKit must fetch the actual full-SHA source
-      # commit so configSource records verified remote context rather than a
-      # caller-supplied local VCS hint.
-      SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      # Only pull requests can select a fork source. Push and merge-group builds
-      # retain docker/container-inputs.json's reviewed canonical repository.
-      SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}
     # Generous cap so it only kills a genuinely hung run, not a slow-but-live
     # one (the authority job runs the full suite + coverage and can take ~40min).
     # Without this a hung run rides to the 6h GitHub default.
@@ -120,6 +111,12 @@ jobs:
           # Buildx otherwise emits `{}` for buildx.build.provenance, which
           # cannot establish the receipt's requested source/build details.
           BUILDX_METADATA_PROVENANCE: max
+          # GitHub's pull-request SHA is a generated merge commit that is not a
+          # fetchable Git object. BuildKit instead fetches the authoritative
+          # head repository at its full SHA. Push and merge-group builds select
+          # the policy repository in the step body.
+          SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}
         run: |
           set -euo pipefail
           container_dir="$RUNNER_TEMP/whatsoup-container"
@@ -176,6 +173,9 @@ jobs:
           upload-release-assets: false
 
       - name: Verify container build receipt
+        env:
+          SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}
         run: |
           set -euo pipefail
           container_dir="$RUNNER_TEMP/whatsoup-container"
