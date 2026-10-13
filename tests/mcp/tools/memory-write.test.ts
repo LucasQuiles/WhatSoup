@@ -77,6 +77,43 @@ describe('memory_write tool', () => {
     }
   });
 
+  it('tombstones a provider-success/local-finalization ambiguity and reconciles it immediately', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot', indexName: 'test-memory-index', now: () => 1_700_000_000_000,
+      });
+      const tools: ToolDeclaration[] = [];
+      const writer: MemoryWriter = { upsert: async () => {} };
+      vi.spyOn(lifecycle, 'markWriteFinalized').mockImplementationOnce(() => {
+        throw new Error('local receipt finalization failed');
+      });
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        () => writer,
+        fakeClock(1_700_000_000_000),
+        lifecycle,
+      );
+      const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
+
+      const result = await tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'provider success has to be erased', memory_type: 'preference' },
+        chatSession(),
+      );
+
+      expect(isToolErrorPayload(result)).toBe(true);
+      expect(db.raw.prepare('SELECT state, erase_requested_at FROM remote_memory_lifecycle').get()).toMatchObject({
+        state: 'erase_pending', erase_requested_at: 1_700_000_000_000,
+      });
+      const deleteRecord = vi.fn(async () => {});
+      expect(await lifecycle.processDue({ deleteRecord, recordExists: async () => false }, 'ambiguity-reconcile')).toBe('verified_absent');
+      expect(deleteRecord).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
   it('refuses a delayed provider retry after erasure is tombstoned', async () => {
     const db = new Database(':memory:');
     db.open();

@@ -908,6 +908,33 @@ describe('PineconeMemory', () => {
   });
 
   describe('direct remote-memory lifecycle operations', () => {
+    it('propagates a lifecycle abort signal through both delete and fetch transports', async () => {
+      const clientConfig = vi.mocked(Pinecone).mock.calls[0][0] as {
+        fetchApi?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+      };
+      const observedSignals: Array<AbortSignal | null | undefined> = [];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        observedSignals.push(init?.signal);
+        return new Response('{}', { status: 200 });
+      });
+      mockDeleteOne.mockImplementation(async () => { await clientConfig.fetchApi?.('https://example.invalid/delete'); });
+      mockFetch.mockImplementation(async () => {
+        await clientConfig.fetchApi?.('https://example.invalid/fetch');
+        return { records: {} };
+      });
+      const controller = new AbortController();
+
+      try {
+        await memory.deleteRemoteMemoryRecord('preference_0123456789abcdef01234567', controller.signal);
+        await memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567', controller.signal);
+        expect(observedSignals).toEqual([controller.signal, controller.signal]);
+        controller.abort();
+        expect(observedSignals.every((signal) => signal?.aborted)).toBe(true);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('deletes and checks records through the configured default namespace', async () => {
       mockDeleteOne.mockResolvedValueOnce(undefined);
       mockFetch.mockResolvedValueOnce({ records: {} });

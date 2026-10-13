@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import {
+  REMOTE_MEMORY_EXPIRY_QUEUE_MARGIN_MS,
   REMOTE_MEMORY_MAX_ATTEMPTS,
+  REMOTE_MEMORY_PROVIDER_CALL_TIMEOUT_MS,
+  REMOTE_MEMORY_RETENTION_MS,
   REMOTE_MEMORY_TERMINAL_RECEIPT_RETENTION_MS,
   RemoteMemoryLifecycle,
+  RemoteMemoryLifecycleTimer,
 } from '../../src/core/remote-memory-lifecycle.ts';
 
 const lifecycleLog = vi.hoisted(() => ({
@@ -35,8 +39,9 @@ type LifecycleModule = {
     lifecycle: {
       processDue: () => Promise<'idle' | 'verified_absent' | 'retry_scheduled'>;
       pruneVerifiedReceipts: () => number;
+      queueExpired: () => number;
     },
-    provider: { deleteRecord: (recordId: string) => Promise<void>; recordExists: (recordId: string) => Promise<boolean> } | null,
+    provider: () => { deleteRecord: (recordId: string, signal?: AbortSignal) => Promise<void>; recordExists: (recordId: string, signal?: AbortSignal) => Promise<boolean> } | null,
     leaseOwner: string,
     intervalMs?: number,
     maxRowsPerRun?: number,
@@ -89,7 +94,7 @@ describe('remote memory lifecycle', () => {
       memory_type: 'preference',
       source: 'memory_write',
       state: 'write_intent',
-      expires_at: 1_700_000_000_000 + 90 * 24 * 60 * 60 * 1000,
+      expires_at: 1_700_000_000_000 + REMOTE_MEMORY_RETENTION_MS - REMOTE_MEMORY_EXPIRY_QUEUE_MARGIN_MS,
     });
     expect(JSON.stringify(receipt)).not.toContain('secret red notebook');
   });
@@ -103,8 +108,8 @@ describe('remote memory lifecycle', () => {
       .mockRejectedValueOnce(new Error('sqlite claim failed'))
       .mockResolvedValue('idle');
     const timer = new module.RemoteMemoryLifecycleTimer(
-      { processDue, pruneVerifiedReceipts: vi.fn(() => 0) },
-      { deleteRecord: async () => {}, recordExists: async () => false },
+      { processDue, pruneVerifiedReceipts: vi.fn(() => 0), queueExpired: vi.fn(() => 0) },
+      () => ({ deleteRecord: async () => {}, recordExists: async () => false }),
       'test-timer',
       25,
     );
@@ -128,8 +133,8 @@ describe('remote memory lifecycle', () => {
     const processDue = vi.fn().mockResolvedValue('idle');
     const pruneVerifiedReceipts = vi.fn(() => 1);
     const timer = new module.RemoteMemoryLifecycleTimer(
-      { processDue, pruneVerifiedReceipts },
-      null,
+      { processDue, pruneVerifiedReceipts, queueExpired: vi.fn(() => 0) },
+      () => null,
       'unavailable-provider',
     );
 
@@ -137,6 +142,57 @@ describe('remote memory lifecycle', () => {
 
     expect(pruneVerifiedReceipts).toHaveBeenCalledOnce();
     expect(processDue).not.toHaveBeenCalled();
+  });
+
+  it('queues expiry while provider construction is unavailable and resumes reconciliation after recovery', async () => {
+    let now = 1_700_000_000_000;
+    db = new Database(':memory:');
+    db.open();
+    const lifecycle = new RemoteMemoryLifecycle(db, {
+      accountId: 'bot@example', indexName: 'memory-index', now: () => now,
+    });
+    const remoteRecordId = 'preference_010101010101010101010101';
+    lifecycle.registerWrite({
+      remoteRecordId, conversationKey: 'one', senderJid: 'alice@s.whatsapp.net', memoryType: 'preference',
+    });
+    now += REMOTE_MEMORY_RETENTION_MS - REMOTE_MEMORY_EXPIRY_QUEUE_MARGIN_MS;
+
+    let provider: { deleteRecord: (recordId: string, signal?: AbortSignal) => Promise<void>; recordExists: (recordId: string, signal?: AbortSignal) => Promise<boolean> } | null = null;
+    const timer = new RemoteMemoryLifecycleTimer(lifecycle, () => provider, 'provider-recovery');
+    await timer.run();
+    expect(lifecycle.get(remoteRecordId)).toMatchObject({ state: 'erase_pending', attemptCount: 0 });
+
+    provider = { deleteRecord: async () => {}, recordExists: async () => false };
+    await timer.run();
+    expect(lifecycle.get(remoteRecordId)).toMatchObject({ state: 'absence_verified', attemptCount: 1 });
+  });
+
+  it('bounds a provider call that ignores its abort signal so the lifecycle timer cannot remain held', async () => {
+    db = new Database(':memory:');
+    db.open();
+    const lifecycle = new RemoteMemoryLifecycle(db, { accountId: 'bot@example', indexName: 'memory-index' });
+    const remoteRecordId = 'preference_020202020202020202020202';
+    lifecycle.registerWrite({
+      remoteRecordId, conversationKey: 'one', senderJid: 'alice@s.whatsapp.net', memoryType: 'preference',
+    });
+    lifecycle.requestErase({ scope: 'conversation', conversationKey: 'one' });
+    let aborted = false;
+    const neverResolving = {
+      deleteRecord: async (_recordId: string, signal?: AbortSignal) => {
+        signal?.addEventListener('abort', () => { aborted = true; }, { once: true });
+        await new Promise<void>(() => {});
+      },
+      recordExists: async () => false,
+    };
+
+    const outcome = await Promise.race([
+      lifecycle.processDue(neverResolving, 'deadline-test', 5),
+      new Promise<'timed_out_test'>((resolve) => setTimeout(() => resolve('timed_out_test'), 50)),
+    ]);
+    expect(outcome).toBe('retry_scheduled');
+    expect(aborted).toBe(true);
+    expect(REMOTE_MEMORY_PROVIDER_CALL_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(lifecycle.get(remoteRecordId)).toMatchObject({ state: 'retry_wait', attemptCount: 1 });
   });
 
   it('keeps provider acknowledgement distinct from verified current absence', async () => {
@@ -220,6 +276,21 @@ describe('remote memory lifecycle', () => {
     expect(() => lifecycle.registerWrite({
       remoteRecordId, conversationKey: 'other', senderJid: 'alice@s.whatsapp.net', memoryType: 'preference',
     })).toThrow(/conflicts with existing provenance/);
+  });
+
+  it('allows the same legacy provider record ID to coexist in a different account and index', () => {
+    db = new Database(':memory:');
+    db.open();
+    const recordId = 'preference_909090909090909090909090';
+    const first = new RemoteMemoryLifecycle(db, { accountId: 'first@example', indexName: 'first-index' });
+    const second = new RemoteMemoryLifecycle(db, { accountId: 'second@example', indexName: 'second-index' });
+    first.registerWrite({ remoteRecordId: recordId, conversationKey: 'one', senderJid: 'alice@s.whatsapp.net', memoryType: 'preference' });
+    second.registerWrite({ remoteRecordId: recordId, conversationKey: 'two', senderJid: 'bob@s.whatsapp.net', memoryType: 'preference' });
+
+    expect(db.raw.prepare('SELECT COUNT(*) AS n FROM remote_memory_lifecycle WHERE remote_record_id = ?').get(recordId)).toEqual({ n: 2 });
+    first.requestErase({ scope: 'account' });
+    expect(first.get(recordId)).toMatchObject({ state: 'erase_pending' });
+    expect(second.get(recordId)).toMatchObject({ state: 'write_intent' });
   });
 
   it('uses bounded backoff, reaches a visible retry cap, and resumes an expired lease after restart', async () => {

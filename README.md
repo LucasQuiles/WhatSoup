@@ -2,7 +2,7 @@
 
 A multi-instance WhatsApp platform that runs three fundamentally different runtimes — passive listener, conversational chatbot, and autonomous AI agent — behind one Baileys v7 connection per line. Ships with a fleet management console for provisioning, monitoring, and operating all instances from a single dashboard.
 
-One process per instance. One SQLite database per instance. 170 MCP tools (166 always registered and 4 conditional); see the [tool reference](docs/tools.md#whatsoup-mcp-tool-api-reference) for exact registration and authorization gates. No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`).
+One process per instance. One SQLite database per instance. 171 MCP tools (166 always registered and 5 conditional); see the [tool reference](docs/tools.md#whatsoup-mcp-tool-api-reference) for exact registration and authorization gates. No backend build step — the runtime executes TypeScript directly via Node `--experimental-strip-types`; only the React console builds (to the repository-level `dist/`).
 
 ## What It Does
 
@@ -403,7 +403,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 | [Contributor Instructions](AGENTS.md) | Shared engineering commands, conventions and publication requirements |
 | [Console Guide](docs/console-guide.md) | Full walkthrough of every console page, tab, and feature |
 | [Configuration Reference](docs/configuration.md) | Full config schema, env vars, worked examples, per-instance chat aliases, send profiles, and **per-instance plugin scoping** |
-| [MCP Tool Reference](docs/tools.md) | All 170 tools across 21 documented modules plus two runtime tools, with scopes, parameters, replay policies |
+| [MCP Tool Reference](docs/tools.md) | All 171 tools across 21 documented modules plus two runtime tools, with scopes, parameters, replay policies |
 | [Agent Decision Polls](docs/runbooks/agent-decision-polls.md) | Portable contract for blocking `AskUserQuestion` poll interactions and non-blocking MCP `send_poll` usage |
 | [Runbook](docs/runbook.md) | Operational procedures and troubleshooting |
 | [Durability Design](docs/durability.md) | Durability engine design, state machines, recovery algorithms |

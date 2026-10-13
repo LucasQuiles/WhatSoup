@@ -3,7 +3,7 @@
 //
 // registerAllTools registers memory_write only when BOTH hold:
 //   1. config.pineconeIndex is set, and
-//   2. process.env[config.memory?.pinecone?.apiKeyEnv ?? 'PINECONE_API_KEY'] is set.
+//   2. the shared resolver can obtain a configured service or environment key.
 //
 // This gate is why the per-tier advertised surface is environment-dependent:
 // with the gate open, a chat-scoped session sees one additional tool
@@ -11,7 +11,7 @@
 // so it is deterministic on CI (no key) and on memory-configured dev hosts
 // (key exported in the shell) alike.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import { ToolRegistry } from '../../src/mcp/registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
@@ -19,6 +19,11 @@ import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
 import { config } from '../../src/config.ts';
+
+const resolver = vi.hoisted(() => vi.fn(({ service, envVar }: { service?: string; envVar: string }) =>
+  service === 'pinecone-instance-keyring' || Boolean(process.env[envVar])));
+
+vi.mock('../../src/lib/api-key-resolver.ts', () => ({ resolveApiKey: resolver }));
 
 function makeConnection(): ConnectionManager {
   return {
@@ -76,6 +81,7 @@ function registerAndInspect(): { registered: boolean; eraseRegistered: boolean; 
 }
 
 afterEach(() => {
+  resolver.mockClear();
   if (originalKey === undefined) delete process.env[DEFAULT_KEY_ENV];
   else process.env[DEFAULT_KEY_ENV] = originalKey;
   if (originalCustom === undefined) delete process.env.WHATSOUP_PROBE_CUSTOM_KEY;
@@ -114,6 +120,21 @@ describe('memory_write registration gate (#1976)', () => {
     setGate('probe-index', 'WHATSOUP_PROBE_CUSTOM_KEY', 'probe-dummy-not-a-secret');
     const { registered } = registerAndInspect();
     expect(registered).toBe(true);
+  });
+
+  it('registers from memory.pinecone.apiKeyService without an environment key', () => {
+    (config as { memory?: unknown }).memory = {
+      pinecone: { apiKeyEnv: 'WHATSOUP_PROBE_CUSTOM_KEY', apiKeyService: 'pinecone-instance-keyring' },
+    };
+    setGate('probe-index', 'WHATSOUP_PROBE_CUSTOM_KEY', undefined);
+
+    const { registered } = registerAndInspect();
+
+    expect(registered).toBe(true);
+    expect(resolver).toHaveBeenCalledWith({
+      service: 'pinecone-instance-keyring',
+      envVar: 'WHATSOUP_PROBE_CUSTOM_KEY',
+    });
   });
 
   it('ignores the default key name when a custom apiKeyEnv is configured but unset', () => {

@@ -8,7 +8,13 @@ export const REMOTE_MEMORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 export const REMOTE_MEMORY_TERMINAL_RECEIPT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 export const REMOTE_MEMORY_MAX_ATTEMPTS = 5;
 export const REMOTE_MEMORY_LEASE_MS = 60_000;
+export const REMOTE_MEMORY_LIFECYCLE_CADENCE_MS = 60 * 60 * 1000;
+// Two sweeps fit before the 90-day retention boundary, so a live timer queues
+// expiry even if one scheduled sweep is delayed.
+export const REMOTE_MEMORY_EXPIRY_QUEUE_MARGIN_MS = 2 * REMOTE_MEMORY_LIFECYCLE_CADENCE_MS;
+export const REMOTE_MEMORY_PROVIDER_CALL_TIMEOUT_MS = 30_000;
 const REMOTE_MEMORY_MAX_BACKOFF_MS = 60 * 60 * 1000;
+const REMOTE_MEMORY_NAMESPACE = '';
 
 export type RemoteMemoryEraseScope = 'account' | 'sender' | 'conversation' | 'expiry';
 export type RemoteMemoryLifecycleState =
@@ -42,9 +48,9 @@ export interface RemoteMemoryEraseRequest {
 }
 
 export interface RemoteMemoryProvider {
-  deleteRecord(recordId: string): Promise<void>;
+  deleteRecord(recordId: string, signal?: AbortSignal): Promise<void>;
   /** True when the record still exists; false includes a verified not-found response. */
-  recordExists(recordId: string): Promise<boolean>;
+  recordExists(recordId: string, signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface RemoteMemoryEraseResult {
@@ -102,6 +108,36 @@ function backoffMs(attemptCount: number): number {
   return Math.min(REMOTE_MEMORY_MAX_BACKOFF_MS, 1_000 * (2 ** Math.max(0, attemptCount - 1)));
 }
 
+function providerDeadlineError(): Error {
+  const error = new Error('remote memory provider call timed out');
+  error.name = 'TimeoutError';
+  return error;
+}
+
+async function withinProviderDeadline<T>(
+  invoke: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > REMOTE_MEMORY_PROVIDER_CALL_TIMEOUT_MS) {
+    throw new Error('remote memory provider deadline is malformed');
+  }
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      invoke(controller.signal),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(providerDeadlineError());
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 export class RemoteMemoryLifecycle {
   private readonly now: () => number;
 
@@ -130,16 +166,17 @@ export class RemoteMemoryLifecycle {
           remote_record_id, account_id, index_name, namespace, conversation_key,
           sender_jid, memory_type, source, accepted_at, expires_at, state,
           created_at, updated_at
-        ) VALUES (?, ?, ?, '', ?, ?, ?, 'memory_write', ?, ?, 'write_intent', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'memory_write', ?, ?, 'write_intent', ?, ?)
       `).run(
         remoteRecordId,
         this.options.accountId,
         this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
         input.conversationKey,
         input.senderJid,
         input.memoryType,
         now,
-        now + REMOTE_MEMORY_RETENTION_MS,
+        now + REMOTE_MEMORY_RETENTION_MS - REMOTE_MEMORY_EXPIRY_QUEUE_MARGIN_MS,
         now,
         now,
       );
@@ -147,8 +184,8 @@ export class RemoteMemoryLifecycle {
         SELECT account_id, index_name, namespace, conversation_key, sender_jid, memory_type,
                source, state, erase_requested_at
           FROM remote_memory_lifecycle
-         WHERE remote_record_id = ?
-      `).get(remoteRecordId) as {
+         WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+      `).get(remoteRecordId, this.options.accountId, this.options.indexName, REMOTE_MEMORY_NAMESPACE) as {
         account_id: string;
         index_name: string;
         namespace: string;
@@ -164,7 +201,7 @@ export class RemoteMemoryLifecycle {
     if (
       state.account_id !== this.options.accountId
       || state.index_name !== this.options.indexName
-      || state.namespace !== ''
+      || state.namespace !== REMOTE_MEMORY_NAMESPACE
       || state.conversation_key !== input.conversationKey
       || state.sender_jid !== input.senderJid
       || state.memory_type !== input.memoryType
@@ -185,8 +222,8 @@ export class RemoteMemoryLifecycle {
     const row = this.db.raw.prepare(`
       SELECT state, erase_requested_at
         FROM remote_memory_lifecycle
-       WHERE remote_record_id = ? AND account_id = ? AND index_name = ?
-    `).get(remoteRecordId, this.options.accountId, this.options.indexName) as {
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+    `).get(remoteRecordId, this.options.accountId, this.options.indexName, REMOTE_MEMORY_NAMESPACE) as {
       state: RemoteMemoryLifecycleState;
       erase_requested_at: number | null;
     } | undefined;
@@ -200,10 +237,10 @@ export class RemoteMemoryLifecycle {
     const result = this.db.raw.prepare(`
       UPDATE remote_memory_lifecycle
          SET state = 'active', write_finalized_at = ?, updated_at = ?
-       WHERE remote_record_id = ? AND account_id = ? AND index_name = ?
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
          AND erase_requested_at IS NULL
          AND state IN ('write_intent', 'write_ambiguous', 'active')
-    `).run(now, now, remoteRecordId, this.options.accountId, this.options.indexName);
+    `).run(now, now, remoteRecordId, this.options.accountId, this.options.indexName, REMOTE_MEMORY_NAMESPACE);
     return Number(result.changes) === 1;
   }
 
@@ -211,10 +248,19 @@ export class RemoteMemoryLifecycle {
     const now = this.now();
     this.db.raw.prepare(`
       UPDATE remote_memory_lifecycle
-         SET state = 'write_ambiguous', updated_at = ?
-       WHERE remote_record_id = ? AND account_id = ? AND index_name = ?
-         AND erase_requested_at IS NULL AND state IN ('write_intent', 'active')
-    `).run(now, remoteRecordId, this.options.accountId, this.options.indexName);
+         SET state = 'erase_pending', erase_scope = 'expiry', erase_requested_at = ?,
+             next_attempt_at = ?, updated_at = ?
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+         AND erase_requested_at IS NULL AND state IN ('write_intent', 'active', 'write_ambiguous')
+    `).run(
+      now,
+      now,
+      now,
+      remoteRecordId,
+      this.options.accountId,
+      this.options.indexName,
+      REMOTE_MEMORY_NAMESPACE,
+    );
   }
 
   requestErase(request: RemoteMemoryEraseRequest): RemoteMemoryEraseResult {
@@ -245,19 +291,21 @@ export class RemoteMemoryLifecycle {
     return withImmediateTransaction(this.db, () => {
       const matched = this.db.raw.prepare(`
         SELECT COUNT(*) AS n FROM remote_memory_lifecycle
-         WHERE account_id = ? AND index_name = ? ${scopeClause}
+         WHERE account_id = ? AND index_name = ? AND namespace = ? ${scopeClause}
       `).get(
         this.options.accountId,
         this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
         ...(scopeValue === undefined ? [] : [scopeValue]),
       ) as { n: number };
       const newlyQueued = this.db.raw.prepare(`
         SELECT COUNT(*) AS n FROM remote_memory_lifecycle
-         WHERE account_id = ? AND index_name = ?
+         WHERE account_id = ? AND index_name = ? AND namespace = ?
            AND erase_requested_at IS NULL AND state <> 'absence_verified' ${scopeClause}
       `).get(
         this.options.accountId,
         this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
         ...(scopeValue === undefined ? [] : [scopeValue]),
       ) as { n: number };
       this.db.raw.prepare(`
@@ -272,7 +320,7 @@ export class RemoteMemoryLifecycle {
                  WHEN state <> 'absence_verified' AND erase_requested_at IS NULL THEN ?
                  ELSE next_attempt_at END,
                updated_at = CASE WHEN erase_requested_at IS NULL THEN ? ELSE updated_at END
-         WHERE account_id = ? AND index_name = ? ${scopeClause}
+         WHERE account_id = ? AND index_name = ? AND namespace = ? ${scopeClause}
       `).run(
         request.scope,
         now,
@@ -280,15 +328,17 @@ export class RemoteMemoryLifecycle {
         now,
         this.options.accountId,
         this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
         ...(scopeValue === undefined ? [] : [scopeValue]),
       );
       const stateRows = this.db.raw.prepare(`
         SELECT state, COUNT(*) AS n FROM remote_memory_lifecycle
-         WHERE account_id = ? AND index_name = ? ${scopeClause}
+         WHERE account_id = ? AND index_name = ? AND namespace = ? ${scopeClause}
          GROUP BY state
       `).all(
         this.options.accountId,
         this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
         ...(scopeValue === undefined ? [] : [scopeValue]),
       ) as Array<{ state: RemoteMemoryLifecycleState; n: number }>;
       return {
@@ -303,9 +353,9 @@ export class RemoteMemoryLifecycle {
     const cutoff = this.now() - REMOTE_MEMORY_TERMINAL_RECEIPT_RETENTION_MS;
     return Number(this.db.raw.prepare(`
       DELETE FROM remote_memory_lifecycle
-       WHERE account_id = ? AND index_name = ? AND state = 'absence_verified'
+       WHERE account_id = ? AND index_name = ? AND namespace = ? AND state = 'absence_verified'
          AND absence_verified_at IS NOT NULL AND absence_verified_at <= ?
-    `).run(this.options.accountId, this.options.indexName, cutoff).changes);
+    `).run(this.options.accountId, this.options.indexName, REMOTE_MEMORY_NAMESPACE, cutoff).changes);
   }
 
   queueExpired(): number {
@@ -314,9 +364,9 @@ export class RemoteMemoryLifecycle {
       UPDATE remote_memory_lifecycle
          SET state = 'erase_pending', erase_scope = 'expiry', erase_requested_at = ?,
              next_attempt_at = ?, updated_at = ?
-       WHERE account_id = ? AND index_name = ? AND expires_at <= ?
+       WHERE account_id = ? AND index_name = ? AND namespace = ? AND expires_at <= ?
          AND erase_requested_at IS NULL AND state <> 'absence_verified'
-    `).run(now, now, now, this.options.accountId, this.options.indexName, now).changes);
+    `).run(now, now, now, this.options.accountId, this.options.indexName, REMOTE_MEMORY_NAMESPACE, now).changes);
   }
 
   reclaimExpiredLeases(): number {
@@ -332,7 +382,7 @@ export class RemoteMemoryLifecycle {
              failure_code = CASE WHEN attempt_count >= ? THEN 'unknown' ELSE failure_code END,
              updated_at = ?
        WHERE state = 'leased' AND lease_expires_at <= ?
-         AND account_id = ? AND index_name = ?
+         AND account_id = ? AND index_name = ? AND namespace = ?
     `).run(
       REMOTE_MEMORY_MAX_ATTEMPTS,
       REMOTE_MEMORY_MAX_ATTEMPTS,
@@ -342,6 +392,7 @@ export class RemoteMemoryLifecycle {
       now,
       this.options.accountId,
       this.options.indexName,
+      REMOTE_MEMORY_NAMESPACE,
     ).changes);
   }
 
@@ -355,7 +406,7 @@ export class RemoteMemoryLifecycle {
       const row = this.db.raw.prepare(`
         SELECT remote_record_id, state, attempt_count, provider_acknowledged_at
           FROM remote_memory_lifecycle
-         WHERE account_id = ? AND index_name = ?
+         WHERE account_id = ? AND index_name = ? AND namespace = ?
            AND state IN ('erase_pending', 'retry_wait', 'provider_acknowledged')
            AND attempt_count < ?
            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
@@ -364,6 +415,7 @@ export class RemoteMemoryLifecycle {
       `).get(
         this.options.accountId,
         this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
         REMOTE_MEMORY_MAX_ATTEMPTS,
         now,
       ) as {
@@ -377,8 +429,19 @@ export class RemoteMemoryLifecycle {
         UPDATE remote_memory_lifecycle
            SET state = 'leased', lease_owner = ?, lease_expires_at = ?,
                attempt_count = attempt_count + 1, next_attempt_at = NULL, updated_at = ?
-         WHERE remote_record_id = ? AND state = ? AND attempt_count = ?
-      `).run(owner, now + REMOTE_MEMORY_LEASE_MS, now, row.remote_record_id, row.state, row.attempt_count).changes;
+         WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+           AND state = ? AND attempt_count = ?
+      `).run(
+        owner,
+        now + REMOTE_MEMORY_LEASE_MS,
+        now,
+        row.remote_record_id,
+        this.options.accountId,
+        this.options.indexName,
+        REMOTE_MEMORY_NAMESPACE,
+        row.state,
+        row.attempt_count,
+      ).changes;
       if (Number(changes) !== 1) return undefined;
       return {
         remoteRecordId: row.remote_record_id,
@@ -395,8 +458,17 @@ export class RemoteMemoryLifecycle {
     this.db.raw.prepare(`
       UPDATE remote_memory_lifecycle
          SET provider_acknowledged_at = COALESCE(provider_acknowledged_at, ?), updated_at = ?
-       WHERE remote_record_id = ? AND state = 'leased' AND lease_owner = ?
-    `).run(now, now, row.remoteRecordId, row.leaseOwner);
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+         AND state = 'leased' AND lease_owner = ?
+    `).run(
+      now,
+      now,
+      row.remoteRecordId,
+      this.options.accountId,
+      this.options.indexName,
+      REMOTE_MEMORY_NAMESPACE,
+      row.leaseOwner,
+    );
   }
 
   private markVerifiedAbsent(row: StoredRow): boolean {
@@ -405,8 +477,17 @@ export class RemoteMemoryLifecycle {
       UPDATE remote_memory_lifecycle
          SET state = 'absence_verified', absence_verified_at = ?, lease_owner = NULL,
              lease_expires_at = NULL, next_attempt_at = NULL, failure_code = NULL, updated_at = ?
-       WHERE remote_record_id = ? AND state = 'leased' AND lease_owner = ?
-    `).run(now, now, row.remoteRecordId, row.leaseOwner).changes;
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+         AND state = 'leased' AND lease_owner = ?
+    `).run(
+      now,
+      now,
+      row.remoteRecordId,
+      this.options.accountId,
+      this.options.indexName,
+      REMOTE_MEMORY_NAMESPACE,
+      row.leaseOwner,
+    ).changes;
     return Number(changes) === 1;
   }
 
@@ -423,7 +504,8 @@ export class RemoteMemoryLifecycle {
              failure_code = ?,
              next_attempt_at = CASE WHEN ? THEN NULL ELSE ? END,
              updated_at = ?
-       WHERE remote_record_id = ? AND state = 'leased' AND lease_owner = ?
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+         AND state = 'leased' AND lease_owner = ?
     `).run(
       exhausted ? 1 : 0,
       boundedFailureCode(error),
@@ -431,21 +513,34 @@ export class RemoteMemoryLifecycle {
       now + backoffMs(row.attemptCount),
       now,
       row.remoteRecordId,
+      this.options.accountId,
+      this.options.indexName,
+      REMOTE_MEMORY_NAMESPACE,
       row.leaseOwner,
     );
   }
 
-  async processDue(provider: RemoteMemoryProvider, leaseOwner: string): Promise<
+  async processDue(
+    provider: RemoteMemoryProvider,
+    leaseOwner: string,
+    providerCallTimeoutMs = REMOTE_MEMORY_PROVIDER_CALL_TIMEOUT_MS,
+  ): Promise<
     'idle' | 'verified_absent' | 'retry_scheduled'
   > {
     const row = this.claimDue(leaseOwner);
     if (!row) return 'idle';
     try {
       if (row.providerAcknowledgedAt === null) {
-        await provider.deleteRecord(row.remoteRecordId);
+        await withinProviderDeadline(
+          (signal) => provider.deleteRecord(row.remoteRecordId, signal),
+          providerCallTimeoutMs,
+        );
         this.markAcknowledged(row);
       }
-      const exists = await provider.recordExists(row.remoteRecordId);
+      const exists = await withinProviderDeadline(
+        (signal) => provider.recordExists(row.remoteRecordId, signal),
+        providerCallTimeoutMs,
+      );
       if (!exists && this.markVerifiedAbsent(row)) return 'verified_absent';
       this.retry(row, new Error('remote memory record still present'));
       return 'retry_scheduled';
@@ -459,8 +554,8 @@ export class RemoteMemoryLifecycle {
     const row = this.db.raw.prepare(`
       SELECT remote_record_id, state, attempt_count, provider_acknowledged_at
         FROM remote_memory_lifecycle
-       WHERE remote_record_id = ? AND account_id = ? AND index_name = ?
-    `).get(remoteRecordId, this.options.accountId, this.options.indexName) as {
+       WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
+    `).get(remoteRecordId, this.options.accountId, this.options.indexName, REMOTE_MEMORY_NAMESPACE) as {
       remote_record_id: string;
       state: RemoteMemoryLifecycleState;
       attempt_count: number;
@@ -484,9 +579,9 @@ export class RemoteMemoryLifecycleTimer {
 
   constructor(
     private readonly lifecycle: RemoteMemoryLifecycle,
-    private readonly provider: RemoteMemoryProvider | null,
+    private readonly provider: () => RemoteMemoryProvider | null,
     private readonly leaseOwner: string,
-    private readonly intervalMs = 60 * 60 * 1000,
+    private readonly intervalMs = REMOTE_MEMORY_LIFECYCLE_CADENCE_MS,
     private readonly maxRowsPerRun = 50,
   ) {}
 
@@ -505,9 +600,13 @@ export class RemoteMemoryLifecycleTimer {
 
   async run(): Promise<void> {
     this.lifecycle.pruneVerifiedReceipts();
-    if (!this.provider) return;
+    // Queue expiry before checking credentials: privacy retention does not wait
+    // for a provider outage, and the next recovered sweep will reconcile it.
+    this.lifecycle.queueExpired();
+    const provider = this.provider();
+    if (!provider) return;
     for (let count = 0; count < this.maxRowsPerRun; count += 1) {
-      const result = await this.lifecycle.processDue(this.provider, this.leaseOwner);
+      const result = await this.lifecycle.processDue(provider, this.leaseOwner);
       if (result === 'idle') return;
     }
   }

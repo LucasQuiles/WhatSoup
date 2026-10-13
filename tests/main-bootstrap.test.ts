@@ -78,6 +78,8 @@ async function importMainWithMocks(options: {
   messageCount?: number;
   grantReconcileError?: Error;
   expectStartupFailure?: boolean;
+  remoteMemoryApiKey?: string;
+  remoteMemoryApiKeyService?: string;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -181,7 +183,11 @@ async function importMainWithMocks(options: {
         dryRun: false,
       },
       sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.80, lookbackHours: 48, reviewByDays: 7, overdueProposalAlertThreshold: 10 },
-      pinecone: { allowedIndexes: [] },
+      pinecone: {
+        allowedIndexes: [],
+        apiKeyEnv: 'PINECONE_API_KEY',
+        ...(options.remoteMemoryApiKeyService ? { apiKeyService: options.remoteMemoryApiKeyService } : {}),
+      },
       fileWatch: { allowedRoots: [] },
     },
     advanced: { enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1_048_576, enableUrlWatch: false },
@@ -282,6 +288,7 @@ async function importMainWithMocks(options: {
     resolveLatestPluginDir: vi.fn((dir: string) => `${dir}-latest`),
     resolveAgentModel: vi.fn(() => 'claude-sonnet'),
     PineconeMemory: vi.fn(function () {}),
+    resolveApiKey: vi.fn(() => options.remoteMemoryApiKey ?? ''),
     getPineconeReadiness: vi.fn(async () => ({
       index: 'mw-mind',
       state: options.pineconeState ?? 'ready',
@@ -388,6 +395,7 @@ async function importMainWithMocks(options: {
   };
 
   vi.doMock('../src/config.ts', () => ({ config }));
+  vi.doMock('../src/lib/api-key-resolver.ts', () => ({ resolveApiKey: mocks.resolveApiKey }));
   vi.doMock('../src/logger.ts', () => ({
     default: logger,
     createChildLogger: vi.fn(() => logger),
@@ -871,6 +879,26 @@ describe('main bootstrap', () => {
       expect.objectContaining({ lastMaxPk: expect.any(Number), knownUnresolvedLids: expect.any(Set) }),
     );
     expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
+  });
+
+  it('uses a service-only credential for lifecycle provider recovery and reuses the recovered client', async () => {
+    const h = await importMainWithMocks({
+      remoteMemoryApiKey: 'keyring-only-value',
+      remoteMemoryApiKeyService: 'pinecone-instance-keyring',
+    });
+    const providerFactory = h.RemoteMemoryLifecycleTimer.mock.calls[0]?.[1] as (() => unknown);
+
+    h.PineconeMemory.mockClear();
+    const first = providerFactory();
+    const second = providerFactory();
+
+    expect(h.resolveApiKey).toHaveBeenCalledWith({
+      service: 'pinecone-instance-keyring',
+      envVar: 'PINECONE_API_KEY',
+    });
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+    expect(h.PineconeMemory).toHaveBeenCalledOnce();
   });
 
   it('logs Pinecone bootstrap state without the configured index', async () => {

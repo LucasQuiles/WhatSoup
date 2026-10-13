@@ -1280,22 +1280,26 @@ export class PineconeMemory {
    * It deliberately shares the upsert path's project guard; a mismatched key
    * must never delete or inspect another Pinecone project.
    */
-  async deleteRemoteMemoryRecord(recordId: string): Promise<void> {
-    const projectGuardError = await this.getProjectGuardError();
-    if (projectGuardError) {
-      throw new AppError('Pinecone project guard failed', 'PINECONE_UNAVAILABLE', projectGuardError);
-    }
-    await this.index.deleteOne({ id: recordId });
+  async deleteRemoteMemoryRecord(recordId: string, signal?: AbortSignal): Promise<void> {
+    await pineconeOperationSignal.run(signal, async () => {
+      const projectGuardError = await this.getProjectGuardError();
+      if (projectGuardError) {
+        throw new AppError('Pinecone project guard failed', 'PINECONE_UNAVAILABLE', projectGuardError);
+      }
+      await this.index.deleteOne({ id: recordId });
+    });
   }
 
   /** True only when the configured default namespace currently returns the record. */
-  async remoteMemoryRecordExists(recordId: string): Promise<boolean> {
-    const projectGuardError = await this.getProjectGuardError();
-    if (projectGuardError) {
-      throw new AppError('Pinecone project guard failed', 'PINECONE_UNAVAILABLE', projectGuardError);
-    }
-    const response = await this.index.fetch({ ids: [recordId] });
-    return Boolean((response as { records?: Record<string, unknown> }).records?.[recordId]);
+  async remoteMemoryRecordExists(recordId: string, signal?: AbortSignal): Promise<boolean> {
+    return pineconeOperationSignal.run(signal, async () => {
+      const projectGuardError = await this.getProjectGuardError();
+      if (projectGuardError) {
+        throw new AppError('Pinecone project guard failed', 'PINECONE_UNAVAILABLE', projectGuardError);
+      }
+      const response = await this.index.fetch({ ids: [recordId] });
+      return Boolean((response as { records?: Record<string, unknown> }).records?.[recordId]);
+    });
   }
 
   async checkDuplicate(

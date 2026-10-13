@@ -206,6 +206,7 @@ export function registerMemoryWriteTools(
             : undefined,
         });
         if (lifecycle && !lifecycle.markWriteFinalized(record.id)) {
+          lifecycle.markWriteAmbiguous(record.id);
           return toolError({
             error: 'memory_write completed remotely but erasure was accepted before local finalization',
             code: 'unknown',

@@ -9,7 +9,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 const CREATE_LIFECYCLE_TABLE = `
   CREATE TABLE IF NOT EXISTS remote_memory_lifecycle (
-    remote_record_id          TEXT PRIMARY KEY NOT NULL,
+    remote_record_id          TEXT NOT NULL,
     account_id                TEXT NOT NULL,
     index_name                TEXT NOT NULL,
     namespace                 TEXT NOT NULL DEFAULT '',
@@ -39,6 +39,7 @@ const CREATE_LIFECYCLE_TABLE = `
     write_finalized_at        INTEGER,
     created_at                INTEGER NOT NULL,
     updated_at                INTEGER NOT NULL,
+    PRIMARY KEY (account_id, index_name, namespace, remote_record_id),
     CHECK (remote_record_id = trim(remote_record_id) AND length(remote_record_id) BETWEEN 1 AND 128),
     CHECK (namespace = ''),
     CHECK (length(account_id) BETWEEN 1 AND 256),
@@ -61,7 +62,7 @@ const CREATE_LIFECYCLE_TABLE = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_remote_memory_lifecycle_scope
-    ON remote_memory_lifecycle(account_id, index_name, conversation_key, sender_jid);
+    ON remote_memory_lifecycle(account_id, index_name, namespace, conversation_key, sender_jid);
   CREATE INDEX IF NOT EXISTS idx_remote_memory_lifecycle_due
     ON remote_memory_lifecycle(state, next_attempt_at, lease_expires_at, expires_at);
 `;

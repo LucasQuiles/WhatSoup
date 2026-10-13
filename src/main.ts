@@ -374,26 +374,44 @@ const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
 const remoteMemoryLifecycle = config.pineconeIndex
   ? new RemoteMemoryLifecycle(db, { accountId: config.botName, indexName: config.pineconeIndex })
   : null;
-const remoteMemoryApiKeyEnv = config.memory?.pinecone?.apiKeyEnv ?? 'PINECONE_API_KEY';
-const remoteMemoryApiKeyService = (config.memory as { pinecone?: { apiKeyService?: string } } | undefined)
-  ?.pinecone?.apiKeyService;
+const remoteMemoryApiKeyEnv = config.memory.pinecone.apiKeyEnv;
+const remoteMemoryApiKeyService = config.memory.pinecone.apiKeyService;
 let remoteMemoryProvider: PineconeMemory | null = null;
-if (remoteMemoryLifecycle && resolveApiKey({ service: remoteMemoryApiKeyService, envVar: remoteMemoryApiKeyEnv })) {
+let remoteMemoryProviderAdapter: {
+  deleteRecord: (recordId: string, signal?: AbortSignal) => Promise<void>;
+  recordExists: (recordId: string, signal?: AbortSignal) => Promise<boolean>;
+} | null = null;
+let remoteMemoryProviderUnavailableLogged = false;
+const getRemoteMemoryProvider = () => {
+  if (!remoteMemoryLifecycle) return null;
+  if (remoteMemoryProviderAdapter) return remoteMemoryProviderAdapter;
+  if (!resolveApiKey({ service: remoteMemoryApiKeyService, envVar: remoteMemoryApiKeyEnv })) {
+    if (!remoteMemoryProviderUnavailableLogged) {
+      remoteMemoryProviderUnavailableLogged = true;
+      log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable');
+    }
+    return null;
+  }
   try {
     remoteMemoryProvider = new PineconeMemory();
+    remoteMemoryProviderAdapter = {
+      deleteRecord: (recordId, signal) => remoteMemoryProvider!.deleteRemoteMemoryRecord(recordId, signal),
+      recordExists: (recordId, signal) => remoteMemoryProvider!.remoteMemoryRecordExists(recordId, signal),
+    };
+    remoteMemoryProviderUnavailableLogged = false;
+    return remoteMemoryProviderAdapter;
   } catch {
-    log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable at startup');
+    if (!remoteMemoryProviderUnavailableLogged) {
+      remoteMemoryProviderUnavailableLogged = true;
+      log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable');
+    }
+    return null;
   }
-} else if (remoteMemoryLifecycle) {
-  log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable at startup');
-}
+};
 const remoteMemoryLifecycleTimer = remoteMemoryLifecycle
   ? new RemoteMemoryLifecycleTimer(
       remoteMemoryLifecycle,
-      remoteMemoryProvider ? {
-        deleteRecord: (recordId) => remoteMemoryProvider.deleteRemoteMemoryRecord(recordId),
-        recordExists: (recordId) => remoteMemoryProvider.remoteMemoryRecordExists(recordId),
-      } : null,
+      getRemoteMemoryProvider,
       `remote-memory:${process.pid}`,
     )
   : null;
