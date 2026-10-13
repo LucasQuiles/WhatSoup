@@ -1,13 +1,17 @@
 import contextlib
 import io
 import json
+import os
 import pathlib
+import plistlib
 import sys
 import time
 import types
 from unittest.mock import patch
+from tempfile import TemporaryDirectory
 
 import pytest
+from hypothesis import given, strategies as st
 
 FLEET = pathlib.Path(__file__).resolve().parents[1]
 LIB = FLEET.parent / "lib"
@@ -225,6 +229,47 @@ def test_primary_model_health_distinguishes_failure_from_stale_success(tmp_path)
         with patch.object(sys,'platform','darwin'):
             result=remote_probe(tmp_path, {'health':(200,body),'ready':(200,{'status':'ready'})},instances=['bot'])
         assert result['checks']['bot_primary_model_usable'] is expected
+
+
+@pytest.mark.parametrize("override,shared,file_token,expected", [
+    ("instance-token", "shared-token", "file-token", "instance-token"),
+    ("", "shared-token", "file-token", "shared-token"),
+    ("", "", "file-token", "file-token"),
+    ("", "", "", "legacy-token"),
+])
+@given(suffix=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=30))
+def test_remote_health_uses_canonical_token_precedence_with_legacy_plist_fallback(override, shared, file_token, expected, suffix):
+    override = override + suffix if override else ""
+    shared = shared + suffix if shared else ""
+    file_token = file_token + suffix if file_token else ""
+    expected += suffix
+    with TemporaryDirectory() as directory:
+        tmp_path = pathlib.Path(directory)
+        config = tmp_path / ".config/whatsoup/instances/example-bot/config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"healthPort": 9090}))
+        if file_token:
+            (config.parent / "tokens.env").write_text("WHATSOUP_HEALTH_TOKEN=" + file_token + "\n")
+        plist = tmp_path / "Library/LaunchAgents/com.whatsoup.example-bot.plist"
+        plist.parent.mkdir(parents=True)
+        plist.write_bytes(plistlib.dumps({"RunAtLoad": True, "KeepAlive": True,
+                                         "EnvironmentVariables": {"WHATSOUP_HEALTH_TOKEN": "legacy-token" + suffix}}))
+        request = {"instances": ["example-bot"], "health_reader_code": HEALTH_READER.read_text()}
+
+        def respond(req, timeout):
+            accepted = req.get_header("Authorization") == "Bearer " + expected
+            body = {"whatsapp": {"connected": True}} if accepted else {"schema_version": "health.public.v1"}
+            response = io.BytesIO(json.dumps(body).encode())
+            response.status = 200
+            return response
+
+        output = io.StringIO()
+        environment = {"BOT_ERRORS_HEALTH_TOKEN_EXAMPLE_BOT": override, "WHATSOUP_HEALTH_TOKEN": shared}
+        with patch.dict(os.environ, environment), patch.object(sys, "argv", ["probe", json.dumps(request)]), patch("pathlib.Path.home", return_value=tmp_path), patch("urllib.request.urlopen", side_effect=respond), contextlib.redirect_stdout(output):
+            exec(compile((ROOT / "fleet_probe_remote.py").read_text(), "remote", "exec"), {})
+        result = json.loads(output.getvalue())
+        assert result["checks"]["example_bot_health_readable"] is True
+        assert result["checks"]["example_bot_whatsapp_connected"] is True
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])

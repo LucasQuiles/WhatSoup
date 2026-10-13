@@ -802,6 +802,7 @@ def main():
         if args.state_dir is not None and args.state_dir != config["state_dir"]:
             raise supervisor.StateError("state_dir_mismatch")
         if args.check_config:
+            supervisor.private_directory(Path(config["state_dir"]), create=False)
             print(json.dumps({"config_valid": True}, sort_keys=True))
             return 0
         state = run_watchdog(config) if args.watchdog else run_once(config)

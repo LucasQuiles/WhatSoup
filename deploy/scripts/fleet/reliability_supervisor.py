@@ -27,9 +27,15 @@ class StateError(RuntimeError):
     pass
 
 
-def private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    metadata = path.lstat()
+def private_directory(path: Path, *, create: bool = True) -> None:
+    if create:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            return
+        raise
     if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
         raise StateError("state_directory_unsafe")
     if stat.S_IMODE(metadata.st_mode) != 0o700:

@@ -784,6 +784,12 @@ tools. A legacy capability probe can read a mailbox resource only when its
 private config explicitly sets `legacy_sent_items_probe: true`; it is not part
 of the default observer or deadman schedule.
 
+Instance health tokens use the shared reader's precedence: per-instance
+`BOT_ERRORS_HEALTH_TOKEN_<INSTANCE>`, then `WHATSOUP_HEALTH_TOKEN`, then the
+instance's `tokens.env`. An existing launchd plist token is a compatibility
+fallback only when the shared reader resolves no token. Remote destinations
+must be SSH host aliases or addresses, not command-line options.
+
 Render the jobs from the release that will run them. Rendering writes only the
 named fresh staging directory, after validating the private config and its state
 path. Paths must be absolute and use letters, digits, dots, slashes, underscores,
@@ -805,7 +811,12 @@ The private observer config names `state_dir`, `emitter_command`,
 command invokes `fleet_probe.py --targets /absolute/private/targets.json
 --target <synthetic-target>`. Keep the config mode `0600` and state directory
 mode `0700`. An empty `hosts` list requires a valid top-level `instance` for
-deadman alert delivery; otherwise that destination defaults to the first host.
+deadman alert delivery. Preflight rejects an existing state path that is a
+symlink, is not a directory, belongs to another user or has a mode other than
+`0700`; it does not repair permissions or create state while rendering. Installation
+creates missing state under its private umask and validates it again before
+activation. Without an explicit top-level destination,
+the deadman destination defaults to the first host.
 The observer preserves schema-v1 state files, incident IDs, and
 explicit `retired_checks`; it does not infer retirement from an unreachable
 host. The target file accepts the existing flat host map or a versioned

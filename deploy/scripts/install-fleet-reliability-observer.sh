@@ -112,9 +112,12 @@ if [[ "$MODE" == "install" ]]; then
   inspect_jobs
 fi
 [[ ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || { echo "refusing existing output directory" >&2; exit 3; }
-"$PYTHON" "$OBSERVER" --config "$CONFIG" --state-dir "$STATE_DIR" --check-config || {
-  echo "fleet configuration validation failed" >&2; exit 2;
+validate_config() {
+  "$PYTHON" "$OBSERVER" --config "$CONFIG" --state-dir "$STATE_DIR" --check-config || {
+    echo "fleet configuration validation failed" >&2; exit 2;
+  }
 }
+validate_config
 mkdir "$OUTPUT_DIR"
 
 render_systemd() {
@@ -186,6 +189,7 @@ if [[ "$MODE" == "render" ]]; then
 fi
 
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+validate_config
 
 activation_failed() {
   echo "fleet activation failed; stopping the new jobs; retain definitions and state for inspection" >&2

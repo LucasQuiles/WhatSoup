@@ -40,10 +40,15 @@ def load_target(targets_path: Path, target_name: str) -> dict[str, Any]:
         raise ValueError("requested fleet target is not configured")
     request = dict(target)
     request["name"] = target_name
-    if request.get("local") is not True and (
-        not isinstance(request.get("target"), str) or not request["target"]
-    ):
-        raise ValueError("fleet target must name a transport target")
+    if request.get("local") is not True:
+        target = request.get("target")
+        if (
+            not isinstance(target, str)
+            or not target
+            or target.startswith("-")
+            or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in target)
+        ):
+            raise ValueError("fleet target must name a transport target")
     if not isinstance(request.get("instances", []), list) or not all(
         isinstance(item, str) for item in request.get("instances", [])
     ):
@@ -81,6 +86,7 @@ def run_target(request: dict[str, Any]) -> dict[str, Any]:
             "ServerAliveInterval=5",
             "-o",
             "ServerAliveCountMax=2",
+            "--",
             request["target"],
             remote,
         ]

@@ -12,7 +12,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 import pytest
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 
 FLEET = Path(__file__).resolve().parents[1]
@@ -69,6 +69,38 @@ def test_existing_local_target_does_not_require_an_ssh_destination(tmp_path):
     inventory = tmp_path / "targets.json"
     inventory.write_text(json.dumps({"local-host": {"local": True, "instances": ["example-bot"]}}))
     assert probe.load_target(inventory, "local-host")["local"] is True
+
+
+@given(target=st.one_of(
+    st.text(max_size=40).map(lambda value: "-" + value),
+    st.tuples(st.text(max_size=20), st.sampled_from([" ", "\t", "\n", "\x00", "\x7f"]), st.text(max_size=20)).map("".join),
+))
+@example(target="-oProxyCommand=unexpected")
+@example(target="host\n-oProxyCommand=unexpected")
+@example(target=" ")
+@example(target="host\x00")
+def test_probe_rejects_option_or_control_characters_in_ssh_destination(target):
+    probe = load_module("fleet_transport_validation", FLEET / "fleet_probe.py")
+    with TemporaryDirectory() as directory:
+        inventory = Path(directory) / "targets.json"
+        inventory.write_text(json.dumps({"remote": {"target": target, "instances": []}}))
+        with pytest.raises(ValueError, match="transport target"):
+            probe.load_target(inventory, "remote")
+
+
+def test_probe_ssh_destination_cannot_add_transport_options(monkeypatch):
+    probe = load_module("fleet_transport_arguments", FLEET / "fleet_probe.py")
+    commands = []
+
+    def capture_transport(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 255, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(probe.subprocess, "run", capture_transport)
+    result = probe.run_target({"target": "-oProxyCommand=unexpected", "instances": []})
+    assert result["checks"]["ssh_reachable"] is False
+    assert len(commands) == 1
+    assert commands[0][-3:-1] == ["--", "-oProxyCommand=unexpected"]
 
 
 def test_default_mcp_sequence_has_no_mailbox_operation(tmp_path) -> None:
@@ -348,6 +380,47 @@ exit 0
     assert list(installed.iterdir()) == []
     calls = tmp_path / "calls"
     assert not calls.exists() or "bootstrap" not in calls.read_text()
+
+
+@pytest.mark.parametrize("mode", ["render", "install"])
+@settings(deadline=None)
+@given(unsafe=st.one_of(st.sampled_from(["symlink", "file"]), st.integers(min_value=0, max_value=0o777).filter(lambda mode: mode != 0o700)))
+@example(unsafe=0o755)
+@example(unsafe="symlink")
+@example(unsafe="file")
+def test_installer_rejects_unsafe_state_before_writing_jobs(mode, unsafe):
+    with TemporaryDirectory() as directory:
+        tmp_path = Path(directory)
+        body = '''printf '%s\\n' "$*" >> "$CALLS"
+if [[ "$*" == *" show "* ]]; then echo not-found; fi
+exit 0
+'''
+        command, environment, output, installed = install_fixture(tmp_path, "systemd", body, mode)
+        for name in ("fleet_reliability_observer.py", "reliability_supervisor.py"):
+            (tmp_path / "release/deploy/scripts/fleet" / name).write_bytes((FLEET / name).read_bytes())
+        state = tmp_path / "state"
+        if isinstance(unsafe, int):
+            state.mkdir(mode=0o700)
+            state.chmod(unsafe)
+        elif unsafe == "symlink":
+            target = tmp_path / "retained-state"
+            target.mkdir(mode=0o700)
+            state.symlink_to(target, target_is_directory=True)
+        else:
+            state.write_text("retained state")
+        metadata = state.lstat()
+        config = tmp_path / "private-config.json"
+        config.write_text(json.dumps({
+            "state_dir": str(state), "hosts": [], "instance": "operations",
+            "emitter_command": ["/synthetic/emitter"], "delivery_command": ["/synthetic/delivery"],
+        }))
+        result = subprocess.run(command, env=environment, capture_output=True, text=True)
+        assert result.returncode != 0
+        assert not output.exists()
+        assert list(installed.iterdir()) == []
+        assert (state.lstat().st_ino, state.lstat().st_mode) == (metadata.st_ino, metadata.st_mode)
+        calls = tmp_path / "calls"
+        assert not calls.exists() or "enable" not in calls.read_text()
 
 
 @pytest.mark.parametrize("platform", ["launchd", "systemd"])

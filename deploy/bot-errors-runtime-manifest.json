@@ -942,7 +942,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_probe.py",
-      "sha256": "e40dca19f30960019b04c9c9e2754d2727cea46233363312740a99570c0f3fda",
+      "sha256": "257f07f446b18071168c83cb140947fc7d07da6b70c71ac10b919b3cebc196e8",
       "mustContain": [
         "fleet targets path must be absolute",
         "health_reader_code"
@@ -950,7 +950,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_probe_remote.py",
-      "sha256": "01fd54ab0e709969e427fcdc90460ef430ff06d5155c78e144585eb4d820714e",
+      "sha256": "da37a3c0abf2ce0f492515509ead12df0f8f88d2c3d13145a1529d1e19f38063",
       "mustContain": [
         "classify_projection",
         "retired_checks"
@@ -966,7 +966,7 @@
     },
     {
       "path": "deploy/scripts/fleet/fleet_reliability_observer.py",
-      "sha256": "305ae1a587d54564af2e6a4f5ecf8db0cbe3af8192746d9b270f1aa1332c3c47",
+      "sha256": "e7e26f158bea79191327e7bff83372a6a6d0655c327c4b1cefaf55434808d2bb",
       "mustContain": [
         "schema_version",
         "retired_checks",
@@ -975,7 +975,7 @@
     },
     {
       "path": "deploy/scripts/fleet/reliability_supervisor.py",
-      "sha256": "33689e24d0b3cc91c3ed2f4bfc01e14add9eb77de6ad6d9a9ef314a4b6be2cde",
+      "sha256": "5fa05d70b855d5fb25707c8f08cfb8300e1db86afacfd8a0925b537ec8223790",
       "mustContain": [
         "legacy_sent_items_probe",
         "resolve_alert_delivery"
@@ -991,7 +991,7 @@
     },
     {
       "path": "deploy/scripts/install-fleet-reliability-observer.sh",
-      "sha256": "2225b3d2c031358caeb43033a46b39d632d40e471d3777550dd7636de8107be1",
+      "sha256": "64b618551dfe218182a2f423cb99823dc8134433a77e47cca2f9deaeb6023aba",
       "mustContain": [
         "--activate",
         "fleet-deadman"

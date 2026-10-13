@@ -39,13 +39,15 @@ for instance in instances:
     name=instance.replace('-','_')
     checks[name+'_configured']=cfgpath.is_file()
     if not cfgpath.is_file():continue
-    cfg=json.loads(cfgpath.read_text());token=None
+    cfg=json.loads(cfgpath.read_text())
     # An owner-retired instance has nothing listening; report it rather than probe it.
     if cfg.get('enabled') is False:
         checks[name+'_retired']=True;continue
+    token=health_reader['instance_health_token'](instance)
     plist=r/'Library/LaunchAgents'/('com.whatsoup.'+instance+'.plist')
     if plist.exists():
-        data=plistlib.loads(plist.read_bytes());token=data.get('EnvironmentVariables',{}).get('WHATSOUP_HEALTH_TOKEN')
+        data=plistlib.loads(plist.read_bytes())
+        if not token:token=data.get('EnvironmentVariables',{}).get('WHATSOUP_HEALTH_TOKEN')
         persistent=data.get('RunAtLoad') is True and bool(data.get('KeepAlive'))
         watchdog=r/'Library/LaunchAgents'/('com.whatsoup.'+instance+'-watchdog.plist')
         if not persistent and watchdog.exists():
@@ -57,7 +59,6 @@ for instance in instances:
         unit=subprocess.run(['systemctl','--user','show','whatsoup@'+instance+'.service','-p','UnitFileState','-p','Restart','-p','ActiveState'],capture_output=True,text=True,timeout=5)
         values=dict(line.split('=',1) for line in unit.stdout.splitlines() if '=' in line)
         checks[name+'_persistent']=unit.returncode==0 and values.get('UnitFileState')=='enabled' and values.get('Restart') in ('always','on-failure') and values.get('ActiveState')=='active'
-    if not token:token=env_file(cfgpath.parent/'tokens.env').get('WHATSOUP_HEALTH_TOKEN')
     status,health=http(cfg.get('healthPort',0),'/health',token)
     disclosed=health_reader['classify_projection'](health,token_sent=bool(token))=='diagnostic'
     checks[name+'_health_readable']=disclosed
