@@ -17,6 +17,7 @@ import { constants as sqliteConstants } from 'node:sqlite';
 import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
+import { TRIGGER_BUDGETS } from '../../../src/core/substrate/trigger-budgets.ts';
 import { TriggerPoller, runIsolatedSqlite, toBindArgs } from '../../../src/core/substrate/poller.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
 import type { Messenger, SubmissionReceipt } from '../../../src/core/types.ts';
@@ -284,7 +285,7 @@ describe('TriggerPoller — poll.sqlite', () => {
     expect(db.raw.prepare(`SELECT COUNT(*) AS n FROM trigger_runs WHERE trigger_id = ?`).get(t.id)).toMatchObject({ n: 1 });
   });
 
-  it('bounds a materialized SQLite row while retaining a separate fixed rowCount response', async () => {
+  it('counts a huge projected SQLite value without materializing it in JavaScript', async () => {
     const result = await runIsolatedSqlite({
       databasePath: path,
       sql: `SELECT printf('%.*c', 3000, 120) AS body`,
@@ -292,7 +293,28 @@ describe('TriggerPoller — poll.sqlite', () => {
       maxRows: 1,
       timeoutMs: 1_000,
     });
-    expect(result).toEqual({ kind: 'resource_exhausted', limit: 'output' });
+    expect(result).toEqual({ kind: 'ok', rowCount: 1 });
+  });
+
+  it('preserves a valid trailing SQLite line comment when nesting the admitted query', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'SELECT 1 -- a trailing comment remains part of the admitted query',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 1 });
+  });
+
+  it('returns the exact capped row count and stops at maxRows plus one', async () => {
+    db.raw.exec('CREATE TABLE capped_rows(id INTEGER PRIMARY KEY)');
+    db.raw.prepare('INSERT INTO capped_rows DEFAULT VALUES').run();
+    db.raw.prepare('INSERT INTO capped_rows DEFAULT VALUES').run();
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql: 'SELECT id FROM capped_rows', binds: [], maxRows: 2, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'ok', rowCount: 2 });
+    db.raw.prepare('INSERT INTO capped_rows DEFAULT VALUES').run();
+    await expect(runIsolatedSqlite({
+      databasePath: path, sql: 'SELECT id FROM capped_rows', binds: [], maxRows: 2, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'resource_exhausted', limit: 'rows' });
   });
 
   it('rejects direct isolated-worker SQL and bind budget breaches before spawning a child', async () => {
@@ -310,6 +332,14 @@ describe('TriggerPoller — poll.sqlite', () => {
       maxRows: 1,
       timeoutMs: 1_000,
     })).resolves.toEqual({ kind: 'resource_exhausted', limit: 'binds' });
+  });
+
+  it('makes the child repeat outer-statement validation for direct SQLite calls', async () => {
+    await expect(runIsolatedSqlite({
+      databasePath: path,
+      sql: 'WITH c AS (SELECT 1) DELETE FROM probes',
+      binds: [], maxRows: 1, timeoutMs: 1_000,
+    })).resolves.toEqual({ kind: 'unavailable', reason: 'exit' });
   });
 
   it('fails closed before execution when no durable main database location exists', async () => {
@@ -339,6 +369,41 @@ describe('TriggerPoller — poll.sqlite', () => {
       await expect(runIsolatedSqlite({
         databasePath, sql: 'SELECT 1', binds: [], maxRows: 1, timeoutMs: 1_000,
       })).resolves.toEqual({ kind: 'unavailable', reason: 'location' });
+    }
+  });
+
+  it('revalidates restored report targets and dedupe keys before execution or retry', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'legacy root fields', ownerJid: 'mw', actor: 'u' });
+    db.raw.exec('CREATE TABLE legacy_root_rows(id INTEGER PRIMARY KEY)');
+    for (const [column, value] of [
+      ['report_chat_jid', '😀'.repeat((TRIGGER_BUDGETS.maxReportTargetBytes / 4) + 1)],
+      ['dedupe_key', '😀'.repeat((TRIGGER_BUDGETS.maxDedupeKeyBytes / 4) + 1)],
+    ] as const) {
+      const t = createTrigger(db.raw, {
+        beadId: bead.id, kind: 'poll.sqlite',
+        spec: { sql: 'SELECT id FROM legacy_root_rows', fire_when: 'rows_returned' },
+        reportChatJid: 'admin@s.whatsapp.net', dedupeKey: `safe-${column}`,
+        intervalSeconds: 60, nextFireAt: 1_000_000_000, actor: 'u',
+      });
+      db.raw.prepare(`UPDATE bead_triggers SET ${column} = ? WHERE id = ?`).run(value, t.id);
+    }
+    const executor = vi.fn(async () => ({ kind: 'ok' as const, rowCount: 1 }));
+    let now = 1_000_000_001;
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => now, sqliteExecutor: executor });
+    await poller.tickOnce();
+    now += 120;
+    await poller.tickOnce();
+
+    expect(executor).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+    const runs = db.raw.prepare(
+      `SELECT error_kind, output_json FROM trigger_runs WHERE bead_id = ? ORDER BY id`,
+    ).all(bead.id) as Array<{ error_kind: string; output_json: string }>;
+    expect(runs).toHaveLength(4);
+    for (const run of runs) {
+      expect(run.error_kind).toBe('resource_exhausted');
+      expect(run.output_json).toBe('{"kind":"poll.sqlite","reason":"resource_exhausted"}');
     }
   });
 
@@ -788,6 +853,35 @@ describe('TriggerPoller — agent_job dispatch', () => {
     expect(refreshed.next_fire_at).toBeGreaterThan(1_000_000_001);
   });
 
+  it('fails closed before dispatch when a restored agent-job title or body exceeds its budget', async () => {
+    const { messenger, calls } = makeMessenger();
+    const dispatched = vi.fn(() => ({ dispatched: true }));
+    const bead = createBead(db.raw, {
+      kind: 'agent_job', title: 'safe title', body: 'safe body', ownerJid: 'mw', actor: 'u',
+    });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'schedule.cron', spec: { expr: '* * * * *' },
+      reportChatJid: 'report@g.us', nextFireAt: 1_000_000_000, actor: 'u',
+    });
+    db.raw.prepare('UPDATE beads SET title = ?, body = ? WHERE id = ?').run(
+      '😀'.repeat((TRIGGER_BUDGETS.maxTitleBytes / 4) + 1),
+      '😀'.repeat((TRIGGER_BUDGETS.maxPromptBytes / 4) + 1),
+      bead.id,
+    );
+    await new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      agentJobDispatch: dispatched,
+    }).tickOnce();
+
+    expect(dispatched).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      'SELECT status, error_kind, output_json FROM trigger_runs WHERE trigger_id = ?',
+    ).get(t.id) as { status: string; error_kind: string; output_json: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'resource_exhausted' });
+    expect(run.output_json).toBe('{"kind":"schedule.cron","agentJob":true,"reason":"resource_exhausted"}');
+  });
+
   it('fails CLOSED with an alert when no dispatcher is wired (never a silent cron tick)', async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, {
@@ -1101,6 +1195,29 @@ describe('TriggerPoller — not-yet-implemented kinds', () => {
     // and the row stays active (it TTL-expires via the sweep, not here).
     const refreshed = db.raw.prepare(`SELECT status, next_fire_at FROM bead_triggers WHERE id = ?`).get(t.id) as { status: string; next_fire_at: number | null };
     expect(refreshed).toMatchObject({ status: 'active', next_fire_at: null });
+  });
+
+  it('records a redacted resource result for a restored event.message regex over its byte budget', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'msg regex budget', ownerJid: 'mw', actor: 'u' });
+    const t = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'event.message',
+      spec: { match: 'regex', value: '^urgent$' },
+      reportChatJid: 'admin@s.whatsapp.net', actor: 'u',
+    });
+    db.raw.prepare('UPDATE bead_triggers SET spec_json = ?, next_fire_at = ? WHERE id = ?').run(
+      JSON.stringify({ match: 'regex', value: '😀'.repeat((TRIGGER_BUDGETS.maxRegexBytes / 4) + 1) }),
+      1_000_000_000,
+      t.id,
+    );
+    await new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001 }).tickOnce();
+
+    expect(calls).toHaveLength(0);
+    const run = db.raw.prepare(
+      'SELECT error_kind, output_json FROM trigger_runs WHERE trigger_id = ?',
+    ).get(t.id) as { error_kind: string; output_json: string };
+    expect(run).toMatchObject({ error_kind: 'resource_exhausted' });
+    expect(run.output_json).toBe('{"kind":"event.message","reason":"resource_exhausted"}');
   });
 });
 

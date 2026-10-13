@@ -45,7 +45,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { systemClock } from '../../lib/clock.ts';
 import {
-  dueTriggers, validateTriggerSpec, isSafeSqliteSql, TriggerBudgetError, TRIGGER_BUDGETS,
+  dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
+  TriggerBudgetError, TRIGGER_BUDGETS,
   countPastDueTriggers, DEFAULT_TRIGGER_PAST_DUE_GRACE_SEC,
 } from './triggers.ts';
 import { TERMINAL, countOverdueProposals } from './beads.ts';
@@ -69,9 +70,9 @@ const log = createChildLogger('substrate.trigger-poller');
 const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_BATCH_SIZE = 50;
 /**
- * Hard cap on rows a single poll.sqlite execution may materialize (QR-026).
- * The isolated child iterates and returns a bounded scalar response only; it
- * stops at this cap before materializing query rows in the poller process.
+ * Hard cap on rows a single poll.sqlite execution may count (QR-026). The
+ * isolated child limits the admitted query to this many rows plus one, then
+ * returns one bounded scalar response without materializing caller row values.
  */
 export const MAX_SQLITE_ROWS = TRIGGER_BUDGETS.maxSqliteRows;
 /** Cooldown applied when a kind is not yet implemented — avoids tight loops. */
@@ -98,9 +99,10 @@ function boundedPollerOption(
   fallback: number,
   ceiling: number,
   name: string,
+  minimum = 1,
 ): number {
   const resolved = value ?? fallback;
-  if (!Number.isInteger(resolved) || resolved < 1 || resolved > ceiling) {
+  if (!Number.isInteger(resolved) || resolved < minimum || resolved > ceiling) {
     throw new TriggerBudgetError(`poller.${name}`);
   }
   return resolved;
@@ -266,7 +268,7 @@ export interface TriggerPollerOptions {
    * process-scoped random token; tests inject a fixed value.
    */
   occurrenceLeaseOwner?: string;
-  /** Max triggers fetched per tick. Default 50. */
+  /** Max triggers fetched per tick. 0 intentionally drains only expiry work; default 50. */
   batchSize?: number;
   /**
    * #2566 slice 2 — max concurrently executing non-side-effecting probe
@@ -566,7 +568,10 @@ export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<Isola
       }
     });
     child.on('error', () => {
-      finish(terminal ?? { kind: 'unavailable', reason: 'spawn' });
+      // A child error does not prove the process is gone. Keep the terminal
+      // disposition pending until close so late output cannot resolve the
+      // durable occurrence after an error path.
+      terminate(terminal ?? { kind: 'unavailable', reason: 'spawn' });
     });
     child.on('close', (code) => {
       if (terminal) {
@@ -711,7 +716,13 @@ export class TriggerPoller {
     this.db = db;
     this.messenger = messenger;
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-    this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+    this.batchSize = boundedPollerOption(
+      opts.batchSize,
+      DEFAULT_BATCH_SIZE,
+      TRIGGER_BUDGETS.maxBatchSize,
+      'batch_size',
+      0,
+    );
     this.nowFn = opts.now ?? systemClock.nowUnixSec;
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
@@ -886,8 +897,18 @@ export class TriggerPoller {
       TRIGGER_BUDGETS.maxConcurrentPerTick,
       'max_concurrent_executors',
     );
-    this.tickBudgetSeconds = opts.tickBudgetSeconds ?? 600;
-    this.executionTimeoutSeconds = opts.executionTimeoutSeconds ?? 300;
+    this.tickBudgetSeconds = boundedPollerOption(
+      opts.tickBudgetSeconds,
+      TRIGGER_BUDGETS.maxTickBudgetSeconds,
+      TRIGGER_BUDGETS.maxTickBudgetSeconds,
+      'tick_budget_seconds',
+    );
+    this.executionTimeoutSeconds = boundedPollerOption(
+      opts.executionTimeoutSeconds,
+      TRIGGER_BUDGETS.maxExecutionTimeoutSeconds,
+      TRIGGER_BUDGETS.maxExecutionTimeoutSeconds,
+      'execution_timeout_seconds',
+    );
     this.sqliteExecutor = opts.sqliteExecutor ?? runIsolatedSqlite;
     this.livenessObserver = new TriggerLivenessObserver(this.db, {
       instance: opts.instance,
@@ -1404,6 +1425,7 @@ export class TriggerPoller {
       };
     }
     try {
+      assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
       spec = validateTriggerSpec(kind, spec);
     } catch (err) {
       if (err instanceof TriggerBudgetError) {
@@ -1505,6 +1527,26 @@ export class TriggerPoller {
     bead: { title: string; body: string | null },
     occurrenceId: number,
   ): ExecuteOutcome {
+    try {
+      if (typeof bead.title !== 'string' || (bead.body !== null && typeof bead.body !== 'string')) {
+        throw new TriggerBudgetError('agent_job.persisted_type');
+      }
+      assertTriggerTextBudget(bead.title, 'agent_job.title.bytes', TRIGGER_BUDGETS.maxTitleBytes);
+      if (bead.body !== null) {
+        assertTriggerTextBudget(bead.body, 'agent_job.body.bytes', TRIGGER_BUDGETS.maxPromptBytes);
+      }
+    } catch (err) {
+      if (err instanceof TriggerBudgetError) {
+        return {
+          status: 'failed', fired: false,
+          outputSummary: 'agent job resource budget exceeded',
+          outputJson: { kind: t.kind, agentJob: true, reason: 'resource_exhausted' satisfies TriggerReason },
+          errorKind: 'resource_exhausted',
+          errorMessage: 'persisted agent job exceeded the current resource budget',
+        };
+      }
+      throw err;
+    }
     const prompt = bead.body?.trim();
     if (!prompt) {
       return {

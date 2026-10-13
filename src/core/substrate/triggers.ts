@@ -9,9 +9,9 @@ import type { TriggerKind, TriggerRow, TriggerStatus, OnTerminal } from './types
 import { nextCronRun } from '../cron.ts';
 import { createChildLogger } from '../../logger.ts';
 import { queryAll, queryOne } from '../../lib/db-query.ts';
-import { TRIGGER_BUDGETS } from './trigger-budgets.ts';
+import { TRIGGER_BUDGETS, isSafeSqliteSql } from './trigger-budgets.ts';
 
-export { TRIGGER_BUDGETS } from './trigger-budgets.ts';
+export { TRIGGER_BUDGETS, isSafeSqliteSql } from './trigger-budgets.ts';
 
 const log = createChildLogger('substrate.triggers');
 
@@ -152,7 +152,12 @@ function assertKnownTriggerTextBudgets(kind: TriggerKind, value: unknown): void 
       return;
     }
     case 'event.message':
-      assertOptionalText(spec, 'value', 'message.value', TRIGGER_BUDGETS.maxTextBytes);
+      assertOptionalText(
+        spec,
+        'value',
+        'message.value',
+        spec['match'] === 'regex' ? TRIGGER_BUDGETS.maxRegexBytes : TRIGGER_BUDGETS.maxTextBytes,
+      );
       assertOptionalText(spec, 'chat_jid', 'message.chat_jid', TRIGGER_BUDGETS.maxReportTargetBytes);
       return;
     case 'schedule.at_time':
@@ -243,30 +248,6 @@ export function normalizeFireAtSeconds(fireAt: number): number {
   );
 }
 
-/**
- * Guard for `poll.sqlite` specs. `query_only` blocks writes but not cross-database
- * reads, runtime knob flips, or CPU/time, so reject statements that could exfiltrate
- * beyond the intended query or freeze the synchronous DatabaseSync: ATTACH/DETACH
- * (pull in other DB files), PRAGMA, multi-statement bodies, and recursive CTEs.
- * Defense-in-depth for admin-gated specs (#1096, QR-026).
- */
-export function isSafeSqliteSql(sql: string): boolean {
-  if (Buffer.byteLength(sql, 'utf8') > TRIGGER_BUDGETS.maxSqlBytes) return false;
-  // Strip one optional trailing semicolon; any remaining ';' implies 2+ statements.
-  const trimmed = sql.trim().replace(/;\s*$/, '');
-  if (!/^(?:select\b|with\b)/i.test(trimmed)) return false;
-  if (trimmed.includes(';')) return false;
-  if (/\b(attach|detach|pragma)\b/i.test(trimmed)) return false;
-  // QR-026: a recursive CTE runs unbounded CPU under query_only (writes blocked, compute
-  // is not), and node:sqlite DatabaseSync is synchronous with no statement-time interrupt.
-  // The poller's MAX_SQLITE_ROWS cap only bounds row-RETURNING queries — a count/aggregate
-  // over a recursive CTE (e.g. `WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r
-  // WHERE x<1e12) SELECT count(*) FROM r`) returns ONE row and freezes the whole process
-  // before the cap can fire. poll.sqlite monitoring specs never need recursion — reject it.
-  if (/\brecursive\b/i.test(trimmed)) return false;
-  return true;
-}
-
 const BoundedRegex = boundedText(z.string(), TRIGGER_BUDGETS.maxRegexBytes, 'regex').refine(isBoundedRe2Pattern, {
   message: 'regex must compile with RE2 and fit the trigger regex budget',
 });
@@ -326,11 +307,18 @@ const ShellSpec   = z.object({
   fire_when: z.enum(['exit_zero','stdout_nonempty','stdout_regex']),
   regex: BoundedRegex.optional(),
 }).strict();
-const MessageSpec = z.object({
-  match: z.enum(['sender_jid','regex','mention']),
-  value: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxTextBytes, 'message.value'),
-  chat_jid: boundedText(z.string(), TRIGGER_BUDGETS.maxReportTargetBytes, 'message.chat_jid').optional(),
-}).strict();
+const MessageSpec = z.discriminatedUnion('match', [
+  z.object({
+    match: z.literal('regex'),
+    value: BoundedRegex.refine((value) => value.length > 0, { message: 'message.value must not be empty' }),
+    chat_jid: boundedText(z.string(), TRIGGER_BUDGETS.maxReportTargetBytes, 'message.chat_jid').optional(),
+  }).strict(),
+  z.object({
+    match: z.enum(['sender_jid', 'mention']),
+    value: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxTextBytes, 'message.value'),
+    chat_jid: boundedText(z.string(), TRIGGER_BUDGETS.maxReportTargetBytes, 'message.chat_jid').optional(),
+  }).strict(),
+]);
 
 const SPEC_REGISTRY: Record<TriggerKind, z.ZodType> = {
   'schedule.cron':    CronSpec,
@@ -369,6 +357,16 @@ export interface CreateTriggerArgs {
   actor: string;
 }
 
+/** Applies the creation target/idempotency bounds to every persisted-row path. */
+export function assertTriggerRootBudgets(reportChatJid: unknown, dedupeKey: unknown): void {
+  if (typeof reportChatJid !== 'string') budgetError('report_target.type');
+  assertTriggerTextBudget(reportChatJid, 'report_target.bytes', TRIGGER_BUDGETS.maxReportTargetBytes);
+  if (dedupeKey !== null && dedupeKey !== undefined) {
+    if (typeof dedupeKey !== 'string') budgetError('dedupe_key.type');
+    assertTriggerTextBudget(dedupeKey, 'dedupe_key.bytes', TRIGGER_BUDGETS.maxDedupeKeyBytes);
+  }
+}
+
 interface PreparedTrigger {
   validated: unknown;
   now: number;
@@ -403,10 +401,7 @@ function computeNextFireAt(
 }
 
 export function prepareTrigger(args: CreateTriggerArgs, clock: Clock = systemClock): PreparedTrigger {
-  assertTriggerTextBudget(args.reportChatJid, 'report_target.bytes', TRIGGER_BUDGETS.maxReportTargetBytes);
-  if (args.dedupeKey != null) {
-    assertTriggerTextBudget(args.dedupeKey, 'dedupe_key.bytes', TRIGGER_BUDGETS.maxDedupeKeyBytes);
-  }
+  assertTriggerRootBudgets(args.reportChatJid, args.dedupeKey);
   if (args.intervalSeconds != null && (!Number.isInteger(args.intervalSeconds) || args.intervalSeconds <= 0)) {
     budgetError('interval_seconds');
   }
@@ -577,6 +572,7 @@ export function resumeTrigger(db: DatabaseSync, id: number, args: ResumeTriggerA
   if (t.kind === 'poll.url' && !args.enableUrlWatch) {
     throw new Error('resumeTrigger: url watch is disabled. Set advanced.enableUrlWatch: true in instance config to resume poll.url watches.');
   }
+  assertTriggerRootBudgets(t.report_chat_jid, t.dedupe_key);
   const validated = validateTriggerSpec(t.kind, JSON.parse(t.spec_json));
   let terminalAt = t.terminal_at;
   if (args.until !== undefined) {

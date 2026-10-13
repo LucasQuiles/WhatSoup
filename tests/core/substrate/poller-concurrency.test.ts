@@ -10,6 +10,7 @@ import { existsSync, unlinkSync } from 'node:fs';
 import { Database } from '../../../src/core/database.ts';
 import { createBead } from '../../../src/core/substrate/beads.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
+import { TRIGGER_BUDGETS } from '../../../src/core/substrate/trigger-budgets.ts';
 import { TriggerPoller } from '../../../src/core/substrate/poller.ts';
 import type { Messenger, SubmissionReceipt } from '../../../src/core/types.ts';
 
@@ -64,6 +65,28 @@ describe('TriggerPoller — hang isolation and bounded concurrency (#2566 slice 
     expect(() => new TriggerPoller(db.raw, messenger, {
       maxConsecutiveForbiddenRejects: 4,
     })).toThrow(/resource budget/i);
+  });
+
+  it('bounds public batch and execution settings while preserving the deliberate batchSize:0 path', () => {
+    const { messenger } = makeMessenger();
+    expect(() => new TriggerPoller(db.raw, messenger, {
+      batchSize: 0,
+      tickBudgetSeconds: TRIGGER_BUDGETS.maxTickBudgetSeconds,
+      executionTimeoutSeconds: TRIGGER_BUDGETS.maxExecutionTimeoutSeconds,
+    })).not.toThrow();
+    for (const options of [
+      { batchSize: TRIGGER_BUDGETS.maxBatchSize + 1 },
+      { batchSize: -1 },
+      { batchSize: 0.5 },
+      { tickBudgetSeconds: TRIGGER_BUDGETS.maxTickBudgetSeconds + 1 },
+      { tickBudgetSeconds: 0 },
+      { tickBudgetSeconds: 1.5 },
+      { executionTimeoutSeconds: TRIGGER_BUDGETS.maxExecutionTimeoutSeconds + 1 },
+      { executionTimeoutSeconds: 0 },
+      { executionTimeoutSeconds: 1.5 },
+    ]) {
+      expect(() => new TriggerPoller(db.raw, messenger, options)).toThrow(/resource budget/i);
+    }
   });
 
   it('F1: a hung executor does not block an unrelated due trigger in the same tick', async () => {

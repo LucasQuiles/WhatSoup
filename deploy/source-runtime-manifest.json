@@ -31,7 +31,7 @@
     },
     {
       "path": "src/core/substrate/sqlite-trigger-worker.ts",
-      "sha256": "94b6c47315e8c8e2f47698ad1d28bd32809ee4e29c04e7c43d85ab43e415612a",
+      "sha256": "d321d9d3c4edf2ada873a236beb7f961d2e8791b1d838df90933794a6f6bb5e8",
       "mustContain": [
         "DatabaseSync",
         "resource_exhausted",

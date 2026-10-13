@@ -2,7 +2,12 @@
 // deadline and process lifecycle; this child owns only a bounded JSON request
 // and a bounded, content-free result.
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { TRIGGER_BUDGETS, type SqliteJsonBind } from './trigger-budgets.ts';
+import {
+  TRIGGER_BUDGETS,
+  isSafeSqliteSql,
+  sqliteBoundedCountQuery,
+  type SqliteJsonBind,
+} from './trigger-budgets.ts';
 
 interface Request {
   databasePath: string;
@@ -18,9 +23,9 @@ type Reply =
   | { status: 'sql_error' }
   | { status: 'unavailable' };
 
-function emit(reply: Reply): void {
+function emit(reply: Reply, maxOutputBytes: number): void {
   const encoded = JSON.stringify(reply);
-  if (Buffer.byteLength(encoded, 'utf8') > TRIGGER_BUDGETS.maxWorkerStdoutBytes) {
+  if (Buffer.byteLength(encoded, 'utf8') > Math.min(maxOutputBytes, TRIGGER_BUDGETS.maxWorkerStdoutBytes)) {
     process.exitCode = 70;
     return;
   }
@@ -43,26 +48,6 @@ function boundedBindBytes(binds: readonly SqliteJsonBind[]): boolean {
     if (total > TRIGGER_BUDGETS.maxSqliteBindPayloadBytes) return false;
   }
   return true;
-}
-
-function rowBytes(row: Record<string, unknown>): number | null {
-  let bytes = 2;
-  for (const [key, value] of Object.entries(row)) {
-    bytes += Buffer.byteLength(key, 'utf8') + 4;
-    if (value === null) {
-      bytes += 4;
-    } else if (typeof value === 'string') {
-      bytes += Buffer.byteLength(value, 'utf8') + 2;
-    } else if (typeof value === 'number' || typeof value === 'boolean') {
-      bytes += Buffer.byteLength(JSON.stringify(value), 'utf8');
-    } else if (value instanceof Uint8Array) {
-      bytes += value.byteLength;
-    } else {
-      return null;
-    }
-    if (bytes > TRIGGER_BUDGETS.maxSqliteOutputBytes) return bytes;
-  }
-  return bytes;
 }
 
 async function readRequest(): Promise<Request | null> {
@@ -91,6 +76,7 @@ async function readRequest(): Promise<Request | null> {
       || maxOutputBytes <= 0
       || maxOutputBytes > TRIGGER_BUDGETS.maxSqliteOutputBytes
       || Buffer.byteLength(parsed.sql, 'utf8') > TRIGGER_BUDGETS.maxSqlBytes
+      || !isSafeSqliteSql(parsed.sql)
       || !parsed.binds.every(isJsonBind)
       || !boundedBindBytes(parsed.binds)
     ) return null;
@@ -120,27 +106,31 @@ async function main(): Promise<void> {
     // connection's main-database location before it grants this path.
     db = new DatabaseSync(request.databasePath, { readOnly: true, timeout: 5_000 });
     databaseOpened = true;
-    const stmt = db.prepare(request.sql);
-    let rowCount = 0;
-    for (const row of stmt.iterate(...request.binds as SQLInputValue[])) {
-      rowCount++;
-      if (rowCount > request.maxRows) {
-        emit({ status: 'resource_exhausted', limit: 'rows' });
-        return;
-      }
-      const bytes = rowBytes(row as Record<string, unknown>);
-      if (bytes === null || bytes > request.maxOutputBytes) {
-        emit({ status: 'resource_exhausted', limit: 'output' });
-        return;
-      }
+    const countSql = sqliteBoundedCountQuery(request.sql, request.maxRows);
+    if (!countSql) {
+      emit({ status: 'sql_error' }, request.maxOutputBytes);
+      return;
     }
-    // The aggregate result is the fixed `{rowCount}` protocol, independently
-    // capped in emit(). Individual rows are never serialized into the response.
-    emit({ status: 'ok', rowCount });
+    const row = db.prepare(countSql).get(...request.binds as SQLInputValue[]) as { row_count?: unknown } | undefined;
+    const rawCount = row?.row_count;
+    const rowCount = typeof rawCount === 'bigint'
+      ? (rawCount <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(rawCount) : null)
+      : (typeof rawCount === 'number' && Number.isSafeInteger(rawCount) ? rawCount : null);
+    if (rowCount === null || rowCount < 0) {
+      emit({ status: 'resource_exhausted', limit: 'output' }, request.maxOutputBytes);
+      return;
+    }
+    if (rowCount > request.maxRows) {
+      emit({ status: 'resource_exhausted', limit: 'rows' }, request.maxOutputBytes);
+      return;
+    }
+    // The fixed scalar reply is the independent output budget. Caller-selected
+    // rows are never materialized by JavaScript or serialized across IPC.
+    emit({ status: 'ok', rowCount }, request.maxOutputBytes);
   } catch {
     // Query failures are distinct from a budget hit. Never include the query,
     // bind values, SQLite error, or response data in the cross-process reply.
-    emit(databaseOpened ? { status: 'sql_error' } : { status: 'unavailable' });
+    emit(databaseOpened ? { status: 'sql_error' } : { status: 'unavailable' }, request.maxOutputBytes);
   } finally {
     try { db?.close(); } catch { /* process exit releases the read-only handle */ }
   }

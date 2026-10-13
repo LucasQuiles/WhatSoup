@@ -1619,14 +1619,18 @@ guard makes any late write from the abandoned execution a no-op. The run loop aw
 under `tickBudgetSeconds` (default 600s) and re-arms the timer past stragglers, which keep
 running detached and finalize under their lease.
 
-`poll.sqlite` has a stricter execution boundary. A validated query is sent over bounded JSON
-stdin to a short-lived read-only child process for the `main` database location. The parent owns
-the hard deadline and resolves only after the child closes, so a deadline kills and reaps the
-process instead of racing a Promise around same-thread `DatabaseSync`. The child returns only a
-bounded `{rowCount}` value; SQL text, binds, and rows do not enter `trigger_runs`. Its 10,000-row,
-2,048-byte row/materialization, IPC, and 30-second limits return the durable redacted class
-`resource_exhausted`. A normal query failure remains the distinct `sql_error` class; an absent
-durable database location is `sqlite_worker_unavailable`.
+`poll.sqlite` has a stricter execution boundary. A validated non-recursive `SELECT` (including a
+read-only `WITH … SELECT`) is sent over bounded JSON stdin to a short-lived read-only child
+process for the `main` database location. The parent owns the hard deadline and resolves only
+after the child closes, so a deadline kills and reaps the process instead of racing a Promise
+around same-thread `DatabaseSync`. The child nests the admitted query under `SELECT 1` with a
+`maxRows + 1` limit, then returns only the fixed `{rowCount}` scalar; SQL text, binds, and caller
+rows do not enter `trigger_runs`. The 10,000-row cap, 2,048-byte fixed-output/IPC caps, and
+30-second deadline return the durable redacted class `resource_exhausted`. SQLite may still use
+internal memory or work before a query's outer row limit takes effect, and the child has no RSS
+guarantee; process isolation lets the parent terminate that work, but is not a memory proof. A
+normal query failure remains the distinct `sql_error` class; an absent durable database location
+is `sqlite_worker_unavailable`.
 
 ### 8.3 Independent liveness observation
 
