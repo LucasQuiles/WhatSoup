@@ -1301,9 +1301,39 @@ async awaitRejectedRuntimeTurnFinalizations(): Promise<void> {
   throw new AggregateError(failures, 'rejected runtime turn finalization failed');
 }
 
+/**
+ * #3703: close every runtime TurnQueue and take its undispatched turns, so a
+ * planned stop can drain the dispatched turns without starting new ones. The
+ * taken turns must be handed back to finalizeActiveRuntimeTurnsForShutdown().
+ * A queue owned by a reset/kill teardown is left for that path.
+ */
+takePendingTurnsForPlannedStop(): QueuedTurn[] {
+  const taken: QueuedTurn[] = [];
+  for (const queue of [this.host.turnQueue, ...this.host.perChatTurnQueues.values()]) {
+    try {
+      taken.push(...queue.closeAndTakePendingTurns());
+    } catch {
+      // Teardown-owned queue: finalized by its own lifecycle, joined below.
+    }
+  }
+  return taken;
+}
+
+/** #3703: true while any runtime TurnQueue still holds a turn. */
+hasActiveRuntimeTurns(): boolean {
+  return [this.host.turnQueue, ...this.host.perChatTurnQueues.values()]
+    .some((queue) => queue.activeTurn !== null);
+}
+
+/**
+ * Finalize every turn still held at shutdown. Returns how many journaled
+ * turns ended `failed_terminal` (no delivered reply, no recovery owner): a
+ * stop with a nonzero count lost replies and must not report clean (#3703).
+ */
 async finalizeActiveRuntimeTurnsForShutdown(
   deadlineAt = Date.now() + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS,
-): Promise<void> {
+  heldPendingTurns: readonly QueuedTurn[] = [],
+): Promise<{ readonly lostJournaledTurns: number }> {
   if (!Number.isFinite(deadlineAt)) {
     throw new Error('Runtime turn shutdown deadline must be finite');
   }
@@ -1330,6 +1360,7 @@ async finalizeActiveRuntimeTurnsForShutdown(
     }
     pending.push(this.finalizeUndispatchedRuntimeTurn(turn.runtimeContext));
   };
+  for (const turn of heldPendingTurns) queueUndispatched(turn);
   for (const turn of this.host.turnQueue.closeAndTakePendingTurns()) queueUndispatched(turn);
   const pendingSingleton = this.host.pendingSingletonRuntimeTurnContext;
   if (
@@ -1426,6 +1457,15 @@ async finalizeActiveRuntimeTurnsForShutdown(
       'active runtime turn shutdown finalization failed',
     );
   }
+  // A journaled turn this stop finalized without a delivered reply or a
+  // recovery owner is a lost reply (#3703).
+  const lostJournaledTurns = settled.filter((item) => (
+    item.status === 'fulfilled'
+      && item.value.kind === 'terminal'
+      && item.value.terminal.inboundDisposition === 'failed_terminal'
+      && item.value.terminal.identity.inboundSeq !== null
+  )).length;
+  return { lostJournaledTurns };
 }
 
 /**

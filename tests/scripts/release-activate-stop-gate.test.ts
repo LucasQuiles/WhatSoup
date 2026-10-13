@@ -25,10 +25,10 @@
  *  - That an older turn is dead. The preflight's 15-minute horizon is pinned
  *    separately in stop-safety-gate.test.ts.
  *
- * RED convention (scheduled-turn-lifecycle.test.ts): probes assert the DESIRED
- * property and are committed as `it.fails` while main lacks it. Each was
- * verified to fail at a668b5cff on an assertion; the reasons are recorded in
- * docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md.
+ * History: committed red as `it.fails` at 50100084e (native failures in
+ * docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md),
+ * promoted to plain assertions with the stop gate in
+ * scripts/lib/release-activation/apply.ts.
  *
  * Harness: the simulated launchd world of release-activate.test.ts, with the
  * preflight exec answered by a scripted verdict sequence.
@@ -115,7 +115,7 @@ afterEach(() => {
 });
 
 describe('release:activate --apply: stop gate before reload (#3703 T6)', () => {
-  it.fails('T6a: runs the stop preflight on the instance database before the instance bootout (ordering only)', async () => {
+  it('T6a: runs the stop preflight on the instance database before the instance bootout (ordering only)', async () => {
     const world = new GatedLaunchd(fixture, [0]);
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
@@ -129,7 +129,7 @@ describe('release:activate --apply: stop gate before reload (#3703 T6)', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
   });
 
-  it.fails('T6b: while the preflight exits 3 the apply waits and re-checks, then proceeds once it is quiet', async () => {
+  it('T6b: while the preflight exits 3 the apply waits and re-checks, then proceeds once it is quiet', async () => {
     const world = new GatedLaunchd(fixture, [3, 3, 0]);
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
@@ -143,7 +143,7 @@ describe('release:activate --apply: stop gate before reload (#3703 T6)', () => {
     expect(result.json.outcome).toBe('activated');
   });
 
-  it.fails('T6c: past the bound it fails closed — refused, no reload, symlink and plists untouched', async () => {
+  it('T6c: past the bound it fails closed — refused, no reload, symlink and plists untouched', async () => {
     const installedPlist = readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8');
     const world = new GatedLaunchd(fixture, [3]);
 

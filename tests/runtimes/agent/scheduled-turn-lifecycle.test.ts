@@ -32,6 +32,7 @@
 // withheld terminal result genuinely pin TurnQueue.drain() — the #3374 wedge —
 // instead of the mock resolving instantly and vacuously passing every case.
 
+import { acceptPlannedStopTurnLoss } from './helpers/planned-stop-loss.ts';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -591,7 +592,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       expectUnfinalizableShutdown = false;
       await expect(runtime.shutdown()).rejects.toThrow('AgentRuntime shutdown failed');
     } else {
-      await runtime?.shutdown();
+      await runtime?.shutdown().catch(acceptPlannedStopTurnLoss);
     }
     db.close();
   });

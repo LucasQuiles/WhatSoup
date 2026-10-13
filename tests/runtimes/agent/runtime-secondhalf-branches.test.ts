@@ -3598,7 +3598,7 @@ describe('AgentRuntime route recycle publication and shutdown ownership', () => 
         mapKey: string | undefined,
       ): Promise<string>;
       runtimeTurnCoordinator: {
-        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<void>;
+        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<{ lostJournaledTurns: number }>;
       };
     };
     state.session = session;
@@ -3626,6 +3626,7 @@ describe('AgentRuntime route recycle publication and shutdown ownership', () => 
     state.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown = vi.fn(async () => {
       markFinalizationStarted();
       await finalizationBlocked;
+      return { lostJournaledTurns: 0 };
     });
 
     const shutdown = runtime.shutdown();

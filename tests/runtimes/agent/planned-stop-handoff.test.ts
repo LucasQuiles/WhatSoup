@@ -27,6 +27,12 @@
 // the admission/drain/ownership property shown through the actual supported
 // route before rollout.
 //
+// Status: T2, T3a and T4 are plain assertions, fixed by the bounded
+// planned-stop drain and the loss report (planned-stop-drain.ts). T1, T1b,
+// T3b, T5a and T5b stay `it.fails`: they need a durable owner that dispatches a
+// handed-off turn on the next start, and the #3295 deferred-obligation drain
+// consumer that would do it does not exist yet.
+//
 // RED convention (scheduled-turn-lifecycle.test.ts): each probe asserts the
 // DESIRED property and is committed as `it.fails` while main lacks it; landing
 // the fix flips it red and forces promotion to a plain `it`. A passing
@@ -562,7 +568,7 @@ describe('planned stop handoff (#3703)', () => {
 
   // ─── T2: dispatched turn answered inside the drain bound ───
 
-  it.fails('T2: shutdown waits (bounded) for a dispatched turn; an answer inside the bound is delivered and the stop is clean', async () => {
+  it('T2: shutdown waits (bounded) for a dispatched turn; an answer inside the bound is delivered and the stop is clean', async () => {
     const a = startProcess({ plannedStopDrainMs: LONG_DRAIN_MS } as PlannedStopOptions);
     const { seq, session } = await arriveInFlight(a.runtime, a.engine, 'wamid-t2', 't2 question');
 
@@ -585,7 +591,7 @@ describe('planned stop handoff (#3703)', () => {
 
   // ─── T3: bound exceeded / handoff write fails → honest failure + incomplete ───
 
-  it.fails('T3a: a dispatched turn that outlives the drain bound stays failed_terminal (never transferred) and shutdown rejects', async () => {
+  it('T3a: a dispatched turn that outlives the drain bound stays failed_terminal (never transferred) and shutdown rejects', async () => {
     const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
     const { seq } = await arriveInFlight(a.runtime, a.engine, 'wamid-t3a', 't3a question');
 
@@ -629,7 +635,7 @@ describe('planned stop handoff (#3703)', () => {
 
   // ─── T4: no false clean-stop success through main's shutdown sequence ───
 
-  it.fails('T4: a shutdown that finalized a turn failed is `shutdown incomplete` (no `shutdown complete`, exit 1)', async () => {
+  it('T4: a shutdown that finalized a turn failed is `shutdown incomplete` (no `shutdown complete`, exit 1)', async () => {
     const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
     const { seq } = await arriveInFlight(a.runtime, a.engine, 'wamid-t4', 't4 question');
     const log = { info: vi.fn(), error: vi.fn() };

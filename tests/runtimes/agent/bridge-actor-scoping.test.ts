@@ -20,6 +20,7 @@
 // resolver; a probe tool registered on the runtime's registry records the
 // actorJid the bridge hands the registry per call.
 
+import { acceptPlannedStopTurnLoss } from './helpers/planned-stop-loss.ts';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import { z } from 'zod';
@@ -431,7 +432,7 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
     for (const session of sessionDoubles) {
       if (session.turnInFlight) session.emit({ type: 'result', text: 'late' });
     }
-    await runtime?.shutdown();
+    await runtime?.shutdown().catch(acceptPlannedStopTurnLoss);
     db.close();
   });
 

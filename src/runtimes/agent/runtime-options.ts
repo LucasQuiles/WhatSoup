@@ -43,6 +43,11 @@ export interface AgentRuntimeOptions {
   perChatConversationBound?: boolean;
   /** Plugin directories to pass via --plugin-dir to the claude subprocess. */
   pluginDirs?: string[];
+  /**
+   * #3703: bound (ms) on the planned-stop drain of dispatched turns before
+   * shutdown finalizes them failed. Defaults to PLANNED_STOP_DRAIN_MS; 0 disables it.
+   */
+  plannedStopDrainMs?: number;
   /** Per-instance plugin enablement. Written to project settings.json to override global. */
   enabledPlugins?: Record<string, boolean>;
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */

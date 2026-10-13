@@ -48,6 +48,19 @@ export interface ActivationArgs {
   verifyTimeoutSeconds: number;
 }
 
+/**
+ * #3703: the stop gate before any live change. While the new release's stop
+ * preflight (`restart-safety-preflight.ts --mode stop`) exits 3 — live or
+ * unverified turns on the instance database — the apply waits and re-checks;
+ * past the bound it refuses with nothing switched. Any other exit refuses at
+ * once. There is no override.
+ *
+ * This orders the check before the stop; it does not stop the running
+ * transport from admitting work between the check and the bootout.
+ */
+export const STOP_GATE_WAIT_SECONDS = 900;
+export const STOP_GATE_POLL_INTERVAL_MS = 15_000;
+
 export interface Precondition {
   id: string;
   ok: boolean;
@@ -457,6 +470,11 @@ export function describeActions(context: ActivationContext): Array<Record<string
     { step: 'record-symlink', link: context.wrapperLink, to: '<backup>/symlink.before' },
     { step: 'backup-plists', labels, to: '<backup>/<label>.plist', mode: '0600' },
     { step: 'write-staged-plists', labels, to: '<backup>/<label>.staged.plist', lint: 'plutil -lint' },
+    {
+      step: 'stop-gate',
+      run: `${path.join(args.release, 'scripts', 'restart-safety-preflight.ts')} --mode stop --db ${context.dbPath} --json`,
+      wait: `re-check every ${STOP_GATE_POLL_INTERVAL_MS / 1_000}s for up to ${STOP_GATE_WAIT_SECONDS}s while it exits 3; refuse with nothing switched otherwise`,
+    },
     { step: 'switch-symlink', link: context.wrapperLink, target: wrapperTargetFor(args.release), atomic: true },
     { step: 'install-plists', labels, dir: context.launchAgentsDir, atomic: true },
     ...labels.map((label) => ({

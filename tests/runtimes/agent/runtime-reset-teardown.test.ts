@@ -759,7 +759,7 @@ describe('AgentRuntime reset teardown ownership', () => {
         hasGlobalTeardownPending(): boolean;
         terminalizeGlobalTurnForReset(): Promise<unknown>;
         retireGlobalTurnQueueAfterReset(teardown: unknown): Promise<void>;
-        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<void>;
+        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<{ lostJournaledTurns: number }>;
         finalizeUndispatchedRuntimeTurn: (...args: unknown[]) => Promise<unknown>;
       };
     };
@@ -794,7 +794,7 @@ describe('AgentRuntime reset teardown ownership', () => {
     const [firstTeardown, secondTeardown] = await Promise.all([first, second]);
     expect(secondTeardown).toBe(firstTeardown);
     await state.runtimeTurnCoordinator.retireGlobalTurnQueueAfterReset(firstTeardown);
-    await expect(shutdown).resolves.toBeUndefined();
+    await expect(shutdown).resolves.toEqual({ lostJournaledTurns: 0 });
     expect(state.runtimeTurnCoordinator.hasGlobalTeardownPending()).toBe(false);
   });
 

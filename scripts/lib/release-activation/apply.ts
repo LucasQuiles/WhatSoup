@@ -52,9 +52,12 @@ import {
   bootstrapEntrypointFor,
   countRenderDriftLines,
   wrapperTargetFor,
+  STOP_GATE_POLL_INTERVAL_MS,
+  STOP_GATE_WAIT_SECONDS,
 } from './plan.ts';
 
 export const VERIFY_POLL_INTERVAL_MS = 3_000;
+
 const EXIT_POLL_INTERVAL_MS = 1_000;
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -174,6 +177,46 @@ export async function launchdState(host: ActivationHost, domain: string, label: 
   if (result.code !== 0) return { loaded: false, pid: null, definition: '' };
   const match = PID_LINE.exec(result.stdout);
   return { loaded: true, pid: match ? Number(match[1]) : null, definition: result.stdout };
+}
+
+function stopGateReason(stdout: string): string {
+  try {
+    const parsed = JSON.parse(stdout.trim().split('\n').at(-1) ?? '') as { reason?: unknown };
+    return typeof parsed.reason === 'string' ? parsed.reason : 'unparsed verdict';
+  } catch {
+    return 'unparsed verdict';
+  }
+}
+
+/** #3703: run the stop preflight until it allows the stop or the bound passes. Returns a failure string, or null. */
+async function awaitStopGate(host: ActivationHost, context: ActivationContext, steps: StepRecord[]): Promise<string | null> {
+  const { release } = context.args;
+  const deadline = host.now() + STOP_GATE_WAIT_SECONDS * 1_000;
+  for (let check = 1; ; check += 1) {
+    const result = await host.exec('bash', [
+      path.join(release, 'scripts', 'run-with-pinned-node.sh'),
+      path.join(release, 'scripts', 'restart-safety-preflight.ts'),
+      '--mode', 'stop',
+      '--db', context.dbPath,
+      '--json',
+    ]);
+    const reason = stopGateReason(result.stdout);
+    if (result.code === 0) {
+      steps.push({ step: 'stop-gate', ok: true, detail: `${reason} after ${check} check(s)` });
+      return null;
+    }
+    if (result.code !== 3) {
+      const failure = `stop preflight exited ${result.code} (${reason}); refusing to stop the instance`;
+      steps.push({ step: 'stop-gate', ok: false, detail: failure });
+      return failure;
+    }
+    if (host.now() >= deadline) {
+      const failure = `stop preflight still blocking (${reason}) after ${check} check(s) over ${STOP_GATE_WAIT_SECONDS}s; refusing to stop the instance`;
+      steps.push({ step: 'stop-gate', ok: false, detail: failure });
+      return failure;
+    }
+    await host.sleep(STOP_GATE_POLL_INTERVAL_MS);
+  }
 }
 
 /** bootout → bounded wait for the old pid to exit. Returns a failure string, or null once it is gone. */
@@ -585,6 +628,10 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
   } catch (error) {
     return refuse(error instanceof Error ? error.message : String(error), existsSync(backupPath) ? backupPath : null);
   }
+
+  // ---- stop gate (no live change yet) ----
+  const gateFailure = await awaitStopGate(host, context, steps);
+  if (gateFailure !== null) return refuse(gateFailure, backupPath);
 
   const previous = await launchdState(host, context.domain, context.instanceLabel);
 

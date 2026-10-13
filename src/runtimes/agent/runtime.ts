@@ -135,6 +135,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopTurnLossError, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -2128,6 +2129,8 @@ export class AgentRuntime implements Runtime {
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
+  /** #3703: bound on the planned-stop drain of dispatched turns. */
+  private readonly plannedStopDrainMs: number;
 
   // Startup events are deferred until main's strict-readiness controller runs.
   private pendingStartupEvent: StartupNotificationEvent | null = null;
@@ -2707,6 +2710,7 @@ export class AgentRuntime implements Runtime {
       getModel: () => handoffDistillModel(),
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
+    this.plannedStopDrainMs = Math.max(0, options?.plannedStopDrainMs ?? PLANNED_STOP_DRAIN_MS);
     this.shared = this.sessionScope === 'shared';
     this.cwd = options?.cwd;
     this.configSystemPrompt = options?.configSystemPrompt;
@@ -8065,7 +8069,6 @@ export class AgentRuntime implements Runtime {
       sandboxPerChat: this.sandboxPerChat,
     }, 'AgentRuntime shutting down');
     const startedAt = Date.now();
-    const shutdownDeadlineAt = startedAt + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS;
 
     if (this.controlSessionTimeout) {
       clearTimeout(this.controlSessionTimeout);
@@ -8100,6 +8103,21 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.zombieSessionSweepTimer);
       this.zombieSessionSweepTimer = null;
     }
+    // #3703: planned-stop drain. Undispatched turns are taken now so none is
+    // dispatched during the drain; dispatched turns get a bounded window to
+    // finish. Everything still held afterwards is finalized below, and any
+    // journaled loss makes this shutdown fail instead of report clean.
+    const heldPendingTurns = this.plannedStopDrainMs > 0
+      ? this.runtimeTurnCoordinator.takePendingTurnsForPlannedStop()
+      : [];
+    if (this.plannedStopDrainMs > 0 && this.runtimeTurnCoordinator.hasActiveRuntimeTurns()) {
+      const drained = await waitForPlannedStopDrain(
+        () => this.runtimeTurnCoordinator.hasActiveRuntimeTurns(),
+        startedAt + this.plannedStopDrainMs,
+      );
+      log.info({ drained, drainMs: systemClock.now() - startedAt }, 'planned-stop drain of dispatched turns ended');
+    }
+    const shutdownDeadlineAt = systemClock.now() + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS;
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -8131,7 +8149,14 @@ export class AgentRuntime implements Runtime {
     this.autoCompact.shutdown();
 
     try {
-      await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(shutdownDeadlineAt);
+      const { lostJournaledTurns } = await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(
+        shutdownDeadlineAt,
+        heldPendingTurns,
+      );
+      if (lostJournaledTurns > 0) {
+        log.error({ lostJournaledTurns }, 'shutdown finalized journaled turns failed');
+        shutdownFailures.push(new PlannedStopTurnLossError(lostJournaledTurns));
+      }
     } catch (err) {
       shutdownFailures.push(err);
       preserveRuntimeTurnState = true;
