@@ -101,7 +101,13 @@ function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
   tool(bin, 'git', 'git version 2.50.0');
   tool(bin, 'launchctl', 'launchctl fixture');
   executable(join(bin, 'security'), "printf '%s\\n' 'SECRET_SHOULD_NOT_APPEAR'");
-  tool(bin, 'python3.12', 'Python 3.12.11');
+  executable(join(bin, 'python3.13'), [
+    'case "${1:-}" in',
+    '  --version) printf "Python %s\\n" "${FAKE_PYTHON_VERSION:-3.13.16}" ;;',
+    '  -c) printf "%s\\n" "${FAKE_PYTHON_IDENTITY:-cpython|3.13.16}" ;;',
+    '  *) exit 2 ;;',
+    'esac',
+  ].join('\n'));
   tool(bin, 'rg', 'ripgrep 14.1.1');
   tool(bin, 'zsh', 'zsh 5.9');
   tool(bin, 'shellcheck', 'ShellCheck 0.10.0');
@@ -155,7 +161,7 @@ describe('portable host capability doctor', () => {
   it.each([
     ['npm', 'npm', '11.12.1'],
     ['git', 'git', 'git version 2.50.0'],
-    ['python', 'python3.12', 'Python 3.12.11'],
+    ['python', 'python3.13', 'Python 3.13.16'],
     ['rg', 'rg', 'ripgrep 14.1.1'],
     ['zsh', 'zsh', 'zsh 5.9'],
     ['shellcheck', 'shellcheck', 'ShellCheck 0.10.0'],
@@ -169,6 +175,21 @@ describe('portable host capability doctor', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
     expect(result.receipt?.outcome).toBe('inconclusive');
     expect(record(result.receipt, id)?.status).toBe('inconclusive');
+  });
+
+  it.each([
+    ['wrong implementation', 'pypy|3.13.16'],
+    ['older patch', 'cpython|3.13.15'],
+    ['newer patch', 'cpython|3.14.0'],
+  ])('blocks a quality runtime with a %s', (_reason, identity) => {
+    const result = runDoctor(fixture({ FAKE_PYTHON_IDENTITY: identity }), ['--profile', 'quality', '--json']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.receipt?.outcome).toBe('blocked');
+    expect(record(result.receipt, 'python')).toMatchObject({
+      status: 'incompatible',
+      versionRule: 'exact-cpython:3.13.16',
+    });
   });
 
   it.each(['FAKE_NODE_VERSION_EXIT', 'FAKE_NODE_ARCH_EXIT', 'FAKE_ARM64_EXIT'])(

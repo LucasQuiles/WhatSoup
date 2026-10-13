@@ -97,6 +97,25 @@ whatsoup_resolve_python312() {
   return 1
 }
 
+whatsoup_resolve_locked_python() {
+  managed_python="$(whatsoup_quality_venv_root)/bin/python"
+  if [ -x "$managed_python" ]; then
+    CAP_PATH="$managed_python"
+    CAP_VISIBILITY=managed_venv
+    return 0
+  fi
+
+  for python_candidate in python3.13 python3; do
+    if whatsoup_resolve_executable "$python_candidate"; then
+      return 0
+    fi
+  done
+
+  CAP_PATH=""
+  CAP_VISIBILITY=absent
+  return 1
+}
+
 whatsoup_packages_for_manager() {
   profile="$1"
   platform="$2"
@@ -152,11 +171,7 @@ whatsoup_capability_records() {
 
   [ "$profile" = "runtime" ] && return 0
 
-  if [ "$platform" = "darwin" ]; then
-    printf 'python|required|python3.13|minimum:3.13|python@3.13|python3.13 python3.13-venv|python python-pip|Install Python 3.13 with venv support.\n'
-  else
-    printf 'python|required|python3.13|minimum:3.13|python@3.13|python3.13 python3.13-venv|python python-pip|Install Python 3.13 with venv support.\n'
-  fi
+  printf 'python|required|python3.13|exact-cpython:3.13.16|python@3.13|python3 python3-venv|python python-pip|Provide CPython 3.13.16 with venv support; platform packages may require a separately managed exact runtime.\n'
   printf 'rg|required|rg|command|ripgrep|ripgrep|ripgrep|Install ripgrep.\n'
   printf 'zsh|required|zsh|command|zsh|zsh|zsh|Install zsh.\n'
   printf 'shellcheck|required|shellcheck|command|shellcheck|shellcheck|shellcheck|Install ShellCheck.\n'
@@ -244,6 +259,28 @@ whatsoup_probe_node() {
 }
 
 whatsoup_probe_python() {
+  version_rule="${1:-minimum:3.12}"
+  if [ "${version_rule%%:*}" = "exact-cpython" ]; then
+    expected_version="${version_rule#*:}"
+    identity="$(whatsoup_first_line "$CAP_PATH" -c 'import sys; print(f"{sys.implementation.name}|{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')" || {
+      CAP_STATUS=inconclusive
+      CAP_DETAIL=python-identity-probe-failed
+      return 0
+    }
+    implementation="${identity%%|*}"
+    version="${identity#*|}"
+    CAP_VERSION="$version"
+    if [ "$identity" != "cpython|$expected_version" ]; then
+      CAP_STATUS=incompatible
+      if [ "$implementation" != "cpython" ]; then
+        CAP_DETAIL=python-implementation-mismatch
+      else
+        CAP_DETAIL=python-version-mismatch
+      fi
+    fi
+    return 0
+  fi
+
   raw_version="$(whatsoup_first_line "$CAP_PATH" --version)" || {
     CAP_STATUS=inconclusive
     CAP_DETAIL=python-version-probe-failed
@@ -284,7 +321,11 @@ whatsoup_probe_capability() {
   fi
 
   if [ "$capability_id" = "python" ]; then
-    whatsoup_resolve_python312
+    if [ "${version_rule%%:*}" = "exact-cpython" ]; then
+      whatsoup_resolve_locked_python
+    else
+      whatsoup_resolve_python312
+    fi
     resolved_status=$?
   else
     whatsoup_resolve_executable "$probe"
@@ -307,7 +348,7 @@ whatsoup_probe_capability() {
 
   case "$capability_id" in
     node) whatsoup_probe_node "$version_rule" ;;
-    python) whatsoup_probe_python ;;
+    python) whatsoup_probe_python "$version_rule" ;;
     npm|git|rg|zsh|shellcheck|timeout)
       CAP_VERSION="$(whatsoup_first_line "$CAP_PATH" --version)" || {
         CAP_STATUS=inconclusive

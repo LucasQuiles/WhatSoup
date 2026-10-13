@@ -204,8 +204,8 @@ describe('explicit host dependency installer', () => {
     expect(result.status).toBe(0);
     expect(receipt(result).packages).toEqual([
       'git',
-      'python3.13',
-      'python3.13-venv',
+      'python3',
+      'python3-venv',
       'ripgrep',
       'zsh',
       'shellcheck',
@@ -271,7 +271,7 @@ describe('explicit host dependency installer', () => {
     expect(ledger(fx)).toEqual([
       'brew install git python@3.13 ripgrep zsh shellcheck',
       `python -m venv ${join(fx.home, 'quality-venv')}`,
-      'python -m pip install pytest pytest-cov hypothesis ruff==0.15.10',
+      `python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${join(repoRoot, 'requirements/python/quality-cpython313-darwin-arm64.txt')}`,
     ]);
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });

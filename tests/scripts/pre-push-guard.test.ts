@@ -1319,6 +1319,21 @@ describe('quality workflow composition', () => {
     expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
   });
 
+  it('selects macOS Python locks through the shared policy', () => {
+    const macosStart = qualityWorkflow.indexOf('  bot-errors-health-macos:');
+    const macos = qualityWorkflow.slice(macosStart);
+
+    expect(macos).toContain('. deploy/lib/python-lock-policy.sh');
+    expect(macos).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" "$GITHUB_WORKSPACE" quality');
+    expect(macos).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
+    expect(macos).not.toContain('quality-cpython313-darwin-arm64.txt');
+  });
+
+  it('clean-installs the Linux transcription lock through the shared policy', () => {
+    expect(qualityWorkflow).toContain('name: Verify Linux transcription lock installation');
+    expect(qualityWorkflow).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
+  });
+
   it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
     const compatibilityStart = qualityWorkflow.indexOf('  compatibility:');
     const nextJob = qualityWorkflow.indexOf('  bot-errors-health-macos:', compatibilityStart);

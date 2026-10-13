@@ -77,6 +77,14 @@ jobs:
       - name: Verify Linux quality lock imports
         run: $HOME/.local/share/whatsoup/quality-venv/bin/python -c 'import coverage, hypothesis, pytest, pytest_cov'
 
+      - name: Verify Linux transcription lock installation
+        run: |
+          set -euo pipefail
+          . deploy/lib/python-lock-policy.sh
+          python -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
+          whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription
+          "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
+
       - name: Validate strict doctor receipt
         run: |
           set -o pipefail
@@ -531,7 +539,7 @@ jobs:
 
   bot-errors-health-macos:
     runs-on: macos-14
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -553,11 +561,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify macOS quality lock installation
+      - name: Verify macOS Python lock installations
         run: |
+          set -euo pipefail
+          . deploy/lib/python-lock-policy.sh
           python -m venv "$RUNNER_TEMP/whatsoup-quality-lock"
-          "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r requirements/python/quality-cpython313-darwin-arm64.txt
+          whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" "$GITHUB_WORKSPACE" quality
           "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" -c 'import coverage, hypothesis, pytest, pytest_cov'
+          python -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
+          whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription
+          "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
