@@ -104,7 +104,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
   executable(join(bin, 'python3.13'), [
     'case "${1:-}" in',
     '  --version) printf "Python %s\\n" "${FAKE_PYTHON_VERSION:-3.13.16}" ;;',
-    '  -c) printf "%s\\n" "${FAKE_PYTHON_IDENTITY:-cpython|3.13.16}" ;;',
+    '  -c) printf "%s\\n" "${FAKE_PYTHON_IDENTITY:-cpython:3.13.16}" ;;',
     '  *) exit 2 ;;',
     'esac',
   ].join('\n'));
@@ -178,9 +178,9 @@ describe('portable host capability doctor', () => {
   });
 
   it.each([
-    ['wrong implementation', 'pypy|3.13.16'],
-    ['older patch', 'cpython|3.13.15'],
-    ['newer patch', 'cpython|3.14.0'],
+    ['wrong implementation', 'pypy:3.13.16'],
+    ['older patch', 'cpython:3.13.15'],
+    ['newer patch', 'cpython:3.14.0'],
   ])('blocks a quality runtime with a %s', (_reason, identity) => {
     const result = runDoctor(fixture({ FAKE_PYTHON_IDENTITY: identity }), ['--profile', 'quality', '--json']);
 

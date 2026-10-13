@@ -9,11 +9,11 @@ WHATSOUP_PYTHON_INDEX_URL=https://pypi.org/simple
 
 whatsoup_require_locked_python() {
   local python_bin="$1" observed
-  observed="$($python_bin -c 'import sys; print(f"{sys.implementation.name}|{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null)" || {
+  observed="$($python_bin -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null)" || {
     echo "Python lock policy: could not query $python_bin" >&2
     return 1
   }
-  if [ "$observed" != "$WHATSOUP_LOCKED_PYTHON_IMPLEMENTATION|$WHATSOUP_LOCKED_PYTHON_VERSION" ]; then
+  if [ "$observed" != "$WHATSOUP_LOCKED_PYTHON_IMPLEMENTATION:$WHATSOUP_LOCKED_PYTHON_VERSION" ]; then
     echo "Python lock policy: CPython $WHATSOUP_LOCKED_PYTHON_VERSION is required; found ${observed:-unknown}" >&2
     return 1
   fi

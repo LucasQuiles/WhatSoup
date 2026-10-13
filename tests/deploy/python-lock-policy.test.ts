@@ -38,7 +38,7 @@ describe('Python lock runtime policy', () => {
     const root = tempRoot();
     const python = join(root, 'python');
     executable(python, [
-      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython|3.13.16"; exit 0; fi',
+      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython:3.13.16"; exit 0; fi',
       'exit 2',
     ].join('\n'));
 
@@ -51,7 +51,7 @@ describe('Python lock runtime policy', () => {
     const root = tempRoot();
     const python = join(root, 'python');
     executable(python, [
-      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython|3.13.15"; exit 0; fi',
+      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython:3.13.15"; exit 0; fi',
       'exit 2',
     ].join('\n'));
 
@@ -96,7 +96,7 @@ describe('Python lock runtime policy', () => {
       'esac',
     ].join('\n'));
     executable(python, [
-      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython|3.13.16"; exit 0; fi',
+      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython:3.13.16"; exit 0; fi',
       'printf "%s\\n" "$*" > "$WHATSOUP_TEST_PIP_ARGS"',
     ].join('\n'));
 
