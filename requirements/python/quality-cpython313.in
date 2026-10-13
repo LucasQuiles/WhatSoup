@@ -1,0 +1,6 @@
+# Direct inputs for the host quality profile. Resolve with the exact command in
+# requirements/python/README.md; the lock files, not this input, are installed.
+pytest==8.3.5
+pytest-cov==6.0.0
+hypothesis==6.155.3
+ruff==0.15.10

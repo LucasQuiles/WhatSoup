@@ -1304,7 +1304,7 @@ describe('quality workflow composition', () => {
   });
 
   it('uses the shared quality installer before Python-backed gates run', () => {
-    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
+    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup CPython 3.13.16');
     const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
     const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
 
@@ -1312,7 +1312,8 @@ describe('quality workflow composition', () => {
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
-    expect(qualityWorkflow).toContain("python-version: '3.12'");
+    expect(qualityWorkflow).toContain("python-version: '3.13.16'");
+    expect(qualityWorkflow).toContain('name: Verify locked Python runtime');
     expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
     expect(qualityWorkflow).not.toContain('Install Python and Linux quality prerequisites');
     expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
@@ -1333,7 +1334,7 @@ describe('quality workflow composition', () => {
     expect(compatibility).not.toContain('coverage:check');
     expect(compatibility).not.toContain('guard:');
     expect(compatibility).not.toContain('Playwright');
-    expect(compatibility).not.toContain('Setup Python');
+    expect(compatibility).toContain('Setup CPython 3.13.16');
     expect(compatibility).not.toContain('test-integrity');
     expect(compatibility).not.toContain('ci-disk-reclaim');
   });

@@ -91,7 +91,7 @@ if (!hasLocalProvider) {
     + '\n    model  ($WHATSOUP_WHISPER_CPP_MODEL, else the default in whisper-cpp.ts)'
     + `\n      resolved to ${WHISPER_CPP_MODEL} — ${existsSync(WHISPER_CPP_MODEL) ? 'present' : 'MISSING'}`
     + `\n  faster-whisper = ${fasterWhisperUsable ? 'usable' : 'NOT USABLE'}`
-    + `\n    python ($WHATSOUP_FASTER_WHISPER_PYTHON, else ${FASTER_WHISPER_VENV_ROOT}/bin/{python3.12,python3,python}) = ${pythonPath ?? 'NOT FOUND'}`
+    + `\n    python ($WHATSOUP_FASTER_WHISPER_PYTHON, else ${FASTER_WHISPER_VENV_ROOT}/bin/{python3.13,python3,python}) = ${pythonPath ?? 'NOT FOUND'}`
     + `\n    wrapper script ${FASTER_WHISPER_SCRIPT_PATH} — ${existsSync(FASTER_WHISPER_SCRIPT_PATH) ? 'present' : 'MISSING'}`,
   );
 }

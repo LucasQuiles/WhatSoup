@@ -153,9 +153,9 @@ whatsoup_capability_records() {
   [ "$profile" = "runtime" ] && return 0
 
   if [ "$platform" = "darwin" ]; then
-    printf 'python|required|python3.12|minimum:3.12|python@3.12|python3 python3-venv|python python-pip|Install Python 3.12 with venv support.\n'
+    printf 'python|required|python3.13|minimum:3.13|python@3.13|python3.13 python3.13-venv|python python-pip|Install Python 3.13 with venv support.\n'
   else
-    printf 'python|required|python3.12|minimum:3.12|python@3.12|python3 python3-venv|python python-pip|Install Python 3.12 with venv support.\n'
+    printf 'python|required|python3.13|minimum:3.13|python@3.13|python3.13 python3.13-venv|python python-pip|Install Python 3.13 with venv support.\n'
   fi
   printf 'rg|required|rg|command|ripgrep|ripgrep|ripgrep|Install ripgrep.\n'
   printf 'zsh|required|zsh|command|zsh|zsh|zsh|Install zsh.\n'

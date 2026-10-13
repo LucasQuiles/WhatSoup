@@ -9,6 +9,8 @@ export WHATSOUP_CAPABILITY_ROOT
 . "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/host-capabilities.sh"
 # shellcheck source=deploy/lib/bounded-exec.sh
 . "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/bounded-exec.sh"
+# shellcheck source=deploy/lib/python-lock-policy.sh
+. "$WHATSOUP_CAPABILITY_ROOT/deploy/lib/python-lock-policy.sh"
 
 # Budgets (seconds) for the three unbounded network steps. A stalled mirror or a
 # held dpkg lock must fail fast and legibly instead of silently inheriting the
@@ -208,20 +210,19 @@ case "$manager" in
 esac
 
 if [ "$profile" = "quality" ] || [ "$profile" = "release" ]; then
-  CAP_STATUS=available
-  CAP_VERSION=""
-  CAP_DETAIL=""
-  whatsoup_resolve_python312 || {
-    echo "host dependency installer: Python 3.12 or newer was not found after installation" >&2
-    exit 1
-  }
-  whatsoup_probe_python
-  [ "$CAP_STATUS" = "available" ] || {
-    echo "host dependency installer: Python 3.12 or newer is required" >&2
+  base_python=""
+  for python_candidate in python3.13 python3; do
+    if whatsoup_resolve_executable "$python_candidate" \
+      && whatsoup_require_locked_python "$CAP_PATH"; then
+      base_python="$CAP_PATH"
+      break
+    fi
+  done
+  [ -n "$base_python" ] || {
+    echo "host dependency installer: CPython $WHATSOUP_LOCKED_PYTHON_VERSION is required after installation" >&2
     exit 1
   }
 
-  base_python="$CAP_PATH"
   venv_root="$(whatsoup_quality_venv_root)"
   mkdir -p "$(dirname "$venv_root")" || exit 1
   "$base_python" -m venv "$venv_root" >&2 || exit 1
@@ -231,7 +232,8 @@ if [ "$profile" = "quality" ] || [ "$profile" = "release" ]; then
     echo "host dependency installer: managed venv did not create an executable Python" >&2
     exit 1
   }
-  whatsoup_bounded_install "$WHATSOUP_PIP_INSTALL_TIMEOUT" "pip install" "$venv_python" -m pip install pytest pytest-cov hypothesis ruff==0.15.10
+  whatsoup_bounded_install "$WHATSOUP_PIP_INSTALL_TIMEOUT" "hash-locked Python dependencies" \
+    whatsoup_install_locked_requirements "$venv_python" "$WHATSOUP_CAPABILITY_ROOT" quality
 fi
 
 if ! PATH="$(whatsoup_quality_venv_root)/bin:$PATH" \

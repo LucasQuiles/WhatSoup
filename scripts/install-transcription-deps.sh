@@ -24,6 +24,10 @@ for brew_bin in /opt/homebrew/bin /usr/local/bin; do
 done
 export PATH
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=deploy/lib/python-lock-policy.sh
+. "$REPO_ROOT/deploy/lib/python-lock-policy.sh"
+
 ROOT="$HOME/.local/share/whatsoup"
 VENV="$ROOT/transcription-venv"
 MODELS="$ROOT/models"
@@ -64,13 +68,17 @@ sha256_matches() {
 
 # Resolve a Python that can build the venv. Candidate loop rather than a
 # hardcoded path so this works on Linux, Intel macOS, and Apple Silicon without
-# requiring the python@3.12 formula to live at one specific prefix.
+# requiring the python@3.13 formula to live at one specific prefix. The lock
+# policy qualifies both implementation and patch version before the candidate
+# can create or reuse the managed venv.
 resolve_python() {
   local candidates=() candidate
   [ -n "${WHATSOUP_TRANSCRIPTION_PYTHON:-}" ] && candidates+=("$WHATSOUP_TRANSCRIPTION_PYTHON")
-  candidates+=(python3.12 python3)
+  candidates+=(python3.13 python3)
   for candidate in "${candidates[@]}"; do
-    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import venv' >/dev/null 2>&1; then
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'import venv' >/dev/null 2>&1 \
+      && whatsoup_require_locked_python "$candidate"; then
       command -v "$candidate"
       return 0
     fi
@@ -85,18 +93,18 @@ mkdir -p "$FW_MODEL_DIR" "$WCPP_MODEL_DIR"
 # died under `set -e` with "command not found", which tells a Linux operator
 # nothing about what to install.
 if command -v brew >/dev/null 2>&1; then
-  brew install ffmpeg whisper-cpp python@3.12
+  brew install ffmpeg whisper-cpp python@3.13
 else
   missing=()
   command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
   # whisper.cpp ships its CLI under either name depending on version/packaging.
   command -v whisper-cli >/dev/null 2>&1 || command -v whisper-cpp >/dev/null 2>&1 \
     || missing+=("whisper-cpp (whisper-cli)")
-  resolve_python >/dev/null || missing+=("python3.12 (or python3 with venv)")
+  resolve_python >/dev/null || missing+=("CPython 3.13.16 with venv")
   if [ ${#missing[@]} -gt 0 ]; then
     echo "Homebrew is not available and these dependencies are missing: ${missing[*]}" >&2
     echo "Install them with your platform's package manager, for example:" >&2
-    echo "  Debian/Ubuntu: sudo apt-get install -y ffmpeg python3.12-venv" >&2
+    echo "  Debian/Ubuntu: sudo apt-get install -y ffmpeg python3.13 python3.13-venv" >&2
     echo "  Alpine:        sudo apk add ffmpeg python3" >&2
     echo "whisper.cpp is not packaged on most distros — build it from source:" >&2
     echo "  https://github.com/ggerganov/whisper.cpp#quick-start" >&2
@@ -106,7 +114,7 @@ else
 fi
 
 if ! PYTHON_BIN="$(resolve_python)"; then
-  echo "No usable Python found (tried \$WHATSOUP_TRANSCRIPTION_PYTHON, python3.12, python3)" >&2
+  echo "No usable CPython $WHATSOUP_LOCKED_PYTHON_VERSION found (tried \$WHATSOUP_TRANSCRIPTION_PYTHON, python3.13, python3)" >&2
   exit 1
 fi
 
@@ -114,11 +122,7 @@ if [ ! -d "$VENV" ]; then
   "$PYTHON_BIN" -m venv "$VENV"
 fi
 
-"$VENV/bin/python" -m pip install --upgrade pip
-"$VENV/bin/python" -m pip install \
-  "faster-whisper==$FW_VERSION" \
-  "huggingface-hub==$HF_VERSION" \
-  "ctranslate2==$CTRANS_VERSION"
+whatsoup_install_locked_requirements "$VENV/bin/python" "$REPO_ROOT" transcription
 
 if ! sha256_matches "$GGML_SMALL_PATH" "$EXPECTED_GGML_SMALL_SHA256"; then
   rm -f "$GGML_SMALL_PATH"
