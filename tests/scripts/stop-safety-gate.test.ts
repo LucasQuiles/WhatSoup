@@ -113,6 +113,22 @@ describe('stop-safety gate', () => {
     expect(verdict.liveTurns.staleIgnored).toBe(3);
   });
 
+  // #3703: the 15-minute horizon must not silently exclude an actually active
+  // older turn. q instance, 2026-10-13: group inbounds 87114, 87145 and 87146
+  // stayed open 16-22 min while their turns progressed. At minute 20 such a row is
+  // `processing` and counted only in staleIgnored, so the stop is allowed and
+  // the live turn is killed. RED until the gate can tell it from wedged debt.
+  it.fails('does NOT allow a stop while an older open turn may still be active (#3703 horizon)', () => {
+    const { dbPath, db } = createFixtureDb();
+    insertInbound(db, 'processing', 20 * 60);
+    db.close();
+
+    const verdict = inspectStopSafety(dbPath);
+
+    expect(verdict.decision).not.toBe('allow');
+    expect(verdict.ok).toBe(false);
+  });
+
   it('counts every open disposition as live, not just processing', () => {
     const { dbPath, db } = createFixtureDb();
     insertInbound(db, 'pending', 10);
