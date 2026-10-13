@@ -3362,9 +3362,10 @@ npm run guard:node-pin-consistency
 The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
 The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
 subtree, and APT-root indirection assignments, including both `ENV` forms and `ARG` default
-declarations. This is a deliberately narrow static invariant,
-not a shell interpreter: an ambiguous new descriptor path is rejected until the invariant and its
-behavior test are extended together.
+declarations. Active Dockerfile instructions may not use `$` expansion or backtick command
+substitution until a reviewed parser and behavior test explicitly support them. This is a
+static drift invariant, not proof of arbitrary shell semantics: ambiguous new paths or expansion
+forms are rejected until the invariant and its behavior test are extended together.
 
 CI also checks that both Debian snapshot `Release` files remain available before it builds.
 Run the network check when the environment can reach the snapshot service:

@@ -540,6 +540,83 @@ describe('node-pin consistency check', () => {
     });
   });
 
+  it('rejects a root-prefix build argument composed into an APT descriptor path', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ARG ROOT=/\nRUN cp /tmp/replacement.list "\${ROOT}etc/apt/sources.list"\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects split-token variables composed into an APT descriptor path', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ARG ROOT=/\nARG ETC=etc\nARG APT=apt\nRUN cp /tmp/replacement.list "\${ROOT}\${ETC}/\${APT}/sources.list"\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects backtick command substitution in an active Dockerfile instruction', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN printf '%s\\n' \`unreviewed-command\` > /tmp/build-marker\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
+  it('rejects a variable-driven overwrite appended to the approved bootstrap', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    const dockerfile = readFileSync(dockerfilePath, 'utf8')
+      .replace(
+        "RUN printf '%s\\n' \\",
+        'ARG ROOT=/\\nARG APT_TARGET="\\${ROOT}etc/apt/sources.list"\\nRUN printf \'%s\\n\' \\\\',
+      )
+      .replace(
+        '&& rm -rf /etc/apt/sources.list.d/*',
+        '&& rm -rf /etc/apt/sources.list.d/* && cp /tmp/replacement.list "$APT_TARGET"',
+      );
+    writeFileSync(dockerfilePath, dockerfile, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    });
+  });
+
   it('rejects a package snapshot whose immutable identifier is unavailable', () => {
     const dir = makeFixture({
       aptSnapshot: 'not-a-snapshot',

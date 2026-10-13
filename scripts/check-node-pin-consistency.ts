@@ -336,6 +336,7 @@ const APT_DIRECTORY_CHANGE_PATTERN = /(?:^|[;&|()]\s*)\s*(?:cd|pushd)\s+(?:--\s*
 const RELATIVE_APT_DESCRIPTOR_PATTERN = /(?:^|[\s;'"=])(?:\.\/)?(?:etc\/)?apt\/sources\.list(?:\.d(?:\/[A-Za-z0-9_.-]+)?|(?:[\s'";)&|]|$))/im;
 const APT_ROOT_ASSIGNMENT_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 const APT_ROOT_DECLARATION_PATTERN = /^\s*(?:ENV|ARG)\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]?\/etc(?:[/'"\s;)&|]|$)/im;
+const UNSUPPORTED_DOCKERFILE_EXPANSION_PATTERN = /[$`]/;
 
 function descriptorPaths(instruction: string): string[] {
   return [...instruction.matchAll(APT_SOURCE_DESCRIPTOR_PATH_PATTERN)].map((match) => match[0] ?? '');
@@ -378,6 +379,10 @@ function hasUnsafeAptSourceMutation(instructions: DockerfileInstruction[]): bool
     return APT_DIRECTORY_CHANGE_PATTERN.test(shell)
       || APT_ROOT_ASSIGNMENT_PATTERN.test(shell);
   });
+}
+
+function hasUnsupportedDockerfileExpansion(instructions: DockerfileInstruction[]): boolean {
+  return instructions.some((instruction) => UNSUPPORTED_DOCKERFILE_EXPANSION_PATTERN.test(instruction.text));
 }
 
 function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
@@ -453,6 +458,13 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
       cwd,
       'docker/Dockerfile',
       'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    ));
+  }
+  if (hasUnsupportedDockerfileExpansion(activeInstructions)) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/Dockerfile',
+      'Dockerfile may not use variable or command expansion until the static invariant is extended',
     ));
   }
   const expectedDefinitions = expectedSources.map((source) => `deb [check-valid-until=no] ${source}`);
