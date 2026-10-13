@@ -1575,6 +1575,16 @@
       "owner": "src/core/ingest.ts",
       "test": "tests/core/admission-contract.test.ts"
     },
+    "inbound_no_consumer": {
+      "disposition": "local_non_dispatch_rate_limited_warning_no_upstream_loss_claim",
+      "owner": "src/core/inbound-observation.ts",
+      "test": "tests/core/inbound-observation.test.ts"
+    },
+    "inbound_store_failed": {
+      "disposition": "local_non_retention_rate_limited_warning_no_upstream_loss_claim",
+      "owner": "src/core/inbound-observation.ts",
+      "test": "tests/core/inbound-observation.test.ts"
+    },
     "scheduler_delinked_send_held": {
       "disposition": "delink_hold_latch_until_relink_restores_delivery",
       "owner": "src/core/scheduler.ts",

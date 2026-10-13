@@ -27,6 +27,7 @@ import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
 import { startShadowGateAttempt, warmShadowGate } from './shadow-gate-adapter.ts';
+import { observeInbound } from './inbound-observation.ts';
 
 const log = createChildLogger('ingest');
 
@@ -392,7 +393,10 @@ export function createIngestHandler(
         //    For LID DMs, resolve to the phone-based conversation key so messages from
         //    the same person (via LID or JID) share one conversation thread.
         const storedMessage = persistIncomingMessage(db, msg);
-        if (!storedMessage) return;
+        if (!storedMessage) {
+          observeInbound(config.botName, 'ingest.store_failed');
+          return;
+        }
         const { conversationKey } = storedMessage;
         if (!storedMessage.isNew) {
           log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
@@ -529,6 +533,9 @@ export function createIngestHandler(
             );
           } catch (err) {
             shadowAttempt?.journalFailed();
+            // Stored above, but not journaled or dispatched. Control flow and
+            // recovery ownership stay as before; this only records it.
+            observeInbound(config.botName, 'ingest.stored_not_admitted');
             throw err;
           }
           shadowAttempt?.settle(seq);

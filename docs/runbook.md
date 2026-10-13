@@ -551,6 +551,15 @@ The authenticated diagnostic body (excerpt):
       "invalid": 0, "writeErrors": 0, "journalFailures": 0
     }
   },
+  "inbound_observations": {
+    "counts": {
+      "transport.no_consumer": 0, "transport.stale_socket": 0,
+      "transport.unsupported_upsert_type": 3, "transport.parser_refused": 12,
+      "ingest.store_failed": 0, "ingest.stored_not_admitted": 0
+    },
+    "alerts": { "durably_queued": 0, "captured": 0, "legacy_accepted_unconfirmed": 0, "failed": 0, "rate_limited": 0 },
+    "recorder_failures": 0
+  },
   "durability": {
     "pendingOutbound": 0,
     "quarantinedOutbound": 0,
@@ -560,6 +569,8 @@ The authenticated diagnostic body (excerpt):
 ```
 
 `shadowGate` is `{ "mode": "off" }` unless the shadow gate is enabled; see [Shadow Gate](#shadow-gate) → "Live status" for every field and `recorder` value.
+
+`inbound_observations` is advisory: it never feeds `status`, `status_reasons` or `degradation_causes`. It counts, per closed reason and since process start, inbound messages that a transport or ingest exit ended locally without storing or dispatching them. A count is an observed attempt, not a unique lost message, and makes no claim about delivery upstream. Transport reasons are observed before storage, so a redelivered message can be counted again; a delivery the database recognises as a duplicate is never counted, and queue displacement keeps its own `ingest_queue_displacement` alert. `transport.no_consumer` and `ingest.store_failed` also raise a warning alert under the fixed sources `inbound_no_consumer` and `inbound_store_failed`. An accepted emission (`durably_queued`, `captured` or `legacy_accepted_unconfirmed`) suppresses further alerts for that reason for 15 minutes; a `failed` or thrown emission does not, so the next observation retries. `alerts` counts each returned emission status plus `rate_limited` observations inside an accepted window. `ingest.stored_not_admitted` is a stored message whose journal write failed. `recorder_failures` counts alert or log steps that threw; a broken logger does not stop the alert.
 
 `model_advisories` carries the latest model-currency check (`checkedAt` is `null` until the first check completes; `advisories` is empty when every configured model is current). Levels: `upgrade-available`, `deprecated` (with `retiresAt`), `retired`. See `docs/configuration.md` → "Model currency advisories" for the full behavior.
 
