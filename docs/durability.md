@@ -1131,8 +1131,11 @@ restores the episode as `operator-held` with `probe-outcome-unknown`; it does
 not repeat the unknown probe or replay accepted work. Malformed or unreadable
 failed-provider evidence is also held as `unavailable`. Its raw stored value is
 quarantined for reconciliation and is never cleared or overwritten as an empty
-failed-entry list by automatic restore. Returning to primary requires a fresh,
-independent validated probe through the operator recovery control.
+failed-entry list by automatic restore. While it is unavailable, no new turn
+is routed to either provider: health reports `effectiveProvider: unavailable`
+and the operator must reconcile the retained row before recovery can resume.
+Returning to primary requires a fresh, independent validated probe through the
+operator recovery control.
 
 ---
 

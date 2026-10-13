@@ -122,9 +122,9 @@ export interface Runtime {
     fallbackChainExhausted?: boolean;
     failedEntryCount?: number;
   };
-  /** Admin override: force a fallback window of the given duration (or the default). */
+  /** Admin override: arm an initial fallback window only when no episode exists. */
   forceFallback?(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string };
-  /** Admin override: end any active fallback window immediately. Idempotent. */
+  /** Admin override: idempotent only when no fallback episode exists. */
   disableFallback?(): { ok: true } | { ok: false; reason: string };
   /** Hold automatic primary recovery while preserving the fallback route. */
   holdFallbackRecovery?(): { ok: true } | { ok: false; reason: string };

@@ -152,7 +152,7 @@ type FallbackView = {
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
-    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'server-error',
+    reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): unknown;
   deactivateProviderFallback(reason: string): void;
   disableFallback(): { ok: true } | { ok: false; reason: string };
@@ -468,6 +468,24 @@ describe('AgentRuntime — fallback recovery-probe stall cap', () => {
     expect(v.fallbackWindow.activeUntil).toBe(rearmedWindow);
     expect(v.effectiveProvider).toBe('opencode-cli');
   });
+
+  it.each(['model-unavailable', 'server-error'] as const)(
+    '(g2c) requires fresh primary proof before %s can leave an expired fallback window',
+    async (reason) => {
+      const runtime = makeRuntime();
+      const v = view(runtime);
+      const probe = vi.fn(() => false);
+      v.probePrimaryProviderRecovered = probe as unknown as () => Promise<boolean>;
+      v.activateProviderFallback(new Date(Date.now() + 1_000), reason);
+
+      await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+
+      expect(probe).toHaveBeenCalledTimes(1);
+      expect(v.effectiveProvider).toBe('opencode-cli');
+      expect(v.fallbackWindow.activeUntil).not.toBeNull();
+      expect(v.getFallbackState().recoveryState).toBe('active');
+    },
+  );
 
   it('(g3) counts failed early-window probes toward the same bounded recovery episode', async () => {
     const runtime = makeRuntime();

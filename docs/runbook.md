@@ -1855,25 +1855,25 @@ After `ALLOW`, any messages the user sent while pending are replayed automatical
 Agent instances with `agentOptions.fallbackProvider` or `agentOptions.fallbacks` configured (see [docs/configuration.md §Provider fallback behavior](configuration.md#provider-fallback-behavior)) accept three more admin commands. Like `ALLOW`/`BLOCK`, they are matched case-insensitively and only from an admin phone in a direct chat — never in groups:
 
 ```
-FALLBACK ON          # force a fallback window for the default 5 hours
+FALLBACK ON          # force an initial fallback window for the default 5 hours
 FALLBACK ON 30m      # force a 30-minute window (<n>m or <n>h, positive integer)
 FALLBACK ON 2h       # force a 2-hour window
-FALLBACK OFF         # end the window now — new sessions use the primary provider
+FALLBACK OFF         # idempotent only when no fallback episode exists
 FALLBACK KILL        # hold automatic recovery while keeping fallback routing
 FALLBACK RETRY       # start a new bounded primary-recovery episode
 FALLBACK RECOVER     # probe primary and reactivate it only with fresh proof
 FALLBACK STATUS      # report effective provider, window expiry, turn counters
 ```
 
-- `FALLBACK ON` sets the window **exactly** to the requested duration — unlike usage-limit activation it may *shorten* an already-active window (operator intent wins). Durations are clamped to the allowed bounds (1 minute–24 hours) and the reply notes when clamping occurred. With no duration, the window is 5 hours. Forced windows go through the same hardened path as usage-limit windows: persisted across restarts, with credential pre-flight alerts.
-- `FALLBACK OFF` reverts new sessions to the primary provider immediately only while recovery is active. It refuses terminal and operator-held episodes because verified recovery proof is required.
+- `FALLBACK ON` starts an initial fallback window only when no recovery episode exists. It refuses active, terminal, operator-held, and unavailable episodes; `FALLBACK RETRY` is the only control that begins a new bounded recovery episode. Durations are clamped to the allowed bounds (1 minute–24 hours) and the reply notes when clamping occurred. With no duration, the window is 5 hours. Forced windows go through the same hardened path as usage-limit windows: persisted across restarts, with credential pre-flight alerts.
+- `FALLBACK OFF` refuses every existing fallback recovery episode. Only `FALLBACK RECOVER` with fresh independent primary proof, or a validated automatic recovery probe, can return new sessions to the primary provider. It is idempotent when no fallback episode exists.
 - `FALLBACK KILL` durably stops automatic primary probes and leaves the fallback route active as `operator-held`. It is the operator stop control for a recovery episode.
 - `FALLBACK RETRY` durably starts a new bounded recovery episode: automatic recovery stops after 12 failed probes or 24 elapsed hours from the new episode start. It changes routing and recovery state only; it never replays accepted work.
 - `FALLBACK RECOVER` performs one fresh independent primary probe. Only validated evidence returns new sessions to primary. A failed or interrupted proof leaves the fallback route held. A late probe result cannot override a later KILL or RETRY action.
 - `FALLBACK STATUS` replies with the effective provider, the window expiry as an ISO timestamp (`none` when on the primary), the process-local fallback turn counters (`served` / `empty`, reset on restart), recovery state and terminal reason, probe attempts, activations/reverts (process-lifetime window counts), cost (accumulated `fallbackWindowCostUsd` when non-zero), and the ordered fallback chain readiness when the configured chain has more than one entry. `terminal`, `operator-held`, and `unavailable` are distinct states; `unavailable` means failed-provider evidence needs reconciliation and its stored bytes are retained. Fields from `getFallbackState()` that older runtimes do not expose are omitted gracefully.
 - `FALLBACK` or `FALLBACK HELP` replies with a one-line usage summary of these commands (support varies by instance type).
 
-**Canary test:** `FALLBACK ON 5m` is the operator's way to live-test the fallback provider end-to-end — force a short window, send the bot a message, confirm a real reply arrives and `FALLBACK STATUS` shows `served` incrementing while `empty` stays at 0, then let the window lapse or send `FALLBACK OFF`.
+**Canary test:** `FALLBACK ON 5m` is the operator's way to live-test the fallback provider end-to-end — force a short window, send the bot a message, confirm a real reply arrives and `FALLBACK STATUS` shows `served` incrementing while `empty` stays at 0, then use `FALLBACK RECOVER` and wait for fresh primary proof before primary routing resumes.
 
 Notes: on instances whose runtime has no fallback support (e.g. chat-mode), the bot replies "Fallback control not supported on this instance." A malformed duration (`FALLBACK ON 0m`, `FALLBACK ON tomorrow`) is not recognized as an admin command at all — the text falls through to normal message handling.
 

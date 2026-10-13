@@ -7,7 +7,6 @@
  * These functions were the cleanest slice: none is re-exported, none appears in
  * `docs/public-surface.md`, and each is a total function of its arguments.
  */
-import { fallbackRequiresIndependentProbe } from './fallback-config.ts';
 import type { UserTemplateId } from './response-registry.ts';
 import type { ProviderFallbackReason } from './runtime-turn-result-handler.ts';
 
@@ -56,24 +55,11 @@ export function isProviderFallbackReason(value: unknown): value is ProviderFallb
 }
 
 export function fallbackRequiresPrimaryProbe(reason: ProviderFallbackReason): boolean {
-  // Recovery-probe gating is intentionally BROADER than independent-provider
-  // routing (`fallbackRequiresIndependentProbe`, used at the routing call-site).
-  // Usage/rate limits carry an unreliable reset estimate — e.g. a weekly limit's
-  // "resets 9am" is parsed as a daily clock time — so we must re-probe the
-  // primary and revert the moment it recovers rather than blind-waiting for the
-  // window to elapse. Routing semantics are unchanged; only the recovery path widens.
-  //
-  // unknown-terminal-repeated joins the recovery-probe set (NOT the
-  // independent-probe set): an unclassified terminal error has NO parseable
-  // reset estimate, so without a recovery probe the window blind-waits. It is
-  // deliberately kept OUT of fallbackRequiresIndependentProbe so an operator's
-  // same-provider downgrade rung (e.g. claude-cli/opus) stays selectable.
-  return (
-    fallbackRequiresIndependentProbe(reason) ||
-    reason === 'usage-limit' ||
-    reason === 'rate-limit' ||
-    reason === 'unknown-terminal-repeated'
-  );
+  // Every automatic return to the primary needs fresh independent evidence.
+  // The failure reason can affect fallback selection, but elapsed time alone
+  // never proves that the primary is healthy again.
+  void reason;
+  return true;
 }
 
 export function templateForFallbackReason(reason: ProviderFallbackReason): UserTemplateId {

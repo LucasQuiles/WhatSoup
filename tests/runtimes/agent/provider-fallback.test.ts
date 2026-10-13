@@ -3,8 +3,8 @@
  *
  * Covers the pure reset-time parser plus the AgentRuntime fallback state
  * machine: activation only when a fallback provider is configured,
- * effectiveProvider/effectiveModel flipping during the window, auto-revert
- * after the window elapses, window extension (idempotent activation), and
+ * effectiveProvider/effectiveModel flipping during the window, proof-gated
+ * recovery after expiry, window extension (idempotent activation), and
  * cleanup on shutdown. The state machine fields/methods are private, so the
  * tests reach them through bracket access on the constructed runtime.
  *
@@ -356,15 +356,16 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(until - before).toBe(5 * 60 * 60 * 1000);
   });
 
-  it('auto-reverts to the primary provider after the window elapses', () => {
+  it('requires a fresh primary proof before server-error expiry returns to the primary', async () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
-    // server-error is a window-elapse reason (NOT recovery-probe-gated, unlike
-    // usage/rate/auth/empty/probe), so it reverts purely on window expiry.
+    const proof = vi.fn(() => true);
+    view(runtime).probePrimaryProviderRecovered = proof;
     view(runtime).activateProviderFallback(null, 'server-error');
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
 
-    // Advance past the 5h default window.
-    vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
+    // Expiry invokes a proof rather than trusting elapsed time alone.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
+    expect(proof).toHaveBeenCalledTimes(1);
     expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).effectiveProvider).toBe('claude-cli');
   });
@@ -446,7 +447,9 @@ describe('AgentRuntime — provider fallback state machine', () => {
       expect(v.effectiveProvider).toBe('opencode-cli');
       expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
 
-      await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
+      // One failed early probe leaves the bounded episode active. Do not run
+      // through all twelve attempts here: terminal episodes require RETRY.
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
       expect(v.effectiveProvider).toBe('opencode-cli');
       expect(v.fallbackWindow.activeUntil).not.toBeNull();
 
@@ -474,7 +477,7 @@ describe('AgentRuntime — provider fallback state machine', () => {
       expect(v.effectiveProvider).toBe('opencode-cli');
       expect(v.getFallbackState().fallbackRecoveryProbeRequired).toBe(true);
 
-      await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
       expect(v.effectiveProvider).toBe('opencode-cli');
       expect(v.fallbackWindow.activeUntil).not.toBeNull();
 
@@ -1085,6 +1088,7 @@ type PersistenceView = {
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
   deactivateProviderFallback(reason: string): void;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   restorePersistedFallbackWindow(): void;
 };
 
@@ -1128,7 +1132,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     expect(clearSpy).toHaveBeenCalled();
   });
 
-  it('restores a persisted future window, preserves original activatedAt, and auto-reverts', () => {
+  it('restores a persisted future window, preserves original activatedAt, and requires proof before returning primary', async () => {
     // Verify armFallbackWindow re-saves with the original activatedAt (not Date.now())
     // so the persisted record retains provenance across restarts.
     const now = Date.now();
@@ -1143,6 +1147,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeEntryProvider: null,
       activeEntryModel: null,
       failedKeys: [],
+      recoveryState: 'active',
+      recoveryProbeInFlight: false,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi
@@ -1159,6 +1165,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
 
     persistView(runtime).restorePersistedFallbackWindow();
     expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+    const proof = vi.fn(() => true);
+    persistView(runtime).probePrimaryProviderRecovered = proof;
 
     // The re-save must carry the original activatedAt and the original reason
     // (not 'restored' — the restore event is captured in the log line, not
@@ -1171,7 +1179,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       }),
     );
 
-    vi.advanceTimersByTime(61 * 60_000);
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(proof).toHaveBeenCalledTimes(1);
     expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
     expect(clearSpy).toHaveBeenCalled();
   });
@@ -1187,6 +1196,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeEntryProvider: null,
       activeEntryModel: null,
       failedKeys: [],
+      recoveryState: 'active',
+      recoveryProbeInFlight: false,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
@@ -1216,6 +1227,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeEntryProvider: null,
       activeEntryModel: null,
       failedKeys: [],
+      recoveryState: 'active',
+      recoveryProbeInFlight: false,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const clearSpy = vi
@@ -1281,6 +1294,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
       activeEntryProvider: null,
       activeEntryModel: null,
       failedKeys: [],
+      recoveryState: 'active',
+      recoveryProbeInFlight: false,
     });
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
     const saveSpy = vi
@@ -1322,7 +1337,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
 
     // First activation — record the activatedAt it persists.
     persistView(runtime).activateProviderFallback(null);
-    const firstCall = saveSpy.mock.calls[0];
+    const firstCall = saveSpy.mock.calls.at(-1);
     if (!firstCall) throw new Error('saveFallbackState was not called on first activation');
     const originalActivatedAt = firstCall[1].activatedAt;
     const firstActiveUntil = firstCall[1].activeUntil;
@@ -1333,7 +1348,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     vi.advanceTimersByTime(60 * 60 * 1000);
     persistView(runtime).activateProviderFallback(new Date(Date.now() + 20 * 60 * 60 * 1000));
 
-    const secondCall = saveSpy.mock.calls[1];
+    const secondCall = saveSpy.mock.calls.at(-1);
     if (!secondCall) throw new Error('saveFallbackState was not called on second activation');
     expect(secondCall[1].activatedAt).toBe(originalActivatedAt);
     expect(secondCall[1].activeUntil).toBeGreaterThan(firstActiveUntil);

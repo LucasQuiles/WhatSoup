@@ -350,7 +350,7 @@ export async function handleFallbackCommand(
 
   if (cmd.sub === 'help') {
     await reply(
-      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force backup-provider window; FALLBACK OFF — revert while active recovery permits it; FALLBACK KILL — hold recovery on the fallback route; FALLBACK RETRY — begin a new bounded recovery episode; FALLBACK RECOVER — require fresh primary proof; FALLBACK STATUS — current provider and recovery state. (support varies by instance type)',
+      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force a backup window only when no episode exists; FALLBACK OFF — refuses to leave an existing recovery episode; FALLBACK KILL — hold recovery on the fallback route; FALLBACK RETRY — begin the only new bounded recovery episode; FALLBACK RECOVER — require fresh primary proof before primary routing; FALLBACK STATUS — current provider and recovery state. (support varies by instance type)',
     );
     return;
   }

@@ -4923,6 +4923,21 @@ export class AgentRuntime implements Runtime {
         )
       : undefined;
 
+    // Corrupt failed-provider evidence means the persisted route cannot be
+    // trusted. Refuse before session creation so neither primary nor fallback
+    // runs on a guessed route; the raw DB record remains for reconciliation.
+    if (this.fallback.isRoutingQuarantined()) {
+      this.sendDirect(
+        chatJid,
+        'Service is temporarily unavailable while provider recovery evidence is reconciled. Please try again later.',
+        'status',
+      );
+      if (this.durability && msg.inboundSeq !== undefined) {
+        this.durability.markInboundSkipped(msg.inboundSeq, 'fallback_recovery_evidence_unavailable');
+      }
+      return;
+    }
+
     // Substrate slice 1: propagate sender identity to every MCP session so
     // admin-gated substrate tools can distinguish the caller from the target
     // chat. In groups, msg.chatJid IS the group JID; without this propagation
@@ -9393,6 +9408,7 @@ export class AgentRuntime implements Runtime {
    * takes effect on the next auto-respawned or freshly created session.
    */
   private get effectiveProvider(): string {
+    if (this.fallback.isRoutingQuarantined()) return 'unavailable';
     const fallbackEntry = this.effectiveFallbackEntry;
     return fallbackEntry
       ? fallbackEntry.provider

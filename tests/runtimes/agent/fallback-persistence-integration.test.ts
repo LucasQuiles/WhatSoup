@@ -95,7 +95,7 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
 // ─── Imports after mocks ──────────────────────────────────────────────────────
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
-import type { Messenger } from '../../../src/core/types.ts';
+import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -110,8 +110,8 @@ function makeMessenger(): Messenger {
   } as unknown as Messenger;
 }
 
-function makeRuntime(db: Database): AgentRuntime {
-  return new AgentRuntime(db, makeMessenger(), 'integration-test', {
+function makeRuntime(db: Database, messenger: Messenger = makeMessenger()): AgentRuntime {
+  return new AgentRuntime(db, messenger, 'integration-test', {
     model: 'claude-opus-4-8[1m]',
   });
 }
@@ -165,7 +165,7 @@ describe('fallback persistence — real-DB integration', () => {
     }
   });
 
-  it('activate writes a row, restore reads it, expiry clears it', () => {
+  it('activate writes a row, restore reads it, and a successful expiry probe clears it', async () => {
     // Runtime A activates fallback — the DB must receive a real upsert.
     const runtimeA = makeRuntime(db);
     fbView(runtimeA).activateProviderFallback(null, 'model-unavailable');
@@ -181,14 +181,22 @@ describe('fallback persistence — real-DB integration', () => {
     expect(row!.reason).toBe('model-unavailable');
     expect(row!.activeUntil).toBeGreaterThan(Date.now());
 
+    // A process restart clears A's timers without deleting its durable row.
+    // Otherwise both live runtimes race to update the same singleton row at
+    // expiry, which is not a restart scenario.
+    await runtimeA.shutdown();
+
     // Runtime B over the same DB restores the window without any mocking.
     const runtimeB = makeRuntime(db);
     fbView(runtimeB).restorePersistedFallbackWindow();
     expect(fbView(runtimeB).effectiveProvider).toBe('opencode-cli');
+    const proof = vi.fn(() => true);
+    fbView(runtimeB).probePrimaryProviderRecovered = proof as unknown as () => Promise<boolean>;
 
-    // Advance past the default 5h window; the runtime must revert and
-    // the DB row must be deleted.
-    vi.advanceTimersByTime(5 * 60 * 60 * 1000 + 1);
+    // Expiry requests fresh primary proof. Only a successful proof may revert
+    // the runtime and clear the durable row.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000 + 1);
+    expect(proof).toHaveBeenCalledTimes(1);
     expect(fbView(runtimeB).effectiveProvider).toBe('claude-cli');
     expect(fbView(runtimeB).fallbackWindow.activeUntil).toBeNull();
 
@@ -289,5 +297,47 @@ describe('fallback persistence — real-DB integration', () => {
     expect(vB.getFallbackState().recoveryTerminalReason).toBe('attempt-limit');
     await vi.advanceTimersByTimeAsync(3 * 5 * 60 * 1000);
     expect(restartProbe).not.toHaveBeenCalled();
+  });
+
+  it('corrupt failed-provider evidence restores to an unavailable no-routing state and blocks a real turn before session creation', async () => {
+    const runtimeA = makeRuntime(db);
+    fbView(runtimeA).activateProviderFallback(null, 'auth-required');
+    const rawEvidence = '{malformed-failed-key-evidence';
+    db.raw.prepare(`UPDATE agent_fallback_state SET failed_keys_json = ? WHERE id = 1`).run(rawEvidence);
+
+    const messenger = makeMessenger();
+    const runtimeB = makeRuntime(db, messenger);
+    const vB = fbView(runtimeB);
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('unavailable');
+    expect(vB.getFallbackState().recoveryState).toBe('unavailable');
+    expect(vB.getFallbackState().recoveryTerminalReason).toBe('failed-provider-evidence-unavailable');
+    const persisted = db.raw.prepare(`SELECT failed_keys_json AS failedKeysJson FROM agent_fallback_state WHERE id = 1`)
+      .get() as { failedKeysJson: string };
+    expect(persisted.failedKeysJson).toBe(rawEvidence);
+
+    const internals = runtimeB as unknown as {
+      ensureSessionAndQueueSync(chatJid: string, mapKey?: string, actorJid?: string): void;
+    };
+    const ensure = vi.spyOn(internals, 'ensureSessionAndQueueSync').mockImplementation(() => {});
+    const blockedTurn: IncomingMessage = {
+      messageId: 'corrupt-fallback-evidence-turn',
+      chatJid: '15550001111@s.whatsapp.net',
+      senderJid: '15550001111@s.whatsapp.net',
+      senderName: 'test',
+      content: 'route this turn',
+      contentText: null,
+      contentType: 'text',
+      isFromMe: false,
+      isGroup: false,
+      mentionedJids: [],
+      timestamp: Math.floor(Date.now() / 1000),
+      quotedMessageId: null,
+      isResponseWorthy: true,
+    };
+    await runtimeB.handleMessage(blockedTurn);
+
+    expect(ensure).not.toHaveBeenCalled();
   });
 });
