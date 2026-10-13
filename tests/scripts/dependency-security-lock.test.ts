@@ -53,7 +53,11 @@ function parseExactVersion(version: unknown): ExactVersion | null {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(version);
   if (!match) return null;
 
-  const parsed = match.slice(1).map(Number) as ExactVersion;
+  const parsed: ExactVersion = [
+    Number(match[1]!),
+    Number(match[2]!),
+    Number(match[3]!),
+  ];
   return parsed.every(Number.isSafeInteger) ? parsed : null;
 }
 
