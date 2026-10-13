@@ -45,6 +45,7 @@ APPROVED_BOT_IDENTS=(
   "SoupBot QPI 1 <308864230+qpi-lab@users.noreply.github.com>"
   "SoupBot QPI 1 <310849274+LabRatQ@users.noreply.github.com>"
   "SoupBot QPI 2 <308865677+qpi-lab2@users.noreply.github.com>"
+  "Loops <341747946+l00pr@users.noreply.github.com>" # Machine account approved 2026-10-12.
   "dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>"
 )
 # The legacy `SoupBot <soupbot@users.noreply.github.com>` entry was removed
