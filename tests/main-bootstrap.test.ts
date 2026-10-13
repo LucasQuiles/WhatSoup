@@ -96,7 +96,7 @@ async function importMainWithMocks(options: {
   const existingPaths = new Set(options.existingPaths ?? []);
   const processOn = installProcessOnCapture();
   const logger = { ...singletonLoggerMock(), fatal: vi.fn() };
-  const dbRows = [
+  const dbRows: Array<Record<string, string>> = [
     { sender_jid: '15551230000@s.whatsapp.net', sender_name: 'Ada' },
   ];
   const db = {
@@ -375,7 +375,10 @@ async function importMainWithMocks(options: {
     RemoteMemoryLifecycle: vi.fn(function () {
       return remoteMemoryLifecycle;
     }),
-    RemoteMemoryLifecycleTimer: vi.fn(function () {
+    RemoteMemoryLifecycleTimer: vi.fn(function (
+      _lifecycle: unknown,
+      _providerFactory: () => unknown,
+    ) {
       return remoteMemoryLifecycleTimer;
     }),
     persistIntroSentFlag: vi.fn(),
@@ -886,7 +889,9 @@ describe('main bootstrap', () => {
       remoteMemoryApiKey: 'keyring-only-value',
       remoteMemoryApiKeyService: 'pinecone-instance-keyring',
     });
-    const providerFactory = h.RemoteMemoryLifecycleTimer.mock.calls[0]?.[1] as (() => unknown);
+    const providerFactory = h.RemoteMemoryLifecycleTimer.mock.calls[0]?.[1];
+    expect(providerFactory).toBeDefined();
+    if (!providerFactory) return;
 
     h.PineconeMemory.mockClear();
     const first = providerFactory();
