@@ -960,7 +960,7 @@ export class RuntimeFallbackCoordinator {
    *  state and deliberately does not replay accepted user work. */
   retryFallbackRecovery(): { ok: true } | { ok: false; reason: string } {
     if (this.host.fallbackWindow.recoveryState === 'unavailable') {
-      return { ok: false, reason: 'persisted failed-provider evidence is unavailable; reconcile it before retrying' };
+      return { ok: false, reason: 'persisted fallback recovery state is unavailable; reconcile it before retrying' };
     }
     if (this.host.fallbackWindow.activeUntil === null) return { ok: false, reason: 'no fallback episode is active' };
     const now = Date.now();
@@ -986,7 +986,7 @@ export class RuntimeFallbackCoordinator {
    *  may return routing to the primary; accepted work is never replayed here. */
   async recoverPrimaryFromFallback(): Promise<{ ok: true } | { ok: false; reason: string }> {
     if (this.host.fallbackWindow.recoveryState === 'unavailable') {
-      return { ok: false, reason: 'persisted failed-provider evidence is unavailable; reconcile it before recovery' };
+      return { ok: false, reason: 'persisted fallback recovery state is unavailable; reconcile it before recovery' };
     }
     if (this.host.fallbackWindow.activeUntil === null) return { ok: false, reason: 'no fallback episode is active' };
     const windowAtProbe = this.host.fallbackWindow.activeUntil;
@@ -1968,9 +1968,9 @@ export class RuntimeFallbackCoordinator {
         addFailedKey: (k) => this.host.fallbackChain.failedKeys.add(k),
         entryKeyFor: (p, m) => this.host.fallbackChain.entryKey({ provider: p, model: m ?? undefined }) },
       MAX_FALLBACK_WINDOW_MS, Date.now);
-    if (r.outcome === 'failed-key-evidence-unavailable') {
+    if (r.outcome === 'unavailable') {
       this.host.fallbackWindow.recoveryState = 'unavailable';
-      this.host.fallbackWindow.recoveryTerminalReason = 'failed-provider-evidence-unavailable';
+      this.host.fallbackWindow.recoveryTerminalReason = r.reason;
       this.host.fallbackWindow.recoveryProbeRequired = false;
       this.host.fallbackWindow.recoveryProbeInFlight = false;
       this.host.fallbackWindowRestored = false;
@@ -2007,15 +2007,20 @@ export class RuntimeFallbackCoordinator {
         failedKeys: failedKeysToPersistedKeys(this.host.fallbackChain.failedKeys),
         recoveryEpisodeStartedAt: this.host.fallbackWindow.recoveryEpisodeStartedAt ?? this.host.fallbackWindow.activatedAt ?? Date.now(),
         recoveryState: this.host.fallbackWindow.recoveryState === 'unavailable' ? 'operator-held' : this.host.fallbackWindow.recoveryState,
-        recoveryTerminalReason: this.host.fallbackWindow.recoveryTerminalReason === 'failed-provider-evidence-unavailable'
+        recoveryTerminalReason: this.host.fallbackWindow.recoveryState === 'unavailable'
           ? 'operator-killed'
-          : this.host.fallbackWindow.recoveryTerminalReason,
+          : this.host.fallbackWindow.recoveryTerminalReason as FallbackRecoveryTerminalReason | null,
         recoveryProbeInFlight: this.host.fallbackWindow.recoveryProbeInFlight,
       });
       return true;
     } catch (err) {
       log.warn({ err }, 'failed to persist fallback recovery state');
-      emitAlertChecked(this.host.instanceName, 'fallback_persist_failed', 'Failed to persist fallback recovery state', 'recovery_state=unavailable');
+      emitAlertChecked(
+        this.host.instanceName,
+        'fallback_persist_failed',
+        'Failed to persist fallback recovery state',
+        `recovery_state=unavailable until=${this.host.fallbackWindow.activeUntil === null ? 'unknown' : new Date(this.host.fallbackWindow.activeUntil).toISOString()} reason=${this.host.fallbackWindow.armReason ?? 'unknown'}`,
+      );
       return false;
     }
   }
@@ -2263,10 +2268,9 @@ export class RuntimeFallbackCoordinator {
     }
     if (!this.claimPrimaryRecoveryProbe()) return;
     // The probe spawns a child process; fire-and-forget with the result
-    // driving deactivate-or-extend in the resolution. While the probe is in
-    // flight (≤5 s) the window shows expired — acceptable: the previous
-    // spawnSync froze the WHOLE event loop for the same duration, forever on
-    // a dead auth primary.
+    // driving deactivate-or-extend in the resolution. While it is in flight,
+    // the armed window continues to route fallback so no session can use
+    // primary before fresh proof commits.
     const windowAtProbe = this.host.fallbackWindow.activeUntil;
     const episodeStartedAtProbe = this.host.fallbackWindow.recoveryEpisodeStartedAt;
     void this.probeAndEvaluateFallbackRecovery().then((decision) => {

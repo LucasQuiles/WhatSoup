@@ -503,7 +503,7 @@ describe('fallback chain selection — restore path', () => {
     );
   });
 
-  it('clears the persisted row and stays on the primary when the chain was emptied from config since persist', () => {
+  it('quarantines the persisted row when the chain was emptied from config since persist', () => {
     lookupCredentialMock.mockReturnValue('present-key');
     const now = Date.now();
     vi.spyOn(fallbackStateDb, 'ensureFallbackStateSchema').mockImplementation(() => {});
@@ -528,9 +528,9 @@ describe('fallback chain selection — restore path', () => {
 
     view(runtime).restorePersistedFallbackWindow();
 
-    expect(clearSpy).toHaveBeenCalled();
+    expect(clearSpy).not.toHaveBeenCalled();
     expect(saveSpy).not.toHaveBeenCalled();
-    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(view(runtime).effectiveProvider).toBe('unavailable');
     expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
     expect(view(runtime).getFallbackState().activeFallbackEntry).toBeNull();
     expect(view(runtime).getFallbackState().fallbackChain).toEqual([]);

@@ -121,6 +121,7 @@ type FallbackView = {
     activeUntil: number | null;
     recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
     recoveryTerminalReason: string | null;
+    recoveryProbeInFlight: boolean;
   };
   fallbackProbeAttempts: number;
   effectiveProvider: string;
@@ -139,6 +140,33 @@ type FallbackView = {
 
 function fbView(runtime: AgentRuntime): FallbackView {
   return runtime as unknown as FallbackView;
+}
+
+function quarantinedIncomingMessage(messageId: string): IncomingMessage {
+  return {
+    messageId,
+    chatJid: '15550001111@s.whatsapp.net',
+    senderJid: '15550001111@s.whatsapp.net',
+    senderName: 'test',
+    content: 'route this turn',
+    contentText: null,
+    contentType: 'text',
+    isFromMe: false,
+    isGroup: false,
+    mentionedJids: [],
+    timestamp: Math.floor(Date.now() / 1000),
+    quotedMessageId: null,
+    isResponseWorthy: true,
+  };
+}
+
+async function expectQuarantinedAdmission(runtime: AgentRuntime, messageId: string): Promise<void> {
+  const internals = runtime as unknown as {
+    ensureSessionAndQueueSync(chatJid: string, mapKey?: string, actorJid?: string): void;
+  };
+  const ensure = vi.spyOn(internals, 'ensureSessionAndQueueSync').mockImplementation(() => {});
+  await runtime.handleMessage(quarantinedIncomingMessage(messageId));
+  expect(ensure).not.toHaveBeenCalled();
 }
 
 // ─── Test suite ───────────────────────────────────────────────────────────────
@@ -339,5 +367,127 @@ describe('fallback persistence — real-DB integration', () => {
     await runtimeB.handleMessage(blockedTurn);
 
     expect(ensure).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['recovery_state', 'not-a-recovery-state'],
+    ['recovery_terminal_reason', 'not-a-terminal-reason'],
+    ['recovery_episode_started_at', 'not-a-timestamp'],
+    ['recovery_probe_in_flight', 2],
+  ] as const)('quarantines corrupt v2 %s without rewriting its raw bytes or admitting a turn', async (column, rawValue) => {
+    const runtimeA = makeRuntime(db);
+    fbView(runtimeA).activateProviderFallback(null, 'auth-required');
+    db.raw.prepare(`UPDATE agent_fallback_state SET ${column} = ? WHERE id = 1`).run(rawValue);
+    const before = db.raw.prepare(`SELECT ${column} AS value FROM agent_fallback_state WHERE id = 1`)
+      .get() as { value: string | number | null };
+
+    const runtimeB = makeRuntime(db, makeMessenger());
+    const vB = fbView(runtimeB);
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('unavailable');
+    expect(vB.getFallbackState().recoveryState).toBe('unavailable');
+    const after = db.raw.prepare(`SELECT ${column} AS value FROM agent_fallback_state WHERE id = 1`)
+      .get() as { value: string | number | null };
+    expect(after.value).toBe(before.value);
+    await expectQuarantinedAdmission(runtimeB, `corrupt-v2-${column}`);
+  });
+
+  it('quarantines malformed core window evidence without clearing bytes or admitting a turn', async () => {
+    const runtimeA = makeRuntime(db);
+    fbView(runtimeA).activateProviderFallback(null, 'auth-required');
+    const rawActiveUntil = 'not-an-epoch';
+    db.raw.prepare(`UPDATE agent_fallback_state SET active_until = ? WHERE id = 1`).run(rawActiveUntil);
+    const before = db.raw.prepare(`SELECT active_until AS activeUntil FROM agent_fallback_state WHERE id = 1`)
+      .get() as { activeUntil: string };
+
+    const runtimeB = makeRuntime(db, makeMessenger());
+    const vB = fbView(runtimeB);
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('unavailable');
+    expect(vB.getFallbackState().recoveryState).toBe('unavailable');
+    const after = db.raw.prepare(`SELECT active_until AS activeUntil FROM agent_fallback_state WHERE id = 1`)
+      .get() as { activeUntil: string };
+    expect(after).toEqual(before);
+    await expectQuarantinedAdmission(runtimeB, 'corrupt-core-fallback-turn');
+  });
+
+  it.each([
+    { column: 'active_until', assignment: "active_until = 'not-an-epoch'" },
+    { column: 'activated_at', assignment: "activated_at = 'not-an-epoch'" },
+    { column: 'reason', assignment: "reason = CAST(X'01' AS BLOB)" },
+    { column: 'probe_attempts', assignment: "probe_attempts = 'not-a-count'" },
+    { column: 'version', assignment: "version = 'not-a-version'" },
+    { column: 'active_entry_provider', assignment: 'active_entry_provider = NULL' },
+    { column: 'active_entry_model', assignment: "active_entry_model = CAST(X'01' AS BLOB)" },
+    { column: 'failed_keys_json', assignment: "failed_keys_json = '{malformed-json'" },
+    { column: 'recovery_episode_started_at', assignment: "recovery_episode_started_at = 'not-an-epoch'" },
+    { column: 'recovery_state', assignment: "recovery_state = 'not-a-recovery-state'" },
+    { column: 'recovery_terminal_reason', assignment: "recovery_terminal_reason = 'not-a-terminal-reason'" },
+    { column: 'recovery_probe_in_flight', assignment: 'recovery_probe_in_flight = 2' },
+  ])('quarantines malformed v2 %s evidence bytes before any route can be admitted', async ({ column, assignment }) => {
+    const runtimeA = makeRuntime(db);
+    fbView(runtimeA).activateProviderFallback(null, 'auth-required');
+    db.raw.exec(`UPDATE agent_fallback_state SET ${assignment} WHERE id = 1`);
+    const before = db.raw.prepare(`SELECT quote(${column}) AS value FROM agent_fallback_state WHERE id = 1`)
+      .get() as { value: string };
+
+    const runtimeB = makeRuntime(db, makeMessenger());
+    const vB = fbView(runtimeB);
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('unavailable');
+    expect(vB.getFallbackState().recoveryState).toBe('unavailable');
+    const after = db.raw.prepare(`SELECT quote(${column}) AS value FROM agent_fallback_state WHERE id = 1`)
+      .get() as { value: string };
+    expect(after).toEqual(before);
+    await expectQuarantinedAdmission(runtimeB, `corrupt-v2-persisted-${column}`);
+  });
+
+  it('quarantines a future-version row without clearing bytes or admitting a turn', async () => {
+    const runtimeA = makeRuntime(db);
+    fbView(runtimeA).activateProviderFallback(null, 'auth-required');
+    const futureVersion = 99;
+    db.raw.prepare(`UPDATE agent_fallback_state SET version = ? WHERE id = 1`).run(futureVersion);
+    const before = db.raw.prepare(`SELECT version, failed_keys_json AS failedKeysJson FROM agent_fallback_state WHERE id = 1`)
+      .get() as { version: number; failedKeysJson: string };
+
+    const runtimeB = makeRuntime(db, makeMessenger());
+    const vB = fbView(runtimeB);
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('unavailable');
+    expect(vB.getFallbackState().recoveryState).toBe('unavailable');
+    const after = db.raw.prepare(`SELECT version, failed_keys_json AS failedKeysJson FROM agent_fallback_state WHERE id = 1`)
+      .get() as { version: number; failedKeysJson: string };
+    expect(after).toEqual(before);
+    await expectQuarantinedAdmission(runtimeB, 'future-version-fallback-turn');
+  });
+
+  it('restores an expired active row on fallback until a freshly claimed proof commits, including the in-flight gap', async () => {
+    const runtimeA = makeRuntime(db);
+    fbView(runtimeA).activateProviderFallback(null, 'auth-required');
+    db.raw.prepare(`UPDATE agent_fallback_state SET active_until = ? WHERE id = 1`).run(Date.now() - 1);
+    await runtimeA.shutdown();
+
+    const runtimeB = makeRuntime(db);
+    const vB = fbView(runtimeB);
+    let resolveProbe: ((value: boolean) => void) | null = null;
+    const pendingProbe = new Promise<boolean>((resolve) => { resolveProbe = resolve; });
+    const proof = vi.fn(() => pendingProbe);
+    vB.probePrimaryProviderRecovered = proof as unknown as () => Promise<boolean>;
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('opencode-cli');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(proof).toHaveBeenCalledTimes(1);
+    expect(vB.fallbackWindow.recoveryProbeInFlight).toBe(true);
+    expect(vB.effectiveProvider).toBe('opencode-cli');
+
+    resolveProbe!(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    expect(vB.effectiveProvider).toBe('claude-cli');
   });
 });

@@ -27,6 +27,13 @@ import {
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
 import log from '../../logger.ts';
 
+export type FallbackRestoreUnavailableReason =
+  | 'persisted-state-evidence-unavailable'
+  | 'failed-provider-evidence-unavailable'
+  | 'recovery-state-evidence-unavailable'
+  | 'persisted-version-incompatible'
+  | 'fallback-route-unavailable';
+
 /** A failed key serialized for persistence (provider + model only, no secrets). */
 export function failedKeysToPersistedKeys(failedKeys: Set<string>): PersistedFailedKey[] {
   return [...failedKeys].map((k) => {
@@ -49,10 +56,7 @@ export interface FallbackRestoreContext {
 /** Result of the restore attempt. */
 export type FallbackRestoreResult =
   | { outcome: 'no-state'; cleared: boolean }
-  | { outcome: 'expired-or-no-fallback'; cleared: boolean }
-  | { outcome: 'failed-key-evidence-unavailable'; cleared: false }
-  | { outcome: 'version-incompatible'; cleared: boolean }
-  | { outcome: 'chain-mismatch'; cleared: boolean }
+  | { outcome: 'unavailable'; cleared: false; reason: FallbackRestoreUnavailableReason }
   | {
     outcome: 'armed';
     clampedUntil: number;
@@ -75,9 +79,9 @@ export type FallbackRestoreResult =
  * #3019: reconstitutes `FallbackChain.failedKeys` + active-entry identity from
  * the persisted row so a restart mid-window does not retry a known-failed entry
  * against an empty chain. Validates restored entries against the configured
- * chain by exact provider AND model — removed/reordered/duplicated/malformed/
- * version-incompatible rows enter an explicit fail-closed reconciliation state
- * (clear + alert + proceed on primary), never a silent re-route.
+ * chain by exact provider AND model — malformed, future-version, or
+ * no-longer-routable rows enter an explicit unavailable reconciliation state
+ * without clearing their raw evidence or re-routing to primary.
  *
  * Returns the result; the caller (runtime.ts) applies it (e.g. sets
  * fallbackWindowRestored, restores probeAttempts, calls armFallbackWindow).
@@ -94,9 +98,36 @@ export function restorePersistedFallbackWindowState(
       clearFallbackState(ctx.db);
       return { outcome: 'no-state', cleared: true };
     }
+    // A present row with malformed core fields is not an absent episode. Keep
+    // its raw bytes and block routing until an operator reconciles it.
+    if (persisted.fallbackStateEvidenceAvailability === 'unavailable') {
+      emitAlertChecked(
+        'fallback-restore',
+        'fallback_persist_state_evidence_unavailable',
+        'Persisted fallback state evidence is unavailable — fallback restore is quarantined',
+        'state_evidence=unavailable action=operator-reconciliation-required',
+      );
+      return { outcome: 'unavailable', cleared: false, reason: 'persisted-state-evidence-unavailable' };
+    }
+    // #3019: version-incompatible rows are explicit reconciliation, never a
+    // silent re-route. A future version the running code doesn't understand
+    // must not be re-armed with guessed semantics or cleared into primary.
+    if (persisted.version > PERSISTED_FALLBACK_STATE_VERSION) {
+      log.warn(
+        { persistedVersion: persisted.version, knownVersion: PERSISTED_FALLBACK_STATE_VERSION },
+        'persisted fallback state version is newer than known — quarantining to reconcile',
+      );
+      emitAlertChecked(
+        'fallback-restore',
+        'fallback_persist_version_incompatible',
+        'Persisted fallback state version is incompatible — restore is quarantined',
+        `persistedVersion=${persisted.version} knownVersion=${PERSISTED_FALLBACK_STATE_VERSION}`,
+      );
+      return { outcome: 'unavailable', cleared: false, reason: 'persisted-version-incompatible' };
+    }
     // A corrupt failed-key record is evidence that a prior route failed. It
-    // must remain available for reconciliation, not be erased by restore's
-    // usual expiry cleanup or overwritten by a fresh empty array.
+    // must remain available for reconciliation, not be erased or overwritten
+    // by a fresh empty array.
     if (persisted.failedKeysEvidenceAvailability === 'unavailable') {
       emitAlertChecked(
         'fallback-restore',
@@ -104,36 +135,32 @@ export function restorePersistedFallbackWindowState(
         'Persisted failed-provider evidence is unavailable — fallback restore is quarantined',
         'failed_keys_evidence=unavailable action=operator-reconciliation-required',
       );
-      return { outcome: 'failed-key-evidence-unavailable', cleared: false };
+      return { outcome: 'unavailable', cleared: false, reason: 'failed-provider-evidence-unavailable' };
     }
-    const restoredAt = now();
-    if (
-      ctx.agentFallbacks.length === 0
-      // A probe claim is durable before its provider effect begins. If the
-      // process dies while that effect is unknown, the expired timer deadline
-      // cannot authorize clearing the episode: restore must preserve the
-      // fallback route and convert it to an explicit operator hold first.
-      || (persisted.recoveryState === 'active' && !persisted.recoveryProbeInFlight && persisted.activeUntil <= restoredAt)
-    ) {
-      clearFallbackState(ctx.db);
-      return { outcome: 'expired-or-no-fallback', cleared: true };
-    }
-    // #3019: version-incompatible rows are explicit reconciliation, never a
-    // silent re-route. A future version the running code doesn't understand
-    // must not be re-armed with guessed semantics.
-    if (persisted.version > PERSISTED_FALLBACK_STATE_VERSION) {
-      log.warn(
-        { persistedVersion: persisted.version, knownVersion: PERSISTED_FALLBACK_STATE_VERSION },
-        'persisted fallback state version is newer than known — clearing to reconcile',
-      );
+    // Version-2 recovery fields are authoritative durable control state. Do
+    // not reinterpret malformed fields as legacy defaults, because that could
+    // convert terminal or unknown work into an active expiry/recovery path.
+    if (persisted.recoveryEvidenceAvailability === 'unavailable') {
       emitAlertChecked(
         'fallback-restore',
-        'fallback_persist_version_incompatible',
-        'Persisted fallback state version is incompatible — cleared to reconcile',
-        `persistedVersion=${persisted.version} knownVersion=${PERSISTED_FALLBACK_STATE_VERSION}`,
+        'fallback_persist_recovery_evidence_unavailable',
+        'Persisted fallback recovery evidence is unavailable — fallback restore is quarantined',
+        'recovery_evidence=unavailable action=operator-reconciliation-required',
       );
-      clearFallbackState(ctx.db);
-      return { outcome: 'version-incompatible', cleared: true };
+      return { outcome: 'unavailable', cleared: false, reason: 'recovery-state-evidence-unavailable' };
+    }
+    const restoredAt = now();
+    // An existing episode with no configured fallback route cannot resume on
+    // primary before fresh proof. Keep its row for reconciliation and block
+    // new routing instead of treating configuration removal as recovery.
+    if (ctx.agentFallbacks.length === 0) {
+      emitAlertChecked(
+        'fallback-restore',
+        'fallback_persist_route_unavailable',
+        'Persisted fallback route is no longer configured — restore is quarantined',
+        'route=config-missing action=operator-reconciliation-required',
+      );
+      return { outcome: 'unavailable', cleared: false, reason: 'fallback-route-unavailable' };
     }
     // #3019: validate the persisted active-entry identity against the
     // configured chain by exact provider AND model. A removed/reordered/
@@ -152,16 +179,15 @@ export function restorePersistedFallbackWindowState(
             persistedModel: persisted.activeEntryModel,
             configuredChain: ctx.agentFallbacks.map((e) => ({ provider: e.provider, model: e.model })),
           },
-          'persisted fallback active-entry identity not found in configured chain — clearing to reconcile',
+          'persisted fallback active-entry identity not found in configured chain — quarantining to reconcile',
         );
         emitAlertChecked(
           'fallback-restore',
           'fallback_persist_chain_mismatch',
-          'Persisted fallback active-entry not in configured chain — cleared to reconcile',
+          'Persisted fallback active-entry not in configured chain — restore is quarantined',
           `persistedProvider=${persisted.activeEntryProvider} persistedModel=${persisted.activeEntryModel ?? 'default'}`,
         );
-        clearFallbackState(ctx.db);
-        return { outcome: 'chain-mismatch', cleared: true };
+        return { outcome: 'unavailable', cleared: false, reason: 'fallback-route-unavailable' };
       }
     }
     // #3019: reconstitute FallbackChain.failedKeys from the persisted row,

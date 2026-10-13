@@ -14,6 +14,12 @@ export type FallbackRecoveryTerminalReason =
   | 'operator-killed'
   | 'operator-recovery-failed';
 export type FailedKeysEvidenceAvailability = 'available' | 'unavailable';
+/** Recovery fields became mandatory in persisted state version 2. A malformed
+ *  v2 field is unavailable evidence, never a legacy default. */
+export type RecoveryEvidenceAvailability = 'available' | 'unavailable';
+/** Core window fields identify whether a durable episode exists at all. A
+ * malformed present row must not be treated as an absent row. */
+export type FallbackStateEvidenceAvailability = 'available' | 'unavailable';
 
 /** A failed-entry key as persisted — provider + model, the same identity
  *  `FallbackChain.entryKey` produces. Persisted as a JSON array of these so
@@ -58,6 +64,10 @@ export interface PersistedFallbackState {
   /** `unavailable` means failed_keys_json was malformed or unreadable. The
    *  raw SQLite value stays in place for operator reconciliation. */
   failedKeysEvidenceAvailability?: FailedKeysEvidenceAvailability;
+  /** Whether the version-2 recovery fields were safe to interpret. */
+  recoveryEvidenceAvailability?: RecoveryEvidenceAvailability;
+  /** Whether the core persisted window shape was safe to interpret. */
+  fallbackStateEvidenceAvailability?: FallbackStateEvidenceAvailability;
 }
 
 /** Ensure the singleton fallback-state table exists. Idempotent — also
@@ -159,10 +169,12 @@ export function saveFallbackState(db: Database, s: PersistedFallbackState): void
 /**
  * Load the persisted fallback state, or null if none exists.
  *
- * Validates that all fields are the expected types before returning — SQLite
- * affinity means a corrupted row can contain wrong-typed values that would
- * otherwise silently propagate as garbage. On any validation failure, null is
- * returned so the caller can treat it as "no persisted state".
+ * Validates the core window fields before returning — SQLite affinity means a
+ * corrupted row can contain wrong-typed values that would otherwise silently
+ * propagate as garbage. A malformed version-2 recovery field is represented
+ * as unavailable evidence so restore can quarantine its raw row. An absent
+ * row returns null; a malformed present core window becomes unavailable
+ * evidence and preserves its raw bytes for reconciliation.
  */
 export function getFallbackState(db: Database): PersistedFallbackState | null {
   const row = db.raw
@@ -179,48 +191,106 @@ export function getFallbackState(db: Database): PersistedFallbackState | null {
        FROM agent_fallback_state WHERE id = 1`,
     )
     .get() as Partial<PersistedFallbackState> & { failedKeysJson?: unknown } | undefined;
+  if (!row) return null;
   if (
-    !row ||
-    typeof row.activeUntil !== 'number' ||
-    typeof row.activatedAt !== 'number' ||
-    typeof row.reason !== 'string'
+    typeof row.activeUntil !== 'number' || !Number.isFinite(row.activeUntil)
+    || typeof row.activatedAt !== 'number' || !Number.isFinite(row.activatedAt)
+    || typeof row.reason !== 'string'
   ) {
-    return null;
+    // These placeholders never reach routing: restore checks the availability
+    // marker before interpreting any field. They make a malformed present row
+    // distinguishable from no row, without normalizing or rewriting its bytes.
+    return {
+      activeUntil: 0,
+      activatedAt: 0,
+      reason: 'unavailable',
+      probeAttempts: 0,
+      version: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      failedKeys: [],
+      recoveryEpisodeStartedAt: 0,
+      recoveryState: 'active',
+      recoveryTerminalReason: null,
+      recoveryProbeInFlight: false,
+      failedKeysEvidenceAvailability: 'available',
+      recoveryEvidenceAvailability: 'available',
+      fallbackStateEvidenceAvailability: 'unavailable',
+    };
   }
-  // probe_attempts is additive observability: a corrupt value must not
-  // invalidate an otherwise valid window, so coerce instead of nulling.
-  const probeAttempts =
-    typeof row.probeAttempts === 'number' && Number.isFinite(row.probeAttempts) && row.probeAttempts >= 0
-      ? row.probeAttempts
+  // Legacy rows predate the durable recovery budget and retain a zero default.
+  // For version 2 or later, a malformed count is unavailable evidence and
+  // cannot reset the 12-failure budget.
+  const hasValidProbeAttempts =
+    typeof row.probeAttempts === 'number' && Number.isFinite(row.probeAttempts)
+    && Number.isInteger(row.probeAttempts) && row.probeAttempts >= 0;
+  const probeAttempts: number =
+    hasValidProbeAttempts
+      ? row.probeAttempts as number
       : 0;
-  // version is additive: a corrupt/missing value reads as 0 (legacy), which
-  // the restore path handles as a pre-chain-identity row.
-  const version =
-    typeof row.version === 'number' && Number.isFinite(row.version) && row.version >= 0
-      ? row.version
+  // Version 0/1 are compatible legacy rows. A malformed version value is
+  // unavailable recovery evidence; do not reinterpret it as legacy.
+  const versionIsValid =
+    typeof row.version === 'number' && Number.isFinite(row.version)
+    && Number.isInteger(row.version) && row.version >= 0;
+  const version: number =
+    versionIsValid
+      ? row.version as number
       : 0;
-  const activeEntryProvider =
-    typeof row.activeEntryProvider === 'string' ? row.activeEntryProvider : null;
-  const activeEntryModel =
-    typeof row.activeEntryModel === 'string' ? row.activeEntryModel : null;
-  const recoveryEpisodeStartedAt =
-    typeof row.recoveryEpisodeStartedAt === 'number' && Number.isFinite(row.recoveryEpisodeStartedAt)
-      ? row.recoveryEpisodeStartedAt
-      : row.activatedAt;
-  const recoveryState: FallbackRecoveryState =
-    row.recoveryState === 'terminal' || row.recoveryState === 'operator-held'
-      ? row.recoveryState
+  const raw = row as Record<string, unknown>;
+  const hasValidActiveEntryProvider =
+    typeof raw['activeEntryProvider'] === 'string' && raw['activeEntryProvider'].length > 0;
+  const hasValidActiveEntryModel = raw['activeEntryModel'] === null || typeof raw['activeEntryModel'] === 'string';
+  const activeEntryProvider = hasValidActiveEntryProvider ? raw['activeEntryProvider'] as string : null;
+  const activeEntryModel = typeof raw['activeEntryModel'] === 'string' ? raw['activeEntryModel'] : null;
+  const hasValidRecoveryEpisodeStartedAt =
+    typeof raw['recoveryEpisodeStartedAt'] === 'number' && Number.isFinite(raw['recoveryEpisodeStartedAt']);
+  const parsedRecoveryState =
+    raw['recoveryState'] === 'terminal' || raw['recoveryState'] === 'operator-held'
+      ? raw['recoveryState']
       : 'active';
-  const recoveryTerminalReason: FallbackRecoveryTerminalReason | null =
-    row.recoveryTerminalReason === 'attempt-limit'
-    || row.recoveryTerminalReason === 'elapsed-limit'
-    || row.recoveryTerminalReason === 'clock-anomaly'
-    || row.recoveryTerminalReason === 'probe-outcome-unknown'
-    || row.recoveryTerminalReason === 'operator-killed'
-    || row.recoveryTerminalReason === 'operator-recovery-failed'
-      ? row.recoveryTerminalReason
+  const hasValidRecoveryState = raw['recoveryState'] === 'active'
+    || raw['recoveryState'] === 'terminal'
+    || raw['recoveryState'] === 'operator-held';
+  const parsedRecoveryTerminalReason: FallbackRecoveryTerminalReason | null =
+    raw['recoveryTerminalReason'] === 'attempt-limit'
+    || raw['recoveryTerminalReason'] === 'elapsed-limit'
+    || raw['recoveryTerminalReason'] === 'clock-anomaly'
+    || raw['recoveryTerminalReason'] === 'probe-outcome-unknown'
+    || raw['recoveryTerminalReason'] === 'operator-killed'
+    || raw['recoveryTerminalReason'] === 'operator-recovery-failed'
+      ? raw['recoveryTerminalReason']
       : null;
-  const recoveryProbeInFlight = (row.recoveryProbeInFlight as unknown) === 1 || row.recoveryProbeInFlight === true;
+  const hasValidRecoveryTerminalReason = raw['recoveryTerminalReason'] === null
+    || raw['recoveryTerminalReason'] === 'attempt-limit'
+    || raw['recoveryTerminalReason'] === 'elapsed-limit'
+    || raw['recoveryTerminalReason'] === 'clock-anomaly'
+    || raw['recoveryTerminalReason'] === 'probe-outcome-unknown'
+    || raw['recoveryTerminalReason'] === 'operator-killed'
+    || raw['recoveryTerminalReason'] === 'operator-recovery-failed';
+  const hasValidRecoveryProbeInFlight = raw['recoveryProbeInFlight'] === 0 || raw['recoveryProbeInFlight'] === 1;
+  // Version 0/1 retain compatible migration defaults. A malformed schema
+  // version or any required version-2+ control, budget, or route-identity
+  // field is unavailable evidence, never a safe legacy default.
+  const recoveryEvidenceAvailability: RecoveryEvidenceAvailability = !versionIsValid
+    || (version >= 2
+      && (!hasValidProbeAttempts || !hasValidActiveEntryProvider || !hasValidActiveEntryModel
+        || !hasValidRecoveryEpisodeStartedAt || !hasValidRecoveryState || !hasValidRecoveryTerminalReason
+        || !hasValidRecoveryProbeInFlight))
+    ? 'unavailable'
+    : 'available';
+  const recoveryEpisodeStartedAt = version >= 2 && hasValidRecoveryEpisodeStartedAt
+    ? raw['recoveryEpisodeStartedAt'] as number
+    : row.activatedAt;
+  const recoveryState: FallbackRecoveryState = version >= 2 && hasValidRecoveryState
+    ? parsedRecoveryState
+    : 'active';
+  const recoveryTerminalReason: FallbackRecoveryTerminalReason | null = version >= 2 && hasValidRecoveryTerminalReason
+    ? parsedRecoveryTerminalReason
+    : null;
+  const recoveryProbeInFlight = version >= 2 && hasValidRecoveryProbeInFlight
+    ? raw['recoveryProbeInFlight'] === 1
+    : false;
   // Never coerce corrupted failed-provider evidence to an empty set. Doing so
   // would permit a known failed route to be selected after restart. The raw
   // database value remains untouched for a separately authorized repair.
@@ -261,6 +331,8 @@ export function getFallbackState(db: Database): PersistedFallbackState | null {
     recoveryTerminalReason,
     recoveryProbeInFlight,
     failedKeysEvidenceAvailability,
+    recoveryEvidenceAvailability,
+    fallbackStateEvidenceAvailability: 'available',
   };
 }
 

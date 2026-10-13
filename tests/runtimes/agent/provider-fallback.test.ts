@@ -1185,7 +1185,7 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     expect(clearSpy).toHaveBeenCalled();
   });
 
-  it('discards a stale persisted window (past expiry) without re-arming', () => {
+  it('holds an expired persisted window on fallback until fresh proof completes', async () => {
     const now = Date.now();
     vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now - 1000,
@@ -1210,13 +1210,21 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     });
 
     persistView(runtime).restorePersistedFallbackWindow();
+    expect(persistView(runtime).effectiveProvider).toBe('opencode-cli');
+    expect(clearSpy).not.toHaveBeenCalled();
+
+    const proof = vi.fn(() => true);
+    persistView(runtime).probePrimaryProviderRecovered = proof;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(proof).toHaveBeenCalledTimes(1);
     expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
     expect(clearSpy).toHaveBeenCalled();
   });
 
-  it('discards a persisted window when no fallback provider is configured', () => {
-    // Covers the branch where agentFallbackProvider is undefined at restart —
-    // the stale row must be cleared and the runtime must remain on the primary.
+  it('quarantines a persisted window when no fallback provider is configured', () => {
+    // Configuration removal is not recovery proof. The retained row blocks
+    // routing until an operator reconciles the route.
     const now = Date.now();
     vi.spyOn(fallbackStateDb, 'getFallbackState').mockReturnValue({
       activeUntil: now + 60 * 60_000,
@@ -1239,8 +1247,8 @@ describe('AgentRuntime — fallback persistence hooks', () => {
     const runtime = makeRuntime({});
 
     persistView(runtime).restorePersistedFallbackWindow();
-    expect(persistView(runtime).effectiveProvider).toBe('claude-cli');
-    expect(clearSpy).toHaveBeenCalled();
+    expect(persistView(runtime).effectiveProvider).toBe('unavailable');
+    expect(clearSpy).not.toHaveBeenCalled();
   });
 
   it('clears a corrupt persisted row that fails load validation', () => {

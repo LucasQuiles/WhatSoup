@@ -9,6 +9,7 @@ import {
   saveFallbackState,
   getFallbackState,
   clearFallbackState,
+  PERSISTED_FALLBACK_STATE_VERSION,
 } from '../../../src/runtimes/agent/fallback-state-db.ts';
 
 function tempDbPath(): string {
@@ -51,6 +52,8 @@ describe('fallback-state-db', () => {
       recoveryTerminalReason: null,
       recoveryProbeInFlight: false,
       failedKeysEvidenceAvailability: 'available' as const,
+      recoveryEvidenceAvailability: 'available' as const,
+      fallbackStateEvidenceAvailability: 'available' as const,
     };
     saveFallbackState(db, state);
     const loaded = getFallbackState(db);
@@ -132,7 +135,7 @@ describe('fallback-state-db', () => {
     }).toThrow();
   });
 
-  it('getFallbackState returns null when a row has wrong-typed data (type validation)', () => {
+  it('marks a present row with wrong-typed core data unavailable instead of treating it as absent', () => {
     clearFallbackState(db);
     // SQLite type affinity lets us store TEXT in an INTEGER column.
     // Insert malformed data directly to test the loader's guard.
@@ -142,8 +145,11 @@ describe('fallback-state-db', () => {
          VALUES (1, 'not-a-number', 1699999000000, 'usage-limit')`,
       )
       .run();
-    // The loader must return null rather than propagating garbage.
-    expect(getFallbackState(db)).toStrictEqual(null);
+    // The loader keeps the raw row distinguishable from no state so restore
+    // can quarantine it rather than route primary.
+    expect(getFallbackState(db)).toMatchObject({
+      fallbackStateEvidenceAvailability: 'unavailable',
+    });
   });
 
   it('migrates a legacy table without probe_attempts: ensure adds the column, old rows load as 0', () => {
@@ -190,6 +196,8 @@ describe('fallback-state-db', () => {
         recoveryTerminalReason: null,
         recoveryProbeInFlight: false,
         failedKeysEvidenceAvailability: 'available',
+        recoveryEvidenceAvailability: 'available',
+        fallbackStateEvidenceAvailability: 'available',
       });
     } finally {
       legacyDb.close();
@@ -226,6 +234,8 @@ describe('fallback-state-db', () => {
       recoveryTerminalReason: null,
       recoveryProbeInFlight: false,
       failedKeysEvidenceAvailability: 'available',
+      recoveryEvidenceAvailability: 'available',
+      fallbackStateEvidenceAvailability: 'available',
     });
   });
 
@@ -247,5 +257,68 @@ describe('fallback-state-db', () => {
     const loaded = getFallbackState(db);
     expect(loaded?.failedKeys).toEqual([]);
     expect(loaded?.failedKeysEvidenceAvailability).toBe('unavailable');
+  });
+
+  it.each([
+    ['recovery_state', 'not-a-recovery-state'],
+    ['recovery_terminal_reason', 'not-a-terminal-reason'],
+    ['recovery_episode_started_at', 'not-an-epoch'],
+    ['recovery_probe_in_flight', 2],
+  ])('marks malformed version-2 %s as unavailable evidence without rewriting the row', (column, value) => {
+    clearFallbackState(db);
+    saveFallbackState(db, {
+      activeUntil: 1_700_000_000_000,
+      activatedAt: 1_699_999_000_000,
+      reason: 'auth-required',
+      probeAttempts: 0,
+      version: PERSISTED_FALLBACK_STATE_VERSION,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'minimax/minimax-m2',
+      failedKeys: [],
+    });
+    db.raw.prepare(`UPDATE agent_fallback_state SET ${column} = ? WHERE id = 1`).run(value);
+
+    const loaded = getFallbackState(db);
+    expect(loaded?.recoveryEvidenceAvailability).toBe('unavailable');
+    const raw = db.raw.prepare(`SELECT ${column} AS value FROM agent_fallback_state WHERE id = 1`)
+      .get() as { value: unknown };
+    expect(raw.value).toBe(value);
+  });
+
+  it('keeps legacy version-1 recovery defaults compatible even when additive recovery columns are malformed', () => {
+    clearFallbackState(db);
+    saveFallbackState(db, {
+      activeUntil: 1_700_000_000_000,
+      activatedAt: 1_699_999_000_000,
+      reason: 'auth-required',
+      probeAttempts: 0,
+      version: 1,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'minimax/minimax-m2',
+      failedKeys: [],
+    });
+    db.raw.prepare(
+      `UPDATE agent_fallback_state
+       SET probe_attempts = 'not-a-count',
+           active_entry_provider = NULL,
+           active_entry_model = CAST(X'01' AS BLOB),
+           recovery_episode_started_at = 'not-an-epoch',
+           recovery_state = 'not-a-recovery-state',
+           recovery_terminal_reason = 'not-a-terminal-reason',
+           recovery_probe_in_flight = 2
+       WHERE id = 1`,
+    ).run();
+
+    expect(getFallbackState(db)).toMatchObject({
+      version: 1,
+      recoveryEvidenceAvailability: 'available',
+      probeAttempts: 0,
+      activeEntryProvider: null,
+      activeEntryModel: null,
+      recoveryEpisodeStartedAt: 1_699_999_000_000,
+      recoveryState: 'active',
+      recoveryTerminalReason: null,
+      recoveryProbeInFlight: false,
+    });
   });
 });

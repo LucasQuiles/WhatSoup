@@ -4,7 +4,7 @@
  *
  * The class is a pure field-relocation slice: it owns the six window-lifecycle
  * scalars the fallback machinery arms / extends / reverts together, plus the
- * ONE piece of read logic in the whole module — isActive(), the deadline-vs-now
+ * ONE piece of read logic in the whole module — isActive(), the armed-route
  * check. All orchestration (arm / activate / deactivate / revert / probe /
  * restore) lives in AgentRuntime and pokes these fields directly, so the
  * class's own surface was previously exercised only indirectly through the
@@ -17,10 +17,9 @@
  * pinned here so a regression fails in this file, not deep in an integration
  * assertion:
  *
- *   1. Deadline is a STRICT upper bound: at the exact deadline (now ===
- *      activeUntil) the window is ALREADY expired (false). A off-by-one
- *      loosening of `<` to `<=` would leak an expired window past its deadline
- *      — the classic check-and-advance boundary bug.
+ *   1. An armed route remains active through its deadline until the recovery
+ *      probe settles. Returning false during that asynchronous proof gap
+ *      would admit a new primary session before fresh evidence exists.
  *   2. A null activeUntil short-circuits to false REGARDLESS of the clock —
  *      a null deadline must never be read as "0 < now → active". Dropping the
  *      null guard is a plausible bug (and would make every fresh/cleared window
@@ -29,7 +28,7 @@
  * We also pin the six field defaults and their documented preservation
  * contracts (activatedAt / armReason preserved across extension; activeEntry
  * carries the provider/model), and that isActive() reads live state each call
- * (mutating activeUntil across the deadline flips the answer without a new
+ * (mutating activeUntil or the recovery state flips the answer without a new
  * instance).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -80,28 +79,27 @@ describe('FallbackWindowState', () => {
     expect(s.isActive()).toBe(true);
   });
 
-  it('isActive() boundary: at the EXACT deadline the window is already expired (strict <, not <=)', () => {
+  it('isActive() boundary: at the exact deadline the armed fallback route remains active pending proof', () => {
     vi.useFakeTimers();
     const now = Date.parse('2026-06-30T12:00:00.000Z');
     vi.setSystemTime(now);
     const s = new FallbackWindowState();
     s.activeUntil = now; // now === activeUntil
-    // This is the check-and-advance boundary: at the tick the deadline is
-    // reached the window must read expired so the machinery clears it and
-    // does not extend a stale window. A `<=` regression would return true here.
-    expect(s.isActive()).toBe(false);
+    // The timer starts a proof attempt at this boundary. New sessions must not
+    // route primary until the asynchronous proof has committed.
+    expect(s.isActive()).toBe(true);
   });
 
-  it('isActive() is false strictly AFTER the deadline', () => {
+  it('isActive() remains true strictly after the deadline while the route awaits proof', () => {
     vi.useFakeTimers();
     const now = Date.parse('2026-06-30T12:00:00.000Z');
     vi.setSystemTime(now);
     const s = new FallbackWindowState();
     s.activeUntil = now - 1; // deadline already one ms in the past
-    expect(s.isActive()).toBe(false);
+    expect(s.isActive()).toBe(true);
   });
 
-  it('isActive() reads LIVE state each call: advancing the clock across the deadline flips true→false on the same instance', () => {
+  it('isActive() reads live state: clock passage does not release primary, but unavailable does', () => {
     vi.useFakeTimers();
     const armAt = Date.parse('2026-06-30T12:00:00.000Z');
     vi.setSystemTime(armAt);
@@ -112,9 +110,11 @@ describe('FallbackWindowState', () => {
     vi.setSystemTime(armAt + 59_999);
     expect(s.isActive()).toBe(true); // 1ms before deadline
     vi.setSystemTime(armAt + 60_000);
-    expect(s.isActive()).toBe(false); // AT the deadline → expired
+    expect(s.isActive()).toBe(true); // proof has not committed
     vi.setSystemTime(armAt + 120_000);
-    expect(s.isActive()).toBe(false); // well past → still expired
+    expect(s.isActive()).toBe(true); // still holds fallback
+    s.recoveryState = 'unavailable';
+    expect(s.isActive()).toBe(false); // admission quarantine is separate
   });
 
   it('isActive() reflects a re-armed deadline: clearing then re-setting activeUntil re-activates the same instance', () => {
