@@ -375,55 +375,51 @@ def test_readiness_incident_needs_fresh_positive_recovery(
     supervisor = load_module()
     with TemporaryDirectory() as directory:
         config = {"state_dir": str(Path(directory) / "state"), "instance": "test-bot"}
-        _assert_readiness_recovery(supervisor, config, uncertain, uncertain_cycles)
-
-
-def _assert_readiness_recovery(supervisor, config, uncertain, uncertain_cycles):
-    bad = {
-        "supervisor": {"status": "fresh"},
-        "worker": {"status": "fresh"},
-        "capabilities": {
-            "status": "fresh",
-            "token": {"ok": True},
-            "readiness": {"ok": False},
-        },
-    }
-    events = []
-
-    def emit(event):
-        events.append(event)
-        return {"published": True}
-
-    for now in [0, 60]:
-        supervisor.run_sentinel(config, now=now, observe_remote=lambda: bad, emit=emit)
-
-    def observe_uncertain():
-        if uncertain == "unreachable":
-            raise OSError("remote offline")
-        return {
-            **bad,
+        bad = {
+            "supervisor": {"status": "fresh"},
+            "worker": {"status": "fresh"},
             "capabilities": {
-                "status": "stale" if uncertain == "stale" else "fresh",
+                "status": "fresh",
                 "token": {"ok": True},
+                "readiness": {"ok": False},
             },
         }
+        events = []
 
-    for cycle in range(uncertain_cycles):
+        def emit(event):
+            events.append(event)
+            return {"published": True}
+
+        for now in [0, 60]:
+            supervisor.run_sentinel(config, now=now, observe_remote=lambda: bad, emit=emit)
+
+        def observe_uncertain():
+            if uncertain == "unreachable":
+                raise OSError("remote offline")
+            return {
+                **bad,
+                "capabilities": {
+                    "status": "stale" if uncertain == "stale" else "fresh",
+                    "token": {"ok": True},
+                },
+            }
+
+        for cycle in range(uncertain_cycles):
+            result = supervisor.run_sentinel(
+                config, now=120 + cycle * 60, observe_remote=observe_uncertain, emit=emit
+            )
+            assert "broker_not_ready" in result["incidents"]
+            assert not any(e["kind"] == "clear" for e in events)
+        good = {**bad, "capabilities": {**bad["capabilities"], "readiness": {"ok": True}}}
         result = supervisor.run_sentinel(
-            config, now=120 + cycle * 60, observe_remote=observe_uncertain, emit=emit
+            config, now=120 + uncertain_cycles * 60, observe_remote=lambda: good, emit=emit
         )
-        assert "broker_not_ready" in result["incidents"]
-        assert not any(e["kind"] == "clear" for e in events)
-    good = {**bad, "capabilities": {**bad["capabilities"], "readiness": {"ok": True}}}
-    result = supervisor.run_sentinel(
-        config, now=120 + uncertain_cycles * 60, observe_remote=lambda: good, emit=emit
-    )
-    assert "broker_not_ready" not in result["incidents"]
-    # Repeated unreachable observations may also open their own transport incident.
-    assert [(e["kind"], e["reason"]) for e in events if e["reason"] == "broker_not_ready"] == [
-        ("alert", "broker_not_ready"),
-        ("clear", "broker_not_ready"),
-    ]
+        assert "broker_not_ready" not in result["incidents"]
+        # Repeated unreachable observations may also open their own transport incident.
+        assert [(e["kind"], e["reason"]) for e in events if e["reason"] == "broker_not_ready"] == [
+            ("alert", "broker_not_ready"),
+            ("clear", "broker_not_ready"),
+        ]
 
 
 @pytest.mark.parametrize(
