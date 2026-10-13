@@ -52,18 +52,20 @@ function writeOciArchive(
   archivePath: string,
   predicateTypes: string[],
   imageDigest: string = `sha256:${'a'.repeat(64)}`,
+  manifestContents?: string,
 ): void {
   const layout = tmp.make('oci-layout');
   const blobs = path.join(layout, 'blobs/sha256');
   mkdirSync(blobs, { recursive: true });
   const manifestDigest = 'b'.repeat(64);
-  writeFileSync(path.join(blobs, manifestDigest), JSON.stringify({
+  const manifest = manifestContents ?? JSON.stringify({
     schemaVersion: 2,
     layers: predicateTypes.map((predicate, index) => ({
       digest: `sha256:${String.fromCharCode(99 + index).repeat(64)}`,
       annotations: { 'in-toto.io/predicate-type': predicate },
     })),
-  }));
+  });
+  writeFileSync(path.join(blobs, manifestDigest), manifest);
   writeFileSync(path.join(layout, 'index.json'), JSON.stringify({
     schemaVersion: 2,
     manifests: [{
@@ -176,6 +178,16 @@ describe('container build evidence CI contract', () => {
     writeOciArchive(missingProvenance.imagePath, ['https://spdx.dev/Document'], imageDigest);
     expect(() => verifyOciArchiveAttestations(missingProvenance.imagePath, imageDigest)).toThrow(
       `OCI image archive has no SLSA provenance predicate for ${imageDigest}`,
+    );
+  });
+
+  it('fails closed when a bound attestation manifest is invalid JSON', () => {
+    const input = makeReceiptInput();
+    const imageDigest = `sha256:${'a'.repeat(64)}`;
+    writeOciArchive(input.imagePath, [], imageDigest, '{invalid');
+
+    expect(() => verifyOciArchiveAttestations(input.imagePath, imageDigest)).toThrow(
+      'OCI image archive has an invalid attestation manifest',
     );
   });
 

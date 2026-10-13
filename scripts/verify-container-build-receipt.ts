@@ -181,6 +181,7 @@ function readOciArchiveEntry(archivePath: string, entry: string): string {
       return execFileSync('tar', ['-xOf', archivePath, candidate], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 30_000,
       });
     } catch {
       // OCI exporters differ on whether archive members have a leading "./".
@@ -197,16 +198,16 @@ function blobEntryFromDigest(digest: unknown): string | null {
 function predicateTypesForAttestation(archivePath: string, descriptor: OciIndexDescriptor): string[] {
   const blobEntry = blobEntryFromDigest(descriptor.digest);
   if (!blobEntry) return [];
-  let manifest: OciManifest;
   try {
-    manifest = JSON.parse(readOciArchiveEntry(archivePath, blobEntry)) as OciManifest;
-  } catch {
-    return [];
+    const manifest = JSON.parse(readOciArchiveEntry(archivePath, blobEntry)) as OciManifest;
+    if (!Array.isArray(manifest.layers)) return [];
+    return (manifest.layers as OciLayerDescriptor[])
+      .map((layer) => layer?.annotations?.['in-toto.io/predicate-type'])
+      .filter((predicate): predicate is string => typeof predicate === 'string');
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('OCI image archive')) throw error;
+    throw new Error(`OCI image archive has an invalid attestation manifest: ${blobEntry}`);
   }
-  if (!Array.isArray(manifest.layers)) return [];
-  return (manifest.layers as OciLayerDescriptor[])
-    .map((layer) => layer?.annotations?.['in-toto.io/predicate-type'])
-    .filter((predicate): predicate is string => typeof predicate === 'string');
 }
 
 /**

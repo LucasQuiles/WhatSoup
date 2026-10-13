@@ -25,7 +25,7 @@ function makeRepo(asset: Buffer): string {
 }
 
 function successfulFetch(asset: Buffer): typeof fetch {
-  return vi.fn(async () => new Response(asset, { status: 200 })) as unknown as typeof fetch;
+  return vi.fn(async () => new Response(new Uint8Array(asset), { status: 200 })) as unknown as typeof fetch;
 }
 
 describe('pinned Buildx installer', () => {
