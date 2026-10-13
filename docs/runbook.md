@@ -3370,16 +3370,22 @@ or Debian security update is published; immutable references make a reviewed bui
 reproducible, but they do not update themselves.
 
 The Quality workflow downloads the policy's pinned Buildx Linux asset with a bounded request,
-checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, creates its named
-`docker-container` builder from the policy's pinned BuildKit image, exports the image as an
-OCI archive, verifies that the archive retains BuildKit SLSA provenance and SPDX SBOM
-predicates, generates a separate SPDX SBOM, and binds the source revision, expected builder,
-Buildx version, image digest, metadata, and SBOM hashes in a receipt.
+checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, and
+creates its named `docker-container` builder from the policy's pinned BuildKit image. It builds
+from the policy's Git repository at an exact full commit SHA, rather than a local checkout, so
+BuildKit records a verified `configSource` revision. The receipt verifies OCI descriptor sizes
+and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
+parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the
+runnable manifest digest; checks the source repository, Dockerfile path, source revision,
+builder invocation, and base-image dependency; and records hashes for both the embedded SPDX
+statement and the separately generated SPDX SBOM.
+
 Pull requests produce unsigned evidence only. After a trusted `main` build succeeds, the
-separate attestation job rechecks the archived evidence and signs provenance and SBOM
-attestations for that archive. A local Docker or compatible container engine is still needed
-to establish local build proof; a missing engine is an inconclusive result, not a successful
-build.
+attestation job rechecks that evidence, exports the verified runnable-manifest digest, and signs
+provenance and SBOM attestations with that digest as the subject. It never attests the OCI tar
+archive as though it were the container image. A local Docker or compatible container engine is
+still needed to establish local build proof; a missing engine is an inconclusive result, not a
+successful build.
 
 ### Configure
 

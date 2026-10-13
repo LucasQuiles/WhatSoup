@@ -44,10 +44,12 @@ interface DockerNodePinReading extends NodePinReading {
 
 interface ContainerInputPolicy {
   schemaVersion: number;
+  sourceRepository: string;
   baseImage: string;
   builder: {
     name: string;
     driver: string;
+    provenanceIdPrefix: string;
   };
   buildx: {
     version: string;
@@ -67,6 +69,7 @@ const NODE_IMAGE_PATTERN = /^node:(\d+\.\d+\.\d+)-slim@(sha256:[a-f0-9]{64})$/;
 const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{8}T\d{6}Z$/;
 const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
+const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
 const APT_SOURCE_DEFINITION_PATTERN = /(?:^|['"\s])((?:deb|deb-src)(?:\s+\[[^\]\r\n]+\])?\s+[^\s'"]+\s+[^\s'"]+(?:\s+[^\s'"]+)*)(?=['"\\,;]|\s*$)/g;
 
 const HARDCODED_NODE_PATH_PATTERN =
@@ -186,12 +189,17 @@ function readContainerInputPolicy(cwd: string):
   if (
     !parsed
     || typeof parsed !== 'object'
-    || !Number.isInteger((parsed as { schemaVersion?: unknown }).schemaVersion)
+    || (parsed as { schemaVersion?: unknown }).schemaVersion !== 2
+    || typeof (parsed as { sourceRepository?: unknown }).sourceRepository !== 'string'
+    || !SOURCE_REPOSITORY_PATTERN.test((parsed as { sourceRepository: string }).sourceRepository)
     || typeof (parsed as { baseImage?: unknown }).baseImage !== 'string'
     || !(parsed as { builder?: unknown }).builder
     || typeof (parsed as { builder: { name?: unknown } }).builder.name !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test((parsed as { builder: { name: string } }).builder.name)
     || (parsed as { builder: { driver?: unknown } }).builder.driver !== 'docker-container'
+    || typeof (parsed as { builder: { provenanceIdPrefix?: unknown } }).builder.provenanceIdPrefix !== 'string'
+    || (parsed as { builder: { provenanceIdPrefix: string } }).builder.provenanceIdPrefix
+      !== `${(parsed as { sourceRepository: string }).sourceRepository.slice(0, -'.git'.length)}/actions/runs/`
     || !(parsed as { buildx?: unknown }).buildx
     || typeof (parsed as { buildx: { version?: unknown } }).buildx.version !== 'string'
     || !BUILDX_VERSION_PATTERN.test((parsed as { buildx: { version: string } }).buildx.version)
@@ -271,6 +279,65 @@ function activeAptSourceDefinitions(runLines: string[]): string[] {
   return definitions;
 }
 
+interface DockerfileInstruction {
+  keyword: string;
+  text: string;
+}
+
+function activeDockerfileInstructions(lines: string[]): DockerfileInstruction[] {
+  const instructions: DockerfileInstruction[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    const match = /^\s*([A-Za-z]+)\s+/.exec(line);
+    if (!match?.[1]) continue;
+    const instructionLines = [line];
+    const heredocDelimiter = /<<-?\s*['"]?([A-Za-z0-9_.-]+)['"]?/.exec(line)?.[1];
+    if (heredocDelimiter) {
+      while (index + 1 < lines.length) {
+        index += 1;
+        const heredocLine = lines[index] ?? '';
+        instructionLines.push(heredocLine);
+        if (heredocLine.trim() === heredocDelimiter) break;
+      }
+    } else {
+      while (lineEndsWithContinuation(lines[index] ?? '') && index + 1 < lines.length) {
+        index += 1;
+        instructionLines.push(lines[index] ?? '');
+      }
+    }
+    instructions.push({ keyword: match[1].toUpperCase(), text: instructionLines.join('\n') });
+  }
+  return instructions;
+}
+
+const APT_SOURCE_DESCRIPTOR_PATH_PATTERN = /\/etc\/apt(?:\/sources\.list(?:\.d(?:\/[^\s'"]*)?)?|\/sources\.list\.d(?:\/[^\s'"]*)?)?/g;
+
+function descriptorPaths(instruction: string): string[] {
+  return [...instruction.matchAll(APT_SOURCE_DESCRIPTOR_PATH_PATTERN)].map((match) => match[0] ?? '');
+}
+
+function isApprovedAptBootstrap(instruction: DockerfileInstruction): boolean {
+  if (instruction.keyword !== 'RUN') return false;
+  const paths = descriptorPaths(instruction.text);
+  if (
+    paths.length !== 2
+    || paths[0] !== '/etc/apt/sources.list'
+    || paths[1] !== '/etc/apt/sources.list.d/*'
+  ) return false;
+  return /(?:^|\s)>\s*\/etc\/apt\/sources\.list(?:\s|\\|$)/m.test(instruction.text)
+    && /rm\s+-rf\s+\/etc\/apt\/sources\.list\.d\/\*(?:\s|$)/m.test(instruction.text);
+}
+
+function hasUnsafeAptSourceMutation(instructions: DockerfileInstruction[]): boolean {
+  return instructions.some((instruction) => {
+    if (instruction.keyword === 'WORKDIR' && /\bWORKDIR\s+\/etc(?:\/|\s|$)/i.test(instruction.text)) {
+      return true;
+    }
+    if (descriptorPaths(instruction.text).length === 0) return false;
+    return !isApprovedAptBootstrap(instruction);
+  });
+}
+
 function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   const policyResult = readContainerInputPolicy(cwd);
   if (!policyResult.policy) return [policyResult.issue];
@@ -312,6 +379,7 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   const dockerfile = readFileSync(dockerfilePath, 'utf8');
   const activeLines = activeDockerfileLines(dockerfile);
   const activeRunLines = activeDockerfileRunLines(activeLines);
+  const activeInstructions = activeDockerfileInstructions(activeLines);
   for (const image of dockerExternalImageRefs(dockerfile)) {
     if (!image.includes('@sha256:')) {
       policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'base image is not pinned by digest'));
@@ -336,6 +404,13 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
       cwd,
       'docker/Dockerfile',
       'Dockerfile does not fully clear inherited APT source descriptors',
+    ));
+  }
+  if (hasUnsafeAptSourceMutation(activeInstructions)) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/Dockerfile',
+      'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
     ));
   }
   const expectedDefinitions = expectedSources.map((source) => `deb [check-valid-until=no] ${source}`);

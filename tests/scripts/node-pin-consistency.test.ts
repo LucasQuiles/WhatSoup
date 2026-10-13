@@ -101,11 +101,13 @@ function makeFixture(opts: {
   writeFileSync(
     path.join(dir, 'docker/container-inputs.json'),
     `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      sourceRepository: 'https://github.com/LucasQuiles/WhatSoup.git',
       baseImage: `node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST}`,
       builder: {
         name: 'whatsoup-ci-builder',
         driver: 'docker-container',
+        provenanceIdPrefix: 'https://github.com/LucasQuiles/WhatSoup/actions/runs/',
       },
       buildx: {
         version: 'v0.38.0',
@@ -367,6 +369,78 @@ describe('node-pin consistency check', () => {
       source: 'docker/Dockerfile',
       filePath: dockerfilePath,
       reason: 'Dockerfile does not fully clear inherited APT source descriptors',
+    });
+  });
+
+  it('rejects a later COPY that replaces the approved APT source file', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}COPY replacement.list /etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a later shell copy that replaces the approved APT source file', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}RUN cp /tmp/replacement.list /etc/apt/sources.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a later ADD that can repopulate a cleared APT source directory', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ADD replacement.list /etc/apt/sources.list.d/replacement.list\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
+  it('rejects a working directory that makes relative APT source replacement possible', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}WORKDIR /etc/apt\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
     });
   });
 

@@ -1,22 +1,15 @@
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 interface ContainerInputPolicy {
   schemaVersion: number;
+  sourceRepository: string;
   baseImage: string;
-  builder: {
-    name: string;
-    driver: string;
-  };
-  buildx: {
-    version: string;
-    asset: string;
-    sha256: string;
-    buildkitImage: string;
-  };
+  builder: { name: string; driver: string; provenanceIdPrefix: string };
+  buildx: { version: string; asset: string; sha256: string; buildkitImage: string };
 }
 
 interface BuildMetadata {
@@ -24,9 +17,7 @@ interface BuildMetadata {
   'buildx.build.provenance'?: unknown;
 }
 
-interface SbomDocument {
-  spdxVersion?: unknown;
-}
+interface SbomDocument { spdxVersion?: unknown }
 
 export interface ContainerBuildReceiptInput {
   repoRoot: string;
@@ -37,22 +28,30 @@ export interface ContainerBuildReceiptInput {
   builder: string;
   buildxVersion: string;
   buildkitVersion: string;
+  provenanceBuilderId: string;
 }
 
 export interface ContainerBuildReceipt {
-  schemaVersion: 1;
+  schemaVersion: 2;
   sourceRevision: string;
+  sourceRepository: string;
   builder: string;
+  provenanceBuilderId: string;
   buildxVersion: string;
   buildkitImage: string;
   buildkitVersion: string;
   baseImage: string;
+  outputDigest: string;
+  imageIndexDigest: string;
   imageDigest: string;
+  imageManifestSize: number;
   imageArchiveSha256: string;
   metadataSha256: string;
   sbomSha256: string;
+  slsaStatementSha256: string;
+  spdxStatementSha256: string;
   sbomFormat: 'SPDX';
-  provenance: 'buildx.build.provenance';
+  provenance: 'in-toto/slsa-v1';
 }
 
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
@@ -60,27 +59,57 @@ const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const BUILDER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
+const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
+const OCI_IMAGE_MANIFEST_MEDIA_TYPE = 'application/vnd.oci.image.manifest.v1+json';
+const OCI_ATTESTATION_ARTIFACT_TYPE = 'application/vnd.docker.attestation.manifest.v1+json';
+const IN_TOTO_MEDIA_TYPE = 'application/vnd.in-toto+json';
+const IN_TOTO_STATEMENT_V1 = 'https://in-toto.io/Statement/v1';
+const SLSA_V1_PREDICATE = 'https://slsa.dev/provenance/v1';
+const SPDX_PREDICATE = 'https://spdx.dev/Document';
+const BUILDKIT_SLSA_V1_BUILD_TYPE = 'https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md';
 
-interface OciIndexDescriptor {
+interface OciDescriptor {
+  mediaType?: unknown;
   digest?: unknown;
-  annotations?: Record<string, unknown>;
+  size?: unknown;
+  annotations?: unknown;
 }
 
-interface OciIndex {
-  schemaVersion?: unknown;
-  manifests?: unknown;
+interface OciIndex { schemaVersion?: unknown; manifests?: unknown }
+interface OciManifest { schemaVersion?: unknown; mediaType?: unknown; artifactType?: unknown; subject?: unknown; layers?: unknown }
+interface InTotoStatement { _type?: unknown; subject?: unknown; predicateType?: unknown; predicate?: unknown }
+
+interface OciVerificationExpectation {
+  sourceRevision: string;
+  sourceRepository: string;
+  provenanceBuilderId: string;
+  baseImageDigest: string;
+  buildxProvenance: unknown;
 }
 
-interface OciManifest {
-  layers?: unknown;
+interface OciVerificationResult {
+  outputDigest: string;
+  imageIndexDigest: string;
+  imageDigest: string;
+  imageManifestSize: number;
+  slsaStatementSha256: string;
+  spdxStatementSha256: string;
 }
 
-interface OciLayerDescriptor {
-  annotations?: Record<string, unknown>;
+function sha256(contents: Buffer): string {
+  return `sha256:${createHash('sha256').update(contents).digest('hex')}`;
 }
 
 function sha256File(filePath: string): string {
-  return createHash('sha256').update(readFileSync(filePath)).digest('hex');
+  return sha256(readFileSync(filePath));
+}
+
+function parseJsonBytes<T>(bytes: Buffer, label: string): T {
+  try {
+    return JSON.parse(bytes.toString('utf8')) as T;
+  } catch {
+    throw new Error(`${label} is invalid JSON`);
+  }
 }
 
 function parseJson<T>(filePath: string, label: string): T {
@@ -93,32 +122,39 @@ function parseJson<T>(filePath: string, label: string): T {
 
 function requireRegularFile(filePath: string, label: string): void {
   let stat;
-  try {
-    stat = statSync(filePath);
-  } catch {
-    throw new Error(`${label} is missing: ${filePath}`);
-  }
+  try { stat = statSync(filePath); } catch { throw new Error(`${label} is missing: ${filePath}`); }
   if (!stat.isFile()) throw new Error(`${label} must be a regular file: ${filePath}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  if (isRecord(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
 }
 
 function loadPolicy(repoRoot: string): ContainerInputPolicy {
   const policyPath = path.join(repoRoot, 'docker/container-inputs.json');
   const policy = parseJson<ContainerInputPolicy>(policyPath, 'container input policy');
   if (
-    policy.schemaVersion !== 1
+    policy.schemaVersion !== 2
+    || typeof policy.sourceRepository !== 'string'
+    || !SOURCE_REPOSITORY_PATTERN.test(policy.sourceRepository)
     || typeof policy.baseImage !== 'string'
-    || policy.baseImage.length === 0
+    || !SHA256_PATTERN.test(policy.baseImage.slice(policy.baseImage.indexOf('@') + 1))
     || !policy.builder
     || !BUILDER_NAME_PATTERN.test(policy.builder.name)
     || policy.builder.driver !== 'docker-container'
+    || policy.builder.provenanceIdPrefix !== `${policy.sourceRepository.slice(0, -'.git'.length)}/actions/runs/`
     || !policy.buildx
     || !BUILDX_VERSION_PATTERN.test(policy.buildx.version)
     || policy.buildx.asset !== `buildx-${policy.buildx.version}.linux-amd64`
     || !SHA256_PATTERN.test(policy.buildx.sha256)
     || !BUILDKIT_IMAGE_PATTERN.test(policy.buildx.buildkitImage)
-  ) {
-    throw new Error(`container input policy has an invalid base image or builder: ${policyPath}`);
-  }
+  ) throw new Error(`container input policy has an invalid source, base image, or builder: ${policyPath}`);
   return policy;
 }
 
@@ -132,154 +168,221 @@ function expectedBuildkitVersion(policy: ContainerInputPolicy): string {
   return match[1];
 }
 
-function hasNonEmptyProvenance(value: unknown): boolean {
-  if (typeof value === 'string') return value.trim().length > 0;
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+function imageDigestFromPolicy(policy: ContainerInputPolicy): string {
+  const digest = policy.baseImage.slice(policy.baseImage.indexOf('@') + 1);
+  if (!SHA256_PATTERN.test(digest)) throw new Error('container input policy has an invalid base image digest');
+  return digest;
+}
+
+function readOciArchiveEntry(archivePath: string, entry: string): Buffer {
+  for (const candidate of [entry, `./${entry}`]) {
+    try {
+      return execFileSync('tar', ['-xOf', archivePath, candidate], {
+        stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000, maxBuffer: 96 * 1024 * 1024,
+      });
+    } catch { /* OCI exporters differ on a leading ./ prefix. */ }
+  }
+  throw new Error(`OCI image archive is missing ${entry}: ${archivePath}`);
+}
+
+function annotations(descriptor: OciDescriptor): Record<string, unknown> {
+  return isRecord(descriptor.annotations) ? descriptor.annotations : {};
+}
+
+function descriptorDigest(descriptor: OciDescriptor, label: string): string {
+  if (typeof descriptor.digest !== 'string' || !SHA256_PATTERN.test(descriptor.digest)) throw new Error(`${label} has an invalid OCI descriptor digest`);
+  return descriptor.digest;
+}
+
+function descriptorSize(descriptor: OciDescriptor, label: string): number {
+  if (!Number.isSafeInteger(descriptor.size) || (descriptor.size as number) < 0) throw new Error(`${label} has an invalid OCI descriptor size`);
+  return descriptor.size as number;
+}
+
+function readVerifiedDescriptorBlob(archivePath: string, descriptor: OciDescriptor, label: string): Buffer {
+  const digest = descriptorDigest(descriptor, label);
+  const bytes = readOciArchiveEntry(archivePath, `blobs/sha256/${digest.slice('sha256:'.length)}`);
+  if (bytes.length !== descriptorSize(descriptor, label)) throw new Error(`OCI descriptor size does not match blob: ${label}`);
+  if (sha256(bytes) !== digest) throw new Error(`OCI descriptor SHA-256 does not match blob: ${label}`);
+  return bytes;
+}
+
+function assertStatementSubject(statement: InTotoStatement, imageDigest: string): void {
+  if (statement._type !== IN_TOTO_STATEMENT_V1 || !Array.isArray(statement.subject) || statement.subject.length === 0) {
+    throw new Error('OCI image archive attestation layer is not a complete in-toto Statement v1');
+  }
+  const expected = imageDigest.slice('sha256:'.length);
+  for (const subject of statement.subject) {
+    if (!isRecord(subject) || !isRecord(subject.digest) || subject.digest.sha256 !== expected) {
+      throw new Error('in-toto statement subject is not bound to runnable image manifest');
+    }
+  }
+}
+
+function assertSpdxPredicate(predicate: unknown): void {
+  if (!isRecord(predicate) || typeof predicate.spdxVersion !== 'string' || predicate.spdxVersion.length === 0) {
+    throw new Error('SPDX in-toto predicate is missing a valid SPDX document');
+  }
+}
+
+function assertSlsaPredicate(predicate: unknown, expected: OciVerificationExpectation): void {
+  if (!isRecord(predicate) || !isRecord(predicate.buildDefinition) || !isRecord(predicate.runDetails)) {
+    throw new Error('SLSA provenance predicate is missing build definition or run details');
+  }
+  const buildDefinition = predicate.buildDefinition;
+  const runDetails = predicate.runDetails;
+  if (buildDefinition.buildType !== BUILDKIT_SLSA_V1_BUILD_TYPE) throw new Error('SLSA provenance build type is not the reviewed BuildKit v1 definition');
+  if (!isRecord(buildDefinition.externalParameters) || !isRecord(buildDefinition.externalParameters.configSource)) throw new Error('SLSA provenance predicate is missing config source');
+  const configSource = buildDefinition.externalParameters.configSource;
+  if (!isRecord(configSource.digest) || configSource.digest.sha1 !== expected.sourceRevision) throw new Error('SLSA config source revision does not match requested source revision');
+  if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRevision}`) throw new Error('SLSA config source repository does not match the reviewed remote context');
+  if (configSource.path !== 'docker/Dockerfile') throw new Error('SLSA config source path is not docker/Dockerfile');
+  if (!Array.isArray(buildDefinition.resolvedDependencies) || !buildDefinition.resolvedDependencies.some((dependency) => (
+    isRecord(dependency) && isRecord(dependency.digest) && dependency.digest.sha256 === expected.baseImageDigest.slice('sha256:'.length)
+  ))) throw new Error('SLSA provenance does not bind the reviewed base image digest');
+  if (!isRecord(runDetails.builder) || runDetails.builder.id !== expected.provenanceBuilderId) {
+    throw new Error('SLSA provenance builder id does not match the reviewed workflow invocation');
+  }
+}
+
+/**
+ * Verifies OCI descriptor bytes before using the selected in-toto statements.
+ * BuildKit considers VCS hints from local contexts advisory, so receipt callers
+ * supply source facts from an exact full-SHA remote Git context.
+ */
+export function verifyOciArchiveAttestations(
+  imagePath: string,
+  expectedOutputDigest: string,
+  expected?: OciVerificationExpectation,
+): OciVerificationResult {
+  if (!SHA256_PATTERN.test(expectedOutputDigest)) throw new Error('expected OCI output digest must be a SHA-256 digest');
+  const indexBytes = readOciArchiveEntry(imagePath, 'index.json');
+  const index = parseJsonBytes<OciIndex>(indexBytes, `OCI image archive index.json: ${imagePath}`);
+  if (index.schemaVersion !== 2 || !Array.isArray(index.manifests)) throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
+  const descriptors = index.manifests.filter(isRecord) as OciDescriptor[];
+  const attestationDescriptors = descriptors.filter((descriptor) => annotations(descriptor)['vnd.docker.reference.type'] === 'attestation-manifest');
+  const runnableDescriptors = descriptors.filter((descriptor) => !attestationDescriptors.includes(descriptor));
+  if (runnableDescriptors.length !== 1) throw new Error(`OCI image archive must contain exactly one runnable image descriptor: ${imagePath}`);
+  const runnable = runnableDescriptors[0];
+  const imageDigest = descriptorDigest(runnable, 'runnable image descriptor');
+  const imageManifestBytes = readVerifiedDescriptorBlob(imagePath, runnable, 'runnable image descriptor');
+  const manifest = parseJsonBytes<Record<string, unknown>>(imageManifestBytes, 'runnable image manifest');
+  if (manifest.schemaVersion !== 2 || manifest.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('runnable image descriptor does not reference an OCI image manifest');
+  const imageIndexDigest = sha256(indexBytes);
+  if (expectedOutputDigest !== imageDigest && expectedOutputDigest !== imageIndexDigest) throw new Error('build metadata output digest does not match the verified OCI output');
+  if (attestationDescriptors.length === 0) throw new Error(`OCI image archive has no BuildKit attestation manifest: ${imagePath}`);
+
+  let slsaStatementSha256: string | undefined;
+  let spdxStatementSha256: string | undefined;
+  for (const descriptor of attestationDescriptors) {
+    if (annotations(descriptor)['vnd.docker.reference.digest'] !== imageDigest) continue;
+    if (descriptor.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('OCI image archive attestation descriptor has an unexpected media type');
+    const attestationBytes = readVerifiedDescriptorBlob(imagePath, descriptor, 'attestation manifest descriptor');
+    const attestation = parseJsonBytes<OciManifest>(attestationBytes, 'OCI image archive attestation manifest');
+    if (attestation.schemaVersion !== 2 || attestation.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE || attestation.artifactType !== OCI_ATTESTATION_ARTIFACT_TYPE || !isRecord(attestation.subject)) {
+      throw new Error('OCI image archive has an invalid attestation manifest');
+    }
+    if (descriptorDigest(attestation.subject as OciDescriptor, 'attestation manifest subject') !== imageDigest || descriptorSize(attestation.subject as OciDescriptor, 'attestation manifest subject') !== descriptorSize(runnable, 'runnable image descriptor')) {
+      throw new Error('OCI image archive attestation manifest is not bound to runnable image descriptor');
+    }
+    if (!Array.isArray(attestation.layers)) throw new Error('OCI image archive attestation manifest has no layers');
+    for (const layer of attestation.layers) {
+      if (!isRecord(layer) || layer.mediaType !== IN_TOTO_MEDIA_TYPE) continue;
+      const layerDescriptor = layer as OciDescriptor;
+      const layerBytes = readVerifiedDescriptorBlob(imagePath, layerDescriptor, 'attestation layer descriptor');
+      const statement = parseJsonBytes<InTotoStatement>(layerBytes, 'OCI image archive in-toto statement');
+      assertStatementSubject(statement, imageDigest);
+      if (typeof statement.predicateType !== 'string' || annotations(layerDescriptor)['in-toto.io/predicate-type'] !== statement.predicateType) {
+        throw new Error('OCI image archive attestation layer predicate annotation does not match statement payload');
+      }
+      if (statement.predicateType === SLSA_V1_PREDICATE) {
+        if (expected) {
+          assertSlsaPredicate(statement.predicate, expected);
+          if (stableJson(expected.buildxProvenance) !== stableJson(statement.predicate)) throw new Error('Buildx metadata provenance does not match verified SLSA statement');
+        }
+        slsaStatementSha256 = sha256(layerBytes);
+      }
+      if (statement.predicateType === SPDX_PREDICATE) {
+        assertSpdxPredicate(statement.predicate);
+        spdxStatementSha256 = sha256(layerBytes);
+      }
+    }
+  }
+  if (!slsaStatementSha256) throw new Error(`OCI image archive has no SLSA provenance predicate for ${imageDigest}`);
+  if (!spdxStatementSha256) throw new Error(`OCI image archive has no SPDX SBOM predicate for ${imageDigest}`);
+  return {
+    outputDigest: expectedOutputDigest,
+    imageIndexDigest,
+    imageDigest,
+    imageManifestSize: descriptorSize(runnable, 'runnable image descriptor'),
+    slsaStatementSha256,
+    spdxStatementSha256,
+  };
 }
 
 function assertInput(input: ContainerBuildReceiptInput): {
   metadata: BuildMetadata;
   sbom: SbomDocument;
   policy: ContainerInputPolicy;
+  oci: OciVerificationResult;
 } {
-  if (!COMMIT_PATTERN.test(input.sourceRevision)) {
-    throw new Error(`source revision must be a full 40-hex commit: ${input.sourceRevision}`);
-  }
-  if (input.builder.trim().length === 0) throw new Error('builder identity is required');
+  if (!COMMIT_PATTERN.test(input.sourceRevision)) throw new Error(`source revision must be a full 40-hex commit: ${input.sourceRevision}`);
   requireRegularFile(input.metadataPath, 'build metadata');
   requireRegularFile(input.sbomPath, 'SBOM');
   requireRegularFile(input.imagePath, 'image archive');
-
   const metadata = parseJson<BuildMetadata>(input.metadataPath, 'build metadata');
-  if (typeof metadata['containerimage.digest'] !== 'string' || !SHA256_PATTERN.test(metadata['containerimage.digest'])) {
-    throw new Error('build metadata is missing a valid containerimage.digest');
-  }
-  if (!hasNonEmptyProvenance(metadata['buildx.build.provenance'])) {
+  if (typeof metadata['containerimage.digest'] !== 'string' || !SHA256_PATTERN.test(metadata['containerimage.digest'])) throw new Error('build metadata is missing a valid containerimage.digest');
+  if (!isRecord(metadata['buildx.build.provenance']) || Object.keys(metadata['buildx.build.provenance']).length === 0) {
     throw new Error('build metadata is missing non-empty buildx.build.provenance');
   }
-
   const sbom = parseJson<SbomDocument>(input.sbomPath, 'SBOM');
-  if (typeof sbom.spdxVersion !== 'string' || sbom.spdxVersion.length === 0) {
-    throw new Error('SBOM must be SPDX JSON');
-  }
+  if (typeof sbom.spdxVersion !== 'string' || sbom.spdxVersion.length === 0) throw new Error('SBOM must be SPDX JSON');
   const policy = loadPolicy(input.repoRoot);
-  if (input.builder !== expectedBuilderIdentity(policy)) {
-    throw new Error('builder identity does not match docker/container-inputs.json');
+  if (input.builder !== expectedBuilderIdentity(policy)) throw new Error('builder identity does not match docker/container-inputs.json');
+  if (input.buildxVersion !== policy.buildx.version) throw new Error('Buildx version does not match docker/container-inputs.json');
+  if (input.buildkitVersion !== expectedBuildkitVersion(policy)) throw new Error('BuildKit version does not match docker/container-inputs.json');
+  if (!input.provenanceBuilderId.startsWith(policy.builder.provenanceIdPrefix)) throw new Error('provenance builder id does not match docker/container-inputs.json');
+  if (!/^\d+$/.test(input.provenanceBuilderId.slice(policy.builder.provenanceIdPrefix.length))) {
+    throw new Error('provenance builder id does not identify a GitHub Actions run');
   }
-  if (input.buildxVersion !== policy.buildx.version) {
-    throw new Error('Buildx version does not match docker/container-inputs.json');
-  }
-  if (input.buildkitVersion !== expectedBuildkitVersion(policy)) {
-    throw new Error('BuildKit version does not match docker/container-inputs.json');
-  }
-  return { metadata, sbom, policy };
-}
-
-function readOciArchiveEntry(archivePath: string, entry: string): string {
-  for (const candidate of [entry, `./${entry}`]) {
-    try {
-      return execFileSync('tar', ['-xOf', archivePath, candidate], {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 30_000,
-      });
-    } catch {
-      // OCI exporters differ on whether archive members have a leading "./".
-    }
-  }
-  throw new Error(`OCI image archive is missing ${entry}: ${archivePath}`);
-}
-
-function blobEntryFromDigest(digest: unknown): string | null {
-  if (typeof digest !== 'string' || !SHA256_PATTERN.test(digest)) return null;
-  return `blobs/sha256/${digest.slice('sha256:'.length)}`;
-}
-
-function predicateTypesForAttestation(archivePath: string, descriptor: OciIndexDescriptor): string[] {
-  const blobEntry = blobEntryFromDigest(descriptor.digest);
-  if (!blobEntry) return [];
-  try {
-    const manifest = JSON.parse(readOciArchiveEntry(archivePath, blobEntry)) as OciManifest;
-    if (!Array.isArray(manifest.layers)) return [];
-    return (manifest.layers as OciLayerDescriptor[])
-      .map((layer) => layer?.annotations?.['in-toto.io/predicate-type'])
-      .filter((predicate): predicate is string => typeof predicate === 'string');
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('OCI image archive')) throw error;
-    throw new Error(`OCI image archive has an invalid attestation manifest: ${blobEntry}`);
-  }
-}
-
-/**
- * Checks the preserved OCI layout rather than trusting a `--load` image, whose
- * Docker exporter can discard BuildKit attestations. The signed GitHub
- * attestations later bind this archive to the trusted workflow; this check makes
- * the unsigned PR evidence fail closed if BuildKit did not retain both its SLSA
- * provenance and SPDX SBOM predicates for the image digest.
- */
-export function verifyOciArchiveAttestations(imagePath: string, imageDigest: string): void {
-  let index: OciIndex;
-  try {
-    index = JSON.parse(readOciArchiveEntry(imagePath, 'index.json')) as OciIndex;
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('OCI image archive')) throw error;
-    throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
-  }
-  if (index.schemaVersion !== 2 || !Array.isArray(index.manifests)) {
-    throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
-  }
-  const attestations = (index.manifests as OciIndexDescriptor[]).filter((descriptor) => (
-    descriptor
-    && typeof descriptor === 'object'
-    && descriptor.annotations?.['vnd.docker.reference.type'] === 'attestation-manifest'
-  ));
-  if (attestations.length === 0) {
-    throw new Error(`OCI image archive has no BuildKit attestation manifest: ${imagePath}`);
-  }
-  const boundAttestations = attestations.filter(
-    (descriptor) => descriptor.annotations?.['vnd.docker.reference.digest'] === imageDigest,
-  );
-  if (boundAttestations.length === 0) {
-    throw new Error(`OCI image archive attestation is not bound to ${imageDigest}`);
-  }
-  const predicateTypes = boundAttestations.flatMap((descriptor) => (
-    predicateTypesForAttestation(imagePath, descriptor)
-  ));
-  if (!predicateTypes.some((predicate) => predicate.startsWith('https://slsa.dev/provenance/'))) {
-    throw new Error(`OCI image archive has no SLSA provenance predicate for ${imageDigest}`);
-  }
-  if (!predicateTypes.includes('https://spdx.dev/Document')) {
-    throw new Error(`OCI image archive has no SPDX SBOM predicate for ${imageDigest}`);
-  }
+  const oci = verifyOciArchiveAttestations(input.imagePath, metadata['containerimage.digest'], {
+    sourceRevision: input.sourceRevision,
+    sourceRepository: policy.sourceRepository,
+    provenanceBuilderId: input.provenanceBuilderId,
+    baseImageDigest: imageDigestFromPolicy(policy),
+    buildxProvenance: metadata['buildx.build.provenance'],
+  });
+  return { metadata, sbom, policy, oci };
 }
 
 export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): ContainerBuildReceipt {
-  const { metadata, policy } = assertInput(input);
+  const { metadata, policy, oci } = assertInput(input);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceRevision: input.sourceRevision,
+    sourceRepository: policy.sourceRepository,
     builder: input.builder,
+    provenanceBuilderId: input.provenanceBuilderId,
     buildxVersion: input.buildxVersion,
     buildkitImage: policy.buildx.buildkitImage,
     buildkitVersion: input.buildkitVersion,
     baseImage: policy.baseImage,
-    imageDigest: metadata['containerimage.digest'] as string,
+    outputDigest: metadata['containerimage.digest'] as string,
+    imageIndexDigest: oci.imageIndexDigest,
+    imageDigest: oci.imageDigest,
+    imageManifestSize: oci.imageManifestSize,
     imageArchiveSha256: sha256File(input.imagePath),
     metadataSha256: sha256File(input.metadataPath),
     sbomSha256: sha256File(input.sbomPath),
+    slsaStatementSha256: oci.slsaStatementSha256,
+    spdxStatementSha256: oci.spdxStatementSha256,
     sbomFormat: 'SPDX',
-    provenance: 'buildx.build.provenance',
+    provenance: 'in-toto/slsa-v1',
   };
 }
 
-export function verifyContainerBuildReceipt(
-  receipt: ContainerBuildReceipt,
-  input: ContainerBuildReceiptInput,
-): void {
-  const expected = createContainerBuildReceipt(input);
-  if (JSON.stringify(receipt) !== JSON.stringify(expected)) {
-    throw new Error('container build receipt does not match the verified build inputs');
-  }
+export function verifyContainerBuildReceipt(receipt: ContainerBuildReceipt, input: ContainerBuildReceiptInput): void {
+  if (stableJson(receipt) !== stableJson(createContainerBuildReceipt(input))) throw new Error('container build receipt does not match the verified build inputs');
 }
 
 interface ParsedArgs {
@@ -290,25 +393,19 @@ interface ParsedArgs {
   builder: string;
   buildxVersion: string;
   buildkitVersion: string;
+  provenanceBuilderId: string;
   repoRoot: string;
   outputPath?: string;
   receiptPath?: string;
-  verifyOciAttestations: boolean;
+  githubOutputPath?: string;
 }
 
 function parseArgs(argv: string[], cwd: string): ParsedArgs {
   const values = new Map<string, string>();
-  let verifyOciAttestations = false;
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
-    if (flag === '--verify-oci-attestations') {
-      verifyOciAttestations = true;
-      continue;
-    }
     const value = argv[index + 1];
-    if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) {
-      throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION [--repo-root PATH] (--output PATH | --receipt PATH)');
-    }
+    if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)');
     values.set(flag, value);
     index += 1;
   }
@@ -319,52 +416,35 @@ function parseArgs(argv: string[], cwd: string): ParsedArgs {
   };
   const outputPath = values.get('--output');
   const receiptPath = values.get('--receipt');
-  if (Boolean(outputPath) === Boolean(receiptPath)) {
-    throw new Error('provide exactly one of --output or --receipt');
-  }
+  if (Boolean(outputPath) === Boolean(receiptPath)) throw new Error('provide exactly one of --output or --receipt');
   return {
-    metadataPath: required('--metadata'),
-    sbomPath: required('--sbom'),
-    imagePath: required('--image'),
-    sourceRevision: required('--source'),
-    builder: required('--builder'),
-    buildxVersion: required('--buildx-version'),
-    buildkitVersion: required('--buildkit-version'),
-    repoRoot: values.get('--repo-root') ?? cwd,
-    outputPath,
-    receiptPath,
-    verifyOciAttestations,
+    metadataPath: required('--metadata'), sbomPath: required('--sbom'), imagePath: required('--image'),
+    sourceRevision: required('--source'), builder: required('--builder'), buildxVersion: required('--buildx-version'),
+    buildkitVersion: required('--buildkit-version'), provenanceBuilderId: required('--provenance-builder-id'),
+    repoRoot: values.get('--repo-root') ?? cwd, outputPath, receiptPath, githubOutputPath: values.get('--github-output'),
   };
 }
 
 export function run(argv: string[] = process.argv.slice(2), cwd: string = process.cwd()): ContainerBuildReceipt {
   const args = parseArgs(argv, cwd);
   const input: ContainerBuildReceiptInput = {
-    repoRoot: args.repoRoot,
-    metadataPath: args.metadataPath,
-    sbomPath: args.sbomPath,
-    imagePath: args.imagePath,
-    sourceRevision: args.sourceRevision,
-    builder: args.builder,
-    buildxVersion: args.buildxVersion,
-    buildkitVersion: args.buildkitVersion,
+    repoRoot: args.repoRoot, metadataPath: args.metadataPath, sbomPath: args.sbomPath, imagePath: args.imagePath,
+    sourceRevision: args.sourceRevision, builder: args.builder, buildxVersion: args.buildxVersion,
+    buildkitVersion: args.buildkitVersion, provenanceBuilderId: args.provenanceBuilderId,
   };
   const receipt = createContainerBuildReceipt(input);
-  if (args.verifyOciAttestations) verifyOciArchiveAttestations(input.imagePath, receipt.imageDigest);
   if (args.outputPath) {
     writeFileSync(args.outputPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
     verifyContainerBuildReceipt(parseJson<ContainerBuildReceipt>(args.outputPath, 'container build receipt'), input);
   } else if (args.receiptPath) {
     verifyContainerBuildReceipt(parseJson<ContainerBuildReceipt>(args.receiptPath, 'container build receipt'), input);
   }
+  if (args.githubOutputPath) appendFileSync(args.githubOutputPath, `image_digest=${receipt.imageDigest}\nexternal_sbom_sha256=${receipt.sbomSha256}\n`, 'utf8');
   return receipt;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    const receipt = run();
-    console.log(`container build receipt verified: ${receipt.imageDigest}`);
-  } catch (error) {
+  try { console.log(`container build receipt verified: ${run().imageDigest}`); } catch (error) {
     console.error((error as Error).message);
     process.exitCode = 1;
   }

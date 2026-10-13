@@ -29,6 +29,12 @@ jobs:
   quality:
     name: quality (24.x)
     runs-on: ubuntu-latest
+    env:
+      # GitHub's pull-request SHA is a generated merge commit that is not a
+      # fetchable Git object. BuildKit must fetch the actual full-SHA source
+      # commit so configSource records verified remote context rather than a
+      # caller-supplied local VCS hint.
+      SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     # Generous cap so it only kills a genuinely hung run, not a slow-but-live
     # one (the authority job runs the full suite + coverage and can take ~40min).
     # Without this a hung run rides to the 6h GitHub default.
@@ -134,15 +140,17 @@ jobs:
             exit 1
           fi
           builder_name="${builder%%|*}"
+          source_repository="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sourceRepository)')"
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           docker buildx build \
             --builder "$builder_name" \
             --file docker/Dockerfile \
             --tag whatsoup-ci \
-            --provenance=mode=max \
+            --attest "type=provenance,mode=max,builder-id=$provenance_builder_id" \
             --sbom=true \
             --metadata-file "$container_dir/build-metadata.json" \
             --output type=oci,dest="$container_dir/whatsoup-image.oci.tar" \
-            .
+            "${source_repository}#${SOURCE_REVISION}"
 
       - name: Generate container SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
@@ -160,25 +168,26 @@ jobs:
           builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
           buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
           buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
             --sbom "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
-            --source "$GITHUB_SHA" \
+            --source "$SOURCE_REVISION" \
             --builder "$builder" \
             --buildx-version "$buildx_version" \
             --buildkit-version "$buildkit_version" \
-            --verify-oci-attestations \
+            --provenance-builder-id "$provenance_builder_id" \
             --output "$container_dir/container-build-receipt.json"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
             --sbom "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
-            --source "$GITHUB_SHA" \
+            --source "$SOURCE_REVISION" \
             --builder "$builder" \
             --buildx-version "$buildx_version" \
             --buildkit-version "$buildkit_version" \
-            --verify-oci-attestations \
+            --provenance-builder-id "$provenance_builder_id" \
             --receipt "$container_dir/container-build-receipt.json"
 
       - name: Upload container build evidence
@@ -600,12 +609,14 @@ jobs:
           path: ${{ runner.temp }}/whatsoup-container
 
       - name: Reverify downloaded container evidence
+        id: reverify-container-evidence
         run: |
           set -euo pipefail
           container_dir="$RUNNER_TEMP/whatsoup-container"
           builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
           buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
           buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
             --sbom "$container_dir/whatsoup-image.spdx.json" \
@@ -614,18 +625,21 @@ jobs:
             --builder "$builder" \
             --buildx-version "$buildx_version" \
             --buildkit-version "$buildkit_version" \
-            --verify-oci-attestations \
+            --provenance-builder-id "$provenance_builder_id" \
+            --github-output "$GITHUB_OUTPUT" \
             --receipt "$container_dir/container-build-receipt.json"
 
       - name: Attest container image provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
         with:
-          subject-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.oci.tar
+          subject-name: ghcr.io/lucasquiles/whatsoup
+          subject-digest: ${{ steps.reverify-container-evidence.outputs.image_digest }}
 
       - name: Attest container image SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
         with:
-          subject-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.oci.tar
+          subject-name: ghcr.io/lucasquiles/whatsoup
+          subject-digest: ${{ steps.reverify-container-evidence.outputs.image_digest }}
           sbom-path: ${{ runner.temp }}/whatsoup-container/whatsoup-image.spdx.json
 
   compatibility:

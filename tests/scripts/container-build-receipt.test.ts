@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,69 +21,165 @@ const containerInputs = JSON.parse(
 };
 const tmp = trackTmpDirs('container-build-receipt-');
 
+const SOURCE_REVISION = 'b'.repeat(40);
+const PROVENANCE_BUILDER_ID = 'https://github.com/LucasQuiles/WhatSoup/actions/runs/123';
+const SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
+const BASE_IMAGE_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
+
+function sha256(contents: string | Buffer): string {
+  return createHash('sha256').update(contents).digest('hex');
+}
+
 function makeReceiptInput(options: {
   provenance?: unknown;
   builder?: string;
   buildxVersion?: string;
   buildkitVersion?: string;
+  ociSourceRevision?: string;
+  ociSourceRepository?: string;
+  ociProvenanceBuilderId?: string;
+  ociBaseImageDigest?: string;
 } = {}) {
   const dir = tmp.make('evidence');
   const metadataPath = path.join(dir, 'build-metadata.json');
   const sbomPath = path.join(dir, 'image.spdx.json');
   const imagePath = path.join(dir, 'image.tar');
+  const oci = writeOciArchive(imagePath, {
+    sourceRevision: options.ociSourceRevision ?? SOURCE_REVISION,
+    sourceRepository: options.ociSourceRepository,
+    provenanceBuilderId: options.ociProvenanceBuilderId,
+    baseImageDigest: options.ociBaseImageDigest,
+  });
   writeFileSync(metadataPath, JSON.stringify({
-    'containerimage.digest': `sha256:${'a'.repeat(64)}`,
-    'buildx.build.provenance': options.provenance ?? { buildType: 'https://mobyproject.org/buildkit@v1' },
+    'containerimage.digest': oci.imageDigest,
+    'buildx.build.provenance': options.provenance ?? oci.provenance,
   }));
   writeFileSync(sbomPath, JSON.stringify({ spdxVersion: 'SPDX-2.3' }));
-  writeFileSync(imagePath, 'container-image');
   return {
     repoRoot,
     metadataPath,
     sbomPath,
     imagePath,
-    sourceRevision: 'b'.repeat(40),
+    sourceRevision: SOURCE_REVISION,
     builder: options.builder ?? 'whatsoup-ci-builder|docker-container',
     buildxVersion: options.buildxVersion ?? 'v0.38.0',
     buildkitVersion: options.buildkitVersion ?? 'v0.33.1',
+    provenanceBuilderId: PROVENANCE_BUILDER_ID,
   };
+}
+
+interface OciArchiveOptions {
+  sourceRevision?: string;
+  sourceRepository?: string;
+  provenanceBuilderId?: string;
+  baseImageDigest?: string;
+  statementSubjectDigest?: string;
+  predicateAnnotation?: string;
+  predicateType?: string;
+  includeSlsa?: boolean;
+  includeSpdx?: boolean;
+  corruptAttestationSize?: boolean;
+  corruptLayerDigest?: boolean;
 }
 
 function writeOciArchive(
   archivePath: string,
-  predicateTypes: string[],
-  imageDigest: string = `sha256:${'a'.repeat(64)}`,
-  manifestContents?: string,
-): void {
+  options: OciArchiveOptions = {},
+): { imageDigest: string; provenance: Record<string, unknown> } {
   const layout = tmp.make('oci-layout');
   const blobs = path.join(layout, 'blobs/sha256');
   mkdirSync(blobs, { recursive: true });
-  const manifestDigest = 'b'.repeat(64);
-  const manifest = manifestContents ?? JSON.stringify({
+  const writeBlob = (contents: string): { digest: string; size: number } => {
+    const bytes = Buffer.from(contents, 'utf8');
+    const digest = sha256(bytes);
+    writeFileSync(path.join(blobs, digest), bytes);
+    return { digest: `sha256:${digest}`, size: bytes.length };
+  };
+
+  const runnable = writeBlob(JSON.stringify({
     schemaVersion: 2,
-    layers: predicateTypes.map((predicate, index) => ({
-      digest: `sha256:${String.fromCharCode(99 + index).repeat(64)}`,
-      annotations: { 'in-toto.io/predicate-type': predicate },
-    })),
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    config: { mediaType: 'application/vnd.oci.image.config.v1+json', digest: `sha256:${'0'.repeat(64)}`, size: 0 },
+    layers: [],
+  }));
+  const imageDigest = runnable.digest;
+  const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
+  const provenance = {
+    buildDefinition: {
+      buildType: 'https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md',
+      externalParameters: {
+        configSource: {
+          uri: `${options.sourceRepository ?? SOURCE_REPOSITORY}#${sourceRevision}`,
+          digest: { sha1: sourceRevision },
+          path: 'docker/Dockerfile',
+        },
+      },
+      resolvedDependencies: [{
+        uri: 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64',
+        digest: { sha256: options.baseImageDigest ?? BASE_IMAGE_DIGEST },
+      }],
+    },
+    runDetails: { builder: { id: options.provenanceBuilderId ?? PROVENANCE_BUILDER_ID } },
+  };
+  const statementSubjectDigest = options.statementSubjectDigest ?? imageDigest.slice('sha256:'.length);
+  const statementPredicateType = options.predicateType ?? 'https://slsa.dev/provenance/v1';
+  const statement = writeBlob(JSON.stringify({
+    _type: 'https://in-toto.io/Statement/v1',
+    subject: [{ name: '_', digest: { sha256: statementSubjectDigest } }],
+    predicateType: statementPredicateType,
+    predicate: provenance,
+  }));
+  const sbomStatement = writeBlob(JSON.stringify({
+    _type: 'https://in-toto.io/Statement/v1',
+    subject: [{ name: '_', digest: { sha256: statementSubjectDigest } }],
+    predicateType: 'https://spdx.dev/Document',
+    predicate: { SPDXID: 'SPDXRef-DOCUMENT', spdxVersion: 'SPDX-2.3', packages: [] },
+  }));
+  const emptyConfig = writeBlob('{}');
+  const manifest = JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    artifactType: 'application/vnd.docker.attestation.manifest.v1+json',
+    config: { mediaType: 'application/vnd.oci.empty.v1+json', ...emptyConfig },
+    subject: { mediaType: 'application/vnd.oci.image.manifest.v1+json', ...runnable },
+    layers: [
+      ...(options.includeSlsa === false ? [] : [{
+        mediaType: 'application/vnd.in-toto+json',
+        ...statement,
+        annotations: { 'in-toto.io/predicate-type': options.predicateAnnotation ?? 'https://slsa.dev/provenance/v1' },
+      }]),
+      ...(options.includeSpdx === false ? [] : [{
+        mediaType: 'application/vnd.in-toto+json',
+        digest: options.corruptLayerDigest ? `sha256:${'f'.repeat(64)}` : sbomStatement.digest,
+        size: sbomStatement.size,
+        annotations: { 'in-toto.io/predicate-type': 'https://spdx.dev/Document' },
+      }]),
+    ],
   });
-  writeFileSync(path.join(blobs, manifestDigest), manifest);
+  const attestation = writeBlob(manifest);
   writeFileSync(path.join(layout, 'index.json'), JSON.stringify({
     schemaVersion: 2,
-    manifests: [{
-      digest: `sha256:${manifestDigest}`,
-      annotations: {
-        'vnd.docker.reference.type': 'attestation-manifest',
-        'vnd.docker.reference.digest': imageDigest,
+    manifests: [
+      { mediaType: 'application/vnd.oci.image.manifest.v1+json', ...runnable },
+      {
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        digest: attestation.digest,
+        size: attestation.size + (options.corruptAttestationSize ? 1 : 0),
+        annotations: {
+          'vnd.docker.reference.type': 'attestation-manifest',
+          'vnd.docker.reference.digest': imageDigest,
+        },
       },
-    }],
+    ],
   }));
   execFileSync('tar', ['-cf', archivePath, '-C', layout, 'index.json', 'blobs']);
+  return { imageDigest, provenance };
 }
 
 describe('container build evidence CI contract', () => {
   it('builds pinned inputs and produces an independently checked evidence bundle', () => {
     expect(qualityWorkflow).toContain('docker buildx build');
-    expect(qualityWorkflow).toContain('--provenance=mode=max');
+    expect(qualityWorkflow).toContain('type=provenance,mode=max,builder-id=$provenance_builder_id');
     expect(qualityWorkflow).toContain('--sbom=true');
     expect(qualityWorkflow).toContain('BUILDX_METADATA_PROVENANCE: max');
     expect(qualityWorkflow).toContain('--output type=oci');
@@ -105,6 +202,8 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).not.toContain('--load');
     expect(qualityWorkflow).not.toContain('docker image save whatsoup-ci');
     expect(qualityWorkflow).toContain('--metadata-file');
+    expect(qualityWorkflow).toContain('"${source_repository}#${SOURCE_REVISION}"');
+    expect(qualityWorkflow).toContain('--provenance-builder-id "$provenance_builder_id"');
     expect(qualityWorkflow).toContain('anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c');
     expect(qualityWorkflow).toContain('scripts/verify-container-build-receipt.ts');
     expect(qualityWorkflow).toContain('container-build-evidence-${{ github.sha }}');
@@ -117,6 +216,10 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('attestations: write');
     expect(qualityWorkflow).toContain('artifact-metadata: write');
     expect(qualityWorkflow).toContain('actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6');
+    expect(qualityWorkflow).toContain('id: reverify-container-evidence');
+    expect(qualityWorkflow).toContain('--github-output "$GITHUB_OUTPUT"');
+    expect(qualityWorkflow).toContain('subject-name: ghcr.io/lucasquiles/whatsoup');
+    expect(qualityWorkflow).toContain('subject-digest: ${{ steps.reverify-container-evidence.outputs.image_digest }}');
   });
 
   it('binds the source, image digest, SPDX SBOM and non-empty Buildx provenance in the receipt', () => {
@@ -129,9 +232,14 @@ describe('container build evidence CI contract', () => {
       'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
     );
     expect(receipt.buildkitVersion).toBe('v0.33.1');
-    expect(receipt.imageDigest).toBe(`sha256:${'a'.repeat(64)}`);
+    expect(receipt.schemaVersion).toBe(2);
+    expect(receipt.imageDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(receipt.outputDigest).toBe(receipt.imageDigest);
+    expect(receipt.imageIndexDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(receipt.slsaStatementSha256).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(receipt.spdxStatementSha256).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(receipt.sbomFormat).toBe('SPDX');
-    expect(receipt.provenance).toBe('buildx.build.provenance');
+    expect(receipt.provenance).toBe('in-toto/slsa-v1');
     expect(() => verifyContainerBuildReceipt(receipt, input)).not.toThrow();
   });
 
@@ -147,6 +255,14 @@ describe('container build evidence CI contract', () => {
     );
   });
 
+  it('refuses a provenance builder identity that is not a workflow run', () => {
+    const input = makeReceiptInput();
+    expect(() => createContainerBuildReceipt({
+      ...input,
+      provenanceBuilderId: 'https://github.com/LucasQuiles/WhatSoup/actions/runs/not-a-run',
+    })).toThrow('provenance builder id does not identify a GitHub Actions run');
+  });
+
   it('refuses a Buildx client version outside the reviewed policy', () => {
     expect(() => createContainerBuildReceipt(makeReceiptInput({ buildxVersion: 'v0.0.0' }))).toThrow(
       'Buildx version does not match docker/container-inputs.json',
@@ -159,36 +275,86 @@ describe('container build evidence CI contract', () => {
     );
   });
 
-  it('requires OCI evidence to retain both BuildKit predicates for the image digest', () => {
+  it('requires OCI evidence to retain both BuildKit predicates for the runnable image digest', () => {
     const input = makeReceiptInput();
-    const imageDigest = `sha256:${'a'.repeat(64)}`;
-    writeOciArchive(input.imagePath, [
-      'https://slsa.dev/provenance/v1',
-      'https://spdx.dev/Document',
-    ], imageDigest);
+    const { imageDigest } = writeOciArchive(input.imagePath);
     expect(() => verifyOciArchiveAttestations(input.imagePath, imageDigest)).not.toThrow();
 
     const missingSbom = makeReceiptInput();
-    writeOciArchive(missingSbom.imagePath, ['https://slsa.dev/provenance/v1'], imageDigest);
+    const missingSbomArchive = writeOciArchive(missingSbom.imagePath, {
+      includeSpdx: false,
+    });
     expect(() => verifyOciArchiveAttestations(missingSbom.imagePath, imageDigest)).toThrow(
       `OCI image archive has no SPDX SBOM predicate for ${imageDigest}`,
     );
 
+    expect(missingSbomArchive.imageDigest).toBe(imageDigest);
+
     const missingProvenance = makeReceiptInput();
-    writeOciArchive(missingProvenance.imagePath, ['https://spdx.dev/Document'], imageDigest);
+    const missingProvenanceArchive = writeOciArchive(missingProvenance.imagePath, {
+      includeSlsa: false,
+    });
     expect(() => verifyOciArchiveAttestations(missingProvenance.imagePath, imageDigest)).toThrow(
       `OCI image archive has no SLSA provenance predicate for ${imageDigest}`,
     );
+    expect(missingProvenanceArchive.imageDigest).toBe(imageDigest);
   });
 
-  it('fails closed when a bound attestation manifest is invalid JSON', () => {
+  it('rejects a forged predicate annotation that disagrees with its in-toto statement', () => {
     const input = makeReceiptInput();
-    const imageDigest = `sha256:${'a'.repeat(64)}`;
-    writeOciArchive(input.imagePath, [], imageDigest, '{invalid');
+    const { imageDigest } = writeOciArchive(input.imagePath, {
+      predicateAnnotation: 'https://spdx.dev/Document',
+      predicateType: 'https://slsa.dev/provenance/v1',
+    });
 
     expect(() => verifyOciArchiveAttestations(input.imagePath, imageDigest)).toThrow(
-      'OCI image archive has an invalid attestation manifest',
+      'OCI image archive attestation layer predicate annotation does not match statement payload',
     );
+  });
+
+  it('rejects a mismatched attestation descriptor size and layer digest', () => {
+    const sizeMismatch = makeReceiptInput();
+    const { imageDigest } = writeOciArchive(sizeMismatch.imagePath, { corruptAttestationSize: true });
+    expect(() => verifyOciArchiveAttestations(sizeMismatch.imagePath, imageDigest)).toThrow(
+      'OCI descriptor size does not match blob',
+    );
+
+    const digestMismatch = makeReceiptInput();
+    const digestArchive = writeOciArchive(digestMismatch.imagePath, { corruptLayerDigest: true });
+    expect(() => verifyOciArchiveAttestations(digestMismatch.imagePath, digestArchive.imageDigest)).toThrow(
+      'OCI image archive is missing blobs/sha256/',
+    );
+  });
+
+  it('rejects an in-toto statement whose subject is not the runnable image manifest', () => {
+    const input = makeReceiptInput();
+    const { imageDigest } = writeOciArchive(input.imagePath, {
+      statementSubjectDigest: 'c'.repeat(64),
+    });
+
+    expect(() => verifyOciArchiveAttestations(input.imagePath, imageDigest)).toThrow(
+      'in-toto statement subject is not bound to runnable image manifest',
+    );
+  });
+
+  it('requires the SLSA config source revision to match the verified remote context', () => {
+    const input = makeReceiptInput({ ociSourceRevision: 'c'.repeat(40) });
+
+    expect(() => createContainerBuildReceipt(input)).toThrow(
+      'SLSA config source revision does not match requested source revision',
+    );
+  });
+
+  it('requires the reviewed source repository, builder invocation, and base-image dependency', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociSourceRepository: 'https://github.com/example/other.git',
+    }))).toThrow('SLSA config source repository does not match the reviewed remote context');
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociProvenanceBuilderId: 'https://github.com/LucasQuiles/WhatSoup/actions/runs/999',
+    }))).toThrow('SLSA provenance builder id does not match the reviewed workflow invocation');
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociBaseImageDigest: 'f'.repeat(64),
+    }))).toThrow('SLSA provenance does not bind the reviewed base image digest');
   });
 
   it('rejects metadata, image, and SBOM byte changes after receipt creation', () => {
@@ -199,14 +365,14 @@ describe('container build evidence CI contract', () => {
       'buildx.build.provenance': { buildType: 'changed' },
     }));
     expect(() => verifyContainerBuildReceipt(metadataReceipt, metadataInput)).toThrow(
-      'container build receipt does not match the verified build inputs',
+      'build metadata output digest does not match the verified OCI output',
     );
 
     const imageInput = makeReceiptInput();
     const imageReceipt = createContainerBuildReceipt(imageInput);
     writeFileSync(imageInput.imagePath, 'changed-container-image');
     expect(() => verifyContainerBuildReceipt(imageReceipt, imageInput)).toThrow(
-      'container build receipt does not match the verified build inputs',
+      'OCI image archive is missing index.json',
     );
 
     const sbomInput = makeReceiptInput();
@@ -224,7 +390,7 @@ describe('container build evidence CI contract', () => {
     expect(() => verifyContainerBuildReceipt(receipt, {
       ...input,
       sourceRevision: 'c'.repeat(40),
-    })).toThrow('container build receipt does not match the verified build inputs');
+    })).toThrow('SLSA config source revision does not match requested source revision');
     expect(() => verifyContainerBuildReceipt(receipt, {
       ...input,
       builder: 'unreviewed|docker',
