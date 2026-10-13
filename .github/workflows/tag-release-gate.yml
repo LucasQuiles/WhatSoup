@@ -59,7 +59,9 @@ jobs:
         run: python -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
 
       - name: Install Python test dependencies
-        run: python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r requirements/python/quality-cpython313-linux-x64.txt
+        run: |
+          . deploy/lib/python-lock-policy.sh
+          whatsoup_install_locked_requirements python "$GITHUB_WORKSPACE" quality
 
       - name: Python dependency lock guard
         run: npm run guard:python-dependency-lock

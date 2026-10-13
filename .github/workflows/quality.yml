@@ -506,24 +506,15 @@ jobs:
             package-lock.json
             console/package-lock.json
 
-      - name: Setup CPython 3.13.16
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
-        with:
-          python-version: '3.13.16'
-
-      - name: Verify locked Python runtime
-        run: python -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
-
       - name: Install compatibility host dependencies
         run: |
-          bash deploy/scripts/install-host-dependencies.sh --profile quality --node-policy compatibility --apply --yes --json > "$RUNNER_TEMP/whatsoup-host-install-compatibility.json"
-          echo "$HOME/.local/share/whatsoup/quality-venv/bin" >> "$GITHUB_PATH"
+          bash deploy/scripts/install-host-dependencies.sh --profile runtime --node-policy compatibility --apply --yes --json > "$RUNNER_TEMP/whatsoup-host-install-compatibility.json"
 
       - name: Host dependency profile (compatibility-only)
         run: |
           set -o pipefail
-          bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --node-policy compatibility --json | tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"
-          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-doctor-compatibility.json", "utf8")); if (r.profile !== "quality" || r.nodePolicy !== "compatibility" || r.outcome !== "compatibility_only") process.exit(1)'
+          bash deploy/scripts/whatsoup-host-doctor.sh --profile runtime --node-policy compatibility --json | tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"
+          node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/whatsoup-doctor-compatibility.json", "utf8")); if (r.profile !== "runtime" || r.nodePolicy !== "compatibility" || r.outcome !== "compatibility_only") process.exit(1)'
 
       - name: Install dependencies
         run: npm ci
