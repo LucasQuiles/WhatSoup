@@ -18,6 +18,7 @@ const containerInputs = JSON.parse(
   readFileSync(path.join(repoRoot, 'docker/container-inputs.json'), 'utf8'),
 ) as {
   platform?: string;
+  baseImageDependency?: string;
   baseImageResolvedDigest?: string;
   buildx?: { version?: string; asset?: string; sha256?: string; buildkitImage?: string };
   sbom?: { generator?: string; dependency?: string; resolvedDigest?: string };
@@ -122,7 +123,7 @@ function writeOciArchive(
         },
       },
       resolvedDependencies: [{
-        uri: 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64',
+        uri: 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64',
         digest: { sha256: options.baseImageDigest ?? BASE_IMAGE_DIGEST },
       }, {
         uri: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
@@ -194,6 +195,7 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('BUILDX_METADATA_PROVENANCE: max');
     expect(qualityWorkflow).toContain('--output type=oci');
     expect(containerInputs.platform).toBe('linux/amd64');
+    expect(containerInputs.baseImageDependency).toBe('pkg:docker/node@24.15.0-slim?platform=linux%2Famd64');
     expect(containerInputs.baseImageResolvedDigest).toBe(`sha256:${BASE_IMAGE_DIGEST}`);
     expect(containerInputs.buildx).toEqual({
       version: 'v0.38.0',

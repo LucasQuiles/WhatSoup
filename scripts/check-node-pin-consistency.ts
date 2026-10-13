@@ -78,7 +78,7 @@ const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{8}T\d{6}Z$/;
 const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
 const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
-const BASE_IMAGE_DEPENDENCY = 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64';
+const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64';
 const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64';
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
 const APT_SOURCE_DEFINITION_PATTERN = /(?:^|['"\s])((?:deb|deb-src)(?:\s+\[[^\]\r\n]+\])?\s+[^\s'"]+\s+[^\s'"]+(?:\s+[^\s'"]+)*)(?=['"\\,;]|\s*$)/g;

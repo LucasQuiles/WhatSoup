@@ -3348,6 +3348,9 @@ The multi-stage build installs production dependencies and applies the required 
 Node image tag and index digest, its selected-platform dependency digest, Buildx client version,
 Linux release asset and SHA-256, BuildKit image, the digest-pinned BuildKit SBOM generator and
 its selected-platform dependency digest, builder name and driver, and Debian snapshot.
+For Docker Hub official images, BuildKit emits the familiar provenance PURL
+(`pkg:docker/node@...`), without the registry's implicit `library/` namespace; the policy stores
+that emitted identifier for receipt verification.
 `docker/Dockerfile` must match it exactly:
 the readable image tag remains alongside its immutable digest, and the package sources use
 only the declared snapshot. Check the static policy before a build:

@@ -105,7 +105,7 @@ function makeFixture(opts: {
       platform: 'linux/amd64',
       sourceRepository: 'https://github.com/LucasQuiles/WhatSoup.git',
       baseImage: `node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST}`,
-      baseImageDependency: 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64',
+      baseImageDependency: 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64',
       baseImageResolvedDigest: `sha256:${'d'.repeat(64)}`,
       builder: {
         name: 'whatsoup-ci-builder',
