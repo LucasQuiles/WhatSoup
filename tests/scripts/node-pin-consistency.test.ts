@@ -522,6 +522,24 @@ describe('node-pin consistency check', () => {
     });
   });
 
+  it('rejects environment and build-argument indirection to the APT descriptor root', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}ENV APT_ROOT /etc\nARG APT_FALLBACK=/etc\nRUN cp /tmp/replacement.list "$APT_ROOT/apt/sources.list" && cp /tmp/replacement.list "$APT_FALLBACK/apt/sources.list"\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not modify APT source descriptors outside the approved bootstrap',
+    });
+  });
+
   it('rejects a package snapshot whose immutable identifier is unavailable', () => {
     const dir = makeFixture({
       aptSnapshot: 'not-a-snapshot',

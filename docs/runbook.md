@@ -3361,7 +3361,8 @@ npm run guard:node-pin-consistency
 
 The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
 The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
-subtree, and APT-root indirection assignments. This is a deliberately narrow static invariant,
+subtree, and APT-root indirection assignments, including both `ENV` forms and `ARG` default
+declarations. This is a deliberately narrow static invariant,
 not a shell interpreter: an ambiguous new descriptor path is rejected until the invariant and its
 behavior test are extended together.
 

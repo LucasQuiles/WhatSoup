@@ -335,6 +335,7 @@ const APT_SOURCE_DESCRIPTOR_PATH_PATTERN = /\/etc\/apt(?:\/sources\.list(?:\.d(?
 const APT_DIRECTORY_CHANGE_PATTERN = /(?:^|[;&|()]\s*)\s*(?:cd|pushd)\s+(?:--\s*)?['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 const RELATIVE_APT_DESCRIPTOR_PATTERN = /(?:^|[\s;'"=])(?:\.\/)?(?:etc\/)?apt\/sources\.list(?:\.d(?:\/[A-Za-z0-9_.-]+)?|(?:[\s'";)&|]|$))/im;
 const APT_ROOT_ASSIGNMENT_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*['"]?\/etc(?:[/'"\s;)&|]|$)/im;
+const APT_ROOT_DECLARATION_PATTERN = /^\s*(?:ENV|ARG)\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 
 function descriptorPaths(instruction: string): string[] {
   return [...instruction.matchAll(APT_SOURCE_DESCRIPTOR_PATH_PATTERN)].map((match) => match[0] ?? '');
@@ -352,6 +353,12 @@ function isApprovedAptBootstrap(instruction: DockerfileInstruction): boolean {
     && /rm\s+-rf\s+\/etc\/apt\/sources\.list\.d\/\*(?:\s|$)/m.test(instruction.text);
 }
 
+function declaresAptRoot(instruction: DockerfileInstruction): boolean {
+  if (instruction.keyword !== 'ENV' && instruction.keyword !== 'ARG') return false;
+  return APT_ROOT_ASSIGNMENT_PATTERN.test(instruction.text)
+    || APT_ROOT_DECLARATION_PATTERN.test(instruction.text);
+}
+
 function hasUnsafeAptSourceMutation(instructions: DockerfileInstruction[]): boolean {
   return instructions.some((instruction) => {
     if (instruction.keyword === 'WORKDIR' && /\bWORKDIR\s+\/etc(?:\/|\s|$)/i.test(instruction.text)) {
@@ -359,6 +366,7 @@ function hasUnsafeAptSourceMutation(instructions: DockerfileInstruction[]): bool
     }
     if (descriptorPaths(instruction.text).length > 0) return !isApprovedAptBootstrap(instruction);
     if (RELATIVE_APT_DESCRIPTOR_PATTERN.test(instruction.text)) return true;
+    if (declaresAptRoot(instruction)) return true;
     if (instruction.keyword !== 'RUN') return false;
     const shell = instruction.text.replace(/^\s*RUN\s+/i, '');
     // The bootstrap is the sole authorized writer of effective APT source
