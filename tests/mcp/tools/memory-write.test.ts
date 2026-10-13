@@ -114,6 +114,90 @@ describe('memory_write tool', () => {
     }
   });
 
+  it('rearms erasure when a late admitted write follows verified absence', async () => {
+    let now = 1_700_000_000_000;
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot', indexName: 'test-memory-index', now: () => now,
+      });
+      const tools: ToolDeclaration[] = [];
+      let remoteRecordPresent = false;
+      let beginUpsert!: () => void;
+      let releaseUpsert!: () => void;
+      const upsertBegan = new Promise<void>((resolve) => { beginUpsert = resolve; });
+      const release = new Promise<void>((resolve) => { releaseUpsert = resolve; });
+      const writer: MemoryWriter = {
+        upsert: async (_records, context) => {
+          await context?.beforeProviderAttempt?.();
+          beginUpsert();
+          await release;
+          remoteRecordPresent = true;
+        },
+      };
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        () => writer,
+        fakeClock(now),
+        lifecycle,
+      );
+      const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
+
+      const write = tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'late provider write must be erased', memory_type: 'preference' },
+        chatSession(),
+      );
+      await upsertBegan;
+      const stored = db.raw.prepare('SELECT remote_record_id FROM remote_memory_lifecycle').get() as { remote_record_id: string };
+
+      now += 1_000;
+      lifecycle.requestErase({ scope: 'conversation', conversationKey: '12345@s.whatsapp.net' });
+      const deleteRecord = vi.fn(async () => { remoteRecordPresent = false; });
+      const recordExists = vi.fn(async () => remoteRecordPresent);
+      expect(await lifecycle.processDue({ deleteRecord, recordExists }, 'first-erase')).toBe('verified_absent');
+      expect(lifecycle.get(stored.remote_record_id)).toMatchObject({ state: 'absence_verified', attemptCount: 1 });
+
+      now += 1_000;
+      releaseUpsert();
+      expect(isToolErrorPayload(await write)).toBe(true);
+      expect(db.raw.prepare(`
+        SELECT state, erase_scope, erase_requested_at, provider_acknowledged_at,
+               absence_verified_at, lease_owner, lease_expires_at, failure_code,
+               next_attempt_at, attempt_count, write_finalized_at, updated_at
+          FROM remote_memory_lifecycle
+      `).get()).toEqual({
+        state: 'erase_pending',
+        erase_scope: 'conversation',
+        erase_requested_at: 1_700_000_001_000,
+        provider_acknowledged_at: null,
+        absence_verified_at: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        failure_code: null,
+        next_attempt_at: 1_700_000_002_000,
+        attempt_count: 0,
+        // No local finalization occurred after the tombstone won, so this
+        // must remain absent instead of fabricating a success receipt.
+        write_finalized_at: null,
+        updated_at: 1_700_000_002_000,
+      });
+      expect(lifecycle.registerWrite({
+        remoteRecordId: stored.remote_record_id,
+        conversationKey: '12345@s.whatsapp.net',
+        senderJid: 'phil@s.whatsapp.net',
+        memoryType: 'preference',
+      }).admitted).toBe(false);
+
+      expect(await lifecycle.processDue({ deleteRecord, recordExists }, 'second-erase')).toBe('verified_absent');
+      expect(deleteRecord).toHaveBeenCalledTimes(2);
+      expect(recordExists).toHaveBeenCalledTimes(2);
+      expect(lifecycle.get(stored.remote_record_id)).toMatchObject({ state: 'absence_verified', attemptCount: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
   it('refuses a delayed provider retry after erasure is tombstoned', async () => {
     const db = new Database(':memory:');
     db.open();

@@ -248,10 +248,12 @@ export class RemoteMemoryLifecycle {
     const now = this.now();
     this.db.raw.prepare(`
       UPDATE remote_memory_lifecycle
-         SET state = 'erase_pending', erase_scope = 'expiry', erase_requested_at = ?,
-             next_attempt_at = ?, updated_at = ?
+         SET state = 'erase_pending', erase_scope = COALESCE(erase_scope, 'expiry'),
+             erase_requested_at = COALESCE(erase_requested_at, ?),
+             provider_acknowledged_at = NULL, absence_verified_at = NULL,
+             lease_owner = NULL, lease_expires_at = NULL, failure_code = NULL,
+             next_attempt_at = ?, attempt_count = 0, updated_at = ?
        WHERE remote_record_id = ? AND account_id = ? AND index_name = ? AND namespace = ?
-         AND erase_requested_at IS NULL AND state IN ('write_intent', 'active', 'write_ambiguous')
     `).run(
       now,
       now,
