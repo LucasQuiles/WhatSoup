@@ -99,6 +99,16 @@ FILES=(
   "deploy/scripts/lib/state_files.py"
   "deploy/scripts/lib/state_root.py"
   "deploy/scripts/lib/target_provenance.py"
+  # Portable fleet monitoring: observer and deadman jobs run these from the
+  # materialized release tree. Their target and observer configuration stay
+  # outside the bundle as explicit private paths.
+  "deploy/scripts/fleet/fleet_probe.py"
+  "deploy/scripts/fleet/fleet_probe_remote.py"
+  "deploy/scripts/fleet/mcp_probe_remote.py"
+  "deploy/scripts/fleet/fleet_reliability_observer.py"
+  "deploy/scripts/fleet/reliability_supervisor.py"
+  "deploy/scripts/fleet/bot_errors_delivery_receipts.py"
+  "deploy/scripts/install-fleet-reliability-observer.sh"
   # Loaded by file path, not by an import statement:
   # bot-errors-health-check.py resolves this hyphenated sibling through
   # importlib.util.spec_from_file_location and returns None when it is absent,

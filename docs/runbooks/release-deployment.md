@@ -773,6 +773,70 @@ findings under `release-currency`. `--clear-on-ok` clears each source only from
 its own successful observation. Installing or updating the rendered job remains
 a separately approved live-host mutation.
 
+### Portable fleet observer and deadman
+
+Release exports include `deploy/scripts/fleet/` through the BOT ERRORS runtime
+manifest and `whatsoup-bot-errors-deploy.sh`. The module has no tracked host
+inventory. An operator supplies an absolute, private target file to
+`fleet_probe.py` and an absolute, private observer config to the jobs. The
+default MCP check calls only the configured authentication and diagnostics
+tools. A legacy capability probe can read a mailbox resource only when its
+private config explicitly sets `legacy_sent_items_probe: true`; it is not part
+of the default observer or deadman schedule.
+
+Render the jobs from the release that will run them. Rendering writes only the
+named fresh staging directory, after validating the private config and its state
+path. Paths must be absolute and use letters, digits, dots, slashes, underscores,
+hyphens or `@` (no spaces or service-manager expansions). Set `PYTHON` to the
+approved absolute interpreter if it is not on `PATH`. Rendering does not create state, change the private config,
+or activate a service:
+
+```bash
+bash deploy/scripts/install-fleet-reliability-observer.sh render \
+  --platform systemd \
+  --release-root /absolute/release \
+  --config /absolute/private/fleet-observer.json \
+  --state-dir /absolute/private/fleet-state \
+  --output-dir /absolute/staging/fleet-jobs
+```
+
+The private observer config names `state_dir`, `emitter_command`,
+`delivery_command`, and each host's absolute `probe_command`. Each probe
+command invokes `fleet_probe.py --targets /absolute/private/targets.json
+--target <synthetic-target>`. Keep the config mode `0600` and state directory
+mode `0700`. An empty `hosts` list requires a valid top-level `instance` for
+deadman alert delivery; otherwise that destination defaults to the first host.
+The observer preserves schema-v1 state files, incident IDs, and
+explicit `retired_checks`; it does not infer retirement from an unreachable
+host. The target file accepts the existing flat host map or a versioned
+`{"schema_version": 1, "hosts": {...}}` wrapper; migration need not rewrite it.
+
+Activation is a separate live-host action. After reviewing the staged files,
+run `install` with both `--install-dir` and `--activate` and a new output directory.
+The installer refuses existing new or legacy job definitions in the install
+directory and loaded `com.whatsoup.fleet-*` or `com.agent365.fleet-*` observer jobs.
+Unavailable service-manager inspection also refuses installation. This checks
+the named jobs, not arbitrarily renamed copies: inventory custom jobs before
+migration. The operator must unload the old pair and preserve its definitions
+outside the install directory under the approved cutover plan first. A partial
+activation failure stops the new pair and retains definitions and state for
+inspection. It does not automatically restart the old pair.
+
+For migration, retain the old private config and the `fleet-observer.json` and
+`fleet-watchdog.json` state files. Prepare and validate updated probe commands
+against the new release. With both job pairs stopped, install that config at
+the existing private path, preserving its owner and `0600` mode, then activate
+the new pair using the existing state directory. Check
+both job identities and the observer/deadman receipts after activation. On
+systemd, capture `systemctl --user status` for both timers and services. On
+launchd, capture `launchctl print gui/$(id -u)/com.whatsoup.fleet-observer` and
+the corresponding deadman label. To roll back, stop the new pair, restore the
+retained private config with its previous probe commands, then reactivate the
+previously recorded job pair. Retain the current incident state files; do not
+reset them to the pre-cutover copy. Do not run two observers against one state directory. A source test
+or rendered plist/unit does not prove a live job loaded; capture the
+service-manager result as continuity evidence.
+
 ## Pinned npm toolchain in `verify:release`
 
 The `verify:release` npm script routes all `npm ci`, `run typecheck`, `test`,
