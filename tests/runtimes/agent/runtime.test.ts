@@ -469,6 +469,7 @@ vi.mock('../../../src/runtimes/agent/media-bridge.ts', () => ({
   setMediaBridgeChat: mockSetMediaBridgeChat,
 }));
 
+vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({ verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')) }));
 vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability.ts')>();
   return {
