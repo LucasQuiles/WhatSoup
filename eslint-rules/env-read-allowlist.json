@@ -142,11 +142,6 @@
       "reason": "preflight import probe (2) \u2014 remaining after the slice-2 migrations."
     },
     {
-      "file": "src/mcp/register-all.ts",
-      "allowedUnmarkedSites": 1,
-      "reason": "memory-write API key resolver \u2014 must stay env-late (secret surface)."
-    },
-    {
       "file": "src/runtimes/agent/capability-obligation-runtime.ts",
       "allowedUnmarkedSites": 1,
       "reason": "whole-object process.env \u2192 resolveReleaseIdentity (build/release identity)."

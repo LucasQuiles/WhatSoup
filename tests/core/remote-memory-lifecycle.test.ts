@@ -10,17 +10,15 @@ import {
   RemoteMemoryLifecycleTimer,
 } from '../../src/core/remote-memory-lifecycle.ts';
 
-const lifecycleLog = vi.hoisted(() => ({
-  debug: vi.fn(),
-  error: vi.fn(),
-  fatal: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
+const { lifecycleLog } = vi.hoisted(() => ({
+  lifecycleLog: {} as Record<string, ReturnType<typeof vi.fn>>,
 }));
 
-vi.mock('../../src/logger.ts', () => ({
-  createChildLogger: () => lifecycleLog,
-}));
+vi.mock('../../src/logger.ts', async () => {
+  const { hoistedLoggerMock } = await import('../helpers/logger-mock.ts');
+  const { createChildLogger } = hoistedLoggerMock(lifecycleLog);
+  return { createChildLogger };
+});
 
 type LifecycleModule = {
   RemoteMemoryLifecycle: new (db: Database, options: {
