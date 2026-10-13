@@ -58,7 +58,7 @@ const sharedDb = new Database(':memory:');
 sharedDb.open();
 
 /** Register everything into a fresh registry and report memory_write's state. */
-function registerAndInspect(): { registered: boolean; declaration?: ToolDeclaration } {
+function registerAndInspect(): { registered: boolean; eraseRegistered: boolean; declaration?: ToolDeclaration } {
   const registry = new ToolRegistry();
   const captured: ToolDeclaration[] = [];
   const origRegister = registry.register.bind(registry);
@@ -68,7 +68,11 @@ function registerAndInspect(): { registered: boolean; declaration?: ToolDeclarat
   };
   registerAllTools(registry, makeConnection(), sharedDb);
   const declaration = captured.find((t) => t.name === 'memory_write');
-  return { registered: declaration !== undefined, declaration };
+  return {
+    registered: declaration !== undefined,
+    eraseRegistered: captured.some((tool) => tool.name === 'erase_remote_memory'),
+    declaration,
+  };
 }
 
 afterEach(() => {
@@ -93,14 +97,16 @@ describe('memory_write registration gate (#1976)', () => {
 
   it('does not register when the API key env is absent (index alone is insufficient)', () => {
     setGate('probe-index', DEFAULT_KEY_ENV, undefined);
-    const { registered } = registerAndInspect();
+    const { registered, eraseRegistered } = registerAndInspect();
     expect(registered).toBe(false);
+    expect(eraseRegistered).toBe(true);
   });
 
   it('does not register when pineconeIndex is absent (key alone is insufficient)', () => {
     setGate(undefined, DEFAULT_KEY_ENV, 'probe-dummy-not-a-secret');
-    const { registered } = registerAndInspect();
+    const { registered, eraseRegistered } = registerAndInspect();
     expect(registered).toBe(false);
+    expect(eraseRegistered).toBe(false);
   });
 
   it('resolves the key through memory.pinecone.apiKeyEnv when configured', () => {

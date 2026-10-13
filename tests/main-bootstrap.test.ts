@@ -106,6 +106,7 @@ async function importMainWithMocks(options: {
     open: vi.fn(),
     close: vi.fn(),
     clearChat: vi.fn(() => 2),
+    markMessagesDeleted: vi.fn(() => 1),
     importFromLegacyDb: vi.fn(),
   };
   const connection = new FakeConnection();
@@ -121,6 +122,10 @@ async function importMainWithMocks(options: {
     stop: vi.fn(),
     getHealthSnapshot: vi.fn(() => ({ running: true })),
   };
+  const remoteMemoryLifecycle = {
+    requestErase: vi.fn(),
+  };
+  const remoteMemoryLifecycleTimer = { start: vi.fn(), stop: vi.fn() };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
   const grantManager = {
@@ -236,6 +241,8 @@ async function importMainWithMocks(options: {
     mediaRetentionTimer,
     processTmpRetentionTimer,
     databaseRetentionTimer,
+    remoteMemoryLifecycle,
+    remoteMemoryLifecycleTimer,
     messageScheduler,
     triggerPoller,
     durability,
@@ -358,6 +365,12 @@ async function importMainWithMocks(options: {
     DatabaseRetentionTimer: vi.fn(function () {
       return databaseRetentionTimer;
     }),
+    RemoteMemoryLifecycle: vi.fn(function () {
+      return remoteMemoryLifecycle;
+    }),
+    RemoteMemoryLifecycleTimer: vi.fn(function () {
+      return remoteMemoryLifecycleTimer;
+    }),
     persistIntroSentFlag: vi.fn(),
     MessageScheduler: vi.fn(function () {
       return messageScheduler;
@@ -383,6 +396,10 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/database.ts', () => ({
     Database,
     storeDecryptionFailure: mocks.storeDecryptionFailure,
+  }));
+  vi.doMock('../src/core/remote-memory-lifecycle.ts', () => ({
+    RemoteMemoryLifecycle: mocks.RemoteMemoryLifecycle,
+    RemoteMemoryLifecycleTimer: mocks.RemoteMemoryLifecycleTimer,
   }));
   vi.doMock('../src/runtimes/chat/rate-limits-db.ts', () => ({
     cleanupOldRateLimits: mocks.cleanupOldRateLimits,
@@ -705,6 +722,18 @@ describe('main bootstrap', () => {
 
     h.connection.emit('chatCleared', 'chat@s.whatsapp.net');
     expect(h.db.clearChat).toHaveBeenCalledWith('conversation:chat@s.whatsapp.net');
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation', conversationKey: 'conversation:chat@s.whatsapp.net',
+    });
+
+    h.db.raw.prepare.mockReturnValueOnce({
+      all: vi.fn(() => [{ conversation_key: 'conversation:chat@s.whatsapp.net' }]),
+    });
+    h.connection.emit('messageDeleted', ['revoked-message']);
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation', conversationKey: 'conversation:chat@s.whatsapp.net',
+    });
+    expect(h.db.markMessagesDeleted).toHaveBeenCalledWith(['revoked-message']);
 
     h.db.clearChat.mockImplementationOnce(() => {
       throw new Error('clear failed');

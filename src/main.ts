@@ -70,6 +70,7 @@ import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
 import { ProcessTmpRetentionTimer, DEFAULT_PROCESS_TMP_RETENTION } from './core/process-tmp-retention.ts';
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
+import { RemoteMemoryLifecycle, RemoteMemoryLifecycleTimer } from './core/remote-memory-lifecycle.ts';
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { TriggerPoller } from './core/substrate/poller.ts';
@@ -77,6 +78,7 @@ import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
+import { resolveApiKey } from './lib/api-key-resolver.ts';
 import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
@@ -369,6 +371,32 @@ const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
   ...DEFAULT_DATABASE_RETENTION,
   messageRetentionDays: config.retentionDays,
 });
+const remoteMemoryLifecycle = config.pineconeIndex
+  ? new RemoteMemoryLifecycle(db, { accountId: config.botName, indexName: config.pineconeIndex })
+  : null;
+const remoteMemoryApiKeyEnv = config.memory?.pinecone?.apiKeyEnv ?? 'PINECONE_API_KEY';
+const remoteMemoryApiKeyService = (config.memory as { pinecone?: { apiKeyService?: string } } | undefined)
+  ?.pinecone?.apiKeyService;
+let remoteMemoryProvider: PineconeMemory | null = null;
+if (remoteMemoryLifecycle && resolveApiKey({ service: remoteMemoryApiKeyService, envVar: remoteMemoryApiKeyEnv })) {
+  try {
+    remoteMemoryProvider = new PineconeMemory();
+  } catch {
+    log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable at startup');
+  }
+} else if (remoteMemoryLifecycle) {
+  log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable at startup');
+}
+const remoteMemoryLifecycleTimer = remoteMemoryLifecycle
+  ? new RemoteMemoryLifecycleTimer(
+      remoteMemoryLifecycle,
+      remoteMemoryProvider ? {
+        deleteRecord: (recordId) => remoteMemoryProvider.deleteRemoteMemoryRecord(recordId),
+        recordExists: (recordId) => remoteMemoryProvider.remoteMemoryRecordExists(recordId),
+      } : null,
+      `remote-memory:${process.pid}`,
+    )
+  : null;
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
@@ -669,6 +697,7 @@ connectionManager.onMessage = createIngestHandler(
 connectionManager.on('chatCleared', (jid: string) => {
   const conversationKey = toConversationKey(jid);
   try {
+    remoteMemoryLifecycle?.requestErase({ scope: 'conversation', conversationKey });
     const count = db.clearChat(conversationKey);
     log.info({ jid, conversationKey, count }, 'chatCleared: soft-deleted messages');
   } catch (err) {
@@ -678,6 +707,16 @@ connectionManager.on('chatCleared', (jid: string) => {
 
 connectionManager.on('messageDeleted', (messageIds: string[]) => {
   try {
+    if (remoteMemoryLifecycle && messageIds.length > 0) {
+      const placeholders = messageIds.map(() => '?').join(', ');
+      const conversations = db.raw.prepare(
+        `SELECT DISTINCT conversation_key FROM messages
+          WHERE message_id IN (${placeholders}) AND deleted_at IS NULL`,
+      ).all(...messageIds) as Array<{ conversation_key: string }>;
+      for (const { conversation_key: conversationKey } of conversations) {
+        remoteMemoryLifecycle.requestErase({ scope: 'conversation', conversationKey });
+      }
+    }
     const count = db.markMessagesDeleted(messageIds);
     log.info(
       { count, requested: messageIds.length },
@@ -1111,6 +1150,7 @@ processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
 // standalone path read), replacing the separate startup timeout + daily
 // interval that used to call deleteOldMessages() directly.
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
+remoteMemoryLifecycleTimer?.start();
 
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
 const echoTimeoutInterval = setInterval(() => {
@@ -1373,6 +1413,7 @@ async function shutdown(signal: string): Promise<void> {
         { name: 'media-retention-timer', stop: () => mediaRetentionTimer.stop() },
         { name: 'process-tmp-retention-timer', stop: () => processTmpRetentionTimer.stop() },
         { name: 'database-retention-timer', stop: () => databaseRetentionTimer.stop() },
+        { name: 'remote-memory-lifecycle-timer', stop: () => remoteMemoryLifecycleTimer?.stop() },
         { name: 'memory-consolidation-scheduler', stop: async () => { await memoryConsolidationScheduler?.stop(); } },
         { name: 'echo-timeout-interval', stop: () => clearInterval(echoTimeoutInterval) },
         { name: 'stuck-inbound-interval', stop: () => clearInterval(stuckInboundInterval) },

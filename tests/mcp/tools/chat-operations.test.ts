@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Database } from '../../../src/core/database.ts';
 import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerChatOperationTools } from '../../../src/mcp/tools/chat-operations.ts';
+import { RemoteMemoryLifecycle } from '../../../src/core/remote-memory-lifecycle.ts';
 import { config } from '../../../src/config.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
@@ -73,6 +74,31 @@ describe('chat-operations tools', () => {
       const props = schema.properties;
       expect(props.chatJid).toEqual({ type: 'string' });
       expect(schema.required).toEqual(['chatJid', 'messages']);
+    });
+
+    it('queues remote-memory erasure for the cleared conversation', async () => {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot',
+        indexName: 'test-memory-index',
+      });
+      const remoteRecordId = 'preference_ee0f9dbe7c2f22e938e0ed47';
+      lifecycle.registerWrite({
+        remoteRecordId,
+        conversationKey: '111',
+        senderJid: '111@s.whatsapp.net',
+        memoryType: 'preference',
+      });
+      const lifecycleRegistry = new ToolRegistry();
+      registerChatOperationTools(db, () => mockSock, (tool) => lifecycleRegistry.register(tool), lifecycle);
+
+      const result = await lifecycleRegistry.call(
+        'clear_chat',
+        { chatJid: '111@s.whatsapp.net', messages: [{ id: 'msg1', fromMe: false, timestamp: 1000 }] },
+        globalSession(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(lifecycle.get(remoteRecordId)).toMatchObject({ state: 'erase_pending' });
     });
   });
 

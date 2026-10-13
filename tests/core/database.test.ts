@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import {
   Database,
+  CURRENT_SCHEMA_MIGRATION,
   storeDecryptionFailure,
   resolveDecryptionFailure,
   type DecryptionFailureInput,
@@ -48,6 +49,23 @@ describe('Database schema', () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it('migrates the content-free remote-memory lifecycle ledger', () => {
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(67);
+    const table = db.raw
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'remote_memory_lifecycle'")
+      .get() as { name: string } | undefined;
+    expect(table?.name).toBe('remote_memory_lifecycle');
+
+    const columns = db.raw.prepare("PRAGMA table_info('remote_memory_lifecycle')").all() as Array<{ name: string }>;
+    const names = columns.map((column) => column.name);
+    expect(names).toEqual(expect.arrayContaining([
+      'remote_record_id', 'index_name', 'namespace', 'conversation_key', 'sender_jid',
+      'memory_type', 'state', 'attempt_count', 'next_attempt_at',
+      'provider_acknowledged_at', 'absence_verified_at',
+    ]));
+    expect(names).not.toEqual(expect.arrayContaining(['text', 'claim', 'evidence', 'warrant', 'error']));
   });
 
   it('records migration version 1 in schema_migrations', () => {

@@ -12,6 +12,8 @@ import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
+import { toConversationKey } from '../../core/conversation-key.ts';
+import type { RemoteMemoryLifecycle } from '../../core/remote-memory-lifecycle.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('chat-operations');
@@ -40,7 +42,7 @@ function assertMessageConversationAccess(
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const chatOperationSockConfigs: SockToolConfig<any>[] = [
+const makeChatOperationSockConfigs = (lifecycle?: RemoteMemoryLifecycle): SockToolConfig<any>[] => [
   {
     name: 'clear_chat',
     description: 'Clear messages from a WhatsApp chat. Provide the message IDs, fromMe flag, and timestamps of the messages to clear.',
@@ -59,6 +61,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, messages }, sock) => {
+      lifecycle?.requestErase({ scope: 'conversation', conversationKey: toConversationKey(chatJid) });
       await sock.chatModify({ clear: { messages } } as any, chatJid);
       log.info({ chatJid, count: messages.length }, 'chat cleared');
       return { success: true, jid: chatJid, messagesCleared: messages.length };
@@ -80,6 +83,7 @@ const chatOperationSockConfigs: SockToolConfig<any>[] = [
     replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ chatJid, last_message_key, last_message_timestamp }, sock) => {
+      lifecycle?.requestErase({ scope: 'conversation', conversationKey: toConversationKey(chatJid) });
       await sock.chatModify(
         {
           delete: true,
@@ -340,8 +344,9 @@ export function registerChatOperationTools(
   db: Database,
   getSock: () => ExtendedBaileysSocket | null,
   register: (tool: ToolDeclaration) => void,
+  lifecycle?: RemoteMemoryLifecycle,
 ): void {
-  registerSockTools(getSock, chatOperationSockConfigs, register);
+  registerSockTools(getSock, makeChatOperationSockConfigs(lifecycle), register);
   register(makeSetDisappearingMessages(getSock, db)); // QR-067: guarded caller-jid egress
   register(makeGetReactions(db));
   register(makeGetMessageReceipts(db));

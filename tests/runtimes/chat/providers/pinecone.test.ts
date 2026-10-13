@@ -4,9 +4,13 @@ import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 // Mock index methods — set up before mock factory so factory can reference them
 const mockSearchRecords = vi.fn();
 const mockUpsertRecords = vi.fn();
+const mockDeleteOne = vi.fn();
+const mockFetch = vi.fn();
 const mockRerank = vi.fn();
 const { mockPineconeLogger } = vi.hoisted(() => ({ mockPineconeLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const mockIndex = {
+  deleteOne: mockDeleteOne,
+  fetch: mockFetch,
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
 };
@@ -900,6 +904,38 @@ describe('PineconeMemory', () => {
           ],
         },
       ]]);
+    });
+  });
+
+  describe('direct remote-memory lifecycle operations', () => {
+    it('deletes and checks records through the configured default namespace', async () => {
+      mockDeleteOne.mockResolvedValueOnce(undefined);
+      mockFetch.mockResolvedValueOnce({ records: {} });
+      mockFetch.mockResolvedValueOnce({ records: { 'preference_0123456789abcdef01234567': {} } });
+
+      await memory.deleteRemoteMemoryRecord('preference_0123456789abcdef01234567');
+      await expect(memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567')).resolves.toBe(false);
+      await expect(memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567')).resolves.toBe(true);
+
+      expect(mockDeleteOne).toHaveBeenCalledWith({ id: 'preference_0123456789abcdef01234567' });
+      expect(mockFetch).toHaveBeenNthCalledWith(1, { ids: ['preference_0123456789abcdef01234567'] });
+      expect(mockFetch).toHaveBeenNthCalledWith(2, { ids: ['preference_0123456789abcdef01234567'] });
+    });
+
+    it('applies the project guard to delete and fetch before provider calls', async () => {
+      (configModule.config as any).botName = 'mini3';
+      try {
+        await expect(memory.deleteRemoteMemoryRecord('preference_0123456789abcdef01234567')).rejects.toMatchObject({
+          code: 'PINECONE_UNAVAILABLE',
+        });
+        await expect(memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567')).rejects.toMatchObject({
+          code: 'PINECONE_UNAVAILABLE',
+        });
+        expect(mockDeleteOne).not.toHaveBeenCalled();
+        expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        delete (configModule.config as any).botName;
+      }
     });
   });
 
