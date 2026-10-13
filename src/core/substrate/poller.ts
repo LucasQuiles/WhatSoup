@@ -529,9 +529,8 @@ export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<Isola
         SQLITE_WORKER_PATH,
       ], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        // The worker needs no application credentials or provider settings.
-        // env-allowed: isolated worker inherits only the executable lookup path needed for process launch.
-        env: { PATH: process.env.PATH ?? '' },
+        // The worker receives no application credentials or provider settings.
+        env: {},
       });
     } catch {
       resolveResult({ kind: 'unavailable', reason: 'spawn' });
