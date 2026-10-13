@@ -34,6 +34,7 @@ const requiredPackageScripts = {
   'guard:agent-decision-polls': 'node scripts/agent-decision-polls-guard.ts',
   'guard:semantic-quality': 'node scripts/semantic-quality-check.ts',
   'guard:safeguard-diagnostics': 'node scripts/safeguard-diagnostics.ts',
+  'guard:security-boundaries': 'node scripts/security-boundary-guard.ts',
   'guard:fleet-bot-hardening-parity': 'node scripts/check-fleet-bot-hardening-parity.ts',
   'guard:bot-errors-runtime-manifest': 'node scripts/check-bot-errors-runtime-manifest.ts',
   'test:design-guards': 'npm test -- tests/scripts/theme-parity.test.ts tests/scripts/token-spec-drift.test.ts tests/scripts/contrast-matrix.test.ts tests/scripts/shadow-baseline.test.ts tests/scripts/shadow-frozen-inventory.test.ts tests/scripts/raw-form-control-inventory.test.ts tests/scripts/design-regression-guards.test.ts tests/scripts/design-metrics.test.ts tests/scripts/design-burndown-check.test.ts tests/scripts/color-semantics.test.ts tests/scripts/design-resilience-audit.test.ts tests/scripts/font-assets.test.ts tests/scripts/brand-assets.test.ts tests/scripts/design-lint-fixtures.test.ts --pool=forks',
@@ -85,6 +86,7 @@ const requiredPackageScripts = {
     'npm run guard:test-integrity',
     'npm run guard:boundaries',
     'npm run guard:catch-ratchet',
+    'npm run guard:security-boundaries',
     'npm run guard:lint:src',
     'npm run typecheck:all',
     'npm test',
@@ -121,6 +123,7 @@ const requiredPackageScripts = {
     'npm run guard:no-destructive-git',
     'npm run guard:catch-ratchet',
     'npm run guard:grant-resolver',
+    'npm run guard:security-boundaries',
     'npm run guard:resolved-override',
     'npm run guard:instance-config',
     'npm run guard:guard-test-coverage -- --semantic-mode enforce',
@@ -737,6 +740,21 @@ describe('safeguard diagnostics', () => {
     expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
       status: 'fail',
       evidence: expect.arrayContaining(['missing npm run test:deployment-qualification']),
+    });
+  });
+
+  it('rejects release verification without the security boundary guard', () => {
+    const fixture = makeRepo({
+      scripts: {
+        'verify:release': requiredPackageScripts['verify:release']
+          .replace(' && npm run guard:security-boundaries', ''),
+      },
+    });
+    const result = checkSafeguards(fixture);
+
+    expect(result.checks.find((check) => check.id === 'release-chain')).toMatchObject({
+      status: 'fail',
+      evidence: expect.arrayContaining(['missing npm run guard:security-boundaries']),
     });
   });
 
