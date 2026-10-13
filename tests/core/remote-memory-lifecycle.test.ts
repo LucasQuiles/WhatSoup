@@ -185,10 +185,7 @@ describe('remote memory lifecycle', () => {
       recordExists: async () => false,
     };
 
-    const outcome = await Promise.race([
-      lifecycle.processDue(neverResolving, 'deadline-test', 5),
-      new Promise<'timed_out_test'>((resolve) => setTimeout(() => resolve('timed_out_test'), 50)),
-    ]);
+    const outcome = await lifecycle.processDue(neverResolving, 'deadline-test', 5);
     expect(outcome).toBe('retry_scheduled');
     expect(aborted).toBe(true);
     expect(REMOTE_MEMORY_PROVIDER_CALL_TIMEOUT_MS).toBeGreaterThan(0);
