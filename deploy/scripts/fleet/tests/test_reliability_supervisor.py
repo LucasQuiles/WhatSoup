@@ -260,6 +260,8 @@ def test_liveness_handles_a_reset_during_response_read(supervisor, reset, monkey
                 # Synchronize the real socket reset with body reading, not a timer.
                 assert reading_body.wait(timeout=2)
                 self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                # TCPServer otherwise calls shutdown(SHUT_WR), which can deliver EOF first.
+                self.request.close()
 
     with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
         server.timeout = 2
