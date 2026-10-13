@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 const hookPath = path.join(repoRoot, ".husky/check-commit-identity.sh");
 
-function checkIdentity(name: string, email: string) {
+function checkIdentity(
+  name: string,
+  email: string,
+  committer = { name, email },
+) {
   return spawnSync("/bin/bash", [hookPath], {
     cwd: repoRoot,
     encoding: "utf8",
@@ -13,8 +17,8 @@ function checkIdentity(name: string, email: string) {
       ...process.env,
       GIT_AUTHOR_NAME: name,
       GIT_AUTHOR_EMAIL: email,
-      GIT_COMMITTER_NAME: name,
-      GIT_COMMITTER_EMAIL: email,
+      GIT_COMMITTER_NAME: committer.name,
+      GIT_COMMITTER_EMAIL: committer.email,
     },
   });
 }
@@ -24,10 +28,34 @@ describe("commit identity allowlist", () => {
     ["SoupBot QPI 1", "308864230+qpi-lab@users.noreply.github.com"],
     ["SoupBot QPI 1", "310849274+LabRatQ@users.noreply.github.com"],
     ["SoupBot QPI 2", "308865677+qpi-lab2@users.noreply.github.com"],
+    ["Loops", "341747946+l00pr@users.noreply.github.com"],
   ])("accepts the approved identity %s <%s>", (name, email) => {
     const result = checkIdentity(name, email);
 
     expect(result.status, result.stderr).toBe(0);
+  });
+
+  describe.each([
+    ["Loops", "308864230+qpi-lab@users.noreply.github.com"],
+    ["SoupBot QPI 1", "341747946+l00pr@users.noreply.github.com"],
+    ["Loops", "person@example.test"],
+  ])("unapproved identity %s <%s>", (name, email) => {
+    it.each(["author", "committer"])("rejects an unapproved %s", (role) => {
+      const approved = {
+        name: "Loops",
+        email: "341747946+l00pr@users.noreply.github.com",
+      };
+      const result =
+        role === "author"
+          ? checkIdentity(name, email, approved)
+          : checkIdentity(approved.name, approved.email, { name, email });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain(`${role} identity is not approved`);
+      const otherRole = role === "author" ? "committer" : "author";
+      expect(result.stderr).not.toContain(`${otherRole} identity is not approved`);
+    });
   });
 
   it("rejects the retired legacy soupbot identity", () => {
