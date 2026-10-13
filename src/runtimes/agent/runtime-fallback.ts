@@ -921,13 +921,14 @@ export class RuntimeFallbackCoordinator {
     }
     const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
     const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
-    const until = Date.now() + dur;
+    const now = systemClock.now();
+    const until = now + dur;
     // There is no existing episode at this point, so this is its initial
     // reason; no prior durable state is replaced by ON.
     this.host.fallbackWindow.armReason = null;
     this.host.fallbackWindow.recoveryState = 'active';
     this.host.fallbackWindow.recoveryTerminalReason = null;
-    this.host.fallbackWindow.recoveryEpisodeStartedAt = Date.now();
+    this.host.fallbackWindow.recoveryEpisodeStartedAt = now;
     this.host.fallbackWindow.recoveryProbeInFlight = false;
     this.host.fallbackChain.failedKeys.clear();
     this.host.fallbackEmptyAdvance.reset();
@@ -963,7 +964,7 @@ export class RuntimeFallbackCoordinator {
       return { ok: false, reason: 'persisted fallback recovery state is unavailable; reconcile it before retrying' };
     }
     if (this.host.fallbackWindow.activeUntil === null) return { ok: false, reason: 'no fallback episode is active' };
-    const now = Date.now();
+    const now = systemClock.now();
     this.host.fallbackProbeAttempts = 0;
     this.host.fallbackWindow.recoveryState = 'active';
     this.host.fallbackWindow.recoveryTerminalReason = null;
@@ -1677,7 +1678,7 @@ export class RuntimeFallbackCoordinator {
   armFallbackWindow(
     until: number,
     reason: string,
-    activatedAt: number = Date.now(),
+    activatedAt: number = systemClock.now(),
     opts?: {
       restored?: boolean;
       preserveClocks?: boolean;
@@ -1995,17 +1996,18 @@ export class RuntimeFallbackCoordinator {
 
   private persistCurrentFallbackState(): boolean {
     if (this.host.fallbackWindow.activeUntil === null) return false;
+    const now = systemClock.now();
     try {
       saveFallbackState(this.host.db, {
         activeUntil: this.host.fallbackWindow.activeUntil,
-        activatedAt: this.host.fallbackWindow.activatedAt ?? Date.now(),
+        activatedAt: this.host.fallbackWindow.activatedAt ?? now,
         reason: this.host.fallbackWindow.armReason ?? 'auth-required',
         probeAttempts: this.host.fallbackProbeAttempts,
         version: PERSISTED_FALLBACK_STATE_VERSION,
         activeEntryProvider: this.host.fallbackWindow.activeEntry?.provider ?? null,
         activeEntryModel: this.host.fallbackWindow.activeEntry?.model ?? null,
         failedKeys: failedKeysToPersistedKeys(this.host.fallbackChain.failedKeys),
-        recoveryEpisodeStartedAt: this.host.fallbackWindow.recoveryEpisodeStartedAt ?? this.host.fallbackWindow.activatedAt ?? Date.now(),
+        recoveryEpisodeStartedAt: this.host.fallbackWindow.recoveryEpisodeStartedAt ?? this.host.fallbackWindow.activatedAt ?? now,
         recoveryState: this.host.fallbackWindow.recoveryState === 'unavailable' ? 'operator-held' : this.host.fallbackWindow.recoveryState,
         recoveryTerminalReason: this.host.fallbackWindow.recoveryState === 'unavailable'
           ? 'operator-killed'
@@ -2114,7 +2116,7 @@ export class RuntimeFallbackCoordinator {
       failureTier === 'fallback' || this.host.fallbackWindow.recoveryState !== 'active'
     );
 
-    const now = Date.now();
+    const now = systemClock.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
     const clampedUntil = Math.min(
       now + MAX_FALLBACK_WINDOW_MS,
@@ -2337,7 +2339,7 @@ export class RuntimeFallbackCoordinator {
 
   /** Returns true once the failure terminalizes the episode. */
   private finishFailedPrimaryRecoveryProbe(): boolean {
-    const terminalReason = this.recoveryTerminalReasonAt(Date.now());
+    const terminalReason = this.recoveryTerminalReasonAt(systemClock.now());
     if (terminalReason !== null) {
       this.terminalizeFallbackRecovery('terminal', terminalReason);
       return true;
