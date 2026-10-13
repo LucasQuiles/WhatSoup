@@ -2,6 +2,7 @@
 // deadline and process lifecycle; this child owns only a bounded JSON request
 // and a bounded, content-free result.
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { SQLITE_BUSY_TIMEOUT_MS } from '../../lib/sqlite-constants.ts';
 import {
   TRIGGER_BUDGETS,
   isSafeSqliteSql,
@@ -104,7 +105,7 @@ async function main(): Promise<void> {
   try {
     // This connection cannot persist writes. The parent checks the original
     // connection's main-database location before it grants this path.
-    db = new DatabaseSync(request.databasePath, { readOnly: true, timeout: 5_000 });
+    db = new DatabaseSync(request.databasePath, { readOnly: true, timeout: SQLITE_BUSY_TIMEOUT_MS });
     databaseOpened = true;
     const countSql = sqliteBoundedCountQuery(request.sql, request.maxRows);
     if (!countSql) {
@@ -132,7 +133,7 @@ async function main(): Promise<void> {
     // bind values, SQLite error, or response data in the cross-process reply.
     emit(databaseOpened ? { status: 'sql_error' } : { status: 'unavailable' }, request.maxOutputBytes);
   } finally {
-    try { db?.close(); } catch { /* process exit releases the read-only handle */ }
+    try { db?.close(); } catch { /* intentional: process exit releases the already read-only database handle */ }
   }
 }
 

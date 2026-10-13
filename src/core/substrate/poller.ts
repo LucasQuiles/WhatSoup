@@ -45,6 +45,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { systemClock } from '../../lib/clock.ts';
 import { SIGNAL } from '../../lib/signals.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import {
   dueTriggers, validateTriggerSpec, isSafeSqliteSql, assertTriggerRootBudgets, assertTriggerTextBudget,
   TriggerBudgetError, TRIGGER_BUDGETS,
@@ -529,6 +530,7 @@ export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<Isola
       ], {
         stdio: ['pipe', 'pipe', 'pipe'],
         // The worker needs no application credentials or provider settings.
+        // env-allowed: isolated worker inherits only the executable lookup path needed for process launch.
         env: { PATH: process.env.PATH ?? '' },
       });
     } catch {
@@ -551,7 +553,7 @@ export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<Isola
     const terminate = (result: IsolatedSqliteResult): void => {
       if (terminal) return;
       terminal = result;
-      try { child.kill(SIGNAL.KILL); } catch { /* close/error settles the result */ }
+      try { child.kill(SIGNAL.KILL); } catch { /* intentional: close or error below settles the fixed terminal result */ }
     };
     deadline = setTimeout(() => {
       terminate({ kind: 'resource_exhausted', limit: 'wall_time' });
@@ -605,7 +607,7 @@ export function runIsolatedSqlite(request: IsolatedSqliteRequest): Promise<Isola
           finish({ kind: 'unavailable', reason: 'location' });
           return;
         }
-      } catch { /* protocol failures stay content-free */ }
+      } catch { /* intentional: malformed worker output maps to the content-free protocol result below */ }
       finish({ kind: 'unavailable', reason: 'protocol' });
     });
     child.stdin.on('error', () => terminate({ kind: 'unavailable', reason: 'spawn' }));
@@ -1633,11 +1635,12 @@ export class TriggerPoller {
     let databasePath: string | null = null;
     try {
       const location = this.db.location('main');
-      if (typeof location === 'string' && location.length > 0 && location !== ':memory:' && isAbsolute(location)) {
+      if (isNonEmptyString(location) && location !== ':memory:' && isAbsolute(location)) {
         databasePath = location;
       }
     } catch {
-      // The unavailable disposition below intentionally reveals no database path.
+      // Intentional: location lookup failure maps to the unavailable disposition
+      // below without revealing a database path.
     }
     if (!databasePath) {
       return {
