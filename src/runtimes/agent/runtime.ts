@@ -2019,7 +2019,22 @@ export class AgentRuntime implements Runtime {
 
   private evictIdleSession(mapKey: string, session: SessionManager, reason: string): void {
     log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
-    const childStopped = session.shutdown(true);
+    // The socket teardown barrier gates every later manager's spawn for this
+    // chat, and a rejected barrier stays rejected until restart. A suspend
+    // that failed only at its durable lifecycle step has already stopped the
+    // provider, so, as #3658 does for a pre-spawn close, the unclosed
+    // generation is retired and the barrier settles: the next message starts
+    // fresh with a notice instead of being rejected forever. An unproven stop
+    // keeps the barrier rejected, so no second provider can start.
+    const childStopped = session.shutdown(true).catch((err: unknown) => {
+      if (adoptionAfterFailedClose(err, session.getStatus()) === null || !session.retireUnclosedGeneration()) {
+        throw err;
+      }
+      log.warn(
+        { err, errorMessage: errorMessage(err), chatJid: mapKey, reason },
+        'idle session suspend failed after its provider stopped — generation retired, next message starts fresh',
+      );
+    });
     this.perChatMcpSocketManager.releaseAfter(mapKey, childStopped);
     // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
     this.deleteOwnedPerChatSession(mapKey, session);
@@ -2037,8 +2052,8 @@ export class AgentRuntime implements Runtime {
     // and repopulates. Safe at this point: the safety guards already exclude a
     // chat with a pending turn or pending poll.
     this.cleanupPerChatState(mapKey, { preserveActorSocket: true });
-    void childStopped.catch((err) => {
-      log.warn({ err, chatJid: mapKey }, 'idle session shutdown failed');
+    void childStopped.catch((err: unknown) => {
+      log.warn({ err, errorMessage: errorMessage(err), chatJid: mapKey, reason }, 'idle session shutdown failed');
     });
   }
 

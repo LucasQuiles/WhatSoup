@@ -1391,6 +1391,15 @@ start fresh.
   `CHECKPOINT_ADOPTION_REFUSED` and the chat is told its previous session may still be
   running. No session is spawned, so the chat never gets a second live session.
 
+Idle eviction suspends a resident manager and holds the chat's actor-socket teardown
+barrier until the provider has stopped; every later manager for the chat waits on that
+barrier before spawning. When the suspend fails only at its durable lifecycle step after
+the provider stopped, the evicted generation is retired (its row ends, so it is never
+resumed) and the barrier settles. The next message then takes the "own session, not
+resumable" or foreign-checkpoint path above and starts fresh with the notice. When the stop
+itself is unproven, the barrier stays rejected and the chat's turns are refused, so no
+second provider can start. Both outcomes are logged with the underlying `errorMessage`.
+
 A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
 transaction before provider initialization. The reset clears stale session, turn, watchdog,
 delivery, and completed-turn identity while making the new lifecycle active. If persistence
