@@ -2072,10 +2072,11 @@ If the evaluator throws for a conversation that has a policy, the message is als
 
 **Turn outcome.** A turn whose answers were all withheld ends as a deliberate terminal outcome, not a delivery failure. The terminal record has attempt kind `withheld_by_policy` under the `finalized_no_reply_policy` disposition. The inbound message completes with terminal reason `client_output_withheld`. The turn is not handed to recovery, is not replayed, raises no reply-guarantee breach alert and is not marked for catch-up. The policy decision satisfies the reply guarantee, which is disarmed. A turn that also delivered another answer finalizes as replied. Withheld text never becomes an automatic voice reply.
 
+**Unsupported setting.** `authorization` is rejected. It does not authorize client output.
+
 Not covered:
 
 - The redirect status send, which goes to the separate status JID, and the fixed "could not be delivered" notice are not checked.
-- `authorization` is parsed but not yet checked.
 - Matching is exact on the canonical conversation key. A chat whose key stays an unresolved LID does not match a policy keyed by phone number.
 - An automatic voice reply of admitted text is not checked again as one combined message.
 
@@ -2100,9 +2101,7 @@ Fields (every object is closed; unknown keys are rejected):
 - `maxQuestionMarks`: an integer from 0 to 20. ASCII, fullwidth and Arabic question marks all count.
 - `blockedTerms`: up to 64 terms. Each term has a `value` (NFC, no surrounding whitespace, 1 to 128 code points), a `match` of `whole_word` or `substring`, and a boolean `caseSensitive`.
 - `rejectInternalArtifacts` and `rejectWhatsAppJids`: booleans.
-- `authorization` (optional): `keyId`, `publicKey` (an unpadded base64url Ed25519 SPKI key) and `requiredActions`, drawn from `assistant_text`, `send_message`, `reply_message`, `edit_message`, `send_poll` and `send_media`.
-
-The fleet API returns blocked-term values and public keys as `[redacted]` in line detail and config-update responses. The full values stay in `config.json`.
+The fleet API returns blocked-term values as `[redacted]` in line detail and config-update responses. The full values stay in `config.json`.
 
 ### `chatOptions`
 

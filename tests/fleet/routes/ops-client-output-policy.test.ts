@@ -18,12 +18,7 @@ import {
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
-const DER_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const SYNTHETIC_PHONE = ['1555', '020', '0001'].join('');
-
-function syntheticPublicKey(): string {
-  return Buffer.concat([DER_PREFIX, Buffer.alloc(32, 13)]).toString('base64url');
-}
 
 function policy(conversationKey: string, privateTerm = 'restricted') {
   return {
@@ -33,11 +28,6 @@ function policy(conversationKey: string, privateTerm = 'restricted') {
     blockedTerms: [{ value: privateTerm, match: 'whole_word', caseSensitive: false }],
     rejectInternalArtifacts: true,
     rejectWhatsAppJids: true,
-    authorization: {
-      keyId: 'synthetic-key',
-      publicKey: syntheticPublicKey(),
-      requiredActions: ['send_message'],
-    },
   };
 }
 
@@ -81,15 +71,22 @@ const INVALID_POLICY_CASES: readonly {
     }],
   },
   {
-    id: 'unknown-auth',
-    label: 'an unknown authorization field',
+    id: 'legacy-authorization-empty',
+    label: 'an empty legacy authorization object',
     policies: [{
       ...policy('unknown-authorization'),
+      authorization: {},
+    }],
+  },
+  {
+    id: 'legacy-authorization-populated',
+    label: 'a populated legacy authorization object',
+    policies: [{
+      ...policy('populated-authorization'),
       authorization: {
-        keyId: 'synthetic-key',
-        publicKey: syntheticPublicKey(),
+        keyId: 'legacy-key',
+        publicKey: 'legacy-public-key',
         requiredActions: ['send_message'],
-        unsupportedAuthorizationField: true,
       },
     }],
   },
@@ -249,7 +246,6 @@ describe('fleet client-output policy config admission and projection', () => {
     expect(res._status).toBe(201);
     expect(JSON.parse(fs.readFileSync(configPath(name), 'utf8')).clientOutputPolicies).toEqual(policies);
     expect(res._body).not.toContain(privateTerm);
-    expect(res._body).not.toContain(syntheticPublicKey());
   });
 
   it.each(INVALID_POLICY_CASES)(
@@ -297,10 +293,8 @@ describe('fleet client-output policy config admission and projection', () => {
     expect(response.clientOutputPolicies[0]).toMatchObject({
       conversationKey: 'replacement',
       blockedTerms: [{ value: '[redacted]', match: 'whole_word', caseSensitive: false }],
-      authorization: { keyId: 'synthetic-key', publicKey: '[redacted]' },
     });
     expect(res._body).not.toContain(privateTerm);
-    expect(res._body).not.toContain(syntheticPublicKey());
   });
 
   it('leaves config bytes and auxiliary state unchanged when PATCH validation fails', async () => {

@@ -1,14 +1,10 @@
-import { createPublicKey } from 'node:crypto';
 import { asRecord, isNonEmptyString } from '../lib/type-guards.ts';
 import { conversationKeyToJid, toConversationKey } from './conversation-key.ts';
 import { DEFAULT_TRANSPORT_ID } from './transport-refs.ts';
 import {
-  CLIENT_OUTPUT_POLICY_ACTIONS,
   countUnicodeCodePoints,
   normalizeClientOutputTermForComparison,
   type ClientOutputBlockedTerm,
-  type ClientOutputPolicyAction,
-  type ClientOutputPolicyAuthorization,
   type ConfiguredClientOutputPolicy,
 } from './client-output-policy-contract.ts';
 
@@ -19,12 +15,8 @@ const POLICY_KEYS = new Set([
   'blockedTerms',
   'rejectInternalArtifacts',
   'rejectWhatsAppJids',
-  'authorization',
 ]);
 const TERM_KEYS = new Set(['value', 'match', 'caseSensitive']);
-const AUTHORIZATION_KEYS = new Set(['keyId', 'publicKey', 'requiredActions']);
-const ACTIONS = new Set<string>(CLIENT_OUTPUT_POLICY_ACTIONS);
-const KEY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export const CLIENT_OUTPUT_POLICY_REDACTION = '[redacted]';
@@ -140,22 +132,6 @@ function validConversationKey(value: unknown): value is string {
     && hasReachableGroupConversationKey(value);
 }
 
-function validEd25519PublicKey(value: unknown): value is string {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(value)) return false;
-  try {
-    const der = Buffer.from(value, 'base64url');
-    if (der.toString('base64url') !== value) return false;
-    const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
-    if (key.asymmetricKeyType !== 'ed25519') return false;
-    const canonical = key.export({ format: 'der', type: 'spki' });
-    return Buffer.isBuffer(canonical)
-      && canonical.equals(der)
-      && canonical.toString('base64url') === value;
-  } catch {
-    return false;
-  }
-}
-
 function parseTerm(
   value: unknown,
   field: string,
@@ -191,49 +167,6 @@ function parseTerm(
   return Object.freeze({ value: rawValue, match, caseSensitive });
 }
 
-function parseAuthorization(
-  value: unknown,
-  field: string,
-): ClientOutputPolicyAuthorization | ClientOutputPolicyParseResult {
-  const authorization = asRecord(value);
-  if (!authorization) return issue(field, 'must be an object');
-  if (hasUnknownKey(authorization, AUTHORIZATION_KEYS)) {
-    return issue(field, 'contains an unsupported field');
-  }
-
-  const keyId = authorization['keyId'];
-  if (typeof keyId !== 'string' || keyId.length > 64 || !KEY_ID_RE.test(keyId)) {
-    return issue(`${field}.keyId`, 'must be a 1 to 64 character ASCII token using letters, numbers, dot, underscore, or hyphen');
-  }
-  const publicKey = authorization['publicKey'];
-  if (!validEd25519PublicKey(publicKey)) {
-    return issue(`${field}.publicKey`, 'must be the canonical unpadded base64url encoding of an Ed25519 DER-SPKI public key');
-  }
-  const requiredActions = authorization['requiredActions'];
-  if (!Array.isArray(requiredActions)) {
-    return issue(`${field}.requiredActions`, 'must be an array');
-  }
-  const seen = new Set<string>();
-  const actions: ClientOutputPolicyAction[] = [];
-  for (let index = 0; index < requiredActions.length; index += 1) {
-    const action = requiredActions[index];
-    if (typeof action !== 'string' || !ACTIONS.has(action)) {
-      return issue(`${field}.requiredActions[${index}]`, 'must be a supported client-output action');
-    }
-    if (seen.has(action)) {
-      return issue(`${field}.requiredActions[${index}]`, 'duplicates an earlier required action');
-    }
-    seen.add(action);
-    actions.push(action as ClientOutputPolicyAction);
-  }
-
-  return Object.freeze({
-    keyId,
-    publicKey,
-    requiredActions: Object.freeze(actions),
-  });
-}
-
 export function parseClientOutputPolicies(value: unknown): ClientOutputPolicyParseResult {
   if (value === undefined) {
     const policies = Object.freeze([]) as readonly ConfiguredClientOutputPolicy[];
@@ -252,6 +185,12 @@ export function parseClientOutputPolicies(value: unknown): ClientOutputPolicyPar
     const field = `clientOutputPolicies[${policyIndex}]`;
     const rawPolicy = asRecord(value[policyIndex]);
     if (!rawPolicy) return issue(field, 'must be an object');
+    if (Object.prototype.hasOwnProperty.call(rawPolicy, 'authorization')) {
+      return issue(
+        `${field}.authorization`,
+        'is unsupported because client-output authorization is not enforced',
+      );
+    }
     if (hasUnknownKey(rawPolicy, POLICY_KEYS)) return issue(field, 'contains an unsupported field');
 
     const conversationKey = rawPolicy['conversationKey'];
@@ -296,16 +235,6 @@ export function parseClientOutputPolicies(value: unknown): ClientOutputPolicyPar
       return issue(`${field}.rejectWhatsAppJids`, 'must be a boolean');
     }
 
-    let authorization: ClientOutputPolicyAuthorization | undefined;
-    if (rawPolicy['authorization'] !== undefined) {
-      const parsedAuthorization = parseAuthorization(
-        rawPolicy['authorization'],
-        `${field}.authorization`,
-      );
-      if ('ok' in parsedAuthorization) return parsedAuthorization;
-      authorization = parsedAuthorization;
-    }
-
     policies.push(Object.freeze({
       conversationKey,
       maxCodePoints,
@@ -313,7 +242,6 @@ export function parseClientOutputPolicies(value: unknown): ClientOutputPolicyPar
       blockedTerms: Object.freeze(blockedTerms),
       rejectInternalArtifacts,
       rejectWhatsAppJids,
-      ...(authorization ? { authorization } : {}),
     }));
   }
 
@@ -365,8 +293,8 @@ export function selectClientOutputPolicy(
 
 /**
  * Projects authenticated configuration-authority responses only. The selector
- * conversationKey remains visible while blocked terms and public keys are
- * redacted. Do not reuse this projector for telemetry or discovery output.
+ * conversationKey remains visible while blocked terms are redacted. Do not
+ * reuse this projector for telemetry or discovery output.
  */
 export function projectClientOutputPolicyConfig(
   config: Record<string, unknown>,
@@ -384,14 +312,6 @@ export function projectClientOutputPolicyConfig(
         ...term,
         value: CLIENT_OUTPUT_POLICY_REDACTION,
       })),
-      ...(policy.authorization
-        ? {
-            authorization: {
-              ...policy.authorization,
-              publicKey: CLIENT_OUTPUT_POLICY_REDACTION,
-            },
-          }
-        : {}),
     })),
   };
 }
