@@ -3003,6 +3003,34 @@ this contract with direct ad hoc deletes.
 
 Migration 51 removes old raw columns from the live schema, but migration success alone is not forensic erasure. SQLite free pages, WAL files, backups, and snapshots may retain prior bytes; schedule any `VACUUM`, `secure_delete` policy, or backup retirement separately under the deployment's maintenance controls.
 
+### Handoff artifact retention
+
+`agent_handoff_artifacts` is a short-lived continuity cache for agent fallback.
+Its summary, seeded artifact content, source provider, source model, and token
+baseline are eligible for online deletion 24 hours after `updated_at`. The single
+canonical database-retention runner drains every eligible artifact through
+deterministic statements of no more than 100 rows inside its normal transaction.
+It runs immediately at startup and then on its periodic interval (daily by default),
+so a restored database's expired backlog is removed by the first successful cleanup.
+Eligibility does not promise exact wall-clock deletion: a stopped process or failed
+sweep delays online removal. Check
+`health.retention.database.lastResult.handoffArtifacts` for the count from the
+latest successful sweep; chat/passive instances that do not have the optional table
+report zero.
+
+Chat clear, message revoke/delete, and agent `/new` workspace reset invalidate the
+affected conversation's artifact. For revoke/delete, the runtime finds all owning
+conversation keys before soft-deleting message rows, then invalidates their
+artifacts first. The prompt-injection freshness TTL is distinct: it decides whether
+an artifact may enter a prompt, while this lifecycle controls how long the row can
+remain on disk. There is currently no application privacy-erasure endpoint; a
+future one must call the same invalidation seam.
+
+Online deletion does not erase bytes already captured in backups, WAL copies,
+storage snapshots, or provider copies. Operate backup rotation/destruction and
+provider-data retention under their separate controls. This runbook describes the
+implemented lifecycle; it does not attest any deployed system or external copy.
+
 ---
 
 ## 8. Monitoring
