@@ -1117,6 +1117,25 @@ the DM drain, both group drains, and the old-binary rehearsal are separately own
 
 ---
 
+### 5.8 Provider Fallback Recovery Evidence
+
+Provider fallback recovery state is separate from inbound and outbound replay.
+The singleton `agent_fallback_state` row records the active fallback route, the
+primary-recovery episode start, failed-probe count, terminal reason, and an
+in-flight probe claim before the probe begins. An automatic episode stops after
+12 failed probes or 24 elapsed hours from its original start. A backward clock
+is held as a clock anomaly rather than resetting the elapsed budget.
+
+After a crash with a durable probe claim, startup preserves fallback routing and
+restores the episode as `operator-held` with `probe-outcome-unknown`; it does
+not repeat the unknown probe or replay accepted work. Malformed or unreadable
+failed-provider evidence is also held as `unavailable`. Its raw stored value is
+quarantined for reconciliation and is never cleared or overwritten as an empty
+failed-entry list by automatic restore. Returning to primary requires a fresh,
+independent validated probe through the operator recovery control.
+
+---
+
 ## 6. Database Schema
 
 Migration 2 creates the original durability tables. Migrations 37 and 38 add terminal-decision

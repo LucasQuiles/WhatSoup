@@ -20,6 +20,8 @@ import {
   getFallbackState,
   clearFallbackState,
   PERSISTED_FALLBACK_STATE_VERSION,
+  type FallbackRecoveryState,
+  type FallbackRecoveryTerminalReason,
   type PersistedFailedKey,
 } from './fallback-state-db.ts';
 import { emitAlertChecked } from '../../lib/emit-alert.ts';
@@ -48,9 +50,22 @@ export interface FallbackRestoreContext {
 export type FallbackRestoreResult =
   | { outcome: 'no-state'; cleared: boolean }
   | { outcome: 'expired-or-no-fallback'; cleared: boolean }
+  | { outcome: 'failed-key-evidence-unavailable'; cleared: false }
   | { outcome: 'version-incompatible'; cleared: boolean }
   | { outcome: 'chain-mismatch'; cleared: boolean }
-  | { outcome: 'armed'; clampedUntil: number; persistedUntil: number; persistedReason: string; persistedActivatedAt: number; persistedProbeAttempts: number; restoredFailedKeys: number }
+  | {
+    outcome: 'armed';
+    clampedUntil: number;
+    persistedUntil: number;
+    persistedReason: string;
+    persistedActivatedAt: number;
+    persistedRecoveryEpisodeStartedAt: number;
+    persistedProbeAttempts: number;
+    persistedRecoveryState: FallbackRecoveryState;
+    persistedRecoveryTerminalReason: FallbackRecoveryTerminalReason | null;
+    persistedRecoveryProbeInFlight: boolean;
+    restoredFailedKeys: number;
+  }
   | { outcome: 'arm-failed'; cleared: boolean }
   | { outcome: 'error' };
 
@@ -79,7 +94,27 @@ export function restorePersistedFallbackWindowState(
       clearFallbackState(ctx.db);
       return { outcome: 'no-state', cleared: true };
     }
-    if (ctx.agentFallbacks.length === 0 || persisted.activeUntil <= now()) {
+    // A corrupt failed-key record is evidence that a prior route failed. It
+    // must remain available for reconciliation, not be erased by restore's
+    // usual expiry cleanup or overwritten by a fresh empty array.
+    if (persisted.failedKeysEvidenceAvailability === 'unavailable') {
+      emitAlertChecked(
+        'fallback-restore',
+        'fallback_persist_evidence_unavailable',
+        'Persisted failed-provider evidence is unavailable — fallback restore is quarantined',
+        'failed_keys_evidence=unavailable action=operator-reconciliation-required',
+      );
+      return { outcome: 'failed-key-evidence-unavailable', cleared: false };
+    }
+    const restoredAt = now();
+    if (
+      ctx.agentFallbacks.length === 0
+      // A probe claim is durable before its provider effect begins. If the
+      // process dies while that effect is unknown, the expired timer deadline
+      // cannot authorize clearing the episode: restore must preserve the
+      // fallback route and convert it to an explicit operator hold first.
+      || (persisted.recoveryState === 'active' && !persisted.recoveryProbeInFlight && persisted.activeUntil <= restoredAt)
+    ) {
       clearFallbackState(ctx.db);
       return { outcome: 'expired-or-no-fallback', cleared: true };
     }
@@ -151,7 +186,9 @@ export function restorePersistedFallbackWindowState(
     }
     // Clamp the restored window so a clock-skew or tampered row cannot pin
     // the fallback for longer than MAX_FALLBACK_WINDOW_MS from now.
-    const clampedUntil = Math.min(persisted.activeUntil, now() + maxFallbackWindowMs);
+    const clampedUntil = persisted.recoveryState === 'active'
+      ? Math.min(persisted.activeUntil, restoredAt + maxFallbackWindowMs)
+      : persisted.activeUntil;
     const restoredFailedKeys = persisted.version >= 1
       ? persisted.failedKeys.filter((fk) =>
           ctx.agentFallbacks.some((e) => e.provider === fk.provider && (e.model ?? null) === fk.model),
@@ -163,9 +200,18 @@ export function restorePersistedFallbackWindowState(
       persistedUntil: persisted.activeUntil,
       persistedReason: persisted.reason,
       persistedActivatedAt: persisted.activatedAt,
+      persistedRecoveryEpisodeStartedAt: persisted.recoveryEpisodeStartedAt ?? persisted.activatedAt,
       // getFallbackState sanitizes probe_attempts (finite, >= 0) at the read
       // boundary — a corrupt row can never surface a non-finite value here.
       persistedProbeAttempts: persisted.probeAttempts,
+      // A crash after a probe claim has an unknown outcome. The caller holds
+      // the fallback route and requires explicit operator retry/recovery; it
+      // never replays accepted work from this ambiguous episode.
+      persistedRecoveryState: persisted.recoveryProbeInFlight ? 'operator-held' : (persisted.recoveryState ?? 'active'),
+      persistedRecoveryTerminalReason: persisted.recoveryProbeInFlight
+        ? 'probe-outcome-unknown'
+        : (persisted.recoveryTerminalReason ?? null),
+      persistedRecoveryProbeInFlight: persisted.recoveryProbeInFlight ?? false,
       restoredFailedKeys,
     };
   } catch (err) {

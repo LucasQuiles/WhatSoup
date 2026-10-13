@@ -103,6 +103,10 @@ export interface Runtime {
     fallbackModel?: string | null;
     fallbackResetAt?: number | null;
     fallbackRecoveryProbeRequired?: boolean;
+    /** Recovery state is distinct from fallback routing: terminal and
+     * operator-held episodes keep the fallback route until verified recovery. */
+    recoveryState?: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+    recoveryTerminalReason?: string | null;
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
@@ -121,7 +125,13 @@ export interface Runtime {
   /** Admin override: force a fallback window of the given duration (or the default). */
   forceFallback?(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string };
   /** Admin override: end any active fallback window immediately. Idempotent. */
-  disableFallback?(): { ok: true };
+  disableFallback?(): { ok: true } | { ok: false; reason: string };
+  /** Hold automatic primary recovery while preserving the fallback route. */
+  holdFallbackRecovery?(): { ok: true } | { ok: false; reason: string };
+  /** Start a new bounded recovery episode. It never replays accepted work. */
+  retryFallbackRecovery?(): { ok: true } | { ok: false; reason: string };
+  /** Probe the primary and return to it only on fresh validated evidence. */
+  recoverPrimaryFromFallback?(): Promise<{ ok: true } | { ok: false; reason: string }>;
   /**
    * #1753 rem-2: MCP tool-call liveness (agent runtimes only). The oldest
    * in-flight call's age and the pending count make an async-hung send path

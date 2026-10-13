@@ -20,7 +20,7 @@ export function isAdminMessage(msg: IncomingMessage, db: Database): boolean {
 export type AdminCommand =
   | { action: 'allow' | 'block'; subjectType: SubjectType; subjectId: string }
   | { action: 'fallback'; sub: 'on'; durationMs?: number }
-  | { action: 'fallback'; sub: 'off' | 'status' | 'help' }
+  | { action: 'fallback'; sub: 'off' | 'status' | 'kill' | 'retry' | 'recover' | 'help' }
   | { action: 'grant'; sub: 'arm'; group: string; durationMs?: number }
   | { action: 'grant'; sub: 'disarm' | 'status' | 'help' };
 
@@ -63,9 +63,9 @@ export function parseAdminCommand(content: string): AdminCommand | null {
     return { action: 'fallback', sub: 'on', ...(n !== undefined ? { durationMs: n * (unit === 'h' ? MS_PER_HOUR : 60_000) } : {}) };
   }
 
-  // FALLBACK OFF / FALLBACK STATUS / FALLBACK HELP
-  const fallbackCtl = content.match(/^fallback\s+(off|status|help)\s*$/i);
-  if (fallbackCtl) return { action: 'fallback', sub: fallbackCtl[1].toLowerCase() as 'off' | 'status' | 'help' };
+  // FALLBACK OFF / STATUS / KILL / RETRY / RECOVER / HELP
+  const fallbackCtl = content.match(/^fallback\s+(off|status|kill|retry|recover|help)\s*$/i);
+  if (fallbackCtl) return { action: 'fallback', sub: fallbackCtl[1].toLowerCase() as 'off' | 'status' | 'kill' | 'retry' | 'recover' | 'help' };
 
   // Bare FALLBACK or FALLBACK HELP (no sub-command) → help
   if (content.match(/^fallback\s*$/i)) return { action: 'fallback', sub: 'help' };

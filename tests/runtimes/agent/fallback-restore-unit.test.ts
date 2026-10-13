@@ -10,6 +10,8 @@
  * U2: null-model chain entries match a persisted null activeEntryModel;
  *     unconfigured persisted failedKeys are skipped (never restored);
  *     a non-finite persisted probeAttempts restores as 0.
+ * U4: malformed failed-key evidence remains quarantined in place rather than
+ *     being mistaken for an empty set on restore.
  * U3: chain-mismatch with a null persisted model reports the 'default'
  *     placeholder in the alert detail and clears state.
  */
@@ -104,7 +106,6 @@ describe('fallback-restore module unit branches', () => {
       activeEntryProvider: 'anthropic-api',
       activeEntryModel: null, // matches the model-less configured entry via ?? null
       failedKeys: [
-        { provider: 'anthropic-api' } as unknown as { provider: string; model: string }, // model-less legacy entry: DROPPED at the read boundary, never restored
         { provider: 'opencode-cli', model: 'glm' }, // configured -> restored
         { provider: 'anthropic-api', model: 'ghost-model' }, // provider matches the null-model entry, model does not -> skipped
         { provider: 'ghost-provider', model: 'gone' }, // NOT configured -> skipped
@@ -122,15 +123,45 @@ describe('fallback-restore module unit branches', () => {
     // The corrupt row is sanitized at the db read boundary (getFallbackState),
     // so the restore result reports 0, never NaN.
     expect(result.persistedProbeAttempts).toBe(0);
-    // Only configured keys restored: the ghost provider is skipped, and the
-    // model-less legacy entry was dropped at the read boundary (never restored).
+    // Only configured keys are restored; provider/model mismatches are skipped.
     expect(ctx.added).toContain('opencode-cli\u0000glm');
     expect(ctx.added.some((k) => k.startsWith('anthropic-api'))).toBe(false);
     expect(ctx.added.some((k) => k.startsWith('ghost-provider'))).toBe(false);
     expect(ctx.resetCalls).toHaveLength(1);
-    // restoredFailedKeys counts exactly the one fully-configured entry (the
+    // restoredFailedKeys counts exactly the one configured entry (the
     // provider-match/model-mismatch key is skipped like the ghost).
     expect(result.restoredFailedKeys).toBe(1);
+  });
+
+  it('U4: malformed failed-key evidence is quarantined without clearing or overwriting the raw record', () => {
+    saveFallbackState(db, {
+      activeUntil: NOW + 10 * 60 * 1000,
+      activatedAt: NOW - 60 * 1000,
+      reason: 'unit-corrupt-evidence',
+      probeAttempts: 0,
+      version: PERSISTED_FALLBACK_STATE_VERSION,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'glm',
+      failedKeys: [],
+    });
+    const rawEvidence = '{malformed-json';
+    db.raw.prepare(`UPDATE agent_fallback_state SET failed_keys_json = ? WHERE id = 1`).run(rawEvidence);
+
+    const ctx = makeCtx();
+    const result = restorePersistedFallbackWindowState(ctx, WINDOW_MS, () => NOW);
+
+    expect(result).toEqual({ outcome: 'failed-key-evidence-unavailable', cleared: false });
+    expect(ctx.resetCalls).toHaveLength(0);
+    expect(ctx.added).toHaveLength(0);
+    const row = db.raw.prepare(`SELECT failed_keys_json AS failedKeysJson FROM agent_fallback_state WHERE id = 1`)
+      .get() as { failedKeysJson: string };
+    expect(row.failedKeysJson).toBe(rawEvidence);
+    expect(vi.mocked(emitAlertChecked)).toHaveBeenCalledWith(
+      'fallback-restore',
+      'fallback_persist_evidence_unavailable',
+      expect.any(String),
+      expect.stringContaining('operator-reconciliation-required'),
+    );
   });
 
   it('U3: chain-mismatch with null persisted model clears state and reports the default placeholder', () => {

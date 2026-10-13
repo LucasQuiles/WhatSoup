@@ -826,11 +826,10 @@ export class AgentRuntime implements Runtime {
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
   /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
   private periodicUsabilityProbeDueAt: number | null = null;
-  // Consecutive failed recovery probes on the revert-timer EXTENSION path
-  // (process-local, reset on deactivation — which a successful probe triggers).
-  // Early-window standing probes do not count: nothing is extending yet.
-  // At config.fallbackTunables.probeStallThreshold one fallback_recovery_stalled
-  // alert fires per stall episode; the window keeps extending regardless.
+  // Failed primary-recovery probes in the current bounded recovery episode.
+  // The counter is persisted while fallback is active, including early-window
+  // probes, and is reset only by a fresh episode or verified reactivation.
+  // Twelve failures (or 24 elapsed hours) terminalize automatic recovery.
   private fallbackProbeAttempts = 0;
   // Epoch ms of the most recent recovery probe (either path); null until the
   // first probe. Process-local observability only — never persisted.
@@ -9502,8 +9501,20 @@ export class AgentRuntime implements Runtime {
     return this.fallback.forceFallback(durationMs);
   }
 
-  disableFallback(): { ok: true } {
+  disableFallback(): { ok: true } | { ok: false; reason: string } {
     return this.fallback.disableFallback();
+  }
+
+  holdFallbackRecovery(): { ok: true } | { ok: false; reason: string } {
+    return this.fallback.holdFallbackRecovery();
+  }
+
+  retryFallbackRecovery(): { ok: true } | { ok: false; reason: string } {
+    return this.fallback.retryFallbackRecovery();
+  }
+
+  recoverPrimaryFromFallback(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    return this.fallback.recoverPrimaryFromFallback();
   }
 
   /** Named seam: fallback-probe suites spy this method on the runtime instance;

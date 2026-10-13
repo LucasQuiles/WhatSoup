@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Database } from '../../../src/core/database.ts';
-import { ensureFallbackStateSchema } from '../../../src/runtimes/agent/fallback-state-db.ts';
+import { ensureFallbackStateSchema, getFallbackState } from '../../../src/runtimes/agent/fallback-state-db.ts';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -117,7 +117,11 @@ function makeRuntime(db: Database): AgentRuntime {
 }
 
 type FallbackView = {
-  fallbackWindow: { activeUntil: number | null };
+  fallbackWindow: {
+    activeUntil: number | null;
+    recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+    recoveryTerminalReason: string | null;
+  };
   fallbackProbeAttempts: number;
   effectiveProvider: string;
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
@@ -126,6 +130,11 @@ type FallbackView = {
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): void;
   restorePersistedFallbackWindow(): void;
+  getFallbackState(): {
+    recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+    recoveryTerminalReason: string | null;
+    probeAttempts: number;
+  };
 };
 
 function fbView(runtime: AgentRuntime): FallbackView {
@@ -223,5 +232,62 @@ describe('fallback persistence — real-DB integration', () => {
     // The next failed extension probe continues the SAME stall episode.
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
     expect(vB.fallbackProbeAttempts).toBe(3);
+  });
+
+  it('a crash after durably claiming an expired-window probe holds fallback on restart and never replays the ambiguous probe', async () => {
+    const runtimeA = makeRuntime(db);
+    const vA = fbView(runtimeA);
+    const pendingProbe = new Promise<boolean>(() => {});
+    vA.probePrimaryProviderRecovered = vi.fn(() => pendingProbe);
+    vA.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
+
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+    const claimed = getFallbackState(db);
+    expect(claimed?.recoveryProbeInFlight).toBe(true);
+    expect(claimed?.probeAttempts).toBe(1);
+
+    const runtimeB = makeRuntime(db);
+    const vB = fbView(runtimeB);
+    const restartProbe = vi.fn(() => false);
+    vB.probePrimaryProviderRecovered = restartProbe as unknown as () => Promise<boolean>;
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('opencode-cli');
+    expect(vB.getFallbackState().recoveryState).toBe('operator-held');
+    expect(vB.getFallbackState().recoveryTerminalReason).toBe('probe-outcome-unknown');
+    await vi.advanceTimersByTimeAsync(3 * 5 * 60 * 1000);
+    expect(restartProbe).not.toHaveBeenCalled();
+
+    const held = getFallbackState(db);
+    expect(held?.recoveryState).toBe('operator-held');
+    expect(held?.recoveryTerminalReason).toBe('probe-outcome-unknown');
+    expect(held?.recoveryProbeInFlight).toBe(false);
+  });
+
+  it('a crash after terminalization restores the terminal fallback route without resuming automatic recovery', async () => {
+    const runtimeA = makeRuntime(db);
+    const vA = fbView(runtimeA);
+    const failedProbe = vi.fn(() => false);
+    vA.probePrimaryProviderRecovered = failedProbe as unknown as () => Promise<boolean>;
+    vA.activateProviderFallback(new Date(Date.now() + 1000), 'auth-required');
+
+    await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+    for (let attempt = 2; attempt <= 12; attempt++) {
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    }
+    expect(getFallbackState(db)?.recoveryState).toBe('terminal');
+    expect(getFallbackState(db)?.recoveryTerminalReason).toBe('attempt-limit');
+
+    const runtimeB = makeRuntime(db);
+    const vB = fbView(runtimeB);
+    const restartProbe = vi.fn(() => false);
+    vB.probePrimaryProviderRecovered = restartProbe as unknown as () => Promise<boolean>;
+    vB.restorePersistedFallbackWindow();
+
+    expect(vB.effectiveProvider).toBe('opencode-cli');
+    expect(vB.getFallbackState().recoveryState).toBe('terminal');
+    expect(vB.getFallbackState().recoveryTerminalReason).toBe('attempt-limit');
+    await vi.advanceTimersByTimeAsync(3 * 5 * 60 * 1000);
+    expect(restartProbe).not.toHaveBeenCalled();
   });
 });

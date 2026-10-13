@@ -69,6 +69,9 @@ interface AgentRuntimeOpts {
   lastFallbackTurnAt?: number | null;
   windowCostUsd?: number | null;
   forceResult?: ForceResult;
+  recoveryState?: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+  recoveryTerminalReason?: string | null;
+  disableResult?: { ok: true } | { ok: false; reason: string };
 }
 
 /** Build a Runtime mock with full fallback optional methods. */
@@ -87,6 +90,8 @@ function makeAgentRuntime(opts: AgentRuntimeOpts = {}): Runtime {
     fallbackActivations: opts.activations ?? 0,
     fallbackReverts: opts.reverts ?? 0,
     fallbackWindowCostUsd: opts.windowCostUsd ?? 0,
+    recoveryState: opts.recoveryState,
+    recoveryTerminalReason: opts.recoveryTerminalReason,
   };
 
   const forceResult: ForceResult = opts.forceResult
@@ -100,7 +105,7 @@ function makeAgentRuntime(opts: AgentRuntimeOpts = {}): Runtime {
     setDurability: vi.fn(),
     getFallbackState: vi.fn().mockReturnValue(fallbackState),
     forceFallback: vi.fn().mockReturnValue(forceResult),
-    disableFallback: vi.fn().mockReturnValue({ ok: true }),
+    disableFallback: vi.fn().mockReturnValue(opts.disableResult ?? { ok: true }),
   };
 }
 
@@ -219,6 +224,20 @@ describe('handleFallbackCommand -- FALLBACK STATUS', () => {
     const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
     expect(reply).not.toContain('cost');
   });
+
+  it.each([
+    ['terminal', 'attempt-limit', 'terminal (attempt-limit)'],
+    ['operator-held', 'probe-outcome-unknown', 'operator-held (probe-outcome-unknown)'],
+    ['unavailable', 'failed-provider-evidence-unavailable', 'unavailable (failed-provider-evidence-unavailable)'],
+  ] as const)('renders the %s recovery state distinctly', async (recoveryState, recoveryTerminalReason, expected) => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime({ recoveryState, recoveryTerminalReason });
+
+    await handleFallbackCommand(runtime, messenger, statusCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain(`recovery: ${expected}`);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -324,5 +343,59 @@ describe('handleFallbackCommand -- FALLBACK OFF', () => {
     const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
     expect(reply).toContain('not supported');
     expect(vi.mocked(messenger.sendMessage)).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects OFF when the terminal fallback requires fresh primary proof', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime({
+      disableResult: { ok: false, reason: 'fresh primary recovery proof is required before leaving a held fallback route' },
+    });
+
+    await handleFallbackCommand(runtime, messenger, offCmd, ADMIN_CHAT_JID);
+
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain('Cannot disable fallback');
+    expect(reply).toContain('fresh primary recovery proof');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Explicit recovery controls
+// ---------------------------------------------------------------------------
+
+describe('handleFallbackCommand -- explicit recovery controls', () => {
+  it('KILL holds fallback recovery while retaining the fallback route', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime();
+    runtime.holdFallbackRecovery = vi.fn().mockReturnValue({ ok: true });
+
+    await handleFallbackCommand(runtime, messenger, { action: 'fallback', sub: 'kill' }, ADMIN_CHAT_JID);
+
+    expect(runtime.holdFallbackRecovery).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(messenger.sendMessage).mock.calls[0][1]).toContain('fallback routing remains active');
+  });
+
+  it('RETRY starts a new bounded recovery episode without replaying accepted work', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime();
+    runtime.retryFallbackRecovery = vi.fn().mockReturnValue({ ok: true });
+
+    await handleFallbackCommand(runtime, messenger, { action: 'fallback', sub: 'retry' }, ADMIN_CHAT_JID);
+
+    expect(runtime.retryFallbackRecovery).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(messenger.sendMessage).mock.calls[0][1]).toContain('Accepted work was not replayed');
+  });
+
+  it('RECOVER reports when fresh independent primary proof is rejected', async () => {
+    const messenger = makeMockMessenger() as unknown as Messenger;
+    const runtime = makeAgentRuntime();
+    runtime.recoverPrimaryFromFallback = vi.fn().mockResolvedValue({ ok: false, reason: 'fresh primary recovery proof did not validate' });
+
+    await handleFallbackCommand(runtime, messenger, { action: 'fallback', sub: 'recover' }, ADMIN_CHAT_JID);
+
+    expect(runtime.recoverPrimaryFromFallback).toHaveBeenCalledTimes(1);
+    const reply = vi.mocked(messenger.sendMessage).mock.calls[0][1] as string;
+    expect(reply).toContain('Primary recovery was not accepted');
+    expect(reply).toContain('did not validate');
   });
 });

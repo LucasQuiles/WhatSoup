@@ -3,7 +3,17 @@ import type { Database } from '../../core/database.ts';
 /** Schema version for the persisted fallback-state row. Bumped when the
  *  persisted shape changes; the restore path rejects version-incompatible
  *  rows with an explicit reconciliation state instead of silently re-routing. */
-export const PERSISTED_FALLBACK_STATE_VERSION = 1;
+export const PERSISTED_FALLBACK_STATE_VERSION = 2;
+
+export type FallbackRecoveryState = 'active' | 'terminal' | 'operator-held';
+export type FallbackRecoveryTerminalReason =
+  | 'attempt-limit'
+  | 'elapsed-limit'
+  | 'clock-anomaly'
+  | 'probe-outcome-unknown'
+  | 'operator-killed'
+  | 'operator-recovery-failed';
+export type FailedKeysEvidenceAvailability = 'available' | 'unavailable';
 
 /** A failed-entry key as persisted — provider + model, the same identity
  *  `FallbackChain.entryKey` produces. Persisted as a JSON array of these so
@@ -36,6 +46,18 @@ export interface PersistedFallbackState {
    *  known-failed entry A is not retried while the episode presents as the same
    *  restored window. `[]` for legacy rows. */
   failedKeys: PersistedFailedKey[];
+  /** The recovery episode's original start, distinct from the fallback window
+   *  start so an explicit retry can begin a new bounded episode without
+   *  concealing the original fallback window. */
+  recoveryEpisodeStartedAt?: number;
+  recoveryState?: FallbackRecoveryState;
+  recoveryTerminalReason?: FallbackRecoveryTerminalReason | null;
+  /** A process died after claiming a probe and before recording its outcome.
+   *  Restore must hold the episode for reconciliation instead of replaying it. */
+  recoveryProbeInFlight?: boolean;
+  /** `unavailable` means failed_keys_json was malformed or unreadable. The
+   *  raw SQLite value stays in place for operator reconciliation. */
+  failedKeysEvidenceAvailability?: FailedKeysEvidenceAvailability;
 }
 
 /** Ensure the singleton fallback-state table exists. Idempotent — also
@@ -82,6 +104,18 @@ export function ensureFallbackStateSchema(db: Database): void {
   if (!hasColumn('failed_keys_json')) {
     db.raw.exec(`ALTER TABLE agent_fallback_state ADD COLUMN failed_keys_json TEXT NOT NULL DEFAULT '[]'`);
   }
+  if (!hasColumn('recovery_episode_started_at')) {
+    db.raw.exec(`ALTER TABLE agent_fallback_state ADD COLUMN recovery_episode_started_at INTEGER`);
+  }
+  if (!hasColumn('recovery_state')) {
+    db.raw.exec(`ALTER TABLE agent_fallback_state ADD COLUMN recovery_state TEXT NOT NULL DEFAULT 'active'`);
+  }
+  if (!hasColumn('recovery_terminal_reason')) {
+    db.raw.exec(`ALTER TABLE agent_fallback_state ADD COLUMN recovery_terminal_reason TEXT`);
+  }
+  if (!hasColumn('recovery_probe_in_flight')) {
+    db.raw.exec(`ALTER TABLE agent_fallback_state ADD COLUMN recovery_probe_in_flight INTEGER NOT NULL DEFAULT 0`);
+  }
 }
 
 /** Persist (or replace) the current fallback window. Upserts the singleton row. */
@@ -89,8 +123,9 @@ export function saveFallbackState(db: Database, s: PersistedFallbackState): void
   db.raw
     .prepare(
       `INSERT INTO agent_fallback_state (id, active_until, activated_at, reason, probe_attempts,
-              version, active_entry_provider, active_entry_model, failed_keys_json)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+              version, active_entry_provider, active_entry_model, failed_keys_json,
+              recovery_episode_started_at, recovery_state, recovery_terminal_reason, recovery_probe_in_flight)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          active_until = excluded.active_until,
          activated_at = excluded.activated_at,
@@ -99,7 +134,11 @@ export function saveFallbackState(db: Database, s: PersistedFallbackState): void
          version = excluded.version,
          active_entry_provider = excluded.active_entry_provider,
          active_entry_model = excluded.active_entry_model,
-         failed_keys_json = excluded.failed_keys_json`,
+         failed_keys_json = excluded.failed_keys_json,
+         recovery_episode_started_at = excluded.recovery_episode_started_at,
+         recovery_state = excluded.recovery_state,
+         recovery_terminal_reason = excluded.recovery_terminal_reason,
+         recovery_probe_in_flight = excluded.recovery_probe_in_flight`,
     )
     .run(
       s.activeUntil,
@@ -110,6 +149,10 @@ export function saveFallbackState(db: Database, s: PersistedFallbackState): void
       s.activeEntryProvider,
       s.activeEntryModel,
       JSON.stringify(s.failedKeys),
+      s.recoveryEpisodeStartedAt ?? s.activatedAt,
+      s.recoveryState ?? 'active',
+      s.recoveryTerminalReason ?? null,
+      s.recoveryProbeInFlight ? 1 : 0,
     );
 }
 
@@ -128,7 +171,11 @@ export function getFallbackState(db: Database): PersistedFallbackState | null {
               probe_attempts AS probeAttempts, version,
               active_entry_provider AS activeEntryProvider,
               active_entry_model AS activeEntryModel,
-              failed_keys_json AS failedKeysJson
+              failed_keys_json AS failedKeysJson,
+              recovery_episode_started_at AS recoveryEpisodeStartedAt,
+              recovery_state AS recoveryState,
+              recovery_terminal_reason AS recoveryTerminalReason,
+              recovery_probe_in_flight AS recoveryProbeInFlight
        FROM agent_fallback_state WHERE id = 1`,
     )
     .get() as Partial<PersistedFallbackState> & { failedKeysJson?: unknown } | undefined;
@@ -156,22 +203,48 @@ export function getFallbackState(db: Database): PersistedFallbackState | null {
     typeof row.activeEntryProvider === 'string' ? row.activeEntryProvider : null;
   const activeEntryModel =
     typeof row.activeEntryModel === 'string' ? row.activeEntryModel : null;
-  // failed_keys_json is additive: a corrupt/missing value reads as [] (no
-  // failed keys known), which is the safe legacy default.
+  const recoveryEpisodeStartedAt =
+    typeof row.recoveryEpisodeStartedAt === 'number' && Number.isFinite(row.recoveryEpisodeStartedAt)
+      ? row.recoveryEpisodeStartedAt
+      : row.activatedAt;
+  const recoveryState: FallbackRecoveryState =
+    row.recoveryState === 'terminal' || row.recoveryState === 'operator-held'
+      ? row.recoveryState
+      : 'active';
+  const recoveryTerminalReason: FallbackRecoveryTerminalReason | null =
+    row.recoveryTerminalReason === 'attempt-limit'
+    || row.recoveryTerminalReason === 'elapsed-limit'
+    || row.recoveryTerminalReason === 'clock-anomaly'
+    || row.recoveryTerminalReason === 'probe-outcome-unknown'
+    || row.recoveryTerminalReason === 'operator-killed'
+    || row.recoveryTerminalReason === 'operator-recovery-failed'
+      ? row.recoveryTerminalReason
+      : null;
+  const recoveryProbeInFlight = (row.recoveryProbeInFlight as unknown) === 1 || row.recoveryProbeInFlight === true;
+  // Never coerce corrupted failed-provider evidence to an empty set. Doing so
+  // would permit a known failed route to be selected after restart. The raw
+  // database value remains untouched for a separately authorized repair.
   let failedKeys: PersistedFailedKey[] = [];
-  if (typeof row.failedKeysJson === 'string' && row.failedKeysJson.length > 0) {
+  let failedKeysEvidenceAvailability: FailedKeysEvidenceAvailability = 'available';
+  if (typeof row.failedKeysJson !== 'string' || row.failedKeysJson.length === 0) {
+    failedKeysEvidenceAvailability = 'unavailable';
+  } else {
     try {
       const parsed: unknown = JSON.parse(row.failedKeysJson);
       if (Array.isArray(parsed)) {
-        failedKeys = parsed.filter(
-          (e): e is PersistedFailedKey =>
-            typeof e === 'object' && e !== null &&
-            typeof (e as Record<string, unknown>).provider === 'string' &&
-            typeof (e as Record<string, unknown>).model === 'string',
+        const valid = parsed.every(
+          (e) =>
+            typeof e === 'object' && e !== null
+            && typeof (e as Record<string, unknown>).provider === 'string'
+            && typeof (e as Record<string, unknown>).model === 'string',
         );
+        if (valid) failedKeys = parsed as PersistedFailedKey[];
+        else failedKeysEvidenceAvailability = 'unavailable';
+      } else {
+        failedKeysEvidenceAvailability = 'unavailable';
       }
     } catch {
-      failedKeys = [];
+      failedKeysEvidenceAvailability = 'unavailable';
     }
   }
   return {
@@ -183,6 +256,11 @@ export function getFallbackState(db: Database): PersistedFallbackState | null {
     activeEntryProvider,
     activeEntryModel,
     failedKeys,
+    recoveryEpisodeStartedAt,
+    recoveryState,
+    recoveryTerminalReason,
+    recoveryProbeInFlight,
+    failedKeysEvidenceAvailability,
   };
 }
 

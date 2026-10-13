@@ -46,6 +46,11 @@ describe('fallback-state-db', () => {
       activeEntryProvider: 'opencode-cli',
       activeEntryModel: 'minimax/minimax-m2',
       failedKeys: [{ provider: 'claude-cli', model: '' }],
+      recoveryEpisodeStartedAt: 1_699_999_000_000,
+      recoveryState: 'active' as const,
+      recoveryTerminalReason: null,
+      recoveryProbeInFlight: false,
+      failedKeysEvidenceAvailability: 'available' as const,
     };
     saveFallbackState(db, state);
     const loaded = getFallbackState(db);
@@ -180,6 +185,11 @@ describe('fallback-state-db', () => {
         activeEntryProvider: null,
         activeEntryModel: null,
         failedKeys: [],
+        recoveryEpisodeStartedAt: 1_699_999_000_000,
+        recoveryState: 'active',
+        recoveryTerminalReason: null,
+        recoveryProbeInFlight: false,
+        failedKeysEvidenceAvailability: 'available',
       });
     } finally {
       legacyDb.close();
@@ -211,6 +221,31 @@ describe('fallback-state-db', () => {
       activeEntryProvider: null,
       activeEntryModel: null,
       failedKeys: [],
+      recoveryEpisodeStartedAt: 1_699_999_000_000,
+      recoveryState: 'active',
+      recoveryTerminalReason: null,
+      recoveryProbeInFlight: false,
+      failedKeysEvidenceAvailability: 'available',
     });
+  });
+
+  it('quarantines malformed failed-provider evidence instead of coercing it to an empty set', () => {
+    clearFallbackState(db);
+    saveFallbackState(db, {
+      activeUntil: 1_700_000_000_000,
+      activatedAt: 1_699_999_000_000,
+      reason: 'auth-required',
+      probeAttempts: 0,
+      version: 2,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'minimax/minimax-m2',
+      failedKeys: [],
+    });
+    db.raw.prepare(`UPDATE agent_fallback_state SET failed_keys_json = ? WHERE id = 1`)
+      .run('{malformed-json');
+
+    const loaded = getFallbackState(db);
+    expect(loaded?.failedKeys).toEqual([]);
+    expect(loaded?.failedKeysEvidenceAvailability).toBe('unavailable');
   });
 });

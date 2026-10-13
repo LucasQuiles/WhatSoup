@@ -1859,12 +1859,18 @@ FALLBACK ON          # force a fallback window for the default 5 hours
 FALLBACK ON 30m      # force a 30-minute window (<n>m or <n>h, positive integer)
 FALLBACK ON 2h       # force a 2-hour window
 FALLBACK OFF         # end the window now — new sessions use the primary provider
+FALLBACK KILL        # hold automatic recovery while keeping fallback routing
+FALLBACK RETRY       # start a new bounded primary-recovery episode
+FALLBACK RECOVER     # probe primary and reactivate it only with fresh proof
 FALLBACK STATUS      # report effective provider, window expiry, turn counters
 ```
 
 - `FALLBACK ON` sets the window **exactly** to the requested duration — unlike usage-limit activation it may *shorten* an already-active window (operator intent wins). Durations are clamped to the allowed bounds (1 minute–24 hours) and the reply notes when clamping occurred. With no duration, the window is 5 hours. Forced windows go through the same hardened path as usage-limit windows: persisted across restarts, with credential pre-flight alerts.
-- `FALLBACK OFF` reverts new sessions to the primary provider immediately and is idempotent — safe to send when no window is active.
-- `FALLBACK STATUS` replies with the effective provider, the window expiry as an ISO timestamp (`none` when on the primary), the process-local fallback turn counters (`served` / `empty`, reset on restart), probe attempts (consecutive failed extension probes in the current stall episode), activations/reverts (process-lifetime window counts), cost (accumulated `fallbackWindowCostUsd` when non-zero), and the ordered fallback chain readiness when the configured chain has more than one entry. Fields from `getFallbackState()` that older runtimes do not expose are omitted gracefully.
+- `FALLBACK OFF` reverts new sessions to the primary provider immediately only while recovery is active. It refuses terminal and operator-held episodes because verified recovery proof is required.
+- `FALLBACK KILL` durably stops automatic primary probes and leaves the fallback route active as `operator-held`. It is the operator stop control for a recovery episode.
+- `FALLBACK RETRY` durably starts a new bounded recovery episode: automatic recovery stops after 12 failed probes or 24 elapsed hours from the new episode start. It changes routing and recovery state only; it never replays accepted work.
+- `FALLBACK RECOVER` performs one fresh independent primary probe. Only validated evidence returns new sessions to primary. A failed or interrupted proof leaves the fallback route held. A late probe result cannot override a later KILL or RETRY action.
+- `FALLBACK STATUS` replies with the effective provider, the window expiry as an ISO timestamp (`none` when on the primary), the process-local fallback turn counters (`served` / `empty`, reset on restart), recovery state and terminal reason, probe attempts, activations/reverts (process-lifetime window counts), cost (accumulated `fallbackWindowCostUsd` when non-zero), and the ordered fallback chain readiness when the configured chain has more than one entry. `terminal`, `operator-held`, and `unavailable` are distinct states; `unavailable` means failed-provider evidence needs reconciliation and its stored bytes are retained. Fields from `getFallbackState()` that older runtimes do not expose are omitted gracefully.
 - `FALLBACK` or `FALLBACK HELP` replies with a one-line usage summary of these commands (support varies by instance type).
 
 **Canary test:** `FALLBACK ON 5m` is the operator's way to live-test the fallback provider end-to-end — force a short window, send the bot a message, confirm a real reply arrives and `FALLBACK STATUS` shows `served` incrementing while `empty` stays at 0, then let the window lapse or send `FALLBACK OFF`.
@@ -3058,7 +3064,10 @@ machine-readable disposition registry for sources that participate in fault clas
 | `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
 | `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |
-| `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
+| `fallback_recovery_stalled` | `src/runtimes/agent/runtime-fallback.ts` | Early warning for a bounded persisted fallback recovery episode; the hard terminal bound is separate. |
+| `fallback_recovery_terminal` | `src/runtimes/agent/runtime-fallback.ts` | Durable terminal recovery reason (`attempt-limit`, `elapsed-limit`, or `clock-anomaly`) and fallback-route status. |
+| `fallback_recovery_operator_held` | `src/runtimes/agent/runtime-fallback.ts` | Explicit operator hold, rejected manual proof, or unknown probe outcome; inspect status before `RETRY` or `RECOVER`. |
+| `fallback_persist_evidence_unavailable` | `src/runtimes/agent/fallback-restore.ts` | Failed-provider evidence is malformed or unreadable. Preserve the stored row for reconciliation; automatic restore does not replace it with an empty record. |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
 | `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
