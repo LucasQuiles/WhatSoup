@@ -1283,35 +1283,45 @@ describe('git-estate guard', () => {
 
   it.each(['write', 'accept-stash'])(
     'reports a thrown lock release as an unknown baseline %s outcome',
-    async (action) => {
-      const { repo } = initRepo();
+    (action) => {
+      const { root, repo } = initRepo();
       expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      const lockPath = `${snapshot(repo).snapshot.baselinePath}.lock`;
       writeFileSync(join(repo, 'tracked.txt'), 'release-error fixture\n');
       git(repo, ['stash', 'push', '-m', 'release-error fixture']);
       const oid = git(repo, ['rev-parse', 'refs/stash']);
       const args = action === 'write'
         ? ['baseline', 'write', '--json']
         : ['baseline', 'accept-stash', '--oid', oid, '--reason', 'release-error fixture', '--json'];
-      const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const release = vi.spyOn(processLocks, 'releaseProcessLock').mockImplementationOnce(() => {
-        throw new Error('injected unlink failure');
+      const hook = join(root, 'release-fault.cjs');
+      const marker = join(root, 'release-fault-observed');
+      writeFileSync(hook, `
+const fs = require('node:fs');
+const { syncBuiltinESMExports } = require('node:module');
+const unlink = fs.unlinkSync;
+fs.unlinkSync = function (path) {
+  if (path === ${JSON.stringify(lockPath)}) {
+    fs.appendFileSync(${JSON.stringify(marker)}, 'unlink');
+    throw new Error('injected unlink failure');
+  }
+  return unlink.apply(this, arguments);
+};
+syncBuiltinESMExports();
+`, { mode: 0o600 });
+
+      const result = run(repo, args, {
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${JSON.stringify(hook)}`,
       });
-      try {
-        expect(await runGitEstateGuard(args, repo)).toBe(2);
-        expect(stdout).toHaveBeenCalledTimes(1);
-        expect(JSON.parse(String(stdout.mock.calls[0]![0]))).toMatchObject({
-          exitCode: 2,
-          error: { kind: 'baseline_lock_release_failed', message: 'injected unlink failure' },
-          outcome: 'unknown',
-        });
-      } finally {
-        const handle = release.mock.calls[0]?.[0];
-        release.mockRestore();
-        stdout.mockRestore();
-        stderr.mockRestore();
-        if (handle) processLocks.releaseProcessLock(handle);
-      }
+
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stdout.trim().split('\n')).toHaveLength(1);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        exitCode: 2,
+        error: { kind: 'baseline_lock_release_failed', message: 'injected unlink failure' },
+        outcome: 'unknown',
+      });
+      expect(readFileSync(marker, 'utf8')).toBe('unlink');
+      expect(existsSync(lockPath)).toBe(true);
     },
   );
 
