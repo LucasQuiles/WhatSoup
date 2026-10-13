@@ -3344,9 +3344,10 @@ The multi-stage build installs production dependencies and applies the required 
 
 ### Build input updates and evidence
 
-`docker/container-inputs.json` is the reviewed source of truth for the Node image tag and
-digest, Buildx client version, Linux release asset and SHA-256, BuildKit image, builder name
-and driver, and Debian snapshot.
+`docker/container-inputs.json` is the reviewed source of truth for the Linux target platform,
+Node image tag and index digest, its selected-platform dependency digest, Buildx client version,
+Linux release asset and SHA-256, BuildKit image, the digest-pinned BuildKit SBOM generator and
+its selected-platform dependency digest, builder name and driver, and Debian snapshot.
 `docker/Dockerfile` must match it exactly:
 the readable image tag remains alongside its immutable digest, and the package sources use
 only the declared snapshot. Check the static policy before a build:
@@ -3355,6 +3356,12 @@ only the declared snapshot. Check the static policy before a build:
 npm run guard:node-pin-consistency
 ```
 
+The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
+The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
+subtree, and APT-root indirection assignments. This is a deliberately narrow static invariant,
+not a shell interpreter: an ambiguous new descriptor path is rejected until the invariant and its
+behavior test are extended together.
+
 CI also checks that both Debian snapshot `Release` files remain available before it builds.
 Run the network check when the environment can reach the snapshot service:
 
@@ -3362,9 +3369,10 @@ Run the network check when the environment can reach the snapshot service:
 npm run guard:node-pin-consistency -- --verify-container-snapshot
 ```
 
-To update inputs, verify a new Node tag-to-digest mapping, Buildx Linux release asset and
-SHA-256, BuildKit image digest, and the Debian snapshot metadata, then update the policy,
-Dockerfile, and CI setup together. Run the guard, a clean Linux container build, and the focused receipt tests in the
+To update inputs, verify a new Node tag-to-index-digest mapping and selected platform manifest,
+Buildx Linux release asset and SHA-256, BuildKit image digest, SBOM-generator index digest and
+selected platform manifest, and the Debian snapshot metadata, then update the policy, Dockerfile,
+and CI setup together. Run the guard, a clean Linux container build, and the focused receipt tests in the
 same change. Review inputs at least monthly and whenever a relevant Node, Docker, BuildKit,
 or Debian security update is published; immutable references make a reviewed build
 reproducible, but they do not update themselves.
@@ -3372,12 +3380,13 @@ reproducible, but they do not update themselves.
 The Quality workflow downloads the policy's pinned Buildx Linux asset with a bounded request,
 checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, and
 creates its named `docker-container` builder from the policy's pinned BuildKit image. It builds
-from the policy's Git repository at an exact full commit SHA, rather than a local checkout, so
+for the policy's explicit platform and sends the policy's digest-pinned SBOM generator to BuildKit.
+It builds from the policy's Git repository at an exact full commit SHA, rather than a local checkout, so
 BuildKit records a verified `configSource` revision. The receipt verifies OCI descriptor sizes
 and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
 parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the
 runnable manifest digest; checks the source repository, Dockerfile path, source revision,
-builder invocation, and base-image dependency; and records hashes for both the embedded SPDX
+builder invocation, selected-platform base-image and SBOM-generator dependencies; and records hashes for both the embedded SPDX
 statement and the separately generated SPDX SBOM.
 
 Pull requests produce unsigned evidence only. After a trusted `main` build succeeds, the

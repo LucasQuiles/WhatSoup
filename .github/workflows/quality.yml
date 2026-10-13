@@ -124,6 +124,8 @@ jobs:
           expected_builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
           expected_buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
           expected_buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
+          platform="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.platform)')"
+          sbom_generator="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sbom.generator)')"
           builder="$(docker buildx inspect whatsoup-ci-builder --format '{{.Name}}|{{.Driver}}')"
           if [ "$builder" != "$expected_builder" ]; then
             echo "::error::Buildx builder differs from reviewed policy: expected $expected_builder, got $builder"
@@ -145,9 +147,10 @@ jobs:
           docker buildx build \
             --builder "$builder_name" \
             --file docker/Dockerfile \
+            --platform "$platform" \
             --tag whatsoup-ci \
             --attest "type=provenance,mode=max,builder-id=$provenance_builder_id" \
-            --sbom=true \
+            --sbom "generator=$sbom_generator" \
             --metadata-file "$container_dir/build-metadata.json" \
             --output type=oci,dest="$container_dir/whatsoup-image.oci.tar" \
             "${source_repository}#${SOURCE_REVISION}"

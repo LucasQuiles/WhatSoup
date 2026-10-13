@@ -17,14 +17,18 @@ const qualityWorkflow = readFileSync(path.join(repoRoot, '.github/workflows/qual
 const containerInputs = JSON.parse(
   readFileSync(path.join(repoRoot, 'docker/container-inputs.json'), 'utf8'),
 ) as {
+  platform?: string;
+  baseImageResolvedDigest?: string;
   buildx?: { version?: string; asset?: string; sha256?: string; buildkitImage?: string };
+  sbom?: { generator?: string; dependency?: string; resolvedDigest?: string };
 };
 const tmp = trackTmpDirs('container-build-receipt-');
 
 const SOURCE_REVISION = 'b'.repeat(40);
 const PROVENANCE_BUILDER_ID = 'https://github.com/LucasQuiles/WhatSoup/actions/runs/123';
 const SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
-const BASE_IMAGE_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
+const BASE_IMAGE_DIGEST = '152aceace5c03e2597988763165ee33e3fd3633636db0fc983cd2e126b02cfde';
+const SBOM_GENERATOR_DIGEST = '187e1892a7752c9384c59aba9517dd8e40610b748c72773e87b63720514463c2';
 
 function sha256(contents: string | Buffer): string {
   return createHash('sha256').update(contents).digest('hex');
@@ -39,6 +43,7 @@ function makeReceiptInput(options: {
   ociSourceRepository?: string;
   ociProvenanceBuilderId?: string;
   ociBaseImageDigest?: string;
+  ociSbomGeneratorDigest?: string;
 } = {}) {
   const dir = tmp.make('evidence');
   const metadataPath = path.join(dir, 'build-metadata.json');
@@ -49,6 +54,7 @@ function makeReceiptInput(options: {
     sourceRepository: options.ociSourceRepository,
     provenanceBuilderId: options.ociProvenanceBuilderId,
     baseImageDigest: options.ociBaseImageDigest,
+    sbomGeneratorDigest: options.ociSbomGeneratorDigest,
   });
   writeFileSync(metadataPath, JSON.stringify({
     'containerimage.digest': oci.imageDigest,
@@ -73,6 +79,7 @@ interface OciArchiveOptions {
   sourceRepository?: string;
   provenanceBuilderId?: string;
   baseImageDigest?: string;
+  sbomGeneratorDigest?: string;
   statementSubjectDigest?: string;
   predicateAnnotation?: string;
   predicateType?: string;
@@ -117,6 +124,9 @@ function writeOciArchive(
       resolvedDependencies: [{
         uri: 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64',
         digest: { sha256: options.baseImageDigest ?? BASE_IMAGE_DIGEST },
+      }, {
+        uri: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
+        digest: { sha256: options.sbomGeneratorDigest ?? SBOM_GENERATOR_DIGEST },
       }],
     },
     runDetails: { builder: { id: options.provenanceBuilderId ?? PROVENANCE_BUILDER_ID } },
@@ -180,14 +190,21 @@ describe('container build evidence CI contract', () => {
   it('builds pinned inputs and produces an independently checked evidence bundle', () => {
     expect(qualityWorkflow).toContain('docker buildx build');
     expect(qualityWorkflow).toContain('type=provenance,mode=max,builder-id=$provenance_builder_id');
-    expect(qualityWorkflow).toContain('--sbom=true');
+    expect(qualityWorkflow).toContain('--sbom "generator=$sbom_generator"');
     expect(qualityWorkflow).toContain('BUILDX_METADATA_PROVENANCE: max');
     expect(qualityWorkflow).toContain('--output type=oci');
+    expect(containerInputs.platform).toBe('linux/amd64');
+    expect(containerInputs.baseImageResolvedDigest).toBe(`sha256:${BASE_IMAGE_DIGEST}`);
     expect(containerInputs.buildx).toEqual({
       version: 'v0.38.0',
       asset: 'buildx-v0.38.0.linux-amd64',
       sha256: 'sha256:4fe4cc38adf48169132749b6ca22a990928db0118e3407584ee553723115d287',
       buildkitImage: 'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
+    });
+    expect(containerInputs.sbom).toEqual({
+      generator: 'docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9',
+      dependency: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
+      resolvedDigest: `sha256:${SBOM_GENERATOR_DIGEST}`,
     });
     expect(qualityWorkflow).toContain('scripts/install-pinned-buildx.ts');
     expect(qualityWorkflow).toContain('DOCKER_CONFIG=$docker_config');
@@ -203,6 +220,9 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).not.toContain('docker image save whatsoup-ci');
     expect(qualityWorkflow).toContain('--metadata-file');
     expect(qualityWorkflow).toContain('"${source_repository}#${SOURCE_REVISION}"');
+    expect(qualityWorkflow).toContain('policy.sbom.generator');
+    expect(qualityWorkflow).toContain('policy.platform');
+    expect(qualityWorkflow).toContain('--platform "$platform"');
     expect(qualityWorkflow).toContain('--provenance-builder-id "$provenance_builder_id"');
     expect(qualityWorkflow).toContain('anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c');
     expect(qualityWorkflow).toContain('scripts/verify-container-build-receipt.ts');
@@ -232,7 +252,10 @@ describe('container build evidence CI contract', () => {
       'moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea',
     );
     expect(receipt.buildkitVersion).toBe('v0.33.1');
-    expect(receipt.schemaVersion).toBe(2);
+    expect(receipt.schemaVersion).toBe(3);
+    expect(receipt.platform).toBe('linux/amd64');
+    expect(receipt.baseImageResolvedDigest).toBe(`sha256:${BASE_IMAGE_DIGEST}`);
+    expect(receipt.sbomGeneratorResolvedDigest).toBe(`sha256:${SBOM_GENERATOR_DIGEST}`);
     expect(receipt.imageDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(receipt.outputDigest).toBe(receipt.imageDigest);
     expect(receipt.imageIndexDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -354,7 +377,13 @@ describe('container build evidence CI contract', () => {
     }))).toThrow('SLSA provenance builder id does not match the reviewed workflow invocation');
     expect(() => createContainerBuildReceipt(makeReceiptInput({
       ociBaseImageDigest: 'f'.repeat(64),
-    }))).toThrow('SLSA provenance does not bind the reviewed base image digest');
+    }))).toThrow('SLSA provenance does not bind the reviewed selected-platform base image dependency');
+  });
+
+  it('requires the reviewed selected-platform SBOM generator dependency', () => {
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociSbomGeneratorDigest: 'f'.repeat(64),
+    }))).toThrow('SLSA provenance does not bind the reviewed SBOM generator digest');
   });
 
   it('rejects metadata, image, and SBOM byte changes after receipt creation', () => {

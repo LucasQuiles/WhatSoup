@@ -6,10 +6,14 @@ import { pathToFileURL } from 'node:url';
 
 interface ContainerInputPolicy {
   schemaVersion: number;
+  platform: string;
   sourceRepository: string;
   baseImage: string;
+  baseImageDependency: string;
+  baseImageResolvedDigest: string;
   builder: { name: string; driver: string; provenanceIdPrefix: string };
   buildx: { version: string; asset: string; sha256: string; buildkitImage: string };
+  sbom: { generator: string; dependency: string; resolvedDigest: string };
 }
 
 interface BuildMetadata {
@@ -32,15 +36,21 @@ export interface ContainerBuildReceiptInput {
 }
 
 export interface ContainerBuildReceipt {
-  schemaVersion: 2;
+  schemaVersion: 3;
   sourceRevision: string;
   sourceRepository: string;
+  platform: 'linux/amd64';
   builder: string;
   provenanceBuilderId: string;
   buildxVersion: string;
   buildkitImage: string;
   buildkitVersion: string;
   baseImage: string;
+  baseImageDependency: string;
+  baseImageResolvedDigest: string;
+  sbomGenerator: string;
+  sbomGeneratorDependency: string;
+  sbomGeneratorResolvedDigest: string;
   outputDigest: string;
   imageIndexDigest: string;
   imageDigest: string;
@@ -59,7 +69,11 @@ const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const BUILDER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
+const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
+const PLATFORM = 'linux/amd64';
+const BASE_IMAGE_DEPENDENCY = 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64';
+const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64';
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE = 'application/vnd.oci.image.manifest.v1+json';
 const OCI_ATTESTATION_ARTIFACT_TYPE = 'application/vnd.docker.attestation.manifest.v1+json';
 const IN_TOTO_MEDIA_TYPE = 'application/vnd.in-toto+json';
@@ -83,7 +97,10 @@ interface OciVerificationExpectation {
   sourceRevision: string;
   sourceRepository: string;
   provenanceBuilderId: string;
-  baseImageDigest: string;
+  baseImageDependency: string;
+  baseImageResolvedDigest: string;
+  sbomGeneratorDependency: string;
+  sbomGeneratorResolvedDigest: string;
   buildxProvenance: unknown;
 }
 
@@ -140,11 +157,14 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
   const policyPath = path.join(repoRoot, 'docker/container-inputs.json');
   const policy = parseJson<ContainerInputPolicy>(policyPath, 'container input policy');
   if (
-    policy.schemaVersion !== 2
+    policy.schemaVersion !== 3
+    || policy.platform !== PLATFORM
     || typeof policy.sourceRepository !== 'string'
     || !SOURCE_REPOSITORY_PATTERN.test(policy.sourceRepository)
     || typeof policy.baseImage !== 'string'
     || !SHA256_PATTERN.test(policy.baseImage.slice(policy.baseImage.indexOf('@') + 1))
+    || policy.baseImageDependency !== BASE_IMAGE_DEPENDENCY
+    || !SHA256_PATTERN.test(policy.baseImageResolvedDigest)
     || !policy.builder
     || !BUILDER_NAME_PATTERN.test(policy.builder.name)
     || policy.builder.driver !== 'docker-container'
@@ -154,6 +174,10 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     || policy.buildx.asset !== `buildx-${policy.buildx.version}.linux-amd64`
     || !SHA256_PATTERN.test(policy.buildx.sha256)
     || !BUILDKIT_IMAGE_PATTERN.test(policy.buildx.buildkitImage)
+    || !policy.sbom
+    || !SBOM_GENERATOR_IMAGE_PATTERN.test(policy.sbom.generator)
+    || policy.sbom.dependency !== SBOM_GENERATOR_DEPENDENCY
+    || !SHA256_PATTERN.test(policy.sbom.resolvedDigest)
   ) throw new Error(`container input policy has an invalid source, base image, or builder: ${policyPath}`);
   return policy;
 }
@@ -166,12 +190,6 @@ function expectedBuildkitVersion(policy: ContainerInputPolicy): string {
   const match = /^moby\/buildkit:(v\d+\.\d+\.\d+)@sha256:[a-f0-9]{64}$/.exec(policy.buildx.buildkitImage);
   if (!match?.[1]) throw new Error('container input policy has an invalid BuildKit image version');
   return match[1];
-}
-
-function imageDigestFromPolicy(policy: ContainerInputPolicy): string {
-  const digest = policy.baseImage.slice(policy.baseImage.indexOf('@') + 1);
-  if (!SHA256_PATTERN.test(digest)) throw new Error('container input policy has an invalid base image digest');
-  return digest;
 }
 
 function readOciArchiveEntry(archivePath: string, entry: string): Buffer {
@@ -225,6 +243,20 @@ function assertSpdxPredicate(predicate: unknown): void {
   }
 }
 
+function hasResolvedDependency(
+  dependencies: unknown[],
+  expectedUri: string,
+  expectedDigest: string,
+): boolean {
+  const expected = expectedDigest.slice('sha256:'.length);
+  return dependencies.some((dependency) => (
+    isRecord(dependency)
+    && dependency.uri === expectedUri
+    && isRecord(dependency.digest)
+    && dependency.digest.sha256 === expected
+  ));
+}
+
 function assertSlsaPredicate(predicate: unknown, expected: OciVerificationExpectation): void {
   if (!isRecord(predicate) || !isRecord(predicate.buildDefinition) || !isRecord(predicate.runDetails)) {
     throw new Error('SLSA provenance predicate is missing build definition or run details');
@@ -237,9 +269,16 @@ function assertSlsaPredicate(predicate: unknown, expected: OciVerificationExpect
   if (!isRecord(configSource.digest) || configSource.digest.sha1 !== expected.sourceRevision) throw new Error('SLSA config source revision does not match requested source revision');
   if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRevision}`) throw new Error('SLSA config source repository does not match the reviewed remote context');
   if (configSource.path !== 'docker/Dockerfile') throw new Error('SLSA config source path is not docker/Dockerfile');
-  if (!Array.isArray(buildDefinition.resolvedDependencies) || !buildDefinition.resolvedDependencies.some((dependency) => (
-    isRecord(dependency) && isRecord(dependency.digest) && dependency.digest.sha256 === expected.baseImageDigest.slice('sha256:'.length)
-  ))) throw new Error('SLSA provenance does not bind the reviewed base image digest');
+  if (!Array.isArray(buildDefinition.resolvedDependencies) || !hasResolvedDependency(
+    buildDefinition.resolvedDependencies,
+    expected.baseImageDependency,
+    expected.baseImageResolvedDigest,
+  )) throw new Error('SLSA provenance does not bind the reviewed selected-platform base image dependency');
+  if (!hasResolvedDependency(
+    buildDefinition.resolvedDependencies,
+    expected.sbomGeneratorDependency,
+    expected.sbomGeneratorResolvedDigest,
+  )) throw new Error('SLSA provenance does not bind the reviewed SBOM generator digest');
   if (!isRecord(runDetails.builder) || runDetails.builder.id !== expected.provenanceBuilderId) {
     throw new Error('SLSA provenance builder id does not match the reviewed workflow invocation');
   }
@@ -349,7 +388,10 @@ function assertInput(input: ContainerBuildReceiptInput): {
     sourceRevision: input.sourceRevision,
     sourceRepository: policy.sourceRepository,
     provenanceBuilderId: input.provenanceBuilderId,
-    baseImageDigest: imageDigestFromPolicy(policy),
+    baseImageDependency: policy.baseImageDependency,
+    baseImageResolvedDigest: policy.baseImageResolvedDigest,
+    sbomGeneratorDependency: policy.sbom.dependency,
+    sbomGeneratorResolvedDigest: policy.sbom.resolvedDigest,
     buildxProvenance: metadata['buildx.build.provenance'],
   });
   return { metadata, sbom, policy, oci };
@@ -358,15 +400,21 @@ function assertInput(input: ContainerBuildReceiptInput): {
 export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): ContainerBuildReceipt {
   const { metadata, policy, oci } = assertInput(input);
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     sourceRevision: input.sourceRevision,
     sourceRepository: policy.sourceRepository,
+    platform: PLATFORM,
     builder: input.builder,
     provenanceBuilderId: input.provenanceBuilderId,
     buildxVersion: input.buildxVersion,
     buildkitImage: policy.buildx.buildkitImage,
     buildkitVersion: input.buildkitVersion,
     baseImage: policy.baseImage,
+    baseImageDependency: policy.baseImageDependency,
+    baseImageResolvedDigest: policy.baseImageResolvedDigest,
+    sbomGenerator: policy.sbom.generator,
+    sbomGeneratorDependency: policy.sbom.dependency,
+    sbomGeneratorResolvedDigest: policy.sbom.resolvedDigest,
     outputDigest: metadata['containerimage.digest'] as string,
     imageIndexDigest: oci.imageIndexDigest,
     imageDigest: oci.imageDigest,

@@ -44,8 +44,11 @@ interface DockerNodePinReading extends NodePinReading {
 
 interface ContainerInputPolicy {
   schemaVersion: number;
+  platform: string;
   sourceRepository: string;
   baseImage: string;
+  baseImageDependency: string;
+  baseImageResolvedDigest: string;
   builder: {
     name: string;
     driver: string;
@@ -56,6 +59,11 @@ interface ContainerInputPolicy {
     asset: string;
     sha256: string;
     buildkitImage: string;
+  };
+  sbom: {
+    generator: string;
+    dependency: string;
+    resolvedDigest: string;
   };
   apt: {
     snapshot: string;
@@ -69,6 +77,9 @@ const NODE_IMAGE_PATTERN = /^node:(\d+\.\d+\.\d+)-slim@(sha256:[a-f0-9]{64})$/;
 const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{8}T\d{6}Z$/;
 const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
+const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
+const BASE_IMAGE_DEPENDENCY = 'pkg:docker/library/node@24.15.0-slim?platform=linux%2Famd64';
+const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64';
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
 const APT_SOURCE_DEFINITION_PATTERN = /(?:^|['"\s])((?:deb|deb-src)(?:\s+\[[^\]\r\n]+\])?\s+[^\s'"]+\s+[^\s'"]+(?:\s+[^\s'"]+)*)(?=['"\\,;]|\s*$)/g;
 
@@ -189,10 +200,14 @@ function readContainerInputPolicy(cwd: string):
   if (
     !parsed
     || typeof parsed !== 'object'
-    || (parsed as { schemaVersion?: unknown }).schemaVersion !== 2
+    || (parsed as { schemaVersion?: unknown }).schemaVersion !== 3
+    || (parsed as { platform?: unknown }).platform !== 'linux/amd64'
     || typeof (parsed as { sourceRepository?: unknown }).sourceRepository !== 'string'
     || !SOURCE_REPOSITORY_PATTERN.test((parsed as { sourceRepository: string }).sourceRepository)
     || typeof (parsed as { baseImage?: unknown }).baseImage !== 'string'
+    || (parsed as { baseImageDependency?: unknown }).baseImageDependency !== BASE_IMAGE_DEPENDENCY
+    || typeof (parsed as { baseImageResolvedDigest?: unknown }).baseImageResolvedDigest !== 'string'
+    || !SHA256_DIGEST_PATTERN.test((parsed as { baseImageResolvedDigest: string }).baseImageResolvedDigest)
     || !(parsed as { builder?: unknown }).builder
     || typeof (parsed as { builder: { name?: unknown } }).builder.name !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test((parsed as { builder: { name: string } }).builder.name)
@@ -210,6 +225,12 @@ function readContainerInputPolicy(cwd: string):
     || !SHA256_DIGEST_PATTERN.test((parsed as { buildx: { sha256: string } }).buildx.sha256)
     || typeof (parsed as { buildx: { buildkitImage?: unknown } }).buildx.buildkitImage !== 'string'
     || !BUILDKIT_IMAGE_PATTERN.test((parsed as { buildx: { buildkitImage: string } }).buildx.buildkitImage)
+    || !(parsed as { sbom?: unknown }).sbom
+    || typeof (parsed as { sbom: { generator?: unknown } }).sbom.generator !== 'string'
+    || !SBOM_GENERATOR_IMAGE_PATTERN.test((parsed as { sbom: { generator: string } }).sbom.generator)
+    || (parsed as { sbom: { dependency?: unknown } }).sbom.dependency !== SBOM_GENERATOR_DEPENDENCY
+    || typeof (parsed as { sbom: { resolvedDigest?: unknown } }).sbom.resolvedDigest !== 'string'
+    || !SHA256_DIGEST_PATTERN.test((parsed as { sbom: { resolvedDigest: string } }).sbom.resolvedDigest)
     || !(parsed as { apt?: unknown }).apt
     || typeof (parsed as { apt: { snapshot?: unknown } }).apt.snapshot !== 'string'
     || !Array.isArray((parsed as { apt: { sources?: unknown } }).apt.sources)
@@ -311,6 +332,9 @@ function activeDockerfileInstructions(lines: string[]): DockerfileInstruction[] 
 }
 
 const APT_SOURCE_DESCRIPTOR_PATH_PATTERN = /\/etc\/apt(?:\/sources\.list(?:\.d(?:\/[^\s'"]*)?)?|\/sources\.list\.d(?:\/[^\s'"]*)?)?/g;
+const APT_DIRECTORY_CHANGE_PATTERN = /(?:^|[;&|()]\s*)\s*(?:cd|pushd)\s+(?:--\s*)?['"]?\/etc(?:[/'"\s;)&|]|$)/im;
+const RELATIVE_APT_DESCRIPTOR_PATTERN = /(?:^|[\s;'"=])(?:\.\/)?(?:etc\/)?apt\/sources\.list(?:\.d(?:\/[A-Za-z0-9_.-]+)?|(?:[\s'";)&|]|$))/im;
+const APT_ROOT_ASSIGNMENT_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 
 function descriptorPaths(instruction: string): string[] {
   return [...instruction.matchAll(APT_SOURCE_DESCRIPTOR_PATH_PATTERN)].map((match) => match[0] ?? '');
@@ -333,8 +357,18 @@ function hasUnsafeAptSourceMutation(instructions: DockerfileInstruction[]): bool
     if (instruction.keyword === 'WORKDIR' && /\bWORKDIR\s+\/etc(?:\/|\s|$)/i.test(instruction.text)) {
       return true;
     }
-    if (descriptorPaths(instruction.text).length === 0) return false;
-    return !isApprovedAptBootstrap(instruction);
+    if (descriptorPaths(instruction.text).length > 0) return !isApprovedAptBootstrap(instruction);
+    if (RELATIVE_APT_DESCRIPTOR_PATTERN.test(instruction.text)) return true;
+    if (instruction.keyword !== 'RUN') return false;
+    const shell = instruction.text.replace(/^\s*RUN\s+/i, '');
+    // The bootstrap is the sole authorized writer of effective APT source
+    // descriptors. Reject changing into /etc (or declaring an /etc root
+    // indirection) so later relative paths cannot replace that state outside the
+    // descriptor-path matcher. Any relative `apt/sources.list` operand is
+    // likewise ambiguous: a Docker stage begins from `/` unless a prior
+    // WORKDIR changes it.
+    return APT_DIRECTORY_CHANGE_PATTERN.test(shell)
+      || APT_ROOT_ASSIGNMENT_PATTERN.test(shell);
   });
 }
 
