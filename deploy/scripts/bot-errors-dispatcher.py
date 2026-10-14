@@ -5660,21 +5660,20 @@ def has_incident_authority(event: dict[str, Any], claimed_event: dict[str, Any])
     return delivery.get("incidentAuthorityStatus") == "accepted"
 
 
-def _publish_incident_authority_state(
+def _publish_incident_authority_preflight_state(
     path: Path,
     event: dict[str, Any],
-    component: str,
 ) -> None:
     target = _durable_target(path)
     observation = observe_json(target)
     publication = publish_state_json(
         target,
         event,
-        component=component,
+        component="dispatcher.incident_authority_preflight_state",
         operation_id=operation_id(
             target,
             event,
-            component=component,
+            component="dispatcher.incident_authority_preflight_state",
             predecessor=observation.version,
         ),
         expected=observation.version,
@@ -5715,18 +5714,14 @@ def authorize_ready_events(paths: dict[str, Path]) -> dict[str, int]:
             counts["accepted"] += 1
             continue
         attempt = mark_incident_authority_attempt(event)
-        _publish_incident_authority_state(
-            path, event, "dispatcher.incident_authority_preflight_attempt"
-        )
+        _publish_incident_authority_preflight_state(path, event)
         try:
             accept_incident_authority(event, claimed_event)
         except AuthorityUnavailable:
             mark_incident_authority_unavailable(
                 event, "incident_authority_unavailable"
             )
-            _publish_incident_authority_state(
-                path, event, "dispatcher.incident_authority_preflight_unavailable"
-            )
+            _publish_incident_authority_preflight_state(path, event)
             counts["unavailable"] += 1
             append_dispatch_log(
                 paths,
@@ -5750,9 +5745,7 @@ def authorize_ready_events(paths: dict[str, Path]) -> dict[str, int]:
                 delivery["incidentAuthorityError"] = (
                     "identity_conflict" if isinstance(exc, AuthorityConflict) else "protocol_invalid"
                 )
-            _publish_incident_authority_state(
-                path, event, "dispatcher.incident_authority_preflight_rejected"
-            )
+            _publish_incident_authority_preflight_state(path, event)
             rejected_path = archive_path(
                 paths["quarantine"], path.name, "authority-rejected", event
             )
@@ -5771,9 +5764,7 @@ def authorize_ready_events(paths: dict[str, Path]) -> dict[str, int]:
                 outcome="failed",
             )
             continue
-        _publish_incident_authority_state(
-            path, event, "dispatcher.incident_authority_preflight_accepted"
-        )
+        _publish_incident_authority_preflight_state(path, event)
         counts["accepted"] += 1
     return counts
 
