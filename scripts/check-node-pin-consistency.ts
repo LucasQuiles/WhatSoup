@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
+import { buildkitImageDigest, isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
 
 export type NodePinSource =
   | '.nvmrc'
@@ -215,6 +215,8 @@ function readContainerInputPolicy(cwd: string):
     )
     || typeof (parsed as { baseImageResolvedDigest?: unknown }).baseImageResolvedDigest !== 'string'
     || !SHA256_DIGEST_PATTERN.test((parsed as { baseImageResolvedDigest: string }).baseImageResolvedDigest)
+    || (parsed as { baseImageResolvedDigest: string }).baseImageResolvedDigest
+      !== buildkitImageDigest((parsed as { baseImage: string }).baseImage)
     || !(parsed as { builder?: unknown }).builder
     || typeof (parsed as { builder: { name?: unknown } }).builder.name !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test((parsed as { builder: { name: string } }).builder.name)
@@ -243,6 +245,8 @@ function readContainerInputPolicy(cwd: string):
     )
     || typeof (parsed as { sbom: { resolvedDigest?: unknown } }).sbom.resolvedDigest !== 'string'
     || !SHA256_DIGEST_PATTERN.test((parsed as { sbom: { resolvedDigest: string } }).sbom.resolvedDigest)
+    || (parsed as { sbom: { generator: string; resolvedDigest: string } }).sbom.resolvedDigest
+      !== buildkitImageDigest((parsed as { sbom: { generator: string } }).sbom.generator)
     || !(parsed as { apt?: unknown }).apt
     || typeof (parsed as { apt: { snapshot?: unknown } }).apt.snapshot !== 'string'
     || !Array.isArray((parsed as { apt: { sources?: unknown } }).apt.sources)

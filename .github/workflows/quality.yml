@@ -106,6 +106,7 @@ jobs:
             --use
 
       - name: Build Docker deployment image
+        id: build-container
         timeout-minutes: 10
         env:
           # Buildx otherwise emits `{}` for buildx.build.provenance, which
@@ -199,6 +200,7 @@ jobs:
             --receipt "$container_dir/container-build-receipt.json"
 
       - name: Upload container build evidence
+        if: ${{ always() && steps.build-container.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: container-build-evidence-${{ github.sha }}

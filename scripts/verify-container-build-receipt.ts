@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
-import { isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
+import { buildkitImageDigest, isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
 
 interface ContainerInputPolicy {
@@ -169,6 +169,7 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     || policy.baseImageDependency !== BASE_IMAGE_DEPENDENCY
     || !isBuildkitImageDependency(policy.baseImageDependency, policy.baseImage, policy.platform)
     || !SHA256_PATTERN.test(policy.baseImageResolvedDigest)
+    || policy.baseImageResolvedDigest !== buildkitImageDigest(policy.baseImage)
     || !policy.builder
     || !BUILDER_NAME_PATTERN.test(policy.builder.name)
     || policy.builder.driver !== 'docker-container'
@@ -183,6 +184,7 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     || policy.sbom.dependency !== SBOM_GENERATOR_DEPENDENCY
     || !isBuildkitImageDependency(policy.sbom.dependency, policy.sbom.generator, policy.platform)
     || !SHA256_PATTERN.test(policy.sbom.resolvedDigest)
+    || policy.sbom.resolvedDigest !== buildkitImageDigest(policy.sbom.generator)
   ) throw new Error(`container input policy has an invalid source, base image, or builder: ${policyPath}`);
   return policy;
 }

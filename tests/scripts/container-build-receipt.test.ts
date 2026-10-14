@@ -30,9 +30,9 @@ const SOURCE_REVISION = 'b'.repeat(40);
 const PROVENANCE_BUILDER_ID = 'https://github.com/LucasQuiles/WhatSoup/actions/runs/123';
 const SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
 const BASE_IMAGE_INPUT_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
-const BASE_IMAGE_DIGEST = '152aceace5c03e2597988763165ee33e3fd3633636db0fc983cd2e126b02cfde';
+const BASE_IMAGE_DIGEST = BASE_IMAGE_INPUT_DIGEST;
 const SBOM_GENERATOR_INPUT_DIGEST = 'ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9';
-const SBOM_GENERATOR_DIGEST = '187e1892a7752c9384c59aba9517dd8e40610b748c72773e87b63720514463c2';
+const SBOM_GENERATOR_DIGEST = SBOM_GENERATOR_INPUT_DIGEST;
 const BASE_IMAGE_DEPENDENCY = `pkg:docker/node@24.15.0-slim?digest=sha256:${BASE_IMAGE_INPUT_DIGEST}&platform=linux%2Famd64`;
 const SBOM_GENERATOR_DEPENDENCY = `pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:${SBOM_GENERATOR_INPUT_DIGEST}&platform=linux%2Famd64`;
 
@@ -298,6 +298,8 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c');
     expect(qualityWorkflow).toContain('scripts/verify-container-build-receipt.ts');
     expect(qualityWorkflow).toContain('container-build-evidence-${{ github.sha }}');
+    expect(qualityWorkflow).toContain('id: build-container');
+    expect(qualityWorkflow).toContain("if: ${{ always() && steps.build-container.outcome == 'success' }}");
   });
 
   it('attests only the trusted main branch with a pinned action and isolated permissions', () => {
