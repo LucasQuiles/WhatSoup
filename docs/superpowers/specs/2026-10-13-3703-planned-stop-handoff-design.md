@@ -63,8 +63,10 @@ change.
 
 ## Handoff (#3295 S3)
 
-Behind the default-OFF `deferredTurnAdmission` flag, read live. With the flag OFF nothing below runs and T3a/T4
-behaviour is unchanged, except startup recovery (see Restart ownership).
+Behind the default-OFF `deferredTurnAdmission` setting (`agentOptions.deferredTurnAdmission: { enabled }`, closed
+shape validated at load). main.ts resolves it once and passes the same value to startup recovery and to the agent
+runtime, which reads its option object live. With it OFF nothing below runs and T3a/T4 behaviour is unchanged,
+except startup recovery (see Restart ownership).
 
 - **Distinct cause.** The handoff has its own cause, `planned_stop`, used only by the shutdown sites while the
   runtime is stopping (`handOffUndispatchedTurnAtPlannedStop`). It never keys on a queue rejection reason:
@@ -79,18 +81,23 @@ behaviour is unchanged, except startup recovery (see Restart ownership).
   `failed_terminal`, and the stop rejects (T3b).
 - **Admission boundary during the stop (T1b).** `handleMessage` keeps intake open until the stop closes it,
   just before the message-handler drain. In that window a journaled plain-text message (per_chat, not
-  sandboxed, not a local or forwarded command, not a synthetic job) runs the ordinary intake pipeline; its
-  queue admission then hands it off with cause `planned_stop` instead of dispatching it. The handler is
+  sandboxed, not a local or forwarded command, not a synthetic job) whose replay envelope meets the store's own
+  contract (`deferredTurnEnvelopeRefusal`: replay-safe, text within the 256 KiB bound) runs the ordinary intake
+  pipeline; its queue admission then hands it off with cause `planned_stop` instead of dispatching it. The
+  envelope is checked before the message is accepted, so an accepted message is never found unownable later. The handler is
   awaited through that admission, so the stop's handler drain covers the handoff. Any other message, and every
   message after closure, is refused with `RuntimeAdmissionClosedError`, which ingest records
   `failed / queue_closed` (an honest rejection, not an `unknown` loss). There is no second intake pipeline and no
   new held state.
-- **Restart ownership** (`preConnectRecovery({ deferredTurnOwnerEnabled })`, which must match the flag).
-  Enabled: crash recovery skips an inbound owned by a `claimed` obligation or by a `pending` one with attempts
-  left; a committed or exhausted obligation does not protect its inbound. Disabled (the default, and main.ts
-  today, which does not wire the flag): the inbound is failed like any interrupted turn and its pre-commit
-  obligation is closed `terminal_quarantined` / `owner_disabled`. Nothing is left holding a `processing` row.
-  Retention never deletes a source or envelope while its obligation is non-terminal.
+- **Restart ownership** (`preConnectRecovery({ deferredTurnOwnerEnabled })`). main.ts derives the owner from the
+  same setting it passes to the runtime: enabled exactly for an agent instance in per_chat scope with the setting
+  on (`resolveDeferredTurnStartupSetting`). Enabled: crash recovery skips an inbound owned by a `claimed`
+  obligation or by a `pending` one with attempts left; a committed or exhausted obligation does not protect its
+  inbound, and no obligation is closed (the drain owns them). Disabled (the default): owned inbounds are failed
+  like any interrupted turn and every open obligation is closed `terminal_quarantined`: pre-commit rows
+  `owner_disabled`, `dispatched_commit` rows `owner_disabled_after_commit` (effects may have started: never
+  labelled completed, and as terminal rows never replayed). Nothing is left non-terminal or holding a `processing`
+  row. Retention never deletes a source or envelope while its obligation is non-terminal.
 - **Drain** (`src/runtimes/agent/deferred-turn-drain.ts`). Started in `setDurability`, stopped at shutdown. It
   runs at start, after progress, on request and every 15 s. For the head obligation of each conversation it:
   - skips while a same-scope durable recovery blocks the conversation;
@@ -99,17 +106,32 @@ behaviour is unchanged, except startup recovery (see Restart ownership).
     planned-stop rules as live input;
   - writes `dispatched_commit` at the provider boundary, BEFORE the turn is published or sent. A stale fence
     throws there: nothing is published, the provider is not called, and the source stays open.
+  - Each pass first renews the claim of every drained turn still waiting in a chat queue, then runs the expiry
+    sweep. A turn that waits longer than the claim TTL (600 s) keeps its claim: it is not replayed, its last
+    attempt does not become an exhausted head, and live input still queues behind it.
   - A turn that never reached the provider (stale fence, pre-boundary failure, queue rejection, planned stop) is
     released back to its obligation without any write to the source: a fenced requeue (up to the store's 5
-    attempts, then `terminal_quarantined` and the ordinary terminal path finalizes the source), or, after a
-    stale fence, nothing (the obligation already has its current owner). Operator cancellation closes it.
+    attempts, then `terminal_quarantined` / `attempts_exhausted` and the ordinary terminal path finalizes the
+    source). If the claim lapsed and nobody re-claimed it (same epoch), the claim is restored to this claimant
+    and the release decides as above; it is never swallowed into a replay. If another owner closed the
+    obligation, the ordinary terminal path owns the still-open source; if another claimant holds it, that
+    claimant owns it. Operator cancellation closes the pre-commit obligation without a fence
+    (`operator_cancelled`): it wins over any claim, and a later commit by that claim fails its fence.
+  - Closures the drain makes without a runtime turn settle the source themselves. `unsupported_envelope`, and
+    `context_unavailable` / `enqueue_failed` on the last attempt (`attempts_exhausted`), fail a still-open source
+    `failed / pre_dispatch_error`. `source_not_open` writes nothing: the source keeps the state its own owner
+    wrote. No path labels a source completed.
+  - An exhausted head (`pending` with no attempts left, e.g. a crashed process's last claim expired) can never be
+    claimed: the drain closes it `terminal_quarantined` / `attempts_exhausted`, fails its source if still open,
+    and the next obligation of the chat runs.
   - After the commit, nothing is requeued. The ordinary terminal path owns the turn, and the obligation closes
     once the source inbound is terminal: `terminal_completed` / `completed`, or `terminal_quarantined` /
     `source_failed`. A failed turn is never labelled completed.
-- **FIFO against live input.** A live per_chat message whose conversation has an older runnable obligation
-  (pending with attempts left, claimed, or committed and settling) is itself deferred into an obligation
-  (`fifo_behind_obligation`) and the drain is kicked, so both run in inbound order. An exhausted head does not
-  hold live input. A message that cannot be deferred (not a replay-safe text envelope) keeps the live path.
+- **FIFO against live input.** A live per_chat message whose conversation has ANY older runnable obligation
+  (pending with attempts left, claimed, or committed and settling — not only the queue head) is itself deferred
+  into an obligation (`fifo_behind_obligation`) and the drain is kicked, so both run in inbound order. An
+  exhausted head does not hold live input by itself, but runnable work queued behind it does. A message that
+  cannot be deferred (not a replay-safe text envelope) keeps the live path.
 - **Stop during a drained turn.** A drained turn still queued, or active but not past the commit, is released
   back to its obligation (`planned_stop`); the stop stays clean and the next start dispatches it. A drained turn
   past the commit follows the dispatched-turn rules (bounded drain, then `failed_terminal`) and is never replayed.
@@ -141,6 +163,8 @@ behaviour is unchanged, except startup recovery (see Restart ownership).
 - **Orphaned claim delays live input.** With FIFO, a live message waits behind an older obligation that a
   crashed process left `claimed`, until the claim TTL (600 s) expires and the drain reclaims it.
 - **Each planned stop that releases a drained turn spends one of its 5 attempts** (the requeue counts).
+- **A source the drain fails itself** (`pre_dispatch_error`, no runtime turn) gets an inbound failure but no
+  `turn_terminal_records` row, as crash recovery's failures do.
 - **First old-to-new cutover.** The supported operation is the new release's `release:activate --apply`. Its stop
   gate runs from the new release against the instance database before the old process is touched, so the old
   instance is stopped only after a quiet check.
