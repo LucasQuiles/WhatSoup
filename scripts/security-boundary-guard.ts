@@ -60,6 +60,7 @@ export interface SecurityBoundaryCounts {
 export interface SecurityBoundaryScan {
   findings: SecurityBoundaryFinding[];
   filesExamined: number;
+  typeScriptFilesParsed: number;
   scanIssues: SourceInventoryIssue[];
   scanIssueCount: number;
   scanIssuesOmitted: number;
@@ -77,6 +78,20 @@ const PROVIDER_ADAPTER = 'src/runtimes/chat/providers/pinecone.ts';
 const MEMORY_TOOL = 'src/mcp/tools/memory-write.ts';
 const COMPOSITION_ROOT = 'src/mcp/register-all.ts';
 const TS_EXT_RE = /\.ts$/;
+
+function requiresTypeScriptBoundaryParse(file: string, content: string): boolean {
+  const decoded = content.replace(
+    /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/gi,
+    (match, braced: string | undefined, fixed: string | undefined, hex: string | undefined) => {
+      const codePoint = Number.parseInt(braced ?? fixed ?? hex ?? '', 16);
+      return codePoint <= 0x7f ? String.fromCodePoint(codePoint) : match;
+    },
+  );
+  return decoded.includes('upsertRecords')
+    || decoded.includes('upsertDirectMemory')
+    || decoded.includes('registerMemoryWriteTools')
+    || (file.startsWith('src/mcp/') && decoded.includes('upsert'));
+}
 
 function emptyCounts(): SecurityBoundaryCounts {
   return {
@@ -138,6 +153,7 @@ export function scanFileForSecurityBoundaryViolations(
   counts: SecurityBoundaryCounts = emptyCounts(),
 ): SecurityBoundaryFinding[] {
   const file = relPath.split(path.sep).join('/');
+  if (!requiresTypeScriptBoundaryParse(file, content)) return [];
   const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const findings: SecurityBoundaryFinding[] = [];
   const add = (code: SecurityBoundaryFindingCode, node: ts.Node, detail: string) => {
@@ -264,12 +280,15 @@ export function scanSecurityBoundaries(
   });
   const counts = emptyCounts();
   const findings: SecurityBoundaryFinding[] = [];
+  let typeScriptFilesParsed = 0;
   for (const file of inventory.files) {
+    if (requiresTypeScriptBoundaryParse(file.path, file.content)) typeScriptFilesParsed += 1;
     findings.push(...scanFileForSecurityBoundaryViolations(file.path, file.content, counts));
   }
   const scan: SecurityBoundaryScan = {
     findings,
     filesExamined: inventory.counts.filesRead,
+    typeScriptFilesParsed,
     scanIssues: inventory.issues,
     scanIssueCount: inventory.counts.issuesTotal,
     scanIssuesOmitted: inventory.counts.issuesOmitted,
@@ -310,6 +329,7 @@ function reportFor(evaluation: SecurityBoundaryEvaluation): InventoryGuardReport
       directoriesScanned: scan.inventoryCounts.directoriesScanned,
       entriesInspected: scan.inventoryCounts.entriesInspected,
       candidatesFound: scan.inventoryCounts.candidatesFound,
+      typeScriptFilesParsed: scan.typeScriptFilesParsed,
       ...scan.counts,
     },
     diagnostics: [
