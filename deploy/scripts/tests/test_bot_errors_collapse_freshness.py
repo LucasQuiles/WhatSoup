@@ -68,6 +68,12 @@ _HEALTHY_PROBE = (
 _write_event = dispatcher_fixtures.write_outbox_event
 
 
+@pytest.fixture(autouse=True)
+def _test_incident_authority(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    for key, value in dispatcher_fixtures.incident_authority_test_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+
+
 # ---------------------------------------------------------------------------
 # 1. Storm-collapse — the decisive falsifier (freshness AND closure)
 # ---------------------------------------------------------------------------

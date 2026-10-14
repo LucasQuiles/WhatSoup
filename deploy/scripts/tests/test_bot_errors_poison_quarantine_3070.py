@@ -40,6 +40,7 @@ TEST_ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
     "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS",
     "BOT_ERRORS_OUTBOX_DIR",
+    *dispatcher_fixtures.INCIDENT_AUTHORITY_TEST_ENV_KEYS,
 ]
 
 
@@ -51,6 +52,7 @@ _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
 def _load_module(state_dir: Path):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    dispatcher_fixtures.configure_test_incident_authority(state_dir)
     spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_3070", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

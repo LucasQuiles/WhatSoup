@@ -11950,13 +11950,11 @@ def send_credential_pages(paths: dict[str, Path]) -> None:
                 ).encode("utf-8")
             ).hexdigest()[:32]
             authority_event = {
-                "schemaVersion": 1,
+                **new_event_fields("observation", "info"),
                 "id": f"credential-repage-{page_identity}",
                 "createdAt": time.strftime(
                     "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(attempt_at)
                 ),
-                "eventType": "info",
-                "severity": "critical",
                 "source": "credential_repage_page",
                 "machine": event_machine(),
                 "instance": "bot-errors-dispatcher",

@@ -29,6 +29,36 @@ from typing import Any
 import pytest
 
 
+INCIDENT_AUTHORITY_TEST_ENV_KEYS = (
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
+)
+
+
+def incident_authority_test_env(state_dir: Path) -> dict[str, str]:
+    """Return the opt-in environment for the production dry-authority receipt path."""
+
+    return {
+        "BOT_ERRORS_DRY_SEND_CAPTURE": "",
+        "BOT_ERRORS_TEST_MODE": "1",
+        "BOT_ERRORS_DRY_AUTHORITY_CAPTURE": str(
+            state_dir / "test-incident-authority.jsonl"
+        ),
+        "BOT_ERRORS_INCIDENT_AUTHORITY_URL": "",
+        "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE": "",
+    }
+
+
+def configure_test_incident_authority(state_dir: Path) -> None:
+    """Enable claim-bound dry authority for one dispatcher's isolated state root."""
+
+    for key, value in incident_authority_test_env(state_dir).items():
+        os.environ[key] = value
+
+
 def make_env_scrub_fixture(keys):
     """Return an autouse fixture that removes `keys` for the test and restores them after.
 
