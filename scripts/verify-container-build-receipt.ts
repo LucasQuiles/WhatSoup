@@ -4,6 +4,9 @@ import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { isRecord } from '../src/lib/type-guards.ts';
+import { parseClosedOptions } from './lib/cli-args.ts';
+
 interface ContainerInputPolicy {
   schemaVersion: number;
   platform: string;
@@ -144,10 +147,6 @@ function requireRegularFile(filePath: string, label: string): void {
   let stat;
   try { stat = statSync(filePath); } catch { throw new Error(`${label} is missing: ${filePath}`); }
   if (!stat.isFile()) throw new Error(`${label} must be a regular file: ${filePath}`);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function stableJson(value: unknown): string {
@@ -483,7 +482,7 @@ export function verifyContainerBuildReceipt(receipt: ContainerBuildReceipt, inpu
   if (stableJson(receipt) !== stableJson(createContainerBuildReceipt(input))) throw new Error('container build receipt does not match the verified build inputs');
 }
 
-interface ParsedArgs {
+export interface ParsedArgs {
   metadataPath: string;
   sbomPath: string;
   imagePath: string;
@@ -499,15 +498,18 @@ interface ParsedArgs {
   githubOutputPath?: string;
 }
 
-function parseArgs(argv: string[], cwd: string): ParsedArgs {
-  const values = new Map<string, string>();
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) throw new Error('usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)');
-    values.set(flag, value);
-    index += 1;
-  }
+export function parseArgs(argv: string[], cwd: string): ParsedArgs {
+  const parsed = parseClosedOptions(argv, {
+    booleanOptions: [],
+    valueOptions: [
+      '--metadata', '--sbom', '--image', '--source', '--source-repository',
+      '--builder', '--buildx-version', '--buildkit-version', '--provenance-builder-id',
+      '--repo-root', '--output', '--receipt', '--github-output',
+    ],
+  });
+  const usage = 'usage: verify-container-build-receipt.ts --metadata PATH --sbom PATH --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)';
+  if (parsed.error) throw new Error(usage);
+  const values = parsed.values;
   const required = (flag: string): string => {
     const value = values.get(flag);
     if (!value) throw new Error(`${flag} is required`);

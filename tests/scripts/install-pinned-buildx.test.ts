@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   BUILDX_DOWNLOAD_MAX_BYTES,
   installPinnedBuildx,
+  parseArgs,
 } from '../../scripts/install-pinned-buildx.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
@@ -29,6 +30,22 @@ function successfulFetch(asset: Buffer): typeof fetch {
 }
 
 describe('pinned Buildx installer', () => {
+  it('uses the shared closed-option parser for exact, non-duplicated inputs', () => {
+    expect(parseArgs(['--repo-root', '/repo', '--docker-config', '/docker'])).toEqual({
+      repoRoot: '/repo',
+      dockerConfig: '/docker',
+    });
+    expect(() => parseArgs(['--repo-root', '/repo', '--unknown', '/docker'])).toThrow(
+      'usage: install-pinned-buildx.ts',
+    );
+    expect(() => parseArgs(['--repo-root', '/one', '--repo-root', '/two', '--docker-config', '/docker'])).toThrow(
+      'usage: install-pinned-buildx.ts',
+    );
+    expect(() => parseArgs(['--repo-root', '--docker-config', '/docker'])).toThrow(
+      'usage: install-pinned-buildx.ts',
+    );
+  });
+
   it('downloads the exact reviewed release asset and atomically publishes a checked executable', async () => {
     const asset = Buffer.from('reviewed-buildx-asset');
     const repoRoot = makeRepo(asset);

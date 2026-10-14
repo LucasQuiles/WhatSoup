@@ -3,6 +3,8 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { parseClosedOptions } from './lib/cli-args.ts';
+
 interface BuildxPolicy {
   version: string;
   asset: string;
@@ -147,20 +149,14 @@ export async function installPinnedBuildx(options: InstallPinnedBuildxOptions): 
   }
 }
 
-function parseArgs(argv: string[]): Pick<InstallPinnedBuildxOptions, 'repoRoot' | 'dockerConfig'> {
-  const values = new Map<string, string>();
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (!flag?.startsWith('--') || value === undefined || value.startsWith('--')) {
-      throw new Error('usage: install-pinned-buildx.ts --repo-root PATH --docker-config PATH');
-    }
-    values.set(flag, value);
-    index += 1;
-  }
-  const repoRoot = values.get('--repo-root');
-  const dockerConfig = values.get('--docker-config');
-  if (!repoRoot || !dockerConfig || values.size !== 2) {
+export function parseArgs(argv: string[]): Pick<InstallPinnedBuildxOptions, 'repoRoot' | 'dockerConfig'> {
+  const parsed = parseClosedOptions(argv, {
+    booleanOptions: [],
+    valueOptions: ['--repo-root', '--docker-config'],
+  });
+  const repoRoot = parsed.values.get('--repo-root');
+  const dockerConfig = parsed.values.get('--docker-config');
+  if (parsed.error || !repoRoot || !dockerConfig || parsed.values.size !== 2) {
     throw new Error('usage: install-pinned-buildx.ts --repo-root PATH --docker-config PATH');
   }
   return { repoRoot, dockerConfig };

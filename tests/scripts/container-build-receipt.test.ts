@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createContainerBuildReceipt,
+  parseArgs,
   verifyContainerBuildReceipt,
   verifyOciArchiveAttestations,
 } from '../../scripts/verify-container-build-receipt.ts';
@@ -219,6 +220,34 @@ function writeOciArchive(
 }
 
 describe('container build evidence CI contract', () => {
+  it('uses the shared closed-option parser and rejects ambiguous receipt inputs', () => {
+    const argv = [
+      '--metadata', '/tmp/metadata.json', '--sbom', '/tmp/sbom.json',
+      '--image', '/tmp/image.tar', '--source', SOURCE_REVISION,
+      '--builder', 'whatsoup-ci-builder|docker-container',
+      '--buildx-version', 'v0.38.0', '--buildkit-version', 'v0.33.1',
+      '--provenance-builder-id', PROVENANCE_BUILDER_ID, '--output', '/tmp/receipt.json',
+    ];
+
+    expect(parseArgs(argv, '/repo')).toMatchObject({
+      repoRoot: '/repo',
+      metadataPath: '/tmp/metadata.json',
+      outputPath: '/tmp/receipt.json',
+    });
+    expect(() => parseArgs([...argv, '--unknown', 'value'], '/repo')).toThrow(
+      'usage: verify-container-build-receipt.ts',
+    );
+    expect(() => parseArgs([...argv, '--metadata', '/tmp/replacement.json'], '/repo')).toThrow(
+      'usage: verify-container-build-receipt.ts',
+    );
+    expect(() => parseArgs([...argv.slice(0, -1), '--receipt', '/tmp/existing.json'], '/repo')).toThrow(
+      'usage: verify-container-build-receipt.ts',
+    );
+    expect(() => parseArgs([...argv, '--receipt', '/tmp/existing.json'], '/repo')).toThrow(
+      'provide exactly one of --output or --receipt',
+    );
+  });
+
   it('builds pinned inputs and produces an independently checked evidence bundle', () => {
     expect(qualityWorkflow).toContain('docker buildx build');
     expect(qualityWorkflow).toContain('type=provenance,mode=max,builder-id=$provenance_builder_id');
