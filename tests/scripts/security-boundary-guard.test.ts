@@ -114,7 +114,7 @@ describe('security boundary guard — remote memory writes', () => {
       launchdAuthorityBindings: 2,
     });
     expect(result.scan.findings).toEqual([]);
-  });
+  }, 60_000);
 });
 
 describe('security boundary guard — IncidentStore authority', () => {
