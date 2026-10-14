@@ -136,7 +136,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { PLANNED_STOP_DRAIN_MS, PlannedStopIntakeRetainedError, PlannedStopQueueCloseError, PlannedStopTurnLossError, plannedStopIntakeDecision, waitForPlannedStopDrain } from './planned-stop-drain.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, plannedStopIntakeDecision, plannedStopLossFailures, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -8215,15 +8215,8 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     this.plannedStopIntakeClosed = true; // #3703: later messages are refused; earlier ones finish in the drain below
-    if (lostJournaledTurns > 0) {
-      log.error({ lostJournaledTurns }, 'shutdown finalized journaled turns failed');
-      shutdownFailures.push(new PlannedStopTurnLossError(lostJournaledTurns));
-    }
-    // #3295 S3: accepted messages no deferred owner could hold stay open for recovery; the handoff failed.
-    if (this.plannedStopIntakeRetained > 0) {
-      log.error({ retainedForRecovery: this.plannedStopIntakeRetained }, 'planned stop left accepted messages open for recovery');
-      shutdownFailures.push(new PlannedStopIntakeRetainedError(this.plannedStopIntakeRetained));
-    }
+    // #3703 / #3295 S3: journaled loss, or accepted messages left open for recovery, fail the stop.
+    shutdownFailures.push(...plannedStopLossFailures(log, { lostJournaledTurns, retainedForRecovery: this.plannedStopIntakeRetained }));
     if (!preserveRuntimeTurnState) {
       // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
       // deadline the coordinator above and the recycle lifecycle below honor.

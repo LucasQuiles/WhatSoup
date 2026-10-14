@@ -49,6 +49,28 @@ export class PlannedStopIntakeRetainedError extends Error {
 }
 
 /**
+ * The planned stop's loss accounting: journaled turns it finalized failed, and
+ * (#3295 S3) accepted messages no deferred owner could hold, left open for
+ * recovery. Each is logged and returned as a shutdown failure, in that order,
+ * so a stop that lost or handed off nothing cleanly is never reported clean.
+ */
+export function plannedStopLossFailures(
+  log: { error(fields: object, message: string): void },
+  counts: { lostJournaledTurns: number; retainedForRecovery: number },
+): Error[] {
+  const failures: Error[] = [];
+  if (counts.lostJournaledTurns > 0) {
+    log.error({ lostJournaledTurns: counts.lostJournaledTurns }, 'shutdown finalized journaled turns failed');
+    failures.push(new PlannedStopTurnLossError(counts.lostJournaledTurns));
+  }
+  if (counts.retainedForRecovery > 0) {
+    log.error({ retainedForRecovery: counts.retainedForRecovery }, 'planned stop left accepted messages open for recovery');
+    failures.push(new PlannedStopIntakeRetainedError(counts.retainedForRecovery));
+  }
+  return failures;
+}
+
+/**
  * Content-free failure: the stop could not close runtime TurnQueues that no
  * reset/kill teardown owns, so their undispatched turns were not taken.
  */
