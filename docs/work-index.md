@@ -111,7 +111,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | anonymous-health-projection-ceiling-design | 2026-10-06 |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | fleet-lifecycle-observability-standard-design | 2026-08-27 |
 | `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |
-| `docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md` | spec | 3703-planned-stop-handoff-design | 2026-10-13 |
+| `docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md` | spec | 3703-planned-stop-handoff-design | 2026-10-14 |
 
 ### Cross-tree topic clusters (4)
 
@@ -303,7 +303,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | unknown | body-marker | fleet-lifecycle-observability-standard-design | 2026-08-27 |  |
 | `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | unknown | fallback | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |  |
-| `docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md` | spec | unknown | body-marker | 3703-planned-stop-handoff-design | 2026-10-13 |  |
+| `docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md` | spec | unknown | body-marker | 3703-planned-stop-handoff-design | 2026-10-14 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -324,4 +324,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-10-14T04:26:21Z from commit `af0f85efe295359d725fac2b4315a2740739ce30`
+- Generated at 2026-10-14T06:37:01Z from commit `ad951c41200b98aa8417134ad7f3bf30d3de3cee`
