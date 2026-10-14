@@ -25,6 +25,16 @@ describe('security boundary guard — remote memory writes', () => {
     }));
   });
 
+  it('blocks escaped static provider-upsert property names', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'src/new-provider.ts',
+      'await index["upsert\\u0052ecords"]({ records });',
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.remote-memory.raw-provider-upsert',
+    }));
+  });
+
   it('blocks generic upserts from an MCP tool', () => {
     const findings = scanFileForSecurityBoundaryViolations(
       'src/mcp/tools/new-memory.ts',
@@ -97,6 +107,7 @@ describe('security boundary guard — remote memory writes', () => {
     const result = evaluateSecurityBoundaryGuard(REPO_ROOT);
     expect(result.status).toBe('pass');
     expect(result.scan.filesExamined).toBeGreaterThan(100);
+    expect(result.scan.typeScriptFilesParsed).toBe(4);
     expect(result.scan.counts).toEqual({
       canonicalRegistrations: 1,
       directMemoryWrites: 1,
@@ -114,7 +125,7 @@ describe('security boundary guard — remote memory writes', () => {
       launchdAuthorityBindings: 2,
     });
     expect(result.scan.findings).toEqual([]);
-  }, 60_000);
+  });
 });
 
 describe('security boundary guard — IncidentStore authority', () => {
