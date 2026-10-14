@@ -1032,4 +1032,38 @@ describe('main bootstrap', () => {
     expect(h.agentInstances[0].start).not.toHaveBeenCalled();
     expect(h.connection.connect).not.toHaveBeenCalled();
   });
+
+  // #3295 S3: startup recovery and the agent runtime read ONE deferredTurnAdmission setting.
+  it.each([
+    ['enabled per_chat', 'per_chat', { enabled: true }, true],
+    ['disabled per_chat', 'per_chat', { enabled: false }, false],
+    ['absent', 'per_chat', undefined, false],
+    ['enabled outside per_chat (no drain runs)', 'single', { enabled: true }, false],
+  ] as const)('wires the deferredTurnAdmission setting (%s) into both pre-connect recovery and the agent runtime', async (
+    _label, sessionScope, deferredTurnAdmission, ownerEnabled,
+  ) => {
+    const h = await importMainWithMocks({
+      instanceConfig: {
+        name: 'q',
+        type: 'agent',
+        agentOptions: {
+          sessionScope,
+          cwd: '~/testuser/LAB/WhatSoup',
+          ...(deferredTurnAdmission === undefined ? {} : { deferredTurnAdmission }),
+        },
+      },
+    });
+
+    expect(h.durability.preConnectRecovery).toHaveBeenCalledOnce();
+    expect(h.durability.preConnectRecovery).toHaveBeenCalledWith({ deferredTurnOwnerEnabled: ownerEnabled });
+    expect(h.AgentRuntime).toHaveBeenCalledWith(
+      h.db,
+      h.connection,
+      'q',
+      expect.objectContaining({ deferredTurnAdmission }),
+    );
+    // Recovery runs before the runtime that owns the drain exists.
+    expect(h.durability.preConnectRecovery.mock.invocationCallOrder[0]!)
+      .toBeLessThan(h.AgentRuntime.mock.invocationCallOrder[0]!);
+  });
 });

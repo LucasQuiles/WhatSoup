@@ -23,6 +23,7 @@ import type { ImessageConfig } from './transport/imessage/types.ts';
 import type { SignalConfig } from './transport/signal/types.ts';
 import type { LaunchdPlistRenderOptions } from './lib/launchd-service-config.ts';
 import type { TurnRecoveryCatchupReconcileOptions } from './core/turn-recovery-catchup-config.ts';
+import type { DeferredTurnAdmissionOptions } from './core/deferred-turn-admission-config.ts';
 import { errorMessage } from './lib/error-message.ts';
 import { setLoadedInstanceConfig } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
@@ -94,6 +95,12 @@ interface AgentOptions {
    * (src/core/turn-recovery-catchup-config.ts). See `docs/configuration.md`.
    */
   turnRecoveryCatchupReconcile?: TurnRecoveryCatchupReconcileOptions;
+  /**
+   * #3295 deferred-turn admission, planned-stop handoff and drain (default
+   * OFF). Closed shape, validated by `validateDeferredTurnAdmissionConfig`
+   * (src/core/deferred-turn-admission-config.ts). See `docs/configuration.md`.
+   */
+  deferredTurnAdmission?: DeferredTurnAdmissionOptions;
 }
 
 interface InstanceConfig {

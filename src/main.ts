@@ -47,6 +47,7 @@ import { toConversationKey } from './core/conversation-key.ts';
 import { resolveConfiguredAdminJid, toPersonalJid, toLidJid, toSignalJid } from './core/jid-constants.ts';
 import { selectReplayableDms, rememberReplayedId, type AccessReplayOutcome } from './core/admin.ts';
 import { DurabilityEngine, sendTracked, drainPendingOutboundLocked } from './core/durability.ts';
+import { resolveDeferredTurnStartupSetting } from './core/deferred-turn-admission-config.ts';
 import { waitForHistorySyncThenRecover } from './core/post-connect-recovery.ts';
 import { seedChatAliases } from './core/chats-resolver.ts';
 import { createProfileRegistry } from './core/profiles.ts';
@@ -400,9 +401,13 @@ if (config.accessMode !== 'self_only') {
   if (hydrated > 0) log.info({ count: hydrated }, 'hydrated LID mappings from auth dir');
 }
 
-// 2b. Pre-connect recovery — runs synchronously before any connection attempt
+// 2b. Pre-connect recovery — runs synchronously before any connection attempt.
+// #3295: recovery's deferred owner and the agent runtime read ONE resolved
+// deferredTurnAdmission setting, so an enabled restart keeps recoverable
+// pre-commit obligations for the drain and a disabled one closes them.
+const deferredTurnStartup = resolveDeferredTurnStartupSetting(instanceConfig);
 durability = new DurabilityEngine(db);
-durability.preConnectRecovery();
+durability.preConnectRecovery({ deferredTurnOwnerEnabled: deferredTurnStartup.ownerEnabled });
 
 // Model currency advisories — startup + daily check that configured models are
 // still current, with operator notification via BOT_ERRORS when they are not.
@@ -514,6 +519,7 @@ if (instanceType === 'agent') {
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
     turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
+    deferredTurnAdmission: deferredTurnStartup.admission,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),

@@ -368,7 +368,8 @@ import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { runShutdownSequence, shutdownExitCode } from '../../../src/main-shutdown-policy.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
-import { PlannedStopQueueCloseError } from '../../../src/runtimes/agent/planned-stop-drain.ts';
+import { PlannedStopQueueCloseError, admitsPlannedStopIntake } from '../../../src/runtimes/agent/planned-stop-drain.ts';
+import { TURN_RECOVERY_MAX_TEXT_BYTES } from '../../../src/core/turn-recovery-contract.ts';
 import { RuntimeAdmissionClosedError, classifyErrorForInbound } from '../../../src/core/inbound-failure-class.ts';
 import type { RuntimeTurnCoordinator } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
@@ -611,6 +612,49 @@ describe('planned stop handoff (#3703)', () => {
     // ingest step 6 records a rejected journaled inbound with this class (honest, distinct from 'unknown').
     expect(classifyErrorForInbound(error)).toBe('queue_closed');
     expect(obligationStatuses(seq)).toEqual([]);
+  });
+
+  it('T1b envelope: during the stop, a message the deferred owner could not store (text over the replay bound) is refused before it is accepted, never accepted and then failed', async () => {
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
+    await arriveInFlight(a.runtime, a.engine, 'wamid-t1b-big-head', 't1b big head question');
+    const stopping = a.runtime.shutdown().catch(() => {});
+    const seq = a.engine.journalInbound('wamid-t1b-big', conversationKey, dmJid, 'agent');
+    const oversize = 'x'.repeat(TURN_RECOVERY_MAX_TEXT_BYTES + 1);
+    const error = await a.runtime.handleMessage(makeMsg({ messageId: 'wamid-t1b-big', content: oversize, inboundSeq: seq }))
+      .then(() => null, (err: unknown) => err);
+    await stopping;
+    // Honest transport rejection: ingest records it queue_closed; nothing was admitted.
+    expect(error).toBeInstanceOf(RuntimeAdmissionClosedError);
+    expect(classifyErrorForInbound(error)).toBe('queue_closed');
+    expect(obligationStatuses(seq)).toEqual([]);
+    expect(terminalRows(seq)).toEqual([]);
+    expect(dispatchesOf(oversize)).toBe(0);
+  });
+
+  it('T1b envelope bound: during the stop, a message exactly at the replay bound is still handed off (no-loss contract kept)', async () => {
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
+    await arriveInFlight(a.runtime, a.engine, 'wamid-t1b-edge-head', 't1b edge head question');
+    const stopping = a.runtime.shutdown().catch(() => {});
+    const seq = a.engine.journalInbound('wamid-t1b-edge', conversationKey, dmJid, 'agent');
+    const atBound = 'y'.repeat(TURN_RECOVERY_MAX_TEXT_BYTES);
+    const admitted = await a.runtime.handleMessage(makeMsg({ messageId: 'wamid-t1b-edge', content: atBound, inboundSeq: seq }))
+      .then(() => 'accepted', () => 'rejected');
+    await stopping;
+    expect(admitted).toBe('accepted');
+    expect(status(seq)).toBe('processing');
+    expect(obligationStatuses(seq)).toEqual(['pending']);
+  });
+
+  it('T1b envelope: the planned-stop intake refuses a replay-unsafe envelope', () => {
+    const base = {
+      intakeClosed: false,
+      deferredOwner: true,
+      msg: { inboundSeq: 7, contentType: 'text' as const, isSyntheticJob: false },
+      classification: 'message',
+    };
+    expect(admitsPlannedStopIntake({ ...base, replay: { replaySafe: true, text: 'fits' } })).toBe(true);
+    expect(admitsPlannedStopIntake({ ...base, replay: { replaySafe: false, text: 'fits' } })).toBe(false);
+    expect(admitsPlannedStopIntake({ ...base, replay: { replaySafe: true, text: null } })).toBe(false);
   });
 
   // ─── T1 cause: only the planned stop hands off; ordinary exclusions stay terminal ───

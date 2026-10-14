@@ -11,6 +11,7 @@
 
 import { systemClock, type Clock } from '../../lib/clock.ts';
 import type { IncomingMessage } from '../../core/types.ts';
+import { deferredTurnEnvelopeRefusal } from '../../core/deferred-turn-store.ts';
 
 /** Default bound on the planned-stop drain of dispatched turns. */
 export const PLANNED_STOP_DRAIN_MS = 5_000;
@@ -64,9 +65,12 @@ export async function waitForPlannedStopDrain(
  * closes intake (just before its message-handler drain), a journaled plain
  * text message that can become a durable deferred obligation runs through the
  * ordinary intake pipeline; its queue admission then hands it to the deferred
- * owner (cause `planned_stop`) instead of dispatching it. Everything else, and
- * everything after closure, is refused with RuntimeAdmissionClosedError, which
- * ingest records `failed / queue_closed`: an honest, distinct rejection.
+ * owner (cause `planned_stop`) instead of dispatching it. The replay envelope
+ * is checked against the store's own contract (replay-safe, text within the
+ * byte bound) BEFORE the message is accepted, so no accepted message is found
+ * unownable afterwards. Everything else, and everything after closure, is
+ * refused with RuntimeAdmissionClosedError, which ingest records
+ * `failed / queue_closed`: an honest, distinct rejection.
  */
 export function admitsPlannedStopIntake(input: {
   readonly intakeClosed: boolean;
@@ -75,11 +79,15 @@ export function admitsPlannedStopIntake(input: {
   readonly msg: Pick<IncomingMessage, 'inboundSeq' | 'contentType' | 'isSyntheticJob'>;
   /** classifyInput type: only plain messages (no local or forwarded commands). */
   readonly classification: string | undefined;
+  /** The replay envelope the handoff would store (its text is the message text). */
+  readonly replay: { readonly replaySafe: boolean; readonly text: string | null };
 }): boolean {
   return !input.intakeClosed
     && input.deferredOwner
     && input.msg.inboundSeq !== undefined
     && input.msg.contentType === 'text'
     && input.msg.isSyntheticJob !== true
-    && input.classification === 'message';
+    && input.classification === 'message'
+    && input.replay.text !== null
+    && deferredTurnEnvelopeRefusal({ replaySafe: input.replay.replaySafe, text: input.replay.text }) === null;
 }

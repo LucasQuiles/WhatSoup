@@ -2830,13 +2830,16 @@ export class DurabilityEngine {
   /**
    * Recover interrupted sessions, deliveries, tools, and inbound turns before reconnect.
    *
-   * `deferredTurnOwnerEnabled` (#3295 S3) must equal the runtime's
-   * `deferredTurnAdmission` flag. Enabled: an inbound held by a pre-commit
-   * deferred obligation stays open for the drain. Disabled (the default, and
-   * main.ts today, which does not wire the flag): no owner will run it, so the
-   * inbound is failed like any other interrupted turn and its pre-commit
-   * obligation is closed `terminal_quarantined` / `owner_disabled` — nothing is
-   * left holding a `processing` row.
+   * `deferredTurnOwnerEnabled` (#3295 S3) must equal the runtime's deferred
+   * owner (per_chat and `agentOptions.deferredTurnAdmission` on; main.ts
+   * resolves both from one setting, see deferred-turn-admission-config.ts).
+   * Enabled: an inbound held by a pre-commit deferred obligation stays open for
+   * the drain. Disabled (the default): no owner will run or settle any
+   * obligation, so owned inbounds are failed like any other interrupted turn
+   * and every open obligation is closed `terminal_quarantined` — pre-commit
+   * rows `owner_disabled`, committed rows `owner_disabled_after_commit` (replay
+   * vetoed, never completed). Nothing is left non-terminal or holding a
+   * `processing` row.
    */
   preConnectRecovery(options: { readonly deferredTurnOwnerEnabled?: boolean } = {}): RecoveryStats {
     const deferredTurnOwnerEnabled = options.deferredTurnOwnerEnabled === true;
@@ -2976,11 +2979,6 @@ export class DurabilityEngine {
                 'pre_connect_recovery',
               );
               this.markInboundFailed(ev.seq, 'crash_recovery');
-              // #3295 S3: with the owner disabled nothing will run a pre-commit
-              // obligation of this row; close it with the failed source.
-              if (!deferredTurnOwnerEnabled) {
-                this.deferredTurns.quarantinePreCommitForSource(ev.seq, 'owner_disabled');
-              }
             },
           );
           log.info(
@@ -3004,6 +3002,19 @@ export class DurabilityEngine {
     } catch (err) {
       log.error({ err }, 'preConnectRecovery: unsafe failure recording pending catch-up');
       recoveryRun.failImmediately('record_pending_operator_catchup', err);
+    }
+
+    // #3295 S3: with the deferred owner disabled nothing will run or settle an
+    // open obligation; close them all after their sources were handled above.
+    if (!deferredTurnOwnerEnabled) {
+      try {
+        const closed = this.deferredTurns.closeForDisabledOwner();
+        if (closed > 0) log.warn({ closed }, 'preConnectRecovery: deferred owner disabled — open deferred-turn obligations quarantined');
+      } catch (err) {
+        recoveryRun.recordFailure('close_deferred_obligations_owner_disabled', err);
+        log.warn({ errorClass: err instanceof Error ? err.name : 'non-error' },
+          'preConnectRecovery: error closing deferred-turn obligations with the owner disabled');
+      }
     }
 
     // QR-035: finalize no-reply turns stranded after markTurnDone.

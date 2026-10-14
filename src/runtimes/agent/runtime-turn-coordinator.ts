@@ -35,6 +35,7 @@ import type { SessionManager } from './session.ts';
 import { config } from '../../config.ts';
 import { collectRuntimeTurnAnswerEvidence } from './runtime-turn-finalization.ts';
 import {
+  FRESH_TURN_REPLAY_SAFE,
   createRuntimeTurnContext,
   markRuntimeTurnReplayUnsafe as makeRuntimeTurnReplayUnsafe,
   rebindRuntimeTurnOwner,
@@ -841,7 +842,7 @@ createRuntimeTurnForDispatch(args: {
     replay: {
       sourceMessageId: args.source.sourceMessageId,
       receivedAtUnixSeconds: args.source.receivedAtUnixSeconds,
-      replaySafe: true,
+      replaySafe: FRESH_TURN_REPLAY_SAFE,
       senderJid: args.source.senderJid,
       senderName: args.source.senderName,
       text: args.text,

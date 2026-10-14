@@ -22,16 +22,29 @@
  *   `complete` source closes `terminal_completed`; a `failed` source closes
  *   `terminal_quarantined` / `source_failed` — a failed turn is never labelled
  *   completed.
- *   pending | claimed -> terminal_quarantined (`owner_disabled`) is reachable
- *   WITHOUT a fence only from startup crash recovery when the deferred owner is
- *   disabled (flag off): no process will run the obligation, so its source is
- *   failed honestly and the obligation closed instead of left holding it.
+ *   Every non-terminal row -> terminal_quarantined is reachable WITHOUT a fence
+ *   only from startup crash recovery when the deferred owner is disabled (flag
+ *   off): no process will run or settle the obligation, so it is closed
+ *   instead of left holding its source. A pre-commit row closes
+ *   `owner_disabled`; a `dispatched_commit` row closes
+ *   `owner_disabled_after_commit` — effects may have started, so it is never
+ *   labelled completed and, being terminal, never replayed.
+ *   pending -> terminal_quarantined (`attempts_exhausted`) is reachable WITHOUT
+ *   a fence once the row has no attempts left: nothing may claim it, so the
+ *   drain closes it instead of letting it block its queue.
+ *   pending | claimed -> terminal_quarantined (`operator_cancelled`) is
+ *   reachable WITHOUT a fence: an operator cancellation of a never-committed
+ *   turn wins over any pre-commit claim (a later commit then fails its fence).
+ *   pending -> claimed is restored WITHOUT a new claim (same token, same epoch)
+ *   only when the row's claim lapsed and nobody re-claimed it: the epoch is
+ *   unchanged, so the original claimant still owns the obligation.
  *
  * Invariants:
  * - one obligation per (scope, inbound_seq); enqueue is idempotent;
  * - strict head-of-line FIFO: only the LOWEST open inbound_seq per conversation
- *   in per_chat mode (otherwise per scope) is claimable — an exhausted or held
- *   head blocks its queue rather than permitting out-of-order replay;
+ *   in per_chat mode (otherwise per scope) is claimable — a held head blocks its
+ *   queue rather than permitting out-of-order replay, and an exhausted head
+ *   blocks it until the drain closes it (`terminalizeExhaustedHead`);
  * - `dispatched_commit` is the requirement-4 point of no return: automatic
  *   input replay (requeue) is permanently refused after it;
  * - bounded envelope: oversize replay text and replay-unsafe sources are
@@ -200,6 +213,29 @@ function validateErrorClass(errorClass: string): void {
   }
 }
 
+/**
+ * The replay-envelope contract every obligation must meet: a replay-safe
+ * envelope whose text fits the byte bound. Returns the refusal tag, or null when
+ * the envelope can be durably owned. The one definition read by `enqueue` and
+ * by any caller that must decide BEFORE accepting work whether it can hand the
+ * work to this store (the #3703 planned-stop intake).
+ */
+export function deferredTurnEnvelopeRefusal(envelope: {
+  readonly replaySafe: boolean;
+  readonly text: string;
+}): 'replay_unsafe' | 'replay_text_oversize' | null {
+  if (envelope.replaySafe !== true) return 'replay_unsafe';
+  if (Buffer.byteLength(envelope.text, 'utf8') > TURN_RECOVERY_MAX_TEXT_BYTES) return 'replay_text_oversize';
+  return null;
+}
+
+/** Source identity of an obligation closed without a fence (the caller settles the source). */
+export interface DeferredTurnClosedSource {
+  inboundSeq: number;
+  sourceMessageId: string;
+  deliveryJid: string;
+}
+
 function validateFenceShape(fence: DeferredTurnClaimFence): void {
   if (!CLAIM_TOKEN_RE.test(fence.claimToken)) {
     throw new Error('Deferred turn claim token has an invalid shape');
@@ -273,6 +309,60 @@ export class DeferredTurnStore {
         WHERE id = ?
           AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
         RETURNING id
+      `),
+      // Lease renewal for a claim its live owner still holds (same token and
+      // epoch, still claimed). Never revives a claim another sweeper reset.
+      renewClaim: prepare(`
+        UPDATE deferred_turn_obligations
+        SET claim_expires_at = datetime('now', ?),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND status = 'claimed'
+          AND claim_token = ?
+          AND claim_epoch = ?
+        RETURNING id
+      `),
+      // A lapsed claim nobody re-claimed (the expiry sweep reset it; the epoch
+      // is unchanged) goes back to its original claimant. Attempts unchanged.
+      restoreLapsedClaim: prepare(`
+        UPDATE deferred_turn_obligations
+        SET status = 'claimed',
+            claim_token = ?,
+            claim_expires_at = datetime('now', ?),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND status = 'pending'
+          AND claim_token IS NULL
+          AND claim_epoch = ?
+        RETURNING id
+      `),
+      // An exhausted pending row can never be claimed again: close it so it
+      // stops blocking its queue. The caller settles the source.
+      terminalizeExhausted: prepare(`
+        UPDATE deferred_turn_obligations
+        SET status = 'terminal_quarantined',
+            terminal_reason = 'attempts_exhausted',
+            last_error_class = COALESCE(last_error_class, 'attempts_exhausted'),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND status = 'pending'
+          AND attempt_count >= ${DEFERRED_TURN_MAX_ATTEMPTS}
+        RETURNING inbound_seq, source_message_id, delivery_jid
+      `),
+      // Startup recovery with the deferred owner disabled: nothing will run or
+      // settle any open obligation. Committed rows are never labelled completed.
+      closeForDisabledOwner: prepare(`
+        UPDATE deferred_turn_obligations
+        SET terminal_reason = CASE status
+              WHEN 'dispatched_commit' THEN 'owner_disabled_after_commit'
+              ELSE 'owner_disabled'
+            END,
+            status = 'terminal_quarantined',
+            last_error_class = 'owner_disabled',
+            claim_token = NULL,
+            claim_expires_at = NULL,
+            updated_at = datetime('now')
+        WHERE ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
       `),
       expireStale: prepare(`
         UPDATE deferred_turn_obligations
@@ -351,10 +441,11 @@ export class DeferredTurnStore {
           )
         RETURNING terminal_reason
       `),
-      // FIFO against live input: the conversation's queue head is older than
-      // the given inbound and can still run (pending with attempts left,
-      // claimed, or committed and settling). An exhausted head cannot run, so
-      // it never holds live input back.
+      // FIFO against live input: ANY obligation of the conversation older than
+      // the given inbound that can still run (pending with attempts left,
+      // claimed, or committed and settling) — not only the queue head. An
+      // exhausted head cannot run and the drain closes it, but the runnable
+      // work queued behind it is still older than the live input.
       hasEligibleOpenHeadBefore: prepare(`
         SELECT 1 AS present FROM deferred_turn_obligations o
         WHERE o.scope = ?
@@ -362,12 +453,7 @@ export class DeferredTurnStore {
           AND o.inbound_seq < ?
           AND (o.status IN ('claimed', 'dispatched_commit')
             OR (o.status = 'pending' AND o.attempt_count < ${DEFERRED_TURN_MAX_ATTEMPTS}))
-          AND o.inbound_seq = (
-            SELECT MIN(h.inbound_seq) FROM deferred_turn_obligations h
-            WHERE h.scope = o.scope
-              AND (o.scope <> 'per_chat' OR h.conversation_key = o.conversation_key)
-              AND h.${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
-          )
+        LIMIT 1
       `),
       quarantinePreCommitForSource: prepare(`
         UPDATE deferred_turn_obligations
@@ -386,12 +472,13 @@ export class DeferredTurnStore {
   enqueueDeferredObligation(
     input: DeferredTurnEnqueueInput,
   ): { id: number; status: string; deduplicated: boolean } {
-    if (!input.replaySafe) {
+    const refusal = deferredTurnEnvelopeRefusal(input);
+    if (refusal === 'replay_unsafe') {
       throw new Error(
         'Deferred turn obligations accept only replay-safe envelopes — replay-unsafe turns keep the terminal path',
       );
     }
-    if (Buffer.byteLength(input.text, 'utf8') > TURN_RECOVERY_MAX_TEXT_BYTES) {
+    if (refusal === 'replay_text_oversize') {
       throw new Error(
         `Deferred turn replay text exceeds the ${TURN_RECOVERY_MAX_TEXT_BYTES}-byte envelope bound — refused, never truncated`,
       );
@@ -510,6 +597,66 @@ export class DeferredTurnStore {
     }
   }
 
+  /**
+   * Extend a claim its owner still holds (same token and epoch, still
+   * `claimed`). Returns false when the claim was lost: the sweep reset it, it
+   * was re-claimed, committed or closed.
+   */
+  renewClaim(id: number, fence: DeferredTurnClaimFence, ttlSeconds: number): boolean {
+    validateFenceShape(fence);
+    if (!Number.isSafeInteger(ttlSeconds)) {
+      throw new Error('Deferred turn claim ttlSeconds must be a safe integer');
+    }
+    return this.statements.renewClaim.get(`${ttlSeconds} seconds`, id, fence.claimToken, fence.claimEpoch) !== undefined;
+  }
+
+  /**
+   * Give a lapsed claim back to its original claimant: legal only while the
+   * row is `pending` with no claim and the SAME epoch (the expiry sweep reset
+   * it and nobody claimed it since). Returns false otherwise.
+   */
+  restoreLapsedClaim(id: number, fence: DeferredTurnClaimFence, ttlSeconds: number): boolean {
+    validateFenceShape(fence);
+    if (!Number.isSafeInteger(ttlSeconds)) {
+      throw new Error('Deferred turn claim ttlSeconds must be a safe integer');
+    }
+    return this.statements.restoreLapsedClaim.get(
+      fence.claimToken, `${ttlSeconds} seconds`, id, fence.claimEpoch,
+    ) !== undefined;
+  }
+
+  /**
+   * Close an exhausted `pending` row (no attempts left; nothing may claim it)
+   * `terminal_quarantined` / `attempts_exhausted`. Returns the source identity
+   * for the caller to settle, or null when the row is not an exhausted pending row.
+   */
+  terminalizeExhaustedHead(id: number): DeferredTurnClosedSource | null {
+    const row = this.statements.terminalizeExhausted.get(id) as
+      | { inbound_seq: number; source_message_id: string; delivery_jid: string }
+      | undefined;
+    return row
+      ? { inboundSeq: row.inbound_seq, sourceMessageId: row.source_message_id, deliveryJid: row.delivery_jid }
+      : null;
+  }
+
+  /**
+   * Startup recovery with the deferred owner disabled: close every
+   * non-terminal obligation (no fence; no process will run or settle it).
+   * Pre-commit rows close `owner_disabled`; `dispatched_commit` rows close
+   * `owner_disabled_after_commit` (replay vetoed, never completed). Returns the
+   * number of rows closed.
+   */
+  closeForDisabledOwner(): number {
+    return Number(this.statements.closeForDisabledOwner.run().changes ?? 0);
+  }
+
+  /** True when the obligation is in an absorbing state (or does not exist). */
+  isTerminal(id: number): boolean {
+    const row = this.statements.getStatus.get(id) as { status: string } | undefined;
+    return row === undefined
+      || (DEFERRED_TURN_TERMINAL_STATUSES as readonly string[]).includes(row.status);
+  }
+
   /** claimed rows whose claim TTL passed return to pending (attempts kept). */
   expireStaleClaims(scope: string): number {
     const result = this.statements.expireStale.run(scope);
@@ -578,15 +725,16 @@ export class DeferredTurnStore {
     return row.terminal_reason === 'completed' ? 'completed' : 'source_failed';
   }
 
-  /** True when an older, still runnable obligation heads this conversation's queue. */
+  /** True when an older, still runnable obligation of this conversation exists (FIFO against live input). */
   hasEligibleOpenHeadBefore(scope: string, conversationKey: string, inboundSeq: number): boolean {
     return this.statements.hasEligibleOpenHeadBefore.get(scope, conversationKey, inboundSeq) !== undefined;
   }
 
   /**
-   * Startup recovery with the deferred owner disabled: close every pre-commit
-   * obligation of the source (no fence; no process will run it). Returns the
-   * number of rows closed.
+   * Close every pre-commit (`pending` | `claimed`) obligation of the source
+   * without a fence. Used for an operator cancellation of a never-committed
+   * turn: it must win over any claim, stale or live. Never touches a
+   * `dispatched_commit` row. Returns the number of rows closed.
    */
   quarantinePreCommitForSource(inboundSeq: number, reason: string): number {
     validateErrorClass(reason);

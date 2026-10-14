@@ -513,7 +513,7 @@ describe('deferred turn obligations (#3295 S1)', () => {
       expect(inboundStatus(unowned)).toBe('failed');
     });
 
-    it('with the deferred owner disabled (flag off), crash recovery fails owned inbounds and quarantines their pre-commit obligations', () => {
+    it('with the deferred owner disabled (flag off), crash recovery fails owned inbounds and closes every open obligation, committed ones included', () => {
       const pending = journal('wamid-off-pending');
       const claimedSeq = journal('wamid-off-claimed', '15550100002');
       const committed = journal('wamid-off-committed', '15550100003');
@@ -521,7 +521,7 @@ describe('deferred turn obligations (#3295 S1)', () => {
       store.enqueueDeferredObligation(enqueueInput(claimedSeq, { conversationKey: '15550100002' }));
       store.claimNextEligible(SCOPE, { conversationKey: '15550100002', claimToken: 'claim-off', ttlSeconds: 300 });
       store.enqueueDeferredObligation(enqueueInput(committed, { conversationKey: '15550100003' }));
-      const { claimed: committedRow } = commitHead('claim-off-commit', '15550100003');
+      const { claimed: committedRow, fence: committedFence } = commitHead('claim-off-commit', '15550100003');
 
       // No argument: the owner is disabled, matching a runtime without the flag.
       new DurabilityEngine(db).preConnectRecovery();
@@ -533,10 +533,54 @@ describe('deferred turn obligations (#3295 S1)', () => {
       expect(rows).toEqual([
         { inbound_seq: pending, status: 'terminal_quarantined', terminal_reason: 'owner_disabled' },
         { inbound_seq: claimedSeq, status: 'terminal_quarantined', terminal_reason: 'owner_disabled' },
-        // Post-commit: replay is vetoed; it settles from its now-terminal source, never requeued.
-        { inbound_seq: committed, status: 'dispatched_commit', terminal_reason: null },
+        // Post-commit with no owner to settle it: closed quarantined (never left
+        // dispatched_commit, never completed); being terminal, never replayed.
+        { inbound_seq: committed, status: 'terminal_quarantined', terminal_reason: 'owner_disabled_after_commit' },
       ]);
-      expect(store.settleDispatchedObligation(committedRow.id)).toBe('source_failed');
+      expect(store.hasNonTerminalObligation(SCOPE, committed)).toBe(false);
+      expect(() => store.requeueClaim(committedRow.id, committedFence, 'replay_attempt')).toThrow();
+      expect(store.settleDispatchedObligation(committedRow.id)).toBeNull();
+    });
+
+    it('with the deferred owner disabled, a committed obligation whose source already completed or failed before the restart closes quarantined, never completed', () => {
+      const delivered = journal('wamid-off-delivered');
+      const failedEarlier = journal('wamid-off-failed', '15550100002');
+      store.enqueueDeferredObligation(enqueueInput(delivered));
+      store.enqueueDeferredObligation(enqueueInput(failedEarlier, { conversationKey: '15550100002' }));
+      commitHead('claim-off-delivered');
+      commitHead('claim-off-failed', '15550100002');
+      // The turns ran their course, but no owner settled the obligations before the stop.
+      engine.completeInbound(delivered, 'response_sent');
+      engine.markInboundFailed(failedEarlier);
+
+      new DurabilityEngine(db).preConnectRecovery({ deferredTurnOwnerEnabled: false });
+
+      expect(inboundStatus(delivered)).toBe('complete');
+      expect(inboundStatus(failedEarlier)).toBe('failed');
+      expect(db.raw.prepare(
+        'SELECT inbound_seq, status, terminal_reason FROM deferred_turn_obligations ORDER BY inbound_seq',
+      ).all()).toEqual([
+        { inbound_seq: delivered, status: 'terminal_quarantined', terminal_reason: 'owner_disabled_after_commit' },
+        { inbound_seq: failedEarlier, status: 'terminal_quarantined', terminal_reason: 'owner_disabled_after_commit' },
+      ]);
+    });
+
+    it('with the deferred owner enabled, crash recovery closes no obligation (the drain owns them)', () => {
+      const pending = journal('wamid-on-pending');
+      const committed = journal('wamid-on-committed', '15550100003');
+      store.enqueueDeferredObligation(enqueueInput(pending));
+      store.enqueueDeferredObligation(enqueueInput(committed, { conversationKey: '15550100003' }));
+      commitHead('claim-on-commit', '15550100003');
+
+      new DurabilityEngine(db).preConnectRecovery({ deferredTurnOwnerEnabled: true });
+
+      expect(inboundStatus(pending)).toBe('processing');
+      expect(db.raw.prepare(
+        'SELECT inbound_seq, status FROM deferred_turn_obligations ORDER BY inbound_seq',
+      ).all()).toEqual([
+        { inbound_seq: pending, status: 'pending' },
+        { inbound_seq: committed, status: 'dispatched_commit' },
+      ]);
     });
 
     it('reports an eligible older head only for the same conversation', () => {
@@ -553,6 +597,65 @@ describe('deferred turn obligations (#3295 S1)', () => {
         store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
       }
       expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, later)).toBe(false);
+    });
+
+    it('holds live input behind runnable work queued behind an exhausted head (no FIFO bypass)', () => {
+      const head = journal('wamid-fifo-x-head');
+      const behind = journal('wamid-fifo-x-behind');
+      const live = journal('wamid-fifo-x-live');
+      store.enqueueDeferredObligation(enqueueInput(head));
+      store.enqueueDeferredObligation(enqueueInput(behind));
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-fifo-xh${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds: 300 })!;
+        expect(row.inboundSeq).toBe(head);
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+      // The exhausted head cannot run, but `behind` is older than the live input and can.
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, live)).toBe(true);
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, behind)).toBe(false);
+    });
+
+    it('closes an exhausted pending head without a fence and never a runnable or claimed row', () => {
+      const exhausted = journal('wamid-exh-close');
+      const runnable = journal('wamid-exh-runnable', '15550100002');
+      store.enqueueDeferredObligation(enqueueInput(exhausted));
+      store.enqueueDeferredObligation(enqueueInput(runnable, { conversationKey: '15550100002' }));
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-exh${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds: 300 })!;
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+      const [exhaustedRow, runnableRow] = store.listOpenObligations(SCOPE);
+      expect(store.terminalizeExhaustedHead(runnableRow!.id)).toBeNull();
+      expect(store.terminalizeExhaustedHead(exhaustedRow!.id)).toEqual({
+        inboundSeq: exhausted, sourceMessageId: `wamid-deferred-${exhausted}`, deliveryJid: DELIVERY_JID,
+      });
+      expect(store.listOpenObligations(SCOPE).map((o) => o.inboundSeq)).toEqual([runnable]);
+    });
+
+    it('renews only a live claim and restores a lapsed claim only to its original claimant', () => {
+      const seq = journal('wamid-lease-store');
+      store.enqueueDeferredObligation(enqueueInput(seq));
+      const claimed = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: 'claim-lease', ttlSeconds: -1 })!;
+      const fence = { claimToken: 'claim-lease', claimEpoch: claimed.claimEpoch };
+      expect(store.renewClaim(claimed.id, { ...fence, claimToken: 'claim-other' }, 600)).toBe(false);
+      expect(store.renewClaim(claimed.id, fence, 600)).toBe(true);
+      expect(store.expireStaleClaims(SCOPE)).toBe(0);
+
+      db.raw.prepare("UPDATE deferred_turn_obligations SET claim_expires_at = datetime('now', '-1 seconds') WHERE id = ?").run(claimed.id);
+      expect(store.expireStaleClaims(SCOPE)).toBe(1);
+      // A swept claim is not renewed (renewal never revives it) ...
+      expect(store.renewClaim(claimed.id, fence, 600)).toBe(false);
+      // ... but its claimant may restore it while nobody re-claimed it.
+      expect(store.restoreLapsedClaim(claimed.id, { ...fence, claimEpoch: fence.claimEpoch + 1 }, 600)).toBe(false);
+      expect(store.restoreLapsedClaim(claimed.id, fence, 600)).toBe(true);
+      expect(store.listOpenObligations(SCOPE)[0]).toMatchObject({ status: 'claimed', attemptCount: 1 });
+      store.requeueClaim(claimed.id, fence, 'dispatch_failed');
+
+      // Once another claimant took it, the old claimant cannot restore it.
+      store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: 'claim-next', ttlSeconds: 600 });
+      expect(store.restoreLapsedClaim(claimed.id, fence, 600)).toBe(false);
     });
   });
 });

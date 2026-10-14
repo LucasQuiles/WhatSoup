@@ -855,6 +855,34 @@ describe('loadInstance — agentOptions: turnRecoveryCatchupReconcile validation
   });
 });
 
+describe('loadInstance — agentOptions: deferredTurnAdmission validation (#3295)', () => {
+  const deferredAgent = (name: string, block: unknown) => ({
+    name,
+    type: 'agent',
+    adminPhones: ['15551234567'],
+    accessMode: 'self_only',
+    agentOptions: { sessionScope: 'per_chat', deferredTurnAdmission: block },
+  });
+
+  it('preserves a valid block', () => {
+    writeInstance(path.join(tmpDir, 'config'), 'deferred-agent', deferredAgent('deferred-agent', { enabled: true }));
+
+    loadInstance('deferred-agent');
+    const parsed = JSON.parse(process.env.INSTANCE_CONFIG!);
+    expect(parsed.agentOptions.deferredTurnAdmission).toEqual({ enabled: true });
+  });
+
+  it.each([
+    ['string enabled', { enabled: 'true' }],
+    ['missing enabled', {}],
+    ['misspelled key', { enabled: true, enabeld: true }],
+    ['non-object', true],
+  ])('rejects %s', (_label, block) => {
+    writeInstance(path.join(tmpDir, 'config'), 'deferred-agent-bad', deferredAgent('deferred-agent-bad', block));
+    expect(() => loadInstance('deferred-agent-bad')).toThrow(/agentOptions\.deferredTurnAdmission/);
+  });
+});
+
 describe('loadInstance — agentOptions: sandboxPerChat requires per_chat scope', () => {
   it('rejects agent with sandboxPerChat:true and sessionScope:"shared"', () => {
     writeInstance(path.join(tmpDir, 'config'), 'sandbox-bad-scope', {

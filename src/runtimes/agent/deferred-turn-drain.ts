@@ -18,12 +18,23 @@
 //     and the provider is never called;
 //   - a turn that never reached the provider is released back to its
 //     obligation (fenced requeue, bounded by the store's attempt limit, then
-//     quarantined and the source finalized by the ordinary terminal path); a
-//     stale fence leaves the obligation with its current owner. The source
-//     inbound is never written on release;
+//     quarantined and the source failed honestly). An operator cancellation
+//     closes the obligation without a fence: it always wins over a claim. A
+//     claim that lapsed while the turn waited and that nobody re-claimed is
+//     restored to this claimant before the release decides, so neither a
+//     cancellation nor an exhausted attempt is swallowed into a replay;
+//   - every closure the drain makes itself settles or explicitly retains the
+//     source: an open source of a closed obligation is failed
+//     (`pre_dispatch_error`); a source another owner already settled is
+//     left as it is (never relabelled completed);
 //   - after the commit nothing is ever requeued: the ordinary terminal path
 //     owns the turn and the obligation closes once the source is terminal
 //     (`terminal_completed`, or `terminal_quarantined` / `source_failed`).
+// The drain renews the claim of every turn it still has in a chat queue on
+// each pass (before the expiry sweep), so a turn waiting longer than the claim
+// TTL keeps its claim: it is neither replayed nor overtaken by live input. An
+// exhausted head (no attempts left, e.g. a dead process's last claim expired)
+// is closed so it never blocks its chat.
 // Runs at start, after a dispatch made progress, on request (FIFO deferral of
 // live input) and on a slow backstop timer (lost signals, cleared blockers,
 // spaced retries).
@@ -36,7 +47,9 @@ import { createChildLogger } from '../../logger.ts';
 import type { DurabilityEngine } from '../../core/durability.ts';
 import {
   DEFERRED_TURN_MAX_ATTEMPTS,
+  DeferredTurnClaimFenceError,
   type DeferredTurnClaimFence,
+  type DeferredTurnClosedSource,
   type DeferredTurnObligation,
   type DeferredTurnOpenHead,
   type DeferredTurnStore,
@@ -100,8 +113,11 @@ export class DeferredTurnDrain {
   private pass: Promise<void> | null = null;
   private rescan = false;
   private stopped = true;
-  /** Conversations with a drained turn in their TurnQueue: one per drain queue. */
-  private readonly inFlight = new Set<string>();
+  /**
+   * Conversations with a drained turn in their TurnQueue (one per drain queue),
+   * with the claim each pass renews until the turn commits or is released.
+   */
+  private readonly inFlight = new Map<string, { readonly id: number; readonly fence: DeferredTurnClaimFence }>();
 
   constructor(deps: DeferredTurnDrainDeps) {
     this.deps = deps;
@@ -159,6 +175,11 @@ export class DeferredTurnDrain {
     const durability = this.deps.getDurability();
     if (!durability) return;
     const store = durability.deferredTurns;
+    // Live claims first: a turn still waiting in its chat queue keeps its claim
+    // (a committed or released one is no longer claimed, so this is a no-op).
+    for (const { id, fence } of this.inFlight.values()) {
+      store.renewClaim(id, fence, DEFERRED_TURN_CLAIM_TTL_SECONDS);
+    }
     store.expireStaleClaims(DRAIN_SCOPE);
     for (const head of store.listOpenHeads(DRAIN_SCOPE)) {
       if (!this.canDispatch()) return;
@@ -169,8 +190,33 @@ export class DeferredTurnDrain {
         if (store.settleDispatchedObligation(head.id) !== null) this.rescan = true;
         continue;
       }
-      if (head.status !== 'pending' || head.attemptCount >= DEFERRED_TURN_MAX_ATTEMPTS) continue;
+      if (head.status !== 'pending') continue;
+      if (head.attemptCount >= DEFERRED_TURN_MAX_ATTEMPTS) {
+        // Nothing may claim it again: close it (and fail its open source) so
+        // the obligations queued behind it can run.
+        const closed = store.terminalizeExhaustedHead(head.id);
+        if (closed !== null) {
+          this.failOpenSource(durability, closed);
+          log.warn({ reason: 'attempts_exhausted' }, 'deferred turn quarantined: exhausted head closed before dispatch');
+          this.rescan = true;
+        }
+        continue;
+      }
       this.claimAndEnqueue(head, durability, store);
+    }
+  }
+
+  /**
+   * A drain-owned closure of a never-dispatched obligation: if its source is
+   * still open, nothing else owns it, so fail it honestly (`pre_dispatch_error`).
+   * A source another owner already settled keeps its own terminal state.
+   */
+  private failOpenSource(durability: DurabilityEngine, source: DeferredTurnClosedSource): void {
+    if (!durability.deferredTurns.isSourceOpen(source.inboundSeq)) return;
+    if (!durability.markInboundFailedIfProcessing(
+      source.inboundSeq, source.sourceMessageId, source.deliveryJid, 'pre_dispatch_error',
+    )) {
+      log.warn({ reason: 'source_not_processing' }, 'deferred turn source could not be failed — left with its current owner');
     }
   }
 
@@ -194,13 +240,16 @@ export class DeferredTurnDrain {
     const fence: DeferredTurnClaimFence = { claimToken, claimEpoch: obligation.claimEpoch };
     const dispatch = this.createDispatch(obligation, fence, store);
     if (!store.isSourceOpen(obligation.inboundSeq)) {
-      // Another owner settled the inbound: nothing is owed by this lane.
+      // Another owner settled the inbound (its own terminal state stands):
+      // nothing is owed by this lane and nothing is written to the source.
       store.terminalizeQuarantined(obligation.id, fence, 'source_not_open');
       this.rescan = true;
       return;
     }
     if (obligation.contentType !== 'text' || obligation.deliveryJid === '' || obligation.text.trim() === '') {
+      // Never dispatchable: close the obligation and fail its open source.
       store.terminalizeQuarantined(obligation.id, fence, 'unsupported_envelope');
+      this.failOpenSource(durability, obligation);
       this.rescan = true;
       return;
     }
@@ -232,7 +281,8 @@ export class DeferredTurnDrain {
     }
     // A pre-boundary retry waits for the backstop timer: retries are spaced, not spun.
     if (!runtimeContext) {
-      dispatch.release('context_unavailable');
+      // `terminal`: attempts spent — the drain owns the source (no runtime turn exists).
+      if (dispatch.release('context_unavailable') === 'terminal') this.failOpenSource(durability, obligation);
       return;
     }
     const turn: QueuedTurn = {
@@ -250,13 +300,14 @@ export class DeferredTurnDrain {
       runtimeContext,
       inboundSeq: obligation.inboundSeq,
     };
-    this.inFlight.add(obligation.conversationKey);
+    this.inFlight.set(obligation.conversationKey, { id: obligation.id, fence });
     try {
       // Rejection by the queue releases the turn through the coordinator.
       this.deps.enqueueTurn(target.mapKey, turn, dispatch);
     } catch (err) {
       log.warn({ errorClass: errorClassOf(err) }, 'deferred turn queue admission failed');
-      dispatch.release('enqueue_failed');
+      // `terminal`: attempts spent — the turn never ran, so the drain owns the source.
+      if (dispatch.release('enqueue_failed') === 'terminal') this.failOpenSource(durability, obligation);
     }
   }
 
@@ -284,11 +335,19 @@ export class DeferredTurnDrain {
       },
       release: (errorClass) => {
         if (!close()) return 'retained';
-        try {
-          if (errorClass === 'operator_cancelled') {
-            store.terminalizeQuarantined(id, fence, 'operator_cancelled');
-            return 'terminal';
+        if (errorClass === 'operator_cancelled') {
+          // Unfenced pre-commit close: a cancellation always wins over a claim
+          // (stale or live), so the cancelled text is never replayed. The
+          // ordinary undispatched terminal path then fails the source; if this
+          // write fails, that closed source still keeps the drain from replaying.
+          try {
+            store.quarantinePreCommitForSource(inboundSeq, 'operator_cancelled');
+          } catch (err) {
+            log.warn({ errorClass: errorClassOf(err) }, 'deferred turn cancellation could not close its obligation');
           }
+          return 'terminal';
+        }
+        const decide = (): 'retained' | 'terminal' => {
           if (!store.isSourceOpen(inboundSeq)) {
             store.terminalizeQuarantined(id, fence, 'source_settled_without_dispatch');
             return 'retained';
@@ -301,10 +360,26 @@ export class DeferredTurnDrain {
           store.requeueClaim(id, fence, errorClass);
           log.info({ errorClass }, 'deferred turn returned to its obligation before the provider boundary');
           return 'retained';
+        };
+        try {
+          try {
+            return decide();
+          } catch (err) {
+            if (!(err instanceof DeferredTurnClaimFenceError)) throw err;
+          }
+          // Stale fence: the claim lapsed while the turn waited. If nobody
+          // re-claimed it (same epoch) it is still this claimant's to decide.
+          if (store.restoreLapsedClaim(id, fence, DEFERRED_TURN_CLAIM_TTL_SECONDS)) return decide();
+          // Another owner closed it: the obligation no longer owns an open
+          // source, so the ordinary terminal path does. Otherwise another
+          // claimant holds it and owns the source.
+          const outcome = store.isTerminal(id) && store.isSourceOpen(inboundSeq) ? 'terminal' : 'retained';
+          log.warn({ outcome }, 'deferred turn release found the obligation with another owner');
+          return outcome;
         } catch (err) {
-          // Stale fence: the expiry sweep or another claimant owns the
-          // obligation now. The source stays open and recoverable there.
-          log.warn({ errorClass: errorClassOf(err) }, 'deferred turn release kept the obligation with its current owner');
+          // Not an ownership change (e.g. a storage fault): the claim stays and
+          // its expiry returns the obligation for a counted retry.
+          log.warn({ errorClass: errorClassOf(err) }, 'deferred turn release failed — the claim expires into a counted retry');
           return 'retained';
         }
       },

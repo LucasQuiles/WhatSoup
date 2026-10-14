@@ -224,6 +224,7 @@ import { ProbeErrorThrottle } from '../../lib/probe-error-throttle.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import { QueuedTurnReceiptNotifier } from './runtime-queued-receipt.ts';
 import {
+  FRESH_TURN_REPLAY_SAFE,
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
 } from './runtime-turn-context.ts';
@@ -4757,6 +4758,9 @@ export class AgentRuntime implements Runtime {
         && this.deferredTurnAdmissionEnabled() && this.durability !== null,
       msg,
       classification: initialClassification?.type,
+      // The envelope the handoff would store: a fresh turn's text (plain
+      // messages are forwarded unchanged) under the store's own contract.
+      replay: { replaySafe: FRESH_TURN_REPLAY_SAFE, text: msg.content },
     })) return Promise.reject(new RuntimeAdmissionClosedError());
     const tracksRouteRecycle = (
       initialClassification?.type === 'local'

@@ -31,7 +31,7 @@ describe('prepared statement caching', () => {
     // checkpoint identity and the #3295 S3 deferred-turn drain/recovery SQL.
     // Recovery and lifecycle methods must reuse those statements without
     // preparing more.
-    expect(prepareSpy).toHaveBeenCalledTimes(174);
+    expect(prepareSpy).toHaveBeenCalledTimes(178);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
