@@ -42,6 +42,11 @@ _ENV_KEYS = [
     "BOT_ERRORS_AUTOCLOSE_REOPEN_WINDOW_SECONDS",
     "BOT_ERRORS_AUTOCLOSE_LIVENESS_GATE",
     "BOT_ERRORS_AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
 ]
 
 
@@ -50,6 +55,10 @@ _clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
 
 def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+    os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+        state_dir / "test-incident-authority.jsonl"
+    )
     # Force immediate (non-coalesced) digest so the single sweep emits it.
     os.environ.setdefault("BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS", "0")
     for k, v in (extra_env or {}).items():
