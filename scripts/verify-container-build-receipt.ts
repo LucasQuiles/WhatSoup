@@ -87,6 +87,7 @@ const IN_TOTO_STATEMENT_V1 = 'https://in-toto.io/Statement/v1';
 const SLSA_V1_PREDICATE = 'https://slsa.dev/provenance/v1';
 const SPDX_PREDICATE = 'https://spdx.dev/Document';
 const BUILDKIT_SLSA_V1_BUILD_TYPE = 'https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md';
+const BUILDKIT_SLSA_V02_BUILD_TYPE = 'https://mobyproject.org/buildkit@v1';
 
 interface OciDescriptor {
   mediaType?: unknown;
@@ -118,6 +119,16 @@ interface OciVerificationResult {
   imageManifestSize: number;
   slsaStatementSha256: string;
   spdxStatementSha256: string;
+}
+
+interface ProvenanceBinding {
+  builderId: string;
+  configSource: {
+    uri: string;
+    digest: { sha1: string };
+    path: string;
+  };
+  dependencies: string[];
 }
 
 function sha256(contents: Buffer): string {
@@ -283,7 +294,73 @@ function hasResolvedDependency(
   ));
 }
 
-function assertSlsaPredicate(predicate: unknown, expected: OciVerificationExpectation): void {
+function provenanceDependencies(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label} must be a non-empty array`);
+  const dependencies = value.map((dependency, index) => {
+    if (!isRecord(dependency) || typeof dependency.uri !== 'string' || dependency.uri.length === 0 || !isRecord(dependency.digest)) {
+      throw new Error(`${label}[${index}] must contain a URI and digest`);
+    }
+    const digest: Record<string, string> = {};
+    for (const algorithm of Object.keys(dependency.digest).sort()) {
+      const value = dependency.digest[algorithm];
+      if (
+        typeof value !== 'string'
+        || (algorithm === 'sha1' && !/^[a-f0-9]{40}$/.test(value))
+        || (algorithm === 'sha256' && !/^[a-f0-9]{64}$/.test(value))
+        || (algorithm !== 'sha1' && algorithm !== 'sha256')
+      ) {
+        throw new Error(`${label}[${index}] contains an unsupported digest`);
+      }
+      digest[algorithm] = value;
+    }
+    if (Object.keys(digest).length === 0) throw new Error(`${label}[${index}] must contain a digest`);
+    return stableJson({ uri: dependency.uri, digest });
+  }).sort();
+  if (new Set(dependencies).size !== dependencies.length) throw new Error(`${label} contains a duplicate dependency`);
+  return dependencies;
+}
+
+function assertBuildxProvenance(
+  provenance: unknown,
+  expected: OciVerificationExpectation,
+): ProvenanceBinding {
+  if (!isRecord(provenance) || provenance.buildType !== BUILDKIT_SLSA_V02_BUILD_TYPE) {
+    throw new Error('Buildx metadata provenance is not the reviewed BuildKit SLSA v0.2 definition');
+  }
+  if (!isRecord(provenance.builder) || provenance.builder.id !== expected.provenanceBuilderId) {
+    throw new Error('Buildx metadata builder id does not match the reviewed workflow invocation');
+  }
+  if (!isRecord(provenance.invocation) || !isRecord(provenance.invocation.configSource)) {
+    throw new Error('Buildx metadata provenance is missing config source');
+  }
+  if (!isRecord(provenance.buildConfig) || !isRecord(provenance.metadata)) {
+    throw new Error('Buildx metadata provenance is missing build config or metadata');
+  }
+  const configSource = provenance.invocation.configSource;
+  if (!isRecord(configSource.digest) || configSource.digest.sha1 !== expected.sourceRevision) {
+    throw new Error('Buildx metadata config source revision does not match requested source revision');
+  }
+  if (configSource.uri !== `${expected.sourceRepository}#${expected.sourceRevision}`) {
+    throw new Error('Buildx metadata config source repository does not match the reviewed remote context');
+  }
+  if (configSource.entryPoint !== 'docker/Dockerfile') {
+    throw new Error('Buildx metadata config source path is not docker/Dockerfile');
+  }
+  return {
+    builderId: provenance.builder.id,
+    configSource: {
+      uri: configSource.uri,
+      digest: { sha1: configSource.digest.sha1 },
+      path: configSource.entryPoint,
+    },
+    dependencies: provenanceDependencies(provenance.materials, 'Buildx metadata materials'),
+  };
+}
+
+function assertSlsaPredicate(
+  predicate: unknown,
+  expected: OciVerificationExpectation,
+): ProvenanceBinding {
   if (!isRecord(predicate) || !isRecord(predicate.buildDefinition) || !isRecord(predicate.runDetails)) {
     throw new Error('SLSA provenance predicate is missing build definition or run details');
   }
@@ -308,6 +385,18 @@ function assertSlsaPredicate(predicate: unknown, expected: OciVerificationExpect
   if (!isRecord(runDetails.builder) || runDetails.builder.id !== expected.provenanceBuilderId) {
     throw new Error('SLSA provenance builder id does not match the reviewed workflow invocation');
   }
+  return {
+    builderId: runDetails.builder.id,
+    configSource: {
+      uri: configSource.uri as string,
+      digest: { sha1: configSource.digest.sha1 as string },
+      path: configSource.path as string,
+    },
+    dependencies: provenanceDependencies(
+      buildDefinition.resolvedDependencies,
+      'SLSA resolved dependencies',
+    ),
+  };
 }
 
 /**
@@ -361,6 +450,8 @@ export function verifyOciArchiveAttestations(
 
   let slsaStatementSha256: string | undefined;
   let spdxStatementSha256: string | undefined;
+  let slsaStatementCount = 0;
+  let spdxStatementCount = 0;
   for (const descriptor of attestationDescriptors) {
     if (annotations(descriptor)['vnd.docker.reference.digest'] !== imageDigest) continue;
     if (descriptor.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('OCI image archive attestation descriptor has an unexpected media type');
@@ -387,13 +478,23 @@ export function verifyOciArchiveAttestations(
         throw new Error('OCI image archive attestation layer predicate annotation does not match statement payload');
       }
       if (statement.predicateType === SLSA_V1_PREDICATE) {
+        slsaStatementCount += 1;
+        if (slsaStatementCount > 1) throw new Error('OCI image archive has multiple SLSA provenance predicates');
         if (expected) {
-          assertSlsaPredicate(statement.predicate, expected);
-          if (stableJson(expected.buildxProvenance) !== stableJson(statement.predicate)) throw new Error('Buildx metadata provenance does not match verified SLSA statement');
+          const slsaBinding = assertSlsaPredicate(statement.predicate, expected);
+          const buildxBinding = assertBuildxProvenance(expected.buildxProvenance, expected);
+          if (stableJson(buildxBinding.dependencies) !== stableJson(slsaBinding.dependencies)) {
+            throw new Error('Buildx metadata materials do not match verified SLSA dependencies');
+          }
+          if (stableJson(buildxBinding) !== stableJson(slsaBinding)) {
+            throw new Error('Buildx metadata provenance binding does not match verified SLSA statement');
+          }
         }
         slsaStatementSha256 = sha256(layerBytes);
       }
       if (statement.predicateType === SPDX_PREDICATE) {
+        spdxStatementCount += 1;
+        if (spdxStatementCount > 1) throw new Error('OCI image archive has multiple SPDX SBOM predicates');
         assertSpdxPredicate(statement.predicate);
         spdxStatementSha256 = sha256(layerBytes);
       }

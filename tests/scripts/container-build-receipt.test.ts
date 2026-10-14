@@ -69,7 +69,7 @@ function makeReceiptInput(options: {
   });
   writeFileSync(metadataPath, JSON.stringify({
     'containerimage.digest': oci.outputDigest,
-    'buildx.build.provenance': options.provenance ?? oci.provenance,
+    'buildx.build.provenance': options.provenance ?? oci.buildxProvenance,
   }));
   writeFileSync(sbomPath, JSON.stringify({ spdxVersion: 'SPDX-2.3' }));
   return {
@@ -99,6 +99,8 @@ interface OciArchiveOptions {
   predicateType?: string;
   includeSlsa?: boolean;
   includeSpdx?: boolean;
+  duplicateSlsa?: boolean;
+  duplicateSpdx?: boolean;
   corruptAttestationSize?: boolean;
   corruptLayerDigest?: boolean;
   directLayout?: boolean;
@@ -111,7 +113,7 @@ interface OciArchiveOptions {
 function writeOciArchive(
   archivePath: string,
   options: OciArchiveOptions = {},
-): { imageDigest: string; outputDigest: string; provenance: Record<string, unknown> } {
+): { imageDigest: string; outputDigest: string; buildxProvenance: Record<string, unknown> } {
   const layout = tmp.make('oci-layout');
   const blobs = path.join(layout, 'blobs/sha256');
   mkdirSync(blobs, { recursive: true });
@@ -130,25 +132,46 @@ function writeOciArchive(
   }));
   const imageDigest = runnable.digest;
   const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
+  const sourceRepository = options.sourceRepository ?? SOURCE_REPOSITORY;
+  const sourceUri = `${sourceRepository}#${sourceRevision}`;
+  const provenanceBuilderId = options.provenanceBuilderId ?? PROVENANCE_BUILDER_ID;
+  const resolvedDependencies = [{
+    uri: options.baseImageDependency ?? BASE_IMAGE_DEPENDENCY,
+    digest: { sha256: options.baseImageDigest ?? BASE_IMAGE_DIGEST },
+  }, {
+    uri: options.sbomGeneratorDependency ?? SBOM_GENERATOR_DEPENDENCY,
+    digest: { sha256: options.sbomGeneratorDigest ?? SBOM_GENERATOR_DIGEST },
+  }, {
+    uri: sourceUri,
+    digest: { sha1: sourceRevision },
+  }];
   const provenance = {
     buildDefinition: {
       buildType: 'https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md',
       externalParameters: {
         configSource: {
-          uri: `${options.sourceRepository ?? SOURCE_REPOSITORY}#${sourceRevision}`,
+          uri: sourceUri,
           digest: { sha1: sourceRevision },
           path: 'docker/Dockerfile',
         },
       },
-      resolvedDependencies: [{
-        uri: options.baseImageDependency ?? BASE_IMAGE_DEPENDENCY,
-        digest: { sha256: options.baseImageDigest ?? BASE_IMAGE_DIGEST },
-      }, {
-        uri: options.sbomGeneratorDependency ?? SBOM_GENERATOR_DEPENDENCY,
-        digest: { sha256: options.sbomGeneratorDigest ?? SBOM_GENERATOR_DIGEST },
-      }],
+      resolvedDependencies,
     },
-    runDetails: { builder: { id: options.provenanceBuilderId ?? PROVENANCE_BUILDER_ID } },
+    runDetails: { builder: { id: provenanceBuilderId } },
+  };
+  const buildxProvenance = {
+    builder: { id: provenanceBuilderId },
+    buildType: 'https://mobyproject.org/buildkit@v1',
+    invocation: {
+      configSource: {
+        uri: sourceUri,
+        digest: { sha1: sourceRevision },
+        entryPoint: 'docker/Dockerfile',
+      },
+    },
+    materials: resolvedDependencies,
+    metadata: {},
+    buildConfig: {},
   };
   const statementSubjectDigest = options.statementSubjectDigest ?? imageDigest.slice('sha256:'.length);
   const statementPredicateType = options.predicateType ?? 'https://slsa.dev/provenance/v1';
@@ -176,13 +199,21 @@ function writeOciArchive(
         mediaType: 'application/vnd.in-toto+json',
         ...statement,
         annotations: { 'in-toto.io/predicate-type': options.predicateAnnotation ?? 'https://slsa.dev/provenance/v1' },
-      }]),
+      }, ...(options.duplicateSlsa ? [{
+        mediaType: 'application/vnd.in-toto+json',
+        ...statement,
+        annotations: { 'in-toto.io/predicate-type': options.predicateAnnotation ?? 'https://slsa.dev/provenance/v1' },
+      }] : [])]),
       ...(options.includeSpdx === false ? [] : [{
         mediaType: 'application/vnd.in-toto+json',
         digest: options.corruptLayerDigest ? `sha256:${'f'.repeat(64)}` : sbomStatement.digest,
         size: sbomStatement.size,
         annotations: { 'in-toto.io/predicate-type': 'https://spdx.dev/Document' },
-      }]),
+      }, ...(options.duplicateSpdx ? [{
+        mediaType: 'application/vnd.in-toto+json',
+        ...sbomStatement,
+        annotations: { 'in-toto.io/predicate-type': 'https://spdx.dev/Document' },
+      }] : [])]),
     ],
   });
   const attestation = writeBlob(manifest);
@@ -225,7 +256,7 @@ function writeOciArchive(
   return {
     imageDigest,
     outputDigest: options.directLayout ? imageDigest : outputIndex.digest,
-    provenance,
+    buildxProvenance,
   };
 }
 
@@ -385,6 +416,32 @@ describe('container build evidence CI contract', () => {
     );
   });
 
+  it('refuses Buildx SLSA v0.2 metadata with a substituted source path', () => {
+    const input = makeReceiptInput();
+    const metadata = JSON.parse(readFileSync(input.metadataPath, 'utf8')) as {
+      'buildx.build.provenance': { invocation: { configSource: { entryPoint: string } } };
+    };
+    metadata['buildx.build.provenance'].invocation.configSource.entryPoint = 'Dockerfile';
+    writeFileSync(input.metadataPath, JSON.stringify(metadata));
+
+    expect(() => createContainerBuildReceipt(input)).toThrow(
+      'Buildx metadata config source path is not docker/Dockerfile',
+    );
+  });
+
+  it('refuses Buildx SLSA v0.2 materials that diverge from the SLSA v1 dependencies', () => {
+    const input = makeReceiptInput();
+    const metadata = JSON.parse(readFileSync(input.metadataPath, 'utf8')) as {
+      'buildx.build.provenance': { materials: unknown[] };
+    };
+    metadata['buildx.build.provenance'].materials = metadata['buildx.build.provenance'].materials.slice(1);
+    writeFileSync(input.metadataPath, JSON.stringify(metadata));
+
+    expect(() => createContainerBuildReceipt(input)).toThrow(
+      'Buildx metadata materials do not match verified SLSA dependencies',
+    );
+  });
+
   it('refuses a builder identity outside the reviewed policy', () => {
     expect(() => createContainerBuildReceipt(makeReceiptInput({ builder: 'unreviewed|docker' }))).toThrow(
       'builder identity does not match docker/container-inputs.json',
@@ -434,6 +491,22 @@ describe('container build evidence CI contract', () => {
       `OCI image archive has no SLSA provenance predicate for ${imageDigest}`,
     );
     expect(missingProvenanceArchive.imageDigest).toBe(imageDigest);
+  });
+
+  it('rejects ambiguous duplicate SLSA and SPDX predicate layers', () => {
+    const duplicateSlsa = makeReceiptInput();
+    const duplicateSlsaArchive = writeOciArchive(duplicateSlsa.imagePath, { duplicateSlsa: true });
+    expect(() => verifyOciArchiveAttestations(
+      duplicateSlsa.imagePath,
+      duplicateSlsaArchive.outputDigest,
+    )).toThrow('OCI image archive has multiple SLSA provenance predicates');
+
+    const duplicateSpdx = makeReceiptInput();
+    const duplicateSpdxArchive = writeOciArchive(duplicateSpdx.imagePath, { duplicateSpdx: true });
+    expect(() => verifyOciArchiveAttestations(
+      duplicateSpdx.imagePath,
+      duplicateSpdxArchive.outputDigest,
+    )).toThrow('OCI image archive has multiple SPDX SBOM predicates');
   });
 
   it('accepts the direct OCI layout form while rejecting ambiguous output and runnable descriptors', () => {
