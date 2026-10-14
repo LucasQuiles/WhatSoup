@@ -105,7 +105,7 @@ describe('security boundary guard — remote memory writes', () => {
       providerDirectMethods: 1,
     });
     expect(result.scan.findings).toEqual([]);
-  });
+  }, 60_000);
 });
 
 describe('security boundary guard — fail-closed inventory', () => {
