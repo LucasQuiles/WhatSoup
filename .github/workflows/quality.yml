@@ -121,27 +121,14 @@ jobs:
           set -euo pipefail
           container_dir="$RUNNER_TEMP/whatsoup-container"
           mkdir -p "$container_dir"
-          expected_builder="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.builder.name + "|" + policy.builder.driver)')"
-          expected_buildx_version="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.buildx.version)')"
-          expected_buildkit_version="$(node -e 'const policy = require("./docker/container-inputs.json"); const prefix = "moby/buildkit:"; const image = policy.buildx.buildkitImage; if (!image.startsWith(prefix)) process.exit(1); process.stdout.write(image.slice(prefix.length).split("@", 1)[0])')"
           platform="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.platform)')"
           sbom_generator="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sbom.generator)')"
-          builder="$(docker buildx inspect whatsoup-ci-builder --format '{{.Name}}|{{.Driver}}')"
-          if [ "$builder" != "$expected_builder" ]; then
-            echo "::error::Buildx builder differs from reviewed policy: expected $expected_builder, got $builder"
-            exit 1
-          fi
-          buildx_version="$(docker buildx version | awk '{print $2}')"
-          if [ "$buildx_version" != "$expected_buildx_version" ]; then
-            echo "::error::Buildx version differs from reviewed policy: expected $expected_buildx_version, got $buildx_version"
-            exit 1
-          fi
-          buildkit_version="$(docker buildx inspect whatsoup-ci-builder --bootstrap | awk '/^[[:space:]]*Build[Kk]it(:| version:)/ {print $NF; exit}')"
-          if [ "$buildkit_version" != "$expected_buildkit_version" ]; then
-            echo "::error::BuildKit version differs from reviewed policy: expected $expected_buildkit_version, got $buildkit_version"
-            exit 1
-          fi
-          builder_name="${builder%%|*}"
+          # Buildx v0.38.0 inspect has no format flag. Parse its supported text
+          # interface and fail closed on missing, duplicate, or drifted fields.
+          builder_name="$(
+            bash scripts/run-with-pinned-node.sh scripts/verify-buildx-runtime.ts \
+              --repo-root "$GITHUB_WORKSPACE"
+          )"
           if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
             source_repository="$SOURCE_REPOSITORY"
           else
