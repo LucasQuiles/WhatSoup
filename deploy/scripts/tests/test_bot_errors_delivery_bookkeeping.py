@@ -53,6 +53,10 @@ _ENV_KEYS = [
     "BOT_ERRORS_TRANSIENT_SOURCES",
     "BOT_ERRORS_DRY_SEND_CAPTURE",
     "BOT_ERRORS_DRY_SEND_FAIL",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
     "BOT_ERRORS_OWNER_ROUTE_JID",
     "BOT_ERRORS_OWNER_ROUTE_SOCKET",
 ]
@@ -98,6 +102,10 @@ class _Bench:
     def __init__(self, tmp_path: Path, *, adopted: bool = True, env: dict[str, str] | None = None) -> None:
         state_dir = tmp_path / "state"
         os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+        os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+        os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+            state_dir / "test-incident-authority.jsonl"
+        )
         for name, value in (env or {}).items():
             os.environ[name] = value
         (state_dir / "logs").mkdir(parents=True, exist_ok=True)
