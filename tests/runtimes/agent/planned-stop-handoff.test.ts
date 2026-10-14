@@ -28,10 +28,15 @@
 // route before rollout.
 //
 // Status: T2, T3a and T4 are plain assertions, fixed by the bounded
-// planned-stop drain and the loss report (planned-stop-drain.ts). T1, T1b,
-// T3b, T5a and T5b stay `it.fails`: they need a durable owner that dispatches a
-// handed-off turn on the next start, and the #3295 deferred-obligation drain
-// consumer that would do it does not exist yet.
+// planned-stop drain and the loss report (planned-stop-drain.ts). T1, T3b, T5a
+// and T5b are plain assertions behind the #3295 `deferredTurnAdmission` flag:
+// the stop hands a queued, never-dispatched turn to the durable deferred-turn
+// owner, and the S3 drain (deferred-turn-drain.ts) dispatches it on the next
+// start, committing `dispatched_commit` before the provider send. T1b stays
+// `it.fails`: a message that reaches handleMessage after shutdown began is
+// still rejected (ingest then fails it), because handing it off would need the
+// admission pipeline (classification, commands, session/journal identity) to
+// run during teardown. That is a separate decision, not part of the drain.
 //
 // RED convention (scheduled-turn-lifecycle.test.ts): each probe asserts the
 // DESIRED property and is committed as `it.fails` while main lacks it; landing
@@ -363,6 +368,13 @@ const senderJid = dmJid;
 type PlannedStopOptions = AgentRuntimeOptions & { plannedStopDrainMs?: number };
 const SHORT_DRAIN_MS = 150;
 const LONG_DRAIN_MS = 3_000;
+/**
+ * The handoff and its drain live behind the #3295 `deferredTurnAdmission`
+ * flag (default OFF). Every process generation of a handoff case opts in, so
+ * the drain that dispatches the obligation runs on the next start. Cases
+ * without it pin the flag-OFF behaviour (T3a, T4: the stop fails the turn).
+ */
+const HANDOFF: PlannedStopOptions = { deferredTurnAdmission: { enabled: true } };
 
 /**
  * Structured timing exemption (test-integrity `js-sleep-in-test`): T2 must
@@ -522,8 +534,8 @@ describe('planned stop handoff (#3703)', () => {
 
   // ─── T1: never-dispatched turn → durable handoff → dispatched once on next start ───
 
-  it.fails('T1: a turn admitted behind an in-flight turn (after a quiet stop-check) is handed off, not failed, and the next start dispatches it exactly once', async () => {
-    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+  it('T1: a turn admitted behind an in-flight turn (after a quiet stop-check) is handed off, not failed, and the next start dispatches it exactly once', async () => {
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await arriveInFlight(a.runtime, a.engine, 'wamid-t1-head', 't1 head question');
     const follower = await arriveQueuedBehind(a.runtime, a.engine, 'wamid-t1-follower', 't1 follower question');
 
@@ -540,7 +552,7 @@ describe('planned stop handoff (#3703)', () => {
     // Next start: startup recovery must not fail-mark the owned inbound, and the
     // owner dispatches it exactly once.
     const before = sessionDoubles.length;
-    const b = startProcess();
+    const b = startProcess(HANDOFF);
     expect(status(follower)).toBe('processing');
     await vi.waitFor(() => expect(dispatchesOf('t1 follower question', sessionDoubles.slice(before))).toBe(1), { timeout: 3_000 });
     const session = sessionDoubles.slice(before).find((candidate) => candidate.turnInFlight)!;
@@ -551,8 +563,9 @@ describe('planned stop handoff (#3703)', () => {
     expect(dispatchesOf('t1 follower question')).toBe(1);
   });
 
+  // Still red: handleMessage rejects once shutdown began (see the header).
   it.fails('T1b: a message handed to the runtime while shutdown is draining is handed off (not rejected / failed)', async () => {
-    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await arriveInFlight(a.runtime, a.engine, 'wamid-t1b-head', 't1b head question');
     const stopping = a.runtime.shutdown().catch(() => {});
     // Arrives on the still-open socket during the runtime phase of shutdown
@@ -609,8 +622,8 @@ describe('planned stop handoff (#3703)', () => {
     expect(error).not.toBeNull();
   });
 
-  it.fails('T3b: when the durable handoff write fails, the undispatched turn stays failed_terminal and shutdown rejects', async () => {
-    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+  it('T3b: when the durable handoff write fails, the undispatched turn stays failed_terminal and shutdown rejects', async () => {
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     const { session } = await arriveInFlight(a.runtime, a.engine, 'wamid-t3b-head', 't3b head question');
     const follower = await arriveQueuedBehind(a.runtime, a.engine, 'wamid-t3b-follower', 't3b follower question');
     vi.spyOn(a.engine.deferredTurns, 'enqueueDeferredObligation').mockImplementation(() => {
@@ -721,14 +734,14 @@ describe('planned stop handoff (#3703)', () => {
 
   // ─── T5: exactly-once across two starts ───
 
-  it.fails('T5a: after a handoff, two consecutive starts dispatch the inbound exactly once in total', async () => {
-    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+  it('T5a: after a handoff, two consecutive starts dispatch the inbound exactly once in total', async () => {
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await arriveInFlight(a.runtime, a.engine, 'wamid-t5a-head', 't5a head question');
     const follower = await arriveQueuedBehind(a.runtime, a.engine, 'wamid-t5a-follower', 't5a follower question');
     await a.runtime.shutdown().catch(() => {});
 
     const beforeB = sessionDoubles.length;
-    const b = startProcess();
+    const b = startProcess(HANDOFF);
     await vi.waitFor(() => expect(dispatchesOf('t5a follower question', sessionDoubles.slice(beforeB))).toBe(1), { timeout: 3_000 });
     const session = sessionDoubles.slice(beforeB).find((candidate) => candidate.turnInFlight)!;
     echoNextAnswer(b.engine, queueFor(dmJid), follower);
@@ -737,32 +750,164 @@ describe('planned stop handoff (#3703)', () => {
     await b.runtime.shutdown();
 
     const beforeC = sessionDoubles.length;
-    startProcess();
+    startProcess(HANDOFF);
     await TIMING(300);
     expect(dispatchesOf('t5a follower question', sessionDoubles.slice(beforeC))).toBe(0);
     expect(dispatchesOf('t5a follower question')).toBe(1);
     expect(obligationStatuses(follower)).toEqual(['terminal_completed']);
   });
 
-  it.fails('T5b: a handed-off turn whose re-dispatch is interrupted is NOT dispatched again by the next start (dispatched_commit is final)', async () => {
-    const a = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+  it('T5b: a handed-off turn whose re-dispatch is interrupted is NOT dispatched again by the next start (dispatched_commit is final)', async () => {
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await arriveInFlight(a.runtime, a.engine, 'wamid-t5b-head', 't5b head question');
     const follower = await arriveQueuedBehind(a.runtime, a.engine, 'wamid-t5b-follower', 't5b follower question');
     await a.runtime.shutdown().catch(() => {});
 
     const beforeB = sessionDoubles.length;
-    const b = startProcess({ plannedStopDrainMs: SHORT_DRAIN_MS } as PlannedStopOptions);
+    const b = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await vi.waitFor(() => expect(dispatchesOf('t5b follower question', sessionDoubles.slice(beforeB))).toBe(1), { timeout: 3_000 });
     // B is stopped while the re-dispatched turn is still with the provider.
     await b.runtime.shutdown().catch(() => {});
     expect(status(follower)).toBe('failed');
 
     const beforeC = sessionDoubles.length;
-    startProcess();
+    startProcess(HANDOFF);
     await TIMING(300);
     expect(dispatchesOf('t5b follower question', sessionDoubles.slice(beforeC))).toBe(0);
     expect(dispatchesOf('t5b follower question')).toBe(1);
     expect(obligationStatuses(follower)).not.toContain('pending');
     expect(obligationStatuses(follower)).not.toContain('claimed');
+  });
+
+  // ─── #3295 S3: the deferred-turn drain (fencing, kill switch, blockers) ───
+
+  /** A durable obligation as a prior generation left it: journaled inbound + pending row. */
+  function seedObligation(messageId: string, content: string): number {
+    const engine = new DurabilityEngine(db);
+    const seq = engine.journalInbound(messageId, conversationKey, dmJid, 'agent');
+    engine.deferredTurns.enqueueDeferredObligation({
+      scope: 'per_chat',
+      conversationKey,
+      deliveryJid: dmJid,
+      inboundSeq: seq,
+      sourceMessageId: messageId,
+      receivedAtUnixSeconds: Math.floor(Date.now() / 1000),
+      replaySafe: true,
+      senderJid,
+      senderName: 'Test User',
+      text: content,
+      isGroup: false,
+      contentType: 'text',
+    });
+    return seq;
+  }
+
+  function obligationRow(seq: number) {
+    return db.raw.prepare(
+      'SELECT status, attempt_count, terminal_reason FROM deferred_turn_obligations WHERE inbound_seq = ?',
+    ).get(seq) as { status: string; attempt_count: number; terminal_reason: string | null };
+  }
+
+  function kickDrain(runtime: AgentRuntime): void {
+    (runtime as unknown as { deferredTurnDrain: { kick(): void } }).deferredTurnDrain.kick();
+  }
+
+  it('S3 concurrency: two processes draining the same database dispatch an obligation once', async () => {
+    const seq = seedObligation('wamid-s3-race', 's3 race question');
+    startProcess(HANDOFF);
+    startProcess(HANDOFF);
+
+    await vi.waitFor(() => expect(dispatchesOf('s3 race question')).toBe(1), { timeout: 3_000 });
+    await TIMING(300);
+    expect(dispatchesOf('s3 race question')).toBe(1);
+    // One claim, committed before the provider send.
+    expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit', attempt_count: 1 });
+  });
+
+  it('S3 kill switch: with the flag OFF the next start neither claims nor dispatches; turning it ON drains once', async () => {
+    const seq = seedObligation('wamid-s3-kill', 's3 kill question');
+    const options = { deferredTurnAdmission: { enabled: false } };
+    const b = startProcess(options);
+
+    await TIMING(300);
+    expect(dispatchesOf('s3 kill question')).toBe(0);
+    expect(status(seq)).toBe('processing');
+    expect(obligationRow(seq)).toMatchObject({ status: 'pending', attempt_count: 0 });
+
+    options.deferredTurnAdmission.enabled = true;
+    kickDrain(b.runtime);
+    await vi.waitFor(() => expect(dispatchesOf('s3 kill question')).toBe(1), { timeout: 3_000 });
+    const session = sessionDoubles.find((candidate) => candidate.turnInFlight)!;
+    echoNextAnswer(b.engine, queueFor(dmJid), seq);
+    session.emit({ type: 'result', text: 's3 kill answer' });
+    await vi.waitFor(() => expect(status(seq)).toBe('complete'), { timeout: 3_000 });
+    await vi.waitFor(() => expect(obligationRow(seq)).toMatchObject({
+      status: 'terminal_completed',
+      terminal_reason: 'completed',
+    }), { timeout: 3_000 });
+  });
+
+  it('S3 blocker: an outstanding same-scope recovery holds the obligation unclaimed; it drains once the blocker clears', async () => {
+    const seq = seedObligation('wamid-s3-blocked', 's3 blocked question');
+    const b = startProcess(HANDOFF);
+    const blocked = vi.spyOn(b.engine, 'hasOutstandingTurnRecoveryForScope').mockReturnValue(true);
+
+    await TIMING(300);
+    expect(blocked).toHaveBeenCalledWith('per_chat', conversationKey);
+    expect(dispatchesOf('s3 blocked question')).toBe(0);
+    expect(obligationRow(seq)).toMatchObject({ status: 'pending', attempt_count: 0 });
+
+    blocked.mockReturnValue(false);
+    kickDrain(b.runtime);
+    await vi.waitFor(() => expect(dispatchesOf('s3 blocked question')).toBe(1), { timeout: 3_000 });
+    expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit', attempt_count: 1 });
+  });
+
+  it('S3 stale claim: a pre-commit claim left by a dead process is reclaimed and dispatched once', async () => {
+    const seq = seedObligation('wamid-s3-stale', 's3 stale question');
+    // The dead process claimed but never committed; its claim has expired.
+    new DurabilityEngine(db).deferredTurns.claimNextEligible('per_chat', {
+      conversationKey,
+      claimToken: 'dead-process-claim',
+      ttlSeconds: -1,
+    });
+
+    startProcess(HANDOFF);
+    expect(status(seq)).toBe('processing');
+    await vi.waitFor(() => expect(dispatchesOf('s3 stale question')).toBe(1), { timeout: 3_000 });
+    await TIMING(300);
+    expect(dispatchesOf('s3 stale question')).toBe(1);
+    expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit', attempt_count: 2 });
+  });
+
+  it('S3 retry: a failure before the provider boundary requeues the claim (attempt counted) and a later pass dispatches once', async () => {
+    const seq = seedObligation('wamid-s3-retry', 's3 retry question');
+    const b = startProcess(HANDOFF);
+    const coordinator = (b.runtime as unknown as {
+      runtimeTurnCoordinator: { createRuntimeTurnForDispatch: (...args: unknown[]) => unknown };
+    }).runtimeTurnCoordinator;
+    vi.spyOn(coordinator, 'createRuntimeTurnForDispatch').mockImplementationOnce(() => {
+      throw new Error('injected: no owned session yet');
+    });
+
+    await vi.waitFor(() => expect(obligationRow(seq)).toMatchObject({ status: 'pending', attempt_count: 1 }), { timeout: 3_000 });
+    expect(dispatchesOf('s3 retry question')).toBe(0);
+    expect(status(seq)).toBe('processing');
+
+    kickDrain(b.runtime);
+    await vi.waitFor(() => expect(dispatchesOf('s3 retry question')).toBe(1), { timeout: 3_000 });
+    expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit', attempt_count: 2 });
+  });
+
+  it('S3 settled source: an obligation whose inbound another owner already failed is quarantined, never dispatched', async () => {
+    const seq = seedObligation('wamid-s3-settled', 's3 settled question');
+    new DurabilityEngine(db).markInboundFailed(seq);
+
+    startProcess(HANDOFF);
+    await vi.waitFor(() => expect(obligationRow(seq)).toMatchObject({
+      status: 'terminal_quarantined',
+      terminal_reason: 'source_not_open',
+    }), { timeout: 3_000 });
+    expect(dispatchesOf('s3 settled question')).toBe(0);
   });
 });

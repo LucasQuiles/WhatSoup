@@ -31,7 +31,7 @@ import {
 
 const log = createChildLogger('turn-recovery-dispatch');
 
-function recoveryPurpose(sourceMessageId: string): SessionContext['purpose'] {
+export function recoveryPurpose(sourceMessageId: string): SessionContext['purpose'] {
   return classifyTurnLane(sourceMessageId).lane === 'L-SCH'
     ? 'scheduled-agent-job'
     : undefined;

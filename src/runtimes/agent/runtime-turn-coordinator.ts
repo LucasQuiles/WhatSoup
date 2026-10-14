@@ -905,6 +905,36 @@ private maybeDeferRecoveryBlockedTurn(
   context: RuntimeTurnContext,
   durability: DurabilityEngine,
 ): TurnDeferredToObligationError | null {
+  const obligationId = this.enqueueDeferredObligation(context, durability, 'recovery_blocked');
+  return obligationId === null ? null : new TurnDeferredToObligationError(obligationId);
+}
+
+/**
+ * #3703 + #3295 S3: a planned stop hands a never-dispatched, replay-safe
+ * per_chat text turn to the durable deferred-turn owner instead of failing
+ * it. Same predicate and flag as the S2 admission defer, so the handoff
+ * exists only where the S3 drain (deferred-turn-drain.ts) dispatches it on
+ * the next start. Returns false, with no durable write, when the turn does
+ * not qualify or the obligation write fails; the caller then keeps the
+ * ordinary terminal path, and the stop reports the loss.
+ */
+private handOffUndispatchedTurnAtPlannedStop(context: RuntimeTurnContext): boolean {
+  const durability = this.host.durability;
+  if (!durability) return false;
+  return this.enqueueDeferredObligation(context, durability, 'planned_stop') !== null;
+}
+
+/**
+ * Shared S2/S3 deferral predicate + enqueue. Returns the obligation id, or
+ * null to keep the terminal path. Deferrable = flag ON (live read) AND
+ * per_chat scope AND a journaled inbound AND a replay-safe text envelope.
+ * Both callers are pre-dispatch by construction.
+ */
+private enqueueDeferredObligation(
+  context: RuntimeTurnContext,
+  durability: DurabilityEngine,
+  cause: 'recovery_blocked' | 'planned_stop',
+): number | null {
   if (this.host.deferredTurnAdmissionEnabled?.() !== true) return null;
   if (context.identity.scope !== 'per_chat') return null;
   if (context.identity.inboundSeq === null) return null;
@@ -939,17 +969,20 @@ private maybeDeferRecoveryBlockedTurn(
         obligationId: enqueued.id,
         deduplicated: enqueued.deduplicated,
         scopeKey: this.runtimeTurnScopeKey(context),
+        cause,
       },
-      'recovery-blocked follower deferred into durable obligation (#3295 S2)',
+      cause === 'recovery_blocked'
+        ? 'recovery-blocked follower deferred into durable obligation (#3295 S2)'
+        : 'undispatched turn handed to durable deferred obligation at planned stop (#3703)',
     );
-    return new TurnDeferredToObligationError(enqueued.id);
+    return enqueued.id;
   } catch (err) {
     // Fail toward today's behavior: if the obligation cannot be recorded the
-    // follower keeps the terminal admission-rejection path — deferral must
-    // never turn an explicit loss into a silent one.
+    // turn keeps its terminal path — deferral must never turn an explicit
+    // loss into a silent one.
     log.error(
-      { err, inboundSeq: context.identity.inboundSeq },
-      'deferred-turn enqueue failed — keeping terminal admission rejection',
+      { err, inboundSeq: context.identity.inboundSeq, cause },
+      'deferred-turn enqueue failed — keeping the terminal path',
     );
     return null;
   }
@@ -1370,6 +1403,9 @@ async finalizeActiveRuntimeTurnsForShutdown(
       }
       return;
     }
+    // #3703: a queued turn that never reached the provider is handed off
+    // (flag ON) instead of failed; the next start's drain dispatches it.
+    if (this.handOffUndispatchedTurnAtPlannedStop(turn.runtimeContext)) return;
     pending.push(this.finalizeUndispatchedRuntimeTurn(turn.runtimeContext));
   };
   for (const turn of heldPendingTurns) queueUndispatched(turn);

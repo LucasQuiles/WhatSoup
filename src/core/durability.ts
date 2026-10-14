@@ -6,7 +6,7 @@ import {
 import { allFromStatement } from '../lib/db-query.ts';
 import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
-import { DeferredTurnStore } from './deferred-turn-store.ts';
+import { DEFERRED_TURN_MAX_ATTEMPTS, DeferredTurnStore } from './deferred-turn-store.ts';
 import type { CapabilityDecisionOutcome, CapabilityDecisionParams } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
@@ -1230,11 +1230,21 @@ export class DurabilityEngine {
              duration_ms = NULL
          WHERE id = ?`,
       ),
+      // #3295 S3: an inbound owned by a pre-commit deferred obligation
+      // (pending with attempts left, or claimed) was never dispatched; the
+      // deferred drain owns it across the restart, so crash recovery must not
+      // fail it. A committed or exhausted obligation does not exempt its row.
       getProcessingInboundEvents: prepare(
         `SELECT i.seq FROM inbound_events i
          WHERE i.processing_status = 'processing'
            AND NOT EXISTS (
              SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deferred_turn_obligations d
+             WHERE d.inbound_seq = i.seq
+               AND (d.status = 'claimed'
+                 OR (d.status = 'pending' AND d.attempt_count < ${DEFERRED_TURN_MAX_ATTEMPTS}))
            )`,
       ),
       // QR-035: events stranded at 'turn_done' (turn completed but

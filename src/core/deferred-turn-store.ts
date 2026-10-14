@@ -14,6 +14,11 @@
  *   claimed -> pending                 (fenced requeue, PRE-commit only)
  *   claimed -> terminal_quarantined    (undispatchable envelope)
  *   non-terminal -> terminal_operator  (explicit operator remediation)
+ *   dispatched_commit -> terminal_completed is also reachable WITHOUT a fence
+ *   (slice S3 `settleDispatchedObligation`), but only on durable proof that the
+ *   source inbound already reached its own terminal status: the one dispatch
+ *   authorization was used, the ordinary terminal path owns the outcome, and
+ *   nothing is dispatched or requeued by the settle.
  *
  * Invariants:
  * - one obligation per (scope, inbound_seq); enqueue is idempotent;
@@ -107,6 +112,16 @@ export interface DeferredTurnObligation {
   claimEpoch: number;
   lastErrorClass: string | null;
   terminalReason: string | null;
+}
+
+/** The lowest open obligation of one drain queue (slice S3 drain input). */
+export interface DeferredTurnOpenHead {
+  id: number;
+  conversationKey: string;
+  deliveryJid: string;
+  inboundSeq: number;
+  status: string;
+  attemptCount: number;
 }
 
 export interface DeferredTurnOpenRow {
@@ -284,6 +299,48 @@ export class DeferredTurnStore {
       getStatus: prepare(`
         SELECT status FROM deferred_turn_obligations WHERE id = ?
       `),
+      // The head of every drain queue: the lowest open inbound_seq per
+      // conversation (per_chat) or per scope. Mirrors claimHead's selection.
+      listOpenHeads: prepare(`
+        SELECT o.id, o.conversation_key, o.delivery_jid, o.inbound_seq, o.status, o.attempt_count
+        FROM deferred_turn_obligations o
+        WHERE o.scope = ?
+          AND o.${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
+          AND o.inbound_seq = (
+            SELECT MIN(h.inbound_seq) FROM deferred_turn_obligations h
+            WHERE h.scope = o.scope
+              AND (o.scope <> 'per_chat' OR h.conversation_key = o.conversation_key)
+              AND h.${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
+          )
+        ORDER BY o.inbound_seq ASC
+      `),
+      // The source inbound may still be dispatched: open and without its own
+      // terminal record. Anything else was settled by another owner.
+      isSourceOpen: prepare(`
+        SELECT 1 AS open FROM inbound_events i
+        WHERE i.seq = ?
+          AND i.processing_status IN ('pending', 'processing')
+          AND NOT EXISTS (
+            SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+          )
+      `),
+      settleDispatched: prepare(`
+        UPDATE deferred_turn_obligations
+        SET status = 'terminal_completed',
+            terminal_reason = (
+              SELECT CASE i.processing_status WHEN 'complete' THEN 'completed' ELSE 'source_failed' END
+              FROM inbound_events i WHERE i.seq = deferred_turn_obligations.inbound_seq
+            ),
+            updated_at = datetime('now')
+        WHERE id = ?
+          AND status = 'dispatched_commit'
+          AND EXISTS (
+            SELECT 1 FROM inbound_events i
+            WHERE i.seq = deferred_turn_obligations.inbound_seq
+              AND i.processing_status IN ('complete', 'failed')
+          )
+        RETURNING terminal_reason
+      `),
     };
   }
 
@@ -442,6 +499,43 @@ export class DeferredTurnStore {
     const counts: Record<string, number> = {};
     for (const row of rows) counts[row.status] = row.n;
     return counts;
+  }
+
+  /** Slice S3 drain input: the head obligation of every open drain queue. */
+  listOpenHeads(scope: string): DeferredTurnOpenHead[] {
+    const rows = this.statements.listOpenHeads.all(scope) as Array<{
+      id: number;
+      conversation_key: string;
+      delivery_jid: string;
+      inbound_seq: number;
+      status: string;
+      attempt_count: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      conversationKey: row.conversation_key,
+      deliveryJid: row.delivery_jid,
+      inboundSeq: row.inbound_seq,
+      status: row.status,
+      attemptCount: row.attempt_count,
+    }));
+  }
+
+  /** True while the source inbound is open and has no terminal record of its own. */
+  isSourceOpen(inboundSeq: number): boolean {
+    return this.statements.isSourceOpen.get(inboundSeq) !== undefined;
+  }
+
+  /**
+   * Close a `dispatched_commit` obligation once its source inbound is terminal
+   * (`complete` or `failed`). Never dispatches or requeues. Returns the
+   * bounded terminal reason, or null while the source is still open (the
+   * obligation stays held, its replay vetoed).
+   */
+  settleDispatchedObligation(id: number): 'completed' | 'source_failed' | null {
+    const row = this.statements.settleDispatched.get(id) as { terminal_reason: string } | undefined;
+    if (!row) return null;
+    return row.terminal_reason === 'completed' ? 'completed' : 'source_failed';
   }
 
   /** Retention guard hook: true while the inbound's obligation is non-terminal. */

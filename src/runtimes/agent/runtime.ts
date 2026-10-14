@@ -18,6 +18,7 @@ import type {
   TurnRecoveryReplayDispatchResult,
 } from './turn-recovery-supervisor.ts';
 import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
+import { DeferredTurnDrain } from './deferred-turn-drain.ts';
 import { resolveCatchupReconcileDep } from '../../core/turn-recovery-catchup-config.ts';
 import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
@@ -2100,6 +2101,8 @@ export class AgentRuntime implements Runtime {
   private readonly turnRecoveryDeadman: TurnRecoveryDeadman;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
+  /** #3295 S3: dispatches deferred-turn obligations (flag-gated; started in setDurability). */
+  private readonly deferredTurnDrain: DeferredTurnDrain;
   private readonly modelPinHost: ModelPinPort;
   private readonly routing: RuntimeRoutingCoordinator;
   private readonly fallback: RuntimeFallbackCoordinator;
@@ -2776,6 +2779,20 @@ export class AgentRuntime implements Runtime {
     this.turnQueue = this.createGlobalTurnQueue();
     this.runtimeTurnHost = this.createRuntimeTurnHost();
     this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
+    this.deferredTurnDrain = new DeferredTurnDrain({
+      enabled: () => this.sessionScope === 'per_chat' && this.deferredTurnAdmissionEnabled(),
+      getDurability: () => this.durability, isShuttingDown: () => this.shutdownRequested,
+      coordinator: this.runtimeTurnCoordinator, requireSessionToolScopeKey: (s) => this.requireSessionToolScopeKey(s),
+      prepareTarget: (jid) => {
+        const mapKey = this.resolvePerChatMapKey(jid);
+        this.ensureSessionAndQueueSync(jid, mapKey);
+        const session = this.chatSessions.get(mapKey);
+        return session ? { mapKey, session } : null;
+      },
+      isTargetCurrent: (target) => this.chatSessions.get(target.mapKey) === target.session,
+      isChatBusy: (mapKey) => (this.perChatRuntimeTurnContexts.get(mapKey)?.length ?? 0) > 0
+        || (this.perChatTurnQueues.get(mapKey)?.isProcessing ?? false),
+    });
     this.modelPinHost = this.createModelPinHost();
     this.sessionLifecycleHost = this.createSessionLifecycleHost();
     this.chatTransportHost = this.createChatTransportHost();
@@ -3361,6 +3378,7 @@ export class AgentRuntime implements Runtime {
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
+    this.deferredTurnDrain.start(); // #3295 S3; idempotent, first pass on a timer turn
     this.turnRecoveryDeadman.start();
 
     // #3374 ask 2: when the W2 sweep durably reclaims a stale open inbound, a
@@ -8090,6 +8108,7 @@ export class AgentRuntime implements Runtime {
     // -- that's a different, narrower race this stop() call does not (and
     // cannot) close by itself.
     this.turnRecoverySupervisor.stop();
+    this.deferredTurnDrain.stop();
     this.capabilityObligationRuntime?.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
