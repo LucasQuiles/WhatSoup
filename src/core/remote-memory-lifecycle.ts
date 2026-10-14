@@ -139,12 +139,13 @@ async function withinProviderDeadline<T>(
 }
 
 export class RemoteMemoryLifecycle {
+  private readonly db: Database;
+  private readonly options: RemoteMemoryLifecycleOptions;
   private readonly now: () => number;
 
-  constructor(
-    private readonly db: Database,
-    private readonly options: RemoteMemoryLifecycleOptions,
-  ) {
+  constructor(db: Database, options: RemoteMemoryLifecycleOptions) {
+    this.db = db;
+    this.options = options;
     assertStoredIdentifier('accountId', options.accountId);
     assertStoredIdentifier('indexName', options.indexName);
     this.now = options.now ?? (() => systemClock.now());
@@ -578,14 +579,25 @@ export class RemoteMemoryLifecycle {
  */
 export class RemoteMemoryLifecycleTimer {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly lifecycle: RemoteMemoryLifecycle;
+  private readonly provider: () => RemoteMemoryProvider | null;
+  private readonly leaseOwner: string;
+  private readonly intervalMs: number;
+  private readonly maxRowsPerRun: number;
 
   constructor(
-    private readonly lifecycle: RemoteMemoryLifecycle,
-    private readonly provider: () => RemoteMemoryProvider | null,
-    private readonly leaseOwner: string,
-    private readonly intervalMs = REMOTE_MEMORY_LIFECYCLE_CADENCE_MS,
-    private readonly maxRowsPerRun = 50,
-  ) {}
+    lifecycle: RemoteMemoryLifecycle,
+    provider: () => RemoteMemoryProvider | null,
+    leaseOwner: string,
+    intervalMs = REMOTE_MEMORY_LIFECYCLE_CADENCE_MS,
+    maxRowsPerRun = 50,
+  ) {
+    this.lifecycle = lifecycle;
+    this.provider = provider;
+    this.leaseOwner = leaseOwner;
+    this.intervalMs = intervalMs;
+    this.maxRowsPerRun = maxRowsPerRun;
+  }
 
   start(): void {
     if (this.timer) return;

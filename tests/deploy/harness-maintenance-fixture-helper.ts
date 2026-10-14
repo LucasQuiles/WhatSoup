@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
@@ -209,6 +209,10 @@ export function makeHarness(): Harness {
   symlinkSync(path.join(versions, OLD), h.launcher);
   // The installed instance wrapper, linked into this checkout as deploy/setup.sh links it.
   symlinkSync(path.join(REPO, 'deploy/whatsoup'), path.join(localBin, 'whatsoup'));
+  // The script puts the pinned node's directory on the harness PATH. The host's node directory can
+  // hold a real opencode, codex or npm, so the pinned node is linked into a directory of its own.
+  mkdirSync(path.join(home, 'node-bin'), { mode: 0o755 });
+  symlinkSync(process.execPath, path.join(home, 'node-bin/node'));
 
   const now = Date.now();
   const timeJson = path.join(home, 'npm-time.json');
@@ -225,7 +229,7 @@ export function makeHarness(): Harness {
     HOME: home,
     TMPDIR: path.join(home, 'tmp'),
     XDG_CONFIG_HOME: path.join(home, '.config'),
-    WHATSOUP_NODE_BIN: process.execPath,
+    WHATSOUP_NODE_BIN: path.join(home, 'node-bin/node'),
     WHATSOUP_CODEX_NODE_BIN_DIR: fakeBin,
     WHATSOUP_ALERT_BIN: path.join(fakeBin, 'alert'),
     WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX: path.join(home, 'npm-global'),
@@ -325,16 +329,31 @@ export function faultScript(h: Harness, edits: Array<[string, string]>): string 
   return script;
 }
 
+/** SIGKILL every process left in the group led by `pid`; an empty group (ESRCH) is the normal case. */
+export function killProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
+
 export function run(h: Harness, args: string[] = [], extraEnv: Record<string, string> = {}, script = SCRIPT): RunResult {
-  const result = spawnSync('/bin/bash', [script, ...args], {
+  // spawnSync honours `detached` at run time, but @types/node leaves it out of SpawnSyncOptions.
+  const options: SpawnSyncOptionsWithStringEncoding & { detached: boolean } = {
     cwd: h.home,
     encoding: 'utf8',
     // spawnSync blocks the event loop, so vitest's own timeout cannot interrupt
     // a hung child: bound the child and hard-kill it on overrun.
     timeout: RUN_TIMEOUT_MS,
     killSignal: 'SIGKILL',
+    // The timeout kills only bash. The child leads its own process group so that anything it
+    // started, such as a hung upgrade, is killed with it below instead of outliving the test.
+    detached: true,
     env: { ...h.env, ...extraEnv },
-  });
+  };
+  const result = spawnSync('/bin/bash', [script, ...args], options);
+  if (result.pid) killProcessGroup(result.pid);
   if (result.error) throw result.error;
   const stateFile = path.join(h.home, '.cache/whatsoup/harness-maintenance/state.json');
   return {
