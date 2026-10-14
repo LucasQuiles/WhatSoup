@@ -469,6 +469,11 @@ class Rig:
         # by the stub that replaces the dispatcher's email_fallback function (_load).
         monkeypatch.setenv("BOT_ERRORS_EMAIL_FALLBACK", str(base / "no-email-fallback"))
         monkeypatch.setenv("BOT_ERRORS_JID", "group.invalid")
+        monkeypatch.setenv(
+            "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+            str(base / "incident-authority.jsonl"),
+        )
+        monkeypatch.setenv("BOT_ERRORS_TEST_MODE", "1")
         # Always set, never empty: an unset or empty value would read the
         # developer's private roster or the tracked one.
         monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(self.roster_path))

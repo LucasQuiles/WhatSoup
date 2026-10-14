@@ -23,6 +23,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
 BRACE_QUOTE = "{" + chr(39)   # the "{'" prefix of a baked dict repr
@@ -50,6 +58,12 @@ SYNTH_EVIDENCE_DICT: dict[str, Any] = {
     "epsilon_nested": {"eta_inner": EVIDENCE_NONCE, "theta_flag": False},
     "zeta_pointer": "zeta " + EVIDENCE_NONCE,
 }
+
+
+@pytest.fixture(autouse=True)
+def _test_incident_authority(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    for key, value in dispatcher_fixtures.incident_authority_test_env(tmp_path).items():
+        monkeypatch.setenv(key, value)
 
 
 def _load_module(extra_env: dict[str, str] | None = None):
@@ -1196,7 +1210,11 @@ def test_a_raising_recorder_does_not_stop_the_event(tmp_path, monkeypatch) -> No
     sent: list[str] = []
     logged: list[dict[str, Any]] = []
     monkeypatch.setattr(mod, "send_whatsapp", lambda text, socket_path="", **k: sent.append(text))
-    monkeypatch.setattr(mod, "append_dispatch_log", lambda paths, record: logged.append(record))
+    monkeypatch.setattr(
+        mod,
+        "append_dispatch_log",
+        lambda paths, record, **_kwargs: logged.append(record),
+    )
 
     def raising_recorder(event, incident_state):
         raise RuntimeError("fixture telemetry failure")

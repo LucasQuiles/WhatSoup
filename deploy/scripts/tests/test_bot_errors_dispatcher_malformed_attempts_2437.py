@@ -43,6 +43,7 @@ TEST_ENV_KEYS = [
     "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS",
     "BOT_ERRORS_OUTBOX_DIR",
     "BOT_ERRORS_JID",
+    *dispatcher_fixtures.INCIDENT_AUTHORITY_TEST_ENV_KEYS,
 ]
 
 
@@ -55,6 +56,7 @@ _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 def _load_module(state_dir: Path):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
     os.environ["BOT_ERRORS_JID"] = "12345@s.whatsapp.net"
+    dispatcher_fixtures.configure_test_incident_authority(state_dir)
     spec = importlib.util.spec_from_file_location(
         "bot_errors_dispatcher_2437_attempts", _SCRIPT
     )
@@ -78,6 +80,8 @@ def _write_event(
     """
     event = {
         "schemaVersion": 1,
+        "id": f"evt-{path.stem}",
+        "createdAt": "2026-08-28T23:39:19Z",
         "machine": "test-machine",
         "instance": "bot-errors-test",
         "source": source,

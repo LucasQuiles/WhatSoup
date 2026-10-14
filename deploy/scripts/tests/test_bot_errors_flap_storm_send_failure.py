@@ -35,6 +35,11 @@ _ENV_KEYS = [
     "BOT_ERRORS_FLAP_PROMOTE_SECONDS",
     "BOT_ERRORS_FLAP_CRITICAL_COUNT",
     "BOT_ERRORS_FLAP_STABLE_SECONDS",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
 ]
 
 # One trip opens a storm, so a single outbox event drives the emit path.
@@ -59,6 +64,10 @@ _clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
 
 def _load(state_dir: Path, monkeypatch):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+    os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+        state_dir / "test-incident-authority.jsonl"
+    )
     for k, v in _TEST_ENV.items():
         os.environ[k] = v
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)

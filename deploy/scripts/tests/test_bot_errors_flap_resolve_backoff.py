@@ -38,6 +38,11 @@ _ENV_KEYS = [
     "BOT_ERRORS_FLAP_RESOLVE_RETRY_BASE_SECONDS",
     "BOT_ERRORS_FLAP_RESOLVE_RETRY_MAX_SECONDS",
     "BOT_ERRORS_FLAP_RESOLVE_MAX_ATTEMPTS",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
 ]
 
 _TEST_ENV = {
@@ -66,6 +71,10 @@ class _Clock:
 
 def _load(state_dir: Path, monkeypatch):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+    os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+        state_dir / "test-incident-authority.jsonl"
+    )
     for k, v in _TEST_ENV.items():
         os.environ[k] = v
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)

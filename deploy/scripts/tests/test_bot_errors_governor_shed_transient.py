@@ -11,10 +11,17 @@ import importlib.util
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -41,6 +48,7 @@ _ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
     "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS",
     "BOT_ERRORS_TRANSIENT_MAX_ATTEMPTS",
+    *dispatcher_fixtures.INCIDENT_AUTHORITY_TEST_ENV_KEYS,
 ]
 
 
@@ -59,6 +67,7 @@ def _clean_env():
 
 def _load(state_dir: Path):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(state_dir)
+    dispatcher_fixtures.configure_test_incident_authority(state_dir)
     (state_dir / "logs").mkdir(parents=True, exist_ok=True)
     spec = importlib.util.spec_from_file_location(
         f"bot_errors_dispatcher_governor_shed_{state_dir.name}", _SCRIPT

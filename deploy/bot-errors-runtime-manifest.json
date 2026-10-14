@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "c8be179caab2697956b545227649c823d7ea790f08153117e0d5c159554f07c1",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -133,7 +133,10 @@
         "orphanPagedAtEpoch",
         "observe_credential_members(paths)",
         "send_credential_pages(paths)",
-        "def send_meta_alert("
+        "def send_meta_alert(",
+        "authority_preflight = authorize_ready_events(paths)",
+        "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
+        "def send_authorized_whatsapp("
       ]
     },
     {
@@ -310,7 +313,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-q-loop.py",
-      "sha256": "fe83c46b3ac0f4ff5881214f1a3232cf6398a743ac20cdb106aad9f539084f8e",
+      "sha256": "9f813a5f37d57b7500962e7571f996c1808236103c68aa5ea43218d7c59e5d14",
       "mustContain": [
         "q_unavailable_reason",
         "session_limit",
@@ -318,7 +321,9 @@
         "assert_private_regular_for_read",
         "state_integrity_failed",
         "redact_json_value(state)",
-        "q_loop_state_root"
+        "q_loop_state_root",
+        "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE",
+        "def _authorize_notification("
       ]
     },
     {
@@ -652,6 +657,19 @@
       ]
     },
     {
+      "path": "deploy/scripts/lib/incident_authority.py",
+      "sha256": "f6981e4b94c2d9d97202f9a420de0c7c456cb408eefae592508ffb884baa99f7",
+      "mustContain": [
+        "class IncidentAuthorityClient:",
+        "def canonical_signal(",
+        "def grant_from_record(",
+        "authority_credential_parent_not_private",
+        "Idempotent-Replay",
+        "parsed.path != \"/api/signals\"",
+        "authority_event_time_out_of_range"
+      ]
+    },
+    {
       "path": "deploy/scripts/lib/observation_contract.py",
       "sha256": "dee2986707c6772cb20b96bc8256cfbe28c62ff7714f7d4b2795f6cb56be74c6",
       "mustContain": [
@@ -909,7 +927,7 @@
     },
     {
       "path": "deploy/scripts/lib/owner_route.py",
-      "sha256": "0ae69be6c1f20fbfbb638ec6e55fd4165d1947b74d21bad5880ef518de523eb4",
+      "sha256": "5c03e5987ffa288d55ddbf63d987176c52dec86ce68ace599156b95eaf39345b",
       "mustContain": [
         "def route_owner_critical(",
         "def qualifies(",
@@ -917,7 +935,9 @@
         "whatsappAccepted",
         "class _StateUnreadable(",
         "def send_credential_page(",
-        "def event_machine("
+        "def event_machine(",
+        "def _send_owner_message(",
+        "grant_from_record("
       ]
     },
     {

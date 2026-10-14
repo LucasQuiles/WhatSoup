@@ -10,6 +10,15 @@ import {
   type SignalKind,
 } from './envelope.ts';
 import type { Disposition } from './schema.ts';
+import {
+  extractPhaseFactId,
+  isRecoveryEvidenceDigest,
+  parseIncidentPhaseValue,
+  RECOVERY_EVIDENCE_CLASSES,
+  type IncidentActorClass,
+  type IncidentPhaseEnvelope,
+  type IncidentPhaseKind,
+} from './phase-envelope.ts';
 
 export type { Disposition } from './schema.ts';
 
@@ -17,6 +26,29 @@ export interface ProducerContext {
   producerId: string;
   producerDomainId: string;
 }
+
+export interface PhaseActorContext extends ProducerContext {
+  actorClass: IncidentActorClass;
+}
+
+export interface PhaseReceipt {
+  schemaVersion: 1;
+  phaseEventId: number;
+  producerId: string;
+  factId: string;
+  payloadDigest: string;
+  receivedAt: string;
+  disposition: 'phase_recorded' | 'stored_state_inert';
+  reasonCode: string;
+  incidentId: number;
+  transitionId: number | null;
+}
+
+export type AcceptPhaseResult =
+  | { outcome: 'accepted'; receipt: PhaseReceipt }
+  | { outcome: 'idempotent_replay'; receipt: PhaseReceipt }
+  | { outcome: 'identity_conflict'; existingDigest: string }
+  | { outcome: 'invalid'; malformedJson: boolean; errors: string[] };
 
 export interface SignalReceipt {
   schemaVersion: 1;
@@ -58,12 +90,30 @@ interface EpisodeRow {
   incident_id: number;
   condition_state: string;
   last_occurrence_seq: number;
+  last_observed_at: string;
+  opened_producer_id: string | null;
 }
 
 interface LifecycleEffect {
   disposition: Disposition;
   incidentId: number | null;
   transitionId: number | null;
+}
+
+interface PhaseFactRow {
+  phase_event_id: number;
+  producer_id: string;
+  producer_domain_id: string;
+  fact_id: string;
+  payload_digest: string;
+  received_at: string;
+  disposition: 'phase_recorded' | 'stored_state_inert';
+  reason_code: string;
+  incident_id: number;
+  transition_id: number | null;
+  phase_kind: IncidentPhaseKind;
+  observed_at: string;
+  actor_class: IncidentActorClass;
 }
 
 export class IncidentStore {
@@ -198,6 +248,120 @@ export class IncidentStore {
     }
   }
 
+  acceptPhaseFact(
+    rawBody: string | Uint8Array,
+    actor: PhaseActorContext,
+    now: Date,
+  ): AcceptPhaseResult {
+    const bytes = typeof rawBody === 'string' ? Buffer.from(rawBody) : Buffer.from(rawBody);
+    let bodyText = '';
+    let parsedBody: unknown;
+    let malformedJson = false;
+    try {
+      bodyText = STRICT_UTF8_DECODER.decode(bytes);
+      parsedBody = JSON.parse(bodyText);
+    } catch {
+      parsedBody = undefined;
+      malformedJson = true;
+    }
+    const factId = extractPhaseFactId(parsedBody);
+    const digest = sha256Digest(bytes);
+    if (factId !== null) {
+      const existing = this.findPhaseFact(actor.producerId, factId);
+      if (existing) {
+        return existing.payload_digest === digest
+          ? { outcome: 'idempotent_replay', receipt: this.phaseReceipt(existing) }
+          : { outcome: 'identity_conflict', existingDigest: existing.payload_digest };
+      }
+    }
+    if (malformedJson) {
+      return { outcome: 'invalid', malformedJson: true, errors: ['body is not valid JSON'] };
+    }
+    const parsed = parseIncidentPhaseValue(parsedBody);
+    if (!parsed.ok) return { outcome: 'invalid', malformedJson: false, errors: parsed.errors };
+    const envelope = parsed.envelope;
+    const receivedAt = now.toISOString();
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const raced = this.findPhaseFact(actor.producerId, envelope.factId);
+      if (raced) {
+        this.db.exec('ROLLBACK');
+        return raced.payload_digest === digest
+          ? { outcome: 'idempotent_replay', receipt: this.phaseReceipt(raced) }
+          : { outcome: 'identity_conflict', existingDigest: raced.payload_digest };
+      }
+      const decision = this.evaluatePhaseFact(envelope, actor, now);
+      let transitionId: number | null = null;
+      if (decision.disposition === 'phase_recorded' && envelope.phase === 'recovery_confirmed') {
+        const incident = this.db
+          .prepare(`SELECT condition_state FROM incidents WHERE incident_id = ?`)
+          .get(envelope.incidentId) as { condition_state: string } | undefined;
+        if (incident?.condition_state === 'open') {
+          this.db.prepare(
+            `UPDATE incidents SET condition_state = 'resolved', projection_version = projection_version + 1
+              WHERE incident_id = ?`,
+          ).run(envelope.incidentId);
+          transitionId = this.insertTransition(
+            envelope.incidentId,
+            'open',
+            'resolved',
+            envelope.sourceEventId,
+            'independent_recovery_confirmation',
+            receivedAt,
+          );
+        }
+      }
+      const inserted = this.db.prepare(
+        `INSERT INTO phase_facts (
+           producer_id, producer_domain_id, actor_class, fact_id, payload_digest, payload_json,
+           incident_id, occurrence_id, phase_kind, source_event_id,
+           related_fact_id, evidence_class, evidence_digest, observed_at, received_at,
+           disposition, reason_code, transition_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        actor.producerId,
+        actor.producerDomainId,
+        actor.actorClass,
+        envelope.factId,
+        digest,
+        bodyText,
+        envelope.incidentId,
+        envelope.occurrenceId,
+        envelope.phase,
+        envelope.sourceEventId,
+        envelope.relatedFactId ?? null,
+        envelope.evidenceClass ?? null,
+        envelope.evidenceDigest ?? null,
+        envelope.observedAt,
+        receivedAt,
+        decision.disposition,
+        decision.reasonCode,
+        transitionId,
+      );
+      const phaseEventId = Number(inserted.lastInsertRowid);
+      this.db.exec('COMMIT');
+      return {
+        outcome: 'accepted',
+        receipt: {
+          schemaVersion: 1,
+          phaseEventId,
+          producerId: actor.producerId,
+          factId: envelope.factId,
+          payloadDigest: digest,
+          receivedAt,
+          disposition: decision.disposition,
+          reasonCode: decision.reasonCode,
+          incidentId: envelope.incidentId,
+          transitionId,
+        },
+      };
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   getIncident(incidentId: number): IncidentProjection | null {
     const row = this.db
       .prepare(`SELECT * FROM incidents WHERE incident_id = ?`)
@@ -287,6 +451,123 @@ export class IncidentStore {
       incidentId: row.incident_id,
       transitionId: row.transition_id,
     };
+  }
+
+  private findPhaseFact(producerId: string, factId: string): PhaseFactRow | undefined {
+    return this.db.prepare(
+      `SELECT phase_event_id, producer_id, producer_domain_id, fact_id, payload_digest, received_at,
+              disposition, reason_code, incident_id, transition_id, phase_kind,
+              observed_at, actor_class
+         FROM phase_facts WHERE producer_id = ? AND fact_id = ?`,
+    ).get(producerId, factId) as PhaseFactRow | undefined;
+  }
+
+  private phaseReceipt(row: PhaseFactRow): PhaseReceipt {
+    return {
+      schemaVersion: 1,
+      phaseEventId: row.phase_event_id,
+      producerId: row.producer_id,
+      factId: row.fact_id,
+      payloadDigest: row.payload_digest,
+      receivedAt: row.received_at,
+      disposition: row.disposition,
+      reasonCode: row.reason_code,
+      incidentId: row.incident_id,
+      transitionId: row.transition_id,
+    };
+  }
+
+  private evaluatePhaseFact(
+    envelope: IncidentPhaseEnvelope,
+    actor: PhaseActorContext,
+    now: Date,
+  ): { disposition: 'phase_recorded' | 'stored_state_inert'; reasonCode: string } {
+    const inert = (reasonCode: string) => ({ disposition: 'stored_state_inert' as const, reasonCode });
+    const expectedActors: Record<IncidentPhaseKind, IncidentActorClass> = {
+      notification_delivered: 'notifier',
+      q_receipt: 'q_receiver',
+      diagnosis_recorded: 'diagnostician',
+      change_approved: 'approver',
+      execution_recorded: 'executor',
+      recovery_confirmed: 'recovery_witness',
+    };
+    if (actor.actorClass !== expectedActors[envelope.phase]) return inert('actor_class_mismatch');
+    if (Date.parse(envelope.observedAt) > now.getTime() + this.maxFutureSkewMs) {
+      return inert('future_observation');
+    }
+    if (
+      envelope.phase !== 'recovery_confirmed'
+      && (envelope.evidenceClass !== undefined || envelope.evidenceDigest !== undefined)
+    ) return inert('unexpected_phase_evidence');
+    const incident = this.db.prepare(
+      `SELECT producer_domain_id, occurrence_id, condition_state, opened_event_id, last_observed_at
+         FROM incidents WHERE incident_id = ?`,
+    ).get(envelope.incidentId) as {
+      producer_domain_id: string;
+      occurrence_id: string;
+      condition_state: string;
+      opened_event_id: number;
+      last_observed_at: string;
+    } | undefined;
+    if (!incident || incident.occurrence_id !== envelope.occurrenceId) return inert('incident_mismatch');
+    if (incident.producer_domain_id !== actor.producerDomainId) return inert('producer_domain_mismatch');
+    const source = this.db.prepare(
+      `SELECT event_id FROM events
+        WHERE event_id = ? AND (incident_id = ? OR event_id = ?)`,
+    ).get(envelope.sourceEventId, envelope.incidentId, incident.opened_event_id);
+    if (!source) return inert('source_event_mismatch');
+    const alreadyRecorded = this.db.prepare(
+      `SELECT phase_event_id FROM phase_facts
+        WHERE incident_id = ? AND phase_kind = ? AND disposition = 'phase_recorded'
+        LIMIT 1`,
+    ).get(envelope.incidentId, envelope.phase);
+    if (alreadyRecorded) return inert('phase_already_recorded');
+
+    const predecessorKinds: Partial<Record<IncidentPhaseKind, IncidentPhaseKind>> = {
+      q_receipt: 'notification_delivered',
+      diagnosis_recorded: 'q_receipt',
+      change_approved: 'diagnosis_recorded',
+      execution_recorded: 'change_approved',
+      recovery_confirmed: 'execution_recorded',
+    };
+    const predecessorKind = predecessorKinds[envelope.phase];
+    let predecessor: PhaseFactRow | undefined;
+    if (predecessorKind) {
+      predecessor = this.db.prepare(
+        `SELECT phase_event_id, producer_id, producer_domain_id, fact_id, payload_digest, received_at,
+                disposition, reason_code, incident_id, transition_id, phase_kind,
+                observed_at, actor_class
+           FROM phase_facts
+          WHERE incident_id = ? AND phase_kind = ? AND disposition = 'phase_recorded'
+          ORDER BY phase_event_id DESC LIMIT 1`,
+      ).get(envelope.incidentId, predecessorKind) as PhaseFactRow | undefined;
+      if (!predecessor) return inert('predecessor_missing');
+      if (envelope.relatedFactId !== predecessor.fact_id) return inert('predecessor_binding_mismatch');
+      if (envelope.observedAt <= predecessor.observed_at) return inert('stale_phase_fact');
+    }
+    if (envelope.phase === 'execution_recorded' && predecessor?.producer_id === actor.producerId) {
+      return inert('self_approved_execution');
+    }
+    if (envelope.phase === 'recovery_confirmed') {
+      if (!envelope.evidenceClass || !envelope.evidenceDigest) return inert('recovery_evidence_missing');
+      if (!(RECOVERY_EVIDENCE_CLASSES as readonly string[]).includes(envelope.evidenceClass)) {
+        return inert('unsupported_recovery_evidence');
+      }
+      if (!isRecoveryEvidenceDigest(envelope.evidenceDigest)) {
+        return inert('invalid_recovery_evidence_digest');
+      }
+      if (incident.condition_state !== 'open') return inert('incident_not_open');
+      if (envelope.observedAt <= incident.last_observed_at) return inert('stale_recovery_evidence');
+      if (predecessor?.producer_id === actor.producerId) return inert('self_confirmed_recovery');
+      const approval = this.db.prepare(
+        `SELECT producer_id FROM phase_facts
+          WHERE incident_id = ? AND phase_kind = 'change_approved'
+            AND disposition = 'phase_recorded'
+          ORDER BY phase_event_id DESC LIMIT 1`,
+      ).get(envelope.incidentId) as { producer_id: string } | undefined;
+      if (approval?.producer_id === actor.producerId) return inert('approver_confirmed_recovery');
+    }
+    return { disposition: 'phase_recorded', reasonCode: 'accepted' };
   }
 
   private applyLifecycle(
@@ -381,8 +662,8 @@ export class IncidentStore {
         `INSERT INTO incidents (
            producer_domain_id, subject, condition_class, occurrence_id,
            condition_state, severity, opened_event_id, last_observed_at,
-           last_occurrence_seq, projection_version)
-         VALUES (?, ?, ?, ?, 'open', NULL, ?, ?, ?, 1)`,
+           last_occurrence_seq, projection_version, opened_producer_id)
+         VALUES (?, ?, ?, ?, 'open', NULL, ?, ?, ?, 1, ?)`,
       )
       .run(
         producer.producerDomainId,
@@ -392,6 +673,7 @@ export class IncidentStore {
         eventId,
         envelope.observedAt,
         envelope.occurrenceSeq,
+        producer.producerId,
       );
     const incidentId = Number(openedIncident.lastInsertRowid);
     const transitionId = this.insertTransition(incidentId, null, 'open', eventId, 'condition_observed', receivedAt);
@@ -410,10 +692,19 @@ export class IncidentStore {
     if (!episode || episode.condition_state !== 'open') {
       return { disposition: 'stored_no_state_change', incidentId: null, transitionId: null };
     }
+    if (episode.opened_producer_id === null || episode.opened_producer_id === producer.producerId) {
+      // Observation and independent recovery confirmation are separate
+      // authorities.  The producer that opened an occurrence cannot confirm
+      // its own repair, and legacy rows without opener provenance stay open.
+      return { disposition: 'stored_no_state_change', incidentId: episode.incident_id, transitionId: null };
+    }
     if (envelope.occurrenceSeq <= episode.last_occurrence_seq) {
       // A recovery must be causally newer than the last observation of its
       // occurrence; a delayed or replayed recovery cannot conclude an episode
       // the producer has since re-observed.
+      return { disposition: 'stored_stale_observation', incidentId: episode.incident_id, transitionId: null };
+    }
+    if (envelope.observedAt <= episode.last_observed_at) {
       return { disposition: 'stored_stale_observation', incidentId: episode.incident_id, transitionId: null };
     }
 
@@ -435,7 +726,8 @@ export class IncidentStore {
   ): EpisodeRow | undefined {
     return this.db
       .prepare(
-        `SELECT incident_id, condition_state, last_occurrence_seq
+        `SELECT incident_id, condition_state, last_occurrence_seq,
+                last_observed_at, opened_producer_id
            FROM incidents
           WHERE producer_domain_id = ? AND subject = ? AND condition_class = ? AND occurrence_id = ?`,
       )
@@ -478,6 +770,7 @@ export interface IncidentProjection {
   lastObservedAt: string;
   lastOccurrenceSeq: number;
   projectionVersion: number;
+  openedProducerId: string | null;
 }
 
 export interface StoredEvent {
@@ -526,6 +819,7 @@ function projectIncident(row: Record<string, unknown>): IncidentProjection {
     lastObservedAt: row.last_observed_at as string,
     lastOccurrenceSeq: row.last_occurrence_seq as number,
     projectionVersion: row.projection_version as number,
+    openedProducerId: (row.opened_producer_id as string | null) ?? null,
   };
 }
 

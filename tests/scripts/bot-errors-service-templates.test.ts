@@ -162,6 +162,25 @@ describe('BOT ERRORS service templates', () => {
     }
   });
 
+  it('keeps IncidentStore producer credentials separate and dry seams out of services', () => {
+    const dispatcher = readFileSync('deploy/scripts/bot-errors-dispatcher.py', 'utf8');
+    const qLoop = readFileSync('deploy/scripts/bot-errors-q-loop.py', 'utf8');
+    const installer = readFileSync('deploy/scripts/install-bot-errors-launchd.sh', 'utf8');
+
+    expect(dispatcher).toContain('BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE');
+    expect(dispatcher).not.toContain('BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE');
+    expect(qLoop).toContain('BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE');
+    expect(qLoop).not.toContain('BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE');
+    expect(installer).toContain('<key>BOT_ERRORS_INCIDENT_AUTHORITY_URL</key>');
+    expect(installer).toContain('<key>BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE</key>');
+    for (const file of [...serviceTemplates, ...launchdInstallers]) {
+      expect(readFileSync(file, 'utf8')).not.toMatch(/BOT_ERRORS_(?:DRY_(?:AUTHORITY|SEND)|TEST_MODE)/);
+    }
+    for (const text of [dispatcher, qLoop, installer]) {
+      expect(text).not.toContain('BOT_ERRORS_INCIDENT_AUTHORITY_CREDENTIAL_FILE');
+    }
+  });
+
   it('renders launchd plists with routing env from file without executing env-file shell', () => {
     const home = makeTempRoot('whatsoup-launchd-home-');
     const shimDir = makeTempRoot('whatsoup-launchd-shims-');
@@ -173,6 +192,8 @@ describe('BOT ERRORS service templates', () => {
     const db = path.join(home, 'bot<db>.sqlite');
     const stateDir = path.join(home, 'state "quoted"');
     const repoRoot = path.join(home, "repo 'single'");
+    const authorityUrl = 'https://incident-authority.invalid/api/signals';
+    const authorityCredential = path.join(home, 'credentials & dispatcher.token');
     const escapedSocket = xmlEscape(socket);
     const escapedDb = xmlEscape(db);
     const escapedStateDir = xmlEscape(stateDir);
@@ -187,6 +208,8 @@ describe('BOT ERRORS service templates', () => {
       `BOT_ERRORS_SOCKET_PATH=${socket}`,
       `BOT_ERRORS_SOCKET=${socket}`,
       `BOT_ERRORS_DB=${db}`,
+      `BOT_ERRORS_INCIDENT_AUTHORITY_URL=${authorityUrl}`,
+      `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE=${authorityCredential}`,
       `BOT_ERRORS_HEALTH_PROFILE=${profile}`,
       `MALICIOUS_TOUCH=$(touch ${maliciousTouch})`,
       '',
@@ -241,6 +264,20 @@ describe('BOT ERRORS service templates', () => {
       expect(plist).toContain('/opt/homebrew/bin');
       expect(plist).toContain('/usr/local/bin');
       expect(plist).toContain('/usr/bin:/bin:/usr/sbin:/sbin');
+    }
+    const dispatcherPlist = readFileSync(
+      launchAgentPath(home, 'com.bot-errors.dispatcher'),
+      'utf8',
+    );
+    expect(dispatcherPlist).toContain(
+      `<key>BOT_ERRORS_INCIDENT_AUTHORITY_URL</key><string>${authorityUrl}</string>`,
+    );
+    expect(dispatcherPlist).toContain(
+      `<key>BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE</key><string>${xmlEscape(authorityCredential)}</string>`,
+    );
+    for (const label of ['com.bot-errors.deadman', 'com.bot-errors.health', 'com.bot-errors.health-only']) {
+      const plist = readFileSync(launchAgentPath(home, label), 'utf8');
+      expect(plist).not.toContain('AUTHORITY_CREDENTIAL_FILE');
     }
   });
 

@@ -53,6 +53,106 @@ to read and patch the env file during initial setup. The Python producers read
 `BOT_ERRORS_MACHINE` from the same file with the same rules, then strip
 surrounding whitespace (see "Machine identity").
 
+### NORMATIVE — IncidentStore authority for notification and remediation
+
+The dispatcher and Q loop treat authenticated IncidentStore acceptance as the
+authority for BOT ERRORS side effects. This is a source and configuration
+contract. Merging these files or passing source tests does not prove that a
+fleet host has the settings, producer registrations, credentials, database
+capacity, network route, or running release required to enforce it.
+
+Before the dispatcher mutates incident/suppression state or tries any human
+notification for an eligible outbox event, it writes a canonical,
+content-free signal to `POST /api/signals` and durably records the bound
+receipt beside the event. A restart revalidates the producer, signal identity,
+payload digest, receipt identity, and disposition before reusing that receipt.
+The event body, summary, evidence, host name, chat identifier, delivery errors,
+and credential are absent from the signal and receipt. Delivery attempts and
+backoff therefore cannot change the signal bytes. A newly arrived event that
+races the cycle preflight is checked again in `process_one()`.
+
+The Q loop performs the same acceptance before bootstrap, nudge, or checkpoint
+messages. Owner copies and credential re-pages pass through the shared
+receipt-validating sender in `lib/owner_route.py`; the repository security
+boundary guard rejects direct dispatcher, owner-route, or Q-loop transports.
+The guard also pins the authority preflight ahead of credential observation,
+suppression, flap/storm mutation, and delivery, inventories the full `deploy/`
+tree, rejects test-only dry seams in service definitions, and verifies the two
+producer credential settings remain distinct. The guard runs in the branch,
+release, quality, diagnostics, empty-scope, and guard meta-test paths.
+
+Configure the authority through the private host env file:
+
+| Variable | Consumer | Contract |
+|---|---|---|
+| `BOT_ERRORS_INCIDENT_AUTHORITY_URL` | dispatcher and Q loop | Exact `/api/signals` URL. HTTP is accepted only for a literal loopback address; authenticated deployments use HTTPS. Userinfo, query strings, fragments, alternate paths, and redirects are rejected. |
+| `BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE` | dispatcher | Absolute path to the dispatcher producer credential. |
+| `BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE` | Q loop | Absolute path to the separate Q-loop producer credential. |
+
+Do not reuse one credential for both processes. Credential files must be
+regular, owned by the effective user, single-link, and inaccessible to group
+or other users. Every path component is opened without following symlinks and
+must be owned by root or the effective user and not group/world writable. The
+credential is bounded to 4 KiB and is never accepted in an argument, URL,
+event, receipt, log, or tracked configuration file. The macOS installer writes
+only the dispatcher credential *path* into the dispatcher plist. The systemd
+units read the same private env file, while each process reads only its named
+credential setting.
+
+Register and enroll the two producers through the existing producer admin
+API. Use distinct records in producer domain `bot-errors`:
+
+| Producer | Signal scope | Actor/phase scope |
+|---|---|---|
+| `bot-errors-dispatcher` | subject `bot-errors`; kinds `condition_observed`, `condition_recovered`, `notice_recorded`; condition class `bot_errors_alert` | `notifier`; `notification_delivered` only |
+| `bot-errors-q-loop` | subject `bot-errors`; kind `notice_recorded` | `q_receiver`; `q_receipt` only |
+
+`POST /api/producers` requires the fleet root credential and returns a
+single-use enrollment secret. Exchange it at
+`POST /api/producers/:id/credential`, store the returned credential in the
+producer-specific private file, and discard the plaintext enrollment secret.
+Rotation uses the same endpoint with the current producer bearer credential;
+the old credential has a bounded overlap and never outlives its original
+expiry. `DELETE /api/producers/:id/credential` requires the fleet root
+credential and revokes the producer. Registration, exchange, rotation,
+revocation, service restart, and effective configuration verification are
+deployment operations and are not performed by repository tests.
+
+Signal acceptance is not notification delivery. A notification actor records
+delivery separately at `POST /api/incident-phases`; Q receipt, diagnosis,
+change approval, execution, and recovery confirmation are distinct immutable
+phase facts. Each phase requires its matching actor class and scope, the exact
+previous fact identity, a later observation time, the accepted incident and
+occurrence, and a valid source event. A second fact for an already recorded
+phase is stored state-inert. The approver cannot record execution, and the
+executor or approver cannot confirm recovery. Chat text is observation only:
+approval-shaped or recovery-shaped messages cannot grant scope or change an
+incident. Use separate credentials for notifier, Q receiver, diagnostician,
+approver, executor, and recovery witness roles.
+
+The producer that opened an occurrence cannot resolve it with its own clear.
+Resolution requires the complete phase chain and a fresh
+`recovery_confirmed` fact from an independent recovery-witness producer with a
+closed `evidenceClass` and a content-free `sha256:` evidence digest. Supported
+classes are `runtime_reverified`, `provider_acknowledged`, and
+`sustained_runtime_stability`; adding a class requires a reviewed source
+change. Missing or unsupported evidence, malformed digests, wrong actors,
+wrong occurrence or source bindings, stale/future evidence, self-approval,
+self-confirmation, conflicting identities, and extra repair attempts remain
+durable but state-inert. Per-producer admission counters live in the
+IncidentStore database, so handler recreation and concurrent processes do not
+reset the limit.
+
+Authority unavailability, timeout, rate limiting, disk-full, or store
+corruption stops the protected action. Dispatcher events retain bounded
+backoff state and retry up to the configured authority-attempt cap; a conflict
+or invalid receipt is quarantined. Notification ambiguity remains a separate
+delivery state and must be reconciled before replay. Revoking both producer
+credentials or removing the authority settings is the fail-closed rollback:
+new protected effects stop while the outbox, receipts, phase facts, and
+diagnostic evidence remain available for investigation. It does not undo a
+notification or action that already occurred.
+
 ### NORMATIVE — D2 Fail-closed health-profile guard
 
 Every `install-bot-errors-*launchd.sh` installer and the Linux path of
@@ -864,6 +964,10 @@ reads. The budget therefore bounds how late the next cycle can start. The
 queue holds at most 20 copies; a cycle that fails
 after its sends skips the drain, and a copy arriving at a full queue is
 logged as `skippedQueueFull` and dropped (its group copy exists).
+The queued event carries its accepted IncidentStore receipt. The queue hook
+revalidates it, and `lib/owner_route.py` revalidates it again before recording
+the delivery floor or invoking either channel. A missing or mismatched receipt
+therefore cannot consume the interval or produce an owner copy.
 
 **Inert by default.** Nothing is read, parsed or logged unless both
 `BOT_ERRORS_OWNER_ROUTE_JID` and `BOT_ERRORS_OWNER_ROUTE_SOCKET` are set, so an
