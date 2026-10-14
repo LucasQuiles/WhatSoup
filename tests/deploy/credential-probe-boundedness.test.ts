@@ -1280,8 +1280,9 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(events[index('A')], evidence).toMatch(/^A worker=\d+ worker_rc=2 guard=\d+ guard_rc=2 deadline_rc=124 rc=2$/);
     expect(index('A'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
   });
-  it('bounds an authorized worker that is stopped before timeout cleanup', () => {
+  it('bounds an authorized worker that is stopped before timeout cleanup', ({ task }) => {
     const result = runLifecycleProbe('worker-stopped-after-authorization');
+    Object.assign(task.meta, { boundedStoppedWorker: result });
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.stopped_worker, JSON.stringify(result)).toBeTruthy();
