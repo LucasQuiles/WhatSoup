@@ -337,6 +337,9 @@ const RELATIVE_APT_DESCRIPTOR_PATTERN = /(?:^|[\s;'"=])(?:\.\/)?(?:etc\/)?apt\/s
 const APT_ROOT_ASSIGNMENT_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 const APT_ROOT_DECLARATION_PATTERN = /^\s*(?:ENV|ARG)\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 const UNSUPPORTED_DOCKERFILE_EXPANSION_PATTERN = /[$`]/;
+const UNSAFE_APT_AUTHENTICATION_PATTERN = /(?:--allow-(?:unauthenticated|insecure-repositories|weak-repositories)\b|(?:Acquire::Allow(?:Insecure|Weak|DowngradeToInsecure)Repositories|APT::Get::AllowUnauthenticated)\s*(?:=\s*|\s+)["']?(?:true|yes|1)["']?(?![A-Za-z0-9_])|\b(?:trusted|allow-insecure|allow-weak|allow-downgrade-to-insecure)\s*=\s*["']?(?:true|yes|1)["']?(?![A-Za-z0-9_]))/i;
+const APT_GET_UPDATE_PATTERN = /\bapt-get\b(?:(?![;&|]).)*?\s+update(?=\s|\\|$)/gis;
+const FAIL_CLOSED_APT_UPDATE_OPTION = 'APT::Update::Error-Mode=any';
 
 function descriptorPaths(instruction: string): string[] {
   return [...instruction.matchAll(APT_SOURCE_DESCRIPTOR_PATH_PATTERN)].map((match) => match[0] ?? '');
@@ -385,6 +388,19 @@ function hasUnsupportedDockerfileExpansion(instructions: DockerfileInstruction[]
   return instructions.some((instruction) => UNSUPPORTED_DOCKERFILE_EXPANSION_PATTERN.test(instruction.text));
 }
 
+function hasUnsafeAptAuthentication(instructions: DockerfileInstruction[]): boolean {
+  return instructions.some((instruction) => UNSAFE_APT_AUTHENTICATION_PATTERN.test(instruction.text));
+}
+
+function hasFailOpenAptUpdate(instructions: DockerfileInstruction[]): boolean {
+  return instructions.some((instruction) => {
+    if (instruction.keyword !== 'RUN') return false;
+    const updates = [...instruction.text.matchAll(APT_GET_UPDATE_PATTERN)]
+      .map((match) => match[0] ?? '');
+    return updates.some((update) => !update.includes(FAIL_CLOSED_APT_UPDATE_OPTION));
+  });
+}
+
 function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   const policyResult = readContainerInputPolicy(cwd);
   if (!policyResult.policy) return [policyResult.issue];
@@ -408,8 +424,8 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   }
 
   const expectedSources = [
-    `https://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ bookworm main`,
-    `https://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ bookworm-security main`,
+    `http://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ bookworm main`,
+    `http://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ bookworm-security main`,
   ];
   if (
     policy.apt.sources.length !== expectedSources.length
@@ -418,7 +434,7 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
     policyIssues.push(containerInputIssue(
       cwd,
       'docker/container-inputs.json',
-      'APT sources must use the approved Debian snapshot',
+      'APT sources must use the CA-independent approved Debian snapshot transport',
     ));
   }
 
@@ -465,6 +481,20 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
       cwd,
       'docker/Dockerfile',
       'Dockerfile may not use variable or command expansion until the static invariant is extended',
+    ));
+  }
+  if (hasUnsafeAptAuthentication(activeInstructions)) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/Dockerfile',
+      'Dockerfile may not disable APT repository authentication',
+    ));
+  }
+  if (hasFailOpenAptUpdate(activeInstructions)) {
+    policyIssues.push(containerInputIssue(
+      cwd,
+      'docker/Dockerfile',
+      'every apt-get update must fail on any unavailable snapshot source',
     ));
   }
   const expectedDefinitions = expectedSources.map((source) => `deb [check-valid-until=no] ${source}`);

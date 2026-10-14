@@ -216,9 +216,8 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('--name "$builder_name"');
     expect(qualityWorkflow).toContain('--driver "$builder_driver"');
     expect(qualityWorkflow).toContain('--driver-opt "image=$buildkit_image"');
-    expect(qualityWorkflow).toContain('docker buildx version | awk \'{print $2}\'');
-    expect(qualityWorkflow).toContain('docker buildx inspect whatsoup-ci-builder --bootstrap');
-    expect(qualityWorkflow).toContain('Build[Kk]it(:| version:)');
+    expect(qualityWorkflow).toContain('scripts/verify-buildx-runtime.ts');
+    expect(qualityWorkflow).not.toContain("buildx inspect whatsoup-ci-builder --format");
     expect(qualityWorkflow).not.toContain('docker/setup-buildx-action@');
     expect(qualityWorkflow).not.toContain('--load');
     expect(qualityWorkflow).not.toContain('docker image save whatsoup-ci');

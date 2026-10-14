@@ -26,7 +26,7 @@ function makeFixture(opts: {
   dockerVersion?: string;
   dockerDigest?: string | null;
   aptSnapshot?: string;
-  aptSource?: 'approved' | 'mutable' | 'unavailable';
+  aptSource?: 'approved' | 'https-snapshot' | 'mutable' | 'unavailable';
   wrapperVersion?: string | 'reads-nvmrc' | 'none';
   wrappers?: (
     | 'deploy/whatsoup'
@@ -73,16 +73,20 @@ function makeFixture(opts: {
   );
 
   mkdirSync(path.join(dir, 'docker'), { recursive: true });
-  const approvedDebianSource = `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`;
-  const approvedDebianSecuritySource = `https://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`;
+  const approvedDebianSource = `http://snapshot.debian.org/archive/debian/${aptSnapshot}/`;
+  const approvedDebianSecuritySource = `http://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`;
   const sourceUrl = aptSource === 'mutable'
     ? 'http://deb.debian.org/debian/'
     : aptSource === 'unavailable'
       ? `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`
+      : aptSource === 'https-snapshot'
+        ? `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`
       : approvedDebianSource;
   const securitySourceUrl = aptSource === 'approved'
     ? approvedDebianSecuritySource
-    : sourceUrl;
+    : aptSource === 'https-snapshot'
+      ? `https://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`
+      : sourceUrl;
   writeFileSync(
     path.join(dir, 'docker/Dockerfile'),
     [
@@ -93,7 +97,9 @@ function makeFixture(opts: {
       '  > /etc/apt/sources.list \\',
       '  && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
+      'RUN apt-get -o APT::Update::Error-Mode=any update',
       'FROM base AS runtime',
+      'RUN apt-get -o APT::Update::Error-Mode=any update',
       '',
     ].join('\n'),
     'utf8',
@@ -293,6 +299,80 @@ describe('node-pin consistency check', () => {
     });
   });
 
+  it('rejects HTTPS snapshot sources that cannot bootstrap before ca-certificates is installed', () => {
+    const dir = makeFixture({ aptSource: 'https-snapshot' });
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as {
+      apt: { sources: string[] };
+    };
+    policy.apt.sources = policy.apt.sources.map((source) => source.replace('http://', 'https://'));
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'APT sources must use the CA-independent approved Debian snapshot transport',
+    });
+  });
+
+  it.each([
+    'RUN apt-get update --allow-insecure-repositories',
+    'RUN apt-get update --allow-weak-repositories',
+    'RUN apt-get install --allow-unauthenticated tini',
+    'RUN apt-get -o Acquire::AllowInsecureRepositories=true update',
+    'RUN apt-get -o Acquire::AllowWeakRepositories=true update',
+    'RUN apt-get -o Acquire::AllowDowngradeToInsecureRepositories=1 update',
+    'RUN apt-get -o APT::Get::AllowUnauthenticated=true install tini',
+    `RUN printf '%s\\n' 'Acquire::AllowInsecureRepositories "true";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf -o APT::Update::Error-Mode=any update`,
+    `RUN printf '%s\\n' 'Acquire::AllowWeakRepositories "yes";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf -o APT::Update::Error-Mode=any update`,
+    `RUN printf '%s\\n' 'Acquire::AllowDowngradeToInsecureRepositories "1";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf -o APT::Update::Error-Mode=any update`,
+    `RUN printf '%s\\n' 'APT::Get::AllowUnauthenticated "true";' > /tmp/apt.conf \\
+    && apt-get -c /tmp/apt.conf install tini`,
+    "RUN printf '%s\\n' 'deb [allow-weak=yes] http://example.invalid/debian bookworm main' > /tmp/source.list",
+  ])('rejects APT authentication bypasses: %s', (unsafeInstruction) => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      `${readFileSync(dockerfilePath, 'utf8')}${unsafeInstruction}\n`,
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'Dockerfile may not disable APT repository authentication',
+    });
+  });
+
+  it('requires every APT index refresh to fail on any unavailable snapshot source', () => {
+    const dir = makeFixture({});
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(
+      dockerfilePath,
+      readFileSync(dockerfilePath, 'utf8').replace(
+        'apt-get -o APT::Update::Error-Mode=any update',
+        'apt-get update',
+      ),
+      'utf8',
+    );
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/Dockerfile',
+      filePath: dockerfilePath,
+      reason: 'every apt-get update must fail on any unavailable snapshot source',
+    });
+  });
+
   it('rejects an additive mutable source even when the approved source lines remain', () => {
     const dir = makeFixture({});
     const dockerfilePath = path.join(dir, 'docker/Dockerfile');
@@ -316,8 +396,8 @@ describe('node-pin consistency check', () => {
     const dockerfilePath = path.join(dir, 'docker/Dockerfile');
     writeFileSync(dockerfilePath, [
       `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
-      `# deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main`,
-      `# deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main`,
+      `# deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main`,
+      `# deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main`,
       'RUN : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
       'FROM base AS runtime',
@@ -339,8 +419,8 @@ describe('node-pin consistency check', () => {
     writeFileSync(dockerfilePath, [
       `FROM node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST} AS base`,
       'RUN \\',
-      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
-      `  # deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
+      `  # deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${TEST_SNAPSHOT}/ bookworm main \\`,
+      `  # deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${TEST_SNAPSHOT}/ bookworm-security main \\`,
       '  : > /etc/apt/sources.list && rm -rf /etc/apt/sources.list.d/*',
       'FROM base AS deps',
       'FROM base AS runtime',
