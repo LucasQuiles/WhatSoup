@@ -632,23 +632,42 @@ function hasFailureAssertion(
   return proved;
 }
 
+/**
+ * The syntactic diagnostics `ts.transpileModule` would report, read from the one
+ * parse the semantic walk reuses. Transpiling here parsed every companion test a
+ * second time and emitted JavaScript only to discard it; without declaration
+ * output that emit adds no diagnostics, so the no-emit program reports the same
+ * errors at a fraction of the cost.
+ */
+function syntaxDiagnostics(sourceFile: ts.SourceFile): readonly ts.Diagnostic[] {
+  const options: ts.CompilerOptions = {
+    target: ts.ScriptTarget.Latest,
+    module: ts.ModuleKind.ESNext,
+    jsx: ts.JsxEmit.Preserve,
+    noLib: true,
+    noResolve: true,
+  };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (fileName) => (fileName === sourceFile.fileName ? sourceFile : undefined);
+  const program = ts.createProgram({ rootNames: [sourceFile.fileName], options, host });
+  return program.getSyntacticDiagnostics(sourceFile);
+}
+
 function semanticCoverageGap(
   cwd: string,
   guardRelPath: string,
   testRelPath: string,
 ): GuardCoverageGap | null {
   const testText = readFileSync(path.join(cwd, testRelPath), 'utf8');
-  const diagnostic = ts
-    .transpileModule(testText, {
-      fileName: testRelPath,
-      reportDiagnostics: true,
-      compilerOptions: {
-        target: ts.ScriptTarget.Latest,
-        module: ts.ModuleKind.ESNext,
-        jsx: ts.JsxEmit.Preserve,
-      },
-    })
-    .diagnostics?.find((item) => item.category === ts.DiagnosticCategory.Error);
+  const sourceFile = ts.createSourceFile(
+    testRelPath,
+    testText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const diagnostic = syntaxDiagnostics(sourceFile)
+    .find((item) => item.category === ts.DiagnosticCategory.Error);
   if (diagnostic) {
     return {
       guard: guardRelPath,
@@ -658,13 +677,6 @@ function semanticCoverageGap(
     };
   }
 
-  const sourceFile = ts.createSourceFile(
-    testRelPath,
-    testText,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
   const bindings = collectTestBindings(sourceFile, testRelPath, guardRelPath);
   const invocations = collectGuardInvocations(sourceFile, bindings, guardRelPath);
   if (invocations.length === 0) {
