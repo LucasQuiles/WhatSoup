@@ -2,7 +2,8 @@
 
 Status: partial correction on the branch, not released. Red probes landed at 50100084e (base a668b5cff); the
 correction follows them. Fixed and promoted to plain assertions: T2, T3a, T4, T6a, T6b, T6c and the horizon
-case. Still red (`it.fails`): T1, T1b, T3b, T5a and T5b.
+case; T1, T3b, T5a and T5b behind the #3295 `deferredTurnAdmission` flag (see Handoff). Still red (`it.fails`):
+T1b.
 
 ## Incident shape
 
@@ -60,6 +61,31 @@ change.
   - Contract change: weeks-old wedged rows stay restartable only when such evidence exists. A wedged chat with
     no later turn now blocks until an operator resolves the row.
 
+## Handoff (#3295 S3)
+
+Behind the default-OFF `deferredTurnAdmission` flag, read live. With the flag OFF nothing below runs and T3a/T4
+behaviour is unchanged.
+
+- **Handoff at stop** (`RuntimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown`). A queued per_chat turn
+  that never reached the provider and has a replay-safe text envelope becomes a `pending` row in
+  `deferred_turn_obligations`, with the same predicate as the S2 admission defer. Its inbound stays `processing`
+  and gets no terminal record. If the write fails, the turn takes the old path: `failed_terminal`, and the stop
+  rejects (T3b).
+- **Restart ownership** (`preConnectRecovery`). Crash recovery skips an inbound owned by a `claimed` obligation
+  or by a `pending` one with attempts left. A committed or exhausted obligation does not protect its inbound.
+- **Drain** (`src/runtimes/agent/deferred-turn-drain.ts`). Started in `setDurability`, stopped at shutdown. It
+  runs at start, after progress, and every 15 s. For the head obligation of each conversation it:
+  - skips while a same-scope durable recovery or the chat's own lane is busy;
+  - claims with a fence and checks that the source inbound is still open;
+  - dispatches through `processPerChatTurn`, the route turn-recovery replay uses;
+  - writes `dispatched_commit` at the provider boundary, before the send. A stale fence throws there, so the
+    provider is not called.
+  - Before the boundary, a failure requeues the claim, up to the store's 5 attempts, then quarantines it.
+  - After the boundary, nothing is requeued. The ordinary terminal path owns the turn, and the obligation
+    closes (`terminal_completed`, reason `completed` or `source_failed`) once the source inbound is terminal.
+- **Exactly once across starts** (T5a, T5b): the row is terminal or `dispatched_commit` after the first start,
+  so a later start never claims it again. Concurrent drains on one database get one claim (atomic UPDATE).
+
 ## Scope limits
 
 - **T6a proves ordering only.** It shows that the preflight call precedes the instance bootout. It does not show
@@ -80,11 +106,14 @@ change.
 
 ## Remaining
 
-- **T1, T1b, T3b, T5a, T5b (handoff).** These need a durable owner that dispatches a handed-off, never-dispatched
-  turn exactly once on the next start. The #3295 deferred-obligation store has the state machine, but its drain
-  consumer (slice S3: claim, dispatch, `dispatched_commit`) does not exist; nothing calls `claimHead`. Until it
-  exists, a stop fails such turns and reports the loss (T3a/T4 behaviour).
-  - The decision needed: build S3 as the owner, or hand these turns to another existing owner.
+- **T1b (message arriving during shutdown).** `handleMessage` still rejects once shutdown began, and ingest
+  then fails the inbound (an honest loss). Handing it off would need the admission pipeline (classification,
+  local commands, session and journal identity) to run during teardown, or a copy of it. #3295 also says
+  queue-close keeps its terminal behaviour, and the T1 handoff already departs from that behind the flag. The
+  decision needed: accept fresh work during teardown, or keep T1b as a reported loss.
+- **Ordering against live input.** The drain keeps FIFO among obligations, but nothing defers a later live
+  message behind an earlier pending obligation of the same chat. A message that arrives after a blocker clears
+  and before the drain claims can run first.
 - **First old-to-new cutover.** The supported operation is the new release's `release:activate --apply`. Its stop
   gate runs from the new release against the instance database before the old process is touched, so the old
   instance is stopped only after a quiet check.
