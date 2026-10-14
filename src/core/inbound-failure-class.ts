@@ -104,6 +104,25 @@ export class RuntimeAdmissionClosedError extends Error {
   }
 }
 
+export const PLANNED_STOP_INTAKE_LOSS_ERROR_CODE = 'PLANNED_STOP_INTAKE_LOSS' as const;
+
+/**
+ * #3295 S3: during a planned stop, before intake closes, ingest journaled an
+ * otherwise eligible message whose replay envelope the deferred owner cannot
+ * store (e.g. text over the byte bound). The message is already accepted, so
+ * this is a loss the stop counts (it does not report clean), and ingest records
+ * the row with the fault class `pre_dispatch_error`, never the benign
+ * capacity-shed `queue_closed`. Content-free.
+ */
+export class PlannedStopIntakeLossError extends Error {
+  readonly code = PLANNED_STOP_INTAKE_LOSS_ERROR_CODE;
+
+  constructor() {
+    super('Planned stop cannot durably own this accepted message; it is counted as a stop loss');
+    this.name = 'PlannedStopIntakeLossError';
+  }
+}
+
 /**
  * Distinct reasons an admitted turn can be rejected before dispatch (#1750).
  * Each maps 1:1 onto the same-named InboundFailureClass so the durable
@@ -193,6 +212,9 @@ export function classifyErrorForInbound(err: unknown): InboundFailureClass {
   }
   if (code === RUNTIME_ADMISSION_CLOSED_ERROR_CODE) {
     return 'queue_closed';
+  }
+  if (code === PLANNED_STOP_INTAKE_LOSS_ERROR_CODE) {
+    return 'pre_dispatch_error';
   }
   if (UNRECOVERABLE_SQLITE.test(message) || UNRECOVERABLE_SQLITE.test(code)) {
     return 'db_error';

@@ -57,7 +57,7 @@ import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
-import { classifyErrorForInbound, RuntimeAdmissionClosedError } from '../../core/inbound-failure-class.ts';
+import { classifyErrorForInbound, PlannedStopIntakeLossError, RuntimeAdmissionClosedError } from '../../core/inbound-failure-class.ts';
 import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
@@ -136,7 +136,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, PlannedStopTurnLossError, admitsPlannedStopIntake, waitForPlannedStopDrain } from './planned-stop-drain.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, PlannedStopTurnLossError, plannedStopIntakeDecision, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -2135,6 +2135,8 @@ export class AgentRuntime implements Runtime {
   private shutdownRequested = false;
   /** #3703: set when a planned stop closes intake (before its message-handler drain). */
   private plannedStopIntakeClosed = false;
+  /** #3295 S3: journaled messages refused during the stop, before closure, that no owner could take. */
+  private plannedStopIntakeLosses = 0;
   /** #3703: bound on the planned-stop drain of dispatched turns. */
   private readonly plannedStopDrainMs: number;
 
@@ -4752,16 +4754,24 @@ export class AgentRuntime implements Runtime {
       ? null
       : classifyInput(msg.content, { routingAliases: config.nlRouting });
     const plannedStopIntake = this.shutdownRequested;
-    if (plannedStopIntake && !admitsPlannedStopIntake({
-      intakeClosed: this.plannedStopIntakeClosed,
-      deferredOwner: this.sessionScope === 'per_chat' && !this.sandboxPerChat
-        && this.deferredTurnAdmissionEnabled() && this.durability !== null,
-      msg,
-      classification: initialClassification?.type,
-      // The envelope the handoff would store: a fresh turn's text (plain
-      // messages are forwarded unchanged) under the store's own contract.
-      replay: { replaySafe: FRESH_TURN_REPLAY_SAFE, text: msg.content },
-    })) return Promise.reject(new RuntimeAdmissionClosedError());
+    if (plannedStopIntake) {
+      const decision = plannedStopIntakeDecision({
+        intakeClosed: this.plannedStopIntakeClosed,
+        deferredOwner: this.sessionScope === 'per_chat' && !this.sandboxPerChat
+          && this.deferredTurnAdmissionEnabled() && this.durability !== null,
+        msg,
+        classification: initialClassification?.type,
+        // The envelope the handoff would store: a fresh turn's text (plain
+        // messages are forwarded unchanged) under the store's own contract.
+        replay: { replaySafe: FRESH_TURN_REPLAY_SAFE, text: msg.content },
+      });
+      if (decision === 'closed') return Promise.reject(new RuntimeAdmissionClosedError());
+      if (decision === 'unownable') {
+        // Already journaled by ingest and not ownable: the stop counts it as a loss.
+        this.plannedStopIntakeLosses += 1;
+        return Promise.reject(new PlannedStopIntakeLossError());
+      }
+    }
     const tracksRouteRecycle = (
       initialClassification?.type === 'local'
       && (
@@ -8190,15 +8200,12 @@ export class AgentRuntime implements Runtime {
     // per-scope auto-compact bookkeeping (cumulative health counters persist).
     this.autoCompact.shutdown();
 
+    let lostJournaledTurns = 0;
     try {
-      const { lostJournaledTurns } = await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(
+      ({ lostJournaledTurns } = await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(
         shutdownDeadlineAt,
         heldPendingTurns,
-      );
-      if (lostJournaledTurns > 0) {
-        log.error({ lostJournaledTurns }, 'shutdown finalized journaled turns failed');
-        shutdownFailures.push(new PlannedStopTurnLossError(lostJournaledTurns));
-      }
+      ));
     } catch (err) {
       shutdownFailures.push(err);
       preserveRuntimeTurnState = true;
@@ -8206,6 +8213,12 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     this.plannedStopIntakeClosed = true; // #3703: later messages are refused; earlier ones finish in the drain below
+    // #3295 S3: accepted messages refused before closure because nothing could own them are losses too.
+    lostJournaledTurns += this.plannedStopIntakeLosses;
+    if (lostJournaledTurns > 0) {
+      log.error({ lostJournaledTurns }, 'shutdown finalized journaled turns failed');
+      shutdownFailures.push(new PlannedStopTurnLossError(lostJournaledTurns));
+    }
     if (!preserveRuntimeTurnState) {
       // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
       // deadline the coordinator above and the recycle lifecycle below honor.

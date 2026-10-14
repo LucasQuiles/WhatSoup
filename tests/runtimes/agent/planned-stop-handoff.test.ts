@@ -36,8 +36,10 @@
 // T1b is a plain assertion: until the stop closes intake (before its
 // message-handler drain), a journaled plain-text message runs the ordinary
 // intake pipeline and its queue admission hands it off (cause `planned_stop`);
-// after closure it is refused with RuntimeAdmissionClosedError (ingest:
-// `failed / queue_closed`). Ordinary queue-close / halt / full / unknown /
+// the same message with an envelope the store refuses (e.g. over the byte
+// bound) is already accepted, so it is a counted stop loss (ingest:
+// `failed / pre_dispatch_error`, shutdown incomplete); after closure a message
+// is refused with RuntimeAdmissionClosedError (ingest: `failed / queue_closed`). Ordinary queue-close / halt / full / unknown /
 // processor-failure rejections stay terminal (T1 cause cases).
 //
 // RED convention (scheduled-turn-lifecycle.test.ts): each probe asserts the
@@ -367,10 +369,11 @@ import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { runShutdownSequence, shutdownExitCode } from '../../../src/main-shutdown-policy.ts';
+import { createIngestHandler } from '../../../src/core/ingest.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
-import { PlannedStopQueueCloseError, admitsPlannedStopIntake } from '../../../src/runtimes/agent/planned-stop-drain.ts';
+import { PlannedStopQueueCloseError, plannedStopIntakeDecision } from '../../../src/runtimes/agent/planned-stop-drain.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from '../../../src/core/turn-recovery-contract.ts';
-import { RuntimeAdmissionClosedError, classifyErrorForInbound } from '../../../src/core/inbound-failure-class.ts';
+import { PlannedStopIntakeLossError, RuntimeAdmissionClosedError, classifyErrorForInbound } from '../../../src/core/inbound-failure-class.ts';
 import type { RuntimeTurnCoordinator } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 
@@ -614,7 +617,7 @@ describe('planned stop handoff (#3703)', () => {
     expect(obligationStatuses(seq)).toEqual([]);
   });
 
-  it('T1b envelope: during the stop, a message the deferred owner could not store (text over the replay bound) is refused before it is accepted, never accepted and then failed', async () => {
+  it('T1b envelope: during the stop, a journaled message the deferred owner could not store (text over the replay bound) is refused as a counted stop loss, never handed off or dispatched', async () => {
     const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await arriveInFlight(a.runtime, a.engine, 'wamid-t1b-big-head', 't1b big head question');
     const stopping = a.runtime.shutdown().catch(() => {});
@@ -623,9 +626,10 @@ describe('planned stop handoff (#3703)', () => {
     const error = await a.runtime.handleMessage(makeMsg({ messageId: 'wamid-t1b-big', content: oversize, inboundSeq: seq }))
       .then(() => null, (err: unknown) => err);
     await stopping;
-    // Honest transport rejection: ingest records it queue_closed; nothing was admitted.
-    expect(error).toBeInstanceOf(RuntimeAdmissionClosedError);
-    expect(classifyErrorForInbound(error)).toBe('queue_closed');
+    // Already journaled, so not a benign shed: ingest records it pre_dispatch_error and
+    // the stop counts it (see the ingest-route case for the full pipeline).
+    expect(error).toBeInstanceOf(PlannedStopIntakeLossError);
+    expect(classifyErrorForInbound(error)).toBe('pre_dispatch_error');
     expect(obligationStatuses(seq)).toEqual([]);
     expect(terminalRows(seq)).toEqual([]);
     expect(dispatchesOf(oversize)).toBe(0);
@@ -645,16 +649,68 @@ describe('planned stop handoff (#3703)', () => {
     expect(obligationStatuses(seq)).toEqual(['pending']);
   });
 
-  it('T1b envelope: the planned-stop intake refuses a replay-unsafe envelope', () => {
+  it('T1b envelope: the planned-stop intake treats a replay-unsafe or missing envelope as unownable, and anything after closure as closed', () => {
     const base = {
       intakeClosed: false,
       deferredOwner: true,
       msg: { inboundSeq: 7, contentType: 'text' as const, isSyntheticJob: false },
       classification: 'message',
     };
-    expect(admitsPlannedStopIntake({ ...base, replay: { replaySafe: true, text: 'fits' } })).toBe(true);
-    expect(admitsPlannedStopIntake({ ...base, replay: { replaySafe: false, text: 'fits' } })).toBe(false);
-    expect(admitsPlannedStopIntake({ ...base, replay: { replaySafe: true, text: null } })).toBe(false);
+    expect(plannedStopIntakeDecision({ ...base, replay: { replaySafe: true, text: 'fits' } })).toBe('admit');
+    expect(plannedStopIntakeDecision({ ...base, replay: { replaySafe: false, text: 'fits' } })).toBe('unownable');
+    expect(plannedStopIntakeDecision({ ...base, replay: { replaySafe: true, text: null } })).toBe('unownable');
+    expect(plannedStopIntakeDecision({ ...base, intakeClosed: true, replay: { replaySafe: false, text: 'fits' } })).toBe('closed');
+    expect(plannedStopIntakeDecision({ ...base, classification: 'local', replay: { replaySafe: true, text: 'fits' } })).toBe('closed');
+  });
+
+  it('T1b ingest route: an eligible oversize plain-text message that ingest journaled during the stop is an accounted stop loss, not a benign queue_closed rejection', async () => {
+    // REAL ingest (createIngestHandler) in front of the REAL runtime: ingest
+    // stores and journals the message (inboundSeq assigned) BEFORE
+    // runtime.handleMessage, so a refusal there is past the acceptance boundary.
+    const a = startProcess({ ...HANDOFF, plannedStopDrainMs: LONG_DRAIN_MS });
+    const { seq: headSeq, session } = await arriveInFlight(a.runtime, a.engine, 'wamid-t1b-ingest-head', 't1b ingest head question');
+    const log = { info: vi.fn(), error: vi.fn() };
+    const stopping = runShutdownSequence({
+      auxiliaries: [],
+      shutdownRuntime: () => a.runtime.shutdown(),
+      shutdownTransport: () => {},
+      markCleanExit: () => ({ persisted: true as const }),
+      log,
+    });
+    await vi.waitFor(() => expect((a.runtime as unknown as { shutdownRequested: boolean }).shutdownRequested).toBe(true));
+
+    const ingest = createIngestHandler(db, makeMessenger(), a.runtime, () => '15550000@s.whatsapp.net', () => null, a.engine);
+    const oversize = 'z'.repeat(TURN_RECOVERY_MAX_TEXT_BYTES + 1);
+    ingest(makeMsg({ messageId: 'wamid-t1b-ingest-big', content: oversize }));
+    const row = () => db.raw.prepare(
+      'SELECT seq, processing_status, failure_class FROM inbound_events WHERE message_id = ?',
+    ).get('wamid-t1b-ingest-big') as { seq: number; processing_status: string; failure_class: string | null } | undefined;
+    // Accepted: ingest journaled it before the runtime refused it.
+    await vi.waitFor(() => expect(row()?.processing_status).toBe('failed'), { timeout: 2_000 });
+
+    // The head answers inside the drain bound, so the oversize message is the stop's only loss.
+    echoNextAnswer(a.engine, queueFor(dmJid), headSeq);
+    session.emit({ type: 'result', text: 't1b ingest head answer' });
+    const outcome = await stopping;
+
+    expect({
+      failureClass: row()!.failure_class,
+      stopComplete: outcome.complete,
+      failedPhase: outcome.failedPhase,
+      exitCode: shutdownExitCode('SIGTERM', outcome),
+      shutdownCompleteLogged: log.info.mock.calls.map((call) => call[1]).includes('shutdown complete'),
+    }).toEqual({
+      // A fault class (not the benign capacity-shed queue_closed) on the accepted row.
+      failureClass: 'pre_dispatch_error',
+      // The stop lost accepted work it could not own: it must not report clean.
+      stopComplete: false,
+      failedPhase: 'runtime',
+      exitCode: 1,
+      shutdownCompleteLogged: false,
+    });
+    expect(status(headSeq)).toBe('complete');
+    expect(obligationStatuses(row()!.seq)).toEqual([]);
+    expect(dispatchesOf(oversize)).toBe(0);
   });
 
   // ─── T1 cause: only the planned stop hands off; ordinary exclusions stay terminal ───

@@ -60,19 +60,25 @@ export async function waitForPlannedStopDrain(
   return true;
 }
 
+/** How `handleMessage` treats a message that arrives while a planned stop is running. */
+export type PlannedStopIntakeDecision = 'admit' | 'closed' | 'unownable';
+
 /**
- * #3703 / #3295 S3 admission boundary during a planned stop. Until the stop
- * closes intake (just before its message-handler drain), a journaled plain
- * text message that can become a durable deferred obligation runs through the
- * ordinary intake pipeline; its queue admission then hands it to the deferred
- * owner (cause `planned_stop`) instead of dispatching it. The replay envelope
- * is checked against the store's own contract (replay-safe, text within the
- * byte bound) BEFORE the message is accepted, so no accepted message is found
- * unownable afterwards. Everything else, and everything after closure, is
- * refused with RuntimeAdmissionClosedError, which ingest records
- * `failed / queue_closed`: an honest, distinct rejection.
+ * #3703 / #3295 S3 admission boundary during a planned stop. Ingest stores and
+ * journals a message (inboundSeq assigned) BEFORE the runtime sees it, so every
+ * message reaching this check is already accepted.
+ * - `admit`: until the stop closes intake (just before its message-handler
+ *   drain), a journaled plain-text message whose replay envelope meets the
+ *   deferred store's contract (replay-safe, text within the byte bound) runs
+ *   the ordinary intake pipeline; its queue admission hands it to the deferred
+ *   owner (cause `planned_stop`) instead of dispatching it.
+ * - `unownable`: the same eligible message before closure, but the store would
+ *   refuse its envelope. It cannot be owned, so it is a loss the stop counts
+ *   (PlannedStopIntakeLossError, ingest: `failed / pre_dispatch_error`).
+ * - `closed`: everything else, and everything after closure, is refused with
+ *   RuntimeAdmissionClosedError, which ingest records `failed / queue_closed`.
  */
-export function admitsPlannedStopIntake(input: {
+export function plannedStopIntakeDecision(input: {
   readonly intakeClosed: boolean;
   /** per_chat (not sandboxed), deferredTurnAdmission on, durability present. */
   readonly deferredOwner: boolean;
@@ -81,13 +87,16 @@ export function admitsPlannedStopIntake(input: {
   readonly classification: string | undefined;
   /** The replay envelope the handoff would store (its text is the message text). */
   readonly replay: { readonly replaySafe: boolean; readonly text: string | null };
-}): boolean {
-  return !input.intakeClosed
+}): PlannedStopIntakeDecision {
+  const eligible = !input.intakeClosed
     && input.deferredOwner
     && input.msg.inboundSeq !== undefined
     && input.msg.contentType === 'text'
     && input.msg.isSyntheticJob !== true
-    && input.classification === 'message'
-    && input.replay.text !== null
-    && deferredTurnEnvelopeRefusal({ replaySafe: input.replay.replaySafe, text: input.replay.text }) === null;
+    && input.classification === 'message';
+  if (!eligible) return 'closed';
+  return input.replay.text !== null
+    && deferredTurnEnvelopeRefusal({ replaySafe: input.replay.replaySafe, text: input.replay.text }) === null
+    ? 'admit'
+    : 'unownable';
 }
