@@ -476,6 +476,9 @@ describe('deferred turn obligations (#3295 S1)', () => {
       engine.markInboundFailed(failedSeq);
       engine.markInboundFailed(pendingSeq);
       expect(store.settleDispatchedObligation(committed.claimed.id)).toBe('source_failed');
+      // A failed turn never closes as completed: it is quarantined with the honest reason.
+      expect(db.raw.prepare('SELECT status, terminal_reason FROM deferred_turn_obligations WHERE id = ?')
+        .get(committed.claimed.id)).toEqual({ status: 'terminal_quarantined', terminal_reason: 'source_failed' });
       const pendingId = store.listOpenObligations(SCOPE)[0]!.id;
       expect(store.settleDispatchedObligation(pendingId)).toBeNull();
       expect(store.listOpenObligations(SCOPE)).toEqual([
@@ -501,13 +504,55 @@ describe('deferred turn obligations (#3295 S1)', () => {
         store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
       }
 
-      new DurabilityEngine(db).preConnectRecovery();
+      new DurabilityEngine(db).preConnectRecovery({ deferredTurnOwnerEnabled: true });
 
       expect(inboundStatus(pending)).toBe('processing');
       expect(inboundStatus(claimedSeq)).toBe('processing');
       expect(inboundStatus(committed)).toBe('failed');
       expect(inboundStatus(exhausted)).toBe('failed');
       expect(inboundStatus(unowned)).toBe('failed');
+    });
+
+    it('with the deferred owner disabled (flag off), crash recovery fails owned inbounds and quarantines their pre-commit obligations', () => {
+      const pending = journal('wamid-off-pending');
+      const claimedSeq = journal('wamid-off-claimed', '15550100002');
+      const committed = journal('wamid-off-committed', '15550100003');
+      store.enqueueDeferredObligation(enqueueInput(pending));
+      store.enqueueDeferredObligation(enqueueInput(claimedSeq, { conversationKey: '15550100002' }));
+      store.claimNextEligible(SCOPE, { conversationKey: '15550100002', claimToken: 'claim-off', ttlSeconds: 300 });
+      store.enqueueDeferredObligation(enqueueInput(committed, { conversationKey: '15550100003' }));
+      const { claimed: committedRow } = commitHead('claim-off-commit', '15550100003');
+
+      // No argument: the owner is disabled, matching a runtime without the flag.
+      new DurabilityEngine(db).preConnectRecovery();
+
+      for (const seq of [pending, claimedSeq, committed]) expect(inboundStatus(seq)).toBe('failed');
+      const rows = db.raw.prepare(
+        'SELECT inbound_seq, status, terminal_reason FROM deferred_turn_obligations ORDER BY inbound_seq',
+      ).all();
+      expect(rows).toEqual([
+        { inbound_seq: pending, status: 'terminal_quarantined', terminal_reason: 'owner_disabled' },
+        { inbound_seq: claimedSeq, status: 'terminal_quarantined', terminal_reason: 'owner_disabled' },
+        // Post-commit: replay is vetoed; it settles from its now-terminal source, never requeued.
+        { inbound_seq: committed, status: 'dispatched_commit', terminal_reason: null },
+      ]);
+      expect(store.settleDispatchedObligation(committedRow.id)).toBe('source_failed');
+    });
+
+    it('reports an eligible older head only for the same conversation', () => {
+      const head = journal('wamid-fifo-head');
+      const later = journal('wamid-fifo-later');
+      store.enqueueDeferredObligation(enqueueInput(head));
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, later)).toBe(true);
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, head)).toBe(false);
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, '15550100002', later)).toBe(false);
+      // An exhausted head is not eligible: it cannot run, so it never holds live input.
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-fifo-x${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds: 300 })!;
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, later)).toBe(false);
     });
   });
 });

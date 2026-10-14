@@ -14,11 +14,18 @@
  *   claimed -> pending                 (fenced requeue, PRE-commit only)
  *   claimed -> terminal_quarantined    (undispatchable envelope)
  *   non-terminal -> terminal_operator  (explicit operator remediation)
- *   dispatched_commit -> terminal_completed is also reachable WITHOUT a fence
- *   (slice S3 `settleDispatchedObligation`), but only on durable proof that the
- *   source inbound already reached its own terminal status: the one dispatch
- *   authorization was used, the ordinary terminal path owns the outcome, and
- *   nothing is dispatched or requeued by the settle.
+ *   dispatched_commit -> terminal_completed | terminal_quarantined is also
+ *   reachable WITHOUT a fence (slice S3 `settleDispatchedObligation`), but only
+ *   on durable proof that the source inbound already reached its own terminal
+ *   status: the one dispatch authorization was used, the ordinary terminal path
+ *   owns the outcome, and nothing is dispatched or requeued by the settle. A
+ *   `complete` source closes `terminal_completed`; a `failed` source closes
+ *   `terminal_quarantined` / `source_failed` — a failed turn is never labelled
+ *   completed.
+ *   pending | claimed -> terminal_quarantined (`owner_disabled`) is reachable
+ *   WITHOUT a fence only from startup crash recovery when the deferred owner is
+ *   disabled (flag off): no process will run the obligation, so its source is
+ *   failed honestly and the obligation closed instead of left holding it.
  *
  * Invariants:
  * - one obligation per (scope, inbound_seq); enqueue is idempotent;
@@ -326,7 +333,10 @@ export class DeferredTurnStore {
       `),
       settleDispatched: prepare(`
         UPDATE deferred_turn_obligations
-        SET status = 'terminal_completed',
+        SET status = (
+              SELECT CASE i.processing_status WHEN 'complete' THEN 'terminal_completed' ELSE 'terminal_quarantined' END
+              FROM inbound_events i WHERE i.seq = deferred_turn_obligations.inbound_seq
+            ),
             terminal_reason = (
               SELECT CASE i.processing_status WHEN 'complete' THEN 'completed' ELSE 'source_failed' END
               FROM inbound_events i WHERE i.seq = deferred_turn_obligations.inbound_seq
@@ -340,6 +350,35 @@ export class DeferredTurnStore {
               AND i.processing_status IN ('complete', 'failed')
           )
         RETURNING terminal_reason
+      `),
+      // FIFO against live input: the conversation's queue head is older than
+      // the given inbound and can still run (pending with attempts left,
+      // claimed, or committed and settling). An exhausted head cannot run, so
+      // it never holds live input back.
+      hasEligibleOpenHeadBefore: prepare(`
+        SELECT 1 AS present FROM deferred_turn_obligations o
+        WHERE o.scope = ?
+          AND (o.scope <> 'per_chat' OR o.conversation_key = ?)
+          AND o.inbound_seq < ?
+          AND (o.status IN ('claimed', 'dispatched_commit')
+            OR (o.status = 'pending' AND o.attempt_count < ${DEFERRED_TURN_MAX_ATTEMPTS}))
+          AND o.inbound_seq = (
+            SELECT MIN(h.inbound_seq) FROM deferred_turn_obligations h
+            WHERE h.scope = o.scope
+              AND (o.scope <> 'per_chat' OR h.conversation_key = o.conversation_key)
+              AND h.${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
+          )
+      `),
+      quarantinePreCommitForSource: prepare(`
+        UPDATE deferred_turn_obligations
+        SET status = 'terminal_quarantined',
+            terminal_reason = ?,
+            last_error_class = ?,
+            claim_token = NULL,
+            claim_expires_at = NULL,
+            updated_at = datetime('now')
+        WHERE inbound_seq = ?
+          AND status IN ('pending', 'claimed')
       `),
     };
   }
@@ -527,15 +566,31 @@ export class DeferredTurnStore {
   }
 
   /**
-   * Close a `dispatched_commit` obligation once its source inbound is terminal
-   * (`complete` or `failed`). Never dispatches or requeues. Returns the
-   * bounded terminal reason, or null while the source is still open (the
-   * obligation stays held, its replay vetoed).
+   * Close a `dispatched_commit` obligation once its source inbound is terminal.
+   * A `complete` source closes `terminal_completed` / `completed`; a `failed`
+   * one closes `terminal_quarantined` / `source_failed`. Never dispatches or
+   * requeues. Returns the bounded terminal reason, or null while the source is
+   * still open (the obligation stays held, its replay vetoed).
    */
   settleDispatchedObligation(id: number): 'completed' | 'source_failed' | null {
     const row = this.statements.settleDispatched.get(id) as { terminal_reason: string } | undefined;
     if (!row) return null;
     return row.terminal_reason === 'completed' ? 'completed' : 'source_failed';
+  }
+
+  /** True when an older, still runnable obligation heads this conversation's queue. */
+  hasEligibleOpenHeadBefore(scope: string, conversationKey: string, inboundSeq: number): boolean {
+    return this.statements.hasEligibleOpenHeadBefore.get(scope, conversationKey, inboundSeq) !== undefined;
+  }
+
+  /**
+   * Startup recovery with the deferred owner disabled: close every pre-commit
+   * obligation of the source (no fence; no process will run it). Returns the
+   * number of rows closed.
+   */
+  quarantinePreCommitForSource(inboundSeq: number, reason: string): number {
+    validateErrorClass(reason);
+    return Number(this.statements.quarantinePreCommitForSource.run(reason, reason, inboundSeq).changes ?? 0);
   }
 
   /** Retention guard hook: true while the inbound's obligation is non-terminal. */

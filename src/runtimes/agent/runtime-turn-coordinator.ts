@@ -177,7 +177,7 @@ export interface OperatorCancelledTurnCounts {
  * cancelled by this teardown, so it is not reported as dropped.
  */
 export function countOperatorCancelledTurns(
-  settled: readonly PromiseSettledResult<FinalizeRuntimeTurnResult>[],
+  settled: readonly PromiseSettledResult<UndispatchedTurnFinalizationResult>[],
   queuedIndexes: ReadonlySet<number>,
 ): OperatorCancelledTurnCounts {
   let active = 0;
@@ -267,6 +267,8 @@ export interface RuntimeTurnCoordinatorPort {
    * semantics). Optional so narrow test hosts keep compiling; absent = OFF.
    */
   deferredTurnAdmissionEnabled?(): boolean;
+  /** #3295 S3: request a deferred-turn drain pass now (FIFO deferral of live input). */
+  kickDeferredTurnDrain?(): void;
   readonly runtimeTurnSupervisor: RuntimeTurnSupervisor<RuntimeTurnPostEffects>;
   readonly sessionOwnership: SessionOwnershipRegistry;
   readonly recoveryManagerId: string;
@@ -420,6 +422,51 @@ interface DeferredToObligationRetirement {
   readonly mayAdvance: true;
 }
 
+const DEFERRED_TO_OBLIGATION: DeferredToObligationRetirement = Object.freeze({
+  kind: 'deferred_to_obligation',
+  mayAdvance: true,
+});
+
+/**
+ * What an undispatched finalization can end in: an ordinary finalization
+ * result, or (#3295 S3) the retirement of a drained turn whose obligation
+ * kept ownership of the source.
+ */
+export type UndispatchedTurnFinalizationResult = FinalizeRuntimeTurnResult | DeferredToObligationRetirement;
+
+/**
+ * #3295 S3: the durable owner of one drained obligation turn, bound to the
+ * drain's claim fence. The drained turn runs through the chat's ordinary
+ * TurnQueue; the coordinator reports each disposition back here.
+ */
+export interface DeferredTurnDispatch {
+  /**
+   * Durable `dispatched_commit`, run at the provider boundary BEFORE the turn
+   * is published or sent. Throws when the claim fence is stale; the provider
+   * is then never called and nothing is published.
+   */
+  commit(): void;
+  /**
+   * The turn never reached the provider (bounded error class). `retained`: the
+   * obligation still owns the source (requeued, or owned by another claimant
+   * after a stale fence) — retire runtime state only, never write the source.
+   * `terminal`: the obligation was closed (attempts spent, operator
+   * cancellation); the ordinary undispatched terminal path owns the source.
+   */
+  release(errorClass: string): 'retained' | 'terminal';
+  /** After commit: the ordinary terminal path owned the turn; close once the source is terminal. */
+  settle(): void;
+}
+
+/** Why a turn is moved into a deferred obligation (#3295 S2/S3, #3703). */
+type DeferredObligationCause =
+  // S2: a follower blocked solely by same-scope durable recovery.
+  | 'recovery_blocked'
+  // #3703: a planned stop (runtime shutdown) took an admitted, never-dispatched turn.
+  | 'planned_stop'
+  // S3 FIFO: live input behind an older runnable obligation of the same chat.
+  | 'fifo_behind_obligation';
+
 export class RuntimeTurnCoordinator {
   private readonly host: RuntimeTurnCoordinatorPort;
   private readonly turnQueueHalts = new TurnQueueHaltLatch();
@@ -427,7 +474,7 @@ export class RuntimeTurnCoordinator {
   private readonly activeFinalizations = new Map<string, Promise<FinalizeRuntimeTurnResult>>();
   private readonly undispatchedTerminalFinalizations = new WeakMap<RuntimeTurnContext, {
     attemptOutcome: AttemptOutcome;
-    finalization: Promise<FinalizeRuntimeTurnResult>;
+    finalization: Promise<UndispatchedTurnFinalizationResult>;
   }>();
   private readonly cancelledUndispatchedTurnIds = new Set<string>();
   private readonly undispatchedCrashFinalizations = new Map<string, Promise<void>>();
@@ -435,6 +482,10 @@ export class RuntimeTurnCoordinator {
   private readonly rejectedTurnFinalizationFailures: unknown[] = [];
   private globalTeardown: RuntimeTurnQueueTeardownState | null = null;
   private readonly perChatTeardowns = new Map<string, RuntimeTurnQueueTeardownState>();
+  /** #3295 S3: drained turns not yet committed, by logicalTurnId. */
+  private readonly deferredDispatches = new Map<string, DeferredTurnDispatch>();
+  /** #3295 S3: drained turns committed at the provider boundary, by logicalTurnId. */
+  private readonly committedDeferredDispatches = new Map<string, DeferredTurnDispatch>();
   private readonly continuationDeferrals = new Map<string, {
     initialResultConsumed: boolean;
     cancelled: boolean;
@@ -914,14 +965,51 @@ private maybeDeferRecoveryBlockedTurn(
  * per_chat text turn to the durable deferred-turn owner instead of failing
  * it. Same predicate and flag as the S2 admission defer, so the handoff
  * exists only where the S3 drain (deferred-turn-drain.ts) dispatches it on
- * the next start. Returns false, with no durable write, when the turn does
- * not qualify or the obligation write fails; the caller then keeps the
- * ordinary terminal path, and the stop reports the loss.
+ * the next start.
+ *
+ * The cause is the planned stop itself (`planned_stop`), never a queue
+ * rejection reason: only the shutdown sites call this, and only while the
+ * runtime is shutting down. Ordinary queue-close / halt / full / unknown /
+ * processor-failure rejections keep their terminal path (#3295). The obligation
+ * row is written synchronously here, so it exists before the stop can report
+ * clean. Returns false, with no durable write, when the turn does not qualify
+ * or the obligation write fails; the caller then keeps the ordinary terminal
+ * path, and the stop reports the loss. A drained obligation turn is never
+ * handed off here: it already has its owner (see releaseDeferredDispatch).
  */
 private handOffUndispatchedTurnAtPlannedStop(context: RuntimeTurnContext): boolean {
+  if (this.host.isShuttingDown?.() !== true) return false;
+  if (this.isDeferredDispatchTurn(context)) return false;
   const durability = this.host.durability;
   if (!durability) return false;
   return this.enqueueDeferredObligation(context, durability, 'planned_stop') !== null;
+}
+
+/**
+ * #3295 S3 FIFO: an older runnable obligation of the same chat must run before
+ * fresh live input. The live turn joins the same durable FIFO (an obligation
+ * behind the older one) instead of overtaking it; the drain dispatches both
+ * in inbound order through the chat's TurnQueue. Nothing is published yet,
+ * so there is no runtime state to retire. Returns true when deferred.
+ */
+private deferLiveTurnBehindOlderObligation(turn: QueuedTurn): boolean {
+  const context = turn.runtimeContext;
+  const durability = this.host.durability;
+  if (!context || !durability || this.isDeferredDispatchTurn(context)) return false;
+  if (this.host.deferredTurnAdmissionEnabled?.() !== true) return false;
+  if (context.identity.scope !== 'per_chat' || context.identity.inboundSeq === null) return false;
+  if (!durability.deferredTurns.hasEligibleOpenHeadBefore(
+    context.identity.scope, context.identity.conversationKey, context.identity.inboundSeq,
+  )) return false;
+  if (this.enqueueDeferredObligation(context, durability, 'fifo_behind_obligation') === null) {
+    // Not deferrable (e.g. not a replay-safe text envelope): it keeps the live
+    // path and may run before the older obligation.
+    log.warn({ cause: 'fifo_behind_obligation' },
+      'live turn behind an older deferred obligation is not deferrable — dispatching live');
+    return false;
+  }
+  this.host.kickDeferredTurnDrain?.();
+  return true;
 }
 
 /**
@@ -933,7 +1021,7 @@ private handOffUndispatchedTurnAtPlannedStop(context: RuntimeTurnContext): boole
 private enqueueDeferredObligation(
   context: RuntimeTurnContext,
   durability: DurabilityEngine,
-  cause: 'recovery_blocked' | 'planned_stop',
+  cause: DeferredObligationCause,
 ): number | null {
   if (this.host.deferredTurnAdmissionEnabled?.() !== true) return null;
   if (context.identity.scope !== 'per_chat') return null;
@@ -973,7 +1061,9 @@ private enqueueDeferredObligation(
       },
       cause === 'recovery_blocked'
         ? 'recovery-blocked follower deferred into durable obligation (#3295 S2)'
-        : 'undispatched turn handed to durable deferred obligation at planned stop (#3703)',
+        : cause === 'planned_stop'
+          ? 'undispatched turn handed to durable deferred obligation at planned stop (#3703)'
+          : 'live turn deferred behind an older durable obligation (#3295 S3 FIFO)',
     );
     return enqueued.id;
   } catch (err) {
@@ -1278,16 +1368,16 @@ private terminalPostEffectsAreProven(
 }
 
 private assertResetFinalizations(
-  settled: PromiseSettledResult<FinalizeRuntimeTurnResult>[],
+  settled: PromiseSettledResult<UndispatchedTurnFinalizationResult>[],
   message: string,
 ): void {
   const rejected = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
-  const unproven = settled.filter((item): item is PromiseFulfilledResult<FinalizeRuntimeTurnResult> => (
+  const unproven = settled.filter((item): item is PromiseFulfilledResult<UndispatchedTurnFinalizationResult> => (
     item.status === 'fulfilled'
       && item.value.kind === 'terminal'
       && !this.terminalPostEffectsAreProven(item.value)
   ));
-  const unresolved = settled.filter((item): item is PromiseFulfilledResult<FinalizeRuntimeTurnResult> => (
+  const unresolved = settled.filter((item): item is PromiseFulfilledResult<UndispatchedTurnFinalizationResult> => (
     item.status === 'fulfilled'
       && item.value.kind !== 'terminal'
       && !item.value.mayAdvance
@@ -1393,7 +1483,7 @@ async finalizeActiveRuntimeTurnsForShutdown(
   ]);
   for (const queue of shutdownQueues) queue.preemptForShutdown?.(deadlineAt);
 
-  const pending: Promise<FinalizeRuntimeTurnResult>[] = [];
+  const pending: Promise<UndispatchedTurnFinalizationResult>[] = [];
   const queueUndispatched = (turn: QueuedTurn): void => {
     if (!turn.runtimeContext) {
       if (turn.inboundSeq !== undefined) {
@@ -1463,13 +1553,13 @@ async finalizeActiveRuntimeTurnsForShutdown(
       clearReplayOnSuccess: false,
     }));
   }
-  const finalizationWork = (async (): Promise<PromiseSettledResult<FinalizeRuntimeTurnResult>[]> => {
+  const finalizationWork = (async (): Promise<PromiseSettledResult<UndispatchedTurnFinalizationResult>[]> => {
     const results = await Promise.allSettled(pending);
     await this.awaitActiveFinalizations();
     return results;
   })();
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-  let settled: PromiseSettledResult<FinalizeRuntimeTurnResult>[];
+  let settled: PromiseSettledResult<UndispatchedTurnFinalizationResult>[];
   try {
     settled = await Promise.race([
       finalizationWork,
@@ -1485,12 +1575,12 @@ async finalizeActiveRuntimeTurnsForShutdown(
     clearTimeout(deadlineTimer);
   }
   const rejected = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
-  const unproven = settled.filter((item): item is PromiseFulfilledResult<FinalizeRuntimeTurnResult> => (
+  const unproven = settled.filter((item): item is PromiseFulfilledResult<UndispatchedTurnFinalizationResult> => (
     item.status === 'fulfilled'
       && item.value.kind === 'terminal'
       && !this.terminalPostEffectsAreProven(item.value)
   ));
-  const unresolved = settled.filter((item): item is PromiseFulfilledResult<FinalizeRuntimeTurnResult> => (
+  const unresolved = settled.filter((item): item is PromiseFulfilledResult<UndispatchedTurnFinalizationResult> => (
     item.status === 'fulfilled'
       && item.value.kind !== 'terminal'
       && !item.value.mayAdvance
@@ -1535,7 +1625,7 @@ async terminalizeGlobalTurnForReset(
     }
     return existing.terminalization;
   }
-  const finalizations: Promise<FinalizeRuntimeTurnResult>[] = [];
+  const finalizations: Promise<UndispatchedTurnFinalizationResult>[] = [];
   const runtimeQueue = this.host.turnQueue;
   const teardown = runtimeQueue.beginTeardown();
   const transaction: RuntimeTurnQueueTeardown = {
@@ -1760,7 +1850,7 @@ async terminalizePerChatTurnQueueForKill(
   const scopeRef = runtimeQueue === undefined
     ? { value: mapKey }
     : this.host.perChatTurnQueueKeys.get(runtimeQueue) ?? { value: mapKey };
-  const finalizations: Promise<FinalizeRuntimeTurnResult>[] = [];
+  const finalizations: Promise<UndispatchedTurnFinalizationResult>[] = [];
   const detachedFinalizations: Array<{
     readonly turn: QueuedTurn;
     settledIndex: number | null;
@@ -2300,10 +2390,14 @@ async applyRecoveredRuntimeTurnFinalization(
 
 enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   if (this.host.isShuttingDown?.() === true) {
-    // Shutdown-time admission rejection is a closed queue (#1750).
+    // #3703: a turn admitted during the planned stop is handed to its durable
+    // owner when it qualifies (nothing was published, so nothing to retire).
+    if (turn.runtimeContext && this.handOffUndispatchedTurnAtPlannedStop(turn.runtimeContext)) return false;
+    // Otherwise shutdown-time admission rejection is a closed queue (#1750).
     this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
     return false;
   }
+  if (this.deferLiveTurnBehindOlderObligation(turn)) return false;
   if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(mapKey, turn)) {
     return false;
   }
@@ -2323,15 +2417,21 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
           'per-chat turn rejected — agent queue full or halted',
         );
       },
-      onProcessorError: (failed, error) => this.finalizePerChatProcessorError(queueKey.value, failed, error),
+      // #3295 S3: a drained turn reports back after its ordinary finalizer.
+      // Other turns keep the exact processor shape (no added awaits).
+      onProcessorError: (failed, error) => (this.isDeferredDispatchQueuedTurn(failed)
+        ? this.finalizePerChatProcessorError(queueKey.value, failed, error)
+          .finally(() => this.finishDeferredDispatch(failed))
+        : this.finalizePerChatProcessorError(queueKey.value, failed, error)),
       onHalt: () => {
         this.turnQueueHalts.halt(queueKey.value);
       },
     });
     const liveQueue = queue;
-    queue.setProcessor((queued: QueuedTurn) => this.processPerChatTurn(
-      queueKey, queued, undefined, undefined, undefined, liveQueue,
-    ));
+    queue.setProcessor((queued: QueuedTurn) => (this.isDeferredDispatchQueuedTurn(queued)
+      ? this.processPerChatTurn(queueKey, queued, undefined, undefined, undefined, liveQueue)
+        .then(() => this.finishDeferredDispatch(queued))
+      : this.processPerChatTurn(queueKey, queued, undefined, undefined, undefined, liveQueue)));
     this.host.perChatTurnQueues.set(mapKey, queue);
     this.host.perChatTurnQueueKeys.set(queue, queueKey);
   }
@@ -2377,11 +2477,11 @@ async finalizeUndispatchedRuntimeTurn(
   scopeRef?: PerChatRuntimeScopeRef,
   attemptOutcome: AttemptOutcome = { kind: 'admission_rejected' },
   onOwnershipProven?: () => void,
-): Promise<FinalizeRuntimeTurnResult> {
+): Promise<UndispatchedTurnFinalizationResult> {
   const existing = this.undispatchedTerminalFinalizations.get(context);
   if (existing) {
     const result = await existing.finalization;
-    if (result.kind !== 'terminal' && result.kind !== 'reclaimed_by_sweep') {
+    if (result.kind !== 'terminal' && result.kind !== 'reclaimed_by_sweep' && result.kind !== 'deferred_to_obligation') {
       // A retained finalization still owns its original outcome after storage
       // recovers. Settle that owner before shutdown can request a crash outcome.
       await this.host.runtimeTurnSupervisor.retryAll();
@@ -2396,7 +2496,11 @@ async finalizeUndispatchedRuntimeTurn(
   }
   // A timeout and shutdown can overlap before the FIFO releases this exact
   // immutable context. Join its first terminal owner instead of changing the outcome.
-  const finalization = this.runUndispatchedRuntimeTurnFinalization(context, scopeRef, attemptOutcome, onOwnershipProven);
+  // #3295 S3: a drained turn that never reached the provider goes back to its
+  // obligation (the source inbound is not written) unless the obligation closed.
+  const finalization = this.releaseDeferredDispatch(context, attemptOutcome) === 'retained'
+    ? this.retireReleasedDeferredTurn(context, scopeRef, onOwnershipProven)
+    : this.runUndispatchedRuntimeTurnFinalization(context, scopeRef, attemptOutcome, onOwnershipProven);
   this.undispatchedTerminalFinalizations.set(context, { attemptOutcome, finalization });
   void finalization.catch(() => { this.undispatchedTerminalFinalizations.delete(context); });
   return finalization;
@@ -2518,7 +2622,7 @@ terminalizeUndispatchedRuntimeCrash(
   context: RuntimeTurnContext,
   scopeRef?: PerChatRuntimeScopeRef,
   operatorCancellation?: typeof OPERATOR_CANCELLATION_ATTEMPT_OUTCOME,
-): Promise<FinalizeRuntimeTurnResult> {
+): Promise<UndispatchedTurnFinalizationResult> {
   const turnId = context.identity.logicalTurnId;
   const interruption = operatorCancellation ? 'operator cancellation' : 'crash';
   this.cancelledUndispatchedTurnIds.add(turnId);
@@ -2593,6 +2697,106 @@ finalizeMessageProcessingFailure(inboundSeq: number | undefined): boolean {
     clearReplayOnSuccess: false,
   });
   return true;
+}
+
+/** #3295 S3: register a drained obligation turn before it enters its chat's TurnQueue. */
+registerDeferredDispatch(context: RuntimeTurnContext, dispatch: DeferredTurnDispatch): void {
+  this.deferredDispatches.set(context.identity.logicalTurnId, dispatch);
+}
+
+private isDeferredDispatchQueuedTurn(turn: QueuedTurn): boolean {
+  return turn.runtimeContext !== undefined && this.isDeferredDispatchTurn(turn.runtimeContext);
+}
+
+/** True while `context` is a drained obligation turn (committed or not). */
+isDeferredDispatchTurn(context: RuntimeTurnContext): boolean {
+  const turnId = context.identity.logicalTurnId;
+  return this.deferredDispatches.has(turnId) || this.committedDeferredDispatches.has(turnId);
+}
+
+/**
+ * #3295 S3 provider boundary: write the drained turn's durable dispatch commit
+ * before the turn is published or sent. A stale fence throws here, so nothing
+ * is published and the provider is never called; the processor-error path
+ * then hands the turn back to its obligation (releaseDeferredDispatch).
+ * No-op for every other turn.
+ */
+commitDeferredDispatch(context: RuntimeTurnContext | undefined): void {
+  if (!context) return;
+  const turnId = context.identity.logicalTurnId;
+  const dispatch = this.deferredDispatches.get(turnId);
+  if (!dispatch) return;
+  dispatch.commit();
+  this.deferredDispatches.delete(turnId);
+  this.committedDeferredDispatches.set(turnId, dispatch);
+}
+
+/**
+ * Hand an undispatched drained turn back to its obligation. Returns
+ * `retained` when the obligation still owns the source (retire runtime state
+ * only), `terminal` when the obligation closed (the ordinary terminal path
+ * owns the source), or null for any other turn.
+ */
+private releaseDeferredDispatch(
+  context: RuntimeTurnContext,
+  attemptOutcome: AttemptOutcome,
+): 'retained' | 'terminal' | null {
+  const turnId = context.identity.logicalTurnId;
+  const dispatch = this.deferredDispatches.get(turnId);
+  if (!dispatch) return null;
+  this.deferredDispatches.delete(turnId);
+  const operatorCancelled = attemptOutcome.kind === 'failed' && attemptOutcome.class === 'operator_cancelled';
+  const errorClass = operatorCancelled
+    ? 'operator_cancelled'
+    : this.host.isShuttingDown?.() === true
+      ? 'planned_stop'
+      : attemptOutcome.kind === 'admission_rejected'
+        ? attemptOutcome.class ?? 'admission_rejected'
+        : attemptOutcome.kind === 'failed' ? attemptOutcome.class : attemptOutcome.kind;
+  return dispatch.release(errorClass);
+}
+
+/** Retire a released drained turn's runtime state; the source is never written. */
+private async retireReleasedDeferredTurn(
+  context: RuntimeTurnContext,
+  scopeRef: PerChatRuntimeScopeRef | undefined,
+  onOwnershipProven?: () => void,
+): Promise<UndispatchedTurnFinalizationResult> {
+  onOwnershipProven?.();
+  if (scopeRef !== undefined) {
+    await this.retireDeferredRuntimeTurn(context, scopeRef);
+  } else {
+    this.host.replyGuarantee?.disarm(context.identity.inboundSeq ?? undefined);
+  }
+  return DEFERRED_TO_OBLIGATION;
+}
+
+/**
+ * #3295 S3: after the TurnQueue is done with a drained turn. Committed: the
+ * ordinary terminal path owned it; settle the obligation (a later drain pass
+ * settles it if the source terminal lands later). Never committed and not yet
+ * released (the processor returned without a provider turn, e.g. the text was
+ * consumed as a poll answer): give it back to its obligation, and finalize
+ * the source only if the obligation closed while the source is still open.
+ */
+finishDeferredDispatch(turn: QueuedTurn): void {
+  const context = turn.runtimeContext;
+  if (!context) return;
+  const turnId = context.identity.logicalTurnId;
+  const committed = this.committedDeferredDispatches.get(turnId);
+  if (committed) {
+    this.committedDeferredDispatches.delete(turnId);
+    committed.settle();
+    return;
+  }
+  if (this.releaseDeferredDispatch(context, { kind: 'admission_rejected', class: 'pre_dispatch_error' }) === 'terminal') {
+    void this.finalizeUndispatchedRuntimeTurn(context, undefined, { kind: 'admission_rejected', class: 'pre_dispatch_error' })
+      .catch((err: unknown) => {
+        this.host.runtimeTurnSupervisor.markDegraded(context);
+        log.error({ errorClass: err instanceof Error ? err.name : 'non-error' },
+          'released deferred turn terminal finalization failed');
+      });
+  }
 }
 
 /**

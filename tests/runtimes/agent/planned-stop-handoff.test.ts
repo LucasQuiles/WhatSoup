@@ -32,11 +32,13 @@
 // and T5b are plain assertions behind the #3295 `deferredTurnAdmission` flag:
 // the stop hands a queued, never-dispatched turn to the durable deferred-turn
 // owner, and the S3 drain (deferred-turn-drain.ts) dispatches it on the next
-// start, committing `dispatched_commit` before the provider send. T1b stays
-// `it.fails`: a message that reaches handleMessage after shutdown began is
-// still rejected (ingest then fails it), because handing it off would need the
-// admission pipeline (classification, commands, session/journal identity) to
-// run during teardown. That is a separate decision, not part of the drain.
+// start, committing `dispatched_commit` before the turn is published or sent.
+// T1b is a plain assertion: until the stop closes intake (before its
+// message-handler drain), a journaled plain-text message runs the ordinary
+// intake pipeline and its queue admission hands it off (cause `planned_stop`);
+// after closure it is refused with RuntimeAdmissionClosedError (ingest:
+// `failed / queue_closed`). Ordinary queue-close / halt / full / unknown /
+// processor-failure rejections stay terminal (T1 cause cases).
 //
 // RED convention (scheduled-turn-lifecycle.test.ts): each probe asserts the
 // DESIRED property and is committed as `it.fails` while main lacks it; landing
@@ -216,9 +218,23 @@ const { mockConfig, mockEmitAlertChecked } = vi.hoisted(() => ({
 
 // ─── Module mocks (provider boundary + side-effect surfaces only) ───────────
 
-vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
-  return loggerMock();
+// Records every log call by component so the drain's content-free log
+// contract (#3295 S3 privacy) can be asserted.
+const { logCalls } = vi.hoisted(() => ({
+  logCalls: [] as Array<{ component: string; level: string; args: unknown[] }>,
+}));
+vi.mock('../../../src/logger.ts', () => {
+  const make = (component: string) => {
+    const record = (level: string) => (...args: unknown[]): void => {
+      logCalls.push({ component, level, args });
+    };
+    const logger = {
+      info: record('info'), warn: record('warn'), error: record('error'),
+      debug: record('debug'), fatal: record('fatal'), level: 'error',
+    };
+    return { ...logger, child: () => logger };
+  };
+  return { createChildLogger: (name: string) => make(name) };
 });
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
@@ -353,6 +369,9 @@ import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/ag
 import { runShutdownSequence, shutdownExitCode } from '../../../src/main-shutdown-policy.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 import { PlannedStopQueueCloseError } from '../../../src/runtimes/agent/planned-stop-drain.ts';
+import { RuntimeAdmissionClosedError, classifyErrorForInbound } from '../../../src/core/inbound-failure-class.ts';
+import type { RuntimeTurnCoordinator } from '../../../src/runtimes/agent/runtime-turn-coordinator.ts';
+import type { QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -428,6 +447,7 @@ describe('planned stop handoff (#3703)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetDoubles();
+    logCalls.length = 0;
     db = new Database(':memory:');
     db.open();
     runtimes = [];
@@ -445,7 +465,9 @@ describe('planned stop handoff (#3703)', () => {
   /** One process generation: a fresh engine (startup recovery first, as main.ts 2b) and runtime on the SAME db. */
   function startProcess(options: PlannedStopOptions = {}): { runtime: AgentRuntime; engine: DurabilityEngine } {
     const engine = new DurabilityEngine(db);
-    engine.preConnectRecovery();
+    // Startup recovery and the runtime read the same deferredTurnAdmission
+    // setting: the deferred owner is enabled exactly when the flag is.
+    engine.preConnectRecovery({ deferredTurnOwnerEnabled: options.deferredTurnAdmission?.enabled === true });
     const runtime = new AgentRuntime(db, makeMessenger(), 'test', { sessionScope: 'per_chat', ...options });
     installFakePerChatMcpSocketManager(runtime);
     runtime.setDurability(engine);
@@ -563,8 +585,7 @@ describe('planned stop handoff (#3703)', () => {
     expect(dispatchesOf('t1 follower question')).toBe(1);
   });
 
-  // Still red: handleMessage rejects once shutdown began (see the header).
-  it.fails('T1b: a message handed to the runtime while shutdown is draining is handed off (not rejected / failed)', async () => {
+  it('T1b: a message handed to the runtime while shutdown is draining is handed off (not rejected / failed)', async () => {
     const a = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
     await arriveInFlight(a.runtime, a.engine, 'wamid-t1b-head', 't1b head question');
     const stopping = a.runtime.shutdown().catch(() => {});
@@ -578,6 +599,86 @@ describe('planned stop handoff (#3703)', () => {
     expect(status(seq)).toBe('processing');
     expect(terminalRows(seq)).toEqual([]);
     expect(obligationStatuses(seq)).toEqual(['pending']);
+  });
+
+  it('T1b closure: once the runtime phase of the stop is over, a late message is rejected with a typed closed-admission error that ingest records as queue_closed', async () => {
+    const a = startProcess(HANDOFF);
+    await a.runtime.shutdown();
+    const seq = a.engine.journalInbound('wamid-t1b-closed', conversationKey, dmJid, 'agent');
+    const error = await a.runtime.handleMessage(makeMsg({ messageId: 'wamid-t1b-closed', content: 't1b closed', inboundSeq: seq }))
+      .then(() => null, (err: unknown) => err);
+    expect(error).toBeInstanceOf(RuntimeAdmissionClosedError);
+    // ingest step 6 records a rejected journaled inbound with this class (honest, distinct from 'unknown').
+    expect(classifyErrorForInbound(error)).toBe('queue_closed');
+    expect(obligationStatuses(seq)).toEqual([]);
+  });
+
+  // ─── T1 cause: only the planned stop hands off; ordinary exclusions stay terminal ───
+
+  function coordinatorOf(runtime: AgentRuntime): RuntimeTurnCoordinator {
+    return (runtime as unknown as { runtimeTurnCoordinator: RuntimeTurnCoordinator }).runtimeTurnCoordinator;
+  }
+
+  /** A journaled, admitted, never-dispatched per_chat text turn (replay-safe envelope). */
+  function admittedTurn(a: { runtime: AgentRuntime; engine: DurabilityEngine }, messageId: string, content: string) {
+    const seq = a.engine.journalInbound(messageId, conversationKey, dmJid, 'agent');
+    const runtime = a.runtime as unknown as {
+      resolvePerChatMapKey(jid: string): string;
+      ensureSessionAndQueueSync(jid: string, mapKey: string): void;
+      chatSessions: Map<string, unknown>;
+      requireSessionToolScopeKey(session: unknown): string;
+    };
+    const mapKey = runtime.resolvePerChatMapKey(dmJid);
+    runtime.ensureSessionAndQueueSync(dmJid, mapKey);
+    const session = runtime.chatSessions.get(mapKey);
+    const source = {
+      sourceMessageId: messageId,
+      receivedAtUnixSeconds: Math.floor(Date.now() / 1000),
+      conversationKey,
+      senderJid,
+      senderName: 'Test User',
+      contentType: 'text' as const,
+      isGroup: false,
+    };
+    const runtimeContext = coordinatorOf(a.runtime).createRuntimeTurnForDispatch({
+      scope: 'per_chat', chatJid: dmJid, text: content, inboundSeq: seq, source,
+      session: session as never, toolScopeKey: runtime.requireSessionToolScopeKey(session), mapKey,
+    })!;
+    const turn: QueuedTurn = { ...source, chatJid: dmJid, text: content, runtimeContext, inboundSeq: seq };
+    return { seq, mapKey, turn };
+  }
+
+  it.each([
+    ['generic queue close', 'queue_closed'],
+    ['queue halted', 'queue_halted'],
+    ['queue full', 'queue_full'],
+    ['unknown rejection', undefined],
+  ] as const)('T1 cause: %s during a planned stop stays terminal and is never handed off', async (_label, reason) => {
+    const a = startProcess(HANDOFF);
+    // A planned stop is in progress: the handoff must still key on its own cause, not on the stop state.
+    (a.runtime as unknown as { shutdownRequested: boolean }).shutdownRequested = true;
+    const { seq, turn } = admittedTurn(a, `wamid-cause-${reason ?? 'unknown'}`, 'cause question');
+
+    coordinatorOf(a.runtime).finalizeRejectedRuntimeTurn(turn, reason);
+    await coordinatorOf(a.runtime).awaitRejectedRuntimeTurnFinalizations();
+
+    expect(status(seq)).toBe('failed');
+    expect(terminalRows(seq)).toHaveLength(1);
+    expect(terminalRows(seq)[0]!.inbound_disposition).toBe('failed_terminal');
+    expect(obligationStatuses(seq)).toEqual([]);
+  });
+
+  it('T1 cause: a processor failure during a planned stop stays terminal and is never handed off', async () => {
+    const a = startProcess(HANDOFF);
+    (a.runtime as unknown as { shutdownRequested: boolean }).shutdownRequested = true;
+    const { seq, mapKey, turn } = admittedTurn(a, 'wamid-cause-processor', 'cause processor question');
+
+    await coordinatorOf(a.runtime).finalizePerChatProcessorError(mapKey, turn, new Error('injected: processor failed'));
+
+    expect(status(seq)).toBe('failed');
+    expect(terminalRows(seq)).toHaveLength(1);
+    expect(terminalRows(seq)[0]!.inbound_disposition).toBe('failed_terminal');
+    expect(obligationStatuses(seq)).toEqual([]);
   });
 
   // ─── T2: dispatched turn answered inside the drain bound ───
@@ -824,10 +925,32 @@ describe('planned stop handoff (#3703)', () => {
     expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit', attempt_count: 1 });
   });
 
-  it('S3 kill switch: with the flag OFF the next start neither claims nor dispatches; turning it ON drains once', async () => {
-    const seq = seedObligation('wamid-s3-kill', 's3 kill question');
+  it('S3 kill switch at startup: with the flag OFF the owned inbound is closed honestly, never left processing and never dispatched', async () => {
+    const seq = seedObligation('wamid-s3-kill-start', 's3 kill start question');
     const options = { deferredTurnAdmission: { enabled: false } };
     const b = startProcess(options);
+
+    await TIMING(300);
+    expect(dispatchesOf('s3 kill start question')).toBe(0);
+    // No owner runs while the flag is off: crash recovery fails the inbound
+    // (no silent processing row) and closes the pre-commit obligation.
+    expect(status(seq)).toBe('failed');
+    expect(obligationRow(seq)).toMatchObject({ status: 'terminal_quarantined', terminal_reason: 'owner_disabled' });
+
+    options.deferredTurnAdmission.enabled = true;
+    kickDrain(b.runtime);
+    await TIMING(300);
+    expect(dispatchesOf('s3 kill start question')).toBe(0);
+  });
+
+  it('S3 kill switch: with the flag turned OFF live the drain neither claims nor dispatches; turning it ON drains once', async () => {
+    const seq = seedObligation('wamid-s3-kill', 's3 kill question');
+    const options = { deferredTurnAdmission: { enabled: true } };
+    const b = startProcess(options);
+    // Turned off before the first pass (it runs on a timer turn), after the
+    // startup recovery that ran with the owner enabled.
+    options.deferredTurnAdmission.enabled = false;
+    kickDrain(b.runtime);
 
     await TIMING(300);
     expect(dispatchesOf('s3 kill question')).toBe(0);
@@ -909,5 +1032,142 @@ describe('planned stop handoff (#3703)', () => {
       terminal_reason: 'source_not_open',
     }), { timeout: 3_000 });
     expect(dispatchesOf('s3 settled question')).toBe(0);
+  });
+
+  /** Wrap the next constructed session's spawn (pre-boundary) with `beforeSpawn`. */
+  function onNextSpawn(beforeSpawn: () => Promise<void> | void): void {
+    sessionConstructHooks.push((double) => {
+      const spawn = double.spawnSession.getMockImplementation()!;
+      double.spawnSession.mockImplementation(async () => {
+        await beforeSpawn();
+        await spawn();
+      });
+    });
+  }
+
+  function perChatTurnQueuesIdle(runtime: AgentRuntime): boolean {
+    const queues = (runtime as unknown as { perChatTurnQueues: Map<string, TurnQueue> }).perChatTurnQueues;
+    return [...queues.values()].every((queue) => !queue.isProcessing);
+  }
+
+  it('S3 stale fence at the provider boundary: the provider is not called, the source stays open and the obligation stays recoverable', async () => {
+    const seq = seedObligation('wamid-s3-fence', 's3 fence question');
+    let spawned = false;
+    // While the drained turn waits for its session (before the boundary), its
+    // claim expires and another drain resets it: the fence this turn holds is stale.
+    onNextSpawn(() => {
+      db.raw.prepare(
+        "UPDATE deferred_turn_obligations SET claim_expires_at = datetime('now', '-1 seconds') WHERE inbound_seq = ?",
+      ).run(seq);
+      new DurabilityEngine(db).deferredTurns.expireStaleClaims('per_chat');
+      spawned = true;
+    });
+    const b = startProcess(HANDOFF);
+
+    await vi.waitFor(() => expect(spawned).toBe(true), { timeout: 3_000 });
+    await vi.waitFor(() => expect(perChatTurnQueuesIdle(b.runtime)).toBe(true), { timeout: 3_000 });
+    expect(sessionDoubles.flatMap((session) => session.sendTurn.mock.calls)).toHaveLength(0);
+    expect(dispatchesOf('s3 fence question')).toBe(0);
+    expect(status(seq)).toBe('processing');
+    expect(terminalRows(seq)).toEqual([]);
+    expect(obligationRow(seq)).toMatchObject({ status: 'pending', attempt_count: 1 });
+
+    // Recoverable: the next pass claims it and dispatches it once.
+    kickDrain(b.runtime);
+    await vi.waitFor(() => expect(dispatchesOf('s3 fence question')).toBe(1), { timeout: 3_000 });
+    expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit', attempt_count: 2 });
+  });
+
+  it('S3 post-commit failure: the obligation closes quarantined (source_failed), never completed, and is never replayed', async () => {
+    const seq = seedObligation('wamid-s3-postfail', 's3 postfail question');
+    const b = startProcess(HANDOFF);
+    await vi.waitFor(() => expect(dispatchesOf('s3 postfail question')).toBe(1), { timeout: 3_000 });
+    expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit' });
+
+    sessionDoubles.find((candidate) => candidate.turnInFlight)!.failProviderTurn(new Error('injected: provider child died'));
+
+    await vi.waitFor(() => expect(status(seq)).toBe('failed'), { timeout: 3_000 });
+    await vi.waitFor(() => expect(obligationRow(seq)).toMatchObject({
+      status: 'terminal_quarantined',
+      terminal_reason: 'source_failed',
+    }), { timeout: 3_000 });
+    kickDrain(b.runtime);
+    await TIMING(200);
+    expect(dispatchesOf('s3 postfail question')).toBe(1);
+  });
+
+  it('S3 FIFO: an older durable obligation dispatches before a fresh live message of the same chat', async () => {
+    const older = seedObligation('wamid-s3-fifo-old', 's3 fifo older question');
+    const b = startProcess(HANDOFF);
+    // The live message reaches the runtime before the drain's first pass (a timer turn).
+    const live = await arrive(b.runtime, b.engine, 'wamid-s3-fifo-live', 's3 fifo live question');
+
+    await vi.waitFor(() => expect(
+      dispatchesOf('s3 fifo older question') + dispatchesOf('s3 fifo live question'),
+    ).toBeGreaterThan(0), { timeout: 3_000 });
+    expect(dispatchesOf('s3 fifo older question')).toBe(1);
+    expect(dispatchesOf('s3 fifo live question')).toBe(0);
+
+    echoNextAnswer(b.engine, queueFor(dmJid), older);
+    sessionDoubles.find((candidate) => candidate.turnInFlight)!.emit({ type: 'result', text: 'older answer' });
+    await vi.waitFor(() => expect(status(older)).toBe('complete'), { timeout: 3_000 });
+    await vi.waitFor(() => expect(dispatchesOf('s3 fifo live question')).toBe(1), { timeout: 3_000 });
+    expect(dispatchesOf('s3 fifo older question')).toBe(1);
+    expect(status(live)).toBe('processing');
+  });
+
+  it('S3 stop during a drained turn: a drained turn that has not reached the provider is handed back, the stop is clean, and the next start dispatches it once', async () => {
+    const seq = seedObligation('wamid-s3-stop', 's3 stop question');
+    let spawning = false;
+    // The drained turn's session spawn is still running when the stop lands.
+    onNextSpawn(() => {
+      spawning = true;
+      return new Promise<void>(() => {});
+    });
+    const b = startProcess({ ...HANDOFF, plannedStopDrainMs: SHORT_DRAIN_MS });
+    await vi.waitFor(() => expect(spawning).toBe(true), { timeout: 3_000 });
+    expect(obligationRow(seq)).toMatchObject({ status: 'claimed' });
+
+    const stopped = await b.runtime.shutdown().then(() => null, (err: unknown) => err);
+
+    expect(stopped).toBeNull();
+    expect(status(seq)).toBe('processing');
+    expect(terminalRows(seq)).toEqual([]);
+    expect(obligationRow(seq)).toMatchObject({ status: 'pending' });
+
+    const before = sessionDoubles.length;
+    startProcess(HANDOFF);
+    await vi.waitFor(() => expect(dispatchesOf('s3 stop question', sessionDoubles.slice(before))).toBe(1), { timeout: 3_000 });
+    expect(dispatchesOf('s3 stop question')).toBe(1);
+  });
+
+  it('S3 privacy: drain logs carry no raw error, obligation id or inbound sequence', async () => {
+    const canary = 'canary-raw-error-text-7f3a';
+    const seq = seedObligation('wamid-s3-privacy', 's3 privacy question');
+    const b = startProcess(HANDOFF);
+    const coordinator = coordinatorOf(b.runtime) as unknown as {
+      createRuntimeTurnForDispatch: (...args: unknown[]) => unknown;
+    };
+    vi.spyOn(coordinator, 'createRuntimeTurnForDispatch').mockImplementationOnce(() => {
+      throw new Error(canary);
+    });
+    await vi.waitFor(() => expect(obligationRow(seq)).toMatchObject({ status: 'pending', attempt_count: 1 }), { timeout: 3_000 });
+    kickDrain(b.runtime);
+    await vi.waitFor(() => expect(obligationRow(seq)).toMatchObject({ status: 'dispatched_commit' }), { timeout: 3_000 });
+
+    const drainLogs = logCalls.filter((call) => call.component === 'deferred-turn-drain');
+    expect(drainLogs.length).toBeGreaterThan(0);
+    for (const call of drainLogs) {
+      for (const arg of call.args) {
+        expect(arg).not.toBeInstanceOf(Error);
+        if (arg !== null && typeof arg === 'object') {
+          expect(Object.keys(arg)).not.toContain('err');
+          expect(Object.keys(arg)).not.toContain('obligationId');
+          expect(Object.keys(arg)).not.toContain('inboundSeq');
+          for (const value of Object.values(arg)) expect(value).not.toBeInstanceOf(Error);
+        }
+      }
+      expect(JSON.stringify(call.args)).not.toContain(canary);
+    }
   });
 });

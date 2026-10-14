@@ -57,7 +57,7 @@ import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
-import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { classifyErrorForInbound, RuntimeAdmissionClosedError } from '../../core/inbound-failure-class.ts';
 import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
@@ -136,7 +136,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, PlannedStopTurnLossError, waitForPlannedStopDrain } from './planned-stop-drain.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, PlannedStopTurnLossError, admitsPlannedStopIntake, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -2132,6 +2132,8 @@ export class AgentRuntime implements Runtime {
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
+  /** #3703: set when a planned stop closes intake (before its message-handler drain). */
+  private plannedStopIntakeClosed = false;
   /** #3703: bound on the planned-stop drain of dispatched turns. */
   private readonly plannedStopDrainMs: number;
 
@@ -2789,9 +2791,11 @@ export class AgentRuntime implements Runtime {
         const session = this.chatSessions.get(mapKey);
         return session ? { mapKey, session } : null;
       },
-      isTargetCurrent: (target) => this.chatSessions.get(target.mapKey) === target.session,
-      isChatBusy: (mapKey) => (this.perChatRuntimeTurnContexts.get(mapKey)?.length ?? 0) > 0
-        || (this.perChatTurnQueues.get(mapKey)?.isProcessing ?? false),
+      // The chat's ordinary TurnQueue (live admission, FIFO, planned-stop rules).
+      enqueueTurn: (mapKey, turn, dispatch) => {
+        this.runtimeTurnCoordinator.registerDeferredDispatch(turn.runtimeContext!, dispatch);
+        return this.enqueuePerChatRuntimeTurn(mapKey, turn);
+      },
     });
     this.modelPinHost = this.createModelPinHost();
     this.sessionLifecycleHost = this.createSessionLifecycleHost();
@@ -3160,6 +3164,7 @@ export class AgentRuntime implements Runtime {
       instanceName: runtime.instanceName,
       get sessionScope() { return runtime.sessionScope; },
       deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
+      kickDeferredTurnDrain: () => runtime.deferredTurnDrain.kick(),
       shared: runtime.shared,
       runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
       sessionOwnership: runtime.sessionOwnership,
@@ -4742,12 +4747,17 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       return Promise.reject(err);
     }
-    if (this.shutdownRequested) {
-      return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
-    }
     const initialClassification = msg.content === null
       ? null
       : classifyInput(msg.content, { routingAliases: config.nlRouting });
+    const plannedStopIntake = this.shutdownRequested;
+    if (plannedStopIntake && !admitsPlannedStopIntake({
+      intakeClosed: this.plannedStopIntakeClosed,
+      deferredOwner: this.sessionScope === 'per_chat' && !this.sandboxPerChat
+        && this.deferredTurnAdmissionEnabled() && this.durability !== null,
+      msg,
+      classification: initialClassification?.type,
+    })) return Promise.reject(new RuntimeAdmissionClosedError());
     const tracksRouteRecycle = (
       initialClassification?.type === 'local'
       && (
@@ -4755,7 +4765,8 @@ export class AgentRuntime implements Runtime {
         || initialClassification.command === 'reset'
       )
     );
-    const processing = this.handleMessageInner(msg, tracksRouteRecycle);
+    // #3703: planned-stop intake is awaited through its queue admission (handler drain covers the handoff).
+    const processing = this.handleMessageInner(msg, tracksRouteRecycle || plannedStopIntake);
     this.activeMessageHandlers.add(processing);
     if (tracksRouteRecycle) {
       const scopeKey = this.sessionScope === 'per_chat'
@@ -6353,6 +6364,8 @@ export class AgentRuntime implements Runtime {
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
       try {
         await this.sendTurnToSession(retrySession, chatJid, text, currentMapKey, actorJid, () => {
+          // #3295 S3: a drained turn's durable dispatch commit precedes publication.
+          this.runtimeTurnCoordinator.commitDeferredDispatch(runtimeContext);
           completion.value = beginDispatchedTurn(
             retrySession,
             scopeRef?.value ?? currentMapKey,
@@ -6371,6 +6384,8 @@ export class AgentRuntime implements Runtime {
     const completion: { value: RuntimeTurnCompletion | null } = { value: null };
     try {
       await this.sendTurnToSession(session, chatJid, text, mapKey, actorJid, () => {
+        // #3295 S3: a drained turn's durable dispatch commit precedes publication.
+        this.runtimeTurnCoordinator.commitDeferredDispatch(runtimeContext);
         completion.value = beginDispatchedTurn(
           session,
           scopeRef?.value ?? mapKey,
@@ -8186,6 +8201,7 @@ export class AgentRuntime implements Runtime {
       log.error({ err }, 'active runtime turns could not finalize during shutdown');
     }
     this.pendingSystemResults.clear();
+    this.plannedStopIntakeClosed = true; // #3703: later messages are refused; earlier ones finish in the drain below
     if (!preserveRuntimeTurnState) {
       // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
       // deadline the coordinator above and the recycle lifecycle below honor.

@@ -1,26 +1,35 @@
 // #3295 slice S3: the drain that dispatches deferred-turn obligations.
 //
-// Obligations enter the store from two pre-dispatch sources behind the same
-// default-OFF `deferredTurnAdmission` flag: S2 (a follower blocked solely by
-// same-scope durable recovery) and #3703 (a queued turn a planned stop took
-// before it reached the provider). The flag is read live: OFF stops new
-// claims and dispatch authorizations; existing rows stay durable and visible.
+// Obligations enter the store behind the same default-OFF
+// `deferredTurnAdmission` flag from three pre-dispatch sources: S2 (a follower
+// blocked solely by same-scope durable recovery), #3703 (a turn a planned stop
+// took before it reached the provider, cause `planned_stop`) and S3 FIFO (live
+// input behind an older runnable obligation of the same chat). The flag is
+// read live: OFF stops new claims and dispatch commits; existing rows stay
+// durable and visible.
 //
 // One pass, per per_chat conversation queue head (store FIFO):
-//   - skip while a same-scope durable recovery blocks the conversation or the
-//     chat lane is busy (both are re-checked at admission);
-//   - claim (fenced), revalidate the source inbound is still open, then
-//     dispatch through the ordinary per-chat pipeline (processPerChatTurn),
-//     the same route turn-recovery replay uses;
-//   - write `dispatched_commit` at the provider boundary, BEFORE the send. A
-//     stale fence throws there, so the provider is never called;
-//   - before that boundary a failure requeues (bounded by the store's
-//     attempt limit, then quarantined); after it nothing is ever requeued —
-//     the ordinary terminal path owns the turn and the obligation is closed
-//     once the source inbound is terminal.
-// Runs at start, after each dispatch that made progress, and on a slow
-// backstop timer (lost signals, cleared blockers, spaced retries). No content
-// is logged.
+//   - skip while a same-scope durable recovery blocks the conversation;
+//   - claim (fenced), revalidate that the source inbound is still open, then
+//     admit the turn to the chat's ordinary TurnQueue — the same FIFO, fencing
+//     and planned-stop rules as live input (RuntimeTurnCoordinator);
+//   - the coordinator calls `commit` at the provider boundary, BEFORE the turn
+//     is published or sent: a stale fence throws there, nothing is published
+//     and the provider is never called;
+//   - a turn that never reached the provider is released back to its
+//     obligation (fenced requeue, bounded by the store's attempt limit, then
+//     quarantined and the source finalized by the ordinary terminal path); a
+//     stale fence leaves the obligation with its current owner. The source
+//     inbound is never written on release;
+//   - after the commit nothing is ever requeued: the ordinary terminal path
+//     owns the turn and the obligation closes once the source is terminal
+//     (`terminal_completed`, or `terminal_quarantined` / `source_failed`).
+// Runs at start, after a dispatch made progress, on request (FIFO deferral of
+// live input) and on a slow backstop timer (lost signals, cleared blockers,
+// spaced retries).
+//
+// Logs are content-free: error class names and bounded tags only — no raw
+// error, obligation id, inbound sequence or envelope field.
 
 import { randomUUID } from 'node:crypto';
 import { createChildLogger } from '../../logger.ts';
@@ -33,7 +42,7 @@ import {
   type DeferredTurnStore,
 } from '../../core/deferred-turn-store.ts';
 import type {
-  PerChatRuntimeScopeRef,
+  DeferredTurnDispatch,
   RuntimeTurnCoordinator,
   RuntimeTurnSourceSnapshot,
 } from './runtime-turn-coordinator.ts';
@@ -46,12 +55,25 @@ const log = createChildLogger('deferred-turn-drain');
 /** Backstop scan cadence (matches the turn-recovery supervisor). */
 export const DEFERRED_TURN_DRAIN_INTERVAL_MS = 15_000;
 /**
- * A claim must outlive the wait from claim to provider boundary (session
- * spawn, dispatch barriers); a claim lost to expiry is refused at commit.
+ * A claim must outlive the wait from claim to provider boundary (queue wait,
+ * session spawn, dispatch barriers); a claim lost to expiry is refused at commit.
  */
 export const DEFERRED_TURN_CLAIM_TTL_SECONDS = 600;
 
 const DRAIN_SCOPE = 'per_chat';
+
+/** Content-free error label: the class name only, never the message. */
+function errorClassOf(err: unknown): string {
+  return err instanceof Error ? err.name : 'non-error';
+}
+
+/** The drain refused the dispatch commit (flag turned off, or the runtime is stopping). */
+export class DeferredTurnDispatchRefusedError extends Error {
+  constructor() {
+    super('Deferred turn dispatch refused: the drain is disabled or stopping');
+    this.name = 'DeferredTurnDispatchRefusedError';
+  }
+}
 
 export interface DeferredTurnDrainTarget {
   readonly mapKey: string;
@@ -66,10 +88,9 @@ export interface DeferredTurnDrainDeps {
   readonly coordinator: RuntimeTurnCoordinator;
   /** The chat's owned per-chat session, created as live admission would. */
   readonly prepareTarget: (deliveryJid: string) => DeferredTurnDrainTarget | null;
-  readonly isTargetCurrent: (target: DeferredTurnDrainTarget) => boolean;
-  /** True while the chat lane holds or queues a turn. */
-  readonly isChatBusy: (mapKey: string) => boolean;
   readonly requireSessionToolScopeKey: (session: SessionManager) => string;
+  /** Register `dispatch` for the turn and admit it to the chat's TurnQueue. */
+  readonly enqueueTurn: (mapKey: string, turn: QueuedTurn, dispatch: DeferredTurnDispatch) => boolean;
   readonly scanIntervalMs?: number;
 }
 
@@ -79,8 +100,8 @@ export class DeferredTurnDrain {
   private pass: Promise<void> | null = null;
   private rescan = false;
   private stopped = true;
-  /** Dispatches in flight, keyed by conversation: one per drain queue. */
-  private readonly inFlight = new Map<string, Promise<void>>();
+  /** Conversations with a drained turn in their TurnQueue: one per drain queue. */
+  private readonly inFlight = new Set<string>();
 
   constructor(deps: DeferredTurnDrainDeps) {
     this.deps = deps;
@@ -93,7 +114,7 @@ export class DeferredTurnDrain {
     this.schedule(0);
   }
 
-  /** No new pass, claim or dispatch authorization after this returns. */
+  /** No new pass, claim or dispatch commit after this returns. */
   stop(): void {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
@@ -108,7 +129,7 @@ export class DeferredTurnDrain {
       return;
     }
     this.pass = this.runPass()
-      .catch((err: unknown) => log.error({ err }, 'deferred-turn drain pass failed'))
+      .catch((err: unknown) => log.error({ errorClass: errorClassOf(err) }, 'deferred-turn drain pass failed'))
       .finally(() => {
         this.pass = null;
         if (this.rescan) {
@@ -149,11 +170,11 @@ export class DeferredTurnDrain {
         continue;
       }
       if (head.status !== 'pending' || head.attemptCount >= DEFERRED_TURN_MAX_ATTEMPTS) continue;
-      this.claimAndDispatch(head, durability, store);
+      this.claimAndEnqueue(head, durability, store);
     }
   }
 
-  private claimAndDispatch(
+  private claimAndEnqueue(
     head: DeferredTurnOpenHead,
     durability: DurabilityEngine,
     store: DeferredTurnStore,
@@ -161,7 +182,7 @@ export class DeferredTurnDrain {
     // Blockers first, without a claim: a blocked head costs no attempt.
     if (durability.hasOutstandingTurnRecoveryForScope(DRAIN_SCOPE, head.conversationKey)) return;
     const target = this.deps.prepareTarget(head.deliveryJid);
-    if (!target || this.deps.isChatBusy(target.mapKey)) return;
+    if (!target) return;
     const claimToken = `deferred-drain:${randomUUID()}`;
     const obligation = store.claimNextEligible(DRAIN_SCOPE, {
       conversationKey: head.conversationKey,
@@ -171,46 +192,17 @@ export class DeferredTurnDrain {
     // Another drain (a concurrent process) won the head, or it moved.
     if (!obligation) return;
     const fence: DeferredTurnClaimFence = { claimToken, claimEpoch: obligation.claimEpoch };
-    // A dispatch that made progress re-scans at once (the next obligation of
-    // this conversation, or of a chat it was holding back). A pre-boundary
-    // retry waits for the backstop timer, so retries are spaced, not spun.
-    const dispatch = this.dispatchClaimed(obligation, fence, target, store)
-      .catch((err: unknown) => {
-        log.error({ err, obligationId: obligation.id }, 'deferred-turn dispatch bookkeeping failed');
-        return false;
-      })
-      .then((progressed) => {
-        this.inFlight.delete(head.conversationKey);
-        if (progressed) this.kick();
-      });
-    this.inFlight.set(head.conversationKey, dispatch);
-  }
-
-  private async dispatchClaimed(
-    obligation: DeferredTurnObligation,
-    fence: DeferredTurnClaimFence,
-    target: DeferredTurnDrainTarget,
-    store: DeferredTurnStore,
-  ): Promise<boolean> {
-    const { id, inboundSeq } = obligation;
-    /** Pre-boundary failure: requeue, or quarantine once attempts are spent. */
-    const retryOrExhaust = (errorClass: string): boolean => {
-      if (obligation.attemptCount >= DEFERRED_TURN_MAX_ATTEMPTS) {
-        store.terminalizeQuarantined(id, fence, 'attempts_exhausted');
-        log.warn({ obligationId: id, inboundSeq, errorClass }, 'deferred turn quarantined: attempts exhausted before dispatch');
-        return true;
-      }
-      store.requeueClaim(id, fence, errorClass);
-      return false;
-    };
-    if (!store.isSourceOpen(inboundSeq)) {
+    const dispatch = this.createDispatch(obligation, fence, store);
+    if (!store.isSourceOpen(obligation.inboundSeq)) {
       // Another owner settled the inbound: nothing is owed by this lane.
-      store.terminalizeQuarantined(id, fence, 'source_not_open');
-      return true;
+      store.terminalizeQuarantined(obligation.id, fence, 'source_not_open');
+      this.rescan = true;
+      return;
     }
     if (obligation.contentType !== 'text' || obligation.deliveryJid === '' || obligation.text.trim() === '') {
-      store.terminalizeQuarantined(id, fence, 'unsupported_envelope');
-      return true;
+      store.terminalizeQuarantined(obligation.id, fence, 'unsupported_envelope');
+      this.rescan = true;
+      return;
     }
     const source: RuntimeTurnSourceSnapshot = {
       sourceMessageId: obligation.sourceMessageId,
@@ -228,17 +220,21 @@ export class DeferredTurnDrain {
         scope: DRAIN_SCOPE,
         chatJid: obligation.deliveryJid,
         text: obligation.text,
-        inboundSeq,
+        inboundSeq: obligation.inboundSeq,
         source,
         session: target.session,
         toolScopeKey: this.deps.requireSessionToolScopeKey(target.session),
         mapKey: target.mapKey,
       });
     } catch (err) {
-      log.warn({ err, obligationId: id }, 'deferred turn context construction failed');
+      log.warn({ errorClass: errorClassOf(err) }, 'deferred turn context construction failed');
       runtimeContext = null;
     }
-    if (!runtimeContext) return retryOrExhaust('context_unavailable');
+    // A pre-boundary retry waits for the backstop timer: retries are spaced, not spun.
+    if (!runtimeContext) {
+      dispatch.release('context_unavailable');
+      return;
+    }
     const turn: QueuedTurn = {
       sourceMessageId: source.sourceMessageId,
       receivedAtUnixSeconds: source.receivedAtUnixSeconds,
@@ -252,47 +248,72 @@ export class DeferredTurnDrain {
       contentType: 'text',
       purpose: recoveryPurpose(obligation.sourceMessageId),
       runtimeContext,
-      inboundSeq,
+      inboundSeq: obligation.inboundSeq,
     };
-    const scopeRef: PerChatRuntimeScopeRef = { value: target.mapKey };
-    let boundaryEntered = false;
-    let committed = false;
+    this.inFlight.add(obligation.conversationKey);
     try {
-      await this.deps.coordinator.processPerChatTurn(
-        scopeRef,
-        turn,
-        undefined,
-        () => this.canDispatch() && this.deps.isTargetCurrent(target),
-        () => {
-          boundaryEntered = true;
-          // The point of no return, durably written before the provider send.
-          // A stale fence throws here and the provider is not called.
-          store.markDispatchCommit(id, fence);
-          committed = true;
-          log.info({ obligationId: id, inboundSeq }, 'deferred turn dispatch committed (#3295 S3)');
-        },
-      );
+      // Rejection by the queue releases the turn through the coordinator.
+      this.deps.enqueueTurn(target.mapKey, turn, dispatch);
     } catch (err) {
-      if (boundaryEntered) {
-        // The turn was published at the boundary: the ordinary processor-error
-        // finalizer owns it. Never requeued.
-        log.warn({ err, obligationId: id, committed }, 'deferred turn failed at or after the provider boundary');
-        await this.deps.coordinator.finalizePerChatProcessorError(target.mapKey, turn, err);
-        if (committed) store.settleDispatchedObligation(id);
-        return true;
-      }
-      log.warn({ err, obligationId: id }, 'deferred turn dispatch failed before the provider boundary');
-      return retryOrExhaust('dispatch_failed');
+      log.warn({ errorClass: errorClassOf(err) }, 'deferred turn queue admission failed');
+      dispatch.release('enqueue_failed');
     }
-    if (!boundaryEntered) {
-      // Cancelled before the boundary, or consumed without a provider turn.
-      if (store.isSourceOpen(inboundSeq)) return retryOrExhaust('dispatch_cancelled');
-      store.terminalizeQuarantined(id, fence, 'source_settled_without_dispatch');
+  }
+
+  /** The obligation's side of one drained turn (see DeferredTurnDispatch). */
+  private createDispatch(
+    obligation: DeferredTurnObligation,
+    fence: DeferredTurnClaimFence,
+    store: DeferredTurnStore,
+  ): DeferredTurnDispatch {
+    const { id, inboundSeq, conversationKey } = obligation;
+    let closed = false;
+    const close = (): boolean => {
+      if (closed) return false;
+      closed = true;
+      this.inFlight.delete(conversationKey);
       return true;
-    }
-    // Held (replay vetoed) until the source inbound is terminal; a later pass
-    // settles it if the terminal lands after the turn promise.
-    store.settleDispatchedObligation(id);
-    return true;
+    };
+    return {
+      commit: () => {
+        if (closed || !this.canDispatch()) throw new DeferredTurnDispatchRefusedError();
+        // The point of no return, durably written before publication and the
+        // provider send. A stale fence throws here.
+        store.markDispatchCommit(id, fence);
+        log.info({ attempt: obligation.attemptCount }, 'deferred turn dispatch committed (#3295 S3)');
+      },
+      release: (errorClass) => {
+        if (!close()) return 'retained';
+        try {
+          if (errorClass === 'operator_cancelled') {
+            store.terminalizeQuarantined(id, fence, 'operator_cancelled');
+            return 'terminal';
+          }
+          if (!store.isSourceOpen(inboundSeq)) {
+            store.terminalizeQuarantined(id, fence, 'source_settled_without_dispatch');
+            return 'retained';
+          }
+          if (obligation.attemptCount >= DEFERRED_TURN_MAX_ATTEMPTS) {
+            store.terminalizeQuarantined(id, fence, 'attempts_exhausted');
+            log.warn({ errorClass }, 'deferred turn quarantined: attempts exhausted before dispatch');
+            return 'terminal';
+          }
+          store.requeueClaim(id, fence, errorClass);
+          log.info({ errorClass }, 'deferred turn returned to its obligation before the provider boundary');
+          return 'retained';
+        } catch (err) {
+          // Stale fence: the expiry sweep or another claimant owns the
+          // obligation now. The source stays open and recoverable there.
+          log.warn({ errorClass: errorClassOf(err) }, 'deferred turn release kept the obligation with its current owner');
+          return 'retained';
+        }
+      },
+      settle: () => {
+        close();
+        // Held (replay vetoed) until the source inbound is terminal; a later
+        // pass settles it if the terminal lands after the turn.
+        if (store.settleDispatchedObligation(id) !== null) this.kick();
+      },
+    };
   }
 }

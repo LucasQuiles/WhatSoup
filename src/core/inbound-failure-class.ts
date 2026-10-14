@@ -87,6 +87,23 @@ export class QueueAdmissionTerminalizationError extends Error {
   }
 }
 
+export const RUNTIME_ADMISSION_CLOSED_ERROR_CODE = 'RUNTIME_ADMISSION_CLOSED' as const;
+
+/**
+ * #3703 / #3295 S3: the runtime refused a journaled message because its
+ * admission is closed (a planned stop is past the point where intake can still
+ * reach a durable owner). Ingest records the row `failed / queue_closed` — an
+ * honest, distinct rejection instead of an undifferentiated 'unknown' loss.
+ */
+export class RuntimeAdmissionClosedError extends Error {
+  readonly code = RUNTIME_ADMISSION_CLOSED_ERROR_CODE;
+
+  constructor() {
+    super('Agent runtime is shutting down; new turns are not accepted');
+    this.name = 'RuntimeAdmissionClosedError';
+  }
+}
+
 /**
  * Distinct reasons an admitted turn can be rejected before dispatch (#1750).
  * Each maps 1:1 onto the same-named InboundFailureClass so the durable
@@ -173,6 +190,9 @@ export function classifyErrorForInbound(err: unknown): InboundFailureClass {
 
   if (code === QUEUE_ADMISSION_TERMINALIZATION_ERROR_CODE) {
     return 'queue_full';
+  }
+  if (code === RUNTIME_ADMISSION_CLOSED_ERROR_CODE) {
+    return 'queue_closed';
   }
   if (UNRECOVERABLE_SQLITE.test(message) || UNRECOVERABLE_SQLITE.test(code)) {
     return 'db_error';
