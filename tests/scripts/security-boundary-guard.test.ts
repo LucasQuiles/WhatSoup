@@ -35,6 +35,26 @@ describe('security boundary guard — remote memory writes', () => {
     }));
   });
 
+  it('blocks line-continued static provider-upsert property names', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'src/new-provider.ts',
+      ['await index["upsert\\', 'Records"]({ records });'].join('\n'),
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.remote-memory.raw-provider-upsert',
+    }));
+  });
+
+  it.each([
+    ['identity escape', 'await index["upsert\\Records"]({ records });'],
+    ['legacy octal escape', 'await index["upsert\\122ecords"]({ records });'],
+  ])('blocks static provider-upsert property names using a %s', (_label, content) => {
+    const findings = scanFileForSecurityBoundaryViolations('src/new-provider.ts', content);
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.remote-memory.raw-provider-upsert',
+    }));
+  });
+
   it('blocks generic upserts from an MCP tool', () => {
     const findings = scanFileForSecurityBoundaryViolations(
       'src/mcp/tools/new-memory.ts',

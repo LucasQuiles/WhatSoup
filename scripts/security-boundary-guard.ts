@@ -106,17 +106,24 @@ const COMPOSITION_ROOT = 'src/mcp/register-all.ts';
 const TS_EXT_RE = /\.ts$/;
 
 function requiresTypeScriptBoundaryParse(file: string, content: string): boolean {
-  const decoded = content.replace(
-    /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/gi,
-    (match, braced: string | undefined, fixed: string | undefined, hex: string | undefined) => {
-      const codePoint = Number.parseInt(braced ?? fixed ?? hex ?? '', 16);
+  const probe = content
+    .replace(/\\(?:\r\n|[\n\r\u2028\u2029])/g, '')
+    .replace(
+      /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/gi,
+      (match, braced: string | undefined, fixed: string | undefined, hex: string | undefined) => {
+        const codePoint = Number.parseInt(braced ?? fixed ?? hex ?? '', 16);
+        return codePoint <= 0x7f ? String.fromCodePoint(codePoint) : match;
+      },
+    )
+    .replace(/\\([0-7]{1,3})/g, (match, octal: string) => {
+      const codePoint = Number.parseInt(octal, 8);
       return codePoint <= 0x7f ? String.fromCodePoint(codePoint) : match;
-    },
-  );
-  return decoded.includes('upsertRecords')
-    || decoded.includes('upsertDirectMemory')
-    || decoded.includes('registerMemoryWriteTools')
-    || (file.startsWith('src/mcp/') && decoded.includes('upsert'));
+    })
+    .replace(/\\/g, '');
+  return probe.includes('upsertRecords')
+    || probe.includes('upsertDirectMemory')
+    || probe.includes('registerMemoryWriteTools')
+    || (file.startsWith('src/mcp/') && probe.includes('upsert'));
 }
 
 function emptyCounts(): SecurityBoundaryCounts {
