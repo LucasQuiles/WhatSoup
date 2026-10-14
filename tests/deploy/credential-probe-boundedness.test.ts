@@ -285,7 +285,22 @@ function observeLifecycleEventOrder(source: string): string {
     '        fi',
     '        sleep "$budget" || exit 2',
   ].join('\n'));
-  insert(inner, `        ${event('D_INNER_ENTER')}\n${inner}\n        ${event('D_INNER_COMMIT')}`);
+  // Witness the publish. The EXIT trap records any exit with its status, so a
+  // watchdog SIGKILLed while stalled leaves none, and bash's own errors, such
+  // as a failed fork, go to a retained file instead of /dev/null.
+  const [pending, link] = inner.split('\n');
+  insert(inner, [
+    '        exec 2>> "$TMPDIR/inner-watchdog-stderr"',
+    '        trap \'inner_rc=$?; builtin printf "D_INNER_EXIT rc=%s\\n" "$inner_rc" >> "$EVENT_ORDER_LOG"\' EXIT',
+    `        ${event('D_INNER_ENTER')}`,
+    pending,
+    `        ${event('D_INNER_PENDING')}`,
+    link,
+    `        ${event('D_INNER_COMMIT')}`,
+  ].join('\n'));
+  // The stopped-worker phases: the guard's second grace ends here.
+  const endWorker = '        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }\n        _bounded_guard_end_worker';
+  insert(endWorker, endWorker.replace('\n        _bounded_guard_end_worker', `\n        ${event('G_END_WORKER')}\n        _bounded_guard_end_worker`));
   // A whole frame sets rc in _bounded_take_frame; raw is the status digits.
   const result = '        rc="$completed_rc"';
   insert(result, `${result}\n        ${event('R_FIFO rc=$rc raw=$completed_rc command=$cmd_pid group=$cmd_group')}`);
@@ -360,7 +375,7 @@ function observeLifecycleEventOrder(source: string): string {
   insert('        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"', `        [ "$cleanup_rc" -ne 0 ] || rm -f "$cleanup_file"\n        ${event('C_COMPLETE cleanup=$cleanup_rc')}`);
   insert('      _bounded_claim_outcome deadline-outer\n      outcome_claim_rc=$?', [
     '      case "$EVENT_ORDER_MODE" in event-order-outcome-candidate-directory|event-order-inner-deadline-command-2)',
-    '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
+    `        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { ${event('CONTROL_ERROR authority-hold')}; guard_status=2; _bounded_guard_exit; }`,
     '        ;; esac',
     '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-result-first ]; then',
     ...park,
@@ -370,7 +385,7 @@ function observeLifecycleEventOrder(source: string): string {
     '      outcome_claim_rc=$?',
     `      ${event('O_OUTER_CLAIM rc=$outcome_claim_rc worker=$worker_pid')}`,
     '      if [ "$EVENT_ORDER_MODE" = event-order-expired-reaped ]; then',
-    '        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { guard_status=2; _bounded_guard_exit; }',
+    `        IFS= read -r -t 2 event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || { ${event('CONTROL_ERROR authority-hold')}; guard_status=2; _bounded_guard_exit; }`,
     '      fi',
     '      if [ "$EVENT_ORDER_MODE" = event-order-near-deadline-deadline-first ]; then',
     ...park,
@@ -395,7 +410,9 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
-  const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
+  // The stopped worker records its phases: its bound covers setup, the
+  // guard's whole schedule and cleanup.
+  const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || mode === 'worker-stopped-after-authorization' || outcomeTrace || stoppedWorkerTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
   if (mode.startsWith('outcome-') || mode === 'event-order-outcome-candidate-directory') {
