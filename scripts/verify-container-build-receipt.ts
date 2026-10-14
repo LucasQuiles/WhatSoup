@@ -5,6 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { isRecord } from '../src/lib/type-guards.ts';
+import { isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
 
 interface ContainerInputPolicy {
@@ -76,8 +77,8 @@ const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{6
 const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
 const PLATFORM = 'linux/amd64';
-const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64';
-const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64';
+const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64';
+const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9&platform=linux%2Famd64';
 const OCI_IMAGE_INDEX_MEDIA_TYPE = 'application/vnd.oci.image.index.v1+json';
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE = 'application/vnd.oci.image.manifest.v1+json';
 const OCI_ATTESTATION_ARTIFACT_TYPE = 'application/vnd.docker.attestation.manifest.v1+json';
@@ -166,6 +167,7 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     || typeof policy.baseImage !== 'string'
     || !SHA256_PATTERN.test(policy.baseImage.slice(policy.baseImage.indexOf('@') + 1))
     || policy.baseImageDependency !== BASE_IMAGE_DEPENDENCY
+    || !isBuildkitImageDependency(policy.baseImageDependency, policy.baseImage, policy.platform)
     || !SHA256_PATTERN.test(policy.baseImageResolvedDigest)
     || !policy.builder
     || !BUILDER_NAME_PATTERN.test(policy.builder.name)
@@ -179,6 +181,7 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     || !policy.sbom
     || !SBOM_GENERATOR_IMAGE_PATTERN.test(policy.sbom.generator)
     || policy.sbom.dependency !== SBOM_GENERATOR_DEPENDENCY
+    || !isBuildkitImageDependency(policy.sbom.dependency, policy.sbom.generator, policy.platform)
     || !SHA256_PATTERN.test(policy.sbom.resolvedDigest)
   ) throw new Error(`container input policy has an invalid source, base image, or builder: ${policyPath}`);
   return policy;

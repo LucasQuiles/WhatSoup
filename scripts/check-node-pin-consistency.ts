@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { isBuildkitImageDependency } from './lib/buildkit-image-dependency.ts';
+
 export type NodePinSource =
   | '.nvmrc'
   | 'package.json#volta.node'
@@ -78,8 +80,8 @@ const SNAPSHOT_TIMESTAMP_PATTERN = /^\d{8}T\d{6}Z$/;
 const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
 const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
-const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64';
-const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64';
+const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64';
+const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9&platform=linux%2Famd64';
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
 const APT_SOURCE_DEFINITION_PATTERN = /(?:^|['"\s])((?:deb|deb-src)(?:\s+\[[^\]\r\n]+\])?\s+[^\s'"]+\s+[^\s'"]+(?:\s+[^\s'"]+)*)(?=['"\\,;]|\s*$)/g;
 
@@ -206,6 +208,11 @@ function readContainerInputPolicy(cwd: string):
     || !SOURCE_REPOSITORY_PATTERN.test((parsed as { sourceRepository: string }).sourceRepository)
     || typeof (parsed as { baseImage?: unknown }).baseImage !== 'string'
     || (parsed as { baseImageDependency?: unknown }).baseImageDependency !== BASE_IMAGE_DEPENDENCY
+    || !isBuildkitImageDependency(
+      (parsed as { baseImageDependency?: unknown }).baseImageDependency,
+      (parsed as { baseImage?: unknown }).baseImage,
+      (parsed as { platform?: unknown }).platform,
+    )
     || typeof (parsed as { baseImageResolvedDigest?: unknown }).baseImageResolvedDigest !== 'string'
     || !SHA256_DIGEST_PATTERN.test((parsed as { baseImageResolvedDigest: string }).baseImageResolvedDigest)
     || !(parsed as { builder?: unknown }).builder
@@ -229,6 +236,11 @@ function readContainerInputPolicy(cwd: string):
     || typeof (parsed as { sbom: { generator?: unknown } }).sbom.generator !== 'string'
     || !SBOM_GENERATOR_IMAGE_PATTERN.test((parsed as { sbom: { generator: string } }).sbom.generator)
     || (parsed as { sbom: { dependency?: unknown } }).sbom.dependency !== SBOM_GENERATOR_DEPENDENCY
+    || !isBuildkitImageDependency(
+      (parsed as { sbom: { dependency?: unknown } }).sbom.dependency,
+      (parsed as { sbom: { generator?: unknown } }).sbom.generator,
+      (parsed as { platform?: unknown }).platform,
+    )
     || typeof (parsed as { sbom: { resolvedDigest?: unknown } }).sbom.resolvedDigest !== 'string'
     || !SHA256_DIGEST_PATTERN.test((parsed as { sbom: { resolvedDigest: string } }).sbom.resolvedDigest)
     || !(parsed as { apt?: unknown }).apt

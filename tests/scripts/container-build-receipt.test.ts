@@ -29,8 +29,12 @@ const tmp = trackTmpDirs('container-build-receipt-');
 const SOURCE_REVISION = 'b'.repeat(40);
 const PROVENANCE_BUILDER_ID = 'https://github.com/LucasQuiles/WhatSoup/actions/runs/123';
 const SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
+const BASE_IMAGE_INPUT_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
 const BASE_IMAGE_DIGEST = '152aceace5c03e2597988763165ee33e3fd3633636db0fc983cd2e126b02cfde';
+const SBOM_GENERATOR_INPUT_DIGEST = 'ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9';
 const SBOM_GENERATOR_DIGEST = '187e1892a7752c9384c59aba9517dd8e40610b748c72773e87b63720514463c2';
+const BASE_IMAGE_DEPENDENCY = `pkg:docker/node@24.15.0-slim?digest=sha256:${BASE_IMAGE_INPUT_DIGEST}&platform=linux%2Famd64`;
+const SBOM_GENERATOR_DEPENDENCY = `pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:${SBOM_GENERATOR_INPUT_DIGEST}&platform=linux%2Famd64`;
 
 function sha256(contents: string | Buffer): string {
   return createHash('sha256').update(contents).digest('hex');
@@ -45,7 +49,9 @@ function makeReceiptInput(options: {
   ociSourceRevision?: string;
   ociSourceRepository?: string;
   ociProvenanceBuilderId?: string;
+  ociBaseImageDependency?: string;
   ociBaseImageDigest?: string;
+  ociSbomGeneratorDependency?: string;
   ociSbomGeneratorDigest?: string;
 } = {}) {
   const dir = tmp.make('evidence');
@@ -56,7 +62,9 @@ function makeReceiptInput(options: {
     sourceRevision: options.ociSourceRevision ?? SOURCE_REVISION,
     sourceRepository: options.ociSourceRepository ?? options.sourceRepository,
     provenanceBuilderId: options.ociProvenanceBuilderId,
+    baseImageDependency: options.ociBaseImageDependency,
     baseImageDigest: options.ociBaseImageDigest,
+    sbomGeneratorDependency: options.ociSbomGeneratorDependency,
     sbomGeneratorDigest: options.ociSbomGeneratorDigest,
   });
   writeFileSync(metadataPath, JSON.stringify({
@@ -82,7 +90,9 @@ interface OciArchiveOptions {
   sourceRevision?: string;
   sourceRepository?: string;
   provenanceBuilderId?: string;
+  baseImageDependency?: string;
   baseImageDigest?: string;
+  sbomGeneratorDependency?: string;
   sbomGeneratorDigest?: string;
   statementSubjectDigest?: string;
   predicateAnnotation?: string;
@@ -131,10 +141,10 @@ function writeOciArchive(
         },
       },
       resolvedDependencies: [{
-        uri: 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64',
+        uri: options.baseImageDependency ?? BASE_IMAGE_DEPENDENCY,
         digest: { sha256: options.baseImageDigest ?? BASE_IMAGE_DIGEST },
       }, {
-        uri: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
+        uri: options.sbomGeneratorDependency ?? SBOM_GENERATOR_DEPENDENCY,
         digest: { sha256: options.sbomGeneratorDigest ?? SBOM_GENERATOR_DIGEST },
       }],
     },
@@ -255,7 +265,7 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('BUILDX_METADATA_PROVENANCE: max');
     expect(qualityWorkflow).toContain('--output type=oci');
     expect(containerInputs.platform).toBe('linux/amd64');
-    expect(containerInputs.baseImageDependency).toBe('pkg:docker/node@24.15.0-slim?platform=linux%2Famd64');
+    expect(containerInputs.baseImageDependency).toBe(BASE_IMAGE_DEPENDENCY);
     expect(containerInputs.baseImageResolvedDigest).toBe(`sha256:${BASE_IMAGE_DIGEST}`);
     expect(containerInputs.buildx).toEqual({
       version: 'v0.38.0',
@@ -265,7 +275,7 @@ describe('container build evidence CI contract', () => {
     });
     expect(containerInputs.sbom).toEqual({
       generator: 'docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9',
-      dependency: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
+      dependency: SBOM_GENERATOR_DEPENDENCY,
       resolvedDigest: `sha256:${SBOM_GENERATOR_DIGEST}`,
     });
     expect(qualityWorkflow).toContain('scripts/install-pinned-buildx.ts');
@@ -523,11 +533,20 @@ describe('container build evidence CI contract', () => {
     expect(() => createContainerBuildReceipt(makeReceiptInput({
       ociBaseImageDigest: 'f'.repeat(64),
     }))).toThrow('SLSA provenance does not bind the reviewed selected-platform base image dependency');
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociBaseImageDependency: 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64',
+    }))).toThrow('SLSA provenance does not bind the reviewed selected-platform base image dependency');
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociBaseImageDependency: `pkg:docker/node@24.15.0-slim?digest=sha256:${'f'.repeat(64)}&platform=linux%2Famd64`,
+    }))).toThrow('SLSA provenance does not bind the reviewed selected-platform base image dependency');
   });
 
   it('requires the reviewed selected-platform SBOM generator dependency', () => {
     expect(() => createContainerBuildReceipt(makeReceiptInput({
       ociSbomGeneratorDigest: 'f'.repeat(64),
+    }))).toThrow('SLSA provenance does not bind the reviewed SBOM generator digest');
+    expect(() => createContainerBuildReceipt(makeReceiptInput({
+      ociSbomGeneratorDependency: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
     }))).toThrow('SLSA provenance does not bind the reviewed SBOM generator digest');
   });
 

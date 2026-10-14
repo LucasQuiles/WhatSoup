@@ -11,7 +11,7 @@ import {
 } from '../../scripts/check-node-pin-consistency.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
-const TEST_DOCKER_DIGEST = 'a'.repeat(64);
+const TEST_DOCKER_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
 const TEST_SNAPSHOT = '20261001T000000Z';
 
 /**
@@ -111,7 +111,7 @@ function makeFixture(opts: {
       platform: 'linux/amd64',
       sourceRepository: 'https://github.com/LucasQuiles/WhatSoup.git',
       baseImage: `node:24.15.0-slim@sha256:${TEST_DOCKER_DIGEST}`,
-      baseImageDependency: 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64',
+      baseImageDependency: 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64',
       baseImageResolvedDigest: `sha256:${'d'.repeat(64)}`,
       builder: {
         name: 'whatsoup-ci-builder',
@@ -125,8 +125,8 @@ function makeFixture(opts: {
         buildkitImage: `moby/buildkit:v0.33.1@sha256:${'b'.repeat(64)}`,
       },
       sbom: {
-        generator: `docker/buildkit-syft-scanner:stable-1@sha256:${'e'.repeat(64)}`,
-        dependency: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64',
+        generator: 'docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9',
+        dependency: 'pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9&platform=linux%2Famd64',
         resolvedDigest: `sha256:${'f'.repeat(64)}`,
       },
       apt: {
@@ -260,6 +260,22 @@ describe('node-pin consistency check', () => {
     const policyPath = path.join(dir, 'docker/container-inputs.json');
     const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
     policy.buildx = { version: 'latest', buildkitImage: 'moby/buildkit:latest' };
+    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+
+    const drift = findNodePinDrift({ cwd: dir });
+
+    expect(drift.missing).toContainEqual({
+      source: 'docker/container-inputs.json',
+      filePath: policyPath,
+      reason: 'invalid container input policy shape',
+    });
+  });
+
+  it('requires provenance dependency PURLs to bind the immutable input digest', () => {
+    const dir = makeFixture({});
+    const policyPath = path.join(dir, 'docker/container-inputs.json');
+    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+    policy.baseImageDependency = 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64';
     writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
 
     const drift = findNodePinDrift({ cwd: dir });
