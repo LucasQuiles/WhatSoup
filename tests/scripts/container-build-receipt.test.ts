@@ -59,7 +59,7 @@ function makeReceiptInput(options: {
     sbomGeneratorDigest: options.ociSbomGeneratorDigest,
   });
   writeFileSync(metadataPath, JSON.stringify({
-    'containerimage.digest': oci.imageDigest,
+    'containerimage.digest': oci.outputDigest,
     'buildx.build.provenance': options.provenance ?? oci.provenance,
   }));
   writeFileSync(sbomPath, JSON.stringify({ spdxVersion: 'SPDX-2.3' }));
@@ -90,12 +90,17 @@ interface OciArchiveOptions {
   includeSpdx?: boolean;
   corruptAttestationSize?: boolean;
   corruptLayerDigest?: boolean;
+  directLayout?: boolean;
+  extraOutputDescriptor?: boolean;
+  extraRunnableDescriptor?: boolean;
+  runnablePlatform?: { os: string; architecture: string };
+  attestationPlatform?: { os: string; architecture: string };
 }
 
 function writeOciArchive(
   archivePath: string,
   options: OciArchiveOptions = {},
-): { imageDigest: string; provenance: Record<string, unknown> } {
+): { imageDigest: string; outputDigest: string; provenance: Record<string, unknown> } {
   const layout = tmp.make('oci-layout');
   const blobs = path.join(layout, 'blobs/sha256');
   mkdirSync(blobs, { recursive: true });
@@ -170,23 +175,47 @@ function writeOciArchive(
     ],
   });
   const attestation = writeBlob(manifest);
-  writeFileSync(path.join(layout, 'index.json'), JSON.stringify({
+  const runnableDescriptor = {
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    ...runnable,
+    platform: options.runnablePlatform ?? { os: 'linux', architecture: 'amd64' },
+  };
+  const attestationDescriptor = {
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    digest: attestation.digest,
+    size: attestation.size + (options.corruptAttestationSize ? 1 : 0),
+    platform: options.attestationPlatform ?? { os: 'unknown', architecture: 'unknown' },
+    annotations: {
+      'vnd.docker.reference.type': 'attestation-manifest',
+      'vnd.docker.reference.digest': imageDigest,
+    },
+  };
+  const outputIndex = writeBlob(JSON.stringify({
     schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
     manifests: [
-      { mediaType: 'application/vnd.oci.image.manifest.v1+json', ...runnable },
-      {
-        mediaType: 'application/vnd.oci.image.manifest.v1+json',
-        digest: attestation.digest,
-        size: attestation.size + (options.corruptAttestationSize ? 1 : 0),
-        annotations: {
-          'vnd.docker.reference.type': 'attestation-manifest',
-          'vnd.docker.reference.digest': imageDigest,
-        },
-      },
+      runnableDescriptor,
+      ...(options.extraRunnableDescriptor ? [runnableDescriptor] : []),
+      attestationDescriptor,
     ],
   }));
+  const outputDescriptor = {
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    ...outputIndex,
+  };
+  writeFileSync(path.join(layout, 'index.json'), JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    manifests: options.directLayout
+      ? [runnableDescriptor, attestationDescriptor]
+      : [outputDescriptor, ...(options.extraOutputDescriptor ? [outputDescriptor] : [])],
+  }));
   execFileSync('tar', ['-cf', archivePath, '-C', layout, 'index.json', 'blobs']);
-  return { imageDigest, provenance };
+  return {
+    imageDigest,
+    outputDigest: options.directLayout ? imageDigest : outputIndex.digest,
+    provenance,
+  };
 }
 
 describe('container build evidence CI contract', () => {
@@ -261,7 +290,8 @@ describe('container build evidence CI contract', () => {
     expect(receipt.baseImageResolvedDigest).toBe(`sha256:${BASE_IMAGE_DIGEST}`);
     expect(receipt.sbomGeneratorResolvedDigest).toBe(`sha256:${SBOM_GENERATOR_DIGEST}`);
     expect(receipt.imageDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
-    expect(receipt.outputDigest).toBe(receipt.imageDigest);
+    expect(receipt.outputDigest).toBe(receipt.imageIndexDigest);
+    expect(receipt.outputDigest).not.toBe(receipt.imageDigest);
     expect(receipt.imageIndexDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(receipt.slsaStatementSha256).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(receipt.spdxStatementSha256).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -363,6 +393,50 @@ describe('container build evidence CI contract', () => {
       `OCI image archive has no SLSA provenance predicate for ${imageDigest}`,
     );
     expect(missingProvenanceArchive.imageDigest).toBe(imageDigest);
+  });
+
+  it('accepts the direct OCI layout form while rejecting ambiguous output and runnable descriptors', () => {
+    const direct = makeReceiptInput();
+    const directArchive = writeOciArchive(direct.imagePath, { directLayout: true });
+    expect(() => verifyOciArchiveAttestations(direct.imagePath, directArchive.outputDigest)).not.toThrow();
+
+    const ambiguousOutput = makeReceiptInput();
+    const ambiguousOutputArchive = writeOciArchive(ambiguousOutput.imagePath, { extraOutputDescriptor: true });
+    expect(() => verifyOciArchiveAttestations(
+      ambiguousOutput.imagePath,
+      ambiguousOutputArchive.outputDigest,
+    )).toThrow('OCI image archive must contain exactly one output descriptor');
+
+    const ambiguousRunnable = makeReceiptInput();
+    const ambiguousRunnableArchive = writeOciArchive(ambiguousRunnable.imagePath, {
+      extraRunnableDescriptor: true,
+    });
+    expect(() => verifyOciArchiveAttestations(
+      ambiguousRunnable.imagePath,
+      ambiguousRunnableArchive.outputDigest,
+    )).toThrow('OCI image archive must contain exactly one runnable image descriptor');
+  });
+
+  it('rejects a runnable manifest outside the pinned linux/amd64 platform', () => {
+    const input = makeReceiptInput();
+    const archive = writeOciArchive(input.imagePath, {
+      runnablePlatform: { os: 'linux', architecture: 'arm64' },
+    });
+
+    expect(() => verifyOciArchiveAttestations(input.imagePath, archive.outputDigest)).toThrow(
+      'runnable image descriptor platform does not match linux/amd64',
+    );
+  });
+
+  it('rejects an attestation descriptor presented as a runnable platform', () => {
+    const input = makeReceiptInput();
+    const archive = writeOciArchive(input.imagePath, {
+      attestationPlatform: { os: 'linux', architecture: 'amd64' },
+    });
+
+    expect(() => verifyOciArchiveAttestations(input.imagePath, archive.outputDigest)).toThrow(
+      'OCI image archive attestation descriptor platform is not unknown/unknown',
+    );
   });
 
   it('rejects a forged predicate annotation that disagrees with its in-toto statement', () => {

@@ -75,6 +75,7 @@ const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Z
 const PLATFORM = 'linux/amd64';
 const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?platform=linux%2Famd64';
 const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?platform=linux%2Famd64';
+const OCI_IMAGE_INDEX_MEDIA_TYPE = 'application/vnd.oci.image.index.v1+json';
 const OCI_IMAGE_MANIFEST_MEDIA_TYPE = 'application/vnd.oci.image.manifest.v1+json';
 const OCI_ATTESTATION_ARTIFACT_TYPE = 'application/vnd.docker.attestation.manifest.v1+json';
 const IN_TOTO_MEDIA_TYPE = 'application/vnd.in-toto+json';
@@ -88,9 +89,10 @@ interface OciDescriptor {
   digest?: unknown;
   size?: unknown;
   annotations?: unknown;
+  platform?: unknown;
 }
 
-interface OciIndex { schemaVersion?: unknown; manifests?: unknown }
+interface OciIndex { schemaVersion?: unknown; mediaType?: unknown; manifests?: unknown }
 interface OciManifest { schemaVersion?: unknown; mediaType?: unknown; artifactType?: unknown; subject?: unknown; layers?: unknown }
 interface InTotoStatement { _type?: unknown; subject?: unknown; predicateType?: unknown; predicate?: unknown }
 
@@ -216,6 +218,17 @@ function annotations(descriptor: OciDescriptor): Record<string, unknown> {
   return isRecord(descriptor.annotations) ? descriptor.annotations : {};
 }
 
+function descriptorPlatform(descriptor: OciDescriptor): Record<string, unknown> {
+  return isRecord(descriptor.platform) ? descriptor.platform : {};
+}
+
+function requireDescriptorArray(value: unknown, label: string): OciDescriptor[] {
+  if (!Array.isArray(value) || value.length === 0 || !value.every(isRecord)) {
+    throw new Error(`${label} must contain at least one complete OCI descriptor`);
+  }
+  return value as OciDescriptor[];
+}
+
 function descriptorDigest(descriptor: OciDescriptor, label: string): string {
   if (typeof descriptor.digest !== 'string' || !SHA256_PATTERN.test(descriptor.digest)) throw new Error(`${label} has an invalid OCI descriptor digest`);
   return descriptor.digest;
@@ -306,17 +319,39 @@ export function verifyOciArchiveAttestations(
   if (!SHA256_PATTERN.test(expectedOutputDigest)) throw new Error('expected OCI output digest must be a SHA-256 digest');
   const indexBytes = readOciArchiveEntry(imagePath, 'index.json');
   const index = parseJsonBytes<OciIndex>(indexBytes, `OCI image archive index.json: ${imagePath}`);
-  if (index.schemaVersion !== 2 || !Array.isArray(index.manifests)) throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
-  const descriptors = index.manifests.filter(isRecord) as OciDescriptor[];
+  if (index.schemaVersion !== 2 || (index.mediaType !== undefined && index.mediaType !== OCI_IMAGE_INDEX_MEDIA_TYPE)) {
+    throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
+  }
+  const rootDescriptors = requireDescriptorArray(index.manifests, 'OCI image archive index.json');
+  const nestedOutputDescriptors = rootDescriptors.filter((descriptor) => descriptor.mediaType === OCI_IMAGE_INDEX_MEDIA_TYPE);
+  let descriptors = rootDescriptors;
+  let imageIndexDigest = sha256(indexBytes);
+  if (nestedOutputDescriptors.length > 0) {
+    if (rootDescriptors.length !== 1 || nestedOutputDescriptors.length !== 1) {
+      throw new Error(`OCI image archive must contain exactly one output descriptor: ${imagePath}`);
+    }
+    const outputDescriptor = nestedOutputDescriptors[0];
+    imageIndexDigest = descriptorDigest(outputDescriptor, 'OCI output index descriptor');
+    const outputIndexBytes = readVerifiedDescriptorBlob(imagePath, outputDescriptor, 'OCI output index descriptor');
+    const outputIndex = parseJsonBytes<OciIndex>(outputIndexBytes, 'OCI output image index');
+    if (outputIndex.schemaVersion !== 2 || outputIndex.mediaType !== OCI_IMAGE_INDEX_MEDIA_TYPE) {
+      throw new Error('OCI output descriptor does not reference an OCI image index');
+    }
+    descriptors = requireDescriptorArray(outputIndex.manifests, 'OCI output image index');
+  }
   const attestationDescriptors = descriptors.filter((descriptor) => annotations(descriptor)['vnd.docker.reference.type'] === 'attestation-manifest');
   const runnableDescriptors = descriptors.filter((descriptor) => !attestationDescriptors.includes(descriptor));
   if (runnableDescriptors.length !== 1) throw new Error(`OCI image archive must contain exactly one runnable image descriptor: ${imagePath}`);
   const runnable = runnableDescriptors[0];
+  if (runnable.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('runnable image descriptor has an unexpected media type');
+  const platform = descriptorPlatform(runnable);
+  if (platform.os !== 'linux' || platform.architecture !== 'amd64') {
+    throw new Error('runnable image descriptor platform does not match linux/amd64');
+  }
   const imageDigest = descriptorDigest(runnable, 'runnable image descriptor');
   const imageManifestBytes = readVerifiedDescriptorBlob(imagePath, runnable, 'runnable image descriptor');
   const manifest = parseJsonBytes<Record<string, unknown>>(imageManifestBytes, 'runnable image manifest');
   if (manifest.schemaVersion !== 2 || manifest.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('runnable image descriptor does not reference an OCI image manifest');
-  const imageIndexDigest = sha256(indexBytes);
   if (expectedOutputDigest !== imageDigest && expectedOutputDigest !== imageIndexDigest) throw new Error('build metadata output digest does not match the verified OCI output');
   if (attestationDescriptors.length === 0) throw new Error(`OCI image archive has no BuildKit attestation manifest: ${imagePath}`);
 
@@ -325,6 +360,10 @@ export function verifyOciArchiveAttestations(
   for (const descriptor of attestationDescriptors) {
     if (annotations(descriptor)['vnd.docker.reference.digest'] !== imageDigest) continue;
     if (descriptor.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('OCI image archive attestation descriptor has an unexpected media type');
+    const attestationPlatform = descriptorPlatform(descriptor);
+    if (attestationPlatform.os !== 'unknown' || attestationPlatform.architecture !== 'unknown') {
+      throw new Error('OCI image archive attestation descriptor platform is not unknown/unknown');
+    }
     const attestationBytes = readVerifiedDescriptorBlob(imagePath, descriptor, 'attestation manifest descriptor');
     const attestation = parseJsonBytes<OciManifest>(attestationBytes, 'OCI image archive attestation manifest');
     if (attestation.schemaVersion !== 2 || attestation.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE || attestation.artifactType !== OCI_ATTESTATION_ARTIFACT_TYPE || !isRecord(attestation.subject)) {
