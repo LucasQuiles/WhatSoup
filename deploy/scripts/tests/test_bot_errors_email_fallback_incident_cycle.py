@@ -49,6 +49,11 @@ TEST_ENV_KEYS = [
     "BOT_ERRORS_STATE_DIR",
     "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS",
     "BOT_ERRORS_OUTBOX_DIR",
+    "BOT_ERRORS_DRY_SEND_CAPTURE",
+    "BOT_ERRORS_DRY_AUTHORITY_CAPTURE",
+    "BOT_ERRORS_TEST_MODE",
+    "BOT_ERRORS_INCIDENT_AUTHORITY_URL",
+    "BOT_ERRORS_DISPATCHER_AUTHORITY_CREDENTIAL_FILE",
 ]
 
 
@@ -58,6 +63,12 @@ _clean_test_env = dispatcher_fixtures.make_env_scrub_fixture(TEST_ENV_KEYS)
 def _load_module(extra_env: dict[str, str]):
     for k, v in extra_env.items():
         os.environ[k] = v
+    state_dir = extra_env.get("BOT_ERRORS_STATE_DIR")
+    if state_dir:
+        os.environ["BOT_ERRORS_TEST_MODE"] = "1"
+        os.environ["BOT_ERRORS_DRY_AUTHORITY_CAPTURE"] = str(
+            Path(state_dir) / "test-incident-authority.jsonl"
+        )
     spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_efic", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
