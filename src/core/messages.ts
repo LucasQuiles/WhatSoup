@@ -294,9 +294,25 @@ export function deleteOldMessages(
   clock: Clock = systemClock,
 ): number {
   const cutoff = clock.nowUnixSec() - retentionDays * 86400;
-  const result = db.raw.prepare(
-    'DELETE FROM messages WHERE timestamp < ?'
-  ).run(cutoff);
+  // An open operator catch-up references its inbound by seq; the payload it
+  // needs lives only here, so its message is kept until the catch-up closes.
+  const result = db.raw.prepare(`
+    DELETE FROM messages
+     WHERE timestamp < ?
+       AND message_id NOT IN (
+         SELECT source.message_id
+           FROM inbound_disposition_links pending
+           JOIN inbound_events source ON source.seq = pending.inbound_seq
+          WHERE pending.disposition = 'recovery_pending_operator_catchup'
+            AND NOT EXISTS (
+              SELECT 1
+                FROM inbound_disposition_links closure
+               WHERE closure.inbound_seq = pending.inbound_seq
+                 AND closure.recovery_plan_id = pending.recovery_plan_id
+                 AND closure.disposition = 'superseded_by_operator_catchup'
+            )
+       )
+  `).run(cutoff);
   db.raw.prepare(
     'DELETE FROM receipts WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.message_id = receipts.message_id)'
   ).run();

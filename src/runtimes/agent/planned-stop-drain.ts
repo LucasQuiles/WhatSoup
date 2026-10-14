@@ -33,6 +33,22 @@ export class PlannedStopTurnLossError extends Error {
 }
 
 /**
+ * Typed, content-free failure: accepted messages the stop could not hand off
+ * (the deferred store refuses their envelope) were left open, so startup
+ * recovery gives each an operator catch-up owner. Not a clean stop. Never
+ * carries JIDs, message ids or text.
+ */
+export class PlannedStopIntakeRetainedError extends Error {
+  readonly retained: number;
+
+  constructor(retained: number) {
+    super(`planned stop left ${retained} accepted message(s) open for recovery catch-up`);
+    this.name = 'PlannedStopIntakeRetainedError';
+    this.retained = retained;
+  }
+}
+
+/**
  * Content-free failure: the stop could not close runtime TurnQueues that no
  * reset/kill teardown owns, so their undispatched turns were not taken.
  */
@@ -73,8 +89,9 @@ export type PlannedStopIntakeDecision = 'admit' | 'closed' | 'unownable';
  *   the ordinary intake pipeline; its queue admission hands it to the deferred
  *   owner (cause `planned_stop`) instead of dispatching it.
  * - `unownable`: the same eligible message before closure, but the store would
- *   refuse its envelope. It cannot be owned, so it is a loss the stop counts
- *   (PlannedStopIntakeLossError, ingest: `failed / pre_dispatch_error`).
+ *   refuse its envelope. The runtime leaves the inbound open; startup recovery
+ *   records it as an open operator catch-up (no replay), and the stop fails
+ *   with PlannedStopIntakeRetainedError instead of reporting clean.
  * - `closed`: everything else, and everything after closure, is refused with
  *   RuntimeAdmissionClosedError, which ingest records `failed / queue_closed`.
  */

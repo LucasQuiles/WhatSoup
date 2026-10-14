@@ -57,7 +57,7 @@ import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
-import { classifyErrorForInbound, PlannedStopIntakeLossError, RuntimeAdmissionClosedError } from '../../core/inbound-failure-class.ts';
+import { classifyErrorForInbound, RuntimeAdmissionClosedError } from '../../core/inbound-failure-class.ts';
 import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
@@ -136,7 +136,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
-import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, PlannedStopTurnLossError, plannedStopIntakeDecision, waitForPlannedStopDrain } from './planned-stop-drain.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopIntakeRetainedError, PlannedStopQueueCloseError, PlannedStopTurnLossError, plannedStopIntakeDecision, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -2135,8 +2135,8 @@ export class AgentRuntime implements Runtime {
   private shutdownRequested = false;
   /** #3703: set when a planned stop closes intake (before its message-handler drain). */
   private plannedStopIntakeClosed = false;
-  /** #3295 S3: journaled messages refused during the stop, before closure, that no owner could take. */
-  private plannedStopIntakeLosses = 0;
+  /** #3295 S3: accepted messages left open during the stop, before closure, because no deferred owner could hold them. */
+  private plannedStopIntakeRetained = 0;
   /** #3703: bound on the planned-stop drain of dispatched turns. */
   private readonly plannedStopDrainMs: number;
 
@@ -4767,9 +4767,11 @@ export class AgentRuntime implements Runtime {
       });
       if (decision === 'closed') return Promise.reject(new RuntimeAdmissionClosedError());
       if (decision === 'unownable') {
-        // Already journaled by ingest and not ownable: the stop counts it as a loss.
-        this.plannedStopIntakeLosses += 1;
-        return Promise.reject(new PlannedStopIntakeLossError());
+        // Already journaled by ingest, but the deferred store cannot hold its
+        // envelope. Leave the inbound open: startup recovery gives it an
+        // operator catch-up owner. The stop still does not report clean.
+        this.plannedStopIntakeRetained += 1;
+        return Promise.resolve();
       }
     }
     const tracksRouteRecycle = (
@@ -8213,11 +8215,14 @@ export class AgentRuntime implements Runtime {
     }
     this.pendingSystemResults.clear();
     this.plannedStopIntakeClosed = true; // #3703: later messages are refused; earlier ones finish in the drain below
-    // #3295 S3: accepted messages refused before closure because nothing could own them are losses too.
-    lostJournaledTurns += this.plannedStopIntakeLosses;
     if (lostJournaledTurns > 0) {
       log.error({ lostJournaledTurns }, 'shutdown finalized journaled turns failed');
       shutdownFailures.push(new PlannedStopTurnLossError(lostJournaledTurns));
+    }
+    // #3295 S3: accepted messages no deferred owner could hold stay open for recovery; the handoff failed.
+    if (this.plannedStopIntakeRetained > 0) {
+      log.error({ retainedForRecovery: this.plannedStopIntakeRetained }, 'planned stop left accepted messages open for recovery');
+      shutdownFailures.push(new PlannedStopIntakeRetainedError(this.plannedStopIntakeRetained));
     }
     if (!preserveRuntimeTurnState) {
       // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute

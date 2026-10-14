@@ -87,14 +87,18 @@ except startup recovery (see Restart ownership).
   replay-safe, text within the 256 KiB bound) runs the ordinary intake pipeline; its queue admission then hands
   it off with cause `planned_stop` instead of dispatching it. The handler is awaited through that admission, so
   the stop's handler drain covers the handoff. The same message with an envelope the store refuses (for example
-  text over the bound) cannot be owned: it is refused with `PlannedStopIntakeLossError`, ingest records it
-  `failed / pre_dispatch_error` (a fault class, not the capacity-shed `queue_closed`), and the stop counts it
-  with its other journaled losses, so it rejects with `PlannedStopTurnLossError` (`shutdown incomplete`, exit 1).
+  text over the bound) cannot be handed off. It is already accepted, so it is not refused: `handleMessage`
+  returns without dispatching and the inbound stays `processing`. The stop rejects with
+  `PlannedStopIntakeRetainedError` (`shutdown incomplete`, exit 1). On the next start, `preConnectRecovery`
+  (step 4) gives the same seq the existing durable owner for an accepted inbound with no terminal outbound: an
+  open `recovery_pending_operator_catchup` disposition link (counted in health `openRecoveries`), closed only
+  through the supported operator catch-up. The message text stays whole in `messages`, and message retention
+  (`deleteOldMessages`) keeps a message while its inbound has an open catch-up. It is never replayed.
   The bound is not raised and the text is never truncated. Any other message, and every message after closure, is
   refused with `RuntimeAdmissionClosedError`, which ingest records `failed / queue_closed`. There is no second
-  intake pipeline and no new held state. Proof scope: the ingest-route case drives the real ingest handler into
-  the real runtime during a stop for one oversize plain-text message; it does not prove the whole route or any
-  other ineligible shape.
+  intake pipeline and no new held state. Proof scope: the ingest-route cases drive the real ingest handler into
+  the real runtime during a stop for one oversize plain-text message, then restart on the same database and
+  follow that seq to its open catch-up link; they do not prove the whole route or any other ineligible shape.
 - **Restart ownership** (`preConnectRecovery({ deferredTurnOwnerEnabled })`). main.ts derives the owner from the
   same setting it passes to the runtime: enabled exactly for an agent instance in per_chat scope with the setting
   on (`resolveDeferredTurnStartupSetting`). Enabled: crash recovery skips an inbound owned by a `claimed`
@@ -169,8 +173,11 @@ except startup recovery (see Restart ownership).
 - **Orphaned claim delays live input.** With FIFO, a live message waits behind an older obligation that a
   crashed process left `claimed`, until the claim TTL (600 s) expires and the drain reclaims it.
 - **Each planned stop that releases a drained turn spends one of its 5 attempts** (the requeue counts).
-- **An oversize message accepted during the stop is lost, not replayed.** No durable owner holds text over the
-  256 KiB bound, so the stop reports it as a loss instead of a clean stop; the sender gets no reply.
+- **An oversize message accepted during the stop is not replayed and gets no automatic reply.** No replay owner
+  holds text over the 256 KiB bound. The stop fails instead of reporting clean, and the next start records an open
+  operator catch-up for it. Recovery labels it with its generic reason (`crash_reclaim_no_terminal_outbound`,
+  inbound `failed / crash_recovery`), not a planned-stop cause; the stop's own error carries that cause. Until the
+  next start, the inbound stays `processing`.
 - **A source the drain fails itself** (`pre_dispatch_error`, no runtime turn) gets an inbound failure but no
   `turn_terminal_records` row, as crash recovery's failures do.
 - **First old-to-new cutover.** The supported operation is the new release's `release:activate --apply`. Its stop
