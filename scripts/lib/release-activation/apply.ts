@@ -188,34 +188,46 @@ function stopGateReason(stdout: string): string {
   }
 }
 
-/** #3703: run the stop preflight until it allows the stop or the bound passes. Returns a failure string, or null. */
+/**
+ * #3703: run the stop preflight until it allows the stop or the bound passes. Returns a failure string, or null.
+ * One deadline covers the whole wait: each check is killed when the remaining budget expires, a verdict that settles
+ * at or after the deadline is refused (even an allow), and the poll sleep never runs past it.
+ */
 async function awaitStopGate(host: ActivationHost, context: ActivationContext, steps: StepRecord[]): Promise<string | null> {
   const { release } = context.args;
   const deadline = host.now() + STOP_GATE_WAIT_SECONDS * 1_000;
+  const refuseStop = (failure: string): string => {
+    steps.push({ step: 'stop-gate', ok: false, detail: failure });
+    return failure;
+  };
+  let reason = 'not checked';
   for (let check = 1; ; check += 1) {
+    const remainingMs = deadline - host.now();
+    if (remainingMs <= 0) {
+      return refuseStop(`stop preflight still blocking (${reason}) after ${check - 1} check(s) over ${STOP_GATE_WAIT_SECONDS}s; refusing to stop the instance`);
+    }
     const result = await host.exec('bash', [
       path.join(release, 'scripts', 'run-with-pinned-node.sh'),
       path.join(release, 'scripts', 'restart-safety-preflight.ts'),
       '--mode', 'stop',
       '--db', context.dbPath,
       '--json',
-    ]);
-    const reason = stopGateReason(result.stdout);
+    ], { timeoutMs: remainingMs });
+    if (result.timedOut === true) {
+      return refuseStop(`stop preflight did not settle within the ${STOP_GATE_WAIT_SECONDS}s bound (check ${check} killed); refusing to stop the instance`);
+    }
+    reason = stopGateReason(result.stdout);
+    if (host.now() >= deadline) {
+      return refuseStop(`stop preflight answered exit ${result.code} (${reason}) at or after the ${STOP_GATE_WAIT_SECONDS}s bound on check ${check}; refusing to stop the instance`);
+    }
     if (result.code === 0) {
       steps.push({ step: 'stop-gate', ok: true, detail: `${reason} after ${check} check(s)` });
       return null;
     }
     if (result.code !== 3) {
-      const failure = `stop preflight exited ${result.code} (${reason}); refusing to stop the instance`;
-      steps.push({ step: 'stop-gate', ok: false, detail: failure });
-      return failure;
+      return refuseStop(`stop preflight exited ${result.code} (${reason}); refusing to stop the instance`);
     }
-    if (host.now() >= deadline) {
-      const failure = `stop preflight still blocking (${reason}) after ${check} check(s) over ${STOP_GATE_WAIT_SECONDS}s; refusing to stop the instance`;
-      steps.push({ step: 'stop-gate', ok: false, detail: failure });
-      return failure;
-    }
-    await host.sleep(STOP_GATE_POLL_INTERVAL_MS);
+    await host.sleep(Math.min(STOP_GATE_POLL_INTERVAL_MS, deadline - host.now()));
   }
 }
 

@@ -265,9 +265,9 @@ export interface WorldOptions {
   injectPid?: boolean;
   /** `plutil -lint` rejects every staged plist: a refusal inside the apply, after the backup dir exists. */
   plutilFails?: boolean;
-  /** A bounded exec (one given `timeoutMs`) matching this never settles, as a hung child would. */
+  /** A bounded #2481 sample exec (one given `timeoutMs`) matching this never settles, as a hung child would. */
   hangBounded?: (file: string, args: readonly string[]) => boolean;
-  /** Runs at every bounded exec, before it answers (e.g. a migration that commits meanwhile). */
+  /** Runs at every bounded #2481 sample exec, before it answers (e.g. a migration that commits meanwhile). */
   onBoundedCall?: (file: string, args: readonly string[]) => void;
   /** How long a process has been up when it first answers (its start precedes the tool's clock by this). Default 2 s. */
   bootMs?: number;
@@ -328,7 +328,10 @@ export class SimulatedLaunchd {
   private readonly argv = new Map<number, string>();
   /** Process start time per pid (ms), as `ps -o lstart=` reports it. */
   private readonly startTimes = new Map<number, number>();
-  /** Every exec the tool bounded with its own timeout (`options.timeoutMs`), in order. */
+  /**
+   * Every #2481 sample exec the tool bounded with its own timeout (`options.timeoutMs`), in order. The #3703
+   * stop preflight is bounded too, but it is a pre-switch gate, not a sample, so it is not recorded here.
+   */
   readonly boundedCalls: string[][] = [];
   /** Index into `calls` of every bounded exec, to check its order against the mutating calls. */
   readonly boundedAt: number[] = [];
@@ -483,7 +486,8 @@ export class SimulatedLaunchd {
       exec: async (file, args, options) => {
         this.calls.push([file, ...args]);
         const extra = options as { timeoutMs?: number; env?: unknown } | undefined;
-        if (extra?.timeoutMs !== undefined) {
+        const stopPreflight = args.some((arg) => arg.endsWith('restart-safety-preflight.ts'));
+        if (extra?.timeoutMs !== undefined && !stopPreflight) {
           this.boundedCalls.push([file, ...args]);
           this.boundedAt.push(this.calls.length - 1);
           if (args.includes('lstart=')) this.startTimeEnvs.push(extra.env);

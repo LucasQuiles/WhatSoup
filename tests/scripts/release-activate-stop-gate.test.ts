@@ -9,7 +9,11 @@
  *    the instance's `launchctl bootout`;
  *  - while the preflight exits 3 the apply waits and re-checks, bounded;
  *  - past the bound it fails CLOSED: refused, no bootout/bootstrap/kickstart,
- *    the wrapper symlink and plists untouched.
+ *    the wrapper symlink and plists untouched;
+ *  - the bound is one deadline per apply: each preflight exec is given the
+ *    remaining budget as its `timeoutMs`, a check that times out or settles
+ *    at/after the deadline (even with exit 0) is refused, and the poll sleep
+ *    never runs past the deadline.
  * There is no stop override. A blocked apply is refused; nothing here may be
  * satisfied by adding one.
  *
@@ -38,6 +42,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { RELEASE_ACTIVATE_EXIT } from '../../scripts/release-activate.ts';
+import { STOP_GATE_WAIT_SECONDS } from '../../scripts/lib/release-activation/plan.ts';
 import type { ActivationHost } from '../../scripts/lib/release-activation/host.ts';
 import {
   activationArgs,
@@ -63,13 +68,26 @@ function verdict(code: number): string {
   })}\n`;
 }
 
-/** The simulated world, with the stop preflight answered from a scripted verdict sequence (last value repeats). */
+/**
+ * One scripted preflight check: an exit code answered at once, an exit code
+ * that settles `takesMs` later on the tool clock (whatever `timeoutMs` says:
+ * a child whose settlement lags its kill), or `hang`: a check that never
+ * settles on its own. A hang honours `timeoutMs` the way defaultExec does
+ * (SIGKILL at expiry, `timedOut`); without one it settles a day later with 0.
+ */
+type Check = number | { code: number; takesMs: number } | 'hang';
+
+const HANG_WITHOUT_BOUND_MS = 24 * 60 * 60 * 1_000;
+
+/** The simulated world, with the stop preflight answered from a scripted check sequence (last value repeats). */
 class GatedLaunchd extends SimulatedLaunchd {
   /** Index into `calls` of every preflight exec, and the tool clock at each. */
   readonly preflightAt: number[] = [];
   readonly preflightClock: number[] = [];
+  /** The `timeoutMs` each preflight exec was given (undefined = unbounded). */
+  readonly preflightTimeoutMs: (number | undefined)[] = [];
 
-  constructor(fixture: Fixture, private readonly verdicts: readonly number[], options: WorldOptions = {}) {
+  constructor(fixture: Fixture, private readonly verdicts: readonly Check[], options: WorldOptions = {}) {
     super(fixture, options);
   }
 
@@ -82,10 +100,26 @@ class GatedLaunchd extends SimulatedLaunchd {
         this.calls.push([file, ...args]);
         this.preflightAt.push(this.calls.length - 1);
         this.preflightClock.push(base.now());
-        const code = this.verdicts[Math.min(this.preflightAt.length - 1, this.verdicts.length - 1)]!;
-        return { code, stdout: verdict(code), stderr: '' };
+        this.preflightTimeoutMs.push(options?.timeoutMs);
+        const check = this.verdicts[Math.min(this.preflightAt.length - 1, this.verdicts.length - 1)]!;
+        if (check === 'hang') {
+          if (options?.timeoutMs === undefined) {
+            await base.sleep(HANG_WITHOUT_BOUND_MS);
+            return { code: 0, stdout: verdict(0), stderr: '' };
+          }
+          await base.sleep(options.timeoutMs);
+          return { code: 137, stdout: '', stderr: '', timedOut: true };
+        }
+        if (typeof check === 'number') return { code: check, stdout: verdict(check), stderr: '' };
+        await base.sleep(check.takesMs);
+        return { code: check.code, stdout: verdict(check.code), stderr: '' };
       },
     };
+  }
+
+  /** The deadline the apply's single stop-gate budget allows: first check + STOP_GATE_WAIT_SECONDS. */
+  gateDeadline(): number {
+    return this.preflightClock[0]! + STOP_GATE_WAIT_SECONDS * 1_000;
   }
 
   preflightCalls(): string[][] {
@@ -156,6 +190,65 @@ describe('release:activate --apply: stop gate before reload (#3703 T6)', () => {
     expect(readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8')).toBe(installedPlist);
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
     expect(result.json.outcome).toBe('refused');
+  });
+
+  it('T6d: a preflight that never settles is killed at the bound and refused, nothing switched', async () => {
+    const installedPlist = readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8');
+    const world = new GatedLaunchd(fixture, ['hang']);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.preflightTimeoutMs).toEqual([STOP_GATE_WAIT_SECONDS * 1_000]);
+    expect(world.now()).toBeLessThanOrEqual(world.gateDeadline());
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(world.isAlive(world.initialInstancePid)).toBe(true);
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8')).toBe(installedPlist);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+  });
+
+  it('T6e: an exit 0 that settles at the deadline is refused before any switch or reload', async () => {
+    const installedPlist = readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8');
+    const world = new GatedLaunchd(fixture, [3, { code: 0, takesMs: STOP_GATE_WAIT_SECONDS * 1_000 }]);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.preflightAt).toHaveLength(2);
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(world.isAlive(world.initialInstancePid)).toBe(true);
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(readFileSync(path.join(fixture.launchAgents, `${INSTANCE_LABEL}.plist`), 'utf8')).toBe(installedPlist);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+  });
+
+  it('T6f: polling stops at the deadline: no check starts after it and the last sleep is capped', async () => {
+    const world = new GatedLaunchd(fixture, [{ code: 3, takesMs: (STOP_GATE_WAIT_SECONDS - 10) * 1_000 }, 3]);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.preflightAt).toHaveLength(1);
+    expect(world.now()).toBe(world.gateDeadline());
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+  });
+
+  it('T6g: each check is bounded by the remaining budget, and a timely 0 still activates', async () => {
+    const world = new GatedLaunchd(fixture, [
+      { code: 3, takesMs: 100_000 },
+      { code: 3, takesMs: 100_000 },
+      { code: 0, takesMs: 100_000 },
+    ]);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(world.preflightAt).toHaveLength(3);
+    expect(world.preflightTimeoutMs).toEqual(world.preflightClock.map((at) => world.gateDeadline() - at));
+    expect(world.preflightAt.at(-1)!).toBeLessThan(world.instanceBootoutAt());
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.outcome).toBe('activated');
   });
 
   it('T6 control: a quiet world still activates', async () => {
