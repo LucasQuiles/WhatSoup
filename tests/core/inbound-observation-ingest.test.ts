@@ -1,6 +1,6 @@
 // Ingest exits recorded by inbound-observation.ts, with admission, dispatch,
 // duplicate and displacement behaviour unchanged.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { IncomingMessage, Messenger } from '../../src/core/types.ts';
 import type { Runtime } from '../../src/runtimes/types.ts';
 import type { DurabilityEngine } from '../../src/core/durability.ts';
@@ -56,7 +56,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
   updateAccess: vi.fn(),
 }));
 
-import { Database } from '../../src/core/database.ts';
+import { Database, storeDecryptionFailure } from '../../src/core/database.ts';
 import { config } from '../../src/config.ts';
 import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
 import { getInboundObservationHealth, resetInboundObservations } from '../../src/core/inbound-observation.ts';
@@ -122,10 +122,32 @@ async function waitForIdle(): Promise<void> {
   }, { timeout: 5_000, interval: 5 });
 }
 
+const ownedDbs: Database[] = [];
+
 function openDb(): Database {
   const db = new Database(':memory:');
   db.open();
+  ownedDbs.push(db);
   return db;
+}
+
+// Runs every cleanup step even if one throws, then rethrows the body's failure
+// first so a cleanup error never masks the original one.
+async function withCleanup(body: () => Promise<void>, cleanups: Array<() => void | Promise<void>>): Promise<void> {
+  let failure: { error: unknown } | undefined;
+  try {
+    await body();
+  } catch (error) {
+    failure = { error };
+  }
+  for (const cleanup of cleanups) {
+    try {
+      await cleanup();
+    } catch (error) {
+      failure ??= { error };
+    }
+  }
+  if (failure) throw failure.error;
 }
 
 function storedCount(db: Database, messageId: string): number {
@@ -140,6 +162,11 @@ beforeEach(() => {
   doubles.emitAlert.mockReset();
   doubles.emitAlert.mockReturnValue({ ok: true, channel: 'sink', status: 'durably_queued' });
   resetInboundObservations();
+});
+
+afterEach(async () => {
+  const dbs = ownedDbs.splice(0);
+  await withCleanup(() => waitForIdle(), dbs.map((db) => () => db.close()));
 });
 
 describe('ingest exits recorded as inbound observations', () => {
@@ -192,6 +219,56 @@ describe('ingest exits recorded as inbound observations', () => {
     expect(doubles.emitAlert).not.toHaveBeenCalled();
   });
 
+  it('a resolution failure after the message INSERT records ingest.store_failed without claiming non-retention; the row remains', async () => {
+    const db = openDb();
+    const runtime = makeRuntime();
+    const { durability, journalInbound } = makeDurability();
+    const messageId = 'obs-post-insert-failure';
+    storeDecryptionFailure(db, {
+      messageId,
+      chatJid: '15551230008@s.whatsapp.net',
+      senderJid: '15551230008@s.whatsapp.net',
+      errorMessage: 'Bad MAC',
+      rawKey: { remoteJid: '15551230008@s.whatsapp.net', id: messageId, fromMe: false },
+      timestamp: 1_780_000_000,
+    });
+    // Abort only the post-insert resolution UPDATE; the message INSERT is untouched.
+    db.raw.exec(`
+      CREATE TRIGGER abort_decryption_failure_resolution
+      BEFORE UPDATE OF resolved ON decryption_failures
+      WHEN NEW.resolved = 1
+      BEGIN SELECT RAISE(ABORT, 'resolution aborted'); END
+    `);
+    const { createChildLogger } = await import('../../src/logger.ts');
+    const logger = createChildLogger('ingest') as unknown as { error: ReturnType<typeof vi.fn> };
+
+    makeHandler(db, runtime, durability)(makeMessage({ messageId }));
+    await waitForIdle();
+
+    // The persistence path failed after the INSERT committed: the row is retained
+    // and the decryption failure stays unresolved.
+    expect(storedCount(db, messageId)).toBe(1);
+    expect(db.raw.prepare('SELECT resolved FROM decryption_failures WHERE message_id = ?').get(messageId))
+      .toEqual({ resolved: 0 });
+    const storeError = logger.error.mock.calls.find((call) => call[1] === 'failed to store message');
+    expect(String((storeError?.[0] as { err?: unknown } | undefined)?.err)).toMatch(/resolution aborted/);
+    // No journal, recovery or runtime work is invented for the retained row.
+    expect(journalInbound).not.toHaveBeenCalled();
+    expect(durability.markInboundSkipped).not.toHaveBeenCalled();
+    expect(durability.markInboundFailed).not.toHaveBeenCalled();
+    expect(durability.markInboundFailedIfProcessing).not.toHaveBeenCalled();
+    expect(runtime.handleMessage).not.toHaveBeenCalled();
+    expect(getInboundObservationHealth().counts).toMatchObject({
+      'ingest.store_failed': 1,
+      'ingest.stored_not_admitted': 0,
+    });
+    // The alert reports a persistence-path failure with retention unknown, not non-retention.
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
+    expect(doubles.emitAlert.mock.calls[0]![1]).toBe('inbound_store_failed');
+    expect(doubles.emitAlert.mock.calls[0]![2]).toBe('inbound message persistence path failed; retention unknown');
+    expect(doubles.emitAlert.mock.calls[0]![2]).not.toMatch(/could not be stored|not stored|non-retention/);
+  });
+
   it('a duplicate delivery is not counted and is dispatched once', async () => {
     const db = openDb();
     const runtime = makeRuntime();
@@ -214,9 +291,9 @@ describe('ingest exits recorded as inbound observations', () => {
       configurable: true,
       value: { ...(config.ingest ?? {}), maxConcurrent: 1, maxQueueDepth: 1 },
     });
-    try {
+    const anchor = deferred<void>();
+    await withCleanup(async () => {
       const db = openDb();
-      const anchor = deferred<void>();
       const runtime = makeRuntime(vi.fn().mockImplementation(async (msg: IncomingMessage) => {
         if (msg.messageId === 'obs-anchor') return anchor.promise;
       }));
@@ -237,9 +314,11 @@ describe('ingest exits recorded as inbound observations', () => {
       expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
       expect(doubles.emitAlert.mock.calls[0]![1]).toBe('ingest_queue_displacement');
       expect(Object.values(allZero()).every((n) => n === 0)).toBe(true);
-    } finally {
-      if (original) Object.defineProperty(config, 'ingest', original);
-    }
+    }, [
+      () => anchor.resolve(),
+      () => waitForIdle(),
+      () => { if (original) Object.defineProperty(config, 'ingest', original); },
+    ]);
   });
 
   it('a broken warning logger during a store failure still alerts and leaves admission unchanged', async () => {

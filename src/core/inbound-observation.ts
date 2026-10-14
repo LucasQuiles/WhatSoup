@@ -2,7 +2,7 @@
 // Observed local non-admission of inbound messages.
 //
 // A transport or ingest exit that ends an inbound message's local path without
-// storing or dispatching it is counted here under a closed reason label. A
+// admitting it is counted here under a closed reason label. A
 // count is an observed attempt in this process, not a unique lost message and
 // not a claim about delivery upstream. Transport observations happen before
 // storage, so a redelivered message can be counted again; a delivery the
@@ -10,11 +10,14 @@
 // admission, dispatch or recovery; a logger or alert failure is counted and
 // swallowed, and neither can prevent the other.
 //
-// Two reasons are certain local non-retention or non-dispatch and raise a
-// warning alert under a fixed source each, so the reason survives alert
-// confinement. An accepted emission starts a per-reason window; a failed or
-// thrown emission does not, so the next observation retries (the #2434
-// pattern in emit-alert.ts). The rest are advisory. Queue displacement keeps
+// Two reasons are certain local non-admission and raise a warning alert under
+// a fixed source each, so the reason survives alert confinement.
+// `ingest.store_failed` is a failure anywhere on the persistence path, which
+// includes bookkeeping after the message row is written, so the row may still
+// be retained: it claims non-admission with retention unknown, not loss. An
+// accepted emission starts a per-reason window; a failed or thrown emission
+// does not, so the next observation retries (the #2434 pattern in
+// emit-alert.ts). The rest are advisory. Queue displacement keeps
 // its own count and alert in ingest.ts and is not recorded here.
 
 import { createChildLogger } from '../logger.ts';
@@ -39,7 +42,7 @@ type AlertingReason = 'transport.no_consumer' | 'ingest.store_failed';
 
 const ALERT_SUMMARIES: Record<AlertingReason, string> = {
   'transport.no_consumer': 'inbound message reached no ingest consumer',
-  'ingest.store_failed': 'inbound message could not be stored',
+  'ingest.store_failed': 'inbound message persistence path failed; retention unknown',
 };
 
 export const INBOUND_OBSERVATION_ALERT_WINDOW_MS = 15 * MS_PER_MINUTE;

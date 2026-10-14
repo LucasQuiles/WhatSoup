@@ -1581,7 +1581,7 @@
       "test": "tests/core/inbound-observation.test.ts"
     },
     "inbound_store_failed": {
-      "disposition": "local_non_retention_rate_limited_warning_no_upstream_loss_claim",
+      "disposition": "persistence_path_failure_retention_unknown_rate_limited_warning_no_upstream_loss_claim",
       "owner": "src/core/inbound-observation.ts",
       "test": "tests/core/inbound-observation.test.ts"
     },

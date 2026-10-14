@@ -258,7 +258,7 @@ describe('alert confinement at the real sink boundary', () => {
       correlationDigest: expect.stringMatching(/^[0-9a-f]+$/),
     });
     expect(event).not.toHaveProperty('conversationScope');
-    expect(lines[0]).not.toMatch(/@s\.whatsapp\.net|@lid|@g\.us|messageId|not admitted|could not be stored/);
+    expect(lines[0]).not.toMatch(/@s\.whatsapp\.net|@lid|@g\.us|messageId|not admitted|could not be stored|persistence path|retention unknown/);
     expect(getInboundObservationHealth().alerts.captured).toBe(1);
   });
 });
