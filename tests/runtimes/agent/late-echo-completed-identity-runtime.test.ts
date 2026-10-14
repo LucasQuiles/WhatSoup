@@ -387,13 +387,17 @@ describe('late delivery echo through ingest records the completed identity', () 
   });
 
   afterEach(async () => {
-    for (const session of sessionDoubles) {
-      if (session.turnInFlight) session.emit({ type: 'result', text: 'NO_REPLY' });
+    try {
+      for (const session of sessionDoubles) {
+        if (session.turnInFlight) session.emit({ type: 'result', text: 'NO_REPLY' });
+      }
+      // runtime.ts shutdown throws its cleanup failures; a rejection here fails the case.
+      await runtime?.shutdown();
+    } finally {
+      runtime = undefined;
+      lifecycleRef.current = null;
+      db.close();
     }
-    await runtime?.shutdown().catch(() => undefined);
-    runtime = undefined;
-    lifecycleRef.current = null;
-    db.close();
   });
 
   function makeRuntime(): AgentRuntime {
