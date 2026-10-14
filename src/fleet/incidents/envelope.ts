@@ -47,7 +47,7 @@ const commonFields = {
 const occurrenceFields = {
   conditionClass: boundedId,
   occurrenceId: boundedId,
-  occurrenceSeq: z.number().int().nonnegative(),
+  occurrenceSeq: z.number().int().nonnegative().refine(Number.isSafeInteger, 'must be a safe integer'),
 };
 
 const envelopeSchema = z.discriminatedUnion('kind', [
@@ -59,7 +59,7 @@ const envelopeSchema = z.discriminatedUnion('kind', [
       ...commonFields,
       kind: z.literal('condition_recovered'),
       ...occurrenceFields,
-      recoveryProofClass: boundedId.optional(),
+      recoveryProofClass: boundedId,
     })
     .strict(),
   z.object({ ...commonFields, kind: z.literal('heartbeat_observed') }).strict(),

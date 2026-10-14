@@ -44,6 +44,13 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
+from lib.incident_authority import (
+    AuthorityProtocolError,
+    AuthorityUnavailable,
+    IncidentAuthorityClient,
+    dry_accept_for_test,
+    grant_from_record,
+)
 from lib.state_root import q_loop_state_root, state_root
 
 
@@ -60,6 +67,7 @@ EVENT_LOG = STATE_DIR / "events.jsonl"
 ACTIVITY_LOG = STATE_DIR / "activity.jsonl"
 LOCK_FILE = STATE_DIR / "loop.lock"
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("q_loop")
+INCIDENT_AUTHORITY_PRODUCER_ID = "bot-errors-q-loop"
 
 REQUIRED_MESSAGE_COLUMNS = {
     "pk",
@@ -265,9 +273,11 @@ def default_state() -> dict[str, Any]:
         "last_checkpoint_at": 0,
         "idle_cycles": 0,
         "awaiting_q_since": 0,
-        "scope_approved_at": 0,
         "blocked_since": 0,
         "phase": "sdlc_design_gate",
+        "last_q_disposition": "none",
+        "q_receipts": {},
+        "notification_authority": {},
         "sent": {},
         "next_wait_seconds": ACTIVE_WAIT_SECONDS,
         "sla": {
@@ -299,6 +309,10 @@ def load_state() -> dict[str, Any]:
     state = default_state()
     state.update(loaded)
     state["sent"] = dict(loaded.get("sent", {}))
+    state["q_receipts"] = dict(loaded.get("q_receipts", {}))
+    state["notification_authority"] = dict(
+        loaded.get("notification_authority", {})
+    )
     state["sla"] = dict(loaded.get("sla", {})) | default_state()["sla"]
     return state
 
@@ -743,8 +757,81 @@ def validate_bot_errors_target() -> str | None:
     return None
 
 
-def send_message(socket_path: str, text: str) -> bool:
+def _authority_notification_claim(event_id: str, observed_epoch: int) -> dict[str, Any]:
+    observed_at = time.strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(observed_epoch)
+    )
+    return {
+        "schemaVersion": 1,
+        "id": event_id,
+        "eventType": "info",
+        "severity": "info",
+        "createdAt": observed_at,
+        "machine": "q-loop",
+        "instance": "q-loop",
+        "source": "coordination-notice",
+        "summary": "content withheld",
+        "evidence": "content withheld",
+    }
+
+
+def _authorize_notification(
+    state: dict[str, Any], event_id: str, observed_epoch: int
+) -> dict[str, Any]:
+    claim = _authority_notification_claim(event_id, observed_epoch)
+    records = state.setdefault("notification_authority", {})
+    if not isinstance(records, dict):
+        records = {}
+        state["notification_authority"] = records
+    existing = records.get(event_id)
+    if existing is not None:
+        return grant_from_record(
+            existing,
+            claim,
+            expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+        ).as_record()
+    dry_capture = os.environ.get("BOT_ERRORS_DRY_AUTHORITY_CAPTURE", "").strip()
+    if dry_capture:
+        if os.environ.get("BOT_ERRORS_TEST_MODE") != "1":
+            raise AuthorityProtocolError("dry_authority_requires_test_mode")
+        grant = dry_accept_for_test(
+            claim,
+            Path(dry_capture).expanduser(),
+            producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+        )
+    else:
+        url = os.environ.get("BOT_ERRORS_INCIDENT_AUTHORITY_URL", "").strip()
+        credential = os.environ.get(
+            "BOT_ERRORS_Q_LOOP_AUTHORITY_CREDENTIAL_FILE", ""
+        ).strip()
+        if not url or not credential:
+            raise AuthorityUnavailable("incident_authority_not_configured")
+        grant = IncidentAuthorityClient(
+            url,
+            Path(credential).expanduser(),
+            expected_producer_id=INCIDENT_AUTHORITY_PRODUCER_ID,
+        ).accept(claim)
+    record = grant.as_record()
+    records[event_id] = record
+    while len(records) > 100:
+        records.pop(next(iter(records)))
+    # The grant must survive a crash before the notification leaves.
+    save_state(state)
+    return record
+
+
+def send_message(
+    state: dict[str, Any],
+    socket_path: str,
+    text: str,
+    *,
+    authority_event_id: str,
+    authority_observed_epoch: int,
+) -> bool:
     try:
+        _authorize_notification(
+            state, authority_event_id, authority_observed_epoch
+        )
         target_error = validate_bot_errors_target()
         if target_error:
             raise RuntimeError(target_error)
@@ -825,39 +912,40 @@ def classify_activity(
         if role == "q":
             state["last_q_message_at"] = max(int(state.get("last_q_message_at", 0)), ts)
             unavailable_reason = q_unavailable_reason(body)
+            disposition = "received"
             if unavailable_reason:
                 state["last_q_unavailable_at"] = ts
                 state["last_q_unavailable_reason"] = unavailable_reason
-                state["blocked_since"] = ts
-                state["awaiting_q_since"] = 0
-                state["phase"] = f"q_unavailable_{unavailable_reason}"
-                persist_activity_state(
-                    state, f"q_unavailable_{unavailable_reason}", persist_state
-                )
+                disposition = f"unavailable_{unavailable_reason}"
             elif re.search(r"\bAPPROVED SCOPE\b", body, re.I):
-                state["scope_approved_at"] = ts
-                state["blocked_since"] = 0
-                state["awaiting_q_since"] = 0
-                state["phase"] = "sdlc_spec_and_preslice"
-                persist_activity_state(state, "q_approved_scope", persist_state)
+                disposition = "approval_claim_observed"
             elif re.search(r"\bAPPROVED\b", body, re.I):
-                state["blocked_since"] = 0
-                state["awaiting_q_since"] = 0
-                state["phase"] = "monitoring"
-                persist_activity_state(state, "q_approved", persist_state)
+                disposition = "approval_claim_observed"
             elif re.search(r"(?im)^\s*(?:[*_`]+)?BLOCKED\b", body):
-                state["blocked_since"] = ts
-                state["awaiting_q_since"] = 0
-                state["phase"] = "blocked_by_q"
-                persist_activity_state(state, "q_blocked", persist_state)
+                disposition = "block_claim_observed"
             elif re.search(
                 r"\b(no response needed|standing by|no post warranted|nothing new|no actionable change|monitoring continues|continuing (?:to )?monitor(?:/poll)?)\b",
                 body,
                 re.I,
             ):
-                state["awaiting_q_since"] = 0
-                state["phase"] = "monitoring"
-                persist_activity_state(state, "q_monitoring", persist_state)
+                disposition = "monitor_claim_observed"
+            # A chat frame proves only that the loop observed a Q-shaped sender.
+            # It cannot approve scope, authorize a change, confirm execution, or
+            # prove recovery.  Those facts require the authenticated phase path.
+            state["awaiting_q_since"] = 0
+            state["last_q_disposition"] = disposition
+            receipts = state.setdefault("q_receipts", {})
+            if not isinstance(receipts, dict):
+                receipts = {}
+                state["q_receipts"] = receipts
+            receipts[str(pk)] = {
+                "observedAt": ts,
+                "disposition": disposition,
+                "authority": "observation_only",
+            }
+            for stale_pk in sorted(receipts, key=lambda value: int(value))[:-200]:
+                receipts.pop(stale_pk, None)
+            persist_activity_state(state, "q_receipt_observed", persist_state)
         if role in {"codex", "lucas", "outbound"}:
             state["last_outbound_at"] = max(int(state.get("last_outbound_at", 0)), ts)
             if (
@@ -888,7 +976,13 @@ def maybe_send_bootstrap(state: dict[str, Any], socket_path: str) -> bool:
         "pre-slice hotfix/checks, then start Slice 1 schema + writer. Completion remains blocked "
         "until Q verifies each gate with evidence."
     )
-    if send_message(socket_path, text):
+    if send_message(
+        state,
+        socket_path,
+        text,
+        authority_event_id="q-loop-bootstrap",
+        authority_observed_epoch=int(state.get("started_at", now())),
+    ):
         state["sent"]["daemon_online"] = now()
         state["last_outbound_at"] = now()
         state["awaiting_q_since"] = now()
@@ -911,7 +1005,13 @@ def maybe_send_nudge(state: dict[str, Any], socket_path: str) -> bool:
         "Please reply with APPROVED, BLOCKED, or the next concrete critique for the current gate. "
         "The loop will keep polling and will not mark this complete without evidence and Q validation."
     )
-    if send_message(socket_path, text):
+    if send_message(
+        state,
+        socket_path,
+        text,
+        authority_event_id=f"q-loop-nudge-{waiting_since}",
+        authority_observed_epoch=waiting_since,
+    ):
         state["last_nudge_at"] = current
         state["last_outbound_at"] = current
         return True
@@ -935,7 +1035,14 @@ def maybe_send_checkpoint(state: dict[str, Any], socket_path: str) -> bool:
         "Concrete SLA condition remains: critical BOT ERRORS delivery <=5m; deadman and daily "
         "capability misses have bounded ceilings in the design spec."
     )
-    if send_message(socket_path, text):
+    checkpoint_basis = int(state.get("last_activity_at", current) or current)
+    if send_message(
+        state,
+        socket_path,
+        text,
+        authority_event_id=f"q-loop-checkpoint-{checkpoint_basis}",
+        authority_observed_epoch=checkpoint_basis,
+    ):
         state["last_checkpoint_at"] = current
         state["last_outbound_at"] = current
         return True

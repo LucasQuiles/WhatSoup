@@ -103,8 +103,139 @@ describe('security boundary guard — remote memory writes', () => {
       providerUpserts: 1,
       lifecycleContracts: 1,
       providerDirectMethods: 1,
+      incidentAuthorityPreflights: 1,
+      dispatcherAuthorizedSends: 7,
+      dispatcherAuthorizedEmails: 3,
+      ownerRouteAuthorityChecks: 2,
+      qAuthorityChecks: 1,
+      phaseRouteInstallations: 1,
+      dispatcherCredentialReads: 1,
+      qCredentialReads: 1,
+      launchdAuthorityBindings: 2,
     });
     expect(result.scan.findings).toEqual([]);
+  });
+});
+
+describe('security boundary guard — IncidentStore authority', () => {
+  it('blocks a direct dispatcher notification bypass', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-dispatcher.py',
+      'def alternate(event, text):\n    send_whatsapp(text)\n',
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.raw-dispatch-send',
+    }));
+  });
+
+  it('blocks a direct dispatcher e-mail bypass', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-dispatcher.py',
+      'def alternate(event, text):\n    email_fallback("subject", text)\n',
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.raw-dispatch-email',
+    }));
+  });
+
+  it('blocks transport aliases and dynamic lookup bypasses', () => {
+    const dispatcher = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-dispatcher.py',
+      [
+        'def alternate(event, text):',
+        '    sender = send_whatsapp',
+        '    sender(text)',
+        '    globals()["email_fallback"]("subject", text)',
+      ].join('\n'),
+    );
+    const qLoop = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-q-loop.py',
+      'def alternate(socket):\n    transport = rpc_call\n    transport(socket, "send_message", {})\n',
+    );
+    const owner = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/lib/owner_route.py',
+      'def alternate(socket):\n    transport = json_rpc_call\n    transport(socket, "tools/call", {})\n',
+    );
+    expect(dispatcher).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'security.incident-authority.raw-dispatch-send' }),
+      expect.objectContaining({ code: 'security.incident-authority.raw-dispatch-email' }),
+    ]));
+    expect(qLoop).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.raw-q-send',
+    }));
+    expect(owner).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.raw-owner-send',
+    }));
+  });
+
+  it('blocks a Q-loop RPC bypass and chat-granted phase mutation', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-q-loop.py',
+      [
+        'def classify_activity(state, messages):',
+        '    state["phase"] = "approved"',
+        'def alternate(socket):',
+        '    rpc_call(socket, "send_message", {})',
+      ].join('\n'),
+    );
+    expect(findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'security.incident-authority.q-chat-grants-phase' }),
+      expect.objectContaining({ code: 'security.incident-authority.raw-q-send' }),
+    ]));
+  });
+
+  it('blocks owner-route effects outside the receipt-validating sender', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/lib/owner_route.py',
+      [
+        'def alternate(socket, email):',
+        '    json_rpc_call(socket, "tools/call", {})',
+        '    email_fallback("subject", "body")',
+      ].join('\n'),
+    );
+    expect(findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'security.incident-authority.raw-owner-send' }),
+      expect.objectContaining({ code: 'security.incident-authority.raw-owner-email' }),
+    ]));
+  });
+
+  it('blocks a shared credential identity for independent producers', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-dispatcher.py',
+      'credential = os.environ["BOT_ERRORS_INCIDENT_AUTHORITY_CREDENTIAL_FILE"]\n',
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.shared-producer-credential',
+    }));
+  });
+
+  it('blocks moving the authority preflight behind incident mutation', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/scripts/bot-errors-dispatcher.py',
+      [
+        'def run_once(max_events):',
+        '    observe_credential_members(paths)',
+        '    suppress_ready_recovery_duplicates(paths, incident=_incident_cycle)',
+        '    flap_scan_outbox(paths, incident=_incident_cycle)',
+        '    suppress_alerts_recovered_before_delivery(paths, incident=_incident_cycle)',
+        '    collapse_ready_storms(paths, incident=_incident_cycle)',
+        '    authority_preflight = authorize_ready_events(paths)',
+        '    process_one(path, paths)',
+      ].join('\n'),
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.authority-order-drift',
+    }));
+  });
+
+  it('blocks dry authority seams in production service definitions', () => {
+    const findings = scanFileForSecurityBoundaryViolations(
+      'deploy/templates/dispatcher.service',
+      'Environment="BOT_ERRORS_DRY_AUTHORITY_CAPTURE=/tmp/accept.jsonl"\n',
+    );
+    expect(findings).toContainEqual(expect.objectContaining({
+      code: 'security.incident-authority.dry-config-in-service',
+    }));
   });
 });
 

@@ -24,7 +24,7 @@
 // table" above means every table `migratedSchemaSnapshot()` returns, PLUS
 // every table discovered by the guard's static `CREATE TABLE` scan across
 // `src/**/*.ts` that is declared self-provisioned or excluded below
-// (`SELF_PROVISIONED`, `DISCOVERY_EXCLUSIONS`). Six real, live tables are
+// (`SELF_PROVISIONED`, `DISCOVERY_EXCLUSIONS`). Real, live tables are
 // created OUTSIDE the migration registry by self-provisioning `ensureXSchema`
 // functions and are invisible to `migratedSchemaSnapshot()` — a completeness
 // claim scoped only to the snapshot would silently miss them. The discovery
@@ -536,10 +536,17 @@ export const NON_STATUS_JUSTIFICATIONS: Record<string, string> = {
  * worktree: each module below is read by the guard's discovery-scan
  * anti-dodge extension (check 1b), which requires a truthful `justification`
  * on any entry whose DDL text matches the status-shaped-column regex — the
- * four incident-plane tables (events/incidents/meta/transitions) carry one
- * for exactly that reason; the remaining entries do not match today.
+ * incident-plane tables with status-shaped columns carry one for exactly that
+ * reason; the remaining entries do not match today.
  */
 export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
+  {
+    table: 'admission_windows',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'durable per-producer IncidentStore admission counters; migration v3 of the dedicated fleet incident database, outside the instance message DB migration ledger.',
+    justification:
+      'the table contains only producer_id, fixed-window identity, and a positive request_count; it has no lifecycle or completion-status column. The module-level status-shaped text belongs to other incident tables.',
+  },
   {
     table: 'agent_fallback_state',
     module: 'src/runtimes/agent/fallback-state-db.ts',
@@ -599,6 +606,13 @@ export const SELF_PROVISIONED: SelfProvisionedEntry[] = [
     table: 'pending_poll_decisions',
     module: 'src/fleet/routes/approvals.ts',
     reason: 'offline durable fallback queue for poll decisions when the fleet proxy returns 502 (v1.1 design D2(b)); created lazily inline at the write site, not a numbered global migration.',
+  },
+  {
+    table: 'phase_facts',
+    module: 'src/fleet/incidents/schema.ts',
+    reason: 'append-only incident authority phase ledger; migration v3 of the dedicated fleet incident database, outside the instance message DB migration ledger.',
+    justification:
+      "disposition is an immutable evaluation verdict written once inside the phase-fact transaction; rejected or poisoned facts are retained as 'stored_state_inert', so bad news has an explicit durable value and there is no pending row whose terminal writer can be missing.",
   },
   {
     table: 'standby_notice',

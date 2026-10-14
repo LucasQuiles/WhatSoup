@@ -227,4 +227,27 @@ describe('ProducerStore', () => {
     ).toBe('condition_class_not_allowed');
     expect(store.authorize(producer, { kind: 'heartbeat_observed', subject: 'host:beta' })).toBe('subject_not_allowed');
   });
+
+  it('binds phase permissions and actor class to the authenticated credential', () => {
+    const reg = store.register(registration({
+      producerId: 'prod-notifier',
+      actorClass: 'notifier',
+      allowedPhaseKinds: ['notification_delivered'],
+    }), NOW);
+    if (!reg.ok) throw new Error('setup failed');
+    const ex = store.exchangeEnrollmentSecret('prod-notifier', reg.enrollmentSecret, NOW);
+    if (!ex.ok) throw new Error('setup failed');
+    const producer = store.authenticate(ex.credential, NOW);
+    expect(producer?.actorClass).toBe('notifier');
+    expect(producer && store.authorizePhase(producer, 'notification_delivered')).toBe(true);
+    expect(producer && store.authorizePhase(producer, 'change_approved')).toBe(false);
+  });
+
+  it('rejects phase scopes that do not match the registered actor class', () => {
+    expect(store.register(registration({
+      producerId: 'prod-misconfigured',
+      actorClass: 'executor',
+      allowedPhaseKinds: ['change_approved'],
+    }), NOW)).toEqual({ ok: false, reason: 'invalid_input' });
+  });
 });

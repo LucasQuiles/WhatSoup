@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extractBearer, jsonResponse, readBody, readBodyBytes } from '../../lib/http.ts';
 import { parseSignalEnvelopeValue } from '../incidents/envelope.ts';
+import { parseIncidentPhaseValue } from '../incidents/phase-envelope.ts';
 import { IncidentStoreCorruptError } from '../incidents/db.ts';
 import type { IncidentStore } from '../incidents/store.ts';
 import type { ExchangeFailureReason, ProducerStore } from '../incidents/producers.ts';
@@ -38,11 +39,6 @@ export interface SignalsDeps {
   securityAudit: (event: ProducerSecurityAuditEvent) => void;
 }
 
-interface RateWindow {
-  windowStart: number;
-  count: number;
-}
-
 function errorBody(code: string, retryable: boolean, message: string): {
   error: { code: string; retryable: boolean; message: string };
 } {
@@ -57,26 +53,13 @@ function isSqliteFull(err: unknown): boolean {
 
 export function createSignalsHandlers(deps: SignalsDeps): {
   postSignal(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  postPhaseFact(req: IncomingMessage, res: ServerResponse): Promise<void>;
   postProducer(req: IncomingMessage, res: ServerResponse): Promise<void>;
   postProducerCredential(req: IncomingMessage, res: ServerResponse, params: { id: string }): Promise<void>;
   deleteProducerCredential(req: IncomingMessage, res: ServerResponse, params: { id: string }): Promise<void>;
 } {
   const now = deps.now ?? ((): Date => new Date());
   const rateLimit = deps.rateLimit ?? { windowMs: 60_000, maxPerWindow: 60 };
-  const rateWindows = new Map<string, RateWindow>();
-
-  function overRateLimit(producerId: string, at: number): number | null {
-    const current = rateWindows.get(producerId);
-    if (!current || at - current.windowStart >= rateLimit.windowMs) {
-      rateWindows.set(producerId, { windowStart: at, count: 1 });
-      return null;
-    }
-    current.count += 1;
-    if (current.count > rateLimit.maxPerWindow) {
-      return Math.ceil((current.windowStart + rateLimit.windowMs - at) / 1000);
-    }
-    return null;
-  }
 
   async function postSignal(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const incidentStore = deps.getIncidentStore();
@@ -120,9 +103,19 @@ export function createSignalsHandlers(deps: SignalsDeps): {
       return;
     }
 
-    const retryAfter = overRateLimit(producer.producerId, at.getTime());
-    if (retryAfter !== null) {
-      res.setHeader('Retry-After', String(retryAfter));
+    let admission: ReturnType<ProducerStore['consumeAdmission']>;
+    try {
+      admission = producerStore.consumeAdmission(producer.producerId, at, rateLimit);
+    } catch (err) {
+      if (isSqliteFull(err)) {
+        jsonResponse(res, 507, errorBody('durable_storage_unavailable', true, 'durable storage is unavailable'));
+      } else {
+        jsonResponse(res, 503, errorBody('incident_store_unavailable', true, 'admission store is unavailable'));
+      }
+      return;
+    }
+    if (!admission.allowed) {
+      res.setHeader('Retry-After', String(admission.retryAfterSeconds));
       jsonResponse(res, 429, errorBody('rate_limited', true, 'signal rate limit exceeded'));
       return;
     }
@@ -191,6 +184,105 @@ export function createSignalsHandlers(deps: SignalsDeps): {
     }
   }
 
+  async function postPhaseFact(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const incidentStore = deps.getIncidentStore();
+    const producerStore = deps.getProducerStore();
+    if (!incidentStore || !producerStore) {
+      jsonResponse(res, 503, errorBody('incident_store_unavailable', true, 'incident store is unavailable'));
+      return;
+    }
+    if (req.headers['content-encoding'] !== undefined) {
+      jsonResponse(res, 415, errorBody('unsupported_content_encoding', false, 'compressed bodies are not accepted'));
+      return;
+    }
+    const contentType = req.headers['content-type'];
+    if (typeof contentType !== 'string' || contentType.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
+      jsonResponse(res, 415, errorBody('unsupported_media_type', false, 'body must be application/json'));
+      return;
+    }
+    let rawBytes: Buffer;
+    try {
+      rawBytes = await readBodyBytes(req, SIGNALS_BODY_LIMIT_BYTES);
+    } catch (err) {
+      if (err instanceof Error && (err as { statusCode?: unknown }).statusCode === 413) {
+        jsonResponse(res, 413, errorBody('body_too_large', false, 'body exceeds the 32 KiB limit'));
+      } else {
+        jsonResponse(res, 503, errorBody('body_read_failed', true, 'request body could not be read'));
+      }
+      return;
+    }
+    const bearer = extractBearer(req);
+    if (bearer === null) {
+      jsonResponse(res, 401, errorBody('credential_required', false, 'producer credential required'));
+      return;
+    }
+    const at = now();
+    const producer = producerStore.authenticate(bearer, at);
+    if (!producer) {
+      jsonResponse(res, 401, errorBody('credential_invalid', false, 'producer credential rejected'));
+      return;
+    }
+    try {
+      const admission = producerStore.consumeAdmission(producer.producerId, at, rateLimit);
+      if (!admission.allowed) {
+        res.setHeader('Retry-After', String(admission.retryAfterSeconds));
+        jsonResponse(res, 429, errorBody('rate_limited', true, 'phase rate limit exceeded'));
+        return;
+      }
+    } catch (err) {
+      if (isSqliteFull(err)) {
+        jsonResponse(res, 507, errorBody('durable_storage_unavailable', true, 'durable storage is unavailable'));
+      } else {
+        jsonResponse(res, 503, errorBody('incident_store_unavailable', true, 'admission store is unavailable'));
+      }
+      return;
+    }
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(STRICT_UTF8_DECODER.decode(rawBytes));
+    } catch {
+      jsonResponse(res, 400, errorBody('malformed_request', false, 'body is not valid JSON'));
+      return;
+    }
+    const parsed = parseIncidentPhaseValue(parsedBody);
+    if (!parsed.ok) {
+      jsonResponse(res, 422, errorBody('invalid_phase_fact', false, 'phase fact failed schema validation'));
+      return;
+    }
+    if (!producerStore.authorizePhase(producer, parsed.envelope.phase)) {
+      jsonResponse(res, 403, errorBody('phase_not_allowed', false, 'phase is outside the producer scope'));
+      return;
+    }
+    try {
+      const result = incidentStore.acceptPhaseFact(rawBytes, {
+        producerId: producer.producerId,
+        producerDomainId: producer.producerDomainId,
+        actorClass: producer.actorClass,
+      }, at);
+      switch (result.outcome) {
+        case 'accepted':
+          jsonResponse(res, 201, { ...result.receipt, receiptId: `phase-${result.receipt.phaseEventId}` });
+          return;
+        case 'idempotent_replay':
+          res.setHeader('Idempotent-Replay', 'true');
+          jsonResponse(res, 200, { ...result.receipt, receiptId: `phase-${result.receipt.phaseEventId}` });
+          return;
+        case 'identity_conflict':
+          jsonResponse(res, 409, errorBody('phase_identity_conflict', false, 'phase identity was accepted with different bytes'));
+          return;
+        case 'invalid':
+          jsonResponse(res, result.malformedJson ? 400 : 422, errorBody('invalid_phase_fact', false, 'phase fact failed validation'));
+          return;
+      }
+    } catch (err) {
+      if (isSqliteFull(err)) {
+        jsonResponse(res, 507, errorBody('durable_storage_unavailable', true, 'durable storage is unavailable'));
+      } else {
+        jsonResponse(res, 503, errorBody('incident_store_unavailable', true, 'phase acceptance failed'));
+      }
+    }
+  }
+
   function requireStores(res: ServerResponse): ProducerStore | null {
     const producerStore = deps.getProducerStore();
     if (!producerStore) {
@@ -238,6 +330,8 @@ export function createSignalsHandlers(deps: SignalsDeps): {
       allowedKinds?: unknown;
       allowedConditionClasses?: unknown;
       allowedSubjects?: unknown;
+      actorClass?: unknown;
+      allowedPhaseKinds?: unknown;
       enrollmentTtlMs?: unknown;
     };
     const result = producerStore.register(
@@ -323,5 +417,5 @@ export function createSignalsHandlers(deps: SignalsDeps): {
     res.end();
   }
 
-  return { postSignal, postProducer, postProducerCredential, deleteProducerCredential };
+  return { postSignal, postPhaseFact, postProducer, postProducerCredential, deleteProducerCredential };
 }
