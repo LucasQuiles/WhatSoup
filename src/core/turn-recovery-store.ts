@@ -9,6 +9,7 @@ import {
 } from './delivery-corroboration-sql.ts';
 import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
+import { promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
 export type TurnRecoveryAdmissionState = 'clear' | 'awaiting_delivery_echo' | 'blocked';
@@ -556,6 +557,7 @@ type TurnRecoveryStatements = {
   getEchoedTurnRecoverySettlement: PreparedStatement;
   completeEchoedTurnRecoveryInbound: PreparedStatement;
   completeEchoedTurnRecoveryJob: PreparedStatement;
+  promoteEchoedCheckpointIdentity: PreparedStatement;
   recordEchoedTurnRecoveryConflict: PreparedStatement;
   getUnsettledEchoedTurnRecoveryOps: PreparedStatement;
   requeueTurnRecoveryJob: PreparedStatement;
@@ -738,6 +740,7 @@ export class TurnRecoveryStore {
             completion_proof_id = ?
         WHERE id = ? AND state <> 'completed'
       `),
+      promoteEchoedCheckpointIdentity: prepare(promoteEchoedCheckpointIdentitySql(VALID_RECOVERY_JOB_FROM)),
       recordEchoedTurnRecoveryConflict: prepare(`
         UPDATE turn_recovery_jobs
         SET echo_conflict_at = COALESCE(echo_conflict_at, datetime('now')),
@@ -1454,6 +1457,7 @@ export class TurnRecoveryStore {
     if (completed.changes !== 1) {
       throw new Error('Echoed recovery job settlement did not update exactly one row');
     }
+    this.statements.promoteEchoedCheckpointIdentity.run(outboundOpId);
     return {
       matched: true,
       applied: true,
