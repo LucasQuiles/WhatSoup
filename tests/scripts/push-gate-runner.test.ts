@@ -14,9 +14,9 @@
  * Real child processes: a fake timer cannot bound an external process.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, realpathSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -35,7 +35,36 @@ function fixture(dir: string, name: string, body: string): string {
   return path;
 }
 
+/**
+ * Resolve as soon as `path` exists, driven by the directory watch rather than a
+ * wall clock, and hand back a closer so a competing branch can release it. The
+ * watcher is registered before the first existence check, so a file created
+ * between the check and the registration cannot be missed.
+ */
+function watchForFile(path: string): { appeared: Promise<void>; close: () => void } {
+  let watcher: FSWatcher | undefined;
+  const appeared = new Promise<void>((resolve) => {
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      watcher?.close();
+      resolve();
+    };
+    watcher = watch(dirname(path), () => {
+      if (existsSync(path)) settle();
+    });
+    if (existsSync(path)) settle();
+  });
+  return { appeared, close: (): void => watcher?.close() };
+}
+
 const HANG = 'require("node:net").createServer(function(){}).listen(0,"127.0.0.1");';
+// The same hang, but it announces that it reached the hanging step by writing the
+// file named in argv[2] from the listen callback. The signal case waits for that
+// announcement instead of guessing with a delay, so readiness is the fixture's own
+// statement that the process can now only hang.
+const READY_HANG = 'require("node:net").createServer(function(){}).listen(0,"127.0.0.1",function(){require("node:fs").writeFileSync(process.argv[2],"ready");});';
 const MARKER = 'require("node:fs").writeFileSync(process.argv[2],"ran");';
 // A parent that forks a DETACHED grandchild inheriting its stdio pipe, then blocks: the
 // group kill reaches the parent's group only, and `close` never fires because the
@@ -94,23 +123,49 @@ describe('runGate caller propagation (exit codes reach the outer invocation)', (
 
   it('external SIGTERM -> 143 (128+n) and NO later stage runs', async () => {
     const dir = tmp.make('signal');
-    const hang = fixture(dir, 'hang.cjs', HANG);
+    const ready = join(dir, 'hanging-step-entered');
+    const hang = fixture(dir, 'hang-ready.cjs', READY_HANG);
     const marker = join(dir, 'later-ran');
     const later = fixture(dir, 'marker.cjs', MARKER);
     const runner = fixture(dir, 'runner.ts', [
       `import { runGate } from ${JSON.stringify(join(ROOT, 'scripts', 'push-gate.ts'))};`,
       'const code = await runGate("test-lane", [',
-      `  { name: "hangs", cmd: ${JSON.stringify(`${NODE} ${hang}`)} },`,
+      `  { name: "hangs", cmd: ${JSON.stringify(`${NODE} ${hang} ${ready}`)} },`,
       `  { name: "later", cmd: ${JSON.stringify(`${NODE} ${later} ${marker}`)} },`,
       '], { stdio: "ignore", timeoutMsFor: () => 60_000 });',
       'process.exit(code);',
     ].join('\n'));
 
     const child = spawn(NODE, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', runner], { stdio: 'ignore' });
-    await new Promise((resolve) => setTimeout(resolve, 1_500)); // let it enter the hanging step
+
+    // Observe the terminal state BEFORE signalling, so an exit that happens
+    // before or during the readiness wait is captured rather than missed.
+    let exitCode: number | null | undefined;
+    const exited = new Promise<number | null>((resolve) => {
+      child.on('exit', (c) => {
+        exitCode = c;
+        resolve(c);
+      });
+    });
+
+    // Bounded readiness, no wall clock: the fixture's own announcement from the
+    // listen callback, raced against the child exiting, so a hang or an early
+    // exit both fail with a real value instead of a guessed delay.
+    const readiness = watchForFile(ready);
+    const outcome = await Promise.race([
+      readiness.appeared.then(() => 'hanging-step-entered' as const),
+      exited.then((code) => ({ exited: code }) as const),
+    ]);
+    readiness.close();
+    if (outcome !== 'hanging-step-entered') {
+      throw new Error(`child exited (code ${String(outcome.exited)}) before entering the hanging step`);
+    }
+    expect(existsSync(ready)).toBe(true);
+
     child.kill('SIGTERM');
-    const code = await new Promise<number | null>((resolve) => child.on('exit', (c) => resolve(c)));
+    const code = await exited;
     expect(code).toBe(143); // 128 + SIGTERM(15)
+    expect(exitCode).toBe(143); // and the pre-registered observation saw the same exit
     expect(existsSync(marker)).toBe(false); // the later stage never started
   }, 30_000);
 });
