@@ -176,8 +176,19 @@ describe('install-transcription-deps.sh — resolve_python', () => {
   });
 
   it('fails closed when no candidate has the locked CPython identity', () => {
+    const shim = makeTempRoot('itd-unqualified-py-');
+    const unqualifiedPython = [
+      '#!/bin/sh',
+      'case "$1" in',
+      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.15' ;; *) exit 0 ;; esac ;;",
+      'esac',
+    ].join('\n');
+    writeExecutable(shim, 'python3.13', unqualifiedPython);
+    writeExecutable(shim, 'python3', unqualifiedPython);
     const res = runWithHelpers(
       'WHATSOUP_TRANSCRIPTION_PYTHON=/nonexistent/python resolve_python',
+      shim,
+      false,
     );
     expect(res.status).not.toBe(0);
     expect(res.stdout.trim()).toBe('');
