@@ -118,9 +118,11 @@ if ! PYTHON_BIN="$(resolve_python)"; then
   exit 1
 fi
 
-if [ ! -d "$VENV" ]; then
-  "$PYTHON_BIN" -m venv "$VENV"
-fi
+# Refresh the managed venv on every run so an interpreter upgrade replaces the
+# venv's base identity before the locked installer verifies it. Python's venv
+# operation preserves the managed path while updating its interpreter links and
+# configuration, matching the quality-environment installer.
+"$PYTHON_BIN" -m venv "$VENV"
 
 whatsoup_install_locked_requirements "$VENV/bin/python" "$REPO_ROOT" transcription
 

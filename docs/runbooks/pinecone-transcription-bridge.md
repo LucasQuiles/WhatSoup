@@ -138,10 +138,11 @@ bash scripts/install-transcription-deps.sh
 
 On macOS, the installer uses Homebrew for `ffmpeg`, `whisper-cpp`, and
 `python@3.13`. On Linux it checks prerequisites and prints the required install
-commands when they are missing; it does not use Homebrew. Before it creates or
-reuses the venv, it requires CPython `3.13.16`; a host package manager supplying
-another patch is a visible failure, not an unqualified install. It then installs
-the committed, hash-locked binary dependency graph and prepares:
+commands when they are missing; it does not use Homebrew. It requires CPython
+`3.13.16`, then refreshes the managed venv with that interpreter before every
+install; a host package manager supplying another patch is a visible failure,
+not an unqualified install. It then installs the committed, hash-locked binary
+dependency graph and prepares:
 
 - dedicated venv at `~/.local/share/whatsoup/transcription-venv`
 - faster-whisper cache under `~/.local/share/whatsoup/models/faster-whisper`

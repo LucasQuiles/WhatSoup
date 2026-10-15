@@ -59,6 +59,64 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
+function runVenvPreparationSnippet(): { status: number; marker: string; stderr: string } {
+  const start = scriptSource.indexOf('if ! PYTHON_BIN="$(resolve_python)"; then');
+  const end = scriptSource.indexOf('\n\nif ! sha256_matches', start);
+  if (start === -1 || end === -1) throw new Error('venv preparation block not found');
+
+  const root = makeTempRoot('itd-venv-upgrade-');
+  const venv = path.join(root, 'transcription-venv');
+  const marker = path.join(root, 'refreshed');
+  const hostPython = path.join(root, 'python3.13');
+  fs.mkdirSync(path.join(venv, 'bin'), { recursive: true });
+  writeExecutable(
+    path.join(venv, 'bin'),
+    'python',
+    '#!/bin/sh\nif [ "$1" = "-c" ]; then printf \'%s\\n\' \'cpython:3.12.9\'; exit 0; fi\nexit 0\n',
+  );
+  writeExecutable(root, 'python3.13', `#!/bin/sh
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  target="$3"
+  mkdir -p "$target/bin"
+  cat > "$target/bin/python" <<'PYTHON'
+#!/bin/sh
+if [ "$1" = "-c" ]; then printf '%s\\n' 'cpython:3.13.16'; exit 0; fi
+exit 0
+PYTHON
+  chmod 755 "$target/bin/python"
+  printf '%s\\n' refreshed > "$REFRESH_MARKER"
+  exit 0
+fi
+exit 1
+`);
+
+  const snippet = scriptSource.slice(start, end);
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+HOST_PYTHON="$1"
+VENV="$2"
+REPO_ROOT="$3"
+${lockPolicySource}
+resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
+whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1"; }
+${snippet}`,
+      'venv-preparation-test',
+      hostPython,
+      venv,
+      repoRoot,
+    ],
+    {
+      encoding: 'utf8',
+      cwd: repoRoot,
+      env: { ...process.env, REFRESH_MARKER: marker },
+    },
+  );
+  return { status: result.status ?? -1, marker, stderr: result.stderr ?? '' };
+}
+
 afterEach(() => {
   while (tempRoots.length > 0) {
     const root = tempRoots.pop();
@@ -192,5 +250,13 @@ describe('install-transcription-deps.sh — resolve_python', () => {
     );
     expect(res.status).not.toBe(0);
     expect(res.stdout.trim()).toBe('');
+  });
+});
+
+describe('install-transcription-deps.sh — managed venv upgrades', () => {
+  it('refreshes an existing venv with the qualified interpreter before the locked install', () => {
+    const res = runVenvPreparationSnippet();
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
   });
 });
