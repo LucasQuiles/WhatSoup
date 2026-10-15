@@ -1207,7 +1207,16 @@ payload substitution.
 
 `markEchoed()` preserves the first echo timestamp and records the selected op as `echoed`. When
 the exact linked job is unsettled and its source is `processing`/`turn_done` (or already completed
-as `response_echoed`), the source inbound and job settle in the same SQLite transaction. Startup
+as `response_echoed`), the source inbound and job settle in the same SQLite transaction.
+When that settlement completes a per-chat `completed` turn, the same transaction also writes the
+turn's completed-identity bundle to the checkpoint. It does so only when all of these hold:
+- the bot's own message is stored for the op's exact conversation and chat;
+- that WhatsApp message is claimed by exactly one outbound op;
+- the checkpoint still ends at that inbound and delivery;
+- the checkpoint's session is live for the conversation;
+- there is no active turn and no newer completed identity.
+
+Otherwise the bundle stays unset. Ingest stores an outgoing message before correlating its echo. Startup
 also scans a bounded set of already-echoed exact links, closing the crash gap between transport
 truth and job settlement. If a late echo contradicts a worker-completed outcome or a pending/
 failed source, delivery truth is not rolled back: the completed job retains its original
@@ -1332,7 +1341,8 @@ Migration 39 adds the completed-turn identity bundle below. The seven fields are
 all null (legacy or not-yet-completed checkpoints) or all populated; database triggers
 reject partial bundles. Terminal finalization derives the bundle from the same validated
 terminal identity and writes it in the terminal transaction, rejecting caller-supplied
-values that contradict that identity. `last_inbound_seq` remains independent progress state;
+values that contradict that identity. A completed turn transferred to recovery while its answer
+awaited the echo gets the bundle at echo settlement instead (see the `markEchoed()` contract). `last_inbound_seq` remains independent progress state;
 only `completed_inbound_seq` identifies the resumable completed turn.
 
 | Column | Type | Description |
