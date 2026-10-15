@@ -1350,8 +1350,8 @@ describe('quality workflow composition', () => {
     expect(compatibility).not.toContain('guard:');
     expect(compatibility).not.toContain('Playwright');
     expect(compatibility).not.toContain('setup-python');
-    expect(compatibility).toContain('install-host-dependencies.sh --profile runtime --node-policy compatibility');
-    expect(compatibility).toContain('whatsoup-host-doctor.sh --profile runtime --node-policy compatibility');
+    expect(compatibility).toContain('install-host-dependencies.sh --profile compatibility --node-policy compatibility');
+    expect(compatibility).toContain('whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility');
     expect(compatibility).not.toContain('test-integrity');
     expect(compatibility).not.toContain('ci-disk-reclaim');
   });
