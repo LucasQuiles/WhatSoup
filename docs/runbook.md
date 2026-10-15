@@ -45,6 +45,7 @@ accepts only `y` or `yes`; automation must additionally pass `--yes`. Without
 | Profile | Required capabilities |
 |---|---|
 | `runtime` | Exact `.nvmrc` Node and npm, Git, and the platform service manager |
+| `compatibility` | Runtime plus the host tools used by the Node compatibility suite; omits the version-invariant locked Python stack |
 | `quality` | Runtime plus Python 3.13, ripgrep, zsh, and ShellCheck |
 | `release` | Quality plus GNU timeout and, on Linux, external `flock` |
 

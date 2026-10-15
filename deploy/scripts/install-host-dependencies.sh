@@ -46,7 +46,7 @@ whatsoup_bounded_install() {
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: deploy/scripts/install-host-dependencies.sh --profile <runtime|quality|release> [--node-policy <exact|compatibility>] [--manager <brew|apt|pacman>] [--apply] [--yes] [--json]
+Usage: deploy/scripts/install-host-dependencies.sh --profile <runtime|compatibility|quality|release> [--node-policy <exact|compatibility>] [--manager <brew|apt|pacman>] [--apply] [--yes] [--json]
 USAGE
 }
 
@@ -103,7 +103,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$profile" in
-  runtime|quality|release) ;;
+  runtime|compatibility|quality|release) ;;
   *) usage; exit 2 ;;
 esac
 case "$manager" in

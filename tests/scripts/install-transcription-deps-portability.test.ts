@@ -164,7 +164,7 @@ describe('install-transcription-deps.sh — resolve_python', () => {
     writeExecutable(shim, 'python3.13', [
       '#!/bin/sh',
       'case "$1" in',
-      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython|3.13.16' ;; *) exit 0 ;; esac ;;",
+      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exit 0 ;; esac ;;",
       'esac',
     ].join('\n'));
     const res = runWithHelpers(

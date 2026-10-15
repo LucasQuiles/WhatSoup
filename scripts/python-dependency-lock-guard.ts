@@ -2,6 +2,8 @@ import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { isRecord } from '../src/lib/type-guards.ts';
+
 const POLICY_PATH = 'requirements/python/lock-policy.json';
 const EXPECTED_RUNTIME = { implementation: 'cpython', version: '3.13.16' } as const;
 const EXPECTED_INDEX = 'https://pypi.org/simple';
@@ -33,10 +35,6 @@ function isSafeLockPath(path: string): boolean {
     && !isAbsolute(path)
     && !path.split(/[\\/]/).includes('..')
     && !path.includes('\0');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function loadPolicy(root: string, violations: Violation[]): LockPolicy | null {

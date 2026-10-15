@@ -1031,13 +1031,13 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     'r.outcome !== "pass"',
   ]);
   requireNamedStep(compat, 'Install compatibility host dependencies', 'quality (25.x)', [
-    'bash deploy/scripts/install-host-dependencies.sh --profile runtime --node-policy compatibility --apply --yes --json',
+    'bash deploy/scripts/install-host-dependencies.sh --profile compatibility --node-policy compatibility --apply --yes --json',
   ]);
   requireNamedStep(compat, 'Host dependency profile (compatibility-only)', 'quality (25.x)', [
     'set -o pipefail',
-    'bash deploy/scripts/whatsoup-host-doctor.sh --profile runtime --node-policy compatibility --json',
+    'bash deploy/scripts/whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility --json',
     'tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"',
-    'r.profile !== "runtime"',
+    'r.profile !== "compatibility"',
     'r.outcome !== "compatibility_only"',
   ]);
 

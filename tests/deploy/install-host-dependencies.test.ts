@@ -110,7 +110,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   executable(join(bin, 'python3.13'), [
     'case "${1:-}" in',
     "  --version) printf '%s\\n' 'Python 3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
-    "  -c) printf '%s\\n' 'cpython|3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  -c) printf '%s\\n' 'cpython:3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',
@@ -193,6 +193,27 @@ describe('explicit host dependency installer', () => {
       manager: 'brew',
       mode: 'plan',
       packages: ['git', 'python@3.13', 'ripgrep', 'zsh', 'shellcheck'],
+    });
+    expect(ledger(fx)).toEqual([]);
+  });
+
+  it('plans compatibility test tools without installing the locked Python stack', () => {
+    const fx = fixture('Linux');
+    const result = runInstaller(fx, [
+      '--profile',
+      'compatibility',
+      '--node-policy',
+      'compatibility',
+      '--manager',
+      'apt',
+      '--json',
+    ]);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(receipt(result)).toMatchObject({
+      profile: 'compatibility',
+      nodePolicy: 'compatibility',
+      packages: ['git', 'ripgrep', 'zsh', 'shellcheck'],
     });
     expect(ledger(fx)).toEqual([]);
   });
@@ -315,7 +336,7 @@ describe('explicit host dependency installer', () => {
     fx.env.FAKE_NODE_VERSION = '25.4.0';
     const result = runInstaller(fx, [
       '--profile',
-      'quality',
+      'compatibility',
       '--node-policy',
       'compatibility',
       '--manager',
@@ -325,6 +346,7 @@ describe('explicit host dependency installer', () => {
     ]);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(ledger(fx)).toEqual(['brew install git ripgrep zsh shellcheck']);
     expect(result.stderr).toContain('"outcome":"compatibility_only"');
   });
 

@@ -171,12 +171,16 @@ whatsoup_capability_records() {
 
   [ "$profile" = "runtime" ] && return 0
 
-  printf 'python|required|python3.13|exact-cpython:3.13.16|python@3.13|python3 python3-venv|python python-pip|Provide CPython 3.13.16 with venv support; platform packages may require a separately managed exact runtime.\n'
+  if [ "$profile" != "compatibility" ]; then
+    printf 'python|required|python3.13|exact-cpython:3.13.16|python@3.13|python3 python3-venv|python python-pip|Provide CPython 3.13.16 with venv support; platform packages may require a separately managed exact runtime.\n'
+  fi
   printf 'rg|required|rg|command|ripgrep|ripgrep|ripgrep|Install ripgrep.\n'
   printf 'zsh|required|zsh|command|zsh|zsh|zsh|Install zsh.\n'
   printf 'shellcheck|required|shellcheck|command|shellcheck|shellcheck|shellcheck|Install ShellCheck.\n'
 
-  [ "$profile" = "quality" ] && return 0
+  case "$profile" in
+    compatibility|quality) return 0 ;;
+  esac
 
   if [ "$platform" = "darwin" ]; then
     printf 'timeout|required|gtimeout|gnu-timeout|coreutils|coreutils|coreutils|Install GNU coreutils.\n'

@@ -386,6 +386,18 @@ describe('portable host capability doctor', () => {
     expect(result.receipt?.nodePolicy).toBe('compatibility');
   });
 
+  it('checks compatibility test tools without requiring the locked Python runtime', () => {
+    const result = runDoctor(
+      fixture({ FAKE_NODE_VERSION: '25.3.0', FAKE_NODE_ARCH: 'arm64' }),
+      ['--profile', 'compatibility', '--node-policy', 'compatibility', '--json'],
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.receipt?.outcome).toBe('compatibility_only');
+    expect(record(result.receipt, 'python')).toBeUndefined();
+    expect(record(result.receipt, 'rg')?.status).toBe('available');
+  });
+
   it('rejects malformed arguments as inconclusive infrastructure', () => {
     const result = runDoctor(fixture(), ['--profile', 'runtime', '--unknown']);
 
