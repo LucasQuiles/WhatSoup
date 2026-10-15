@@ -2165,6 +2165,24 @@ export class Database {
   }
 
   /**
+   * Return the distinct conversations that own the supplied WhatsApp message
+   * ids. Call this before soft deletion when related per-conversation data
+   * must be invalidated with the messages. Empty ids are ignored.
+   */
+  getConversationKeysForMessageIds(messageIds: readonly string[]): string[] {
+    const ids = [...new Set(messageIds.filter((messageId) => messageId.length > 0))];
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT DISTINCT conversation_key
+         FROM messages
+        WHERE message_id IN (${placeholders})
+        ORDER BY conversation_key ASC`,
+    ).all(...ids) as Array<{ conversation_key: string }>;
+    return rows.map((row) => row.conversation_key);
+  }
+
+  /**
    * Soft-delete specific messages by WhatsApp message id (revoke /
    * "delete for everyone"). Sets deleted_at on each currently-live match; the
    * messages_fts_soft_delete trigger drops them from FTS automatically, so the
