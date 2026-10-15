@@ -867,7 +867,7 @@ function checkDesignEnforcementClaims(
   designRegressionCheckCount: number,
   designRegressionBlockingChecks: number[],
   designBurndownSummary: DesignBurndownSummary,
-  designGuardTestInventory: DesignGuardTestInventory,
+  designGuardTestInventory: () => DesignGuardTestInventory,
 ): DocDriftIssue[] {
   const issues: DocDriftIssue[] = [];
 
@@ -1021,13 +1021,14 @@ function checkDesignEnforcementClaims(
 
     const designGuardTestMatch = claimText.match(designGuardTestInventoryPattern);
     if (designGuardTestMatch) {
+      const inventory = designGuardTestInventory();
       addTypedCountIssue(
         issues,
         'design-guard-test-file-count',
         filePath,
         line,
         Number(designGuardTestMatch[1]),
-        designGuardTestInventory.fileCount,
+        inventory.fileCount,
         claimText,
         'test:design-guards file count from package.json',
       );
@@ -1037,7 +1038,7 @@ function checkDesignEnforcementClaims(
         filePath,
         line,
         Number(designGuardTestMatch[2]),
-        designGuardTestInventory.testCount,
+        inventory.testCount,
         claimText,
         'test:design-guards test count from Vitest list',
       );
@@ -1061,7 +1062,11 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
   const designRegressionCheckCount = findDesignRegressionCheckCount(cwd);
   const designRegressionBlockingChecks = findDesignRegressionBlockingChecks(cwd);
   const designBurndownSummary = findDesignBurndownSummary(cwd);
-  const designGuardTestInventory = findDesignGuardTestInventory(cwd);
+  // Collecting this inventory spawns `vitest list` over the design-guard suite (~10 s), so it
+  // runs only when a doc actually claims it, and at most once per call.
+  let designGuardTestInventory: DesignGuardTestInventory | undefined;
+  const getDesignGuardTestInventory = (): DesignGuardTestInventory =>
+    (designGuardTestInventory ??= findDesignGuardTestInventory(cwd));
   const testFileCountCache = new Map<string, number>();
   const toolCountsByModule = new Map<string, number>();
   for (const registration of registrations) {
@@ -1090,7 +1095,7 @@ export function findDocDrift(options: DocDriftOptions = {}): DocDriftIssue[] {
       designRegressionCheckCount,
       designRegressionBlockingChecks,
       designBurndownSummary,
-      designGuardTestInventory,
+      getDesignGuardTestInventory,
     ));
 
     lines.forEach((lineText, index) => {

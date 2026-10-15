@@ -4,6 +4,42 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+type SpawnSyncArgs = Parameters<typeof import('node:child_process').spawnSync>;
+type SpawnSyncResult = ReturnType<typeof import('node:child_process').spawnSync>;
+
+// Passthrough: every spawnSync still runs for real. Tests read the recorded calls and may
+// rewrite one `vitest list` result to prove which value findDocDrift consumes.
+const spawnSyncSeam = vi.hoisted(() => ({
+  calls: [] as unknown[][],
+  rewriteVitestList: undefined as ((result: SpawnSyncResult) => SpawnSyncResult) | undefined,
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: (...args: SpawnSyncArgs) => {
+      spawnSyncSeam.calls.push(args);
+      const result = actual.spawnSync(...args);
+      return isVitestListCall(args) && spawnSyncSeam.rewriteVitestList
+        ? spawnSyncSeam.rewriteVitestList(result)
+        : result;
+    },
+  };
+});
+
+function isVitestListCall(args: unknown[]): boolean {
+  const [command, commandArgs] = args;
+  return typeof command === 'string'
+    && command.endsWith(path.join('node_modules', '.bin', 'vitest'))
+    && Array.isArray(commandArgs)
+    && commandArgs[0] === 'list';
+}
+
+function vitestListCallCount(): number {
+  return spawnSyncSeam.calls.filter(isVitestListCall).length;
+}
+
 import {
   findDocDrift,
   findDesignBurndownSummary,
@@ -39,6 +75,8 @@ describe('doc drift check', { timeout: 30_000 }, () => {
   afterEach(() => {
     vi.restoreAllMocks();
     process.exitCode = undefined;
+    spawnSyncSeam.calls.length = 0;
+    spawnSyncSeam.rewriteVitestList = undefined;
   });
 
   it('counts the runtime-gated self-restart tool in the canonical MCP surface', () => {
@@ -563,6 +601,79 @@ describe('doc drift check', { timeout: 30_000 }, () => {
         expected: 'test:design-guards test count from Vitest list',
       },
     ]);
+  });
+
+  describe('design guard test inventory collection', () => {
+    function writeDoc(name: string, text: string): string {
+      const dir = mkdtempSync(path.join(tmpdir(), 'whatsoup-doc-drift-'));
+      const docPath = path.join(dir, name);
+      writeFileSync(docPath, text, 'utf8');
+      return docPath;
+    }
+
+    function designGuardClaim(fileCount: number, testCount: number): string {
+      return `The current design-enforcement run has test:design-guards ${fileCount} files / ${testCount} tests.`;
+    }
+
+    it('does not collect the Vitest inventory when no doc claims it', () => {
+      const staleDoc = writeDoc('stale.md', 'WhatSoup currently exposes 127 MCP tools.\n');
+      spawnSyncSeam.calls.length = 0;
+
+      expect(findDocDrift({ cwd: repoRoot, docPaths: [staleDoc] })).toEqual([
+        expect.objectContaining({ kind: 'tool-count', claimed: 127, actual: currentToolCount }),
+      ]);
+      expect(vitestListCallCount()).toBe(0);
+    });
+
+    it('collects once per call for repeated claims across docs and checks the actual inventory', () => {
+      const { fileCount, testCount } = currentDesignGuardTestInventory;
+      const staleText = designGuardClaim(fileCount, testCount - 1);
+      const firstDoc = writeDoc('current-design.md', `${designGuardClaim(fileCount, testCount)}\n${staleText}\n`);
+      const secondDoc = writeDoc('current-design.md', `${staleText}\n`);
+      spawnSyncSeam.calls.length = 0;
+
+      expect(findDocDrift({ cwd: repoRoot, docPaths: [firstDoc, secondDoc] })).toEqual([
+        expect.objectContaining({ filePath: firstDoc, line: 2, kind: 'design-guard-test-count', claimed: testCount - 1, actual: testCount }),
+        expect.objectContaining({ filePath: secondDoc, line: 1, kind: 'design-guard-test-count', claimed: testCount - 1, actual: testCount }),
+      ]);
+      expect(vitestListCallCount()).toBe(1);
+    });
+
+    it('re-collects on every call instead of reusing an earlier inventory', () => {
+      const { fileCount, testCount } = currentDesignGuardTestInventory;
+      const doc = writeDoc('current-design.md', `${designGuardClaim(fileCount, testCount)}\n`);
+      spawnSyncSeam.calls.length = 0;
+
+      expect(findDocDrift({ cwd: repoRoot, docPaths: [doc] })).toEqual([]);
+
+      // Second call: the real Vitest list gains one duplicated entry, so a fresh inventory
+      // reports testCount + 1 and the unchanged doc becomes stale.
+      spawnSyncSeam.rewriteVitestList = (result) => {
+        const entries = JSON.parse(String(result.stdout).slice(String(result.stdout).indexOf('['))) as unknown[];
+        return { ...result, stdout: JSON.stringify([...entries, entries[0]]) };
+      };
+      expect(findDocDrift({ cwd: repoRoot, docPaths: [doc] })).toEqual([
+        expect.objectContaining({ kind: 'design-guard-test-count', claimed: testCount, actual: testCount + 1 }),
+      ]);
+      expect(vitestListCallCount()).toBe(2);
+    });
+
+    it('still fails closed on a failed or malformed Vitest list when a doc claims the inventory', () => {
+      const { fileCount, testCount } = currentDesignGuardTestInventory;
+      const doc = writeDoc('current-design.md', `${designGuardClaim(fileCount, testCount)}\n`);
+
+      spawnSyncSeam.rewriteVitestList = (result) => ({ ...result, status: 1, stdout: '', stderr: 'collection failed' });
+      expect(() => findDocDrift({ cwd: repoRoot, docPaths: [doc] }))
+        .toThrow('ERROR(schema:vitest-list): vitest list exited 1: collection failed');
+
+      spawnSyncSeam.rewriteVitestList = (result) => ({ ...result, stdout: 'no json here' });
+      expect(() => findDocDrift({ cwd: repoRoot, docPaths: [doc] }))
+        .toThrow('ERROR(schema:test:design-guards): vitest list did not emit JSON');
+
+      spawnSyncSeam.rewriteVitestList = (result) => ({ ...result, stdout: JSON.stringify([{ name: 'no file' }]) });
+      expect(() => findDocDrift({ cwd: repoRoot, docPaths: [doc] }))
+        .toThrow('ERROR(schema:test:design-guards): vitest list entry is malformed');
+    });
   });
 
   it('allows an explicit environment bypass for emergency pushes', () => {
