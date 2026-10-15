@@ -131,6 +131,37 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(elapsed).toBeLessThan(2_000); // grace (600ms) fired well before the grandchild's 2500ms release
   }, 30_000);
 
+  it('FALSIFIER (close-grace): with termGraceMs a successful group kill is NOT settlement proof — a child that never closes stays bounded INCONCLUSIVE (125), never a normal timeout (124)', async () => {
+    const dir = tmp.make('no-close-grace');
+    const parent = join(dir, 'parent.cjs');
+    // The SAME no-close fixture as finding 4 above, now with termGraceMs enabled. At the bound
+    // the runner SIGTERMs the parent's group; the escalation SIGKILLs it after termGraceMs, and
+    // killGroup() answers "gone" (ESRCH) because the escaped detached grandchild sits in its own
+    // group. That answer only proves the kill was DELIVERED. `close` never fires (the grandchild
+    // holds the parent's stdio pipe until it self-releases at 2500ms), so the verdict MUST come
+    // from the bounded terminal grace: inconclusive/125. The pre-fix escalation finished 124 the
+    // instant killGroup() returned true — at ~700ms, without ever waiting out the promised grace.
+    writeFileSync(
+      parent,
+      [
+        'const cp=require("node:child_process");',
+        'const gc=cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2500)"],{detached:true,stdio:"inherit"});',
+        'gc.unref();',
+        'require("node:net").createServer(function(){}).listen(0,"127.0.0.1");',
+      ].join('\n'),
+    );
+    const start = Date.now();
+    // bound 300 + termGraceMs 400 + graceMs 600 → ~1300ms, well before the grandchild's 2500ms
+    // self-release, so the terminal grace — not the delayed close — must be the resolver.
+    const r = await runBoundedBattery({ command: NODE, args: [parent], timeoutMs: 300, stdio: 'pipe', termGraceMs: 400, graceMs: 600 });
+    const elapsed = Date.now() - start;
+    expect(r.timedOut).toBe(true);
+    expect(r.outcome).toBe('inconclusive'); // settlement was never proven — not an ordinary timeout
+    expect(r.wrappedExit).toBe(125); // NEVER 124: a successful kill is not a reap proof
+    expect(elapsed).toBeGreaterThanOrEqual(1_200); // the promised termGraceMs WAS waited out
+    expect(elapsed).toBeLessThan(2_400); // ...and the terminal grace bounded it before the grandchild released
+  }, 30_000);
+
   it('FALSIFIER (round-20 finding 4): a reap FAILURE during a timeout is INCONCLUSIVE (125), never an ordinary timeout (124)', async () => {
     const dir = tmp.make('eperm-timeout');
     const child = join(dir, 'child.cjs');

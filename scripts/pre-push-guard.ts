@@ -14,6 +14,7 @@ import {
   type PushRemoteClass,
   type RemoteClassOptions,
 } from './pre-push-alignment.ts';
+import { gateLifetimeMs, stepsForLane } from './push-gate.ts';
 
 export const ZERO_SHA = '0000000000000000000000000000000000000000';
 const ZERO_SHA_256 = '0'.repeat(64);
@@ -122,6 +123,19 @@ export function commandsForDecision(decision: PushDecision): string[] {
   if (decision === 'release') return ['verify:release'];
   if (decision === 'branch') return ['verify:push:branch'];
   return [];
+}
+
+/** Startup and settle margin for the npm + pinned-node wrappers around push-gate. */
+export const GATE_WRAPPER_MARGIN_MS = 60_000;
+
+/**
+ * Outer bound for the gate command: the lane's derived lifetime (every step at its bound,
+ * plus TERM grace and settle time) plus the wrapper margin. Throws for a decision with no gate.
+ */
+export function gateCommandTimeoutMs(decision: PushDecision, env: NodeJS.ProcessEnv = process.env): number {
+  const steps = stepsForLane(decision);
+  if (!steps) throw new Error(`pre-push guard: no push-gate lane for decision '${decision}'`);
+  return gateLifetimeMs(steps, env) + GATE_WRAPPER_MARGIN_MS;
 }
 
 function assertConsoleDependencies(cwd: string): void {
@@ -288,10 +302,10 @@ export function runPrePushGuard(
 
   for (const script of commands) {
     console.error(`pre-push guard: running npm run ${script}`);
-    // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
-    // run for minutes — 600s bounds a hang without tripping real steps. The 30s
-    // default used elsewhere in this series is for fast single git/gh invocations.
-    execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
+    // This one call runs the WHOLE gate (every step of the lane), not one step. push-gate
+    // bounds and reaps each step itself (#3133's per-step 600s now lives there, #3808), so
+    // this outer bound is only a backstop and must never fire before a step bound would.
+    execFileSync('npm', ['run', script], { cwd, timeout: gateCommandTimeoutMs(decision), stdio: 'inherit' });
   }
 
   if (alignmentReceipt) {
