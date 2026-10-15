@@ -13,6 +13,10 @@ import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { isFullyConnected } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import {
+  clearChatAndDeleteHandoffArtifact,
+  deleteMessagesAndHandoffArtifacts,
+} from './runtimes/agent/handoff-artifact.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
 import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
@@ -666,6 +670,20 @@ if (grantManager) await grantManager.reconcile();
 // 6. Wire durability to runtime and message handler
 runtime.setDurability(durability);
 
+const invalidateAgentHandoffArtifacts = instanceType === 'agent'
+  ? (conversationKeys: readonly string[]) => (
+    (runtime as AgentRuntime).invalidateHandoffArtifacts(conversationKeys)
+  )
+  : undefined;
+const invalidateDeletedConversationData = invalidateAgentHandoffArtifacts || remoteMemoryLifecycle
+  ? (conversationKeys: readonly string[]) => {
+      invalidateAgentHandoffArtifacts?.(conversationKeys);
+      for (const conversationKey of conversationKeys) {
+        remoteMemoryLifecycle?.requestErase({ scope: 'conversation', conversationKey });
+      }
+    }
+  : undefined;
+
 // Self-restart resume: if a fresh intentional-restart marker is present, the
 // previous shutdown was a deliberate restart (not a crash). Consume the marker,
 // emit an info-severity completion alert with measured downtime, and queue the
@@ -715,33 +733,22 @@ connectionManager.onMessage = createIngestHandler(
 connectionManager.on('chatCleared', (jid: string) => {
   const conversationKey = toConversationKey(jid);
   try {
-    remoteMemoryLifecycle?.requestErase({ scope: 'conversation', conversationKey });
-    const count = db.clearChat(conversationKey);
-    log.info({ jid, conversationKey, count }, 'chatCleared: soft-deleted messages');
+    const result = clearChatAndDeleteHandoffArtifact(db, conversationKey, invalidateDeletedConversationData);
+    log.info({ jid, conversationKey, ...result }, 'chatCleared: soft-deleted messages and handoff artifact');
   } catch (err) {
-    log.error({ err, jid, conversationKey }, 'chatCleared: failed to soft-delete messages');
+    log.error({ err, jid, conversationKey }, 'chatCleared: failed to clear messages and handoff artifact');
   }
 });
 
 connectionManager.on('messageDeleted', (messageIds: string[]) => {
   try {
-    if (remoteMemoryLifecycle && messageIds.length > 0) {
-      const placeholders = messageIds.map(() => '?').join(', ');
-      const conversations = db.raw.prepare(
-        `SELECT DISTINCT conversation_key FROM messages
-          WHERE message_id IN (${placeholders}) AND deleted_at IS NULL`,
-      ).all(...messageIds) as Array<{ conversation_key: string }>;
-      for (const { conversation_key: conversationKey } of conversations) {
-        remoteMemoryLifecycle.requestErase({ scope: 'conversation', conversationKey });
-      }
-    }
-    const count = db.markMessagesDeleted(messageIds);
+    const result = deleteMessagesAndHandoffArtifacts(db, messageIds, invalidateDeletedConversationData);
     log.info(
-      { count, requested: messageIds.length },
-      'messageDeleted: soft-deleted revoked messages',
+      { ...result, requested: messageIds.length },
+      'messageDeleted: soft-deleted revoked messages and handoff artifacts',
     );
   } catch (err) {
-    log.error({ err, messageIds }, 'messageDeleted: failed to soft-delete revoked messages');
+    log.error({ err, messageIds }, 'messageDeleted: failed to delete revoked messages and handoff artifacts');
   }
 });
 

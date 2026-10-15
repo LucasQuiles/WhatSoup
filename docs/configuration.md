@@ -1071,6 +1071,32 @@ The unified database retention sweep removes terminal rows older than 30 days an
 
 Authenticated `GET /health` exposes aggregate-only `outbound_sends`, `tool_durability`, and `retention.database` blocks. A failed database observation reports `readable: false` and null counts rather than manufacturing zero. No receipt, destination, provider ID, or error prose appears in these blocks.
 
+### Handoff artifact retention
+
+Agent fallback stores a per-conversation handoff artifact only for short-lived
+cross-provider continuity. Its summary, seeded artifact content, source provider,
+source model, and token baseline have one 24-hour eligibility cutoff. The canonical
+database-retention runner deletes rows whose `updated_at` is strictly older than
+that cutoff through deterministic statements of at most 100 rows, draining the
+eligible backlog during each successful sweep. It runs once immediately when the
+instance starts and then on the configured database-retention interval (daily by
+default). A row is therefore removed on the next successful sweep after it becomes
+eligible; a stopped process or failed sweep delays online deletion.
+`health.retention.database.lastResult.handoffArtifacts` is the count deleted by the
+most recent successful sweep. Databases without the optional agent table report zero
+for that field.
+
+The prompt-injection freshness TTL is separate from disk retention: a stale artifact
+is excluded from a prompt before its row necessarily becomes eligible for deletion.
+Chat clear, message revoke/delete, and the agent `/new` workspace reset also
+invalidate the affected conversation's artifact. The current application has no
+separate privacy-erasure event or API; any future privacy-erasure path must use the
+same artifact invalidation seam.
+
+This is online database deletion only. It does not erase bytes already present in
+SQLite backups, WAL copies, storage snapshots, or provider copies. Those copies
+follow their own backup-retention, destruction, and provider-data controls.
+
 ### `memory`
 
 `memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.
