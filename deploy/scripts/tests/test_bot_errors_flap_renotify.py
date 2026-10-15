@@ -177,7 +177,7 @@ def test_resolve_states_persistent_handoff_when_underlying_still_open(tmp_path, 
     mod.save_incident_state(paths, state)
 
     sends: list[str] = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *a, **k: sends.append(text))
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *a, **k: sends.append(dispatcher_fixtures.expand_notice(mod.state_paths(), text)))
     resolved, errors = mod.sweep_flap_storms(paths)
 
     assert resolved == 1 and errors == 0
@@ -204,7 +204,7 @@ def test_resolve_keeps_stable_wording_when_underlying_cleared(tmp_path, monkeypa
     mod.save_incident_state(paths, state)
 
     sends: list[str] = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *a, **k: sends.append(text))
+    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *a, **k: sends.append(dispatcher_fixtures.expand_notice(mod.state_paths(), text)))
     resolved, _ = mod.sweep_flap_storms(paths)
 
     assert resolved == 1

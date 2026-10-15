@@ -196,8 +196,7 @@ def test_sweep_resolves_and_removes_stable_entry(tmp_path):
     mod.flap_evaluate(fs[KEY], base + 2)
     mod.save_incident_state(paths, state)
 
-    sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, errors = mod.sweep_flap_storms(paths)
 
     assert resolved == 1 and errors == 0
@@ -454,8 +453,7 @@ def test_sweep_prunes_stale_never_stormed_entries_silently(tmp_path):
     mod.record_flap_trip(fs, fresh_key, now - 30)
     mod.save_incident_state(paths, state)
 
-    sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, errors = mod.sweep_flap_storms(paths)
 
     assert (resolved, errors) == (0, 0), "a silent prune is not a resolve"
@@ -484,8 +482,7 @@ def test_sweep_retains_open_storm_past_retention(tmp_path):
         mod.record_flap_trip(fs, KEY, now - 4 + i)
     mod.save_incident_state(paths, state)
 
-    sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     mod.sweep_flap_storms(paths)
     assert KEY in mod.load_incident_state(paths)["flapState"], "open storm must survive retention"
 
@@ -564,8 +561,7 @@ def test_rate_decay_resolve_never_claims_stable(tmp_path):
     assert state.get("openIncidents", {}).get(KEY) is None, "precondition: not in openIncidents"
     mod.save_incident_state(paths, state)
 
-    sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, errors = mod.sweep_flap_storms(paths)
 
     assert (resolved, errors) == (1, 0)
@@ -590,8 +586,7 @@ def test_genuine_silence_still_reports_stable(tmp_path):
     assert mod.flap_source_went_quiet(entry, now) is True, "precondition: silent"
     mod.save_incident_state(paths, state)
 
-    sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, _ = mod.sweep_flap_storms(paths)
 
     assert resolved == 1

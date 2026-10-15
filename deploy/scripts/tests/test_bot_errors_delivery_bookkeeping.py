@@ -161,7 +161,8 @@ class _Bench:
         def send(text: str, *args: Any, **kwargs: Any) -> None:
             self.attempts.append(outcome)
             if outcome == "ok":
-                self.delivered.append(text)
+                # The group line carries a card; its body is in the packet its Ref names.
+                self.delivered.append(dispatcher_fixtures.expand_notice(self.paths, text))
                 return None
             if outcome == "transient":
                 raise RuntimeError("WhatsApp is temporarily disconnected")

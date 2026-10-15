@@ -26,7 +26,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -1328,6 +1328,10 @@ def state_paths() -> dict[str, Path]:
         "suppressed": root / "suppressed",
         "quarantine": root / "quarantine",
         "unrenderable_signals": root / "unrenderable-signals",
+        # One JSON packet per human notice, named by the card's Ref. Created
+        # lazily by the packet write (never by setup_dirs), so an unwritable
+        # packet store degrades one notice to its full text, not the cycle.
+        "packets": root / "packets",
         "testleak": root / "testleak",
         "writefail_recovered": root / "writefail-recovered",
         "writefail_quarantine": root / "writefail-quarantine",
@@ -4333,10 +4337,20 @@ def email_fallback(subject: str, body: str, timeout: float = 20) -> bool:
     return proc.returncode == 0
 
 
+# P2 (relay 10): only "@" directly before a digit or "+" can become a WhatsApp
+# mention of a phone line, so only that "@" is rewritten. Unit and address
+# names keep theirs: "whatsoup@<instance>.service" stays a unit name a reader can use.
+_MENTION_RISK_RE = re.compile(r"@(?=[0-9+])")
+
+
+def neutralize_mentions(text: str) -> str:
+    return _MENTION_RISK_RE.sub(" at ", text)
+
+
 def event_line(label: str, value: Any, limit: int = 700) -> str | None:
     if value is None or value == "":
         return None
-    rendered = redact(value).replace("@", " at ")
+    rendered = neutralize_mentions(redact(value))
     return f"  > {label}: {truncate(rendered, limit)}"
 
 
@@ -4365,7 +4379,7 @@ def requested_action_text(event: dict[str, Any]) -> str:
         return physical_candidate_action_text()
     operator_action = critical_operator_action(event)
     if operator_action:
-        return redact(operator_action).replace("@", " at ")
+        return neutralize_mentions(redact(operator_action))
     if severity == "info":
         return NONACTIONABLE_ACTION
     credential_action = credential_action_sentence(event)
@@ -4424,7 +4438,7 @@ def format_daily_health_event(core: list[str], evidence: str, details: list[str]
     # Redact the complete text first: multiline credentials must not be split
     # before the shared backend redactor has confined them.
     groups: list[list[str]] = [[], [], []]
-    for line in redact(evidence).replace("@", " at ").splitlines():
+    for line in neutralize_mentions(redact(evidence)).splitlines():
         rank = 0 if daily_health_line_is_failure(line) else 1 if daily_health_line_is_warning(line) else 2
         groups[rank].append(line)
     rendered = "\n".join(line for group in groups for line in group)
@@ -4523,7 +4537,7 @@ def format_event(event: dict[str, Any]) -> str:
         title = "BOT ERROR"
     raw_summary = event_text(event, "summary")
     display_summary = event_display_summary(event)
-    summary = truncate(redact(display_summary or "unspecified bot error").replace("@", " at "), 220)
+    summary = truncate(neutralize_mentions(redact(display_summary or "unspecified bot error")), 220)
     # Keep the confined rendering visible for correlation when the headline replaced it.
     confined_summary = raw_summary if display_summary != raw_summary else None
     process_info = event.get("process") if isinstance(event.get("process"), dict) else {}
@@ -4639,6 +4653,569 @@ def format_event(event: dict[str, Any]) -> str:
     ])
     text = "\n".join(line for line in lines if line)
     return truncate(text, MAX_MESSAGE_CHARS)
+
+
+# ---------------------------------------------------------------------------
+# Human card + machine packet (relay 10 P1/P2/P4; relay 16 A, B, D, E)
+#
+# A notice reaches WhatsApp as a short card a person can read on a phone: one
+# icon, a plain title, Where, Impact, Handling, You and Ref. Everything a
+# machine or an agent needs -- the full body format_event renders, every field
+# in it and the whole event -- is written first to one JSON packet named by the
+# card's Ref (``<state root>/packets/<ref>.json``), read back with
+# ``bot-errors-dispatcher.py packet <ref>``. format_event stays the full-detail
+# renderer: it feeds the packet, the e-mail fallback and ``--format-event``.
+#
+# Q routing (relay 16 E): Q admits a BOT ERRORS message by its first characters.
+# A card opens with the red icon and a bold title (``🔴 *``) exactly when the old
+# body opened with "BOT ERROR - ", so admission is unchanged for every event; no
+# other card may open with ``🔴 *``, ``🔴 ⚡ `` or "q,"/"q:".
+# ---------------------------------------------------------------------------
+CARD_ICON_ACT_NOW = "\U0001F534"   # red circle: act now / service down
+CARD_ICON_DEGRADED = "\U0001F7E0"  # orange circle: degraded, being handled
+CARD_ICON_NOTICE = "\U0001F7E1"    # yellow circle: notice
+CARD_ICON_RECOVERED = "✅"     # green check: recovered
+CARD_ICON_INFO = "ℹ️"    # information only
+CARD_TITLE_LIMIT = 120
+CARD_CLIP = "…"
+CARD_NO_ACTION = "You: No action needed"
+CARD_IMPACT_UNCONFIRMED = "Impact not yet confirmed"
+
+# Card-only scrubbing. The card never carries paths, event ids, digests or
+# confined renderings; those stay in the packet.
+_CARD_PATH_RE = re.compile(r"(?<![\w.@-])(?:~|/)[\w.@-]*(?:/[\w.@-]*)+")
+_CARD_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+_CARD_HEX_RE = re.compile(r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{8,}\b")
+_CARD_DIGEST_TAG_RE = re.compile(r"\s*\[(?:digest|set)[ -][0-9a-f]{6,}\]")
+_EVIDENCE_TOKEN_RE = re.compile(r"(?m)^(?P<key>[a-z_]+)=(?P<value>[^\n]*)$")
+
+# P4: the only fields a cause phrase may be built from. Values are checked for
+# shape; anything else, and every unknown field, is dropped and never printed.
+CARD_CAUSE_LABEL_FIELDS = ("provider", "model", "unit")
+CARD_CAUSE_COUNT_FIELDS = ("port", "count")
+
+
+def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
+    """One line of plain card text: redacted, mention-safe, no paths, ids or digests."""
+    text = neutralize_mentions(redact(value))
+    text = _CONFINED_DISPLAY_RE.sub("", text)
+    text = _CARD_DIGEST_TAG_RE.sub("", text)
+    text = _CARD_UUID_RE.sub("", text)
+    text = _CARD_PATH_RE.sub("", text)
+    text = _CARD_HEX_RE.sub("", text)
+    text = text.replace("*", "").replace("_", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    # Audit r3: a first line never ends at a colon (or any dangling separator).
+    text = text.rstrip(" :;,-—(").strip()
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip(" :;,-—(") + CARD_CLIP
+    return text
+
+
+def card_bot_name(event: dict[str, Any]) -> str:
+    label = safe_alert_label(event.get("instance"))
+    if not label or label.lower() == "unknown":
+        return "A bot"
+    return "Q" if label == "q" else label
+
+
+def card_where(event: dict[str, Any]) -> str:
+    machine = card_plain(event.get("machine") or event.get("machineName") or "", 60)
+    instance = safe_alert_label(event.get("instance"))
+    instance = instance if instance and instance.lower() != "unknown" else ""
+    has_machine = bool(machine) and machine.lower() != "unknown"
+    if has_machine and instance:
+        return f"Where: {machine} - {instance}"
+    if has_machine or instance:
+        return f"Where: {machine if has_machine else instance}"
+    return "Where: not recorded"
+
+
+def _dispatcher_evidence_fields(event: dict[str, Any]) -> dict[str, str]:
+    """key=value lines of evidence the dispatcher wrote itself (stale, flap, close).
+
+    Read only for the dispatcher's own notice sources and only by fixed key, so
+    no producer text reaches the card through it.
+    """
+    evidence = event_text(event, "evidence")
+    return {match.group("key"): match.group("value").strip() for match in _EVIDENCE_TOKEN_RE.finditer(evidence)}
+
+
+def _evidence_int(fields: dict[str, str], key: str) -> int | None:
+    value = fields.get(key, "")
+    return int(value) if value.isdigit() else None
+
+
+def _card_month_day(value: str) -> str | None:
+    match = re.match(r"^\d{4}-(\d{2})-(\d{2})T", value or "")
+    return f"{match.group(1)}-{match.group(2)}" if match else None
+
+
+def _card_epoch(value: Any) -> int | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return int(datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def _card_duration(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{max(1, minutes)}m"
+
+
+def card_cause(event: dict[str, Any]) -> str | None:
+    """P4: a plain cause phrase from allowlisted structured fields, or None.
+
+    failureClass comes only from a confinement envelope (closed vocabulary);
+    provider, model and unit must be short code-shaped labels; port and count
+    must be non-negative integers. Free text is never passed through.
+    """
+    parts: list[str] = []
+    for field in ("summary", "evidence"):
+        value = event.get(field)
+        if isinstance(value, Mapping):
+            failure_class = value.get("failureClass")
+            if (
+                isinstance(failure_class, str)
+                and failure_class in LEGACY_FAILURE_CLASSES
+                and failure_class.lower() not in _UNINFORMATIVE_FAILURE_CLASSES
+            ):
+                parts.append(failure_class.replace("_", " "))
+                break
+    containers = [event]
+    diagnostics = event.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        containers.append(diagnostics)  # type: ignore[arg-type]
+    for key in CARD_CAUSE_LABEL_FIELDS:
+        for container in containers:
+            label = safe_alert_label(container.get(key))
+            if label:
+                parts.append(f"{key} {label}")
+                break
+    for key in CARD_CAUSE_COUNT_FIELDS:
+        for container in containers:
+            value = container.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000_000:
+                parts.append(f"{key} {value}")
+                break
+    return "; ".join(parts) or None
+
+
+def _card_underlying_title(event: dict[str, Any]) -> str:
+    source = event.get("alertSource") or event.get("source")
+    return f"{card_bot_name(event)}: {source_headline(source)}"
+
+
+def card_catalog_title(event: dict[str, Any], severity: str) -> str | None:
+    """D: fixed plain titles for the information families, by source."""
+    source = str(event.get("source") or "")
+    bot = card_bot_name(event)
+    fields = _dispatcher_evidence_fields(event)
+    if source == "self_restart_completed":
+        return f"{bot} restarted and is back online"
+    if source == "provider_fallback_restored":
+        return f"{bot} restarted while on its backup AI provider"
+    if source == "provider_fallback_reverted":
+        title = f"{bot} is back on its main AI provider"
+        # The producer confines its evidence to a digest, so this reads the
+        # reason only when the evidence arrived as plain key=value text.
+        if re.search(r"(?:^|\s)reason=primary-probe-ok(?:\s|$)", event_text(event, "evidence")):
+            title += " (checked healthy)"
+        return title
+    if source == "model-currency":
+        if severity == "info":
+            return f"{bot}: newer AI model available"
+        return f"{bot}: AI model in use is being retired"
+    if source == "model-currency-live-scan":
+        return f"{bot}: AI model list could not be read; using the built-in list"
+    if source == "recovery_debt_attention":
+        title = f"{bot} has unfinished recovery work"
+        diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+        count = event.get("count", diagnostics.get("count"))
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            title += f" ({count})"
+        return title
+    if source == "flap_storm_resolved":
+        underlying = source_headline(event.get("alertSource") or fields.get("underlying_source"))
+        if fields.get("underlying_incident_open") == "true":
+            return f"Repeated {underlying} alerts stopped; the problem behind them is still open"
+        return f"Repeated {underlying} alerts stopped; {underlying} is stable again"
+    if source == "flap_storm":
+        return f"{bot}: {source_headline(event.get('alertSource'))} keeps failing and recovering"
+    if source == "stale-autoclose":
+        count = _evidence_int(fields, "closed_count") or 0
+        if count == 1:
+            return "Closed 1 old alert that stopped reporting; it reopens if the problem returns"
+        return f"Closed {count} old alerts that stopped reporting; they reopen if the problem returns"
+    if fields.get("stale_digest") == "true":
+        title = _card_underlying_title(event)
+        since = _card_month_day(fields.get("opened", ""))
+        return f"{title}, open since {since}" if since else f"{title}, still open"
+    return None
+
+
+def card_title(event: dict[str, Any], classification: Any) -> str:
+    title = card_catalog_title(event, classification.severity)
+    if title is None:
+        raw_summary = event_text(event, "summary")
+        confined = alert_text_kind(event.get("summary")) == "legacy_object" or bool(
+            _CONFINED_DISPLAY_RE.search(raw_summary)
+        )
+        if confined or not raw_summary.strip():
+            # Unknown or confined: instance plus a humanised source, never a digest.
+            title = _card_underlying_title(event)
+            cause = card_cause(event)
+            if cause:
+                title += f" ({cause})"
+        else:
+            title = event_display_summary(event)
+    title = card_plain(title)
+    if not title:
+        title = card_plain(_card_underlying_title(event))
+    if classification.kind == "incident_recovery" and not title.lower().startswith("recovered"):
+        title = card_plain(f"Recovered: {title}")
+    return title
+
+
+def card_impact(event: dict[str, Any]) -> str:
+    storm = event.get("storm") if isinstance(event.get("storm"), dict) else {}
+    hosts = storm.get("affectedHosts")
+    if isinstance(hosts, int) and not isinstance(hosts, bool) and hosts > 0:
+        return f"Impact: {hosts} host{'s' if hosts != 1 else ''} affected"
+    return CARD_IMPACT_UNCONFIRMED
+
+
+def card_handling(event: dict[str, Any], classification: Any) -> tuple[str, str]:
+    """(Handling line, You line) from the event's requested action."""
+    if classification.kind == "incident_recovery":
+        opened = _card_epoch(_dispatcher_evidence_fields(event).get("opened"))
+        created = _card_epoch(event.get("createdAt"))
+        if opened is not None and created is not None and created >= opened:
+            return f"Handling: recovered after {_card_duration(created - opened)} open", CARD_NO_ACTION
+        return "Handling: recovered", CARD_NO_ACTION
+    if critical_operator_action(event) == FLAP_STORM_ACTION:
+        return "Handling: Q investigating", CARD_NO_ACTION
+    action = requested_action_text(event)
+    if action == physical_action_text():
+        return (
+            "Handling: waiting on a relink or retirement of the WhatsApp line",
+            "You: Action needed: relink the WhatsApp line or retire it",
+        )
+    if action == physical_candidate_action_text():
+        return "Handling: Q checking whether the logout repeats", CARD_NO_ACTION
+    if action == NONACTIONABLE_ACTION:
+        return "Handling: none needed", CARD_NO_ACTION
+    if action == stale_action_text():
+        return "Handling: Q checking whether it recovered", CARD_NO_ACTION
+    if action == INVESTIGATE_ACTION:
+        return "Handling: Q investigating", CARD_NO_ACTION
+    if action == credential_repage.HUMAN_ACTION:
+        return "Handling: waiting on the owner", "You: Action needed: restore this bot's AI provider sign-in"
+    if action == credential_repage.HUMAN_ACTION_DIGEST:
+        return "Handling: waiting on the owner", "You: Action needed: restore the AI provider sign-in of each bot named"
+    # A producer's own operator step is free text: it stays in the packet. Only
+    # whether it asks the owner decides the You line.
+    if re.search(r"\b(?:lucas|owner)\b", action, re.IGNORECASE):
+        return "Handling: waiting on the owner", "You: Action needed: do the owner step in the packet"
+    return "Handling: Q following the operator step", CARD_NO_ACTION
+
+
+def card_is_information_only(event: dict[str, Any], classification: Any) -> bool:
+    return classification.kind == "observation" and requested_action_text(event) == NONACTIONABLE_ACTION
+
+
+def format_card(event: dict[str, Any], ref: str) -> str:
+    """The human card for one notice (relay 10 target card, relay 16 B)."""
+    classification = classify_event(event)
+    title = card_title(event, classification)
+    if classification.kind == "incident_recovery":
+        icon = CARD_ICON_RECOVERED
+    elif card_is_information_only(event, classification):
+        icon = CARD_ICON_INFO
+    elif classification.kind == "observation":
+        icon = CARD_ICON_NOTICE
+    elif classification.severity == "warning":
+        icon = CARD_ICON_DEGRADED
+    else:
+        icon = CARD_ICON_ACT_NOW
+    lines = [f"{icon} *{title}*", card_where(event)]
+    if icon == CARD_ICON_INFO:
+        # Information only: at most four lines.
+        lines.extend([CARD_NO_ACTION, f"Ref: {ref}"])
+        return "\n".join(lines)
+    if classification.kind != "incident_recovery":
+        lines.append(card_impact(event))
+    handling, you = card_handling(event, classification)
+    lines.extend([handling, you, f"Ref: {ref}"])
+    return "\n".join(lines)
+
+
+# --- Machine packet ---------------------------------------------------------
+
+NOTICE_PACKET_SCHEMA_VERSION = 1
+NOTICE_PACKET_KIND = "bot-errors-notice-packet"
+NOTICE_REF_HEX = 8
+NOTICE_REF_RE = re.compile(r"^[0-9a-f]{8}$")
+# A Ref names ONE card, never an incident: it is derived from the notice's own
+# id (an outbox event id, or the per-notice id a dispatcher-made notice mints
+# with its own timestamp), so every card of one incident gets its own Ref and
+# its own packet. The packet names the incident separately (incidentKey,
+# incidentRef) so the cards of one incident can be grouped.
+# Ref candidates per notice. The first is the notice id's own digest; a later
+# one is used only when an earlier candidate already names a DIFFERENT notice,
+# so a Ref always resolves to exactly one packet and no packet is overwritten
+# by another notice.
+NOTICE_REF_PROBES = 16
+NOTICE_PACKET_RETENTION_SECONDS = max(86400, env_int("BOT_ERRORS_PACKET_RETENTION_SECONDS", 30 * 86400))
+NOTICE_PACKET_PRUNE_MAX = 500
+_BODY_FIELD_RE = re.compile(r"^  > (?P<label>[A-Za-z0-9_]+): ?(?P<value>.*)$")
+
+
+class NoticeRefExhausted(RuntimeError):
+    """Every Ref candidate of a notice already names a different notice."""
+
+
+def notice_id_of(event: dict[str, Any]) -> str:
+    value = event.get("id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "body-" + hashlib.sha256(format_event(event).encode("utf-8")).hexdigest()[:32]
+
+
+def incident_ref(key: str) -> str:
+    """A short id of one incident (its key), never used as a card Ref."""
+    return "i" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:NOTICE_REF_HEX]
+
+
+def notice_ref_candidates(notice_id: str) -> list[str]:
+    candidates: list[str] = []
+    for probe in range(NOTICE_REF_PROBES):
+        material = notice_id if probe == 0 else f"{notice_id}#{probe}"
+        candidates.append(hashlib.sha256(material.encode("utf-8")).hexdigest()[:NOTICE_REF_HEX])
+    return candidates
+
+
+def notice_packet_path(paths: dict[str, Path], ref: str) -> Path:
+    if not NOTICE_REF_RE.match(ref):
+        raise ValueError("notice Ref must be 8 lowercase hex characters")
+    return paths["packets"] / f"{ref}.json"
+
+
+def read_notice_packet(paths: dict[str, Path], ref: str) -> dict[str, Any] | None:
+    """The packet a Ref names, or None when there is none (or it is unreadable)."""
+    try:
+        path = notice_packet_path(paths, ref)
+    except ValueError:
+        return None
+    if not safe_is_regular_entry(path):
+        return None
+    try:
+        return safe_read_json(path)
+    except Exception:  # noqa: BLE001 - an unreadable packet reads as absent
+        return None
+
+
+def allocate_notice_ref(paths: dict[str, Path], notice_id: str) -> str:
+    """The Ref for a notice: its first candidate that is free or already its own."""
+    for ref in notice_ref_candidates(notice_id):
+        path = notice_packet_path(paths, ref)
+        if not path.exists() and not path.is_symlink():
+            return ref
+        existing = read_notice_packet(paths, ref)
+        if existing is not None and existing.get("noticeId") == notice_id:
+            return ref
+    raise NoticeRefExhausted(f"no free notice Ref for {safe_segment(notice_id)}")
+
+
+def body_fields(body: str) -> list[dict[str, str]]:
+    """Every field of a rendered body, in order: the headline, then each '> label'.
+
+    A line that does not open a field continues the previous one (multi-line
+    evidence), so the packet holds the body's fields exactly as rendered.
+    """
+    lines = body.split("\n")
+    fields = [{"label": "headline", "value": lines[0] if lines else ""}]
+    for line in lines[1:]:
+        match = _BODY_FIELD_RE.match(line)
+        if match:
+            fields.append({"label": match.group("label"), "value": match.group("value")})
+        else:
+            fields[-1]["value"] += "\n" + line
+    return fields
+
+
+def build_notice_packet(
+    event: dict[str, Any],
+    *,
+    ref: str,
+    notice_kind: str,
+    card: str | None,
+    extra: Mapping[str, Any] | None = None,
+    body: str | None = None,
+) -> dict[str, Any]:
+    body = format_event(event) if body is None else body
+    # The Ref names this one card; the incident is named separately so the cards
+    # of one incident (different subjects over time) can be grouped.
+    try:
+        key: str | None = incident_key(event)
+    except Exception:  # noqa: BLE001 - grouping is optional; the packet is not
+        key = None
+    packet: dict[str, Any] = {
+        "schemaVersion": NOTICE_PACKET_SCHEMA_VERSION,
+        "kind": NOTICE_PACKET_KIND,
+        "ref": ref,
+        "noticeId": notice_id_of(event),
+        "noticeKind": notice_kind,
+        "incidentKey": key,
+        "incidentRef": incident_ref(key) if key else None,
+        "writtenAt": now_iso(),
+        "writtenAtEpoch": int(time.time()),
+        "card": card,
+        "body": body,
+        "bodyFields": body_fields(body),
+        "event": json_snapshot(event),
+    }
+    if extra:
+        packet.update(json_snapshot(dict(extra)))
+    return packet
+
+
+def publish_notice_packet(path: Path, packet: dict[str, Any]) -> PublicationResult:
+    """The single durable publication site for a notice packet."""
+    target = _durable_target(path)
+    observation = observe_json(target)
+    generation = (observation.version.generation or 0) + 1
+    return publish_state_json(
+        target,
+        packet,
+        component="dispatcher.notice_packet",
+        operation_id=operation_id(
+            target,
+            packet,
+            component="dispatcher.notice_packet",
+            predecessor=observation.version,
+        ),
+        expected=observation.version,
+        generation=generation,
+    )
+
+
+def write_notice_packet(paths: dict[str, Path], packet: dict[str, Any]) -> Path:
+    """Persist a packet BEFORE its notice goes out; fail closed on any doubt.
+
+    A packet already at the Ref may be replaced only by the same notice (a
+    retried send re-renders its own packet); allocate_notice_ref never hands
+    out a Ref that names another notice, and this re-checks it under the write.
+    """
+    ref = str(packet["ref"])
+    path = notice_packet_path(paths, ref)
+    existing = read_notice_packet(paths, ref)
+    if existing is not None and existing.get("noticeId") != packet["noticeId"]:
+        raise NoticeRefExhausted(f"notice Ref {ref} names a different notice; refusing to overwrite")
+    if existing is None and (path.exists() or path.is_symlink()):
+        raise RuntimeError(f"notice Ref {ref} holds an unreadable entry; refusing to overwrite")
+    require_all_advance([publish_notice_packet(path, packet)])
+    written = read_notice_packet(paths, ref)
+    if written is None or written.get("noticeId") != packet["noticeId"]:
+        raise RuntimeError(f"notice packet {ref} did not survive its own write")
+    return path
+
+
+def notice_message(
+    event: dict[str, Any],
+    *,
+    notice_kind: str,
+    paths: dict[str, Path] | None = None,
+    extra: Mapping[str, Any] | None = None,
+    body: str | None = None,
+    render: Callable[[str], str] | None = None,
+) -> tuple[str, str | None]:
+    """(WhatsApp text, Ref) for one notice: its packet is written first.
+
+    ``body`` is the notice's format_event text when the caller already has it
+    (one render feeds every surface); ``render`` builds a card other than the
+    standard one (the daily cards).
+
+    When the packet cannot be written the notice still goes out, as the full
+    body it carried before this change, so a broken packet store never costs an
+    alert or its machine fields. That fallback is logged.
+    """
+    paths = paths or state_paths()
+    try:
+        if body is None:
+            body = format_event(event)
+        ref = allocate_notice_ref(paths, notice_id_of(event))
+        card = render(ref) if render is not None else format_card(event, ref)
+        write_notice_packet(
+            paths,
+            build_notice_packet(event, ref=ref, notice_kind=notice_kind, card=card, extra=extra, body=body),
+        )
+        return card, ref
+    except ControllerStateRequired:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the notice must still go out
+        try:
+            append_dispatch_log(paths, {
+                "type": "notice_packet_failed",
+                "eventId": event.get("id"),
+                "noticeKind": notice_kind,
+                "error": truncate(str(exc), 300),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+        return (body if body is not None else format_event(event)), None
+
+
+def prune_notice_packets(paths: dict[str, Path], now: int | None = None) -> int:
+    """Drop packets older than the retention window (>= 30 days), bounded per cycle."""
+    directory = paths.get("packets")
+    if directory is None or not directory.is_dir() or directory.is_symlink():
+        return 0
+    current = int(time.time()) if now is None else now
+    horizon = current - NOTICE_PACKET_RETENTION_SECONDS
+    pruned = 0
+    for path in sorted(directory.iterdir()):
+        if pruned >= NOTICE_PACKET_PRUNE_MAX:
+            break
+        if not path.name.endswith(".json") or not safe_is_data_entry(path):
+            continue
+        try:
+            if path.lstat().st_mtime >= horizon:
+                continue
+            path.unlink()
+            pruned += 1
+        except FileNotFoundError:
+            continue
+    if pruned:
+        fsync_parent(directory / ".prune-marker")
+        append_dispatch_log(paths, {
+            "type": "notice_packets_pruned",
+            "pruned": pruned,
+            "retentionSeconds": NOTICE_PACKET_RETENTION_SECONDS,
+        })
+    return pruned
+
+
+def packet_command(argv: list[str]) -> int:
+    """``bot-errors-dispatcher.py packet <ref>``: print the packet; exit 1 if absent."""
+    if len(argv) != 1 or not NOTICE_REF_RE.match(argv[0]):
+        print("usage: bot-errors-dispatcher.py packet <ref>  (ref = 8 lowercase hex)", file=sys.stderr)
+        return 2
+    packet = read_notice_packet(state_paths(), argv[0])
+    if packet is None:
+        print(f"no packet for Ref {argv[0]}", file=sys.stderr)
+        return 1
+    print(json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False))
+    return 0
 
 
 def next_backoff(attempts: int) -> int | None:
@@ -5123,9 +5700,15 @@ def queue_dead_letter_meta_alert(paths: dict[str, Path], now: int) -> int:
 
 
 
-def archive_path(directory: Path, original_name: str, status: str, event: dict[str, Any]) -> Path:
+def archive_name(original_name: str, status: str, at: int) -> str:
+    return f"{original_name}.{at}.{status}"
+
+
+def archive_path(
+    directory: Path, original_name: str, status: str, event: dict[str, Any], *, at: int | None = None
+) -> Path:
     _event_id = str(event.get("id") or "")
-    return safe_child_path(directory, f"{original_name}.{int(time.time())}.{status}")
+    return safe_child_path(directory, archive_name(original_name, status, int(time.time()) if at is None else at))
 
 
 def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) -> str | None:
@@ -6745,7 +7328,12 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
             decision = flap_evaluate(entry, now)
             if decision.get("emit"):
                 try:
-                    send_whatsapp(format_event(flap_storm_event(key, entry, str(decision["severity"]), now)))
+                    storm_text, _storm_ref = notice_message(
+                        flap_storm_event(key, entry, str(decision["severity"]), now),
+                        notice_kind="flap-storm",
+                        paths=paths,
+                    )
+                    send_whatsapp(storm_text)
                 except Exception:
                     for field in FLAP_STORM_LIFECYCLE_FIELDS:
                         if field in storm_before:
@@ -6833,7 +7421,12 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                     or not flap_source_went_quiet(entry, now)
                 )
                 try:
-                    send_whatsapp(format_event(flap_resolve_event(str(key), entry, now, underlying_open)))
+                    resolve_text, _resolve_ref = notice_message(
+                        flap_resolve_event(str(key), entry, now, underlying_open),
+                        notice_kind="flap-resolved",
+                        paths=paths,
+                    )
+                    send_whatsapp(resolve_text)
                 except Exception as exc:  # noqa: BLE001 - back off, never retry every cycle
                     errors += 1
                     prior = entry.get("resolveAttempts")
@@ -7145,7 +7738,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 "failed": failed,
             })
             break
-        text = format_event(event)
+        text, _stale_ref = notice_message(event, notice_kind="stale-digest", paths=paths)
         try:
             send_whatsapp(text)
         except Exception as exc:
@@ -7218,7 +7811,10 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 f"Auto-closed {digest_count} non-actionable stale incident(s)"
             )
             try:
-                send_whatsapp(format_event(summary_event))
+                autoclose_text, _autoclose_ref = notice_message(
+                    summary_event, notice_kind="stale-autoclose", paths=paths
+                )
+                send_whatsapp(autoclose_text)
                 append_dispatch_log(paths, {
                     "type": "stale_autoclosed",
                     "count": digest_count,
@@ -9799,7 +10395,8 @@ def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str,
     email_status = "not_attempted"
     direct_error = None
     try:
-        send_whatsapp(text)
+        card_text, _meta_ref = notice_message(meta, notice_kind="meta", body=text)
+        send_whatsapp(card_text)
         direct_whatsapp = "sent"
     except Exception as exc:
         direct_whatsapp = "failed"
@@ -10680,7 +11277,20 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
 
     append_clear_context(event, incident_state)
     stamp_delivery_freshness(event, int(time.time()))
+    # The full body stays the e-mail fallback's text; WhatsApp gets the card,
+    # whose packet (full body, fields, event, sent/ path) is written first.
     text = format_event(event)
+    # The sent/ path this delivery will archive to, named before the send so the
+    # packet can carry it; the archive below uses the same timestamp.
+    planned_sent_at = int(time.time())
+    planned_sent_path = paths["sent"] / safe_filename(archive_name(path.name, "sent", planned_sent_at))
+    card_text, _notice_ref = notice_message(
+        event,
+        notice_kind="outbox",
+        paths=paths,
+        extra={"outbox": {"file": path.name, "sentPath": str(planned_sent_path)}},
+        body=text,
+    )
     # #2424: publish the intent-to-issue durably BEFORE the external effect. The
     # attempt publication above cannot serve as this marker: it lands long
     # before this point, so a crash anywhere in between would be indistinguishable
@@ -10710,7 +11320,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # never left. Routing the refusal through mark_failure below requeues it
         # with the marker cleared, so the next pass retries the send instead.
         require_all_advance([issued_publication])
-        send_receipt = send_whatsapp(text, require_acceptance=True)
+        send_receipt = send_whatsapp(card_text, require_acceptance=True)
     except Exception as exc:
         # #2424: an outcome with no proof must never be re-sent. This runs
         # BEFORE mark_failure and before the transient carve-out below, which
@@ -10856,7 +11466,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
                 if incident
                 else [incident_publication, email_publication]
             )
-            email_sent_path = archive_path(paths["sent"], path.name, "sent", event)
+            email_sent_path = archive_path(paths["sent"], path.name, "sent", event, at=planned_sent_at)
             os.replace(claimed, email_sent_path)
             append_dispatch_log(paths, {
                 "type": "email_delivered",
@@ -10947,7 +11557,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     else:
         incident_publication = save_incident_state(paths, incident_state)
         require_all_advance([incident_publication, sent_publication])
-    sent_path = archive_path(paths["sent"], path.name, "sent", event)
+    # Same name the packet recorded before the send; only a name already taken
+    # (same file, same second) moves aside, and the "sent" record names it.
+    sent_path = archive_path(paths["sent"], path.name, "sent", event, at=planned_sent_at)
     os.replace(claimed, sent_path)
     append_dispatch_log(paths, {
         "type": "sent",
@@ -10955,6 +11567,8 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         "path": str(sent_path),
         "attempts": event.get("delivery", {}).get("attempts") if isinstance(event.get("delivery"), dict) else None,
     })
+    # The owner copy (DM and its e-mail) keeps the full body, as before: it is
+    # a private fallback route, not the BOT ERRORS group card (relay 16 scope).
     route_to_owner(event, paths, text)
     return True, "sent"
 
@@ -11317,11 +11931,14 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
             "delivery": {"attempts": 0, "status": "meta"},
         }
         text = format_event(meta)
+        card_text, _meta_ref = notice_message(meta, notice_kind="meta", body=text)
+    except ControllerStateRequired:
+        raise
     except Exception:  # noqa: BLE001 - it is owed again in the next cycle
         return None
     taken = False
     try:
-        send_whatsapp(text, deadline=min(deadline, time.monotonic() + CREDENTIAL_META_GROUP_SECONDS))
+        send_whatsapp(card_text, deadline=min(deadline, time.monotonic() + CREDENTIAL_META_GROUP_SECONDS))
         return _utc_day()
     except AmbiguousSendOutcome as exc:
         # #2424: the request left and its answer did not come. Taken, so it is never sent again.
@@ -11734,6 +12351,12 @@ def run_once(max_events: int) -> dict[str, Any]:
                 log_conversation_scope_error("cycle_sweep", "", exc, False)
 
             suppressed_pruned = prune_suppressed(paths)
+            # Packet retention (relay 16 A: kept at least 30 days). Bounded per
+            # cycle; a failure here never costs the cycle.
+            try:
+                prune_notice_packets(paths)
+            except OSError as exc:
+                append_dispatch_log(paths, {"type": "notice_packets_prune_failed", "error": truncate(str(exc), 300)})
             # Named for exactly what it counts. `record_state` already reports a
             # `quarantine` key holding the SIZE of the quarantine directory, and
             # this counts only the unrenderable class within one cycle; a bare
@@ -11860,16 +12483,24 @@ def run_daemon(interval: int, max_events: int) -> None:
 
 
 def main() -> int:
+    # `packet <ref>` prints one notice packet (relay 16 A); it never drains.
+    if sys.argv[1:2] == ["packet"]:
+        return packet_command(sys.argv[2:])
     parser = argparse.ArgumentParser(description="Drain local BOT ERRORS outbox")
     parser.add_argument("--once", action="store_true", help="process ready events once and exit")
     parser.add_argument("--daemon", action="store_true", help="run continuously")
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--max-events", type=int, default=25)
     parser.add_argument("--format-event", help="format one event JSON file without sending")
+    parser.add_argument("--format-card", help="render one event JSON file's WhatsApp card without sending")
     args = parser.parse_args()
 
     if args.format_event:
         print(format_event(read_json(Path(args.format_event))))
+        return 0
+    if args.format_card:
+        event = read_json(Path(args.format_card))
+        print(format_card(event, notice_ref_candidates(notice_id_of(event))[0]))
         return 0
 
     if args.daemon:
@@ -11889,7 +12520,7 @@ def main() -> int:
         }))
         return INCIDENT_CYCLE_REQUIRED_EXIT
     except ControllerStateRequired as exc:
-        import sys, traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+        import traceback; traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
         project_dispatcher_state_mode(exc.diagnostic)
         emit_state_recovery_fallback(exc.diagnostic)
         print(json.dumps({

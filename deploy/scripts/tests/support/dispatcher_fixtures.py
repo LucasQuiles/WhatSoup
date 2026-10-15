@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -99,10 +100,34 @@ def empty_state() -> dict:
     return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
 
 
+_NOTICE_REF_LINE = re.compile(r"\nRef: (?P<ref>[0-9a-f]{8})$")
+
+
+def expand_notice(paths: dict[str, Path], text: str) -> str:
+    """A sent notice as a machine reader sees it: the card, then its packet's full body.
+
+    Since relay 16 the group line carries a short card whose last line names a
+    Ref; the full body (every "  > field: value" line the message used to carry)
+    is in the packet that Ref names, written before the send. Assertions about
+    body fields read them through the Ref exactly as an agent would. A text with
+    no Ref (a notice whose packet could not be written goes out as the full body)
+    is returned unchanged; a Ref with no packet is an error, never a silent pass.
+    """
+    match = _NOTICE_REF_LINE.search(text)
+    if not match:
+        return text
+    packet_path = paths["packets"] / f"{match.group('ref')}.json"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    return f"{text}\n{packet['body']}"
+
+
 def capture_sends(mod) -> list[str]:
-    """Replace `mod.send_whatsapp` with a recorder and return the list it appends to."""
+    """Replace `mod.send_whatsapp` with a recorder and return the list it appends to.
+
+    Each recorded text is the card expanded with its packet body (expand_notice).
+    """
     sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    mod.send_whatsapp = lambda text, *a, **k: sends.append(expand_notice(mod.state_paths(), text))  # type: ignore[assignment]
     return sends
 
 

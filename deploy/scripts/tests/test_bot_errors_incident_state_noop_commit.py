@@ -37,6 +37,10 @@ sys.path.insert(0, str(_SCRIPTS / "lib"))
 
 from lib import controller_state as cs  # noqa: E402
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from support.dispatcher_fixtures import expand_notice  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_noop_commit", _SCRIPT)
 disp = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
 spec.loader.exec_module(disp)  # type: ignore[union-attr]
@@ -380,7 +384,8 @@ def quiet_held_incident(adopted, monkeypatch):
     }.items():
         monkeypatch.setattr(disp, name, value)
     sends = []
-    monkeypatch.setattr(disp, "send_whatsapp", sends.append)
+    # The group line is a card; its body is in the packet its Ref names.
+    monkeypatch.setattr(disp, "send_whatsapp", lambda text, *a, **k: sends.append(expand_notice(adopted, text)))
     key = "host-a|bot-errors-health|daily-health-fail:instance-x"
     with _dispatcher_session(adopted) as session:
         loaded = session.load()

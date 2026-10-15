@@ -1,0 +1,48 @@
+{
+  "family": "stale_awaiting_physical",
+  "description": "Reconstructed from one delivered BOT INFO message (2026-10-14/15); host names, private bot names and state paths neutralised. format_event renders this event to exactly legacy_body.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "observation",
+    "eventType": "observation",
+    "severity": "info",
+    "id": "stale-mac-host-1.local_line-bot_daily-health:whatsapp_device_bond_lost-1792091169",
+    "createdAt": "2026-10-15T19:06:09Z",
+    "machine": "mac-host-1.local",
+    "instance": "line-bot",
+    "source": "daily-health",
+    "alertSource": "whatsapp_device_bond_lost",
+    "summary": "Stale incident digest, awaiting physical action: BOT ERRORS linked-device bond lost: line-bot requires verified relink",
+    "evidence": "stale_digest=true\nincident_stale=true\nincident_key=mac-host-1.local|line-bot|daily-health:whatsapp_device_bond_lost\nincident_status=awaiting_physical\nprevious_status=awaiting_physical\nopened=2026-07-23T11:21:15Z\nlast_seen=2026-07-26T11:21:13Z\nquiet_seconds=7026296\nsuppressed_duplicates=5\nrenotify_cadence_seconds=86400",
+    "diagnostics": {
+      "logHints": [
+        "journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"
+      ],
+      "dispatchLog": "/srv/bot-errors-fixture/logs/dispatch.jsonl",
+      "queue": "/srv/bot-errors-fixture"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "stale-renotify",
+      "nextAttemptAtEpoch": 0,
+      "lastError": null
+    },
+    "criticalAsset": {
+      "asset": {
+        "kind": "whatsapp_linked_device",
+        "instance": "line-bot",
+        "owner": "whatsoup"
+      },
+      "failure": {
+        "code": "WA_AUTH_BOND_SERVER_REVOKED",
+        "domain": "account_linkage",
+        "recoverability": "manual_relink_required",
+        "confidence": "confirmed",
+        "operatorAction": "Lucas physical relink or decommission required; Q should preserve the auth bond, avoid unsafe credential replay, monitor for reconnect/decommission clear, and report disposition.",
+        "clearRequirement": "connected WhatsApp state, present non-empty auth bond, and successful outbound send after relink"
+      }
+    }
+  },
+  "legacy_body": "BOT INFO - Stale incident digest, awaiting physical action: BOT ERRORS linked-device bond lost: line-bot requires verified relink\n  > severity: info\n  > machine: mac-host-1.local\n  > instance: line-bot\n  > source: daily-health\n  > alert_source: whatsapp_device_bond_lost\n  > incident_key: mac-host-1.local|line-bot|daily-health:whatsapp_device_bond_lost\n  > asset_kind: whatsapp_linked_device\n  > failure_code: WA_AUTH_BOND_SERVER_REVOKED\n  > failure_domain: account_linkage\n  > recoverability: manual_relink_required\n  > confidence: confirmed\n  > event: stale-mac-host-1.local_line-bot_daily-health:whatsapp_device_bond_lost-1792091169\n  > created: 2026-10-15T19:06:09Z\n  > dispatcher_attempts: 1\n  > clear_requirement: connected WhatsApp state, present non-empty auth bond, and successful outbound send after relink\n  > requested_action: Lucas physical relink or decommission required; Q should preserve the auth bond, avoid unsafe credential replay, monitor for reconnect/decommission clear, and report disposition.\n  > evidence: stale_digest=true\nincident_stale=true\nincident_key=mac-host-1.local|line-bot|daily-health:whatsapp_device_bond_lost\nincident_status=awaiting_physical\nprevious_status=awaiting_physical\nopened=2026-07-23T11:21:15Z\nlast_seen=2026-07-26T11:21:13Z\nquiet_seconds=7026296\nsuppressed_duplicates=5\nrenotify_cadence_seconds=86400\n  > log_1: journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'\n  > queue: /srv/bot-errors-fixture\n  > dispatch_log: /srv/bot-errors-fixture/logs/dispatch.jsonl",
+  "card": "🟡 *line-bot: WhatsApp linked-device bond lost, open since 07-23*\nWhere: mac-host-1.local - line-bot\nImpact not yet confirmed\nHandling: waiting on a relink or retirement of the WhatsApp line\nYou: Action needed: relink the WhatsApp line or retire it\nRef: ec20a620"
+}

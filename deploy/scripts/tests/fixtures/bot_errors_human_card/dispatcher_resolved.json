@@ -1,0 +1,33 @@
+{
+  "family": "dispatcher_resolved",
+  "description": "Synthetic dispatcher event; legacy_body is the pre-change format_event rendering.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "incident_recovery",
+    "eventType": "clear",
+    "severity": "info",
+    "id": "7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a",
+    "createdAt": "2026-10-15T11:05:00.000Z",
+    "machine": "mac-host-2.local",
+    "instance": "fixture-bot",
+    "source": "instance_logged_out",
+    "summary": {
+      "failureClass": "unknown",
+      "length": 51,
+      "correlationDigest": "4d5e6f7000000000000000000000000000000000000000000000000000000000"
+    },
+    "evidence": "unknown - 80 chars - digest 8a9b0c1d\nopened=2026-10-15T09:00:00Z\nprior_event=6a1f0e52-3b7d-4c11-9a0e-2f4d5c6b7a81\nsuppressed_duplicates=2\nlast_seen=2026-10-15T10:55:00Z",
+    "process": {
+      "pid": 4242
+    },
+    "diagnostics": {
+      "queue": "/srv/bot-errors-fixture/outbox"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "queued"
+    }
+  },
+  "legacy_body": "BOT RECOVERY - fixture-bot: WhatsApp session logged out [digest 4d5e6f70]\n  > summary_confined: unknown - 51 chars - digest 4d5e6f70\n  > severity: info\n  > machine: mac-host-2.local\n  > instance: fixture-bot\n  > source: instance_logged_out\n  > incident_key: mac-host-2.local|fixture-bot|instance_logged_out\n  > event: 7d8e9f0a-1b2c-4d3e-8f4a-5b6c7d8e9f0a\n  > created: 2026-10-15T11:05:00.000Z\n  > dispatcher_attempts: 1\n  > pid: 4242\n  > queue: /srv/bot-errors-fixture/outbox\n  > evidence: unknown - 80 chars - digest 8a9b0c1d\nopened=2026-10-15T09:00:00Z\nprior_event=6a1f0e52-3b7d-4c11-9a0e-2f4d5c6b7a81\nsuppressed_duplicates=2\nlast_seen=2026-10-15T10:55:00Z\n  > requested_action: none — informational event; no Q remediation required.",
+  "card": "✅ *Recovered: fixture-bot: WhatsApp session logged out*\nWhere: mac-host-2.local - fixture-bot\nHandling: recovered after 2h 5m open\nYou: No action needed\nRef: f3fccfee"
+}

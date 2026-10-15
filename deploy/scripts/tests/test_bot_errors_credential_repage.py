@@ -515,6 +515,8 @@ class Rig:
     # -- stubs: they record, the test body asserts ---------------------------
 
     def _group_send(self, text, socket_path="", *, require_acceptance=False, deadline=None):
+        # The group line carries a card; its body fields are in the packet its Ref names.
+        text = dispatcher_fixtures.expand_notice(self.d.state_paths(), text)
         self.group_attempts.append({"text": text, "at": int(self.clock.now), "monotonic": self.clock.monotonic(),
                                     "deadline": deadline, "position": len(self.timeline)})
         verdict = self.group_rule(text)
