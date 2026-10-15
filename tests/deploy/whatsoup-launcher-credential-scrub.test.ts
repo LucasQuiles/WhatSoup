@@ -1,6 +1,11 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+
+const tmp = trackTmpDirs('');
 
 const PROTECTED_ENV_NAMES = [
   'ANTHROPIC_API_KEY',
@@ -72,4 +77,152 @@ describe('deploy/whatsoup credential environment boundary', () => {
     expect(source).toContain('exec "$NODE"');
     expect(source).toContain('"$REPO_ROOT/src/bootstrap.ts" "$INSTANCE"');
   });
+});
+
+function sliceBetween(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return source.slice(start, end);
+}
+
+type ManagedRoute = 'ambient-only' | 'private-file' | 'keyring' | 'opencode-auth';
+
+interface ManagedBoundaryResult {
+  inherited: Record<string, string | null>;
+  childKeys: Record<string, string>;
+}
+
+/**
+ * Runs the launcher's real scrub, keyring helper and agent restore block, then
+ * execs the real runtime resolver (lookupCredential via buildChildEnv) for a
+ * zai-coding-plan model — the managed-service boundary the scrub-list
+ * assertions above cannot exercise. Only `security`/`secret-tool` are stubbed.
+ */
+function runManagedCodingPlanBoundary(route: ManagedRoute): ManagedBoundaryResult {
+  const root = tmp.make('whatsoup-launcher-coding-plan');
+  const bin = join(root, 'bin');
+  const configHome = join(root, 'config');
+  const dataHome = join(root, 'data');
+  mkdirSync(bin, { mode: 0o700 });
+  mkdirSync(join(configHome, 'whatsoup', 'instances', 'fixture-agent'), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(configHome, 'whatsoup', 'instances', 'fixture-agent', 'config.json'),
+    JSON.stringify({ type: 'agent' }),
+    { mode: 0o600 },
+  );
+  if (route === 'private-file') {
+    const credentials = join(configHome, 'whatsoup', 'credentials');
+    mkdirSync(credentials, { recursive: true, mode: 0o700 });
+    writeFileSync(join(credentials, 'zai-coding-plan.key'), 'synthetic-file-zhipu\n', { mode: 0o600 });
+  }
+  if (route === 'opencode-auth') {
+    const authDir = join(dataHome, 'opencode');
+    mkdirSync(authDir, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(authDir, 'auth.json'),
+      JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'synthetic-auth-zhipu' } }),
+      { mode: 0o600 },
+    );
+  }
+  const keyringHit = route === 'keyring' ? 'yes' : 'no';
+  writeFileSync(join(bin, 'security'), [
+    '#!/usr/bin/env bash',
+    `if [ "${keyringHit}" = yes ] && [ "$1" = find-generic-password ] && [ "$3" = zai-coding-plan ]; then`,
+    "  printf 'synthetic-keyring-zhipu\\n'; exit 0",
+    'fi',
+    "echo 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2",
+    'exit 44',
+    '',
+  ].join('\n'), { mode: 0o700 });
+  writeFileSync(join(bin, 'secret-tool'), [
+    '#!/usr/bin/env bash',
+    '[ "$1" = --help ] && exit 0',
+    `if [ "${keyringHit}" = yes ] && [ "$1" = lookup ] && [ "$3" = zai-coding-plan ]; then`,
+    "  printf 'synthetic-keyring-zhipu\\n'; exit 0",
+    'fi',
+    'exit 1',
+    '',
+  ].join('\n'), { mode: 0o700 });
+
+  const probe = join(root, 'runtime-probe.ts');
+  writeFileSync(probe, [
+    `import { buildChildEnv } from ${JSON.stringify(resolve('src/runtimes/agent/session.ts'))};`,
+    `import { SERVICE_ENV_MAP } from ${JSON.stringify(resolve('src/lib/provider-key-service.ts'))};`,
+    "const env = buildChildEnv('opencode-cli', undefined, 'zai-coding-plan/synthetic-model');",
+    'const names = [...new Set(Object.values(SERVICE_ENV_MAP))];',
+    'const childKeys = Object.fromEntries(names.filter((n) => Object.hasOwn(env, n)).map((n) => [n, env[n]]));',
+    "const inherited = Object.fromEntries(['ZHIPU_API_KEY', 'ZAI_API_KEY', 'MINIMAX_API_KEY'].map((n) => [n, process.env[n] ?? null]));",
+    'process.stdout.write(JSON.stringify({ inherited, childKeys }));',
+    '',
+  ].join('\n'));
+
+  const source = readFileSync('deploy/whatsoup', 'utf8');
+  const script = join(root, 'launcher-boundary.sh');
+  writeFileSync(script, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'INSTANCE=fixture-agent',
+    sliceBetween(source, '_DISTILL_CAPTURE_DEEPSEEK=', '\n\n# POSIX-portable symlink resolution'),
+    `NODE=${JSON.stringify(process.execPath)}`,
+    `SCRIPT_DIR=${JSON.stringify(resolve('deploy'))}`,
+    `. ${JSON.stringify(resolve('deploy/lib/bounded-exec.sh'))}`,
+    sliceBetween(source, 'macos_keychain_lookup() {', '\n# Pinned Node path'),
+    sliceBetween(source, '# Detect instance type', '\n# Health server auth token'),
+    `exec "$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types ${JSON.stringify(probe)}`,
+    '',
+  ].join('\n'));
+  chmodSync(script, 0o700);
+
+  const result = spawnSync('/bin/bash', [script], {
+    encoding: 'utf8',
+    timeout: 20_000,
+    env: {
+      PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`,
+      HOME: root,
+      USER: 'fixture-user',
+      TMPDIR: root,
+      XDG_CONFIG_HOME: configHome,
+      XDG_DATA_HOME: dataHome,
+      // The documented service-manager values (systemd Environment=, launchd
+      // EnvironmentVariables) arrive exactly like this: inherited by the wrapper.
+      ZHIPU_API_KEY: 'synthetic-ambient-zhipu',
+      ZAI_API_KEY: 'synthetic-ambient-zai',
+      MINIMAX_API_KEY: 'synthetic-ambient-minimax',
+    },
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.signal).toBeNull();
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as ManagedBoundaryResult;
+}
+
+describe('deploy/whatsoup managed coding-plan credential boundary', () => {
+  const scrubbed = { ZHIPU_API_KEY: null, ZAI_API_KEY: null, MINIMAX_API_KEY: null };
+
+  it('drops a service-manager-only ZHIPU_API_KEY: the runtime forwards no key', () => {
+    expect(runManagedCodingPlanBoundary('ambient-only')).toEqual({ inherited: scrubbed, childKeys: {} });
+  }, 30_000);
+
+  it('forwards the private credential file value, not the ambient value', () => {
+    expect(runManagedCodingPlanBoundary('private-file')).toEqual({
+      inherited: scrubbed,
+      childKeys: { ZHIPU_API_KEY: 'synthetic-file-zhipu' },
+    });
+  }, 30_000);
+
+  it('forwards the platform keyring value, not the ambient value', () => {
+    expect(runManagedCodingPlanBoundary('keyring')).toEqual({
+      inherited: scrubbed,
+      childKeys: { ZHIPU_API_KEY: 'synthetic-keyring-zhipu' },
+    });
+  }, 30_000);
+
+  it('forwards the OpenCode auth.json login, not the ambient value', () => {
+    expect(runManagedCodingPlanBoundary('opencode-auth')).toEqual({
+      inherited: scrubbed,
+      childKeys: { ZHIPU_API_KEY: 'synthetic-auth-zhipu' },
+    });
+  }, 30_000);
 });

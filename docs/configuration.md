@@ -1902,7 +1902,7 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    must be current-user regular files with private mode and bounded size;
    symlinks and loose modes are refused.
 
-   **Route A — environment variable (universal).**
+   **Route A — environment variable (unmanaged processes only).**
    Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):
 
    | Provider service | Environment variable |
@@ -1930,36 +1930,39 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    even though it shares `MINIMAX_API_KEY`. The
    same service name is the keychain service for Routes B and C below.
 
-   For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
-   ```ini
-   # ~/.config/systemd/user/whatsoup@<name>.service.d/fallback-key.conf
-   [Service]
-   Environment="MINIMAX_API_KEY=sk-…"
-   # or: EnvironmentFile=%h/.config/whatsoup/<name>.env
-   ```
-   For **launchd** managed instances, add an `EnvironmentVariables` key to the plist (plists are generated in-process by `buildPlist()` in `src/fleet/platform.ts`; to regenerate and redeploy, follow [macOS launchd deployment](runbooks/macos-launchd-deployment.md)):
-   ```xml
-   <key>EnvironmentVariables</key>
-   <dict>
-     <key>MINIMAX_API_KEY</key>
-     <string>sk-…</string>
-   </dict>
-   ```
+   **Managed instances cannot use Route A.** Both service managers start the
+   instance through the `deploy/whatsoup` wrapper (`deploy/whatsoup@.service`
+   `ExecStart`, and the generated launchd plist's `ProgramArguments`). The
+   wrapper unsets every variable in this table before anything else runs, then
+   re-resolves only the keys it supplies itself from the secure stores: the
+   chat-instance keys, `OPENAI_API_KEY`/`PINECONE_API_KEY` for agent instances,
+   and the one handoff-distiller key. A provider key set only through a systemd
+   `Environment=`/`EnvironmentFile=` or a launchd `EnvironmentVariables` entry
+   therefore never reaches the runtime, and a fallback that needs it raises
+   `fallback_credential_missing`. Do not remove the scrub to work around this.
+   Provision managed instances through one of the stores the runtime reads after
+   the environment:
 
-   **launchd caveat:** generated plists emit `PATH`/`HOME`/`TMPDIR`
-   (+`WHATSOUP_NODE`, and — when configured through the instance
-   [`service` block](#service-launchd-render-options) — `CLAUDE_CONFIG_DIR`
-   plus a `pathPrepend`-extended `PATH`) in `EnvironmentVariables`
-   (`buildPlist()`, `src/fleet/platform.ts`). There is no `EnvironmentFile`
-   equivalent to the systemd units' per-instance `tokens.env`, so a hand-added
-   key outside that governed set (e.g. a credential variable) is LOST on the
-   next `deploy:launchd.generated` regeneration. On macOS prefer Route B: API-provider keys are read
-   in-process at request time, so the keychain entry alone is sufficient —
-   no plist edit needed. Grant the service user's launchd context access to
-   the item (`security add-generic-password -U …` under that user); keychain
-   reads from a non-GUI launchd session fail when the login keychain is
-   locked, which surfaces as `fallback_credential_missing` / QR-104 env
-   fallback rather than an explicit error.
+   - **Private credential file:** `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`
+     (default `~/.config/whatsoup/credentials/`), owned by the service user,
+     mode `0600`, holding only the key (for example `zai-coding-plan.key`).
+   - **Platform keyring:** Route B or Route C below.
+   - **OpenCode login:** the `auth.json` entry stored under the provider id
+     (`opencode auth login`, default `~/.local/share/opencode/auth.json`).
+
+   **Health-probe caveat:** the BOT ERRORS provider probe
+   (`deploy/scripts/bot-errors-health-check.py`) reads the loaded LaunchAgent
+   environment, which is the wrapper's input before the scrub. An environment-only
+   key can therefore make that probe pass while the managed runtime has no key.
+   A passing probe is not evidence that Route A provisioning works for a managed
+   instance.
+
+   On macOS prefer Route B. API-provider keys are read in-process at request
+   time, so the keychain entry alone is sufficient and no plist edit is needed.
+   Grant the service user's launchd context access to the item
+   (`security add-generic-password -U …` under that user). Keychain reads from a
+   non-GUI launchd session fail when the login keychain is locked, which
+   surfaces as `fallback_credential_missing` rather than an explicit error.
 
    **Route B — macOS Keychain.**
    The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
