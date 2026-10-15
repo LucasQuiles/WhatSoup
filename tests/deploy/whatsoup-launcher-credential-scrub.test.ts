@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
@@ -104,7 +104,9 @@ interface ManagedBoundaryResult {
  * execs the real runtime resolver (lookupCredential via buildChildEnv) for a
  * coding-plan model (zai-coding-plan unless overridden) — the managed-service
  * boundary the scrub-list assertions above cannot exercise. Only
- * `security`/`secret-tool` are stubbed.
+ * `security`/`secret-tool` are stubbed. The probe returns its result through a
+ * dedicated file: the runtime's own logger writes to stdout (e.g. the Linux
+ * secret-tool miss warning), so stdout is not a result channel.
  */
 function runManagedCodingPlanBoundary(
   route: ManagedRoute,
@@ -157,14 +159,16 @@ function runManagedCodingPlanBoundary(
   ].join('\n'), { mode: 0o700 });
 
   const probe = join(root, 'runtime-probe.ts');
+  const resultFile = join(root, 'probe-result.json');
   writeFileSync(probe, [
+    "import { writeFileSync } from 'node:fs';",
     `import { buildChildEnv } from ${JSON.stringify(resolve('src/runtimes/agent/session.ts'))};`,
     `import { SERVICE_ENV_MAP } from ${JSON.stringify(resolve('src/lib/provider-key-service.ts'))};`,
     `const env = buildChildEnv('opencode-cli', undefined, '${service}/synthetic-model');`,
     'const names = [...new Set(Object.values(SERVICE_ENV_MAP))];',
     'const childKeys = Object.fromEntries(names.filter((n) => Object.hasOwn(env, n)).map((n) => [n, env[n]]));',
     "const inherited = Object.fromEntries(['ZHIPU_API_KEY', 'ZAI_API_KEY', 'MINIMAX_API_KEY'].map((n) => [n, process.env[n] ?? null]));",
-    'process.stdout.write(JSON.stringify({ inherited, childKeys }));',
+    `writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({ inherited, childKeys }), { flag: 'wx', mode: 0o600 });`,
     '',
   ].join('\n'));
 
@@ -205,8 +209,12 @@ function runManagedCodingPlanBoundary(
   });
   expect(result.error).toBeUndefined();
   expect(result.signal).toBeNull();
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as ManagedBoundaryResult;
+  const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+  expect(result.status, output).toBe(0);
+  // Runtime logs may share stdout/stderr; they must never carry a key value.
+  expect(output).not.toContain('synthetic-');
+  expect(existsSync(resultFile), output).toBe(true);
+  return JSON.parse(readFileSync(resultFile, 'utf8')) as ManagedBoundaryResult;
 }
 
 describe('deploy/whatsoup managed coding-plan credential boundary', () => {
