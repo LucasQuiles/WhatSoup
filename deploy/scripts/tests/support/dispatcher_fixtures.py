@@ -121,6 +121,25 @@ def expand_notice(paths: dict[str, Path], text: str) -> str:
     return f"{text}\n{packet['body']}"
 
 
+def deferred_notice_bodies(mod, notice_kind: str) -> list[str]:
+    """Bodies of the notices of `notice_kind` folded into the daily information summary.
+
+    Relay 16 C1/C3: an auto-close digest and an information-only notice send no
+    WhatsApp message of their own. Each writes its packet and queues one entry
+    in incident state's informationSummary; its full body is in that packet.
+    """
+    state = mod.load_incident_state(mod.state_paths())
+    pending = (state.get("informationSummary") or {}).get("pending") or []
+    bodies = []
+    for entry in pending:
+        if entry.get("noticeKind") != notice_kind:
+            continue
+        packet = mod.read_notice_packet(mod.state_paths(), entry["ref"])
+        assert packet is not None, entry
+        bodies.append(packet["body"])
+    return bodies
+
+
 def capture_sends(mod) -> list[str]:
     """Replace `mod.send_whatsapp` with a recorder and return the list it appends to.
 

@@ -62,6 +62,22 @@ def _write_state(mod, records: dict) -> None:
 _capture_sends = dispatcher_fixtures.capture_sends
 
 
+def _autoclose_digests(mod) -> list[str]:
+    """Relay 16 C1: the auto-close summary is no message; it is a packet plus a
+    line in the daily information summary. Its bodies, read through their Refs."""
+    return dispatcher_fixtures.deferred_notice_bodies(mod, "stale-autoclose")
+
+
+def _assert_line_card_deferral(mod, key, sent, sends) -> None:
+    """Relay 16 C2: a logged-out / bond-lost line is rechecked, not renotified on
+    its own; one the recheck cannot clear stays open for the daily line card."""
+    assert sent == 0 and sends == []
+    log_types = [record.get("type") for record in dispatcher_fixtures.dispatch_log_records(mod.state_paths())]
+    assert "stale_renotify_deferred_to_line_card" in log_types
+    record = _open_incidents(mod)[key]
+    assert record.get("lastLineRecheckVerdict") == "could_not_check"
+
+
 def _open_incidents(mod) -> dict:
     path = mod.state_paths()["incident_state"]
     return json.loads(path.read_text())["openIncidents"]
@@ -91,9 +107,11 @@ def test_nonactionable_stale_is_suppressed_and_autoclosed(tmp_path):
 
     assert sent == 0 and failed == 0 and err is None
     # exactly one consolidated auto-close summary, no per-incident renotify
-    assert len(sends) == 1
-    assert "Auto-closed" in sends[0]
-    assert "none — informational" in sends[0]
+    assert sends == []
+    digests = _autoclose_digests(mod)
+    assert len(digests) == 1
+    assert "Auto-closed" in digests[0]
+    assert "none — informational" in digests[0]
     # incident terminally removed from open state
     assert key not in _open_incidents(mod)
 
@@ -134,6 +152,33 @@ def test_nonactionable_stale_below_escalate_suppressed_not_closed(tmp_path):
 def test_actionable_stale_still_sent(tmp_path):
     mod = _load(tmp_path)
     now = int(time.time())
+    # A standing physical action outside the line-recheck family (relay 16 C2
+    # covers logged-out / bond-lost lines only) still renotifies on its own.
+    key = "host-a|instance-x|daily-health:primary_phone:instance-x"
+    _write_state(mod, {
+        key: {
+            "status": "awaiting_physical",
+            "openedAt": now - 10 * 86400,
+            "lastSeenAt": now - 8 * 86400,
+            "lastSummary": "primary phone needs a physical check",
+            "failureCode": "PRIMARY_PHONE_UNVERIFIED",
+            "recoverability": "manual_relink_required",
+            "assetKind": "whatsapp_linked_device",
+        },
+    })
+    sends = _capture_sends(mod)
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 1 and failed == 0
+    assert len(sends) == 1
+    assert "Auto-closed" not in sends[0]
+    assert "none — informational" not in sends[0]
+    assert key in _open_incidents(mod)  # not removed
+
+
+def test_actionable_bond_lost_stale_goes_to_the_line_card(tmp_path):
+    mod = _load(tmp_path)
+    now = int(time.time())
     key = "host-a|instance-x|whatsapp_device_bond_lost"
     _write_state(mod, {
         key: {
@@ -149,11 +194,9 @@ def test_actionable_stale_still_sent(tmp_path):
     sends = _capture_sends(mod)
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
-    assert sent == 1 and failed == 0
-    assert len(sends) == 1
-    assert "Auto-closed" not in sends[0]
-    assert "none — informational" not in sends[0]
-    assert key in _open_incidents(mod)  # not removed
+    assert failed == 0 and err is None
+    _assert_line_card_deferral(mod, key, sent, sends)
+    assert _autoclose_digests(mod) == []  # never auto-closed
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +279,10 @@ def test_stale_verify_filler_with_failure_code_is_suppressed(tmp_path):
 
     assert sent == 0
     # past escalate horizon (5d > 1d default) -> consolidated auto-close summary
-    assert len(sends) == 1
-    assert "Auto-closed" in sends[0]
+    assert sends == []
+    digests = _autoclose_digests(mod)
+    assert len(digests) == 1
+    assert "Auto-closed" in digests[0]
     assert key not in _open_incidents(mod)
 
 
@@ -267,8 +312,10 @@ def test_runtime_tool_error_stale_is_suppressed_and_autoclosed(tmp_path):
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
     assert sent == 0 and failed == 0 and err is None
-    assert len(sends) == 1
-    assert "Auto-closed" in sends[0]
+    assert sends == []
+    digests = _autoclose_digests(mod)
+    assert len(digests) == 1
+    assert "Auto-closed" in digests[0]
     assert key not in _open_incidents(mod)
 
 
@@ -296,6 +343,8 @@ def test_non_tool_error_source_with_failure_code_still_actionable(tmp_path):
     sends = _capture_sends(mod)
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
-    assert sent == 1 and failed == 0
-    assert "Auto-closed" not in sends[0]
+    # Still actionable (not auto-closed); relay 16 C2 hands it to the line card.
+    assert failed == 0
+    _assert_line_card_deferral(mod, key, sent, sends)
+    assert _autoclose_digests(mod) == []
     assert key in _open_incidents(mod)

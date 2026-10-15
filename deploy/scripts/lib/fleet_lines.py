@@ -1,0 +1,314 @@
+"""The local fleet API's line list (``GET /api/lines``), shared by its two readers.
+
+``bot-errors-health-check.py`` reads it for the daily inventory line; the
+dispatcher reads it to recheck an old logged-out / bond-lost incident against
+the line's live state before re-announcing it (relay 16 C2). Both use the same
+endpoint, token file and profile keys, so the endpoint, token and response
+parsing live here once. No new credential: the token is the fleet token the
+health check already reads.
+
+What a line row offers the recheck (``src/fleet/routes/lines.ts``):
+``linkedStatus`` (linked | unlinked | unknown) and ``linkedStatusConfidence``
+(confirmed | inferred). The row carries NO outbound-send time (``lastActive``
+is any activity and ``messageStats`` holds counts only), so a recheck can use
+linked + confirmed alone, never "a send after the incident".
+"""
+from __future__ import annotations
+
+import errno
+import json
+import os
+import socket
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+from urllib.request import Request, urlopen
+
+try:  # imported as ``lib.fleet_lines`` by the deploy scripts
+    from lib.fleet_config import (
+        HEALTH_PROFILE_JSON_ENV,
+        FleetConfigError,
+        read_json_object,
+        resolve_health_profile,
+        tracked_health_profile_path,
+    )
+except ImportError:  # loaded by file path, without deploy/scripts on sys.path
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from lib.fleet_config import (
+        HEALTH_PROFILE_JSON_ENV,
+        FleetConfigError,
+        read_json_object,
+        resolve_health_profile,
+        tracked_health_profile_path,
+    )
+
+
+FLEET_LINES_MAX_BYTES = 256 * 1024
+DEFAULT_FLEET_TOKEN_FILE = Path.home() / ".config/whatsoup/fleet-tokens.json"
+
+
+def host_profile_name() -> str:
+    """Host token used to name per-host profiles.
+
+    Mirrors the install scripts (``hostname -s | tr '[:upper:]' '[:lower:]'``):
+    first DNS label of the hostname, lowercased.
+    """
+    return socket.gethostname().split(".")[0].strip().lower()
+
+
+def fleet_api_endpoint(raw_url: str) -> str:
+    url = raw_url.rstrip("/")
+    if url.endswith("/api/lines") or url.endswith("/api/instances"):
+        return url
+    return f"{url}/api/lines"
+
+
+def fleet_api_profile_value(profile: dict[str, Any], key: str) -> str | None:
+    value = profile.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    fleet_api = profile.get("fleetApi") if isinstance(profile.get("fleetApi"), dict) else {}
+    nested = fleet_api.get(key)
+    if isinstance(nested, str) and nested.strip():
+        return nested.strip()
+    return None
+
+
+def fleet_api_profile_port(profile: dict[str, Any]) -> str | None:
+    fleet_api = profile.get("fleetApi") if isinstance(profile.get("fleetApi"), dict) else {}
+    for source in (profile, fleet_api):
+        for key in ("fleetApiPort", "port"):
+            value = source.get(key)
+            if isinstance(value, int):
+                return str(value)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def fleet_api_default_url(profile: dict[str, Any]) -> str:
+    raw_bind = (
+        os.environ.get("FLEET_BIND_ADDRESS")
+        or fleet_api_profile_value(profile, "fleetBindAddress")
+        or fleet_api_profile_value(profile, "bindAddress")
+        or "127.0.0.1"
+    )
+    bind = raw_bind.strip()
+    if bind in {"", "0.0.0.0", "::", "[::]"}:
+        bind = "127.0.0.1"
+    elif ":" in bind and not bind.startswith("["):
+        bind = f"[{bind}]"
+    port = (
+        os.environ.get("BOT_ERRORS_FLEET_API_PORT")
+        or fleet_api_profile_port(profile)
+        or "9099"
+    ).strip()
+    return f"http://{bind}:{port}"
+
+
+def fleet_api_url(profile: dict[str, Any]) -> str:
+    """The /api/lines endpoint: env override, then the profile, then the default bind."""
+    raw_url = (
+        os.environ.get("BOT_ERRORS_FLEET_API_URL")
+        or fleet_api_profile_value(profile, "fleetApiUrl")
+        or fleet_api_default_url(profile)
+    )
+    return fleet_api_endpoint(raw_url)
+
+
+def fleet_token_path(profile: dict[str, Any]) -> str:
+    return (
+        os.environ.get("BOT_ERRORS_FLEET_TOKEN_FILE")
+        or fleet_api_profile_value(profile, "fleetApiTokenFile")
+        or str(DEFAULT_FLEET_TOKEN_FILE)
+    )
+
+
+def _short_error(text: str) -> str:
+    return text[:160]
+
+
+def read_fleet_token_text(
+    path: Path, *, describe_error: Callable[[str], str] = _short_error
+) -> tuple[str | None, str | None]:
+    """Read the token file without following a symlink anywhere on its path.
+
+    Returns ``(text, None)`` or ``(None, reason)``. ``describe_error`` renders
+    an OS error for the reason (the health check passes its evidence redactor).
+    """
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if len(absolute.parts) >= 2:
+        platform_root = Path(absolute.parts[0]) / absolute.parts[1]
+        if platform_root in {Path("/tmp"), Path("/var")} and platform_root.is_symlink():
+            absolute = Path(os.path.realpath(platform_root)).joinpath(*absolute.parts[2:])
+    parts = absolute.parts
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if no_follow is None or directory_flag is None or len(parts) < 2:
+        return None, "token_secure_open_unavailable"
+
+    common_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_fd = os.open(parts[0], common_flags | directory_flag)
+    try:
+        for depth, part in enumerate(parts[1:-1], start=1):
+            try:
+                next_fd = os.open(part, common_flags | directory_flag | no_follow, dir_fd=parent_fd)
+            except OSError as exc:
+                error_name = errno.errorcode.get(exc.errno, "UNKNOWN")
+                return None, f"token_parent_refused errno={error_name} depth={depth}"
+            os.close(parent_fd)
+            parent_fd = next_fd
+
+        leaf = parts[-1]
+        try:
+            file_fd = os.open(
+                leaf,
+                common_flags | no_follow | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            try:
+                leaf_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError:
+                leaf_stat = None
+            if leaf_stat is not None and stat.S_ISLNK(leaf_stat.st_mode):
+                return None, "token_symlink_refused"
+            return None, f"token_unreadable error={describe_error(str(exc))}"
+
+        try:
+            st = os.fstat(file_fd)
+            mode = stat.S_IMODE(st.st_mode)
+            if not stat.S_ISREG(st.st_mode):
+                return None, "token_non_regular_refused"
+            if mode & 0o077:
+                return None, f"token_mode_too_open mode={mode:o}"
+            if not mode & 0o400:
+                return None, f"token_owner_read_required mode={mode:o}"
+            with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
+                file_fd = -1
+                return handle.read(), None
+        finally:
+            if file_fd >= 0:
+                os.close(file_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def parse_fleet_token(loaded: Any) -> tuple[str | None, int, str | None]:
+    """``(active token, accept count, error)`` from the parsed token file."""
+    if not isinstance(loaded, dict):
+        return None, 0, "token_json_root_not_object"
+    active = loaded.get("active")
+    accept = loaded.get("accept")
+    accept_count = len(accept) if isinstance(accept, list) else 0
+    if not isinstance(active, str) or not active.strip():
+        return None, accept_count, "active_token_missing"
+    return active.strip(), accept_count, None
+
+
+def fleet_lines_from_data(data: Any) -> list[Any] | None:
+    """The line rows of a parsed /api/lines response, or None for an unknown shape."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("instances"), list):
+        return data["instances"]
+    if isinstance(data, dict) and isinstance(data.get("lines"), list):
+        return data["lines"]
+    return None
+
+
+def profile_flag(profile: dict[str, Any], key: str, default: bool) -> bool:
+    value = profile.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def load_local_health_profile(repo_root: Path) -> dict[str, Any]:
+    """This host's health profile, as the health check resolves it, or {} when there is none."""
+    raw = os.environ.get(HEALTH_PROFILE_JSON_ENV)
+    try:
+        if raw:
+            loaded = json.loads(raw)
+            return loaded if isinstance(loaded, dict) else {}
+        return read_json_object(resolve_health_profile(tracked_health_profile_path(repo_root, host_profile_name())))
+    except (FleetConfigError, ValueError, OSError):
+        return {}
+
+
+@dataclass(frozen=True)
+class FleetLinesRead:
+    """One read of the local line list. ``lines`` is None when it could not be read."""
+
+    lines: dict[str, dict[str, Any]] | None
+    error: str | None = None
+
+
+def read_fleet_lines(
+    profile: dict[str, Any],
+    *,
+    timeout: float,
+    opener: Callable[..., Any] = urlopen,
+) -> FleetLinesRead:
+    """GET the local /api/lines with the fleet token; rows keyed by line name.
+
+    Every failure is a reason, never a raise: a recheck that cannot read the
+    list must say "could not check", not stop a cycle.
+    """
+    if not profile_flag(profile, "expectFleetApi", False):
+        return FleetLinesRead(None, "fleet_api_not_expected_on_this_host")
+    try:
+        raw, read_error = read_fleet_token_text(Path(fleet_token_path(profile)).expanduser())
+        if read_error is not None:
+            return FleetLinesRead(None, read_error.split(" ", 1)[0])
+        token, _accept_count, token_error = parse_fleet_token(json.loads(raw or ""))
+        if token_error is not None:
+            return FleetLinesRead(None, token_error)
+        request = Request(fleet_api_url(profile), method="GET", headers={"Authorization": f"Bearer {token}"})
+        with opener(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 200))
+            body = response.read(FLEET_LINES_MAX_BYTES).decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001 - any failure is "could not check"
+        return FleetLinesRead(None, f"fleet_api_unreadable:{type(exc).__name__}")
+    if status < 200 or status >= 300:
+        return FleetLinesRead(None, f"fleet_api_status_{status}")
+    try:
+        rows = fleet_lines_from_data(json.loads(body))
+    except ValueError:
+        return FleetLinesRead(None, "fleet_api_invalid_json")
+    if rows is None:
+        return FleetLinesRead(None, "fleet_api_invalid_response")
+    lines: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("name"), str) and row["name"].strip():
+            lines[row["name"].strip()] = row
+    return FleetLinesRead(lines)
+
+
+LINE_LINKED_CONFIRMED = "linked_confirmed"
+LINE_LOGGED_OUT = "logged_out"
+LINE_COULD_NOT_CHECK = "could_not_check"
+
+
+def line_verdict(row: dict[str, Any] | None) -> str:
+    """linked + confirmed, unlinked + confirmed, or could-not-check (anything else).
+
+    Inferred confidence is never enough either way: an inferred "linked" can be
+    a stale reading, and an inferred "unlinked" can be a missing auth file read.
+    """
+    if not isinstance(row, dict):
+        return LINE_COULD_NOT_CHECK
+    status = row.get("linkedStatus")
+    confidence = row.get("linkedStatusConfidence")
+    if confidence != "confirmed":
+        return LINE_COULD_NOT_CHECK
+    if status == "linked":
+        return LINE_LINKED_CONFIRMED
+    if status == "unlinked":
+        return LINE_LOGGED_OUT
+    return LINE_COULD_NOT_CHECK

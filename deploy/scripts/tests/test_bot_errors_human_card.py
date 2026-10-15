@@ -497,9 +497,9 @@ def test_stale_digest_notice_is_a_card_with_a_packet(state, monkeypatch) -> None
     sends: list[str] = []
     monkeypatch.setattr(_mod, "send_whatsapp", lambda text, *a, **k: sends.append(text))
     now = int(time.time())
-    # A stale renotify goes out only when a standing action remains: here an
-    # awaiting-physical incident whose line needs a relink.
-    key = "mac-host-1.local|fixture-bot|whatsapp_device_bond_lost"
+    # A stale renotify goes out on its own only when a standing action remains
+    # outside the line-recheck family (relay 16 C2): here a primary-phone check.
+    key = "mac-host-1.local|fixture-bot|daily-health:primary_phone:fixture-bot"
     state_doc = dispatcher_fixtures.empty_state()
     state_doc["openIncidents"][key] = {
         "status": "awaiting_physical",

@@ -198,6 +198,10 @@ def test_sweep_resolves_and_removes_stable_entry(tmp_path):
 
     sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, errors = mod.sweep_flap_storms(paths)
+    # Relay 16 C3: a storm close is information only -- no message of its own;
+    # its packet is written and it is one line of the daily information summary.
+    assert sends == []
+    sends = dispatcher_fixtures.deferred_notice_bodies(mod, "flap-resolved")
 
     assert resolved == 1 and errors == 0
     assert len(sends) == 1
@@ -563,6 +567,10 @@ def test_rate_decay_resolve_never_claims_stable(tmp_path):
 
     sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, errors = mod.sweep_flap_storms(paths)
+    # Relay 16 C3: a storm close is information only -- no message of its own;
+    # its packet is written and it is one line of the daily information summary.
+    assert sends == []
+    sends = dispatcher_fixtures.deferred_notice_bodies(mod, "flap-resolved")
 
     assert (resolved, errors) == (1, 0)
     assert len(sends) == 1
@@ -588,6 +596,10 @@ def test_genuine_silence_still_reports_stable(tmp_path):
 
     sends: list[str] = dispatcher_fixtures.capture_sends(mod)
     resolved, _ = mod.sweep_flap_storms(paths)
+    # Relay 16 C3: a storm close is information only -- no message of its own;
+    # its packet is written and it is one line of the daily information summary.
+    assert sends == []
+    sends = dispatcher_fixtures.deferred_notice_bodies(mod, "flap-resolved")
 
     assert resolved == 1
     assert "stable after" in sends[0], f"expected recovery wording, got:\n{sends[0]}"

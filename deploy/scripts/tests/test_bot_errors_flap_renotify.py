@@ -179,6 +179,10 @@ def test_resolve_states_persistent_handoff_when_underlying_still_open(tmp_path, 
     sends: list[str] = []
     monkeypatch.setattr(mod, "send_whatsapp", lambda text, *a, **k: sends.append(dispatcher_fixtures.expand_notice(mod.state_paths(), text)))
     resolved, errors = mod.sweep_flap_storms(paths)
+    # Relay 16 C3: a storm close is information only -- no message of its own;
+    # its packet is written and it is one line of the daily information summary.
+    assert sends == []
+    sends = dispatcher_fixtures.deferred_notice_bodies(mod, "flap-resolved")
 
     assert resolved == 1 and errors == 0
     assert len(sends) == 1
@@ -206,6 +210,10 @@ def test_resolve_keeps_stable_wording_when_underlying_cleared(tmp_path, monkeypa
     sends: list[str] = []
     monkeypatch.setattr(mod, "send_whatsapp", lambda text, *a, **k: sends.append(dispatcher_fixtures.expand_notice(mod.state_paths(), text)))
     resolved, _ = mod.sweep_flap_storms(paths)
+    # Relay 16 C3: a storm close is information only -- no message of its own;
+    # its packet is written and it is one line of the daily information summary.
+    assert sends == []
+    sends = dispatcher_fixtures.deferred_notice_bodies(mod, "flap-resolved")
 
     assert resolved == 1
     assert "stable after" in sends[0].lower()

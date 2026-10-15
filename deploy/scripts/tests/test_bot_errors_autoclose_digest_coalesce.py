@@ -59,6 +59,20 @@ def _load(state_dir: Path, extra_env: dict[str, str] | None = None):
 _capture_sends = dispatcher_fixtures.capture_sends
 
 
+def _autoclose_digests(mod) -> list[str]:
+    """Every emitted auto-close digest, read through its Ref (relay 16 C1: no message)."""
+    return dispatcher_fixtures.deferred_notice_bodies(mod, "stale-autoclose")
+
+
+def _fail_digest(mod) -> None:
+    """Make emitting the digest fail (its packet/summary step raises)."""
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("packet store down")
+
+    mod.defer_information_notice = _boom  # type: ignore[assignment]
+
+
 def _stale_tool_error(now: int, n: int) -> dict:
     """A non-actionable runtime-tool-error:* incident, stale + past escalate."""
     return {
@@ -136,8 +150,10 @@ def test_window_elapsed_emits_single_digest(tmp_path):
     sends = _capture_sends(mod)
     mod.sweep_stale_incidents(mod.state_paths())
 
-    assert len(sends) == 1
-    assert "Auto-closed 6 non-actionable" in sends[0]  # 4 pending + 2 this sweep
+    assert sends == []  # C1: no message
+    digests = _autoclose_digests(mod)
+    assert len(digests) == 1
+    assert "Auto-closed 6 non-actionable" in digests[0]  # 4 pending + 2 this sweep
     accum = _read_state(mod)["staleAutocloseDigest"]
     assert accum["pendingCount"] == 0  # reset after emit
     assert accum["lastDigestAt"] >= now
@@ -167,7 +183,8 @@ def test_quiet_pending_digest_success_persists_and_does_not_resend_after_reload(
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
     assert sent == 0 and failed == 0 and err is None
-    assert len(sends) == 1
+    assert sends == []  # C1: no message
+    assert len(_autoclose_digests(mod)) == 1
     persisted = _read_state(mod)["staleAutocloseDigest"]
     assert persisted["pendingCount"] == 0
     assert persisted["pendingKeys"] == []
@@ -179,6 +196,7 @@ def test_quiet_pending_digest_success_persists_and_does_not_resend_after_reload(
 
     assert sent == 0 and failed == 0 and err is None
     assert reloaded_sends == []
+    assert len(_autoclose_digests(reloaded)) == 1  # not emitted again
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +217,7 @@ def test_quiet_pending_digest_failure_stays_pending_for_retry(tmp_path):
         },
     )
 
-    def _boom(text, *a, **k):
-        raise RuntimeError("whatsapp down")
-
-    mod.send_whatsapp = _boom  # type: ignore[assignment]
+    _fail_digest(mod)
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
     assert sent == 0 and failed == 0 and err is not None
@@ -227,8 +242,10 @@ def test_burst_cap_emits_within_window(tmp_path):
     sends = _capture_sends(mod)
     mod.sweep_stale_incidents(mod.state_paths())
 
-    assert len(sends) == 1  # 4 >= cap of 3 -> emit despite open window
-    assert "Auto-closed 4 non-actionable" in sends[0]
+    assert sends == []  # C1: no message
+    digests = _autoclose_digests(mod)
+    assert len(digests) == 1  # 4 >= cap of 3 -> emit despite open window
+    assert "Auto-closed 4 non-actionable" in digests[0]
     assert _read_state(mod)["staleAutocloseDigest"]["pendingCount"] == 0
 
 
@@ -244,8 +261,10 @@ def test_coalescing_disabled_emits_per_sweep(tmp_path):
     sends = _capture_sends(mod)
     mod.sweep_stale_incidents(mod.state_paths())
 
-    assert len(sends) == 1  # gate off -> emit every run
-    assert "Auto-closed 2 non-actionable" in sends[0]
+    assert sends == []  # C1: no message
+    digests = _autoclose_digests(mod)
+    assert len(digests) == 1  # gate off -> emit every run
+    assert "Auto-closed 2 non-actionable" in digests[0]
 
 
 # ---------------------------------------------------------------------------
@@ -262,10 +281,7 @@ def test_send_failure_keeps_batch_pending(tmp_path):
         digest={"lastDigestAt": now - 4000, "pendingCount": 0, "pendingKeys": []},  # window elapsed -> due
     )
 
-    def _boom(text, *a, **k):
-        raise RuntimeError("whatsapp down")
-
-    mod.send_whatsapp = _boom  # type: ignore[assignment]
+    _fail_digest(mod)
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
     st = _read_state(mod)
