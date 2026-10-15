@@ -112,6 +112,11 @@ export class HandoffDistillCoordinator {
     this.runner = null;
   }
 
+  /** Fence an in-flight distill before a conversation artifact is invalidated. */
+  invalidateConversation(conversationKey: string): void {
+    this.runner?.invalidateConversation(conversationKey);
+  }
+
   /** Construct the production runner. `resolved` is captured for distillFor. */
   private buildRunner(resolved: ResolvedDistillModel): HandoffDistillRunner {
     // Per-conversation token baseline: total input+output since the row's last

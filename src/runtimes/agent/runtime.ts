@@ -3953,6 +3953,13 @@ export class AgentRuntime implements Runtime {
     );
   }
 
+  /** Fence pending distillation before a privacy lifecycle removes its artifact. */
+  invalidateHandoffArtifacts(conversationKeys: readonly string[]): void {
+    for (const conversationKey of conversationKeys) {
+      this.handoffDistill.invalidateConversation(conversationKey);
+    }
+  }
+
   async start(): Promise<void> {
     // Refuse configured paths before startup writes or provider setup.
     const home = homedir();
@@ -5115,6 +5122,7 @@ export class AgentRuntime implements Runtime {
               },
               clearHandoffLatches: () => {
                 const resetKey = toConversationKey(chatJid);
+                this.invalidateHandoffArtifacts([resetKey]);
                 clearStandbyNotice(this.db, resetKey);
                 deleteHandoffArtifact(this.db, resetKey);
               },

@@ -19,8 +19,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IncomingMessage } from '../../../src/core/types.ts';
 import { ensureChatPreferenceSchema } from '../../../src/runtimes/agent/chat-preference-db.ts';
-import { ensureHandoffArtifactSchema } from '../../../src/runtimes/agent/handoff-artifact.ts';
+import {
+  ensureHandoffArtifactSchema,
+  getHandoffArtifact,
+  upsertHandoffArtifact,
+} from '../../../src/runtimes/agent/handoff-artifact.ts';
 import { ensureAgentSchema } from '../../../src/runtimes/agent/session-db.ts';
+import { HandoffDistillCoordinator } from '../../../src/runtimes/agent/handoff-distill-coordinator.ts';
 import { OutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import {
   type StopTeardownReport,
@@ -492,6 +497,20 @@ describe('a local command reply is a status op of the open turn', () => {
     const turn = openCommandTurn();
     ensureStandbyNoticeSchema(turn.db);
     ensureHandoffArtifactSchema(turn.db);
+    upsertHandoffArtifact(turn.db, {
+      conversationKey: turn.key,
+      summary: 'handoff summary to clear',
+      seededArtifacts: 'temporary cross-provider context',
+      updatedAt: Date.now(),
+      sourceProvider: 'test-provider',
+      sourceModel: 'test-model',
+      tokenBaseline: 42,
+    });
+    const invalidate = vi.spyOn(HandoffDistillCoordinator.prototype, 'invalidateConversation')
+      .mockImplementation((conversationKey) => {
+        expect(conversationKey).toBe(turn.key);
+        expect(getHandoffArtifact(turn.db, conversationKey)).not.toBeNull();
+      });
     const sendDirect = boundary(turn);
 
     await callers(turn)._handleMessageInner(inbound(turn, '/new'));
@@ -504,6 +523,8 @@ describe('a local command reply is a status op of the open turn', () => {
       boundary: [[turn.jid, 'status']],
       queued: [],
     });
+    expect(invalidate).toHaveBeenCalledWith(turn.key);
+    expect(getHandoffArtifact(turn.db, turn.key)).toBeNull();
   });
 
   // M-PORT-MP (RT:2831 and RT:2833): the model-pin host forwards the role each
