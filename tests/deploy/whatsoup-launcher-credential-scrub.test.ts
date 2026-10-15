@@ -89,6 +89,11 @@ function sliceBetween(source: string, startMarker: string, endMarker: string): s
 
 type ManagedRoute = 'ambient-only' | 'private-file' | 'keyring' | 'opencode-auth';
 
+interface ManagedBoundaryOptions {
+  service?: 'zai-coding-plan' | 'minimax-coding-plan';
+  distillModel?: string;
+}
+
 interface ManagedBoundaryResult {
   inherited: Record<string, string | null>;
   childKeys: Record<string, string>;
@@ -97,10 +102,15 @@ interface ManagedBoundaryResult {
 /**
  * Runs the launcher's real scrub, keyring helper and agent restore block, then
  * execs the real runtime resolver (lookupCredential via buildChildEnv) for a
- * zai-coding-plan model — the managed-service boundary the scrub-list
- * assertions above cannot exercise. Only `security`/`secret-tool` are stubbed.
+ * coding-plan model (zai-coding-plan unless overridden) — the managed-service
+ * boundary the scrub-list assertions above cannot exercise. Only
+ * `security`/`secret-tool` are stubbed.
  */
-function runManagedCodingPlanBoundary(route: ManagedRoute): ManagedBoundaryResult {
+function runManagedCodingPlanBoundary(
+  route: ManagedRoute,
+  { service = 'zai-coding-plan', distillModel }: ManagedBoundaryOptions = {},
+): ManagedBoundaryResult {
+  const suffix = service === 'zai-coding-plan' ? 'zhipu' : service;
   const root = tmp.make('whatsoup-launcher-coding-plan');
   const bin = join(root, 'bin');
   const configHome = join(root, 'config');
@@ -115,22 +125,22 @@ function runManagedCodingPlanBoundary(route: ManagedRoute): ManagedBoundaryResul
   if (route === 'private-file') {
     const credentials = join(configHome, 'whatsoup', 'credentials');
     mkdirSync(credentials, { recursive: true, mode: 0o700 });
-    writeFileSync(join(credentials, 'zai-coding-plan.key'), 'synthetic-file-zhipu\n', { mode: 0o600 });
+    writeFileSync(join(credentials, `${service}.key`), `synthetic-file-${suffix}\n`, { mode: 0o600 });
   }
   if (route === 'opencode-auth') {
     const authDir = join(dataHome, 'opencode');
     mkdirSync(authDir, { recursive: true, mode: 0o700 });
     writeFileSync(
       join(authDir, 'auth.json'),
-      JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'synthetic-auth-zhipu' } }),
+      JSON.stringify({ [service]: { type: 'api', key: `synthetic-auth-${suffix}` } }),
       { mode: 0o600 },
     );
   }
   const keyringHit = route === 'keyring' ? 'yes' : 'no';
   writeFileSync(join(bin, 'security'), [
     '#!/usr/bin/env bash',
-    `if [ "${keyringHit}" = yes ] && [ "$1" = find-generic-password ] && [ "$3" = zai-coding-plan ]; then`,
-    "  printf 'synthetic-keyring-zhipu\\n'; exit 0",
+    `if [ "${keyringHit}" = yes ] && [ "$1" = find-generic-password ] && [ "$3" = ${service} ]; then`,
+    `  printf 'synthetic-keyring-${suffix}\\n'; exit 0`,
     'fi',
     "echo 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2",
     'exit 44',
@@ -139,8 +149,8 @@ function runManagedCodingPlanBoundary(route: ManagedRoute): ManagedBoundaryResul
   writeFileSync(join(bin, 'secret-tool'), [
     '#!/usr/bin/env bash',
     '[ "$1" = --help ] && exit 0',
-    `if [ "${keyringHit}" = yes ] && [ "$1" = lookup ] && [ "$3" = zai-coding-plan ]; then`,
-    "  printf 'synthetic-keyring-zhipu\\n'; exit 0",
+    `if [ "${keyringHit}" = yes ] && [ "$1" = lookup ] && [ "$3" = ${service} ]; then`,
+    `  printf 'synthetic-keyring-${suffix}\\n'; exit 0`,
     'fi',
     'exit 1',
     '',
@@ -150,7 +160,7 @@ function runManagedCodingPlanBoundary(route: ManagedRoute): ManagedBoundaryResul
   writeFileSync(probe, [
     `import { buildChildEnv } from ${JSON.stringify(resolve('src/runtimes/agent/session.ts'))};`,
     `import { SERVICE_ENV_MAP } from ${JSON.stringify(resolve('src/lib/provider-key-service.ts'))};`,
-    "const env = buildChildEnv('opencode-cli', undefined, 'zai-coding-plan/synthetic-model');",
+    `const env = buildChildEnv('opencode-cli', undefined, '${service}/synthetic-model');`,
     'const names = [...new Set(Object.values(SERVICE_ENV_MAP))];',
     'const childKeys = Object.fromEntries(names.filter((n) => Object.hasOwn(env, n)).map((n) => [n, env[n]]));',
     "const inherited = Object.fromEntries(['ZHIPU_API_KEY', 'ZAI_API_KEY', 'MINIMAX_API_KEY'].map((n) => [n, process.env[n] ?? null]));",
@@ -190,6 +200,7 @@ function runManagedCodingPlanBoundary(route: ManagedRoute): ManagedBoundaryResul
       ZHIPU_API_KEY: 'synthetic-ambient-zhipu',
       ZAI_API_KEY: 'synthetic-ambient-zai',
       MINIMAX_API_KEY: 'synthetic-ambient-minimax',
+      ...(distillModel === undefined ? {} : { WHATSOUP_HANDOFF_DISTILL_MODEL: distillModel }),
     },
   });
   expect(result.error).toBeUndefined();
@@ -223,6 +234,25 @@ describe('deploy/whatsoup managed coding-plan credential boundary', () => {
     expect(runManagedCodingPlanBoundary('opencode-auth')).toEqual({
       inherited: scrubbed,
       childKeys: { ZHIPU_API_KEY: 'synthetic-auth-zhipu' },
+    });
+  }, 30_000);
+
+  // The selected-distiller restore is a deliberate exception to the scrub, and
+  // minimax-coding-plan shares the restored variable (docs/configuration.md).
+  it('without a distiller, a minimax-coding-plan fallback forwards its own stored key', () => {
+    expect(runManagedCodingPlanBoundary('private-file', { service: 'minimax-coding-plan' })).toEqual({
+      inherited: scrubbed,
+      childKeys: { MINIMAX_API_KEY: 'synthetic-file-minimax-coding-plan' },
+    });
+  }, 30_000);
+
+  it('a MiniMax distiller restores the captured MINIMAX_API_KEY, shadowing the coding-plan key', () => {
+    expect(runManagedCodingPlanBoundary('private-file', {
+      service: 'minimax-coding-plan',
+      distillModel: 'MiniMax-M2.7',
+    })).toEqual({
+      inherited: { ...scrubbed, MINIMAX_API_KEY: 'synthetic-ambient-minimax' },
+      childKeys: { MINIMAX_API_KEY: 'synthetic-ambient-minimax' },
     });
   }, 30_000);
 });

@@ -1930,16 +1930,29 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    even though it shares `MINIMAX_API_KEY`. The
    same service name is the keychain service for Routes B and C below.
 
-   **Managed instances cannot use Route A.** Both service managers start the
+   **Managed instances cannot rely on Route A.** Both service managers start the
    instance through the `deploy/whatsoup` wrapper (`deploy/whatsoup@.service`
    `ExecStart`, and the generated launchd plist's `ProgramArguments`). The
    wrapper unsets every variable in this table before anything else runs, then
    re-resolves only the keys it supplies itself from the secure stores: the
    chat-instance keys, `OPENAI_API_KEY`/`PINECONE_API_KEY` for agent instances,
-   and the one handoff-distiller key. A provider key set only through a systemd
+   and the one handoff-distiller key. On the ordinary path, with no
+   `WHATSOUP_HANDOFF_DISTILL_MODEL`, a provider key set only through a systemd
    `Environment=`/`EnvironmentFile=` or a launchd `EnvironmentVariables` entry
    therefore never reaches the runtime, and a fallback that needs it raises
    `fallback_credential_missing`. Do not remove the scrub to work around this.
+
+   One exception is deliberate. When an agent instance sets
+   `WHATSOUP_HANDOFF_DISTILL_MODEL`, the wrapper restores that model's one
+   variable (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY` or `ZAI_API_KEY`): from the
+   `deepseek`, `minimax` or `zai` keyring entry first, otherwise from the value
+   the service manager supplied. Runtime lookup reads the environment first, so
+   every service mapped to that variable then uses it. `minimax-coding-plan`
+   shares `MINIMAX_API_KEY`, so with a `MiniMax-*` distiller the restored value
+   shadows the separate `minimax-coding-plan` file, keyring or `auth.json`
+   entry: when the two keys differ, a `minimax-coding-plan` fallback sends the
+   distiller's key.
+
    Provision managed instances through one of the stores the runtime reads after
    the environment:
 
