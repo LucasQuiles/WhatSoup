@@ -17,13 +17,14 @@
 // be retained: it claims non-admission with retention unknown, not loss. An
 // accepted emission starts a per-reason window; a failed or thrown emission
 // does not, so the next observation retries (the #2434 pattern in
-// emit-alert.ts). The rest are advisory. Queue displacement keeps
+// emit-alert.ts). The window is timed on the monotonic clock
+// (performance.now()), so a wall-clock step cannot lengthen the suppression
+// of a loss alert. The rest are advisory. Queue displacement keeps
 // its own count and alert in ingest.ts and is not recorded here.
 
 import { createChildLogger } from '../logger.ts';
 import { MS_PER_MINUTE } from '../lib/time-units.ts';
 import { emitAlert, type AlertEmissionStatus } from '../lib/emit-alert.ts';
-import { systemClock } from '../lib/clock.ts';
 
 const log = createChildLogger('inbound-observation');
 
@@ -98,9 +99,10 @@ function emitStoreFailedAlert(instance: string): LocalLossAlertResult {
 
 function emitLocalLossAlert(instance: string, reason: AlertingReason): { accepted: boolean; status: AlertOutcome } {
   // Check the window without recording it; only an accepted emission records.
-  if (systemClock.now() < (nextAlertAt.get(reason) ?? 0)) return { accepted: false, status: 'rate_limited' };
+  const until = nextAlertAt.get(reason);
+  if (until !== undefined && performance.now() < until) return { accepted: false, status: 'rate_limited' };
   const result = reason === 'transport.no_consumer' ? emitNoConsumerAlert(instance) : emitStoreFailedAlert(instance);
-  if (result.status !== 'failed') nextAlertAt.set(reason, systemClock.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
+  if (result.status !== 'failed') nextAlertAt.set(reason, performance.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
   return result;
 }
 

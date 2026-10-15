@@ -115,7 +115,7 @@ describe('inbound observation alerts', () => {
     observeInbound('WhatSoup', 'transport.no_consumer');
     expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
 
-    vi.setSystemTime(Date.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
+    vi.advanceTimersByTime(INBOUND_OBSERVATION_ALERT_WINDOW_MS);
     observeInbound('WhatSoup', 'ingest.store_failed');
 
     expect(doubles.emitAlert).toHaveBeenCalledTimes(3);
@@ -125,13 +125,29 @@ describe('inbound observation alerts', () => {
     });
   });
 
+  it('times the window on the monotonic clock, so a backward wall-clock step does not extend it', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-13T16:00:00Z'));
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+
+    vi.advanceTimersByTime(INBOUND_OBSERVATION_ALERT_WINDOW_MS - 1);
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1);
+    observeInbound('WhatSoup', 'ingest.store_failed');
+    expect(doubles.emitAlert).toHaveBeenCalledTimes(2);
+    expect(getInboundObservationHealth().alerts).toMatchObject({ durably_queued: 2, rate_limited: 1 });
+  });
+
   it('keeps durably_queued, captured, legacy_accepted_unconfirmed and failed distinct', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-13T16:00:00Z'));
     for (const status of ['durably_queued', 'captured', 'legacy_accepted_unconfirmed', 'failed'] as const) {
       doubles.emitAlert.mockReturnValueOnce({ ok: status !== 'failed', channel: 'outbox', status });
       observeInbound('WhatSoup', 'ingest.store_failed');
-      vi.setSystemTime(Date.now() + INBOUND_OBSERVATION_ALERT_WINDOW_MS);
+      vi.advanceTimersByTime(INBOUND_OBSERVATION_ALERT_WINDOW_MS);
     }
 
     expect(getInboundObservationHealth().alerts).toEqual({
