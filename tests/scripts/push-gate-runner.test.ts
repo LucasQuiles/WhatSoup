@@ -13,7 +13,7 @@
  *
  * Real child processes: a fake timer cannot bound an external process.
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, realpathSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -22,6 +22,7 @@ import { describe, expect, it } from 'vitest';
 
 import { gateLifetimeMs, runGate, stepTimeoutMs, DEFAULT_STEP_TIMEOUT_MS, STEP_SETTLE_MS, STEP_TERM_GRACE_MS, type GateStep } from '../../scripts/push-gate.ts';
 import { gateCommandTimeoutMs } from '../../scripts/pre-push-guard.ts';
+import { deferred } from '../helpers/deferred.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const NODE = process.execPath;
@@ -36,27 +37,55 @@ function fixture(dir: string, name: string, body: string): string {
 }
 
 /**
- * Resolve as soon as `path` exists, driven by the directory watch rather than a
- * wall clock, and hand back a closer so a competing branch can release it. The
- * watcher is registered before the first existence check, so a file created
- * between the check and the registration cannot be missed.
+ * Readiness for a fixture step, with a terminal on every path. The fixture
+ * announces itself by writing `path`; this waits for that announcement, for the
+ * child to exit first, or for the deadline — whichever arrives first — and never
+ * leaves a path without an answer. The directory watcher is registered before
+ * the first existence check, so a file created between the check and the
+ * registration cannot be missed. The caller must run `close()` in a finally.
  */
-function watchForFile(path: string): { appeared: Promise<void>; close: () => void } {
+const READINESS_DEADLINE_MS = 10_000;
+
+type Readiness =
+  | { state: 'ready' }
+  | { state: 'exited'; code: number | null }
+  | { state: 'deadline' };
+
+function waitForReadiness(
+  path: string,
+  deadlineMs: number,
+  exited: Promise<number | null>,
+): { outcome: Promise<Readiness>; close: () => void } {
+  const result = deferred<Readiness>();
   let watcher: FSWatcher | undefined;
-  const appeared = new Promise<void>((resolve) => {
-    let settled = false;
-    const settle = (): void => {
-      if (settled) return;
-      settled = true;
-      watcher?.close();
-      resolve();
-    };
-    watcher = watch(dirname(path), () => {
-      if (existsSync(path)) settle();
-    });
-    if (existsSync(path)) settle();
+  let finished = false;
+  const finish = (outcome: Readiness): void => {
+    if (finished) return;
+    finished = true;
+    watcher?.close();
+    result.resolve(outcome);
+  };
+
+  watcher = watch(dirname(path), () => {
+    if (existsSync(path)) finish({ state: 'ready' });
   });
-  return { appeared, close: (): void => watcher?.close() };
+  if (existsSync(path)) finish({ state: 'ready' });
+  AbortSignal.timeout(deadlineMs).addEventListener('abort', () => finish({ state: 'deadline' }), { once: true });
+  void exited.then((code) => finish({ state: 'exited', code }));
+
+  return { outcome: result.promise, close: (): void => finish({ state: 'deadline' }) };
+}
+
+/**
+ * Settlement for the child this test owns: if it is still live, signal it and
+ * wait for the exit we are about to observe. Timer-free — the exit event is the
+ * bound — and safe to call when the child has already gone.
+ */
+async function settleOwnedChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const gone = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  child.kill('SIGKILL');
+  await gone;
 }
 
 const HANG = 'require("node:net").createServer(function(){}).listen(0,"127.0.0.1");';
@@ -137,36 +166,64 @@ describe('runGate caller propagation (exit codes reach the outer invocation)', (
     ].join('\n'));
 
     const child = spawn(NODE, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', runner], { stdio: 'ignore' });
-
-    // Observe the terminal state BEFORE signalling, so an exit that happens
-    // before or during the readiness wait is captured rather than missed.
-    let exitCode: number | null | undefined;
-    const exited = new Promise<number | null>((resolve) => {
-      child.on('exit', (c) => {
-        exitCode = c;
-        resolve(c);
+    let readiness: { outcome: Promise<Readiness>; close: () => void } | undefined;
+    try {
+      // Observe the terminal state BEFORE signalling, so an exit that happens
+      // before or during the readiness wait is captured rather than missed.
+      let exitCode: number | null | undefined;
+      const exited = new Promise<number | null>((resolve) => {
+        child.on('exit', (c) => {
+          exitCode = c;
+          resolve(c);
+        });
       });
-    });
 
-    // Bounded readiness, no wall clock: the fixture's own announcement from the
-    // listen callback, raced against the child exiting, so a hang or an early
-    // exit both fail with a real value instead of a guessed delay.
-    const readiness = watchForFile(ready);
-    const outcome = await Promise.race([
-      readiness.appeared.then(() => 'hanging-step-entered' as const),
-      exited.then((code) => ({ exited: code }) as const),
-    ]);
-    readiness.close();
-    if (outcome !== 'hanging-step-entered') {
-      throw new Error(`child exited (code ${String(outcome.exited)}) before entering the hanging step`);
+      readiness = waitForReadiness(ready, READINESS_DEADLINE_MS, exited);
+      const outcome = await readiness.outcome;
+      if (outcome.state !== 'ready') {
+        throw new Error(`fixture never entered the hanging step (${outcome.state}${outcome.state === 'exited' ? ` code ${String(outcome.code)}` : ''})`);
+      }
+      expect(existsSync(ready)).toBe(true); // the fixture's own announcement, not a guess
+
+      child.kill('SIGTERM');
+      const code = await exited;
+      expect(code).toBe(143); // 128 + SIGTERM(15)
+      expect(exitCode).toBe(143); // and the pre-registered observation saw the same exit
+      expect(existsSync(marker)).toBe(false); // the later stage never started
+    } finally {
+      readiness?.close();
+      await settleOwnedChild(child);
     }
-    expect(existsSync(ready)).toBe(true);
+  }, 30_000);
 
-    child.kill('SIGTERM');
-    const code = await exited;
-    expect(code).toBe(143); // 128 + SIGTERM(15)
-    expect(exitCode).toBe(143); // and the pre-registered observation saw the same exit
-    expect(existsSync(marker)).toBe(false); // the later stage never started
+  it('a live child that never announces readiness is refused at the deadline and settled', async () => {
+    const dir = tmp.make('no-ready');
+    const ready = join(dir, 'hanging-step-entered'); // never written: plain HANG
+    const hang = fixture(dir, 'hang.cjs', HANG);
+    const runner = fixture(dir, 'runner.ts', [
+      `import { runGate } from ${JSON.stringify(join(ROOT, 'scripts', 'push-gate.ts'))};`,
+      'const code = await runGate("test-lane", [',
+      `  { name: "hangs", cmd: ${JSON.stringify(`${NODE} ${hang}`)} },`,
+      '], { stdio: "ignore", timeoutMsFor: () => 60_000 });',
+      'process.exit(code);',
+    ].join('\n'));
+
+    const child = spawn(NODE, ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', runner], { stdio: 'ignore' });
+    let readiness: { outcome: Promise<Readiness>; close: () => void } | undefined;
+    try {
+      const exited = new Promise<number | null>((resolve) => child.on('exit', (c) => resolve(c)));
+      readiness = waitForReadiness(ready, READINESS_DEADLINE_MS, exited);
+
+      const outcome = await readiness.outcome;
+      expect(outcome).toEqual({ state: 'deadline' }); // refused, not left pending
+      expect(existsSync(ready)).toBe(false);
+      expect(child.exitCode).toBeNull(); // and it really was live the whole time
+      expect(child.signalCode).toBeNull();
+    } finally {
+      readiness?.close();
+      await settleOwnedChild(child);
+    }
+    expect(child.signalCode).toBe('SIGKILL'); // settlement observed, not assumed
   }, 30_000);
 });
 
