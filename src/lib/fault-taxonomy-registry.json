@@ -1486,7 +1486,12 @@
       "test": "tests/runtimes/agent/fallback-chain-selection.test.ts"
     },
     "fallback_persist_chain_mismatch": {
-      "disposition": "restore_refused_on_chain_shape_drift_window_continues_in_memory",
+      "disposition": "persisted_chain_mismatch_quarantined_until_operator_reconciliation",
+      "owner": "src/runtimes/agent/fallback-restore.ts",
+      "test": "tests/runtimes/agent/fallback-restore-unit.test.ts"
+    },
+    "fallback_persist_evidence_unavailable": {
+      "disposition": "persisted_failed_provider_evidence_quarantined_until_operator_reconciliation",
       "owner": "src/runtimes/agent/fallback-restore.ts",
       "test": "tests/runtimes/agent/fallback-restore-unit.test.ts"
     },
@@ -1494,6 +1499,21 @@
       "disposition": "window_continues_in_memory_next_persist_retries",
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "fallback_persist_recovery_evidence_unavailable": {
+      "disposition": "persisted_recovery_evidence_quarantined_until_operator_reconciliation",
+      "owner": "src/runtimes/agent/fallback-restore.ts",
+      "test": "tests/runtimes/agent/fallback-persistence-integration.test.ts"
+    },
+    "fallback_persist_route_unavailable": {
+      "disposition": "persisted_fallback_route_quarantined_until_operator_reconciliation",
+      "owner": "src/runtimes/agent/fallback-restore.ts",
+      "test": "tests/runtimes/agent/fallback-restore-unit.test.ts"
+    },
+    "fallback_persist_state_evidence_unavailable": {
+      "disposition": "persisted_core_state_evidence_quarantined_until_operator_reconciliation",
+      "owner": "src/runtimes/agent/fallback-restore.ts",
+      "test": "tests/runtimes/agent/fallback-persistence-integration.test.ts"
     },
     "fallback_preflight_config_error": {
       "disposition": "child_env_config_fault_requires_operator_repair_before_fallback_serves",
@@ -1519,6 +1539,21 @@
       "disposition": "recovery_probe_stall_notice_until_probe_succeeds_and_window_reverts",
       "owner": "src/runtimes/agent/runtime.ts",
       "test": "tests/core/heal-fallback-prerequisite-2399.test.ts"
+    },
+    "fallback_recovery_retry_started": {
+      "disposition": "operator_retry_starts_fresh_bounded_episode_without_replaying_accepted_work",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/fallback-probe-stall.test.ts"
+    },
+    "fallback_recovery_terminal": {
+      "disposition": "bounded_recovery_terminal_hold_requires_explicit_retry_or_proof_gated_recovery",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/fallback-probe-stall.test.ts"
+    },
+    "fallback_recovery_operator_held": {
+      "disposition": "operator_held_recovery_requires_explicit_retry_or_proof_gated_recovery",
+      "owner": "src/runtimes/agent/runtime-fallback.ts",
+      "test": "tests/runtimes/agent/fallback-probe-stall.test.ts"
     },
     "agent_respawn_failed": {
       "disposition": "auto_respawn_exhausted_requires_operator_intervention",
@@ -1691,7 +1726,7 @@
       "test": "tests/runtimes/agent/fallback-binary-preflight.test.ts"
     },
     "fallback_persist_version_incompatible": {
-      "disposition": "newer_persisted_version_cleared_to_reconcile_never_guessed",
+      "disposition": "newer_persisted_version_quarantined_until_operator_reconciliation_never_guessed",
       "owner": "src/runtimes/agent/fallback-restore.ts",
       "test": "tests/runtimes/agent/fallback-restore-unit.test.ts"
     },

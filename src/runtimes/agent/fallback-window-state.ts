@@ -1,4 +1,6 @@
 import { type AgentFallbackEntry } from '../../core/fallback-chain.ts';
+import type { FallbackRecoveryState, FallbackRecoveryTerminalReason } from './fallback-state-db.ts';
+import type { FallbackRestoreUnavailableReason } from './fallback-restore.ts';
 
 /**
  * FallbackWindowState — lifecycle scalars for the provider-fallback window.
@@ -41,9 +43,25 @@ export class FallbackWindowState {
   recoveryProbeRequired = false;
   /** The fallback entry serving the active window, or null. */
   activeEntry: AgentFallbackEntry | null = null;
+  /** Recovery is active until a terminal or explicit operator hold stops
+   *  automatic primary probes. A terminal/held fallback remains the effective
+   *  route until an operator records fresh primary proof. */
+  recoveryState: FallbackRecoveryState | 'unavailable' = 'active';
+  recoveryTerminalReason: FallbackRecoveryTerminalReason | FallbackRestoreUnavailableReason | null = null;
+  /** The start of the current recovery episode. This changes only on an
+   *  explicit retry; `activatedAt` continues to describe the fallback window. */
+  recoveryEpisodeStartedAt: number | null = null;
+  /** A crash between claiming a primary probe and recording its outcome is
+   *  ambiguous. Restore converts it to an operator hold before any replay. */
+  recoveryProbeInFlight = false;
 
-  /** True while a fallback window is armed and not yet expired. */
+  /**
+   * True while an armed fallback route remains eligible. Passing its deadline
+   * starts a proof-gated recovery attempt; it cannot route new work to primary
+   * until that proof commits. Unavailable is admission-quarantined separately.
+   */
   isActive(): boolean {
-    return this.activeUntil !== null && Date.now() < this.activeUntil;
+    return this.activeUntil !== null
+      && this.recoveryState !== 'unavailable';
   }
 }

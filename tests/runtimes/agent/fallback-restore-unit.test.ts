@@ -10,8 +10,10 @@
  * U2: null-model chain entries match a persisted null activeEntryModel;
  *     unconfigured persisted failedKeys are skipped (never restored);
  *     a non-finite persisted probeAttempts restores as 0.
+ * U4: malformed failed-key evidence remains quarantined in place rather than
+ *     being mistaken for an empty set on restore.
  * U3: chain-mismatch with a null persisted model reports the 'default'
- *     placeholder in the alert detail and clears state.
+ *     placeholder in the alert detail and quarantines the retained row.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
@@ -94,46 +96,78 @@ describe('fallback-restore module unit branches', () => {
     expect(persisted).toContainEqual({ provider: 'bare-provider-no-separator', model: '' });
   });
 
-  it('U2: null-model entry matches persisted null model; unconfigured failed keys are skipped; non-finite probeAttempts restores as 0', () => {
+  it('U2: legacy null-model entry matches; unconfigured failed keys are skipped; a legacy non-finite probeAttempts restores as 0', () => {
     saveFallbackState(db, {
       activeUntil: NOW + 10 * 60 * 1000,
       activatedAt: NOW - 60 * 1000,
       reason: 'unit-restore',
       probeAttempts: 3,
-      version: PERSISTED_FALLBACK_STATE_VERSION,
+      version: 1,
       activeEntryProvider: 'anthropic-api',
       activeEntryModel: null, // matches the model-less configured entry via ?? null
       failedKeys: [
-        { provider: 'anthropic-api' } as unknown as { provider: string; model: string }, // model-less legacy entry: DROPPED at the read boundary, never restored
         { provider: 'opencode-cli', model: 'glm' }, // configured -> restored
         { provider: 'anthropic-api', model: 'ghost-model' }, // provider matches the null-model entry, model does not -> skipped
         { provider: 'ghost-provider', model: 'gone' }, // NOT configured -> skipped
       ],
     });
-    // Corrupt the persisted probe_attempts out-of-band: SQLite's dynamic typing
-    // accepts a string (NOT NULL satisfied), which reads back as NaN — the row
-    // shape the Number.isFinite guard exists for (legacy/tampered rows, not
-    // the saveFallbackState path, which cannot produce it).
+    // Corrupt a legacy persisted probe_attempts value out-of-band. Version 1
+    // predates the version-2 durable recovery budget, so its compatible
+    // migration default remains zero; the v2 corruption matrix quarantines
+    // this same malformed value instead.
     db.raw.prepare(`UPDATE agent_fallback_state SET probe_attempts = 'corrupt' WHERE id = 1`).run();
     const ctx = makeCtx();
     const result = restorePersistedFallbackWindowState(ctx, WINDOW_MS, () => NOW);
     expect(result.outcome).toBe('armed');
     if (result.outcome !== 'armed') return;
-    // The corrupt row is sanitized at the db read boundary (getFallbackState),
-    // so the restore result reports 0, never NaN.
+    // The compatible legacy default reports 0, never NaN.
     expect(result.persistedProbeAttempts).toBe(0);
-    // Only configured keys restored: the ghost provider is skipped, and the
-    // model-less legacy entry was dropped at the read boundary (never restored).
+    // Only configured keys are restored; provider/model mismatches are skipped.
     expect(ctx.added).toContain('opencode-cli\u0000glm');
     expect(ctx.added.some((k) => k.startsWith('anthropic-api'))).toBe(false);
     expect(ctx.added.some((k) => k.startsWith('ghost-provider'))).toBe(false);
     expect(ctx.resetCalls).toHaveLength(1);
-    // restoredFailedKeys counts exactly the one fully-configured entry (the
+    // restoredFailedKeys counts exactly the one configured entry (the
     // provider-match/model-mismatch key is skipped like the ghost).
     expect(result.restoredFailedKeys).toBe(1);
   });
 
-  it('U3: chain-mismatch with null persisted model clears state and reports the default placeholder', () => {
+  it('U4: malformed failed-key evidence is quarantined without clearing or overwriting the raw record', () => {
+    saveFallbackState(db, {
+      activeUntil: NOW + 10 * 60 * 1000,
+      activatedAt: NOW - 60 * 1000,
+      reason: 'unit-corrupt-evidence',
+      probeAttempts: 0,
+      version: PERSISTED_FALLBACK_STATE_VERSION,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'glm',
+      failedKeys: [],
+    });
+    const rawEvidence = '{malformed-json';
+    db.raw.prepare(`UPDATE agent_fallback_state SET failed_keys_json = ? WHERE id = 1`).run(rawEvidence);
+
+    const ctx = makeCtx();
+    const result = restorePersistedFallbackWindowState(ctx, WINDOW_MS, () => NOW);
+
+    expect(result).toEqual({
+      outcome: 'unavailable',
+      cleared: false,
+      reason: 'failed-provider-evidence-unavailable',
+    });
+    expect(ctx.resetCalls).toHaveLength(0);
+    expect(ctx.added).toHaveLength(0);
+    const row = db.raw.prepare(`SELECT failed_keys_json AS failedKeysJson FROM agent_fallback_state WHERE id = 1`)
+      .get() as { failedKeysJson: string };
+    expect(row.failedKeysJson).toBe(rawEvidence);
+    expect(vi.mocked(emitAlertChecked)).toHaveBeenCalledWith(
+      'fallback-restore',
+      'fallback_persist_evidence_unavailable',
+      expect.any(String),
+      expect.stringContaining('operator-reconciliation-required'),
+    );
+  });
+
+  it('U3: chain-mismatch with null persisted model retains state and reports the default placeholder', () => {
     saveFallbackState(db, {
       activeUntil: NOW + 10 * 60 * 1000,
       activatedAt: NOW - 60 * 1000,
@@ -146,16 +180,24 @@ describe('fallback-restore module unit branches', () => {
     });
     const ctx = makeCtx();
     const result = restorePersistedFallbackWindowState(ctx, WINDOW_MS, () => NOW);
-    expect(result).toEqual({ outcome: 'chain-mismatch', cleared: true });
-    // State cleared: a second read finds nothing to restore.
-    expect(getFallbackState(db)).toBeNull();
+    expect(result).toEqual({
+      outcome: 'unavailable',
+      cleared: false,
+      reason: 'fallback-route-unavailable',
+    });
+    // State is evidence for a configuration reconciliation, never a signal
+    // that primary has recovered.
+    expect(getFallbackState(db)).toMatchObject({
+      activeEntryProvider: 'removed-provider',
+      activeEntryModel: null,
+    });
     // The alert detail renders the null model as the 'default' placeholder.
     const call = vi.mocked(emitAlertChecked).mock.calls.find((c) => c[1] === 'fallback_persist_chain_mismatch');
     expect(call).toBeDefined();
     expect(String(call?.[3])).toContain('persistedModel=default');
   });
 
-  it('clears and alerts on a version-incompatible persisted row instead of guessing semantics', () => {
+  it('quarantines and alerts on a version-incompatible persisted row instead of guessing semantics', () => {
     saveFallbackState(db, {
       activeUntil: NOW + 10 * 60 * 1000,
       activatedAt: NOW - 60 * 1000,
@@ -168,10 +210,41 @@ describe('fallback-restore module unit branches', () => {
     });
     const ctx = makeCtx();
     const result = restorePersistedFallbackWindowState(ctx, WINDOW_MS, () => NOW);
-    expect(result).toEqual({ outcome: 'version-incompatible', cleared: true });
-    expect(getFallbackState(db)).toBeNull();
+    expect(result).toEqual({
+      outcome: 'unavailable',
+      cleared: false,
+      reason: 'persisted-version-incompatible',
+    });
+    expect(getFallbackState(db)).toMatchObject({
+      version: PERSISTED_FALLBACK_STATE_VERSION + 1,
+    });
     const call = vi.mocked(emitAlertChecked).mock.calls.find((c) => c[1] === 'fallback_persist_version_incompatible');
     expect(call).toBeDefined();
     expect(String(call?.[3])).toContain(`persistedVersion=${PERSISTED_FALLBACK_STATE_VERSION + 1}`);
+  });
+
+  it('quarantines a persisted episode when no fallback route is configured', () => {
+    saveFallbackState(db, {
+      activeUntil: NOW + 10 * 60 * 1000,
+      activatedAt: NOW - 60 * 1000,
+      reason: 'unit-no-route',
+      probeAttempts: 0,
+      version: PERSISTED_FALLBACK_STATE_VERSION,
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'glm',
+      failedKeys: [],
+    });
+
+    const result = restorePersistedFallbackWindowState(makeCtx({ agentFallbacks: [] }), WINDOW_MS, () => NOW);
+
+    expect(result).toEqual({
+      outcome: 'unavailable',
+      cleared: false,
+      reason: 'fallback-route-unavailable',
+    });
+    expect(getFallbackState(db)).toMatchObject({
+      activeEntryProvider: 'opencode-cli',
+      activeEntryModel: 'glm',
+    });
   });
 });

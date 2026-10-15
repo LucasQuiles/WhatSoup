@@ -220,8 +220,18 @@ type RuntimeView = {
   sessionOwnership: {
     get: (key: string) => { managerId: string; generation: number; state: string } | undefined;
   };
-  fallbackWindow: { activeUntil: number | null; activeEntry: FallbackEntry | null; resetAt: number | null };
+  fallbackWindow: {
+    activeUntil: number | null;
+    activeEntry: FallbackEntry | null;
+    resetAt: number | null;
+    recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+    recoveryTerminalReason: string | null;
+    recoveryEpisodeStartedAt: number | null;
+    recoveryProbeInFlight: boolean;
+  };
   fallbackChain: { failedKeys: Set<string> };
+  revertTimer: ReturnType<typeof setTimeout> | null;
+  fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
   chatQueues: Map<string, unknown>;
   pendingTurnText: Map<string, string>;
   scheduleFallbackReplay(args: unknown): boolean;
@@ -233,6 +243,7 @@ type RuntimeView = {
     wasUnclassifiedError?: boolean,
   ): void;
   probePrimaryProviderRecovered(): boolean | Promise<boolean>;
+  holdFallbackRecovery(): { ok: true } | { ok: false; reason: string };
   restorePersistedFallbackWindow(): void;
   effectiveProvider: string;
 };
@@ -412,6 +423,49 @@ describe('fallback-tier failure clock preservation', () => {
     expect(rv.fallbackChain.failedKeys.size).toBe(1);
     expect(rv.fallbackWindow.activeUntil).not.toBeNull();
   });
+
+  it.each(['terminal', 'operator-held'] as const)(
+    '(d2) a fallback-tier advance preserves a %s recovery episode and never rearms automatic probing',
+    async (recoveryState) => {
+      const runtime = makeRuntime(TWO_ENTRY_CHAIN);
+      const { rv, owner } = armIncidentShape(runtime);
+      const probe = vi.fn(() => false);
+      rv.probePrimaryProviderRecovered = probe as unknown as () => boolean;
+
+      if (recoveryState === 'terminal') {
+        // Reach the terminal state through the real twelve-probe bound, then
+        // clear the call history so the negative assertion below is meaningful.
+        for (let attempt = 1; attempt <= 12; attempt++) {
+          await vi.advanceTimersByTimeAsync(RECHECK_MS);
+        }
+        expect(rv.fallbackWindow.recoveryTerminalReason).toBe('attempt-limit');
+      } else {
+        expect(rv.holdFallbackRecovery()).toEqual({ ok: true });
+        expect(rv.fallbackWindow.recoveryTerminalReason).toBe('operator-killed');
+      }
+      expect(rv.fallbackWindow.recoveryState).toBe(recoveryState);
+      const terminalReason = rv.fallbackWindow.recoveryTerminalReason;
+      const episodeStartedAt = rv.fallbackWindow.recoveryEpisodeStartedAt;
+      probe.mockClear();
+      expect(rv.revertTimer).toBeNull();
+      expect(rv.fallbackPrimaryProbeTimer).toBeNull();
+
+      // A real fallback-tier process failure still advances the chain. It must
+      // not convert a held/terminal recovery episode back into active state.
+      rv.handlePerChatCrash(CHAT, CHAT, crashInfo(owner));
+
+      expect(rv.fallbackWindow.activeEntry?.model).toBe('glm/glm-5.2');
+      expect(rv.fallbackWindow.recoveryState).toBe(recoveryState);
+      expect(rv.fallbackWindow.recoveryTerminalReason).toBe(terminalReason);
+      expect(rv.fallbackWindow.recoveryEpisodeStartedAt).toBe(episodeStartedAt);
+      expect(rv.fallbackWindow.recoveryProbeInFlight).toBe(false);
+      expect(rv.revertTimer).toBeNull();
+      expect(rv.fallbackPrimaryProbeTimer).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(3 * RECHECK_MS);
+      expect(probe).not.toHaveBeenCalled();
+    },
+  );
 
   it('(e) a PRIMARY-tier failure with null resetAt still extends the window and restarts the probe countdown (regression pin)', async () => {
     const runtime = makeRuntime(TWO_ENTRY_CHAIN);

@@ -20,6 +20,8 @@
     "outbound_send_failed": "src/core/durability.ts",
     "model-currency": "src/lib/model-advisor.ts",
     "model-currency-live-scan": "src/lib/model-advisor.ts",
-    "handoff-distill": "src/runtimes/agent/handoff-distill-coordinator.ts"
+    "handoff-distill": "src/runtimes/agent/handoff-distill-coordinator.ts",
+    "fallback_recovery_terminal": "src/runtimes/agent/runtime-fallback.ts",
+    "fallback_recovery_operator_held": "src/runtimes/agent/runtime-fallback.ts"
   }
 }

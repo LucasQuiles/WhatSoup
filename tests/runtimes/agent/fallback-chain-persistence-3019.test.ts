@@ -8,7 +8,8 @@
  *     (failedKeys are provider+model keyed; a failed model does not
  *     invalidate a different model on the same provider).
  * D3: chain-mismatch classes -> explicit reconciliation state (removed/
- *     reordered active-entry identity is cleared, never silently re-routed).
+ *     reordered active-entry identity is retained and quarantined, never
+ *     silently re-routed).
  * D4: persistence-failure -> degraded readiness, not durable-recovery
  *     (saveFallbackState throwing does not crash the window; the in-memory
  *     window continues but the next restart won't see it).
@@ -282,7 +283,7 @@ describe('#3019 fallback chain persistence across restart', () => {
   });
 
   // D3: chain-mismatch classes -> explicit reconciliation state
-  it('D3: persisted active-entry not in configured chain -> cleared, never silently re-routed', () => {
+  it('D3: persisted active-entry not in configured chain -> retained unavailable, never silently re-routed', () => {
     // Persist a state with an active-entry identity for a provider that is
     // NOT in the configured chain (simulating a config change between restarts).
     const futureUntil = Date.now() + 60 * 60_000;
@@ -298,24 +299,27 @@ describe('#3019 fallback chain persistence across restart', () => {
     });
 
     // The configured chain is [opencode-cli, anthropic-api] — 'removed-provider'
-    // is not present. Restore must clear and proceed on the primary, never
-    // silently re-route to a different entry.
+    // is not present. Restore must hold the route unavailable, never
+    // silently re-route to a different entry or to primary.
     const runtime = makeRuntime(db);
     const v = fbView(runtime);
     v.restorePersistedFallbackWindow();
 
-    expect(v.effectiveProvider).toBe('claude-cli'); // primary, not fallback
+    expect(v.effectiveProvider).toBe('unavailable');
     expect(v.fallbackWindow.activeUntil).toBeNull();
 
-    // The DB row must be cleared.
-    expect(getFallbackState(db)).toBeNull();
+    // The DB row stays available for reconciliation.
+    expect(getFallbackState(db)).toMatchObject({
+      activeEntryProvider: 'removed-provider',
+      activeEntryModel: 'removed-model',
+    });
 
-    // Health must NOT show restored (it was cleared, not restored).
+    // Health must NOT show restored (it is quarantined, not restored).
     expect(v.getFallbackState().fallbackRestoredFromPersist).toBe(false);
   });
 
   // D3b: version-incompatible row -> explicit reconciliation
-  it('D3b: persisted version newer than known -> cleared, never silently re-routed', () => {
+  it('D3b: persisted version newer than known -> retained unavailable, never silently re-routed', () => {
     const futureUntil = Date.now() + 60 * 60_000;
     saveFallbackState(db, {
       activeUntil: futureUntil,
@@ -332,9 +336,11 @@ describe('#3019 fallback chain persistence across restart', () => {
     const v = fbView(runtime);
     v.restorePersistedFallbackWindow();
 
-    expect(v.effectiveProvider).toBe('claude-cli');
+    expect(v.effectiveProvider).toBe('unavailable');
     expect(v.fallbackWindow.activeUntil).toBeNull();
-    expect(getFallbackState(db)).toBeNull();
+    expect(getFallbackState(db)).toMatchObject({
+      version: PERSISTED_FALLBACK_STATE_VERSION + 99,
+    });
   });
 
   // D4: persistence-failure -> degraded readiness, not durable-recovery

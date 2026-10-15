@@ -350,7 +350,7 @@ export async function handleFallbackCommand(
 
   if (cmd.sub === 'help') {
     await reply(
-      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force backup-provider window (default 5h); FALLBACK OFF — revert to primary; FALLBACK STATUS — current provider, window, turn counters. (support varies by instance type)',
+      'Fallback commands: FALLBACK ON [<n>m|<n>h] — force a backup window only when no episode exists; FALLBACK OFF — refuses to leave an existing recovery episode; FALLBACK KILL — hold recovery on the fallback route; FALLBACK RETRY — begin the only new bounded recovery episode; FALLBACK RECOVER — require fresh primary proof before primary routing; FALLBACK STATUS — current provider and recovery state. (support varies by instance type)',
     );
     return;
   }
@@ -378,7 +378,10 @@ export async function handleFallbackCommand(
     const costUsd = typeof state.fallbackWindowCostUsd === 'number' && state.fallbackWindowCostUsd > 0
       ? `; window cost: $${state.fallbackWindowCostUsd.toFixed(2)}`
       : '';
-    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty${probes}${acts}${costUsd}${chain}`);
+    const recovery = state.recoveryState && state.recoveryState !== 'active'
+      ? `; recovery: ${state.recoveryState}${state.recoveryTerminalReason ? ` (${state.recoveryTerminalReason})` : ''}`
+      : '';
+    await reply(`Provider: ${state.effectiveProvider}; window: ${window}; fallback turns: ${state.fallbackTurnsServed} served, ${state.fallbackTurnsEmpty} empty${probes}${acts}${costUsd}${chain}${recovery}`);
     return;
   }
 
@@ -390,10 +393,31 @@ export async function handleFallbackCommand(
     return;
   }
 
+  if (cmd.sub === 'kill') {
+    if (!runtime.holdFallbackRecovery) { await reply('Fallback recovery control not supported on this instance.'); return; }
+    const result = runtime.holdFallbackRecovery();
+    await reply(result.ok ? 'Fallback recovery held — fallback routing remains active until explicit recovery.' : `Cannot hold fallback recovery: ${result.reason}`);
+    return;
+  }
+
+  if (cmd.sub === 'retry') {
+    if (!runtime.retryFallbackRecovery) { await reply('Fallback recovery control not supported on this instance.'); return; }
+    const result = runtime.retryFallbackRecovery();
+    await reply(result.ok ? 'Fallback recovery retry started. Accepted work was not replayed.' : `Cannot retry fallback recovery: ${result.reason}`);
+    return;
+  }
+
+  if (cmd.sub === 'recover') {
+    if (!runtime.recoverPrimaryFromFallback) { await reply('Fallback recovery control not supported on this instance.'); return; }
+    const result = await runtime.recoverPrimaryFromFallback();
+    await reply(result.ok ? 'Fresh primary recovery proof accepted — primary provider reactivated.' : `Primary recovery was not accepted: ${result.reason}`);
+    return;
+  }
+
   // sub === 'off'
   if (!runtime.disableFallback) { await reply('Fallback control not supported on this instance.'); return; }
-  runtime.disableFallback();
-  await reply('Fallback disabled — primary provider active.');
+  const result = runtime.disableFallback();
+  await reply(result.ok ? 'Fallback disabled — primary provider active.' : `Cannot disable fallback: ${result.reason}`);
 }
 
 // ---------------------------------------------------------------------------

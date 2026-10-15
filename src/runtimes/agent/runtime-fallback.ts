@@ -41,6 +41,8 @@ import {
   clearFallbackState,
   getFallbackState,
   saveFallbackState,
+  type FallbackRecoveryState,
+  type FallbackRecoveryTerminalReason,
 } from './fallback-state-db.ts';
 import { handoffContextEnabled, handoffDistillModel, handoffDistillerEnabled } from './handoff-distill-config.ts';
 import { CHAIN_CANARY_PROMPT, resolveFallbackCanaryConfig, type FallbackCanaryConfig } from './fallback-canary-config.ts';
@@ -181,6 +183,8 @@ const UNKNOWN_TERMINAL_FALLBACK_THRESHOLD = 2;
  * See {@link AgentRuntime.maybeArmFallbackAfterEmptyPrimaryTurn}.
  */
 const EMPTY_OUTPUT_ARM_STARTUP_GRACE_MS = MS_PER_MINUTE;
+const MAX_PRIMARY_RECOVERY_ATTEMPTS = 12;
+const MAX_PRIMARY_RECOVERY_EPISODE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Host port for the fallback coordinator — the same live-getter shape as
@@ -786,6 +790,8 @@ export class RuntimeFallbackCoordinator {
     fallbackModel: string | null;
     fallbackResetAt: number | null;
     fallbackRecoveryProbeRequired: boolean;
+    recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+    recoveryTerminalReason: string | null;
     fallbackTurnsServed: number;
     fallbackTurnsEmpty: number;
     lastFallbackTurnAt: number | null;
@@ -839,6 +845,8 @@ export class RuntimeFallbackCoordinator {
       fallbackModel: fallbackEntry?.model ?? null,
       fallbackResetAt: active ? this.host.fallbackWindow.resetAt : null,
       fallbackRecoveryProbeRequired: active ? this.host.fallbackWindow.recoveryProbeRequired : false,
+      recoveryState: this.host.fallbackWindow.recoveryState,
+      recoveryTerminalReason: this.host.fallbackWindow.recoveryTerminalReason,
       fallbackTurnsServed: this.host.fallbackMetrics.turnsServed,
       fallbackTurnsEmpty: this.host.fallbackMetrics.turnsEmpty,
       lastFallbackTurnAt: this.host.fallbackMetrics.lastTurnAt,
@@ -898,26 +906,30 @@ export class RuntimeFallbackCoordinator {
   // #1753 rem-2: delegates to the ToolRegistry every socket server (global and per-chat) shares — the single choke point every MCP tool call flows through, so this reflects in-flight calls across the whole instance.
 
   /**
-   * Admin override (FALLBACK ON): force a fallback window. Unlike usage-limit
-   * activation, the window is set EXACTLY — it may shorten an active window;
-   * operator intent wins over extend-never-shorten. Arms via the shared
-   * hardened path (persistence + credential pre-flight).
-   *
-   * Reason provenance: an admin force is always treated as a NEW cause, even
-   * when a usage-limit window is already active. The stored reason is reset to
-   * 'admin-forced' so the persisted record accurately reflects the current
-   * operator action rather than the original automatic trigger.
+   * Admin override (FALLBACK ON): arm an initial fallback window only when no
+   * recovery episode exists. An existing episode owns its durable attempt and
+   * elapsed-time budget, so RETRY is the only control that can begin a new
+   * recovery episode. The first arm uses the shared persistence and pre-flight
+   * path and records the distinct `admin-forced` cause.
    */
   forceFallback(durationMs?: number): { ok: true; activeUntil: number; clamped: boolean } | { ok: false; reason: string } {
+    if (this.fallbackWindowStateExists() || this.host.fallbackWindow.recoveryState !== 'active') {
+      return { ok: false, reason: 'a fallback recovery episode already exists; use RETRY to start a new bounded episode' };
+    }
     if (this.host.agentFallbacks.length === 0) {
       return { ok: false, reason: 'no fallback provider or chain configured for this instance' };
     }
     const requested = durationMs ?? DEFAULT_FALLBACK_WINDOW_MS;
     const dur = Math.min(MAX_FALLBACK_WINDOW_MS, Math.max(MIN_FALLBACK_WINDOW_MS, requested));
-    const until = Date.now() + dur;
-    // Reset reason so armFallbackWindow stores 'admin-forced' as the new
-    // original cause, replacing any prior reason (e.g. 'usage-limit').
+    const now = systemClock.now();
+    const until = now + dur;
+    // There is no existing episode at this point, so this is its initial
+    // reason; no prior durable state is replaced by ON.
     this.host.fallbackWindow.armReason = null;
+    this.host.fallbackWindow.recoveryState = 'active';
+    this.host.fallbackWindow.recoveryTerminalReason = null;
+    this.host.fallbackWindow.recoveryEpisodeStartedAt = now;
+    this.host.fallbackWindow.recoveryProbeInFlight = false;
     this.host.fallbackChain.failedKeys.clear();
     this.host.fallbackEmptyAdvance.reset();
     this.armFallbackWindow(until, 'admin-forced');
@@ -925,10 +937,92 @@ export class RuntimeFallbackCoordinator {
     return { ok: true, activeUntil: until, clamped: dur !== requested };
   }
 
-  /** Admin override (FALLBACK OFF): end any active fallback window now. Idempotent. */
-  disableFallback(): { ok: true } {
+  /**
+   * Admin override (FALLBACK OFF): idempotent only when no fallback episode
+   * exists. Leaving an episode would route new work to primary without fresh
+   * recovery proof, so callers must use RECOVER or await a validated probe.
+   */
+  disableFallback(): { ok: true } | { ok: false; reason: string } {
+    if (this.fallbackWindowStateExists() || this.host.fallbackWindow.recoveryState !== 'active') {
+      return { ok: false, reason: 'fresh primary recovery proof is required before leaving a fallback recovery episode' };
+    }
     this.host.deactivateProviderFallback('admin-disabled');
     return { ok: true };
+  }
+
+  /** Stop automatic recovery while leaving the current fallback route intact. */
+  holdFallbackRecovery(): { ok: true } | { ok: false; reason: string } {
+    if (this.host.fallbackWindow.activeUntil === null) return { ok: false, reason: 'no fallback episode is active' };
+    this.terminalizeFallbackRecovery('operator-held', 'operator-killed');
+    return { ok: true };
+  }
+
+  /** Start a fresh, bounded recovery episode. It only changes provider routing
+   *  state and deliberately does not replay accepted user work. */
+  retryFallbackRecovery(): { ok: true } | { ok: false; reason: string } {
+    if (this.host.fallbackWindow.recoveryState === 'unavailable') {
+      return { ok: false, reason: 'persisted fallback recovery state is unavailable; reconcile it before retrying' };
+    }
+    if (this.host.fallbackWindow.activeUntil === null) return { ok: false, reason: 'no fallback episode is active' };
+    const now = systemClock.now();
+    this.host.fallbackProbeAttempts = 0;
+    this.host.fallbackWindow.recoveryState = 'active';
+    this.host.fallbackWindow.recoveryTerminalReason = null;
+    this.host.fallbackWindow.recoveryEpisodeStartedAt = now;
+    this.host.fallbackWindow.recoveryProbeInFlight = false;
+    this.host.fallbackWindow.recoveryProbeRequired = true;
+    this.host.fallbackWindow.activeUntil = now + this.host.fallbackTunables.primaryRecheckMs;
+    if (!this.persistCurrentFallbackState()) {
+      this.terminalizeFallbackRecovery('operator-held', 'probe-outcome-unknown');
+      return { ok: false, reason: 'could not durably start primary recovery retry' };
+    }
+    if (this.host.revertTimer) clearTimeout(this.host.revertTimer);
+    this.host.revertTimer = setTimeout(() => this.handleFallbackRevertTimer(), this.host.fallbackTunables.primaryRecheckMs);
+    this.host.revertTimer.unref?.();
+    emitAlertChecked(this.host.instanceName, 'fallback_recovery_retry_started', 'Operator restarted a bounded primary recovery episode', 'accepted_work_replay=false');
+    return { ok: true };
+  }
+
+  /** Perform a fresh independent primary probe. Only its validated evidence
+   *  may return routing to the primary; accepted work is never replayed here. */
+  async recoverPrimaryFromFallback(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (this.host.fallbackWindow.recoveryState === 'unavailable') {
+      return { ok: false, reason: 'persisted fallback recovery state is unavailable; reconcile it before recovery' };
+    }
+    if (this.host.fallbackWindow.activeUntil === null) return { ok: false, reason: 'no fallback episode is active' };
+    const windowAtProbe = this.host.fallbackWindow.activeUntil;
+    const episodeStartedAtProbe = this.host.fallbackWindow.recoveryEpisodeStartedAt;
+    const recoveryStateAtProbe = this.host.fallbackWindow.recoveryState;
+    this.host.fallbackWindow.recoveryProbeInFlight = true;
+    if (!this.persistCurrentFallbackState()) {
+      this.terminalizeFallbackRecovery('operator-held', 'probe-outcome-unknown');
+      return { ok: false, reason: 'could not durably claim primary recovery probe' };
+    }
+    const decision = await this.probeAndEvaluateFallbackRecovery();
+    // A concurrent KILL or RETRY owns the route after it has durably changed
+    // the recovery episode. A late successful probe is evidence for the old
+    // episode only and cannot override that explicit operator action.
+    if (
+      this.host.fallbackWindow.activeUntil !== windowAtProbe
+      || this.host.fallbackWindow.recoveryEpisodeStartedAt !== episodeStartedAtProbe
+      || this.host.fallbackWindow.recoveryState !== recoveryStateAtProbe
+      || !this.host.fallbackWindow.recoveryProbeInFlight
+    ) {
+      return { ok: false, reason: 'primary recovery probe was superseded by a newer fallback state' };
+    }
+    if (decision.commit) {
+      this.host.fallbackWindow.recoveryProbeInFlight = false;
+      this.host.deactivateProviderFallback('operator-primary-recovery', decision.receipt);
+      return { ok: true };
+    }
+    this.terminalizeFallbackRecovery('operator-held', 'operator-recovery-failed');
+    return { ok: false, reason: 'fresh primary recovery proof did not validate' };
+  }
+
+  /** Corrupt failed-provider evidence leaves routing indeterminate. New turns
+   *  must stop at admission until an operator reconciles the retained record. */
+  isRoutingQuarantined(): boolean {
+    return this.host.fallbackWindow.recoveryState === 'unavailable';
   }
 
   /** Provider config paired with {@link effectiveProvider}. */
@@ -1581,14 +1675,36 @@ export class RuntimeFallbackCoordinator {
     }
   }
 
-  armFallbackWindow(until: number, reason: string, activatedAt: number = Date.now(), opts?: { restored?: boolean; preserveClocks?: boolean }): boolean {
+  armFallbackWindow(
+    until: number,
+    reason: string,
+    activatedAt: number = systemClock.now(),
+    opts?: {
+      restored?: boolean;
+      preserveClocks?: boolean;
+      recoveryState?: FallbackRecoveryState;
+      recoveryTerminalReason?: FallbackRecoveryTerminalReason | null;
+      recoveryEpisodeStartedAt?: number;
+      recoveryProbeInFlight?: boolean;
+    },
+  ): boolean {
     this.kickStaleDiscoveryRefresh('window-arm');
     const selection = this.selectFallbackEntryForWindow(reason);
     if (!selection) return false;
     const fallbackEntry = selection.entry;
+    // A fallback-tier advance preserves the whole primary-recovery episode,
+    // not merely its timers. In particular it must not turn a terminal or
+    // operator-held record back into `active` by applying arm defaults.
+    const preserveRecoveryEpisode = opts?.preserveClocks === true;
     this.host.fallbackWindow.activeEntry = fallbackEntry;
     this.host.fallbackWindow.activeUntil = until;
     this.host.fallbackWindow.activatedAt = activatedAt;
+    if (!preserveRecoveryEpisode) {
+      this.host.fallbackWindow.recoveryState = opts?.recoveryState ?? 'active';
+      this.host.fallbackWindow.recoveryTerminalReason = opts?.recoveryTerminalReason ?? null;
+      this.host.fallbackWindow.recoveryEpisodeStartedAt = opts?.recoveryEpisodeStartedAt ?? activatedAt;
+      this.host.fallbackWindow.recoveryProbeInFlight = opts?.recoveryProbeInFlight ?? false;
+    }
     // First-arm discriminator, captured before the guard below consumes it:
     // null means this call is the window's first arm in this process (a fresh
     // activation or a post-restart restore), non-null means an extension of
@@ -1656,7 +1772,16 @@ export class RuntimeFallbackCoordinator {
     // passed a moved `until`. The revert timer is only ever null while no
     // window is active, so the preserve branch (active window by definition)
     // still re-arms defensively if the handle is somehow missing.
-    if (!opts?.preserveClocks || this.host.revertTimer === null) {
+    if (this.host.fallbackWindow.recoveryState !== 'active') {
+      if (this.host.revertTimer) {
+        clearTimeout(this.host.revertTimer);
+        this.host.revertTimer = null;
+      }
+      if (this.host.fallbackPrimaryProbeTimer) {
+        clearTimeout(this.host.fallbackPrimaryProbeTimer);
+        this.host.fallbackPrimaryProbeTimer = null;
+      }
+    } else if (!opts?.preserveClocks || this.host.revertTimer === null) {
       if (this.host.revertTimer) {
         clearTimeout(this.host.revertTimer);
         this.host.revertTimer = null;
@@ -1671,31 +1796,13 @@ export class RuntimeFallbackCoordinator {
     // after the set-when-null guard above) so the DB can never diverge from the
     // in-memory value even if a caller passes an incorrect reason directly.
     const persistReason = this.host.fallbackWindow.armReason ?? reason;
-    this.host.fallbackWindow.recoveryProbeRequired = fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
+    this.host.fallbackWindow.recoveryProbeRequired = this.host.fallbackWindow.recoveryState === 'active'
+      && fallbackRequiresPrimaryProbe(persistReason as ProviderFallbackReason);
     // The standing primary probe's countdown must survive a clock-preserving
     // arm: scheduleFallbackPrimaryProbe clears and restarts it, which under
     // per-turn fallback failures kept pushing the probe out forever.
-    if (!opts?.preserveClocks) this.scheduleFallbackPrimaryProbe();
-    try {
-      saveFallbackState(this.host.db, {
-        activeUntil: until,
-        activatedAt,
-        reason: persistReason,
-        probeAttempts: this.host.fallbackProbeAttempts,
-        version: PERSISTED_FALLBACK_STATE_VERSION,
-        activeEntryProvider: fallbackEntry.provider,
-        activeEntryModel: fallbackEntry.model ?? null,
-        failedKeys: failedKeysToPersistedKeys(this.host.fallbackChain.failedKeys),
-      });
-    } catch (err) {
-      log.warn({ err }, 'failed to persist fallback window — continuing in-memory');
-      emitAlertChecked(
-        this.host.instanceName,
-        'fallback_persist_failed',
-        'Failed to persist fallback window — will not survive restart',
-        `until=${new Date(until).toISOString()} reason=${persistReason}`,
-      );
-    }
+    if (!opts?.preserveClocks && this.host.fallbackWindow.recoveryState === 'active') this.scheduleFallbackPrimaryProbe();
+    this.persistCurrentFallbackState();
     // Pre-flight is gated to first arms (fresh activation or post-restart
     // restore). An extension re-arm changes nothing about the target entry's
     // environment, and per-turn usage-limit extensions would otherwise
@@ -1862,15 +1969,93 @@ export class RuntimeFallbackCoordinator {
         addFailedKey: (k) => this.host.fallbackChain.failedKeys.add(k),
         entryKeyFor: (p, m) => this.host.fallbackChain.entryKey({ provider: p, model: m ?? undefined }) },
       MAX_FALLBACK_WINDOW_MS, Date.now);
+    if (r.outcome === 'unavailable') {
+      this.host.fallbackWindow.recoveryState = 'unavailable';
+      this.host.fallbackWindow.recoveryTerminalReason = r.reason;
+      this.host.fallbackWindow.recoveryProbeRequired = false;
+      this.host.fallbackWindow.recoveryProbeInFlight = false;
+      this.host.fallbackWindowRestored = false;
+      return;
+    }
     if (r.outcome !== 'armed') { this.host.fallbackWindowRestored = false; return; }
     this.host.fallbackProbeAttempts = r.persistedProbeAttempts;
-    const ok = this.armFallbackWindow(r.clampedUntil, r.persistedReason, r.persistedActivatedAt, { restored: true });
+    const ok = this.armFallbackWindow(r.clampedUntil, r.persistedReason, r.persistedActivatedAt, {
+      restored: true,
+      recoveryState: r.persistedRecoveryState,
+      recoveryTerminalReason: r.persistedRecoveryTerminalReason,
+      recoveryEpisodeStartedAt: r.persistedRecoveryEpisodeStartedAt,
+      recoveryProbeInFlight: false,
+    });
     if (!ok) { clearFallbackState(this.host.db); this.host.fallbackWindowRestored = false; return; }
     this.host.fallbackWindowRestored = true;
     log.info({ activeUntil: new Date(r.clampedUntil).toISOString(),
       ...(r.clampedUntil < r.persistedUntil ? { persistedUntil: new Date(r.persistedUntil).toISOString() } : {}),
       originalReason: r.persistedReason, restoredFailedKeys: r.restoredFailedKeys },
       'restored provider-fallback window from persisted state');
+  }
+
+  private persistCurrentFallbackState(): boolean {
+    if (this.host.fallbackWindow.activeUntil === null) return false;
+    const now = systemClock.now();
+    try {
+      saveFallbackState(this.host.db, {
+        activeUntil: this.host.fallbackWindow.activeUntil,
+        activatedAt: this.host.fallbackWindow.activatedAt ?? now,
+        reason: this.host.fallbackWindow.armReason ?? 'auth-required',
+        probeAttempts: this.host.fallbackProbeAttempts,
+        version: PERSISTED_FALLBACK_STATE_VERSION,
+        activeEntryProvider: this.host.fallbackWindow.activeEntry?.provider ?? null,
+        activeEntryModel: this.host.fallbackWindow.activeEntry?.model ?? null,
+        failedKeys: failedKeysToPersistedKeys(this.host.fallbackChain.failedKeys),
+        recoveryEpisodeStartedAt: this.host.fallbackWindow.recoveryEpisodeStartedAt ?? this.host.fallbackWindow.activatedAt ?? now,
+        recoveryState: this.host.fallbackWindow.recoveryState === 'unavailable' ? 'operator-held' : this.host.fallbackWindow.recoveryState,
+        recoveryTerminalReason: this.host.fallbackWindow.recoveryState === 'unavailable'
+          ? 'operator-killed'
+          : this.host.fallbackWindow.recoveryTerminalReason as FallbackRecoveryTerminalReason | null,
+        recoveryProbeInFlight: this.host.fallbackWindow.recoveryProbeInFlight,
+      });
+      return true;
+    } catch (err) {
+      log.warn({ err }, 'failed to persist fallback recovery state');
+      emitAlertChecked(
+        this.host.instanceName,
+        'fallback_persist_failed',
+        'Failed to persist fallback recovery state',
+        `recovery_state=unavailable until=${this.host.fallbackWindow.activeUntil === null ? 'unknown' : new Date(this.host.fallbackWindow.activeUntil).toISOString()} reason=${this.host.fallbackWindow.armReason ?? 'unknown'}`,
+      );
+      return false;
+    }
+  }
+
+  private recoveryTerminalReasonAt(now: number): 'elapsed-limit' | 'clock-anomaly' | null {
+    const startedAt = this.host.fallbackWindow.recoveryEpisodeStartedAt ?? this.host.fallbackWindow.activatedAt;
+    if (startedAt === null || !Number.isFinite(startedAt) || now < startedAt) return 'clock-anomaly';
+    return now - startedAt >= MAX_PRIMARY_RECOVERY_EPISODE_MS ? 'elapsed-limit' : null;
+  }
+
+  private terminalizeFallbackRecovery(
+    state: 'terminal' | 'operator-held',
+    reason: 'attempt-limit' | 'elapsed-limit' | 'clock-anomaly' | 'probe-outcome-unknown' | 'operator-killed' | 'operator-recovery-failed',
+  ): void {
+    if (this.host.revertTimer) {
+      clearTimeout(this.host.revertTimer);
+      this.host.revertTimer = null;
+    }
+    if (this.host.fallbackPrimaryProbeTimer) {
+      clearTimeout(this.host.fallbackPrimaryProbeTimer);
+      this.host.fallbackPrimaryProbeTimer = null;
+    }
+    this.host.fallbackWindow.recoveryState = state;
+    this.host.fallbackWindow.recoveryTerminalReason = reason;
+    this.host.fallbackWindow.recoveryProbeInFlight = false;
+    this.host.fallbackWindow.recoveryProbeRequired = false;
+    this.persistCurrentFallbackState();
+    emitAlertChecked(
+      this.host.instanceName,
+      state === 'terminal' ? 'fallback_recovery_terminal' : 'fallback_recovery_operator_held',
+      state === 'terminal' ? 'Fallback recovery episode reached its terminal bound' : 'Fallback recovery is held for operator action',
+      `reason=${reason} attempts=${this.host.fallbackProbeAttempts} accepted_work_replay=false`,
+    );
   }
 
   /**
@@ -1898,6 +2083,7 @@ export class RuntimeFallbackCoordinator {
     // is fire-and-forget: this activation honestly reports the current chain
     // (possibly none); the refreshed chain serves the next attempt.
     this.kickStaleDiscoveryRefresh('window-arm');
+    if (this.host.fallbackWindow.recoveryState === 'unavailable') return null;
     if (this.host.agentFallbacks.length === 0) return null;
 
     // The no-arm rule is scoped to EXISTING window state: while window state
@@ -1926,9 +2112,11 @@ export class RuntimeFallbackCoordinator {
     // the probe on it per-turn suppresses early recovery for the whole
     // window) or the FALLBACK entry's own parsed reset estimate, which
     // describes the fallback provider's quota, never the primary's.
-    const preserveWindowClocks = failureTier === 'fallback' && this.fallbackWindowStateExists();
+    const preserveWindowClocks = this.fallbackWindowStateExists() && (
+      failureTier === 'fallback' || this.host.fallbackWindow.recoveryState !== 'active'
+    );
 
-    const now = Date.now();
+    const now = systemClock.now();
     const rawUntil = resetAt ? resetAt.getTime() : now + DEFAULT_FALLBACK_WINDOW_MS;
     const clampedUntil = Math.min(
       now + MAX_FALLBACK_WINDOW_MS,
@@ -2017,8 +2205,9 @@ export class RuntimeFallbackCoordinator {
       userVisible: false,
       reasonCode: reason,
     });
-    // A revert is a RECOVERY, not a fault: the window ran its course (or was
-    // manually disabled) and new sessions are back on the primary provider.
+    // A revert is a verified RECOVERY, not a fault: only a validated probe
+    // reaches this active-window path in normal runtime operation, and new
+    // sessions are back on the primary provider.
     // It carries useful per-window telemetry (turns served/empty, duration) so
     // it stays an emitted source rather than a bare clear — but at `info`, not
     // the emitAlertChecked `critical` default. Paging an operator to
@@ -2031,7 +2220,8 @@ export class RuntimeFallbackCoordinator {
     // A2: real traffic isn't proven yet — the FIRST post-revert turn succeeding is (recordTurnCapabilitySuccess); a non-probe-confirmed deactivation makes no recovery claim, so it clears now.
     if (receipt) this.host.pendingPostRevertConfirmation = true;
     else clearAlertSourceChecked(this.host.instanceName, 'provider_fallback_activated', `reason=${reason} windowMs=${windowMs ?? 'unknown'}`);
-    // H5: stall-incident open/closed = attempts>=threshold NOW, true for ANY reason — fixes admin-disable-mid-stall re-stranding it forever.
+    // A terminal recovery receipt closes any pre-existing stall incident once
+    // the fallback window is actually removed.
     if (this.host.fallbackProbeAttempts >= this.host.fallbackTunables.probeStallThreshold) clearAlertSourceChecked(this.host.instanceName, 'fallback_recovery_stalled', receiptEvidence ?? `reason=${reason} attempts=${this.host.fallbackProbeAttempts} recovery=unconfirmed episode=abandoned`);
     this.host.fallbackWindow.activeUntil = null;
     this.host.fallbackWindow.activatedAt = null;
@@ -2041,6 +2231,10 @@ export class RuntimeFallbackCoordinator {
     this.host.fallbackEmptyAdvance.reset();
     this.host.fallbackWindow.resetAt = null;
     this.host.fallbackWindow.recoveryProbeRequired = false;
+    this.host.fallbackWindow.recoveryState = 'active';
+    this.host.fallbackWindow.recoveryTerminalReason = null;
+    this.host.fallbackWindow.recoveryEpisodeStartedAt = null;
+    this.host.fallbackWindow.recoveryProbeInFlight = false;
     this.host.fallbackWindowRestored = false;
     // End of the stall episode (covers both successful-probe reverts and
     // manual/elapsed deactivations) — the next episode counts from zero and
@@ -2067,25 +2261,34 @@ export class RuntimeFallbackCoordinator {
   }
 
   private handleFallbackRevertTimer(): void {
-    if (this.host.fallbackWindow.activeUntil === null) return;
+    if (this.host.fallbackWindow.activeUntil === null || this.host.fallbackWindow.recoveryState !== 'active') return;
     if (!this.host.fallbackWindow.recoveryProbeRequired) {
-      this.host.deactivateProviderFallback('window-elapsed');
-      return;
+      // An elapsed window is never proof that the primary recovered. Legacy
+      // persisted rows may lack the current requirement, so repair it before
+      // taking the same proof-gated path as a new window.
+      this.host.fallbackWindow.recoveryProbeRequired = true;
     }
-    this.host.fallbackLastProbeAt = Date.now();
+    if (!this.claimPrimaryRecoveryProbe()) return;
     // The probe spawns a child process; fire-and-forget with the result
-    // driving deactivate-or-extend in the resolution. While the probe is in
-    // flight (≤5 s) the window shows expired — acceptable: the previous
-    // spawnSync froze the WHOLE event loop for the same duration, forever on
-    // a dead auth primary.
+    // driving deactivate-or-extend in the resolution. While it is in flight,
+    // the armed window continues to route fallback so no session can use
+    // primary before fresh proof commits.
     const windowAtProbe = this.host.fallbackWindow.activeUntil;
+    const episodeStartedAtProbe = this.host.fallbackWindow.recoveryEpisodeStartedAt;
     void this.probeAndEvaluateFallbackRecovery().then((decision) => {
-      if (this.host.fallbackWindow.activeUntil === null || this.host.fallbackWindow.activeUntil !== windowAtProbe) return; // stale: window deactivated/re-armed mid-flight
+      if (
+        this.host.fallbackWindow.activeUntil === null
+        || this.host.fallbackWindow.activeUntil !== windowAtProbe
+        || this.host.fallbackWindow.recoveryEpisodeStartedAt !== episodeStartedAtProbe
+        || this.host.fallbackWindow.recoveryState !== 'active'
+        || !this.host.fallbackWindow.recoveryProbeInFlight
+      ) return; // stale: window deactivated, re-armed, or held mid-flight
       if (decision.commit) {
+        this.host.fallbackWindow.recoveryProbeInFlight = false;
         this.host.deactivateProviderFallback('primary-probe-ok', decision.receipt);
         return;
       }
-      this.host.fallbackProbeAttempts += 1;
+      if (this.finishFailedPrimaryRecoveryProbe()) return;
       const now = Date.now();
       const until = now + this.host.fallbackTunables.primaryRecheckMs;
       this.host.fallbackWindow.activeUntil = until;
@@ -2093,27 +2296,13 @@ export class RuntimeFallbackCoordinator {
         this.handleFallbackRevertTimer();
       }, this.host.fallbackTunables.primaryRecheckMs);
       this.host.revertTimer.unref?.();
-      try {
-        saveFallbackState(this.host.db, {
-          activeUntil: until,
-          activatedAt: this.host.fallbackWindow.activatedAt ?? now,
-          reason: this.host.fallbackWindow.armReason ?? 'auth-required',
-          // Persist the stall clock with the window so a restart mid-stall
-          // resumes the count instead of resetting it.
-          probeAttempts: this.host.fallbackProbeAttempts,
-          version: PERSISTED_FALLBACK_STATE_VERSION,
-          activeEntryProvider: this.host.fallbackWindow.activeEntry?.provider ?? null,
-          activeEntryModel: this.host.fallbackWindow.activeEntry?.model ?? null,
-          failedKeys: failedKeysToPersistedKeys(this.host.fallbackChain.failedKeys),
-        });
-      } catch (err) {
-        log.warn({ err }, 'failed to extend persisted fallback window after failed recovery probe');
-      }
-      // Stall alert at T, 2T, 3T ... up to the DUR-02 escalation ceiling, then no repeats (see stallAlertPlan) — counter resets only on deactivation, window keeps extending.
+      this.persistCurrentFallbackState();
+      // The terminal state above stops at twelve. This legacy alert remains
+      // useful while attempts are below the hard episode bound.
       const atts = this.host.fallbackProbeAttempts;
       const plan = stallAlertPlan(atts, this.host.fallbackTunables.probeStallThreshold, this.host.fallbackTunables.probeStallCeilingMultiple);
       if (plan.emit) {
-        emitAlertChecked(this.host.instanceName, 'fallback_recovery_stalled', 'Primary provider recovery probe is stalled — fallback window extending indefinitely', `reason=${this.host.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} windowEnd=${new Date(until).toISOString()} primaryProvider=${this.host.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`);
+        emitAlertChecked(this.host.instanceName, 'fallback_recovery_stalled', 'Primary provider recovery probe is stalled — fallback window remains active pending bounded recovery', `reason=${this.host.fallbackWindow.armReason ?? 'auth-required'} attempts=${atts} windowEnd=${new Date(until).toISOString()} primaryProvider=${this.host.agentProvider}${plan.ceiling ? ' ceiling=true' : ''}`);
       }
       // No scheduleFallbackPrimaryProbe() here: the extension window equals the
       // recheck cadence, so this timer IS the probe cadence. Re-arming the
@@ -2127,6 +2316,40 @@ export class RuntimeFallbackCoordinator {
         probeAttempts: this.host.fallbackProbeAttempts,
       }, 'primary provider recovery probe still failing; keeping fallback armed');
     });
+  }
+
+  /** Claim before probing so a crash cannot reset the attempt budget or let
+   *  an unknown provider effect replay automatically after restart. */
+  private claimPrimaryRecoveryProbe(): boolean {
+    const now = Date.now();
+    const terminalReason = this.recoveryTerminalReasonAt(now);
+    if (terminalReason !== null) {
+      this.terminalizeFallbackRecovery('terminal', terminalReason);
+      return false;
+    }
+    this.host.fallbackProbeAttempts += 1;
+    this.host.fallbackLastProbeAt = now;
+    this.host.fallbackWindow.recoveryProbeInFlight = true;
+    if (!this.persistCurrentFallbackState()) {
+      this.terminalizeFallbackRecovery('operator-held', 'probe-outcome-unknown');
+      return false;
+    }
+    return true;
+  }
+
+  /** Returns true once the failure terminalizes the episode. */
+  private finishFailedPrimaryRecoveryProbe(): boolean {
+    const terminalReason = this.recoveryTerminalReasonAt(systemClock.now());
+    if (terminalReason !== null) {
+      this.terminalizeFallbackRecovery('terminal', terminalReason);
+      return true;
+    }
+    if (this.host.fallbackProbeAttempts >= MAX_PRIMARY_RECOVERY_ATTEMPTS) {
+      this.terminalizeFallbackRecovery('terminal', 'attempt-limit');
+      return true;
+    }
+    this.host.fallbackWindow.recoveryProbeInFlight = false;
+    return false;
   }
 
   /** DUR-02: thin delegator — see resolveFallbackRecoveryDecision (fallback-recovery-transaction.ts) for the shared probe/evaluate core. A3: a commit feeds its fresh evidence straight into recordPrimaryModelUsability so /health refreshes immediately, not transitively on the first post-revert turn. */
@@ -2154,7 +2377,7 @@ export class RuntimeFallbackCoordinator {
       clearTimeout(this.host.fallbackPrimaryProbeTimer);
       this.host.fallbackPrimaryProbeTimer = null;
     }
-    if (!this.host.fallbackWindow.recoveryProbeRequired) return;
+    if (!this.host.fallbackWindow.recoveryProbeRequired || this.host.fallbackWindow.recoveryState !== 'active') return;
     if (
       this.host.fallbackWindow.activeUntil === null
       || this.host.fallbackWindow.activeUntil - Date.now() <= this.host.fallbackTunables.primaryRecheckMs
@@ -2164,18 +2387,25 @@ export class RuntimeFallbackCoordinator {
     this.host.fallbackPrimaryProbeTimer = setTimeout(() => {
       this.host.fallbackPrimaryProbeTimer = null;
       if (this.host.fallbackWindow.activeUntil === null || !this.host.fallbackWindow.recoveryProbeRequired) return;
-      this.host.fallbackLastProbeAt = Date.now();
+      if (!this.claimPrimaryRecoveryProbe()) return;
       const windowAtProbe = this.host.fallbackWindow.activeUntil;
+      const episodeStartedAtProbe = this.host.fallbackWindow.recoveryEpisodeStartedAt;
       void this.probeAndEvaluateFallbackRecovery().then((decision) => {
         if (
           this.host.fallbackWindow.activeUntil === null ||
           !this.host.fallbackWindow.recoveryProbeRequired ||
-          this.host.fallbackWindow.activeUntil !== windowAtProbe
+          this.host.fallbackWindow.activeUntil !== windowAtProbe ||
+          this.host.fallbackWindow.recoveryEpisodeStartedAt !== episodeStartedAtProbe ||
+          this.host.fallbackWindow.recoveryState !== 'active' ||
+          !this.host.fallbackWindow.recoveryProbeInFlight
         ) return;
         if (decision.commit) {
+          this.host.fallbackWindow.recoveryProbeInFlight = false;
           this.host.deactivateProviderFallback('primary-probe-ok', decision.receipt);
           return;
         }
+        if (this.finishFailedPrimaryRecoveryProbe()) return;
+        this.persistCurrentFallbackState();
         this.scheduleFallbackPrimaryProbe();
       });
     }, this.host.fallbackTunables.primaryRecheckMs);

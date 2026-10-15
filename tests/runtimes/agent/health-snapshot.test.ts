@@ -286,6 +286,8 @@ function expectedFallbackDetails(): Record<string, unknown> {
     fallbackModel: null,
     fallbackResetAt: null,
     fallbackRecoveryProbeRequired: false,
+    recoveryState: 'active',
+    recoveryTerminalReason: null,
     fallbackTurnsServed: 0,
     fallbackTurnsEmpty: 0,
     lastFallbackTurnAt: null,
@@ -652,6 +654,25 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
       probeAttempts: 36,
       failedEntryCount: 2,
     });
+  });
+
+  it('distinguishes terminal, unavailable, and operator-held fallback recovery in health', () => {
+    const internals = runtime as unknown as {
+      fallbackWindow: {
+        recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+        recoveryTerminalReason: string | null;
+      };
+    };
+
+    for (const [recoveryState, recoveryTerminalReason] of [
+      ['terminal', 'attempt-limit'],
+      ['unavailable', 'failed-provider-evidence-unavailable'],
+      ['operator-held', 'operator-killed'],
+    ] as const) {
+      internals.fallbackWindow.recoveryState = recoveryState;
+      internals.fallbackWindow.recoveryTerminalReason = recoveryTerminalReason;
+      expect(runtime.getHealthSnapshot().details).toMatchObject({ recoveryState, recoveryTerminalReason });
+    }
   });
 
   it('degrades only while provider execution pressure is active', async () => {

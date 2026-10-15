@@ -254,6 +254,10 @@ describe('parseAdminCommand -- fallback positive', () => {
     expect(parseAdminCommand('FALLBACK OFF')).toEqual({ action: 'fallback', sub: 'off' });
   });
 
+  it.each(['KILL', 'RETRY', 'RECOVER'] as const)('parses FALLBACK %s as an explicit recovery control', (sub) => {
+    expect(parseAdminCommand(`fallback ${sub.toLowerCase()}`)).toEqual({ action: 'fallback', sub: sub.toLowerCase() });
+  });
+
   it('parses fallback status (lowercase)', () => {
     expect(parseAdminCommand('fallback status')).toEqual({ action: 'fallback', sub: 'status' });
   });

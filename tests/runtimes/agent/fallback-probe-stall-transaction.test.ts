@@ -106,6 +106,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert, clearAlertSource } from '../../../src/lib/emit-alert.ts';
 import { ensureChatPreferenceSchema, setPreference } from '../../../src/runtimes/agent/chat-preference-db.ts';
 import { ensureFallbackStateSchema } from '../../../src/runtimes/agent/fallback-state-db.ts';
+import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 import type { FallbackRecoveryEvidence } from '../../../src/runtimes/agent/fallback-recovery-transaction.ts';
 
 function mockConfigRef(): Record<string, unknown> {
@@ -159,6 +160,14 @@ function makeRuntime(db: Database): AgentRuntime {
   });
 }
 
+function setStallThreshold(probeStallThreshold: number): void {
+  const config = mockConfigRef();
+  config['fallbackTunables'] = {
+    ...(config['fallbackTunables'] as Record<string, number>),
+    probeStallThreshold,
+  };
+}
+
 type FallbackView = {
   fallbackWindow: { activeUntil: number | null };
   fallbackProbeAttempts: number;
@@ -198,6 +207,7 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     vi.mocked(emitAlert).mockClear();
     vi.mocked(clearAlertSource).mockClear();
     lookupCredentialMock.mockReturnValue('present-key');
+    setStallThreshold(STALL_THRESHOLD);
     dbPath = join(tmpdir(), `dur02-transaction-test-${randomBytes(6).toString('hex')}.db`);
     realDb = new Database(dbPath);
     ensureFallbackStateSchema(realDb);
@@ -212,11 +222,13 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
   });
 
   it('A2: probe-confirmed revert past the stall threshold clears fallback_recovery_stalled immediately but DEFERS provider_fallback_activated', async () => {
+    const stallThreshold = 3;
+    setStallThreshold(stallThreshold);
     const runtime = makeRuntime(realDb);
     const v = view(runtime);
     const probe = vi.fn(probeImpl(unusableEvidence));
     await enterExtensionPhase(v, probe);
-    for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
+    for (let attempt = 2; attempt <= stallThreshold; attempt++) {
       await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);
@@ -302,13 +314,12 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
     const [, , , evidence] = reverted[0] as [string, string, string, string];
-    // The receipt carries probe_attempts=<the count BEFORE reset — the 2
-    // failed probes at attempts 1 and 2, read at evaluation time before the
-    // successful 3rd attempt's commit path touches the counter at all>,
+    // The receipt carries probe_attempts=<the claimed count BEFORE reset —
+    // two failed probes plus the successful third claim>,
     // proving the reset (fallbackProbeAttempts is 0 by the time this
     // assertion runs) did not lose the count — it was captured into the
     // receipt first.
-    expect(evidence).toContain('probe_attempts=2');
+    expect(evidence).toContain('probe_attempts=3');
     expect(evidence).toContain('probe_validated=true');
     expect(evidence).toContain('post_revert_canary=not_run');
     expect(evidence).toContain('from_provider=opencode-cli');
@@ -318,20 +329,23 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
   });
 
   it('crash-safe ordering: durable receipt + both clears fire even when the persisted-window DB clear throws', async () => {
+    const stallThreshold = 3;
+    setStallThreshold(stallThreshold);
     const runtime = makeRuntime(realDb);
     const v = view(runtime);
     const probe = vi.fn(probeImpl(unusableEvidence));
     await enterExtensionPhase(v, probe);
-    for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
+    for (let attempt = 2; attempt <= stallThreshold; attempt++) {
       await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);
 
     // Simulate a crash-adjacent failure in the LAST step of
-    // deactivateProviderFallback (the persisted-window DB clear) — a broken
-    // sqlite handle, disk full, etc. If durable emission ordering is correct,
-    // every alert/clear above this call already fired and is unaffected.
-    realDb.close();
+    // deactivateProviderFallback (the persisted-window DB clear). The probe
+    // claim itself must still be durably recorded before this point.
+    const clearSpy = vi.spyOn(fallbackStateDb, 'clearFallbackState').mockImplementation(() => {
+      throw new Error('disk full');
+    });
 
     probe.mockImplementation(probeImpl(usableEvidence));
     await vi.advanceTimersByTimeAsync(RECHECK_MS);
@@ -341,6 +355,7 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     // is correctly absent here regardless of ordering.
     expect(clearsFor('fallback_recovery_stalled')).toHaveLength(1);
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(1);
+    clearSpy.mockRestore();
   });
 
   it('a manual deactivation BEFORE the stall threshold never clears fallback_recovery_stalled — nothing was ever open', async () => {
@@ -361,11 +376,13 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
   });
 
   it('H5: an admin-disable AFTER the stall alert fired clears fallback_recovery_stalled with HONEST "unconfirmed/abandoned" evidence — no receipt, no false "recovery confirmed" claim', async () => {
+    const stallThreshold = 3;
+    setStallThreshold(stallThreshold);
     const runtime = makeRuntime(realDb);
     const v = view(runtime);
     const probe = vi.fn(probeImpl(unusableEvidence));
     await enterExtensionPhase(v, probe);
-    for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
+    for (let attempt = 2; attempt <= stallThreshold; attempt++) {
       await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     expect(alertsFor('fallback_recovery_stalled')).toHaveLength(1);
@@ -385,6 +402,8 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
   });
 
   it('a strictly-pinned chat is unaffected by an instance-default revert — resolveRouteForTurn still honors the pin', async () => {
+    const stallThreshold = 3;
+    setStallThreshold(stallThreshold);
     ensureChatPreferenceSchema(realDb);
     const chatJid = '15550001111@s.whatsapp.net';
     const senderJid = '15550002222@s.whatsapp.net';
@@ -414,7 +433,7 @@ describe('AgentRuntime — FallbackRecoveryTransaction wiring', () => {
     // revert (the transaction under test).
     const probe = vi.fn(probeImpl(unusableEvidence));
     await enterExtensionPhase(v, probe);
-    for (let attempt = 2; attempt <= STALL_THRESHOLD; attempt++) {
+    for (let attempt = 2; attempt <= stallThreshold; attempt++) {
       await vi.advanceTimersByTimeAsync(RECHECK_MS);
     }
     probe.mockImplementation(probeImpl(usableEvidence));

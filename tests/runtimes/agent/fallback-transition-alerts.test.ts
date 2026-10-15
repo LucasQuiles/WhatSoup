@@ -178,6 +178,7 @@ type FallbackView = {
     reason?: 'usage-limit' | 'rate-limit' | 'auth-required' | 'model-unavailable' | 'server-error',
   ): Activation | null;
   deactivateProviderFallback(reason: string): void;
+  probePrimaryProviderRecovered(): boolean | Promise<boolean>;
   scheduleFallbackReplay(args: {
     activation: Activation;
     chatJid: string;
@@ -251,16 +252,22 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(alertsFor('provider_fallback_activated')).toHaveLength(1);
   });
 
-  it('emits provider_fallback_reverted on window-elapsed with reason, per-window turn counters, and window duration', () => {
+  it('emits provider_fallback_reverted only after expiry obtains primary proof, with per-window counters and duration', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable'); // +1h
+    const proof = vi.fn(() => true);
+    v.probePrimaryProviderRecovered = proof;
+    // The 1 second requested deadline clamps to one minute. That keeps the
+    // expiry timer authoritative instead of allowing the early 5-minute probe
+    // to settle first.
+    v.activateProviderFallback(new Date(Date.now() + 1_000), 'model-unavailable');
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
     v.fallbackMetrics.turnsServed = 3;
     v.fallbackMetrics.turnsEmpty = 1;
 
-    vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+    await vi.advanceTimersByTimeAsync(60 * 1_000 + 1);
+    expect(proof).toHaveBeenCalledTimes(1);
     expect(v.fallbackWindow.activeUntil).toBeNull();
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);
@@ -269,38 +276,40 @@ describe('AgentRuntime — fallback transition alerts', () => {
     // A revert is a RECOVERY — it must emit at info, never the critical
     // default. Pre-fix this paged "Q investigate, remediate" for clean cycles.
     expect(severity).toBe('info');
-    expect(evidence).toContain('reason=window-elapsed');
+    expect(evidence).toContain('reason=primary-probe-ok');
     expect(evidence).toContain('turnsServed=3');
     expect(evidence).toContain('turnsEmpty=1');
-    expect(evidence).toContain('windowMs=3600000');
+    expect(evidence).toContain('windowMs=60000');
 
-    // Recovery clears the activation incident this window opened.
+    // A proof is not a successful post-revert turn. The activation incident
+    // remains open until that independent confirmation occurs.
     const cleared = clearsFor('provider_fallback_activated');
-    expect(cleared).toHaveLength(1);
-    expect(cleared[0][0]).toBe('test');
+    expect(cleared).toHaveLength(0);
   });
 
-  it('reports per-window turn DELTAS in revert evidence — window 2 never re-reports window 1 turns', () => {
+  it('reports per-window turn DELTAS in proof-gated revert evidence — window 2 never re-reports window 1 turns', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
+    v.probePrimaryProviderRecovered = vi.fn(() => true);
 
-    // Window 1: 3 turns served (1 empty), then elapse.
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable'); // +1h
+    // Window 1: 3 turns served (1 empty), then expiry receives proof.
+    v.activateProviderFallback(new Date(Date.now() + 1_000), 'model-unavailable');
     v.fallbackMetrics.turnsServed = 3;
     v.fallbackMetrics.turnsEmpty = 1;
-    vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+    await vi.advanceTimersByTimeAsync(60 * 1_000 + 1);
     const first = alertsFor('provider_fallback_reverted');
     expect(first).toHaveLength(1);
     expect(first[0][3]).toContain('turnsServed=3');
     expect(first[0][3]).toContain('turnsEmpty=1');
 
-    // Window 2 in the SAME process: 2 more turns (1 empty). The lifetime
+    // Window 2 in the SAME process: 2 more turns (1 empty), followed by
+    // another validated expiry probe. The lifetime
     // counters keep accruing (5/2 — getFallbackState contract), but the
     // revert evidence must report only THIS window's delta (2/1).
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable');
+    v.activateProviderFallback(new Date(Date.now() + 1_000), 'model-unavailable');
     v.fallbackMetrics.turnsServed = 5;
     v.fallbackMetrics.turnsEmpty = 2;
-    runtime.disableFallback();
+    await vi.advanceTimersByTimeAsync(60 * 1_000 + 1);
 
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(2);
@@ -313,22 +322,21 @@ describe('AgentRuntime — fallback transition alerts', () => {
     expect(state.fallbackTurnsEmpty).toBe(2);
   });
 
-  it('emits provider_fallback_reverted on admin-disabled deactivation', () => {
+  it('does not emit provider_fallback_reverted when OFF is rejected for an active episode', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
     v.activateProviderFallback(null, 'model-unavailable');
-    runtime.disableFallback();
+    expect(runtime.disableFallback()).toMatchObject({ ok: false });
     const reverted = alertsFor('provider_fallback_reverted');
-    expect(reverted).toHaveLength(1);
-    expect(reverted[0][3]).toContain('reason=admin-disabled');
+    expect(reverted).toHaveLength(0);
   });
 
   it('does NOT emit provider_fallback_reverted when deactivation is a no-op (no active window)', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
 
-    v.deactivateProviderFallback('admin-disabled');
+    v.deactivateProviderFallback('test-no-active-window');
     expect(alertsFor('provider_fallback_reverted')).toHaveLength(0);
   });
 
@@ -483,24 +491,25 @@ describe('AgentRuntime — fallback transition counters', () => {
     expect(state.fallbackReplays).toBe(0);
   });
 
-  it('counts activations and reverts across two windows as lifetime-of-process totals', () => {
+  it('counts activations and proof-gated reverts across two windows as lifetime-of-process totals', async () => {
     const runtime = makeRuntime();
     const v = view(runtime);
+    v.probePrimaryProviderRecovered = vi.fn(() => true);
 
-    // Window 1: activate (+extend — no extra count), then elapse.
-    v.activateProviderFallback(new Date(Date.now() + 60 * 60 * 1000), 'model-unavailable');
-    v.activateProviderFallback(new Date(Date.now() + 2 * 60 * 60 * 1000), 'model-unavailable');
+    // Window 1: activate (+extend — no extra count), then expiry proof.
+    v.activateProviderFallback(new Date(Date.now() + 1_000), 'model-unavailable');
+    v.activateProviderFallback(new Date(Date.now() + 1_000), 'model-unavailable');
     expect(v.getFallbackState().fallbackActivations).toBe(1);
-    vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 1);
+    await vi.advanceTimersByTimeAsync(60 * 1_000 + 1);
     expect(v.getFallbackState().fallbackReverts).toBe(1);
 
-    // Window 2: activate, then admin-disable. Counters accumulate — no reset.
-    v.activateProviderFallback(null, 'model-unavailable');
+    // Window 2: activate, then expiry proof. Counters accumulate — no reset.
+    v.activateProviderFallback(new Date(Date.now() + 1_000), 'model-unavailable');
     expect(v.getFallbackState().fallbackActivations).toBe(2);
-    runtime.disableFallback();
+    await vi.advanceTimersByTimeAsync(60 * 1_000 + 1);
     expect(v.getFallbackState().fallbackReverts).toBe(2);
 
-    // Idempotent deactivation does not count.
+    // OFF remains idempotent after the episode has ended and does not count.
     runtime.disableFallback();
     expect(v.getFallbackState().fallbackReverts).toBe(2);
   });
@@ -620,7 +629,7 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     expect(alertsFor('provider_fallback_restored')).toHaveLength(2);
   });
 
-  it('a fresh window after the restored one reverts still counts and emits once', () => {
+  it('a fresh window after a restored one proves recovery still counts and emits once', async () => {
     const until = Date.now() + 60 * 60 * 1000;
     getFallbackStateMock.mockReturnValue({
       activeUntil: until,
@@ -630,14 +639,16 @@ describe('AgentRuntime — fallback window restore telemetry', () => {
     const runtime = makeRuntime();
     const v = view(runtime);
     v.restorePersistedFallbackWindow();
+    v.probePrimaryProviderRecovered = vi.fn(() => true);
 
     // The restore arm snapshots the (fresh-process, zero) turn counters too,
     // so the restored window's revert reports the turns served since restart.
     v.fallbackMetrics.turnsServed = 2;
     v.fallbackMetrics.turnsEmpty = 1;
 
-    // Restored window expires → reverts (and clears fallbackArmReason).
-    vi.advanceTimersByTime(60 * 60 * 1000 + 1);
+    // A fresh proof returns the restored window to primary (and clears
+    // fallbackArmReason); elapsed time alone does not.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     expect(v.fallbackWindow.activeUntil).toBeNull();
     const reverted = alertsFor('provider_fallback_reverted');
     expect(reverted).toHaveLength(1);

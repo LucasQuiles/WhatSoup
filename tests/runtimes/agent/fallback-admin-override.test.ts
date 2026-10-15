@@ -2,10 +2,11 @@
  * Admin override commands for provider fallback: forceFallback / disableFallback.
  *
  * Covers:
- *  - forceFallback sets the window EXACTLY (may shorten an active 5h window to 30m)
+ *  - forceFallback starts an initial window only when no recovery episode exists
  *  - forceFallback clamps 48h -> clamped:true
  *  - forceFallback returns {ok:false} when no fallbackProvider is configured
- *  - disableFallback ends the window and is idempotent
+ *  - disableFallback cannot return to primary during an episode and is
+ *    idempotent only when no episode exists
  *  - forced window persists with reason 'admin-forced' (saveFallbackState spy)
  *
  * Harness mirrors provider-fallback.test.ts.
@@ -135,10 +136,16 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 
 /** Bracket-access view of the private fallback state. */
 type FallbackView = {
-  fallbackWindow: { activeUntil: number | null };
+  fallbackWindow: {
+    activeUntil: number | null;
+    recoveryState: 'active' | 'terminal' | 'operator-held' | 'unavailable';
+    recoveryTerminalReason: string | null;
+    recoveryEpisodeStartedAt: number | null;
+  };
   effectiveProvider: string;
   activateProviderFallback(resetAt: Date | null): void;
   deactivateProviderFallback(reason: string): void;
+  holdFallbackRecovery(): { ok: true } | { ok: false; reason: string };
 };
 
 function view(runtime: AgentRuntime): FallbackView {
@@ -181,22 +188,20 @@ describe('AgentRuntime.forceFallback', () => {
     expect(view(runtime).fallbackWindow.activeUntil).toBe(Date.now() + thirtyMin);
   });
 
-  it('may SHORTEN an active 5h window down to 30m (operator intent wins)', () => {
+  it('refuses to replace an active window because only RETRY may start a new recovery episode', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     // First arm a full 5h window via normal activation
     view(runtime).activateProviderFallback(null);
-    expect(view(runtime).fallbackWindow.activeUntil).toBe(Date.now() + DEFAULT_FALLBACK_WINDOW_MS);
+    const initialUntil = view(runtime).fallbackWindow.activeUntil;
+    expect(initialUntil).toBe(Date.now() + DEFAULT_FALLBACK_WINDOW_MS);
 
-    // Now force 30m -- must replace the 5h window
+    // ON must not replace an existing episode; it would erase its recovery
+    // budget and permit a bypass around the proof-gated primary return.
     const thirtyMin = 30 * 60_000;
     const result = runtime.forceFallback(thirtyMin);
-    expect(result).toMatchObject({ ok: true, clamped: false });
-    expect(view(runtime).fallbackWindow.activeUntil).toBe(Date.now() + thirtyMin);
-
-    // Advance 31m -- window should have elapsed and been cleared
-    vi.advanceTimersByTime(thirtyMin + 1);
-    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
-    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(result).toMatchObject({ ok: false });
+    expect(view(runtime).fallbackWindow.activeUntil).toBe(initialUntil);
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
   it('uses DEFAULT_FALLBACK_WINDOW_MS when durationMs is omitted', () => {
@@ -236,6 +241,34 @@ describe('AgentRuntime.forceFallback', () => {
       expect.objectContaining({ reason: 'admin-forced' }),
     );
   });
+
+  it.each(['active', 'terminal', 'operator-held', 'unavailable'] as const)(
+    'does not let FALLBACK ON reset an existing %s recovery episode',
+    (recoveryState) => {
+      const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
+      const v = view(runtime);
+      v.activateProviderFallback(null);
+      if (recoveryState === 'operator-held') {
+        expect(v.holdFallbackRecovery()).toEqual({ ok: true });
+      } else {
+        v.fallbackWindow.recoveryState = recoveryState;
+        v.fallbackWindow.recoveryTerminalReason = recoveryState === 'terminal'
+          ? 'attempt-limit'
+          : recoveryState === 'unavailable'
+            ? 'failed-provider-evidence-unavailable'
+            : null;
+      }
+      const beforeEpisode = v.fallbackWindow.recoveryEpisodeStartedAt;
+      const beforeUntil = v.fallbackWindow.activeUntil;
+
+      const result = runtime.forceFallback(30 * 60_000);
+
+      expect(result).toMatchObject({ ok: false });
+      expect(v.fallbackWindow.recoveryState).toBe(recoveryState);
+      expect(v.fallbackWindow.recoveryEpisodeStartedAt).toBe(beforeEpisode);
+      expect(v.fallbackWindow.activeUntil).toBe(beforeUntil);
+    },
+  );
 });
 
 // ── disableFallback ───────────────────────────────────────────────────────────
@@ -256,16 +289,16 @@ describe('AgentRuntime.disableFallback', () => {
     vi.useRealTimers();
   });
 
-  it('ends an active window and reverts to primary provider', () => {
+  it('refuses an active window because OFF cannot bypass fresh primary proof', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
     view(runtime).activateProviderFallback(null);
     expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
     expect(view(runtime).effectiveProvider).toBe('opencode-cli');
 
     const result = runtime.disableFallback();
-    expect(result).toEqual({ ok: true });
-    expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
-    expect(view(runtime).effectiveProvider).toBe('claude-cli');
+    expect(result).toMatchObject({ ok: false });
+    expect(view(runtime).fallbackWindow.activeUntil).not.toBeNull();
+    expect(view(runtime).effectiveProvider).toBe('opencode-cli');
   });
 
   it('is idempotent when no window is active', () => {
@@ -277,10 +310,9 @@ describe('AgentRuntime.disableFallback', () => {
     expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
   });
 
-  it('is idempotent when called twice in a row', () => {
+  it('is idempotent when called twice with no fallback episode', () => {
     const runtime = makeRuntime({ agentFallbackProvider: 'opencode-cli' });
-    view(runtime).activateProviderFallback(null);
-    runtime.disableFallback();
+    expect(runtime.disableFallback()).toEqual({ ok: true });
     expect(() => runtime.disableFallback()).not.toThrow();
     expect(view(runtime).fallbackWindow.activeUntil).toBeNull();
   });
