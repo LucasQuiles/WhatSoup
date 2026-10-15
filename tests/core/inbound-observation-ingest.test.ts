@@ -59,6 +59,7 @@ vi.mock('../../src/core/access-list.ts', () => ({
 import { Database, storeDecryptionFailure } from '../../src/core/database.ts';
 import { config } from '../../src/config.ts';
 import { createIngestHandler, getIngestStats } from '../../src/core/ingest.ts';
+import { shouldRespond } from '../../src/core/access-policy.ts';
 import { getInboundObservationHealth, resetInboundObservations } from '../../src/core/inbound-observation.ts';
 
 const BOT_JID = '15551230004@s.whatsapp.net';
@@ -216,6 +217,23 @@ describe('ingest exits recorded as inbound observations', () => {
       'ingest.stored_not_admitted': 1,
       'ingest.store_failed': 0,
     });
+    expect(doubles.emitAlert).not.toHaveBeenCalled();
+  });
+
+  it('a journal failure on a deliberate skip path is not counted; that message was never going to be admitted', async () => {
+    const db = openDb();
+    const runtime = makeRuntime();
+    const { durability, journalInbound } = makeDurability(vi.fn().mockImplementation(() => { throw new Error('journal write failed'); }));
+    vi.mocked(shouldRespond).mockReturnValueOnce({ respond: false, reason: 'blocked', accessStatus: 'blocked' });
+
+    makeHandler(db, runtime, durability)(makeMessage({ messageId: 'obs-skip-journal-failed' }));
+    await waitForIdle();
+
+    expect(journalInbound).toHaveBeenCalledTimes(1);
+    expect(journalInbound.mock.calls[0]![3]).toBe('none');
+    expect(storedCount(db, 'obs-skip-journal-failed')).toBe(1);
+    expect(runtime.handleMessage).not.toHaveBeenCalled();
+    expect(Object.values(allZero()).every((n) => n === 0)).toBe(true);
     expect(doubles.emitAlert).not.toHaveBeenCalled();
   });
 
