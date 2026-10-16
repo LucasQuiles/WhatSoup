@@ -382,6 +382,27 @@ def test_packet_cli_prints_the_packet_and_exits_one_when_absent(state, tmp_path)
     assert bad.returncode == 2
 
 
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_format_card_cli_prints_only_the_card_the_group_gets(golden: dict, state, tmp_path) -> None:
+    # --format-card goes to standard output: it must print the scrubbed card the
+    # send path sends, byte for byte, and nothing from the event beyond it.
+    sent, _ref = _mod.notice_message(golden["event"], notice_kind="fixture", paths=state)
+    event_file = tmp_path / "event.json"
+    event_file.write_text(json.dumps(golden["event"]), encoding="utf-8")
+    cli_state = tmp_path / "cli-state"
+    cli_state.mkdir(mode=0o700)
+    printed = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--format-card", str(event_file)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "BOT_ERRORS_STATE_DIR": str(cli_state)},
+        timeout=60,
+    )
+    assert printed.returncode == 0, printed.stderr
+    assert printed.stdout == sent + "\n"
+    assert list(cli_state.iterdir()) == []
+
+
 def test_ref_collision_never_overwrites_another_notice(state) -> None:
     golden = next(g for g in _GOLDENS if g["family"] == "dispatcher_error")
     event = golden["event"]

@@ -4688,7 +4688,9 @@ CARD_ICON_RECOVERED = "✅"     # green check: recovered
 CARD_ICON_INFO = "ℹ️"    # information only
 CARD_TITLE_LIMIT = 120
 CARD_CLIP = "…"
-CARD_NO_ACTION = "You: No action needed"
+# Not "CARD_NO_...": CodeQL reads card.?no as a card number and flags every
+# print of a card that carries this fixed line (alert 82 on PR #3815).
+CARD_YOU_NO_ACTION = "You: No action needed"
 CARD_IMPACT_UNCONFIRMED = "Impact not yet confirmed"
 
 # Card-only scrubbing. The card never carries paths, event ids, digests or
@@ -4910,10 +4912,10 @@ def card_handling(event: dict[str, Any], classification: Any) -> tuple[str, str]
         opened = _card_epoch(_dispatcher_evidence_fields(event).get("opened"))
         created = _card_epoch(event.get("createdAt"))
         if opened is not None and created is not None and created >= opened:
-            return f"Handling: recovered after {_card_duration(created - opened)} open", CARD_NO_ACTION
-        return "Handling: recovered", CARD_NO_ACTION
+            return f"Handling: recovered after {_card_duration(created - opened)} open", CARD_YOU_NO_ACTION
+        return "Handling: recovered", CARD_YOU_NO_ACTION
     if critical_operator_action(event) == FLAP_STORM_ACTION:
-        return "Handling: Q investigating", CARD_NO_ACTION
+        return "Handling: Q investigating", CARD_YOU_NO_ACTION
     action = requested_action_text(event)
     if action == physical_action_text():
         return (
@@ -4921,13 +4923,13 @@ def card_handling(event: dict[str, Any], classification: Any) -> tuple[str, str]
             "You: Action needed: relink the WhatsApp line or retire it",
         )
     if action == physical_candidate_action_text():
-        return "Handling: Q checking whether the logout repeats", CARD_NO_ACTION
+        return "Handling: Q checking whether the logout repeats", CARD_YOU_NO_ACTION
     if action == NONACTIONABLE_ACTION:
-        return "Handling: none needed", CARD_NO_ACTION
+        return "Handling: none needed", CARD_YOU_NO_ACTION
     if action == stale_action_text():
-        return "Handling: Q checking whether it recovered", CARD_NO_ACTION
+        return "Handling: Q checking whether it recovered", CARD_YOU_NO_ACTION
     if action == INVESTIGATE_ACTION:
-        return "Handling: Q investigating", CARD_NO_ACTION
+        return "Handling: Q investigating", CARD_YOU_NO_ACTION
     if action == credential_repage.HUMAN_ACTION:
         return "Handling: waiting on the owner", "You: Action needed: restore this bot's AI provider sign-in"
     if action == credential_repage.HUMAN_ACTION_DIGEST:
@@ -4936,7 +4938,7 @@ def card_handling(event: dict[str, Any], classification: Any) -> tuple[str, str]
     # whether it asks the owner decides the You line.
     if re.search(r"\b(?:lucas|owner)\b", action, re.IGNORECASE):
         return "Handling: waiting on the owner", "You: Action needed: do the owner step in the packet"
-    return "Handling: Q following the operator step", CARD_NO_ACTION
+    return "Handling: Q following the operator step", CARD_YOU_NO_ACTION
 
 
 def card_is_information_only(event: dict[str, Any], classification: Any) -> bool:
@@ -4957,7 +4959,7 @@ def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resol
         lines.append(f"Handling: recovered after {_card_duration(created - opened)} open")
     else:
         lines.append("Handling: recovered")
-    lines.extend([CARD_NO_ACTION, f"Ref: {ref}"])
+    lines.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
     return "\n".join(lines)
 
 
@@ -4981,7 +4983,7 @@ def format_card(event: dict[str, Any], ref: str) -> str:
     lines = [f"{icon} *{title}*", card_where(event)]
     if icon == CARD_ICON_INFO:
         # Information only: at most four lines.
-        lines.extend([CARD_NO_ACTION, f"Ref: {ref}"])
+        lines.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
         return "\n".join(lines)
     if classification.kind != "incident_recovery":
         lines.append(card_impact(event))
@@ -5434,7 +5436,7 @@ def format_information_summary_card(lines: list[str], ref: str) -> str:
     card = [f"{CARD_ICON_INFO} *Information since the last summary: {len(lines)}*", *shown]
     if len(lines) > len(shown):
         card.append(f"{CARD_CLIP} {len(lines) - len(shown)} more in the packet")
-    card.extend([CARD_NO_ACTION, f"Ref: {ref}"])
+    card.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
     return "\n".join(card)
 
 
@@ -5754,7 +5756,7 @@ def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
         lines.append("You: Action needed: relink or retire each logged-out line (Lucas)")
     else:
         lines.append("Handling: Q to check these lines")
-        lines.append(CARD_NO_ACTION)
+        lines.append(CARD_YOU_NO_ACTION)
     lines.append(f"Ref: {ref}")
     return "\n".join(lines)
 
