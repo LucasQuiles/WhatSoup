@@ -4754,8 +4754,9 @@ _EVIDENCE_TOKEN_RE = re.compile(r"(?m)^(?P<key>[a-z_]+)=(?P<value>[^\n]*)$")
 CARD_CAUSE_LABEL_FIELDS = ("provider", "model", "unit")
 CARD_CAUSE_COUNT_FIELDS = ("port", "count")
 # Relay 20 S-c: the date a model id ends with ("-20250929", "-2024-08-06") is
-# dropped so the name survives the long-number strip.
-_CARD_MODEL_DATE_RE = re.compile(r"[-_.:]?(?:\d{8}|\d{4}-\d{2}-\d{2})$")
+# dropped so the name survives the long-number strip. Relay 21 S2: only a date,
+# never the last 8 digits of a longer run ("ft:gpt-4o:org:123456789").
+_CARD_MODEL_DATE_RE = re.compile(r"[-_.:]?(?<!\d)(?:(?:19|20)\d{6}|\d{4}-\d{2}-\d{2})$")
 
 
 def _card_scrub_once(text: str) -> str:
@@ -4952,7 +4953,8 @@ def card_catalog_title(event: dict[str, Any], severity: str) -> str | None:
         title = f"{bot} has unfinished recovery work"
         diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
         count = event.get("count", diagnostics.get("count"))
-        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+        # Relay 21 S1: capped like card_cause, so an id-size value never prints.
+        if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 10_000_000:
             title += f" ({count:,})"
         return title
     if source == "flap_storm_resolved":

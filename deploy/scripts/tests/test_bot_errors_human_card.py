@@ -556,6 +556,29 @@ def test_large_counts_keep_thousands_separators_and_dated_models_keep_their_name
     assert "1,234,567 older notices not listed" in summary
 
 
+def test_an_id_size_recovery_debt_count_never_reaches_the_card() -> None:
+    # Relay 21 S1: the count had no upper bound, so an id-size value printed
+    # with separators survived. It is capped like card_cause, at the title
+    # itself, not only by the card's long-number strip.
+    debt = dict(next(g for g in _GOLDENS if g["family"] == "recovery_debt_attention")["event"])
+    debt["diagnostics"] = {**debt["diagnostics"], "count": 123_456_789_012}
+    assert _mod.card_catalog_title(debt, "info") == "Q has unfinished recovery work"
+    first = _mod.format_card(debt, "00000000").split("\n", 1)[0]
+    assert first == "ℹ️ *Q has unfinished recovery work*", first
+    debt["diagnostics"] = {**debt["diagnostics"], "count": 10_000_000}
+    assert "(10,000,000)" in _mod.format_card(debt, "00000000")
+
+
+@pytest.mark.parametrize(("model", "label"), [
+    ("ft:gpt-4o:org:123456789", "ft:gpt-4o:org:123456789"),
+    ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5"),
+    ("gpt-4o-2024-08-06", "gpt-4o"),
+])
+def test_the_model_date_strip_takes_only_a_date(model: str, label: str) -> None:
+    # Relay 21 S2: the pattern cut the last 8 digits off any longer run.
+    assert _mod._CARD_MODEL_DATE_RE.sub("", model) == label
+
+
 def test_unknown_failure_class_is_dropped() -> None:
     event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_warning")["event"])
     assert "unknown" not in _mod.format_card(event, "00000000").lower()
