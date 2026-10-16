@@ -1,6 +1,7 @@
 """Card hygiene for every BOT ERRORS card a test renders (relay 16 B, relay 19 B3/B4; not deployed).
 
-A card carries no paths (absolute, or relative and file-like), event ids,
+A card carries no paths (absolute, or relative and file-like; checked by
+``card_path_tokens``, not by the scrubber's regex), event ids,
 digests, pids, incident keys, long numbers, key=value fields, schema words or
 "@" + digit. The Ref value is 8 hex and is checked separately; the Ref line is
 left out of the pattern check.
@@ -16,20 +17,7 @@ import functools
 import re
 from typing import Any
 
-# A path segment that looks like a file or folder: a dot extension or a common
-# folder word (relay 20 M1). Plain words joined by a slash ("and/or", "3/4") pass.
-_FILE_SEGMENT = (
-    r"(?:[\w-]*\.[A-Za-z][\w.-]*"
-    r"|(?:logs?|config|conf|src|lib|tmp|temp|var|etc|bin|data|state|deploy|scripts?|tests?|build|dist"
-    r"|home|cache|packets|outbox|node_modules)(?![\w.-]))"
-)
-
 FORBIDDEN_CARD_PATTERNS = [
-    re.compile(r"(?:^|[\s(=])(?:~[\w.@-]*)?/[\w.@-]+"),  # an absolute path, one segment or more
-    re.compile(r"(?<![\w./-])[\w.-]+(?:/[\w.-]+){2,}"),  # a relative path, three segments or more
-    re.compile(  # a relative path of two segments, one of them file-like
-        rf"(?<![\w./-])(?:{_FILE_SEGMENT}/[\w.-]+|[\w.-]+/{_FILE_SEGMENT})"
-    ),
     re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE),  # event id
     re.compile(r"\bdigest\b", re.IGNORECASE),
     re.compile(r"\bchars\b", re.IGNORECASE),
@@ -58,9 +46,41 @@ def card_body_without_ref(card: str) -> str:
     return "\n".join(line for line in card.split("\n") if not line.startswith("Ref: "))
 
 
+# Paths are checked token by token, not with the scrubber's regex (relay 21
+# N3): a copy of that regex could not catch a gap of the same shape.
+_TOKEN_EDGE = "\"'`()[]{}<>,;:*!?"
+_DECIMAL = re.compile(r"\d+\.\d+")
+
+
+def _file_like(segment: str) -> bool:
+    """A segment with a dot extension of 1 to 8 letters or digits; a decimal is not one."""
+    _stem, dot, extension = segment.rpartition(".")
+    if not dot or _DECIMAL.fullmatch(segment):
+        return False
+    return 1 <= len(extension) <= 8 and extension.isascii() and extension.isalnum()
+
+
+def card_path_tokens(text: str) -> list[str]:
+    """Every token of the text that is a path: absolute or home, three segments
+    or more, or two segments with a file-like one; "/" or "\\" separated."""
+    found = []
+    for raw in text.split():
+        token = raw.strip(_TOKEN_EDGE).rstrip(".")
+        if "/" not in token and "\\" not in token:
+            continue
+        segments = [segment for segment in re.split(r"[/\\]", token) if segment]
+        if token.startswith(("/", "~")) or len(segments) >= 3 or any(_file_like(s) for s in segments):
+            found.append(token)
+    return found
+
+
 def card_hygiene_violations(card: str) -> list[str]:
     body = card_body_without_ref(card)
-    return [pattern.pattern for pattern in FORBIDDEN_CARD_PATTERNS if pattern.search(body)]
+    violations = [pattern.pattern for pattern in FORBIDDEN_CARD_PATTERNS if pattern.search(body)]
+    paths = card_path_tokens(body)
+    if paths:
+        violations.append(f"path {paths}")
+    return violations
 
 
 class CardHygieneViolation(BaseException):

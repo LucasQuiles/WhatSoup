@@ -138,6 +138,7 @@ def test_card_carries_no_machine_fields(golden: dict) -> None:
     body = _card_body_without_ref(golden["card"])
     for pattern in _FORBIDDEN_CARD_PATTERNS:
         assert not pattern.search(body), (pattern.pattern, golden["card"])
+    assert not card_hygiene.card_path_tokens(body), golden["card"]
     assert re.fullmatch(r"Ref: [0-9a-f]{8}", golden["card"].split("\n")[-1])
     assert len(golden["card"]) <= 600
     first = golden["card"].split("\n", 1)[0]
@@ -462,6 +463,35 @@ def test_plain_words_joined_by_a_slash_stay_on_the_card() -> None:
     text = "read and/or write 3/4 of the read/write checks"
     assert _mod.card_plain(text) == text
     card_hygiene.assert_card_hygiene(f"ℹ️ *{text}*\nRef: 00000000")
+
+
+_N3_PATHS = ("docs/archive.7z", "systemd/getty@.service", "logs\\error.log", "logs/error.log")
+_N3_PHRASES = ("test/prod", "home/away", "and/or", "3/4", "10/16", "8080/8443", "data/voice", "state/city")
+
+
+@pytest.mark.parametrize("path", _N3_PATHS)
+def test_two_segment_paths_with_any_extension_never_reach_the_card(path: str) -> None:
+    # Relay 21 N3: a digit extension, an "@" in a segment and the backslash
+    # form all slipped through the two-segment rule.
+    summary = f"failed reading {path} again"
+    assert _mod.card_plain(summary) == "failed reading again"
+    with pytest.raises(card_hygiene.CardHygieneViolation):
+        card_hygiene.assert_card_hygiene(f"ℹ️ *{summary}*\nRef: 00000000")
+
+
+@pytest.mark.parametrize("phrase", _N3_PHRASES)
+def test_ordinary_slash_phrases_stay_on_the_card(phrase: str) -> None:
+    # Relay 21 N3: the folder-word list emptied ordinary text ("test/prod").
+    summary = f"switch {phrase} now"
+    assert _mod.card_plain(summary) == summary
+    card_hygiene.assert_card_hygiene(f"ℹ️ *{summary}*\nRef: 00000000")
+
+
+def test_the_hygiene_path_check_is_not_the_scrubber_regex() -> None:
+    # Relay 21 N3: the hook copied the scrubber's regex, so it could not catch
+    # a gap of the same shape. It now has a check of its own.
+    assert not hasattr(card_hygiene, "_FILE_SEGMENT")
+    assert card_hygiene.card_path_tokens("see docs/archive.7z and test/prod") == ["docs/archive.7z"]
 
 
 def test_an_instance_with_a_long_digit_run_gives_no_digit_run_on_the_where_line() -> None:

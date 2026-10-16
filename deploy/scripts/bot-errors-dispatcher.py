@@ -4702,22 +4702,20 @@ CARD_SCRUB_MAX_PASSES = 8
 # Card-only scrubbing. The card never carries paths, event ids, digests,
 # confined renderings, pids, long numbers, key=value fields or incident keys;
 # those stay in the packet (relay 16 B, relay 19 B4).
-# A path segment that looks like a file or folder: one with a dot extension
-# ("agent.json", ".env") or a common folder word. Relay 20 M1.
-_CARD_FILE_SEGMENT = (
-    r"(?:[\w-]*\.[A-Za-z][\w.-]*"
-    r"|(?:logs?|config|conf|src|lib|tmp|temp|var|etc|bin|data|state|deploy|scripts?|tests?|build|dist"
-    r"|home|cache|packets|outbox|node_modules)(?![\w.-]))"
-)
+# A path segment that looks like a file: one with a dot extension of letters
+# or digits ("agent.json", ".env", "archive.7z", "getty@.service"). A
+# decimal ("1.5") is not one. Relay 20 M1, relay 21 N3 (no folder-word list:
+# it emptied ordinary text such as "test/prod").
+_CARD_FILE_SEGMENT = r"(?!\d+\.\d+(?![\w.@-]))[\w.@-]*\.[A-Za-z0-9]{1,8}(?![\w@-])"
 _CARD_PATH_RE = re.compile(
     # An absolute or home path of one segment or more ("/tmp", "~/a/b"), a
     # relative path of three segments or more ("src/lib/x.ts"), or a relative
     # path of two segments with a file-like one ("logs/error.log",
-    # "config/agent.json"). Plain words joined by a slash ("and/or",
-    # "read/write", "3/4") stay.
+    # "config/agent.json"). A relative path may use backslashes ("logs\\error.log").
+    # Plain words joined by a slash ("and/or", "test/prod", "3/4") stay.
     r"(?<![\w.@-])(?:~[\w.@-]*)?/[\w.@-]+(?:/[\w.@-]*)*"
-    r"|(?<![\w./-])[\w.-]+(?:/[\w.-]+){2,}/?"
-    rf"|(?<![\w./-])(?:{_CARD_FILE_SEGMENT}/[\w.-]+|[\w.-]+/{_CARD_FILE_SEGMENT})/?"
+    r"|(?<![\w.@/\\-])[\w.@-]+(?:[/\\][\w.@-]+){2,}[/\\]?"
+    rf"|(?<![\w.@/\\-])(?:{_CARD_FILE_SEGMENT}[/\\][\w.@-]+|[\w.@-]+[/\\]{_CARD_FILE_SEGMENT})[/\\]?"
 )
 _CARD_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _CARD_ULID_RE = re.compile(r"\b[0-9A-HJKMNP-TV-Z]{26}\b")
