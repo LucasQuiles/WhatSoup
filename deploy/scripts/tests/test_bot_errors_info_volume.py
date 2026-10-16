@@ -57,6 +57,7 @@ ROSTER = {
                 {"name": "logged-line", "expected": "always_on"},
                 {"name": "inferred-line", "expected": "always_on"},
                 {"name": "shared", "expected": "always_on"},
+                {"name": "pair-line", "expected": "always_on"},
             ],
         },
         {
@@ -66,6 +67,7 @@ ROSTER = {
                 {"name": "far-line", "expected": "always_on"},
                 {"name": "retired-line", "expected": "blocked"},
                 {"name": "shared", "expected": "blocked"},
+                {"name": "far-pair-line", "expected": "always_on"},
             ],
         },
     ],
@@ -76,6 +78,7 @@ LINES = {
     "logged-line": {"name": "logged-line", "linkedStatus": "unlinked", "linkedStatusConfidence": "confirmed"},
     "inferred-line": {"name": "inferred-line", "linkedStatus": "linked", "linkedStatusConfidence": "inferred"},
     "shared": {"name": "shared", "linkedStatus": "linked", "linkedStatusConfidence": "confirmed"},
+    "pair-line": {"name": "pair-line", "linkedStatus": "linked", "linkedStatusConfidence": "confirmed"},
 }
 
 
@@ -263,6 +266,84 @@ def test_daily_card_merges_one_bot_and_separates_could_not_check(mod):
     # Once a UTC day.
     assert mod.send_daily_line_card(mod.state_paths(), now=NOW + 3600) == 0
     assert len(sends) == 1
+
+
+# Two producers page one bond loss under two keys: the host's daily health
+# check ("<host>|<bot>|daily-health:whatsapp_device_bond_lost") and the
+# collector, which does not know the host ("unknown|<bot>|whatsapp_device_bond_lost").
+# Records reconstructed from two delivered stale digests of 2026-10-16 and the
+# incident state they came from; host and line names neutralised.
+_BOND_LOST_CLEAR = (
+    "clear only after WhatsApp is connected with a non-empty auth bond and a successful outbound send "
+    "after the relinked creds mtime and after the incident"
+)
+
+
+def _iso_epoch(text: str) -> int:
+    return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def _two_producer_pair(host: str, bot: str) -> dict:
+    return {
+        f"{host}|{bot}|daily-health:whatsapp_device_bond_lost": _physical(
+            _iso_epoch("2026-09-03T11:20:22Z"),
+            _iso_epoch("2026-09-03T11:20:22Z"),
+            clearRequirement="connected WhatsApp state, present non-empty auth bond, and successful outbound send after relink",
+        ),
+        f"unknown|{bot}|whatsapp_device_bond_lost": _physical(
+            _iso_epoch("2026-09-03T08:32:30Z"),
+            _iso_epoch("2026-09-25T00:48:32Z"),
+            clearRequirement=_BOND_LOST_CLEAR,
+            suppressedCount=3093,
+        ),
+    }
+
+
+def test_two_producer_keys_for_one_linked_line_are_each_rechecked_and_close_without_a_message(mod):
+    incidents = _two_producer_pair("hub-1", "pair-line")
+    _write_state(mod, incidents)
+    sends = _sends(mod)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+
+    assert sends == []
+    state = _state(mod)
+    for key in incidents:
+        assert key not in state["openIncidents"], key
+        assert state["lineRecheckRetired"][key]["disposition"] == "cleared on recheck"
+    packets = {packet["incidentKey"]: packet for packet in _packets(mod)}
+    assert set(packets) == set(incidents)
+    for key, packet in packets.items():
+        # The recheck is the close reason, on the incident's own packet.
+        assert packet["disposition"] == "cleared on recheck"
+        assert packet["lineCheck"] == {
+            "verdict": "cleared on recheck", "host": "hub-1", "bot": "pair-line", "reason": "linked, confirmed",
+        }
+        assert state["lineRecheckRetired"][key]["ref"] == packet["ref"]
+    assert _log_types(mod).count("line_recheck_retired") == 2
+    assert len(mod.fleet_reads) == 1, "one live line read per sweep, not per key"
+
+
+def test_two_producer_keys_for_a_line_on_another_host_are_one_could_not_check_line(mod):
+    incidents = _two_producer_pair("host-2", "far-pair-line")
+    _write_state(mod, incidents)
+    sends = _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    lines = card.split("\n")
+    assert lines[0] == "🟡 *WhatsApp lines that could not be checked: 1*"
+    assert lines[1] == "far-pair-line (host-2)"
+    assert "Action needed" not in card and "relink" not in card
+    state = _state(mod)
+    for key in incidents:
+        assert key in state["openIncidents"], "could not check never retires"
+    packet = mod.read_notice_packet(mod.state_paths(), lines[-1][5:])
+    [group] = packet["included"]
+    assert group["verdict"] == "could_not_check"
+    assert sorted(group["incidentKeys"]) == sorted(incidents)
+    assert group["reasons"] == ["line is on another host"] * 2
 
 
 def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypatch):
