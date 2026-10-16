@@ -8546,11 +8546,26 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                         # Relay 21 S4: capped like the information requeue. The
                         # resolve is dead-lettered, so the dead-letter meta-alert
                         # pages, and the storm entry goes.
-                        dead_path = write_dead_letter_record(
-                            paths,
-                            flap_resolve_event(str(key), entry, now, underlying_open),
-                            f"flap-resolve-{key_id_segment(str(key))}",
-                        )
+                        try:
+                            dead_path = write_dead_letter_record(
+                                paths,
+                                flap_resolve_event(str(key), entry, now, underlying_open),
+                                f"flap-resolve-{key_id_segment(str(key))}",
+                            )
+                        except Exception as dead_exc:  # noqa: BLE001 - keep the storm, retry in 900 s
+                            # Relay 23 W4: the outer catch skips nextResolveAt, so a
+                            # failed dead-letter write retried every cycle.
+                            entry["packetPendingTries"] = tries
+                            entry["lastResolveErrorAt"] = now
+                            entry["nextResolveAt"] = now + DAILY_CARD_RETRY_SECONDS
+                            append_dispatch_log(paths, {
+                                "type": "flap_resolve_dead_letter_failed",
+                                "incidentKey": key,
+                                "tries": tries,
+                                "error": truncate(str(dead_exc), 300),
+                                "nextResolveAt": entry["nextResolveAt"],
+                            })
+                            continue
                         flap_state.pop(key, None)
                         append_dispatch_log(paths, {
                             "type": "flap_resolve_dead_lettered",

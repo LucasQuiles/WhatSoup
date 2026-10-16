@@ -406,3 +406,41 @@ def test_a_flap_resolve_whose_packet_stays_pending_is_dead_lettered_with_a_page(
     assert record["delivery"]["status"] == "dead_letter"
     assert "flap_resolve_dead_lettered" in _kinds(paths)
     assert mod.queue_dead_letter_meta_alert(paths, clock.now) == 1
+
+
+def test_a_failed_dead_letter_write_keeps_the_storm_and_waits_for_the_retry(tmp_path, monkeypatch):
+    # Relay 23 W4: on the S4 cap path a dead-letter write that raised went to the
+    # outer catch, which skips nextResolveAt, so the storm retried every cycle
+    # and counted an error each time. The entry stays and waits 900 s.
+    mod, clock = _load(tmp_path / "dead-letter-fails", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+
+    def _pending(*_a, **_k):
+        raise mod.NoticePacketPending("no packet for deferred flap-resolved notice")
+
+    monkeypatch.setattr(mod, "defer_information_notice", _pending)
+    for _ in range(mod.BOT_ERRORS_DELIVERY_MAX_ATTEMPTS - 1):
+        assert mod.sweep_flap_storms(paths) == (0, 1)
+        clock.now = _entry(mod, paths)["nextResolveAt"]
+
+    real_dead_letter = mod.write_dead_letter_record
+
+    def _dead_letter_fails(*_a, **_k):
+        raise OSError("dead-letter store not writable")
+
+    monkeypatch.setattr(mod, "write_dead_letter_record", _dead_letter_fails)
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+    entry = _entry(mod, paths)
+    assert entry is not None, "a failed dead-letter write keeps the storm"
+    assert entry["nextResolveAt"] == clock.now + mod.DAILY_CARD_RETRY_SECONDS, entry
+    assert "flap_resolve_dead_letter_failed" in _kinds(paths)
+
+    clock.now += CYCLE
+    assert mod.sweep_flap_storms(paths) == (0, 0), "the next cycle does not retry"
+
+    monkeypatch.setattr(mod, "write_dead_letter_record", real_dead_letter)
+    clock.now = entry["nextResolveAt"]
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+    assert _entry(mod, paths) is None
+    assert len(list(paths["dead_letter"].glob("*.json"))) == 1
