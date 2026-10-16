@@ -136,6 +136,24 @@ def _physical(opened: int, last_seen: int, **extra) -> dict:
     }
 
 
+def _healthy_probe(bot: str, *, outbound_at: int | None = None, uptime: int = 60) -> str:
+    """A daily-health reading of a connected line; the recovery path's proof shape."""
+    probe = (
+        f"health {bot}: 200 status=healthy wa_connected=true state=connected auth_bond_status=present "
+        f"auth_bond_creds_exists=true auth_bond_creds_size=512 auth_failure_class=none "
+        f"lifecycle_process_uptime_seconds={uptime} reconnect_attempts=0"
+    )
+    if outbound_at is not None:
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(outbound_at))
+        probe += f" outbound_success_evidence=provider_acknowledged_or_better outbound_success_at={stamp}"
+    return probe
+
+
+def _proven(record: dict, bot: str) -> dict:
+    """The record with a send after the incident in its own health reading (relay 19 B1)."""
+    return {**record, "lastEvidence": _healthy_probe(bot, outbound_at=int(record["openedAt"]) + 3600)}
+
+
 def _packets(mod) -> list[dict]:
     return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(mod.state_paths()["packets"].glob("*.json"))]
 
@@ -147,10 +165,10 @@ def _log_types(mod) -> list[str]:
 # --- C2: recheck at renotify time ---------------------------------------------
 
 
-def test_linked_and_confirmed_line_is_retired_on_recheck_without_a_message(mod):
+def test_linked_line_with_a_send_after_the_incident_is_retired_on_recheck_without_a_message(mod):
     now = int(time.time())
     key = "hub-1|linked-line|instance_logged_out"
-    _write_state(mod, {key: _physical(now - 5 * 86400, now - 4 * 86400)})
+    _write_state(mod, {key: _proven(_physical(now - 5 * 86400, now - 4 * 86400), "linked-line")})
     sends = _sends(mod)
 
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
@@ -164,9 +182,57 @@ def test_linked_and_confirmed_line_is_retired_on_recheck_without_a_message(mod):
     assert packet["disposition"] == "cleared on recheck"
     assert packet["incidentKey"] == key
     assert packet["lineCheck"] == {
-        "verdict": "cleared on recheck", "host": "hub-1", "bot": "linked-line", "reason": "linked, confirmed",
+        "verdict": "cleared on recheck", "host": "hub-1", "bot": "linked-line",
+        "reason": "linked, confirmed; outbound send after the incident",
     }
     assert state["lineRecheckRetired"][key]["ref"] == packet["ref"]
+
+
+@pytest.mark.parametrize("evidence", [
+    None,  # no health reading at all
+    "health linked-line: 200 status=healthy wa_connected=true state=connected auth_bond_status=present "
+    "auth_bond_creds_exists=true auth_bond_creds_size=512 lifecycle_process_uptime_seconds=60 reconnect_attempts=0",
+    "health other-line: 200 status=healthy wa_connected=true state=connected auth_bond_status=present "
+    "auth_bond_creds_exists=true auth_bond_creds_size=512 lifecycle_process_uptime_seconds=99999 reconnect_attempts=0",
+])
+def test_linked_line_without_recovery_proof_stays_open_and_listed(mod, evidence):
+    # Relay 19 B1: "linked, confirmed" alone is not the clear requirement of a
+    # protected bond-loss incident (server-revoked bond, manual relink). Only
+    # the recovery path's proof (a send after the incident, or a sustained
+    # stable connection) retires it; otherwise it stays open and on the card.
+    now = int(time.time())
+    key = "hub-1|linked-line|whatsapp_device_bond_lost"
+    record = _physical(now - 5 * 86400, now - 4 * 86400)
+    if evidence is not None:
+        record["lastEvidence"] = evidence
+    _write_state(mod, {key: record})
+    sends = _sends(mod)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+    assert sends == []
+    state = _state(mod)
+    assert key in state["openIncidents"]
+    assert "lineRecheckRetired" not in state or key not in state["lineRecheckRetired"]
+    assert state["openIncidents"][key]["lastLineRecheckVerdict"] == "could_not_check"
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+    [card] = sends
+    assert "linked-line (hub-1)" in card
+    assert key in _state(mod)["openIncidents"]
+
+
+def test_linked_line_with_a_sustained_stable_connection_is_retired(mod):
+    now = int(time.time())
+    key = "hub-1|linked-line|whatsapp_device_bond_lost"
+    record = _physical(now - 5 * 86400, now - 4 * 86400)
+    record["lastEvidence"] = _healthy_probe("linked-line", uptime=mod.SUSTAINED_STABILITY_MIN_UPTIME_SECONDS)
+    _write_state(mod, {key: record})
+    _sends(mod)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+    state = _state(mod)
+    assert key not in state["openIncidents"]
+    assert state["lineRecheckRetired"][key]["disposition"] == "cleared on recheck"
 
 
 def test_roster_retired_line_closes_as_line_retired_and_never_reaches_the_card(mod):
@@ -235,7 +301,7 @@ def test_daily_card_merges_one_bot_and_separates_could_not_check(mod):
         "hub-1|logged-line|daily-health:whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
         "hub-1|bot-errors-health|daily-health-fail:logged-line": _physical(OLD - 86400, OLD),
         "hub-1|inferred-line|instance_logged_out": _physical(OLD - 86400, OLD),
-        "hub-1|linked-line|whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
+        "hub-1|linked-line|whatsapp_device_bond_lost": _proven(_physical(OLD - 86400, OLD), "linked-line"),
         # Not stale yet: no recheck, not listed.
         "hub-1|far-line|instance_logged_out": _physical(NOW - 3600, NOW - 600),
     })
@@ -302,7 +368,7 @@ def _two_producer_pair(host: str, bot: str) -> dict:
 
 
 def test_two_producer_keys_for_one_linked_line_are_each_rechecked_and_close_without_a_message(mod):
-    incidents = _two_producer_pair("hub-1", "pair-line")
+    incidents = {key: _proven(record, "pair-line") for key, record in _two_producer_pair("hub-1", "pair-line").items()}
     _write_state(mod, incidents)
     sends = _sends(mod)
 
@@ -319,7 +385,8 @@ def test_two_producer_keys_for_one_linked_line_are_each_rechecked_and_close_with
         # The recheck is the close reason, on the incident's own packet.
         assert packet["disposition"] == "cleared on recheck"
         assert packet["lineCheck"] == {
-            "verdict": "cleared on recheck", "host": "hub-1", "bot": "pair-line", "reason": "linked, confirmed",
+            "verdict": "cleared on recheck", "host": "hub-1", "bot": "pair-line",
+            "reason": "linked, confirmed; outbound send after the incident",
         }
         assert state["lineRecheckRetired"][key]["ref"] == packet["ref"]
     assert _log_types(mod).count("line_recheck_retired") == 2

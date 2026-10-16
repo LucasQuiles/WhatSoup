@@ -5298,8 +5298,9 @@ def packet_command(argv: list[str]) -> int:
 # C2  An old logged-out / bond-lost incident is rechecked against the line's
 #     live state before it is re-announced. A line the roster no longer expects
 #     to run closes as "line retired"; a line the local fleet API reports linked
-#     with confirmed confidence closes as "cleared on recheck". Neither sends a
-#     message; both write a packet. Every other such line is listed once a day
+#     with confirmed confidence closes as "cleared on recheck" only when the
+#     incident's own health reading carries the recovery path's proof (relay 19
+#     B1). Neither sends a message; both write a packet. Every other such line is listed once a day
 #     in one grouped card, one line per bot, and nothing is retired on a reading
 #     that is inferred or unreadable ("could not check").
 # C3  An information-only notice (nothing for a person to do) is not sent on its
@@ -5636,6 +5637,34 @@ def read_fleet_lines_for_recheck() -> FleetLinesRead:
     return read_fleet_lines(profile, timeout=LINE_RECHECK_TIMEOUT_SECONDS)
 
 
+_LINE_HEALTH_PROBE_RE = re.compile(r"^(?:FAIL )?health\s+([^:\s]+):\s+(.+)$")
+
+
+def line_recovery_proof(record: dict[str, Any], bot: str) -> str | None:
+    """The recovery path's proof for a line incident, read from its own health reading, or None.
+
+    Relay 19 B1: the recheck may retire a protected line incident (bond loss,
+    logout, awaiting physical action) only with the proof
+    daily_health_recovered_incident_keys asks of it: a verified WhatsApp
+    recovery plus a send after the incident (has_post_incident_outbound_proof)
+    or a sustained stable connection (has_sustained_connection_stability).
+    /api/lines carries neither, so "linked, confirmed" alone never retires.
+    """
+    opened = max(int_field(record, "openedAt"), int_field(record, "eventCreatedAtEpoch"))
+    for raw_line in alert_text(record.get("lastEvidence")).splitlines():
+        match = _LINE_HEALTH_PROBE_RE.match(raw_line.strip())
+        if match is None or match.group(1) != bot:
+            continue
+        probe = match.group(2).strip()
+        if not is_verified_whatsapp_health_recovery(probe):
+            continue
+        if has_post_incident_outbound_proof(probe, record, opened):
+            return "outbound send after the incident"
+        if has_sustained_connection_stability(probe):
+            return "stable connection"
+    return None
+
+
 class LineCheck:
     __slots__ = ("verdict", "host", "bot", "reason")
 
@@ -5671,7 +5700,7 @@ class LineChecker:
                 self._lines = FleetLinesRead(None, f"fleet_api_unreadable:{type(exc).__name__}")
         return self._lines
 
-    def check(self, machine: str, bot: str) -> LineCheck:
+    def check(self, machine: str, bot: str, record: dict[str, Any] | None = None) -> LineCheck:
         roster = self.roster()
         display_host = card_plain(machine, 40) if machine and machine.lower() != "unknown" else "unknown host"
         if roster is None:
@@ -5691,9 +5720,14 @@ class LineChecker:
         row = read.lines.get(bot)
         verdict = line_verdict(row)
         if verdict == LINE_LINKED_CONFIRMED:
-            # /api/lines carries no outbound-send time, so linked + confirmed
-            # alone stands for the clear requirement here (relay 16 C2).
-            return LineCheck(LINE_CLEARED_ON_RECHECK, host, bot, "linked, confirmed")
+            # Relay 19 B1: linked + confirmed is necessary, never enough. The
+            # incident retires only with the recovery path's own proof.
+            proof = line_recovery_proof(record or {}, bot)
+            if proof:
+                return LineCheck(LINE_CLEARED_ON_RECHECK, host, bot, f"linked, confirmed; {proof}")
+            return LineCheck(
+                LINE_COULD_NOT_CHECK, host, bot, "linked, confirmed; no send or stable connection seen since the incident"
+            )
         if verdict == LINE_LOGGED_OUT:
             return LineCheck(LINE_LOGGED_OUT, host, bot, "unlinked, confirmed")
         if row is None:
@@ -5830,7 +5864,7 @@ def send_daily_line_card(
     checker = LineChecker()
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for key, record, machine, bot in members:
-        check = checker.check(machine, bot)
+        check = checker.check(machine, bot, record)
         if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
             retire_line_incident(paths, incident_state, key, record, check, current)
             continue
@@ -8426,7 +8460,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         # the line's live state instead of being re-announced on its own.
         line_member = line_family_member(str(key), record)
         if line_member is not None:
-            check = line_checker.check(*line_member)
+            check = line_checker.check(*line_member, record)
             if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
                 retire_line_incident(paths, incident_state, str(key), record, check, current)
             else:

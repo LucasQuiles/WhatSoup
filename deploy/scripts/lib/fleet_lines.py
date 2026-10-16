@@ -10,8 +10,10 @@ health check already reads.
 What a line row offers the recheck (``src/fleet/routes/lines.ts``):
 ``linkedStatus`` (linked | unlinked | unknown) and ``linkedStatusConfidence``
 (confirmed | inferred). The row carries NO outbound-send time (``lastActive``
-is any activity and ``messageStats`` holds counts only), so a recheck can use
-linked + confirmed alone, never "a send after the incident".
+is any activity and ``messageStats`` holds counts only). A recheck therefore
+never retires a line incident on linked + confirmed alone: the dispatcher also
+asks for the recovery path's proof (a send after the incident or a sustained
+stable connection) from the incident's own health reading (relay 19 B1).
 """
 from __future__ import annotations
 
