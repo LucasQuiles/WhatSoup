@@ -620,6 +620,74 @@ def test_auto_close_summary_waits_for_its_packet(mod):
     assert entry["ref"] and entry["count"] == 1
 
 
+# --- Relay 19 S4: one bad record or roster never stops the rest ------------------
+
+
+def test_a_bad_member_record_is_could_not_check_and_the_card_still_goes_out(mod):
+    _write_state(mod, {
+        "hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD),
+        # An opened time no clock can print (time.gmtime overflows); a float
+        # keeps it inside what the state store accepts.
+        "hub-1|inferred-line|instance_logged_out": _physical(1e20, OLD),
+    })
+    sends = _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    assert "logged-line (hub-1) since " in card
+    assert "inferred-line (hub-1)" in card
+    state = _state(mod)
+    assert "hub-1|inferred-line|instance_logged_out" in state["openIncidents"]
+
+
+def test_a_recheck_that_raises_is_could_not_check_and_the_sweep_goes_on(mod, monkeypatch):
+    now = int(time.time())
+    _write_state(mod, {
+        "hub-1|inferred-line|instance_logged_out": _physical(now - 5 * 86400, now - 4 * 86400),
+        "hub-1|logged-line|instance_logged_out": _physical(now - 5 * 86400, now - 4 * 86400),
+    })
+    sends = _sends(mod)
+    real_check = mod.LineChecker.check
+
+    def _check(self, machine, bot, record=None):
+        if bot == "inferred-line":
+            raise TypeError("bad record")
+        return real_check(self, machine, bot, record)
+
+    monkeypatch.setattr(mod.LineChecker, "check", _check)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+
+    assert sends == []
+    state = _state(mod)
+    bad = state["openIncidents"]["hub-1|inferred-line|instance_logged_out"]
+    assert bad["lastLineRecheckVerdict"] == "could_not_check"
+    assert state["openIncidents"]["hub-1|logged-line|instance_logged_out"]["lastLineRecheckVerdict"] == "logged_out"
+    assert "line_recheck_member_failed" in _log_types(mod)
+
+
+@pytest.mark.parametrize("instances", [5, "far-line", None, {"name": "x"}])
+def test_a_roster_with_a_non_list_instances_value_never_aborts_the_sweep(mod, tmp_path, instances):
+    broken = json.loads(json.dumps(ROSTER))
+    broken["hosts"].append({"host": "host-3", "role": "bot-host", "instances": instances})
+    roster = tmp_path / "fleet-broken.json"
+    roster.write_text(json.dumps(broken), encoding="utf-8")
+    os.environ["BOT_ERRORS_FLEET_SENTINEL_HOSTS"] = str(roster)
+    now = int(time.time())
+    _write_state(mod, {
+        "hub-1|logged-line|instance_logged_out": _physical(now - 5 * 86400, now - 4 * 86400),
+        "host-2|retired-line|whatsapp_device_bond_lost": _physical(now - 9 * 86400, now - 8 * 86400),
+    })
+    _sends(mod)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+
+    state = _state(mod)
+    assert state["openIncidents"]["hub-1|logged-line|instance_logged_out"]["lastLineRecheckVerdict"] == "logged_out"
+    assert state["lineRecheckRetired"]["host-2|retired-line|whatsapp_device_bond_lost"]["disposition"] == "line retired"
+
+
 # --- Relay 19 S2: an ambiguous daily send is sent-unconfirmed, never resent ----
 
 

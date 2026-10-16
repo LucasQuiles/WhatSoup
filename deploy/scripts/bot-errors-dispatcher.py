@@ -5611,7 +5611,9 @@ class LineRoster:
     def __init__(self, data: dict[str, Any]) -> None:
         self.rows: dict[str, list[tuple[str, str]]] = {}
         self.aliases: dict[str, set[str]] = {}
-        for item in data.get("hosts") or []:
+        hosts = data.get("hosts") if isinstance(data, dict) else None
+        # Relay 19 S4: a malformed roster row is skipped, never a raise.
+        for item in hosts if isinstance(hosts, list) else []:
             if not isinstance(item, dict):
                 continue
             host = str(item.get("host") or "").strip().lower()
@@ -5626,7 +5628,8 @@ class LineRoster:
                 for name in names:
                     aliases |= _machine_strings(name)
             self.aliases[host] = aliases
-            for inst in item.get("instances") or []:
+            instances = item.get("instances")
+            for inst in instances if isinstance(instances, list) else []:
                 if not isinstance(inst, dict):
                     continue
                 name = str(inst.get("name") or "").strip().lower()
@@ -5652,9 +5655,9 @@ class LineRoster:
 def load_line_roster() -> LineRoster | None:
     try:
         data, _inventory = load_roster()
-    except RosterError:
+        return LineRoster(data)
+    except Exception:  # noqa: BLE001 - an unusable roster reads as "roster unreadable" (relay 19 S4)
         return None
-    return LineRoster(data)
 
 
 _TEST_RUNNER_SIGNALS = ("VITEST", "VITEST_WORKER_ID", "JEST_WORKER_ID", "PYTEST_CURRENT_TEST")
@@ -5847,7 +5850,12 @@ def _line_card_since(records: list[dict[str, Any]]) -> str | None:
         for record in records
         if int_field(record, "openedAt") > 0
     ]
-    return time.strftime("%m-%d", time.gmtime(min(opened))) if opened else None
+    if not opened:
+        return None
+    try:
+        return time.strftime("%m-%d", time.gmtime(min(opened)))
+    except (OverflowError, OSError, ValueError):  # relay 19 S4: an unprintable time prints no "since"
+        return None
 
 
 def line_group_needs_relink(group: dict[str, Any]) -> bool:
@@ -5897,6 +5905,49 @@ def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
     return card_text(lines)
 
 
+def line_check_failed(paths: dict[str, Path], key: str, machine: str, bot: str, exc: Exception) -> LineCheck:
+    """A recheck that raised reads as "could not check" (relay 19 S4); it never retires."""
+    host = card_plain(machine, 40) if machine and str(machine).lower() != "unknown" else LINE_UNKNOWN_HOST
+    append_dispatch_log(paths, {
+        "type": "line_recheck_member_failed",
+        "incidentKey": key,
+        "error": f"{type(exc).__name__}: {truncate(str(exc), 200)}",
+    })
+    return LineCheck(LINE_COULD_NOT_CHECK, host or LINE_UNKNOWN_HOST, bot, f"recheck failed ({type(exc).__name__})")
+
+
+def line_card_member(
+    key: str, record: dict[str, Any], check: LineCheck, current: int
+) -> tuple[dict[str, Any], bool]:
+    """(packet entry, needs a relink) for one line-card member.
+
+    Relay 19 B2: the member keeps its own requested action. Relay 19 B5: the
+    grouped card replaces the member's own notice, so its packet entry keeps
+    the member's record and that notice's full body.
+    """
+    stale_event = stale_incident_event(key, record, current, ignore_cadence=True)
+    action = requested_action_text(stale_event) if stale_event is not None else None
+    if action is not None:
+        needs_relink = action == physical_action_text()
+    else:
+        needs_relink = str(record.get("status") or "") == "awaiting_physical"
+    member: dict[str, Any] = {
+        "incidentKey": key,
+        "verdict": check.verdict,
+        "reason": check.reason,
+        "requestedAction": action,
+        "record": redacted_dispatcher_payload(json_snapshot(record)),
+    }
+    if stale_event is not None:
+        old_body = format_event(stale_event)
+        member["notice"] = {
+            "noticeId": notice_id_of(stale_event),
+            "body": old_body,
+            "bodyFields": body_fields(old_body),
+        }
+    return member, needs_relink
+
+
 def send_daily_line_card(
     paths: dict[str, Path], incident: "IncidentStateCycle | None" = None, now: int | None = None
 ) -> int:
@@ -5927,11 +5978,19 @@ def send_daily_line_card(
     checker = LineChecker()
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for key, record, machine, bot in members:
-        check = checker.check(machine, bot, record)
-        if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
-            # Retired, or pending its packet (S1): either way not a card line.
-            retire_line_incident(paths, incident_state, key, record, check, current)
-            continue
+        try:
+            check = checker.check(machine, bot, record)
+            if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
+                # Retired, or pending its packet (S1): either way not a card line.
+                retire_line_incident(paths, incident_state, key, record, check, current)
+                continue
+            member, needs_relink = line_card_member(key, record, check, current)
+        except ControllerStateRequired:
+            raise
+        except Exception as exc:  # noqa: BLE001 - relay 19 S4: one bad member never stops the card
+            check = line_check_failed(paths, key, machine, bot, exc)
+            member = {"incidentKey": key, "verdict": check.verdict, "reason": check.reason}
+            needs_relink = str(record.get("status") or "") == "awaiting_physical"
         group = groups.setdefault((check.host, bot.lower()), {
             "bot": card_plain(bot, 40),
             "host": check.host,
@@ -5944,30 +6003,7 @@ def send_daily_line_card(
         })
         if check.verdict == LINE_LOGGED_OUT:
             group["verdict"] = LINE_LOGGED_OUT
-        # Relay 19 B2: the member keeps its own requested action.
-        stale_event = stale_incident_event(key, record, current, ignore_cadence=True)
-        action = requested_action_text(stale_event) if stale_event is not None else None
-        if action is not None:
-            needs_relink = action == physical_action_text()
-        else:
-            needs_relink = str(record.get("status") or "") == "awaiting_physical"
         group["needsRelink"] = group["needsRelink"] or needs_relink
-        # Relay 19 B5: the grouped card replaces this member's own notice, so
-        # its packet keeps the member's record and that notice's full body.
-        member: dict[str, Any] = {
-            "incidentKey": key,
-            "verdict": check.verdict,
-            "reason": check.reason,
-            "requestedAction": action,
-            "record": redacted_dispatcher_payload(json_snapshot(record)),
-        }
-        if stale_event is not None:
-            old_body = format_event(stale_event)
-            member["notice"] = {
-                "noticeId": notice_id_of(stale_event),
-                "body": old_body,
-                "bodyFields": body_fields(old_body),
-            }
         group["members"].append(member)
         group["reasons"].append(check.reason)
         group["keys"].append(key)
@@ -8555,12 +8591,22 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         # the line's live state instead of being re-announced on its own.
         line_member = line_family_member(str(key), record)
         if line_member is not None:
-            check = line_checker.check(*line_member, record)
-            if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
-                if retire_line_incident(paths, incident_state, str(key), record, check, current) is None:
-                    # Pending its packet (S1): no cadence advance, the next sweep retries.
-                    continue
-            else:
+            try:
+                check = line_checker.check(*line_member, record)
+                retired = (
+                    retire_line_incident(paths, incident_state, str(key), record, check, current)
+                    if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED)
+                    else False
+                )
+            except ControllerStateRequired:
+                raise
+            except Exception as exc:  # noqa: BLE001 - relay 19 S4: one bad member never stops the sweep
+                check = line_check_failed(paths, str(key), *line_member, exc)
+                retired = False
+            if retired is None:
+                # Pending its packet (S1): no cadence advance, the next sweep retries.
+                continue
+            if retired is False:
                 mark_stale_incident_deferred(record, event, current, check)
                 append_dispatch_log(paths, {
                     "type": "stale_renotify_deferred_to_line_card",
