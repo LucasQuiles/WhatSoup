@@ -5895,16 +5895,35 @@ def send_daily_line_card(
             "reasons": [],
             "keys": [],
             "records": [],
+            "members": [],
         })
         if check.verdict == LINE_LOGGED_OUT:
             group["verdict"] = LINE_LOGGED_OUT
         # Relay 19 B2: the member keeps its own requested action.
         stale_event = stale_incident_event(key, record, current, ignore_cadence=True)
-        if stale_event is not None:
-            needs_relink = requested_action_text(stale_event) == physical_action_text()
+        action = requested_action_text(stale_event) if stale_event is not None else None
+        if action is not None:
+            needs_relink = action == physical_action_text()
         else:
             needs_relink = str(record.get("status") or "") == "awaiting_physical"
         group["needsRelink"] = group["needsRelink"] or needs_relink
+        # Relay 19 B5: the grouped card replaces this member's own notice, so
+        # its packet keeps the member's record and that notice's full body.
+        member: dict[str, Any] = {
+            "incidentKey": key,
+            "verdict": check.verdict,
+            "reason": check.reason,
+            "requestedAction": action,
+            "record": redacted_dispatcher_payload(json_snapshot(record)),
+        }
+        if stale_event is not None:
+            old_body = format_event(stale_event)
+            member["notice"] = {
+                "noticeId": notice_id_of(stale_event),
+                "body": old_body,
+                "bodyFields": body_fields(old_body),
+            }
+        group["members"].append(member)
         group["reasons"].append(check.reason)
         group["keys"].append(key)
         group["records"].append(record)
@@ -5920,7 +5939,8 @@ def send_daily_line_card(
         group["since"] = _line_card_since(group.pop("records"))
     included = [
         {"bot": group["bot"], "host": group["host"], "verdict": group["verdict"], "since": group["since"],
-         "needsRelink": line_group_needs_relink(group), "reasons": group["reasons"], "incidentKeys": group["keys"]}
+         "needsRelink": line_group_needs_relink(group), "reasons": group["reasons"], "incidentKeys": group["keys"],
+         "members": group["members"]}
         for group in ordered
     ]
     logged_out = sum(1 for group in ordered if group["verdict"] == LINE_LOGGED_OUT)

@@ -422,6 +422,43 @@ def test_two_producer_keys_for_a_line_on_another_host_are_one_could_not_check_li
     assert group["reasons"] == ["line is on another host"] * 2
 
 
+def test_line_card_packet_keeps_every_field_of_each_members_old_notice(mod):
+    # Relay 19 B5: one grouped card replaces a per-incident notice per member;
+    # its packet keeps, per member, the record and the old notice's full body.
+    incidents = _two_producer_pair("host-2", "far-pair-line")
+    _write_state(mod, incidents)
+    sends = _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    packet = json.loads(json.dumps(mod.read_notice_packet(mod.state_paths(), card.rsplit("Ref: ", 1)[1])))
+    [group] = packet["included"]
+    members = {member["incidentKey"]: member for member in group["members"]}
+    assert set(members) == set(incidents)
+    for key, record in incidents.items():
+        member = members[key]
+        for field in ("status", "lastSummary", "openedAt", "lastSeenAt", "failureCode", "recoverability",
+                      "clearRequirement", "assetKind"):
+            assert member["record"][field] == record[field], (key, field)
+        assert member["record"].get("suppressedCount") == record.get("suppressedCount")
+        assert member["verdict"] == "could_not_check" and member["reason"] == "line is on another host"
+        assert member["requestedAction"] == mod.physical_action_text()
+        old_notice = mod.stale_incident_event(key, record, NOW, ignore_cadence=True)
+        old_body = mod.format_event(old_notice)
+        body = member["notice"]["body"]
+        # The old notice's fields, label by label (the id and created time are per render).
+        old_labels = [field["label"] for field in mod.body_fields(old_body)]
+        assert [field["label"] for field in member["notice"]["bodyFields"]] == old_labels
+        for line in old_body.split("\n"):
+            if line.startswith(("  > event:", "  > created:")):
+                continue
+            assert line in body.split("\n"), (key, line)
+        assert f"incident_key={key}" in body
+        assert f"suppressed_duplicates={record.get('suppressedCount', 0)}" in body
+        assert record["clearRequirement"][:60] in body
+
+
 def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypatch):
     monkeypatch.setattr(mod, "read_fleet_lines_for_recheck", lambda: mod.FleetLinesRead(None, "fleet_api_status_503"))
     _write_state(mod, {"hub-1|linked-line|instance_logged_out": _physical(OLD - 86400, OLD)})
