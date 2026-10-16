@@ -29,7 +29,7 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from support import dispatcher_fixtures  # noqa: E402
+from support import card_hygiene, dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = _TESTS_DIR.parent / "bot-errors-dispatcher.py"
 _ENV_KEYS = [
@@ -101,6 +101,8 @@ def mod(tmp_path, monkeypatch):
 
     monkeypatch.setattr(loaded, "read_fleet_lines_for_recheck", _lines)
     loaded.fleet_reads = reads
+    # Relay 19 B4: every card these tests render is checked for machine fields.
+    loaded.rendered_cards = card_hygiene.install_card_hygiene_hook(loaded)
     return loaded
 
 

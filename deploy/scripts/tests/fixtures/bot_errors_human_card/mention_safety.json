@@ -23,6 +23,6 @@
     }
   },
   "legacy_body": "BOT ERROR - unit whatsoup at fixture-bot exited 1; paging  at 15550001111 and  at [REDACTED PHONE]\n  > severity: critical\n  > machine: mac-host-2.local\n  > instance: fixture-bot\n  > source: service_crash\n  > incident_key: mac-host-2.local|fixture-bot|service_crash\n  > event: emit-fixture-mention-001\n  > created: 2026-10-15T10:00:00Z\n  > dispatcher_attempts: 1\n  > log_1: journalctl --user -u whatsoup at fixture-bot --since '30 minutes ago'\n  > evidence: unit=whatsoup at fixture-bot exit=1\n  > requested_action: Q investigate, remediate, and report disposition in BOT ERRORS.",
-  "card": "🔴 *unit whatsoup@fixture-bot exited 1; paging at 15550001111 and @[REDACTED PHONE]*\nWhere: mac-host-2.local - fixture-bot\nImpact not yet confirmed\nHandling: Q investigating\nYou: No action needed\nRef: 6d6293ba",
+  "card": "🔴 *unit whatsoup@fixture-bot exited 1; paging and @[REDACTED PHONE]*\nWhere: mac-host-2.local - fixture-bot\nImpact not yet confirmed\nHandling: Q investigating\nYou: No action needed\nRef: 6d6293ba",
   "p2_changes_body": true
 }

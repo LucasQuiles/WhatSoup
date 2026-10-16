@@ -4693,12 +4693,30 @@ CARD_CLIP = "…"
 CARD_YOU_NO_ACTION = "You: No action needed"
 CARD_IMPACT_UNCONFIRMED = "Impact not yet confirmed"
 
-# Card-only scrubbing. The card never carries paths, event ids, digests or
-# confined renderings; those stay in the packet.
-_CARD_PATH_RE = re.compile(r"(?<![\w.@-])(?:~|/)[\w.@-]*(?:/[\w.@-]*)+")
+# Card-only scrubbing. The card never carries paths, event ids, digests,
+# confined renderings, pids, long numbers, key=value fields or incident keys;
+# those stay in the packet (relay 16 B, relay 19 B4).
+_CARD_PATH_RE = re.compile(
+    # An absolute or home path of one segment or more ("/tmp", "~/a/b"), or a
+    # relative path of three segments or more ("src/lib/x.ts").
+    r"(?<![\w.@-])(?:~[\w.@-]*)?/[\w.@-]+(?:/[\w.@-]*)*"
+    r"|(?<![\w./-])[\w.-]+(?:/[\w.-]+){2,}/?"
+)
 _CARD_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
-_CARD_HEX_RE = re.compile(r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{8,}\b")
+_CARD_ULID_RE = re.compile(r"\b[0-9A-HJKMNP-TV-Z]{26}\b")
+_CARD_HEX_RE = re.compile(r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{8,}\b", re.IGNORECASE)
 _CARD_DIGEST_TAG_RE = re.compile(r"\s*\[(?:digest|set)[ -][0-9a-f]{6,}\]")
+_CARD_PID_RE = re.compile(r"\bpid\b\s*[:=#]?\s*\d*", re.IGNORECASE)
+_CARD_KEY_VALUE_RE = re.compile(r"(?<![\w.-])[A-Za-z_][\w.-]*=\S*")
+# An incident key (machine|instance|source) or any other "|"-joined token.
+_CARD_PIPE_TOKEN_RE = re.compile(r"\S*\|\S*")
+# A token holding a run of six digits or more: a chat or phone id, or an
+# event id stamped with an epoch ("stale-<key>-1760000000", "poison-<s>-<pid>").
+# A neutralized mention (" at <digits>") goes with its number.
+_CARD_LONG_NUMBER_TOKEN_RE = re.compile(r"(?:(?<!\S)at\s+)?\S*\d{6,}\S*")
+# A confined rendering whose digest is glued to more text, so the exact
+# _CONFINED_DISPLAY_RE (word-bounded) cannot see it.
+_CARD_CONFINED_LOOSE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{0,63} - \d{1,9} chars - digest\b\s*\S*")
 _EVIDENCE_TOKEN_RE = re.compile(r"(?m)^(?P<key>[a-z_]+)=(?P<value>[^\n]*)$")
 
 # P4: the only fields a cause phrase may be built from. Values are checked for
@@ -4711,16 +4729,28 @@ def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
     """One line of plain card text: redacted, mention-safe, no paths, ids or digests."""
     text = neutralize_mentions(redact(value))
     text = _CONFINED_DISPLAY_RE.sub("", text)
+    text = _CARD_CONFINED_LOOSE_RE.sub("", text)
     text = _CARD_DIGEST_TAG_RE.sub("", text)
     text = _CARD_UUID_RE.sub("", text)
+    text = _CARD_PID_RE.sub("", text)
+    text = _CARD_KEY_VALUE_RE.sub("", text)
+    text = _CARD_PIPE_TOKEN_RE.sub("", text)
     text = _CARD_PATH_RE.sub("", text)
+    text = _CARD_ULID_RE.sub("", text)
     text = _CARD_HEX_RE.sub("", text)
+    text = _CARD_LONG_NUMBER_TOKEN_RE.sub("", text)
     text = text.replace("*", "").replace("_", " ")
     # Relay 19 B3: a strip above can join an "@" to a digit run it was kept
     # apart from ("@*1555..." -> "@1555..."), so mentions are neutralized again
     # after the last strip.
     text = neutralize_mentions(text)
     text = re.sub(r"\s+", " ", text).strip()
+    # What the removals leave behind: emptied brackets, separators with nothing
+    # between them, a line opening on a separator.
+    text = re.sub(r"[(\[]\s*[;,:]*\s*[)\]]", "", text)
+    text = re.sub(r"\s+([;,:])", r"\1", text)
+    text = re.sub(r"([;,:])(?:\s*[;,:])+", r"\1", text)
+    text = re.sub(r"\s+", " ", text).lstrip(" :;,-—)").strip()
     # Audit r3: a first line never ends at a colon (or any dangling separator).
     text = text.rstrip(" :;,-—(").strip()
     if len(text) > limit:

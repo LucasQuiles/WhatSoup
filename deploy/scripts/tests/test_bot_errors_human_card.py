@@ -29,7 +29,7 @@ if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
 from bot_errors_property_support import properties  # noqa: E402
-from support import dispatcher_fixtures  # noqa: E402
+from support import card_hygiene, dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = _TESTS_DIR.parent / "bot-errors-dispatcher.py"
 _FIXTURES = _TESTS_DIR / "fixtures" / "bot_errors_human_card"
@@ -89,26 +89,11 @@ _INFO_FAMILIES = {
 _REAL_FAMILIES = _INFO_FAMILIES | {"stale_logged_out", "stale_awaiting_physical"}
 _DISPATCHER_FAMILIES = {"dispatcher_error", "dispatcher_warning", "dispatcher_recovery", "dispatcher_resolved"}
 
-# Card hygiene (relay 16 B): no paths, event ids, digests, pids, incident keys or
-# schema words. The Ref value itself is 8 hex and is checked separately.
-_FORBIDDEN_CARD_PATTERNS = [
-    re.compile(r"(?:^|[\s(])(?:~|/)[\w.@-]*/"),  # a path
-    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE),  # event id
-    re.compile(r"\bdigest\b", re.IGNORECASE),
-    re.compile(r"\bchars\b", re.IGNORECASE),
-    re.compile(r"\bpid\b", re.IGNORECASE),
-    re.compile(r"\|"),  # incident keys are machine|instance|source
-    re.compile(
-        r"\b(?:summary_confined|incident_key|severity|alert_source|dispatcher_attempts|dispatch_log|"
-        r"requested_action|clear_requirement|failure_code|failure_domain|recoverability|asset_kind|"
-        r"journalctl|queue|evidence|source)\b",
-        re.IGNORECASE,
-    ),
-]
-
-
-def _card_body_without_ref(card: str) -> str:
-    return "\n".join(line for line in card.split("\n") if not line.startswith("Ref: "))
+# Card hygiene (relay 16 B, relay 19 B4): checked on EVERY card this module
+# renders through the dispatcher's card renderers, not only on the goldens.
+_FORBIDDEN_CARD_PATTERNS = card_hygiene.FORBIDDEN_CARD_PATTERNS
+_card_body_without_ref = card_hygiene.card_body_without_ref
+_RENDERED_CARDS = card_hygiene.install_card_hygiene_hook(_mod)
 
 
 @pytest.fixture
@@ -368,6 +353,38 @@ def test_no_card_line_gets_an_at_digit_from_a_scrubbed_piece(piece: str, digits:
         for line in card.split("\n"):
             assert not _AT_DIGIT.search(line), (text, line)
         assert not q_admits(card) or card.startswith("🔴 *"), card
+
+
+_MACHINE_FIELD_SUMMARIES = (
+    "pid=4242; chat=123456789012345; file=/tmp; key a|b|c",
+    "worker pid 4242 stalled in /tmp for chat 123456789012345 (key hub-1|line|instance_logged_out)",
+    "stale notice stale-hub-1_line_instance_logged_out-1760000000 re-sent from src/lib/bot.ts",
+    "poison-1760000000-4242 quarantined at ~/state/x.json, see 01HZX3K5V8Q9R2T4W6Y8Z0A1B3",
+)
+
+
+@pytest.mark.parametrize("summary", _MACHINE_FIELD_SUMMARIES)
+def test_card_lines_from_producer_text_carry_no_machine_fields(summary: str) -> None:
+    # Relay 19 B4: producer summaries reach the title, the daily summary lines
+    # and the resolved card's Cause line. None of them may carry a pid, a long
+    # number, a path (one segment or more), an incident key or an event id.
+    cards = _producer_text_cards(summary)
+    for card in cards:
+        card_hygiene.assert_card_hygiene(card)
+        for piece in ("pid", "4242", "123456789012345", "/tmp", "a|b|c", "chat=", "file=", "1760000000", "01HZX"):
+            assert piece not in card, (piece, card)
+    plain = _mod.card_plain(summary)
+    assert plain, "words survive the scrub"
+    assert not plain.startswith((";", ",", ":")) and "()" not in plain and ";;" not in plain
+
+
+def test_the_hygiene_hook_checks_every_rendered_card() -> None:
+    before = len(_RENDERED_CARDS)
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_warning")["event"], summary="pid=4242 x")
+    _mod.format_card(event, "00000000")
+    assert len(_RENDERED_CARDS) == before + 1
+    with pytest.raises(AssertionError):
+        card_hygiene.assert_card_hygiene("ℹ️ *worker pid 4242 at /tmp*\nRef: 00000000")
 
 
 # --- P4: confined summaries -----------------------------------------------------
