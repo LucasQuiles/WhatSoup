@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -91,13 +91,19 @@ from lib.fleet_config import (
 from lib.queue_age import scan_directory
 from lib.fleet_lines import (
     fleet_api_default_url,
-    fleet_api_endpoint,
+    fleet_api_opener,
     fleet_api_profile_value,
+    fleet_api_token_target_refused,
+    fleet_api_url,
     fleet_lines_from_data,
     host_profile_name,
     parse_fleet_token,
     read_fleet_token_text as _read_fleet_token_text,
 )
+
+# Relay 23 W2: both HTTP calls here carry a token to a local port, so the
+# opener uses no environment proxy and follows no redirect (relay 22 A2).
+urlopen = fleet_api_opener()
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -7014,12 +7020,11 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
     if not profile_bool(profile, "expectFleetApi", False):
         return ["fleet_api: skipped by health profile"]
 
-    raw_url = (
-        os.environ.get("BOT_ERRORS_FLEET_API_URL")
-        or fleet_api_profile_value(profile, "fleetApiUrl")
-        or fleet_api_default_url(profile)
-    )
-    endpoint = fleet_api_endpoint(raw_url)
+    endpoint = fleet_api_url(profile)
+    # Relay 23 W2: the token goes only to the local fleet API; another host is
+    # refused before the token is read.
+    if fleet_api_token_target_refused(endpoint, profile):
+        return ["FAIL fleet_api: fleet_api_host_refused"]
     token, token_source, accept_count, token_error = load_fleet_api_token(profile)
     if token_error:
         return [f"FAIL fleet_api: {token_error} token_source={token_source} active_token_present=false accept_count={accept_count}"]
@@ -7038,6 +7043,9 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
             body = response.read(256 * 1024).decode("utf-8", errors="replace")
             return [format_fleet_api_response(endpoint, response.status, body, token_source, True, accept_count)]
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            return [f"FAIL fleet_api: fleet_api_redirect_refused endpoint={endpoint} token_source={token_source} status={exc.code}"]
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return [format_fleet_api_response(endpoint, exc.code, body, token_source, True, accept_count)]
     except URLError as exc:
