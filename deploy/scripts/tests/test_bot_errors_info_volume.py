@@ -644,6 +644,33 @@ def test_information_deferral_waits_for_its_packet(mod):
     assert entry["noticeId"] == event["id"] and entry["ref"]
 
 
+def test_an_information_notice_whose_packet_stays_pending_is_dead_lettered_with_a_page(mod):
+    # Relay 20 S-a: the requeue gives the attempt back, so without a cap a
+    # notice whose packet can never be written requeues every 900 s with no
+    # page. After BOT_ERRORS_DELIVERY_MAX_ATTEMPTS tries it is dead-lettered,
+    # and the dead-letter meta-alert pages.
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    _break_packet_store(mod)
+    event = _info_event("abababab-abab-4bab-8bab-abababababab", "self_restart_completed")
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", event)
+
+    for _ in range(mod.BOT_ERRORS_DELIVERY_MAX_ATTEMPTS - 1):
+        assert mod.process_one(path, paths) == (False, "information_deferral_pending")
+        queued = json.loads(path.read_text(encoding="utf-8"))
+        queued["delivery"]["nextAttemptAtEpoch"] = 0
+        path.write_text(json.dumps(queued), encoding="utf-8")
+    ok, detail = mod.process_one(path, paths)
+
+    assert ok is False and detail.startswith("dead_letter"), detail
+    assert not path.exists()
+    [dead] = [p for p in paths["dead_letter"].glob("*.json")]
+    assert json.loads(dead.read_text(encoding="utf-8"))["event"]["id"] == event["id"]
+    assert "information_deferral_dead_lettered" in _log_types(mod)
+    assert sends == []
+    assert mod.queue_dead_letter_meta_alert(paths, int(time.time())) == 1
+
+
 def test_auto_close_summary_waits_for_its_packet(mod):
     now = int(time.time())
     key = "hub-1|worker|runtime-tool-error:provider-cli:Bash"

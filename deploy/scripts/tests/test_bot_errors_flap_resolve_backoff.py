@@ -344,3 +344,32 @@ def test_backoff_resets_when_the_storm_retrips(tmp_path, monkeypatch):
     entry = _entry(mod, paths)
     assert entry.get("resolveAttempts") == 1, entry
     assert entry.get("nextResolveAt") == clock.now + 30, entry
+
+
+def test_a_pending_packet_never_spends_the_flap_budget(tmp_path, monkeypatch):
+    # Relay 20 S-a: a resolve whose packet could not be written is not a failed
+    # resolve. It keeps the entry and retries later; it never counts toward
+    # FLAP_RESOLVE_MAX_ATTEMPTS, so the storm is never dropped with no packet.
+    mod, clock = _load(tmp_path / "packet-pending", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+
+    def _pending(*_a, **_k):
+        raise mod.NoticePacketPending("no packet for deferred flap-resolved notice")
+
+    monkeypatch.setattr(mod, "defer_information_notice", _pending)
+    for _ in range(mod.FLAP_RESOLVE_MAX_ATTEMPTS + 2):
+        assert mod.sweep_flap_storms(paths) == (0, 1)
+        entry = _entry(mod, paths)
+        assert entry is not None, "a pending packet keeps the storm"
+        assert not entry.get("resolveAttempts"), entry
+        assert entry["nextResolveAt"] == clock.now + mod.DAILY_CARD_RETRY_SECONDS, entry
+        clock.now = entry["nextResolveAt"]
+    kinds = _kinds(paths)
+    assert "flap_resolve_abandoned" not in kinds
+    assert kinds.count("flap_resolve_packet_pending") == mod.FLAP_RESOLVE_MAX_ATTEMPTS + 2
+
+    delivered: list = []
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
+    assert mod.sweep_flap_storms(paths) == (1, 0)
+    assert len(delivered) == 1 and _entry(mod, paths) is None

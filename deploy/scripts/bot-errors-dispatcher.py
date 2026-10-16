@@ -8397,6 +8397,21 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                         flap_resolve_event(str(key), entry, now, underlying_open),
                         notice_kind="flap-resolved",
                     )
+                except NoticePacketPending as exc:
+                    # Relay 20 S-a: the packet store failed, not the resolve. The
+                    # storm stays and is retried later; this never spends the
+                    # resolve budget, so it is never dropped with no packet.
+                    errors += 1
+                    changed = True
+                    entry["lastResolveErrorAt"] = now
+                    entry["nextResolveAt"] = now + DAILY_CARD_RETRY_SECONDS
+                    append_dispatch_log(paths, {
+                        "type": "flap_resolve_packet_pending",
+                        "incidentKey": key,
+                        "error": truncate(str(exc), 300),
+                        "nextResolveAt": entry["nextResolveAt"],
+                    })
+                    continue
                 except Exception as exc:  # noqa: BLE001 - back off, never retry every cycle
                     errors += 1
                     prior = entry.get("resolveAttempts")
@@ -11997,8 +12012,26 @@ def requeue_pending_information_notice(
 
     The try does not spend a delivery attempt; the event is retried after
     DAILY_CARD_RETRY_SECONDS, as the transient-transport carve-out requeues.
+    Relay 20 S-a: the tries are counted on their own; after
+    BOT_ERRORS_DELIVERY_MAX_ATTEMPTS the notice is dead-lettered, and the
+    dead-letter meta-alert pages, so it never requeues forever unseen.
     """
     delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    prior_tries = delivery.get("packetPendingTries")
+    tries = (prior_tries if isinstance(prior_tries, int) and not isinstance(prior_tries, bool) else 0) + 1
+    delivery["packetPendingTries"] = tries
+    if tries >= BOT_ERRORS_DELIVERY_MAX_ATTEMPTS:
+        event["delivery"] = delivery
+        _commit_incident_state(paths, incident, incident_state)
+        dead_path = move_to_dead_letter(claimed, paths, event, original_name_from_processing(claimed))
+        append_dispatch_log(paths, {
+            "type": "information_deferral_dead_lettered",
+            "eventId": event.get("id"),
+            "path": str(dead_path),
+            "tries": tries,
+            "error": truncate(str(exc), 300),
+        })
+        return False, f"dead_letter; information packet pending after {tries} tries; {exc}"
     delivery["attempts"] = max(int(delivery.get("attempts") or 0) - 1, 0)
     delivery["status"] = "queued"
     delivery["nextAttemptAtEpoch"] = int(time.time()) + DAILY_CARD_RETRY_SECONDS
