@@ -425,7 +425,7 @@ def test_packet_round_trip(state, golden: dict) -> None:
     assert packet is not None
     assert packet["ref"] == ref and packet["noticeId"] == event["id"]
     assert packet["card"] == text
-    assert packet["event"] == event
+    assert packet["event"] == _mod.redacted_dispatcher_payload(event)
     body = _mod.format_event(event)
     assert packet["body"] == body
     # Every field of today's body is in the packet, by label and value.
@@ -442,6 +442,27 @@ def test_packet_round_trip(state, golden: dict) -> None:
         [packet_fields[0][1]] + [f"  > {label}: {value}" if value else f"  > {label}:" for label, value in packet_fields[1:]]
     )
     assert rebuilt == body
+
+
+def test_packet_stores_the_redacted_event_never_the_raw_one(state, tmp_path) -> None:
+    # Relay 19 S6: `packet <ref>` prints the packet, so the stored event is the
+    # dispatcher's redacted payload, not json_snapshot(event).
+    token = "x" * 40
+    header = "Bear" + "er " + token
+    event = json.loads(json.dumps(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"]))
+    event["evidence"] = f"probe sent Authorization: {header}"
+    event["diagnostics"] = {**event.get("diagnostics", {}), "authHeader": header, "nested": [{"value": header}]}
+    _text, ref = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    packet = _mod.read_notice_packet(state, ref)
+    assert packet["noticeId"] == event["id"]
+    assert token not in json.dumps(packet)
+    assert packet["event"]["diagnostics"]["authHeader"] == _mod.redact(header)
+    env = {**os.environ, "BOT_ERRORS_STATE_DIR": str(tmp_path)}
+    printed = subprocess.run(
+        [sys.executable, str(_SCRIPT), "packet", ref], capture_output=True, text=True, env=env, timeout=60
+    )
+    assert printed.returncode == 0, printed.stderr
+    assert token not in printed.stdout
 
 
 def test_packet_cli_prints_the_packet_and_exits_one_when_absent(state, tmp_path) -> None:

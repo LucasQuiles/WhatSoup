@@ -4671,7 +4671,7 @@ def format_event(event: dict[str, Any]) -> str:
 # A notice reaches WhatsApp as a short card a person can read on a phone: one
 # icon, a plain title, Where, Impact, Handling, You and Ref. Everything a
 # machine or an agent needs -- the full body format_event renders, every field
-# in it and the whole event -- is written first to one JSON packet named by the
+# in it and the whole event, redacted -- is written first to one JSON packet named by the
 # card's Ref (``<state root>/packets/<ref>.json``), read back with
 # ``bot-errors-dispatcher.py packet <ref>``. format_event stays the full-detail
 # renderer: it feeds the packet, the e-mail fallback and ``--format-event``.
@@ -5168,7 +5168,9 @@ def build_notice_packet(
         "card": card,
         "body": body,
         "bodyFields": body_fields(body),
-        "event": json_snapshot(event),
+        # Relay 19 S6: `packet <ref>` prints this, so it is the dispatcher's
+        # redacted payload, never the raw event.
+        "event": redacted_dispatcher_payload(json_snapshot(event)),
     }
     if extra:
         packet.update(json_snapshot(dict(extra)))
