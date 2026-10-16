@@ -408,17 +408,19 @@ describe('bot-errors-dispatcher', () => {
 
     const result = dispatchCaptured(tmpRoot, capturePath);
 
-    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(readCapture(capturePath)).toContain('BOT INFO');
-    expect(readCapture(capturePath)).not.toContain('BOT RECOVERY');
-    const sent = join(tmpRoot, 'sent');
-    const [file] = readdirSync(sent);
-    const event = JSON.parse(readFileSync(join(sent, file!), 'utf8')) as Record<string, unknown>;
+    // Relay 16 C3: an information-only observation has no card of its own; it is
+    // archived with the suppressed events and counted in the daily summary.
+    expect(result).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    const suppressed = join(tmpRoot, 'suppressed');
+    const [file] = readdirSync(suppressed);
+    const event = JSON.parse(readFileSync(join(suppressed, file!), 'utf8')) as Record<string, unknown>;
     expect(event).toMatchObject({
       schemaVersion: 2,
       eventKind: 'observation',
       eventType: 'observation',
       severity: 'info',
+      delivery: { suppressedReason: expect.stringContaining('daily information summary') },
     });
   });
 
@@ -555,10 +557,19 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    const rendered = readCapture(capturePath);
-    expect(rendered).toContain('BOT INFO - attempt counter test');
-    expect(rendered).toContain('requested_action: none');
-    expect(rendered).not.toContain('requested_action: Q investigate');
+    // Relay 16 C3: no card of its own; the full body lives in the notice packet.
+    expect(existsSync(capturePath)).toBe(false);
+    const packets = join(tmpRoot, 'packets');
+    const packetFiles = dataEntries(packets);
+    expect(packetFiles).toHaveLength(1);
+    const packet = JSON.parse(readFileSync(join(packets, packetFiles[0]!), 'utf8')) as {
+      body: string;
+      disposition: string;
+    };
+    expect(packet.disposition).toBe('daily information summary');
+    expect(packet.body).toContain('BOT INFO - attempt counter test');
+    expect(packet.body).toContain('requested_action: none');
+    expect(packet.body).not.toContain('requested_action: Q investigate');
   });
 
   it('suppresses daily-health info sends with a distinct auditable disposition', () => {
