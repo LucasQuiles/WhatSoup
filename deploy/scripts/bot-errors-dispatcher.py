@@ -5050,18 +5050,47 @@ def card_owner_request(event: dict[str, Any]) -> str | None:
     return you if you.startswith(CARD_YOU_ACTION_PREFIX) else None
 
 
-def paged_owner_request(record: dict[str, Any]) -> str | None:
-    """What the page of an open incident asked the owner to do, if anything.
+def _paged_event_from_record(record: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    """The page an incident record was opened by, rebuilt from what the record holds.
 
-    A record written before ownerRequest existed still shows a relink request
-    by its awaiting_physical status.
+    The record shares the notice's incident key, so the notice gives the
+    identity (machine, instance, source); the record gives the page's text. The
+    record keeps no severity, and only an alert pages, so it reads as critical.
+    """
+    page = {key: event[key] for key in ("schemaVersion", "machine", "instance", "source", "alertSource") if key in event}
+    page.update({
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "critical",
+        "id": record.get("eventId"),
+        "createdAt": record.get("eventCreatedAt"),
+        "summary": record.get("lastSummary") or "",
+        "evidence": record.get("lastEvidence") or "",
+    })
+    return page
+
+
+def paged_owner_request(record: dict[str, Any], event: dict[str, Any]) -> tuple[str | None, bool]:
+    """(What the page of an open incident asked the owner to do, whether that is known).
+
+    A page delivered since relay 20 records its request, or None for none. A
+    record written before then shows a relink request by its awaiting_physical
+    status; otherwise its request is derived from the page the record holds, as
+    card_handling maps actions (relay 21 N2). When that finds no request, the
+    page may still have made one the record does not hold: unknown, never "none".
     """
     request = record.get("ownerRequest")
     if isinstance(request, str) and request.startswith(CARD_YOU_ACTION_PREFIX):
-        return request
+        return request, True
     if str(record.get("status") or "") == "awaiting_physical":
-        return CARD_YOU_RELINK
-    return None
+        return CARD_YOU_RELINK, True
+    if "ownerRequest" in record and request is None:
+        return None, True
+    try:
+        derived = card_owner_request(_paged_event_from_record(record, event))
+    except Exception:  # noqa: BLE001 - card wording never stops the notice
+        derived = None
+    return (derived, True) if derived else (None, False)
 
 
 def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resolved: dict[str, Any]) -> str:
@@ -5080,7 +5109,14 @@ def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resol
         step = card_plain(request[len(CARD_YOU_ACTION_PREFIX):])
         you = f"You: The earlier request still stands: {step}; the alert stays open"
     else:
-        you = f"{CARD_YOU_NO_ACTION}; the earlier alert stays open until its own clear arrives"
+        # Relay 21 N2: when the page may have asked the owner for something the
+        # record does not hold, the card never says "No action needed".
+        known = resolved.get("ownerRequestKnown") is True
+        you = (
+            f"{CARD_YOU_NO_ACTION}; the earlier alert stays open until its own clear arrives"
+            if known
+            else "You: Any request in the earlier alert still stands; the earlier alert stays open until its own clear arrives"
+        )
         opened = resolved.get("openedAt")
         created = _card_epoch(event.get("createdAt"))
         if isinstance(opened, int) and not isinstance(opened, bool) and created is not None and created >= opened:
@@ -7300,16 +7336,14 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
             # that delivery does not advance, and the next renotify intent names it.
             updated_record[GENERATION_TOKEN_FIELD] = new_delivery_token()
         # Relay 20 M3: what this page asked the owner, so a later information
-        # card that follows it keeps the request. Card wording never blocks
-        # the delivery record: on an error the earlier request stays.
+        # card that follows it keeps the request. None records that it asked
+        # nothing (relay 21 N2: an absent field means a record from before).
+        # Card wording never blocks the delivery record: on an error the
+        # earlier value stays.
         try:
-            owner_request = card_owner_request(event)
+            updated_record["ownerRequest"] = card_owner_request(event)
         except Exception:  # noqa: BLE001
-            owner_request = updated_record.get("ownerRequest")
-        if owner_request:
-            updated_record["ownerRequest"] = owner_request
-        else:
-            updated_record.pop("ownerRequest", None)
+            pass
         became_awaiting_physical = update_awaiting_physical_tracking(event, updated_record, current)
         announced_for = delivery_field(event, DELIVERY_ANNOUNCE_INTENT_FIELD)
         # Only a delivered announcement for this transition acknowledges it. A
@@ -12364,11 +12398,13 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # Information that follows a page the group already saw (e.g. a
         # recovery after its critical card) is a real state change: its own
         # short resolved card, at once, naming the page it resolves.
+        owner_request, owner_request_known = paged_owner_request(paged, event)
         event[RESOLVES_PAGE_FIELD] = {
             "incidentKey": incident_key(event),
             "pagedSummary": alert_text(paged.get("lastSummary")),
             "openedAt": int_field(paged, "openedAt") or None,
-            "ownerRequest": paged_owner_request(paged),
+            "ownerRequest": owner_request,
+            "ownerRequestKnown": owner_request_known,
         }
     elif not suppress_reason and information_summary_defers(event):
         # Relay 16 C3: information only with no earlier page -- packet now,

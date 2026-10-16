@@ -1057,6 +1057,7 @@ def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_on
         "openedAt": opened,
         "lastNotifiedAt": opened,
         "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "ownerRequest": None,
     }})
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
     assert mod.process_one(path, paths) == (True, "sent")
@@ -1140,6 +1141,54 @@ def test_a_relink_page_with_no_stored_request_still_keeps_the_relink_request(mod
     assert "You: The earlier request still stands: relink the WhatsApp line or retire it; the alert stays open" in card
 
 
+def test_an_old_credential_page_record_keeps_its_request_on_the_information_card(mod):
+    # Relay 21 N2: a record written before ownerRequest existed, whose page
+    # asked for a credential restore, keeps that request: it is derived from
+    # what the record holds, the way card_handling maps actions.
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _info_event("abcdabcd-abcd-4bcd-8bcd-abcdabcdabcd", "provider_credential_dead")
+    event.update({"machine": "hub-1", "summary": "provider sign-in check ran", "evidence": "checked=true"})
+    opened = NOW - 3600
+    _write_state(mod, {mod.incident_key(event): {
+        "status": "open",
+        "openedAt": opened,
+        "lastNotifiedAt": opened,
+        "lastSummary": "q provider credential dead",
+    }})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.credential.json", event)
+    assert mod.process_one(path, paths) == (True, "sent")
+    [card] = sends
+    lines = card.split("\n")
+    assert len(lines) <= 4 and lines[0].startswith("ℹ️ *")
+    assert lines[2] == (
+        "You: The earlier request still stands: restore this bot's AI provider sign-in; the alert stays open"
+    )
+    assert "No action needed" not in card
+
+
+def test_an_old_page_record_with_no_known_request_never_says_no_action_needed(mod):
+    # Relay 21 N2: when the request cannot be known, the card says the earlier
+    # alert and its request stay open.
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _recovered_observation("abcdabcd-abcd-4bcd-8bcd-abcdabcdab00")
+    opened = NOW - 3600
+    _write_state(mod, {mod.incident_key(event): {
+        "status": "open",
+        "openedAt": opened,
+        "lastNotifiedAt": opened,
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+    }})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
+    assert mod.process_one(path, paths) == (True, "sent")
+    [card] = sends
+    lines = card.split("\n")
+    assert len(lines) <= 4
+    assert "No action needed" not in card
+    assert lines[2].startswith("You: Any request in the earlier alert still stands; the earlier alert stays open"), lines
+
+
 def test_a_delivered_page_records_its_owner_request_and_a_later_page_without_one_clears_it(mod):
     state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
     page = {
@@ -1161,7 +1210,10 @@ def test_a_delivered_page_records_its_owner_request_and_a_later_page_without_one
     later = {key: value for key, value in page.items() if key != "criticalAsset"}
     later["id"] = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee0"
     mod.mark_incident_sent(later, state)
-    assert "ownerRequest" not in state["openIncidents"][mod.incident_key(page)]
+    # Relay 21 N2: None records that the page asked nothing; absent means a
+    # record from before the field existed.
+    record = state["openIncidents"][mod.incident_key(page)]
+    assert "ownerRequest" in record and record["ownerRequest"] is None
 
 
 def test_information_with_no_earlier_page_still_goes_to_the_daily_summary(mod):
