@@ -63,6 +63,7 @@ import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
 import { RECENT_DISCONNECT_DEGRADED_THRESHOLD } from '../core/health-reason-hold.ts';
+import { observeInbound } from '../core/inbound-observation.ts';
 import {
   buildDisconnectDecisionRecord,
   decideDisconnectAction,
@@ -1963,7 +1964,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private registerEventHandlers(sock: WhatsAppSocket, saveCreds: () => Promise<void>): void {
     sock.ev.process(async (events) => {
       // Stale-socket guard: drop events from a socket that is no longer current
-      if (this.sock !== sock) return;
+      if (this.sock !== sock) {
+        const staleUpsert = events['messages.upsert'] as { messages?: unknown[] } | undefined;
+        observeInbound(config.botName, 'transport.stale_socket', staleUpsert?.messages?.length ?? 0);
+        return;
+      }
 
       if (events['connection.update']) {
         this.handleConnectionUpdate(sock, events['connection.update']);
@@ -3242,7 +3247,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private handleMessagesUpsert(data: any): void {
     const { messages, type } = data;
     // Only process real-time and appended messages, not full history syncs
-    if (type !== 'notify' && type !== 'append') return;
+    if (type !== 'notify' && type !== 'append') {
+      observeInbound(config.botName, 'transport.unsupported_upsert_type', (messages as unknown[] | undefined)?.length ?? 0);
+      return;
+    }
 
     for (const msg of messages as WAMessage[]) {
       this.historySyncWatch.observeUpsert(msg);
@@ -3291,6 +3299,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       const parsed = parseIncomingMessage(msg);
+      if (!parsed) observeInbound(config.botName, 'transport.parser_refused');
       if (parsed) {
         // Build contacts directory from every incoming sender for @mention resolution
         this.contactsDir.observe(parsed.senderJid, parsed.senderName);
@@ -3301,6 +3310,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
           } catch (err) {
             this.log.warn({ err, messageId: parsed.messageId }, 'onMessage callback threw');
           }
+        } else {
+          observeInbound(config.botName, 'transport.no_consumer');
         }
       }
     }

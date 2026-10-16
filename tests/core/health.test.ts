@@ -110,6 +110,7 @@ import { OutboundFloodDetector } from '../../src/transport/outbound-flood-detect
 import { getShadowGateRecorder, __resetShadowGateForTests } from '../../src/core/shadow-gate-adapter.ts';
 import { SHADOW_GATE_COUNT_KEYS } from '../../src/core/shadow-gate-events.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { getInboundObservationHealth, observeInbound, resetInboundObservations } from '../../src/core/inbound-observation.ts';
 
 // ---------------------------------------------------------------------------
 // HTTP helper
@@ -9466,6 +9467,61 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }
+  });
+});
+
+describe('GET /health — inbound_observations (advisory)', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer>;
+  let port: number;
+
+  beforeEach(async () => {
+    resetInboundObservations();
+    process.env.WHATSOUP_HEALTH_TOKEN = TEST_HEALTH_TOKEN;
+    db = makeDb();
+    ({ server, port } = await buildTestServer(makeDeps(db)));
+  });
+
+  afterEach(async () => {
+    resetInboundObservations();
+    db.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  async function diagnostic(): Promise<Record<string, unknown>> {
+    const { status, body } = await healthReq(port);
+    expect(status).toBe(200);
+    return JSON.parse(body) as Record<string, unknown>;
+  }
+
+  const statusFields = (body: Record<string, unknown>) => ({
+    status: body.status,
+    status_reasons: body.status_reasons,
+    degradation_causes: body.degradation_causes,
+  });
+
+  it('reports closed-label counts, alert outcomes and recorder failures without changing status', async () => {
+    const before = await diagnostic();
+    expect(before.inbound_observations).toEqual(getInboundObservationHealth());
+
+    observeInbound('WhatSoup', 'transport.stale_socket', 2);
+    observeInbound('WhatSoup', 'transport.parser_refused');
+    observeInbound('WhatSoup', 'ingest.stored_not_admitted');
+    const after = await diagnostic();
+
+    expect(after.inbound_observations).toMatchObject({
+      counts: {
+        'transport.stale_socket': 2,
+        'transport.parser_refused': 1,
+        'ingest.stored_not_admitted': 1,
+        'transport.no_consumer': 0,
+        'ingest.store_failed': 0,
+      },
+      recorder_failures: 0,
+    });
+    expect(Object.keys(after.inbound_observations as object).sort()).toEqual(['alerts', 'counts', 'recorder_failures']);
+    expect(statusFields(after)).toEqual(statusFields(before));
   });
 });
 

@@ -56,6 +56,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             # command has already exited. The fixture owns the master reader.
             if select.select([master], [], [], 2)[0]: record['terminal_echo'] = os.read(master, 4096).decode()
         else: child.stdin.write('go\n'); child.stdin.close()
+        record['go_written_ms'] = int((time.monotonic() - started) * 1000)
         if mode == 'job-control-unavailable':
             record['caller_group_stopped'] = False
             record['caller_group_stop_members'] = []
@@ -321,9 +322,11 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 completion.write_text('token=' + token + '\ncomplete=1\n')
                 record['forged_completion'] = str(completion)
             record['expected_helper_group'] = worker
+            record['authorization_seen_ms'] = int((time.monotonic() - started) * 1000)
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
+                record['stop_sent_ms'] = int((time.monotonic() - started) * 1000)
         if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
             deadline = time.monotonic() + 3
             authorization = None
@@ -509,7 +512,21 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        wait_limit = 6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8
+        if os.environ.get('EVENT_ORDER_TRACE') == '1' and not mode.startswith('event-order-'):
+            # Time each event while waiting; the wait bound is unchanged.
+            wait_deadline = time.monotonic() + wait_limit
+            record.setdefault('event_observations', [])
+            events = root / 'event-order.log'
+            while True:
+                exited = child.poll() is not None
+                lines = events.read_text().splitlines() if events.exists() else []
+                for line in lines[len(record['event_observations']):]:
+                    record['event_observations'].append({'event': line, 'observed_monotonic_ns': time.monotonic_ns()})
+                if exited or time.monotonic() >= wait_deadline: break
+                time.sleep(0.005)
+            child.wait(timeout=max(0.0, wait_deadline - time.monotonic()))
+        else: child.wait(timeout=wait_limit)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
@@ -541,6 +558,8 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         if frame_holder is not None: os.close(frame_holder)
         for holder in release_holders: os.close(holder)
 record['duration_ms'] = int((time.monotonic() - started) * 1000)
+record['started_monotonic_ns'] = int(started * 1e9)
+record['inner_watchdog_stderr'] = (root / 'inner-watchdog-stderr').read_text() if (root / 'inner-watchdog-stderr').exists() else None
 record['stdout'] = (root / 'stdout').read_text()
 record['stderr'] = (root / 'stderr').read_text()
 record['command_started'] = (root / 'command-started').exists()
