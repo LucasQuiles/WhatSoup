@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "ca1e30c1eda4c3def1029efed546f06374046ac6529b907a28ca6dada73b6017",
+      "sha256": "7040451e96232c48f74507d7290dfd9123a85fbff9f0eda9b5338160a27fe5d5",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
