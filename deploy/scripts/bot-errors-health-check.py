@@ -166,6 +166,8 @@ SERVICE_ENV_MAP = {
     "google": "GOOGLE_API_KEY",
     "fireworks-ai": "FIREWORKS_API_KEY",
     "togetherai": "TOGETHER_API_KEY",
+    "zai-coding-plan": "ZHIPU_API_KEY",
+    "minimax-coding-plan": "MINIMAX_API_KEY",
     "pinecone": "PINECONE_API_KEY",
     "elevenlabs": "ELEVENLABS_API_KEY",
     "whatsoup-health-token": "WHATSOUP_HEALTH_TOKEN",
