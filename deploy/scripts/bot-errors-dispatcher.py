@@ -11309,6 +11309,16 @@ def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str,
     return direct_whatsapp, email_status, direct_error
 
 
+def meta_alert_id(prefix: str) -> str:
+    """A dispatcher meta-alert's own notice id: second, pid and a random nonce.
+
+    Relay 19 S7: "<prefix>-<second>-<pid>" alone let a second meta-alert in the
+    same second take the first one's notice id, so its Ref, and overwrite that
+    packet. The nonce keeps one id per meta-alert.
+    """
+    return f"{prefix}-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
+
+
 def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
     ensure_private_dir(quarantine_dir)
     dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.poison"
@@ -11318,7 +11328,7 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         return dest
     meta = {
         **new_event_fields("alert", "critical"),
-        "id": f"poison-{int(time.time())}-{os.getpid()}",
+        "id": meta_alert_id("poison"),
         "createdAt": now_iso(),
         "machine": event_machine(),
         "instance": "bot-errors-dispatcher",
@@ -12890,7 +12900,7 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
     try:
         meta = {
             **new_event_fields("alert", "critical"),
-            "id": f"{source}-{int(time.time())}-{os.getpid()}",
+            "id": meta_alert_id(source),
             "createdAt": now_iso(),
             "machine": event_machine(),
             "instance": "bot-errors-dispatcher",

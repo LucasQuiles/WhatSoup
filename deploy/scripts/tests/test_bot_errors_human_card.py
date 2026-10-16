@@ -619,6 +619,31 @@ def test_packet_retention_has_a_thirty_day_floor(monkeypatch, configured: str, e
     assert loaded.NOTICE_PACKET_RETENTION_SECONDS == expected
 
 
+def test_two_quarantines_in_one_second_keep_two_meta_alert_packets(state, monkeypatch, tmp_path) -> None:
+    # Relay 19 S7: "poison-<second>-<pid>" let a second quarantine in the same
+    # second take the first one's Ref and overwrite its packet.
+    paths = _mod.setup_dirs()
+    sends: list[str] = []
+    monkeypatch.setattr(_mod, "send_whatsapp", lambda text, *a, **k: sends.append(text))
+    monkeypatch.setattr(_mod.time, "time", lambda: 1_792_000_000.5)
+    for name in ("one.json", "two.json"):
+        bad = paths["outbox"] / name
+        bad.write_text("{not json", encoding="utf-8")
+        _mod.quarantine_poison(bad, paths["quarantine"], f"invalid JSON: {name}")
+    refs = [card.rsplit("Ref: ", 1)[1] for card in sends]
+    assert len(refs) == 2 and refs[0] != refs[1]
+    packets = [_mod.read_notice_packet(paths, ref) for ref in refs]
+    assert packets[0]["noticeId"] != packets[1]["noticeId"]
+    assert "one.json" in packets[0]["body"] and "two.json" in packets[1]["body"]
+
+
+def test_meta_alert_ids_differ_within_one_second(monkeypatch) -> None:
+    monkeypatch.setattr(_mod.time, "time", lambda: 1_792_000_000.0)
+    ids = {_mod.meta_alert_id("credential-meta") for _ in range(50)}
+    assert len(ids) == 50
+    assert all(value.startswith("credential-meta-1792000000-") for value in ids)
+
+
 def test_outbox_send_carries_the_card_and_the_packet_names_the_sent_file(state, monkeypatch) -> None:
     paths = _mod.setup_dirs()
     sends: list[str] = []
