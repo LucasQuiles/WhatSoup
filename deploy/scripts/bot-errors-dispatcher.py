@@ -4736,6 +4736,9 @@ _EVIDENCE_TOKEN_RE = re.compile(r"(?m)^(?P<key>[a-z_]+)=(?P<value>[^\n]*)$")
 # shape; anything else, and every unknown field, is dropped and never printed.
 CARD_CAUSE_LABEL_FIELDS = ("provider", "model", "unit")
 CARD_CAUSE_COUNT_FIELDS = ("port", "count")
+# Relay 20 S-c: the date a model id ends with ("-20250929", "-2024-08-06") is
+# dropped so the name survives the long-number strip.
+_CARD_MODEL_DATE_RE = re.compile(r"[-_.:]?(?:\d{8}|\d{4}-\d{2}-\d{2})$")
 
 
 def _card_scrub_once(text: str) -> str:
@@ -4876,6 +4879,8 @@ def card_cause(event: dict[str, Any]) -> str | None:
     for key in CARD_CAUSE_LABEL_FIELDS:
         for container in containers:
             label = safe_alert_label(container.get(key))
+            if label and key == "model":
+                label = _CARD_MODEL_DATE_RE.sub("", label)
             if label:
                 parts.append(f"{key} {label}")
                 break
@@ -4883,7 +4888,9 @@ def card_cause(event: dict[str, Any]) -> str | None:
         for container in containers:
             value = container.get(key)
             if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000_000:
-                parts.append(f"{key} {value}")
+                # Relay 20 S-c: a count prints with thousands separators, so it
+                # never forms the six-digit run the card strips. A port stays plain.
+                parts.append(f"{key} {value:,}" if key == "count" else f"{key} {value}")
                 break
     return "; ".join(parts) or None
 
@@ -4920,7 +4927,7 @@ def card_catalog_title(event: dict[str, Any], severity: str) -> str | None:
         diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
         count = event.get("count", diagnostics.get("count"))
         if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
-            title += f" ({count})"
+            title += f" ({count:,})"
         return title
     if source == "flap_storm_resolved":
         underlying = source_headline(event.get("alertSource") or fields.get("underlying_source"))
@@ -4933,7 +4940,7 @@ def card_catalog_title(event: dict[str, Any], severity: str) -> str | None:
         count = _evidence_int(fields, "closed_count") or 0
         if count == 1:
             return "Closed 1 old alert that stopped reporting; it reopens if the problem returns"
-        return f"Closed {count} old alerts that stopped reporting; they reopen if the problem returns"
+        return f"Closed {count:,} old alerts that stopped reporting; they reopen if the problem returns"
     if fields.get("stale_digest") == "true":
         title = _card_underlying_title(event)
         since = _card_month_day(fields.get("opened", ""))
@@ -4968,7 +4975,7 @@ def card_impact(event: dict[str, Any]) -> str:
     storm = event.get("storm") if isinstance(event.get("storm"), dict) else {}
     hosts = storm.get("affectedHosts")
     if isinstance(hosts, int) and not isinstance(hosts, bool) and hosts > 0:
-        return f"Impact: {hosts} host{'s' if hosts != 1 else ''} affected"
+        return f"Impact: {hosts:,} host{'s' if hosts != 1 else ''} affected"
     return CARD_IMPACT_UNCONFIRMED
 
 
@@ -5551,24 +5558,24 @@ def information_summary_lines(entries: list[dict[str, Any]]) -> list[str]:
             order.append(title)
             counts[title] = 0
         counts[title] += 1
-    lines = [f"{title} ({counts[title]}x)" if counts[title] > 1 else title for title in order]
+    lines = [f"{title} ({counts[title]:,}x)" if counts[title] > 1 else title for title in order]
     if closed:
         lines.append(
             "Closed 1 old alert that stopped reporting; it reopens if the problem returns"
             if closed == 1
-            else f"Closed {closed} old alerts that stopped reporting; they reopen if the problem returns"
+            else f"Closed {closed:,} old alerts that stopped reporting; they reopen if the problem returns"
         )
     return lines
 
 
 def format_information_summary_card(lines: list[str], ref: str, dropped: int = 0) -> str:
     shown = lines[:INFO_SUMMARY_MAX_LINES]
-    card = [f"{CARD_ICON_INFO} *Information since the last summary: {len(lines)}*", *shown]
+    card = [f"{CARD_ICON_INFO} *Information since the last summary: {len(lines):,}*", *shown]
     if len(lines) > len(shown):
-        card.append(f"{CARD_CLIP} {len(lines) - len(shown)} more in the packet")
+        card.append(f"{CARD_CLIP} {len(lines) - len(shown):,} more in the packet")
     if dropped > 0:
         # Relay 19 S5: notices that fell off a full queue are counted, not hidden.
-        card.append(f"{CARD_CLIP} {dropped} older notices not listed: the summary was full")
+        card.append(f"{CARD_CLIP} {dropped:,} older notices not listed: the summary was full")
     card.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
     return card_text(card)
 
@@ -5943,18 +5950,18 @@ def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
     lines: list[str] = []
     if relink:
         noun = "logged out" if confirmed else "needing a relink"
-        lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines {noun}: {len(relink)}*")
+        lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines {noun}: {len(relink):,}*")
         lines.extend(_line_card_relink_line(group) for group in relink[:LINE_CARD_MAX_LINES])
         if len(relink) > LINE_CARD_MAX_LINES:
-            lines.append(f"{CARD_CLIP} {len(relink) - LINE_CARD_MAX_LINES} more in the packet")
+            lines.append(f"{CARD_CLIP} {len(relink) - LINE_CARD_MAX_LINES:,} more in the packet")
     else:
-        lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines that could not be checked: {len(unchecked)}*")
+        lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines that could not be checked: {len(unchecked):,}*")
     if unchecked:
         names = [f"{group['bot']} ({group['host']})" for group in unchecked]
         shown = ", ".join(names[:LINE_CARD_MAX_LINES])
         if len(names) > LINE_CARD_MAX_LINES:
             shown += f", {CARD_CLIP}"
-        lines.append(f"Could not check {len(unchecked)}: {shown}" if relink else shown)
+        lines.append(f"Could not check {len(unchecked):,}: {shown}" if relink else shown)
     if relink:
         # Who acts, per the incidents' own requested action (physical_action_text).
         each = "each logged-out line" if confirmed else "each line that needs a QR relink"

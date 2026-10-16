@@ -457,6 +457,31 @@ def test_confined_cause_uses_only_allowlisted_fields() -> None:
     assert "summary_confined" not in card
 
 
+def test_large_counts_keep_thousands_separators_and_dated_models_keep_their_name() -> None:
+    # Relay 20 S-c: a dispatcher-built count of a million or more used to form a
+    # six-digit run the long-number strip then dropped; a dated model id vanished
+    # the same way.
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"])
+    event["diagnostics"] = {"model": "claude-sonnet-4-5-20250929", "count": 1234567}
+    cause = _mod.card_cause(event)
+    assert cause == "provider auth failure; model claude-sonnet-4-5; count 1,234,567"
+    first = _mod.format_card(event, "00000000").split("\n", 1)[0]
+    assert "count 1,234,567" in first and "model claude-sonnet-4-5" in first, first
+
+    debt = dict(next(g for g in _GOLDENS if g["family"] == "recovery_debt_attention")["event"])
+    debt["diagnostics"] = {**debt["diagnostics"], "count": 1234567}
+    assert "*Q has unfinished recovery work (1,234,567)*" in _mod.format_card(debt, "00000000")
+
+    autoclose = dict(next(g for g in _GOLDENS if g["family"] == "stale_autoclose")["event"])
+    autoclose["evidence"] = "closed_count=1234567"
+    assert "Closed 1,234,567 old alerts" in _mod.format_card(autoclose, "00000000")
+
+    lines = _mod.information_summary_lines([{"noticeKind": "stale-autoclose", "count": 1234567}])
+    assert lines == ["Closed 1,234,567 old alerts that stopped reporting; they reopen if the problem returns"]
+    summary = _mod.format_information_summary_card(lines, "00000000", dropped=1234567)
+    assert "1,234,567 older notices not listed" in summary
+
+
 def test_unknown_failure_class_is_dropped() -> None:
     event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_warning")["event"])
     assert "unknown" not in _mod.format_card(event, "00000000").lower()
