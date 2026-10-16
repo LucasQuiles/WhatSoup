@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "23a2e21fed80cb98d52a9f09477ecd4fe53e39ebf7f337c715181c72e6c0f0f9",
+      "sha256": "c9681a90127fa8b21f3054d42399cae686e59b8e1b3746ac005334006abc0370",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -167,7 +167,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "20f173037017fd7555c435ff6ffc001a1d2aa917f9f835ae4f1017dc01afe3b5",
+      "sha256": "6694540a8aa776032811c959e140db12f106a364bcc598619bf2b4b338ec2153",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -642,7 +642,7 @@
     },
     {
       "path": "deploy/scripts/lib/fleet_lines.py",
-      "sha256": "bfc20d1a2e35c9ac13b07ad07b31a511f79a138cc30a735bee3a549c5a44a574",
+      "sha256": "58c8feffa19e04df6b5e121c6773b0af2fa82723b2939e7792a8044eda8e7d40",
       "mustContain": [
         "def read_fleet_lines(",
         "def line_verdict(",
