@@ -4716,12 +4716,21 @@ def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
     text = _CARD_PATH_RE.sub("", text)
     text = _CARD_HEX_RE.sub("", text)
     text = text.replace("*", "").replace("_", " ")
+    # Relay 19 B3: a strip above can join an "@" to a digit run it was kept
+    # apart from ("@*1555..." -> "@1555..."), so mentions are neutralized again
+    # after the last strip.
+    text = neutralize_mentions(text)
     text = re.sub(r"\s+", " ", text).strip()
     # Audit r3: a first line never ends at a colon (or any dangling separator).
     text = text.rstrip(" :;,-—(").strip()
     if len(text) > limit:
         text = text[: limit - 1].rstrip(" :;,-—(") + CARD_CLIP
     return text
+
+
+def card_text(lines: list[str]) -> str:
+    """The card as sent: every line mention-safe, whatever producer text it was built from."""
+    return "\n".join(neutralize_mentions(line) for line in lines)
 
 
 def card_bot_name(event: dict[str, Any]) -> str:
@@ -4960,7 +4969,7 @@ def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resol
     else:
         lines.append("Handling: recovered")
     lines.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
-    return "\n".join(lines)
+    return card_text(lines)
 
 
 def format_card(event: dict[str, Any], ref: str) -> str:
@@ -4984,12 +4993,12 @@ def format_card(event: dict[str, Any], ref: str) -> str:
     if icon == CARD_ICON_INFO:
         # Information only: at most four lines.
         lines.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
-        return "\n".join(lines)
+        return card_text(lines)
     if classification.kind != "incident_recovery":
         lines.append(card_impact(event))
     handling, you = card_handling(event, classification)
     lines.extend([handling, you, f"Ref: {ref}"])
-    return "\n".join(lines)
+    return card_text(lines)
 
 
 # --- Machine packet ---------------------------------------------------------
@@ -5437,7 +5446,7 @@ def format_information_summary_card(lines: list[str], ref: str) -> str:
     if len(lines) > len(shown):
         card.append(f"{CARD_CLIP} {len(lines) - len(shown)} more in the packet")
     card.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
-    return "\n".join(card)
+    return card_text(card)
 
 
 def send_daily_information_summary(
@@ -5758,7 +5767,7 @@ def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
         lines.append("Handling: Q to check these lines")
         lines.append(CARD_YOU_NO_ACTION)
     lines.append(f"Ref: {ref}")
-    return "\n".join(lines)
+    return card_text(lines)
 
 
 def send_daily_line_card(

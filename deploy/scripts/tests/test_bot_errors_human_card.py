@@ -240,15 +240,36 @@ _MATRIX_SOURCES = st.one_of(
     st.sampled_from(("primary_model_unusable", "self_restart_completed", "q", "instance_logged_out")),
     st.from_regex(r"[a-z][a-z_-]{0,24}", fullmatch=True),
 )
+# Pieces the card scrubber removes. Between "@" and a digit run, each one used to
+# leave "@<digits>" behind once it was stripped (relay 19 B3).
+_SCRUBBED_PIECES = (
+    "*",
+    "**",
+    "_",
+    "[digest 0a1b2c3d]",
+    "[set 0a1b2c]",
+    "-",
+    "deadbeef0123",
+    "0a1b2c3d-0a1b-4c2d-8e3f-0a1b2c3d4e5f",
+    "/tmp",
+    "/tmp/x/",
+    "~/a/b/",
+    "unknown - 40 chars - digest 0a1b2c3d",
+)
 # Summaries that try to look addressed to Q or to mention a number, plus a
-# confined (legacy object) summary.
+# confined (legacy object) summary. The text draws punctuation the scrubber
+# removes as well as letters, digits and spaces.
 _MATRIX_SUMMARIES = st.one_of(
     st.just({"failureClass": "unknown", "length": 12, "correlationDigest": "ab" * 32}),
     st.builds(
-        lambda lead, digits, tail: f"{lead}{digits} {tail}".strip(),
+        lambda lead, piece, digits, tail: f"{lead}{piece}{digits} {tail}".strip(),
         st.sampled_from(("q: ", "Q, ", "@q ", "Q: please check @", "@", "")),
+        st.sampled_from(("", *_SCRUBBED_PIECES)),
         st.from_regex(r"[0-9]{0,15}", fullmatch=True),
-        st.text(alphabet=st.characters(codec="ascii", categories=("L", "N", "Zs")), max_size=30),
+        st.text(
+            alphabet=st.characters(codec="ascii", categories=("L", "N", "Zs"), include_characters="*_[]-/~@+.|=:"),
+            max_size=30,
+        ),
     ),
 )
 
@@ -257,6 +278,9 @@ _MATRIX_SUMMARIES = st.one_of(
 @given(kind=st.sampled_from(_MATRIX_TYPES), source=_MATRIX_SOURCES, summary=_MATRIX_SUMMARIES)
 @example(kind=("alert", "critical"), source="q", summary="Q, please check @15550001234")
 @example(kind=("observation", "info"), source="self_restart_completed", summary="q: worker stalled")
+@example(kind=("alert", "warning"), source="q", summary="ping @*15550001111")
+@example(kind=("observation", "info"), source="q", summary="ping @[digest 0a1b2c3d]15550001111")
+@example(kind=("alert", "warning"), source="q", summary="ping @/tmp/x/15550001111")
 def test_q_admission_matrix(kind: tuple[str, str], source: str, summary) -> None:
     """Q admits a notice exactly when it is a critical/error alert, in the old body and in the card alike."""
     event_type, severity = kind
@@ -302,6 +326,48 @@ def test_mention_risk_is_neutralised_and_unit_names_survive() -> None:
     card = _mod.format_card(event, "00000000")
     assert _UNIT in card and "@1555" not in card
     assert _UNIT in _mod.format_event(event)
+
+
+_AT_DIGIT = re.compile(r"@[0-9+]")
+
+
+def _producer_text_cards(text: str) -> list[str]:
+    """Every card whose lines carry producer text: title, Where, Cause, summary line."""
+    alert = {
+        "schemaVersion": 2,
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "warning",
+        "id": "b3-alert",
+        "createdAt": "2026-10-15T10:00:00Z",
+        "machine": text,
+        "instance": "fixture-bot",
+        "source": "health_body_degraded",
+        "summary": text,
+    }
+    observation = dict(alert, id="b3-observation", eventKind="observation", eventType="observation", severity="info")
+    resolved = dict(observation, id="b3-resolved")
+    resolved[_mod.RESOLVES_PAGE_FIELD] = {"incidentKey": "k", "pagedSummary": text, "openedAt": None}
+    summary_lines = _mod.information_summary_lines([{"noticeKind": "outbox", "title": text}])
+    return [
+        _mod.format_card(alert, "00000000"),
+        _mod.format_card(observation, "00000000"),
+        _mod.format_card(resolved, "00000000"),
+        _mod.format_information_summary_card(summary_lines, "00000000"),
+        _mod.card_plain(text),
+    ]
+
+
+@pytest.mark.parametrize("piece", _SCRUBBED_PIECES)
+@pytest.mark.parametrize("digits", ["15550001111", "+15550001111", "4242"])
+def test_no_card_line_gets_an_at_digit_from_a_scrubbed_piece(piece: str, digits: str) -> None:
+    # Relay 19 B3: neutralizing "@" before the scrub let "@<piece><digits>" become
+    # "@<digits>" once the piece was removed; Q admits "@" + six digits.
+    text = f"ping @{piece}{digits} now"
+    for card in _producer_text_cards(text):
+        for line in card.split("\n"):
+            assert not _AT_DIGIT.search(line), (text, line)
+        assert not q_admits(card) or card.startswith("🔴 *"), card
 
 
 # --- P4: confined summaries -----------------------------------------------------
