@@ -18,6 +18,7 @@ import {
 } from '../../core/substrate/beads.ts';
 import {
   createTrigger, listTriggers, listTriggerRunsRedacted, pauseTrigger, extendTrigger, resumeTrigger, prepareTrigger,
+  assertTriggerTextBudget, assertTriggerValueBudget, TRIGGER_BUDGETS,
 } from '../../core/substrate/triggers.ts';
 import { clearAlertSourceChecked } from '../../lib/emit-alert.ts';
 import {
@@ -172,6 +173,23 @@ function toEntityRef(r: z.infer<typeof EntityRefSchema>): EntityRef {
   };
 }
 
+/** Validate MCP-owned trigger fields before any bead or trigger is persisted. */
+function assertTriggerCreationBudget(args: {
+  title?: string;
+  prompt?: string;
+  metadata?: Record<string, unknown>;
+}): void {
+  if (args.title !== undefined) {
+    assertTriggerTextBudget(args.title, 'title.bytes', TRIGGER_BUDGETS.maxTitleBytes);
+  }
+  if (args.prompt !== undefined) {
+    assertTriggerTextBudget(args.prompt, 'prompt.bytes', TRIGGER_BUDGETS.maxPromptBytes);
+  }
+  if (args.metadata !== undefined) {
+    assertTriggerValueBudget(args.metadata, 'metadata', TRIGGER_BUDGETS.maxMetadataBytes);
+  }
+}
+
 export function registerSubstrateTools(
   registry: ToolRegistry,
   deps: SubstrateDeps,
@@ -217,6 +235,7 @@ export function registerSubstrateTools(
         schedule: { kind: 'schedule.cron' | 'schedule.at_time'; expr?: string; fire_at?: number; tz?: string };
         report_chat: string; terminal_at?: number; metadata?: Record<string, unknown>;
       };
+      assertTriggerCreationBudget({ title: p.title, prompt: p.prompt, metadata: p.metadata });
       const spec = p.schedule.kind === 'schedule.cron'
         ? { expr: p.schedule.expr, tz: p.schedule.tz }
         : { fire_at: p.schedule.fire_at };
@@ -274,6 +293,7 @@ export function registerSubstrateTools(
         on_terminal?: 'notify' | 'silent' | 'reopen_bead';
         dedupe_key?: string;
       };
+      assertTriggerCreationBudget({ title: p.title });
       // poll.url is gated default-OFF (F2 Slice B). Throw BEFORE any bead/trigger
       // is created so a disabled url watch never persists, mirroring the
       // relay_message disabled path. The poller also re-guards at exec time.
