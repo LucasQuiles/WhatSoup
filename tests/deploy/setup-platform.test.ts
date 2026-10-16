@@ -127,19 +127,30 @@ function runLinuxSetupReplay(
  * Homebrew's /opt/homebrew/bin) leaks through the inherited PATH that
  * runLinuxSetupReplay appends after the shim dir, and `command -v ffmpeg`
  * finds the real binary regardless of what the test intends to simulate.
+ *
+ * A directory that holds ffmpeg is replaced by a mirror of its other entries,
+ * not dropped: on a host whose ffmpeg lives in /usr/bin, dropping the directory
+ * also removes dirname and every other utility setup.sh needs.
  */
 function realPathWithoutFfmpeg(): string {
+  const ffmpegNames = ['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64'];
   const dirs = (process.env.PATH ?? '').split(path.delimiter);
   return dirs
-    .filter((dir) => {
-      if (!dir) return false;
+    .flatMap((dir) => {
+      if (!dir) return [];
+      let entries: string[];
       try {
-        return !['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64'].some((name) =>
-          fs.existsSync(path.join(dir, name)),
-        );
+        entries = fs.readdirSync(dir);
       } catch {
-        return true;
+        return [dir];
       }
+      if (!entries.some((name) => ffmpegNames.includes(name))) return [dir];
+      const mirror = makeTempRoot('whatsoup-setup-path-mirror-');
+      for (const name of entries) {
+        if (ffmpegNames.includes(name)) continue;
+        fs.symlinkSync(path.join(dir, name), path.join(mirror, name));
+      }
+      return [mirror];
     })
     .join(path.delimiter);
 }

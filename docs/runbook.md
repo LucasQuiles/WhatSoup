@@ -3548,17 +3548,26 @@ Whoever issues the stop must ask the other question first:
 node scripts/restart-safety-preflight.ts --db "$DB" --json --mode stop
 ```
 
-Exit `0` means no open inbound arrived inside the liveness window. Exit `3` means
-`reason=live_turns_in_flight` — a turn is mid-flight and stopping now loses it; wait and re-check, or
-make it an explicit, recorded operator decision. **Any script that repoints a release and restarts a
-unit must run this first** — including a deploy an agent runs against its own runtime, which is how the
-2026-08-29 loss happened.
+Exit `0` (`reason=stop_safe`, or `missing_database`) means no open inbound can be lost by the stop.
+Exit `3` blocks the stop, with one of these reasons:
 
-Liveness is recency-scoped on purpose. Only OPEN inbounds (`pending`, `processing`, `turn_done`)
-received within `LIVE_TURN_WINDOW_SECONDS` (15 minutes, the same threshold the reply-guarantee observer
-uses to call an open inbound stale) block the stop. Older open rows are reported as
-`liveTurns.staleIgnored` and never block — an instance carrying weeks-old wedged rows (q holds 11) must
-stay restartable, since restart is how a wedge gets cleared.
+- `live_turns_in_flight` — an open inbound arrived inside the liveness window, or an older one is under
+  an unexpired recovery or deferred claim. A turn is mid-flight and stopping now loses it.
+- `older_turns_unverified` — an older open inbound has no evidence that nothing runs it. Age alone is
+  not proof of death, so it blocks.
+- `preflight_error` — the check itself failed. It is not a verdict, and it blocks.
+
+Wait and re-check. There is no override: a blocked stop is not done. **Any script that repoints a
+release and restarts a unit must run this first** — including a deploy an agent runs against its own
+runtime, which is how the 2026-08-29 loss happened.
+
+OPEN inbounds (`pending`, `processing`, `turn_done`) received within `LIVE_TURN_WINDOW_SECONDS`
+(15 minutes, the same threshold the reply-guarantee observer uses to call an open inbound stale) always
+block. Older open rows block too unless persisted evidence proves nothing in this process runs them:
+a terminal record, a terminal record of a later turn in the same conversation, or a pending recovery
+job or deferred obligation that resumes them after the restart. Only those proven rows are reported as
+`liveTurns.staleIgnored` and never block, so an instance carrying old wedged rows stays restartable.
+`liveTurns.olderUnverified` counts the older rows that block.
 
 The verdict reports `liveTurns.windowSeconds`, so a deploy receipt can record the exact predicate applied.
 

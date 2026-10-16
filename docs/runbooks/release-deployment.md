@@ -165,14 +165,23 @@ npm --silent run release:activate -- \
      migration level (`schemaMigration.before` in the receipt), records
      `symlink.before`, and copies and stages every plist into a mode-0700
      `<backup-dir>/activation-<commit12>-<utc>/`;
-  2. switches the wrapper symlink and installs the staged plists. Each
+  2. runs the stop gate before any live change: the new release's
+     `scripts/restart-safety-preflight.ts --mode stop` against the instance
+     database, every 15 s, within one 900 s bound. Exit `0` passes. Exit `3`
+     waits and checks again. Any other exit, a check killed at the bound, or
+     any verdict (even an allow) that arrives at or after the bound refuses
+     the apply with the symlink and plists unchanged. There is no override.
+     The gate shows a quiet check, not that no work enters between that check
+     and the stop; on the first old-to-new cutover the old release's shutdown
+     still fails such work (see the #3703 design, "First old-to-new cutover");
+  3. switches the wrapper symlink and installs the staged plists. Each
      installed plist keeps its current permission bits, capped at `0644`
      because launchd refuses group- or world-writable job definitions. An
      owner-only (`0600`) instance plist, for example one carrying credentials
      in `EnvironmentVariables`, stays `0600` through the switch and through
      the automatic rollback;
-  3. reloads each label with the reload sequence below;
-  4. verifies from the executing process (a new pid whose argv names
+  4. reloads each label with the reload sequence below;
+  5. verifies from the executing process (a new pid whose argv names
      `<release>/src/bootstrap.ts`, authenticated health with the manifest
      commit and `whatsapp.connected: true`, and each auxiliary job's loaded
      definition on the new release).
