@@ -370,6 +370,23 @@ def test_card_plain_never_rebuilds_a_long_number_or_an_at_digit(text: str) -> No
     assert plain.split(" ", 1)[0] in {"worker", "ping"}
 
 
+@pytest.mark.parametrize("text", [
+    "(" * 2000 + ")" * 2000,
+    "ping @" + "(" * 2000 + ")" * 2000 + "15550001111 now",
+    "worker " + "(" * 1000 + "123*456*789" + ")" * 1000 + " stalled",
+], ids=["brackets", "mention-brackets", "number-brackets"])
+def test_card_plain_is_bounded_on_a_long_nested_bracket_input(text: str) -> None:
+    # Relay 21 N1: the repeat-until-stable loop had no pass limit and no length
+    # cap, so 2,000 "(" then 2,000 ")" took about 2,000 quadratic passes.
+    started = time.perf_counter()
+    plain = _mod.card_plain(text)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.1, elapsed
+    assert not re.search(r"\d{6,}", plain), plain
+    assert not _AT_DIGIT.search(plain), plain
+    assert len(plain) <= _mod.CARD_TITLE_LIMIT
+
+
 _MACHINE_FIELD_SUMMARIES = (
     "pid=4242; chat=123456789012345; file=/tmp; key a|b|c",
     "worker pid 4242 stalled in /tmp for chat 123456789012345 (key hub-1|line|instance_logged_out)",

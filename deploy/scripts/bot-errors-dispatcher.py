@@ -4694,6 +4694,10 @@ CARD_YOU_NO_ACTION = "You: No action needed"
 CARD_YOU_ACTION_PREFIX = "You: Action needed: "
 CARD_YOU_RELINK = f"{CARD_YOU_ACTION_PREFIX}relink the WhatsApp line or retire it"
 CARD_IMPACT_UNCONFIRMED = "Impact not yet confirmed"
+# Relay 21 N1: card_plain reads at most this many times its limit, and repeats
+# its removals at most this many times.
+CARD_SCRUB_INPUT_FACTOR = 8
+CARD_SCRUB_MAX_PASSES = 8
 
 # Card-only scrubbing. The card never carries paths, event ids, digests,
 # confined renderings, pids, long numbers, key=value fields or incident keys;
@@ -4772,15 +4776,24 @@ def _card_scrub_once(text: str) -> str:
 
 def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
     """One line of plain card text: redacted, mention-safe, no paths, ids or digests."""
-    text = neutralize_mentions(redact(value))
+    # Relay 21 N1: the input is cut before the passes, so their cost is bounded
+    # by the card limit, not by the producer's text.
+    text = neutralize_mentions(redact(value))[: CARD_SCRUB_INPUT_FACTOR * limit]
     # Relay 20 M4: a removal or cleanup can rebuild what an earlier strip
     # removed ("123*456*789" -> a long number, "@()4242" -> "@4242"), so the
-    # pass repeats until the text stops changing. Each pass that changes the
-    # text removes an "@", an "_" or characters and adds neither, so this ends.
-    previous = None
-    while text != previous:
-        previous = text
-        text = _card_scrub_once(text)
+    # pass repeats until the text stops changing, at most CARD_SCRUB_MAX_PASSES
+    # times: a pass can add text (neutralize_mentions turns "@" into " at "),
+    # and nested brackets lose one level per pass.
+    for _ in range(CARD_SCRUB_MAX_PASSES):
+        scrubbed = _card_scrub_once(text)
+        if scrubbed == text:
+            break
+        text = scrubbed
+    else:
+        # Still changing: the strips a later pass could have rebuilt run once
+        # more, with nothing after them that can join pieces again.
+        text = neutralize_mentions(_CARD_LONG_NUMBER_TOKEN_RE.sub("", text))
+        text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[: limit - 1].rstrip(" :;,-—(") + CARD_CLIP
     return text
