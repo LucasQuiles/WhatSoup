@@ -387,6 +387,33 @@ def test_card_plain_is_bounded_on_a_long_nested_bracket_input(text: str) -> None
     assert len(plain) <= _mod.CARD_TITLE_LIMIT
 
 
+@pytest.mark.parametrize("text", [
+    "chat 1,234,567,890,123 stalled",
+    "chat 1 234 567 890 123 stalled",
+    "phone +1 555 000 1111 linked",
+    "line 1-555-000-1111 down",
+    "host 1.234.567.890 down",
+])
+def test_long_numbers_written_with_separators_never_reach_the_card(text: str) -> None:
+    # Relay 21 N4: each digit group was under six digits, so a separated id
+    # passed. A run of 9 digits or more joined by one separator goes.
+    plain = _mod.card_plain(text)
+    assert not re.search(r"\d", plain), plain
+    assert plain.split(" ", 1)[0] == text.split(" ", 1)[0] and plain.endswith(text.rsplit(" ", 1)[1])
+
+
+@pytest.mark.parametrize("text", [
+    "count 1,234,567 queued",
+    "count 10,000,000 queued",
+    "since 2026-10-16 08:00 today",
+    "version 1.2.3 of 4 5 6",
+])
+def test_counts_and_dates_with_separators_stay_on_the_card(text: str) -> None:
+    # Relay 21 N4: dispatcher counts are capped at 10,000,000 (8 digits) and a
+    # date holds 8 digits, so both stay.
+    assert _mod.card_plain(text) == text
+
+
 _MACHINE_FIELD_SUMMARIES = (
     "pid=4242; chat=123456789012345; file=/tmp; key a|b|c",
     "worker pid 4242 stalled in /tmp for chat 123456789012345 (key hub-1|line|instance_logged_out)",

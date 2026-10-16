@@ -4731,6 +4731,21 @@ _CARD_PIPE_TOKEN_RE = re.compile(r"\S*\|\S*")
 # event id stamped with an epoch ("stale-<key>-1760000000", "poison-<s>-<pid>").
 # A neutralized mention (" at <digits>") goes with its number.
 _CARD_LONG_NUMBER_TOKEN_RE = re.compile(r"(?:(?<!\S)at\s+)?\S*\d{6,}\S*")
+# Relay 21 N4: digit groups joined by one separator ("1,234,567,890,123",
+# "+1 555 000 1111", "1-555-000-1111"). The run goes when it holds
+# CARD_SEPARATED_NUMBER_DIGITS digits or more; a dispatcher-built count (capped
+# at 10,000,000, 8 digits) and a date (8 digits) stay.
+_CARD_SEPARATED_NUMBER_RE = re.compile(r"(?<![\w+])\+?\d+(?P<sep>[,. -])\d+(?:(?P=sep)\d+)*(?!\w)")
+CARD_SEPARATED_NUMBER_DIGITS = 9
+
+
+def _card_strip_long_numbers(text: str) -> str:
+    """Drop every long number: a token with a six-digit run, or a separated run of nine digits or more."""
+    text = _CARD_LONG_NUMBER_TOKEN_RE.sub("", text)
+    return _CARD_SEPARATED_NUMBER_RE.sub(
+        lambda match: "" if sum(ch.isdigit() for ch in match.group(0)) >= CARD_SEPARATED_NUMBER_DIGITS else match.group(0),
+        text,
+    )
 # A confined rendering whose digest is glued to more text, so the exact
 # _CONFINED_DISPLAY_RE (word-bounded) cannot see it.
 _CARD_CONFINED_LOOSE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]{0,63} - \d{1,9} chars - digest\b\s*\S*")
@@ -4757,7 +4772,7 @@ def _card_scrub_once(text: str) -> str:
     text = _CARD_PATH_RE.sub("", text)
     text = _CARD_ULID_RE.sub("", text)
     text = _CARD_HEX_RE.sub("", text)
-    text = _CARD_LONG_NUMBER_TOKEN_RE.sub("", text)
+    text = _card_strip_long_numbers(text)
     text = text.replace("*", "").replace("_", " ")
     # Relay 19 B3: a strip above can join an "@" to a digit run it was kept
     # apart from ("@*1555..." -> "@1555..."), so mentions are neutralized again
@@ -4792,7 +4807,7 @@ def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
     else:
         # Still changing: the strips a later pass could have rebuilt run once
         # more, with nothing after them that can join pieces again.
-        text = neutralize_mentions(_CARD_LONG_NUMBER_TOKEN_RE.sub("", text))
+        text = neutralize_mentions(_card_strip_long_numbers(text))
         text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[: limit - 1].rstrip(" :;,-—(") + CARD_CLIP
