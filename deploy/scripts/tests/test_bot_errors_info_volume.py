@@ -15,6 +15,7 @@ All fixtures are synthetic: neutral host and line names, no chat ids.
 from __future__ import annotations
 
 import calendar
+import functools
 import importlib.util
 import json
 import os
@@ -856,6 +857,75 @@ def test_a_send_that_failed_before_the_request_is_still_retried(mod):
     assert "lastSentDay" not in _state(mod)["lineCheckCard"]
     assert mod.send_daily_line_card(mod.state_paths(), now=NOW + mod.DAILY_CARD_RETRY_SECONDS) == 0
     assert len(tries) == 2
+
+
+# --- Relay 22 A1: a daily card counts as sent only on WhatsApp's acceptance proof -----
+
+ACCEPTED = {"sent": True, "resolved_chatJid": "synthetic-group"}
+
+
+def _rpc_replies(mod, monkeypatch, replies: list[dict]) -> list[str]:
+    """The real send_whatsapp runs; each socket call answers with the next reply, as its one text block."""
+    for key in ("BOT_ERRORS_DRY_SEND_FAIL", "BOT_ERRORS_DRY_SEND_CAPTURE"):
+        monkeypatch.delenv(key, raising=False)
+    tries: list[str] = []
+
+    def _call(socket_path, method, params, timeout=15.0, **options):
+        tries.append(params["arguments"]["text"])
+        return {"content": [{"type": "text", "text": json.dumps(replies.pop(0))}]}
+
+    monkeypatch.setattr(mod, "validate_bot_errors_target", lambda: None)
+    monkeypatch.setattr(mod, "BOT_ERRORS_JID", "synthetic-group")
+    monkeypatch.setattr(mod, "json_rpc_call", _call)
+    monkeypatch.setattr(mod, "send_whatsapp", functools.partial(mod.send_whatsapp, socket_path="unused.sock"))
+    return tries
+
+
+def _defer_info_notice(mod, event_id: str) -> None:
+    paths = mod.state_paths()
+    path = dispatcher_fixtures.write_outbox_event(
+        paths, f"x{event_id[:8]}.q.info.json", _info_event(event_id, "self_restart_completed"))
+    assert mod.process_one(path, paths) == (True, "suppressed")
+
+
+@pytest.mark.parametrize("card", ["informationSummary", "lineCheckCard"])
+def test_a_reply_without_acceptance_proof_is_unconfirmed_and_the_next_card_names_its_ref(mod, monkeypatch, card):
+    paths = mod.state_paths()
+    send = mod.send_daily_information_summary if card == "informationSummary" else mod.send_daily_line_card
+    _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
+    _defer_info_notice(mod, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    # A plain answer with no isError, and no proof that WhatsApp took the message.
+    tries = _rpc_replies(mod, monkeypatch, [{"ok": True}, ACCEPTED])
+
+    assert send(paths, now=NOW) == 1
+    section = _state(mod)[card]
+    assert section["lastSendUnconfirmed"] is True, "a reply without acceptance proof counted as confirmed"
+    first_ref = section["lastRef"]
+    if card == "informationSummary":
+        # The notices are not queued again; they stay listed in the packet the Ref names.
+        assert section["pending"] == []
+        included = mod.read_notice_packet(paths, first_ref)["included"]
+        assert [entry["noticeId"] for entry in included] == ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    assert send(paths, now=NOW + mod.DAILY_CARD_RETRY_SECONDS) == 0
+    assert len(tries) == 1, "a card with no proof is never resent that day"
+
+    _defer_info_notice(mod, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    assert send(paths, now=NOW + 86400) == 1
+    assert f"The card of {DAY} may not have arrived, see Ref {first_ref}" in tries[1].split("\n")
+    assert _state(mod)[card]["lastSendUnconfirmed"] is False
+
+
+def test_a_named_rejection_of_the_summary_keeps_its_notices_for_a_retry(mod, monkeypatch):
+    paths = mod.state_paths()
+    _defer_info_notice(mod, "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    tries = _rpc_replies(mod, monkeypatch, [{"sent": False}, ACCEPTED])
+
+    assert mod.send_daily_information_summary(paths, now=NOW) == 0
+    section = _state(mod)["informationSummary"]
+    assert [entry["noticeId"] for entry in section["pending"]] == ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
+    assert "lastSentDay" not in section and "information_summary_failed" in _log_types(mod)
+    assert mod.send_daily_information_summary(paths, now=NOW + mod.DAILY_CARD_RETRY_SECONDS) == 1
+    assert len(tries) == 2 and _state(mod)["informationSummary"]["pending"] == []
 
 
 # --- C1: auto-close -----------------------------------------------------------

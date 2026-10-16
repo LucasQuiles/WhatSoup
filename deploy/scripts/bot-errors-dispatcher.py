@@ -5512,18 +5512,38 @@ def daily_card_due_day(section: dict[str, Any], now: int) -> str | None:
 def send_daily_card_text(text: str) -> bool:
     """Send one daily card. True when confirmed, False when sent-unconfirmed.
 
-    Relay 19 S2: a request that left with no answer (AmbiguousSendOutcome at
-    the post-request phase) may have reached the group, so it counts as sent
-    that day and is never resent -- the rule the outbox path keeps (#2424).
-    Every other failure raises and the card is retried later in the day.
+    Relay 22 A1: confirmed needs WhatsApp's acceptance proof, as on the outbox
+    path. Relay 19 S2: a request with no proven outcome -- no answer after the
+    request, or an answer without acceptance proof (both AmbiguousSendOutcome
+    at the post-request phase) -- may have reached the group, so it counts as
+    sent that day and is never resent (#2424); the next daily card of its kind
+    names it (missed_daily_card_line). A named rejection and every other
+    failure raise, and the card is retried later in the day.
     """
     try:
-        send_whatsapp(text)
+        send_whatsapp(text, require_acceptance=True)
     except AmbiguousSendOutcome as exc:
         if exc.phase == JSON_RPC_POST_REQUEST_PHASE:
             return False
         raise
     return True
+
+
+def missed_daily_card_line(section: dict[str, Any]) -> str | None:
+    """One plain line naming the last daily card of this kind sent with no proof, else None.
+
+    Relay 22 A1: the card's notices stay listed in its packet (lastRef); this
+    line on the next card points the reader there.
+    """
+    if section.get("lastSendUnconfirmed") is not True:
+        return None
+    ref = section.get("lastRef")
+    sent_at = section.get("lastSentAt")
+    if not isinstance(ref, str) or not NOTICE_REF_RE.match(ref):
+        return None
+    if not isinstance(sent_at, int) or isinstance(sent_at, bool) or sent_at <= 0:
+        return None
+    return f"The card of {_utc_day_of(sent_at)} may not have arrived, see Ref {ref}"
 
 
 def _state_section(incident_state: dict[str, Any], key: str) -> dict[str, Any]:
@@ -5647,7 +5667,9 @@ def information_summary_lines(entries: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def format_information_summary_card(lines: list[str], ref: str, dropped: int = 0) -> str:
+def format_information_summary_card(
+    lines: list[str], ref: str, dropped: int = 0, missed: str | None = None
+) -> str:
     shown = lines[:INFO_SUMMARY_MAX_LINES]
     card = [f"{CARD_ICON_INFO} *Information since the last summary: {len(lines):,}*", *shown]
     if len(lines) > len(shown):
@@ -5655,6 +5677,8 @@ def format_information_summary_card(lines: list[str], ref: str, dropped: int = 0
     if dropped > 0:
         # Relay 19 S5: notices that fell off a full queue are counted, not hidden.
         card.append(f"{CARD_CLIP} {dropped:,} older notices not listed: the summary was full")
+    if missed:
+        card.append(missed)
     card.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
     return card_text(card)
 
@@ -5689,12 +5713,13 @@ def send_daily_information_summary(
         "diagnostics": {},
         "delivery": {"attempts": 1, "status": "information-summary", "nextAttemptAtEpoch": 0, "lastError": None},
     }
+    missed = missed_daily_card_line(section)
     text, ref = notice_message(
         event,
         notice_kind="information-summary",
         paths=paths,
         extra={"included": pending, "lines": lines, "droppedFromSummary": dropped},
-        render=lambda summary_ref: format_information_summary_card(lines, summary_ref, dropped),
+        render=lambda summary_ref: format_information_summary_card(lines, summary_ref, dropped, missed),
     )
     try:
         confirmed = send_daily_card_text(text)
@@ -6024,7 +6049,7 @@ def _line_card_relink_line(group: dict[str, Any]) -> str:
     return text
 
 
-def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
+def format_line_card(groups: list[dict[str, Any]], ref: str, missed: str | None = None) -> str:
     relink = [group for group in groups if line_group_needs_relink(group)]
     unchecked = [group for group in groups if not line_group_needs_relink(group)]
     confirmed = all(group["verdict"] == LINE_LOGGED_OUT for group in relink)
@@ -6043,6 +6068,8 @@ def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
         if len(names) > LINE_CARD_MAX_LINES:
             shown += f", {CARD_CLIP}"
         lines.append(f"Could not check {len(unchecked):,}: {shown}" if relink else shown)
+    if missed:
+        lines.append(missed)
     if relink:
         # Who acts, per the incidents' own requested action (physical_action_text).
         each = "each logged-out line" if confirmed else "each line that needs a QR relink"
@@ -6223,12 +6250,13 @@ def send_daily_line_card(
         "diagnostics": {},
         "delivery": {"attempts": 1, "status": "line-check", "nextAttemptAtEpoch": 0, "lastError": None},
     }
+    missed = missed_daily_card_line(section)
     text, ref = notice_message(
         event,
         notice_kind="line-check-card",
         paths=paths,
         extra={"included": included},
-        render=lambda card_ref: format_line_card(ordered, card_ref),
+        render=lambda card_ref: format_line_card(ordered, card_ref, missed),
     )
     try:
         confirmed = send_daily_card_text(text)
