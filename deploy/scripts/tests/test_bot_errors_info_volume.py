@@ -620,6 +620,57 @@ def test_auto_close_summary_waits_for_its_packet(mod):
     assert entry["ref"] and entry["count"] == 1
 
 
+# --- Relay 19 S2: an ambiguous daily send is sent-unconfirmed, never resent ----
+
+
+def _ambiguous_sends(mod, phase: str) -> list[str]:
+    tries: list[str] = []
+
+    def _ambiguous(text, *a, **k):
+        tries.append(text)
+        raise mod.AmbiguousSendOutcome("reply never came", phase=phase)
+
+    mod.send_whatsapp = _ambiguous  # type: ignore[assignment]
+    return tries
+
+
+def test_ambiguous_line_card_send_is_not_resent_that_day(mod):
+    _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
+    tries = _ambiguous_sends(mod, mod.JSON_RPC_POST_REQUEST_PHASE)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+    section = _state(mod)["lineCheckCard"]
+    assert section["lastSentDay"] == DAY and section["lastSendUnconfirmed"] is True
+    assert "line_check_card_sent_unconfirmed" in _log_types(mod)
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW + mod.DAILY_CARD_RETRY_SECONDS) == 0
+    assert len(tries) == 1
+
+
+def test_ambiguous_summary_send_is_not_resent_that_day(mod):
+    paths = mod.state_paths()
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", _info_event(
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "self_restart_completed"))
+    assert mod.process_one(path, paths) == (True, "suppressed")
+    tries = _ambiguous_sends(mod, mod.JSON_RPC_POST_REQUEST_PHASE)
+
+    assert mod.send_daily_information_summary(paths, now=NOW) == 1
+    section = _state(mod)["informationSummary"]
+    assert section["pending"] == [] and section["lastSentDay"] == DAY and section["lastSendUnconfirmed"] is True
+    assert "information_summary_sent_unconfirmed" in _log_types(mod)
+    assert mod.send_daily_information_summary(paths, now=NOW + mod.DAILY_CARD_RETRY_SECONDS) == 0
+    assert len(tries) == 1
+
+
+def test_a_send_that_failed_before_the_request_is_still_retried(mod):
+    _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
+    tries = _ambiguous_sends(mod, mod.JSON_RPC_HANDSHAKE_PHASE)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 0
+    assert "lastSentDay" not in _state(mod)["lineCheckCard"]
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW + mod.DAILY_CARD_RETRY_SECONDS) == 0
+    assert len(tries) == 2
+
+
 # --- C1: auto-close -----------------------------------------------------------
 
 

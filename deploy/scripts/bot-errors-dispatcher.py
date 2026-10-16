@@ -5363,6 +5363,23 @@ def daily_card_due_day(section: dict[str, Any], now: int) -> str | None:
     return day
 
 
+def send_daily_card_text(text: str) -> bool:
+    """Send one daily card. True when confirmed, False when sent-unconfirmed.
+
+    Relay 19 S2: a request that left with no answer (AmbiguousSendOutcome at
+    the post-request phase) may have reached the group, so it counts as sent
+    that day and is never resent -- the rule the outbox path keeps (#2424).
+    Every other failure raises and the card is retried later in the day.
+    """
+    try:
+        send_whatsapp(text)
+    except AmbiguousSendOutcome as exc:
+        if exc.phase == JSON_RPC_POST_REQUEST_PHASE:
+            return False
+        raise
+    return True
+
+
 def _state_section(incident_state: dict[str, Any], key: str) -> dict[str, Any]:
     section = incident_state.get(key)
     if not isinstance(section, dict):
@@ -5529,7 +5546,7 @@ def send_daily_information_summary(
         render=lambda summary_ref: format_information_summary_card(lines, summary_ref),
     )
     try:
-        send_whatsapp(text)
+        confirmed = send_daily_card_text(text)
     except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
         section["lastAttemptAt"] = current
         _commit_incident_state(paths, incident, incident_state)
@@ -5539,10 +5556,11 @@ def send_daily_information_summary(
     section["lastSentDay"] = day
     section["lastSentAt"] = current
     section["lastRef"] = ref
+    section["lastSendUnconfirmed"] = not confirmed
     section.pop("lastAttemptAt", None)
     _commit_incident_state(paths, incident, incident_state)
     append_dispatch_log(paths, {
-        "type": "information_summary_sent",
+        "type": "information_summary_sent" if confirmed else "information_summary_sent_unconfirmed",
         "ref": ref,
         "notices": len(pending),
         "lines": len(lines),
@@ -5986,7 +6004,7 @@ def send_daily_line_card(
         render=lambda card_ref: format_line_card(ordered, card_ref),
     )
     try:
-        send_whatsapp(text)
+        confirmed = send_daily_card_text(text)
     except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
         section["lastAttemptAt"] = current
         _commit_incident_state(paths, incident, incident_state)
@@ -5995,10 +6013,11 @@ def send_daily_line_card(
     section["lastSentDay"] = day
     section["lastSentAt"] = current
     section["lastRef"] = ref
+    section["lastSendUnconfirmed"] = not confirmed
     section.pop("lastAttemptAt", None)
     _commit_incident_state(paths, incident, incident_state)
     append_dispatch_log(paths, {
-        "type": "line_check_card_sent",
+        "type": "line_check_card_sent" if confirmed else "line_check_card_sent_unconfirmed",
         "ref": ref,
         "loggedOut": logged_out,
         "couldNotCheck": len(ordered) - logged_out,
