@@ -5975,13 +5975,50 @@ def line_card_member(
         "record": redacted_dispatcher_payload(json_snapshot(record)),
     }
     if stale_event is not None:
-        old_body = format_event(stale_event)
-        member["notice"] = {
-            "noticeId": notice_id_of(stale_event),
-            "body": old_body,
-            "bodyFields": body_fields(old_body),
-        }
+        member["notice"] = line_member_notice(stale_event)
     return member, needs_relink
+
+
+def line_member_notice(stale_event: dict[str, Any]) -> dict[str, Any]:
+    """The member's old notice, as the packet keeps it: id, full body and its fields."""
+    old_body = format_event(stale_event)
+    return {
+        "noticeId": notice_id_of(stale_event),
+        "body": old_body,
+        "bodyFields": body_fields(old_body),
+    }
+
+
+def failed_line_card_member(
+    paths: dict[str, Path], key: str, record: dict[str, Any], check: LineCheck, current: int
+) -> dict[str, Any]:
+    """The member of a recheck that raised (relay 20 M2).
+
+    Contract A: it keeps the record and, when it can be built, the old notice,
+    like every other member. Each is built in its own guard, so a second error
+    drops only that field and never stops the card.
+    """
+    member: dict[str, Any] = {"incidentKey": key, "verdict": check.verdict, "reason": check.reason}
+    try:
+        member["record"] = redacted_dispatcher_payload(json_snapshot(record))
+    except Exception as exc:  # noqa: BLE001 - one bad field never stops the card
+        _log_line_card_member_field_failed(paths, key, "record", exc)
+    try:
+        stale_event = stale_incident_event(key, record, current, ignore_cadence=True)
+        if stale_event is not None:
+            member["notice"] = line_member_notice(stale_event)
+    except Exception as exc:  # noqa: BLE001 - one bad field never stops the card
+        _log_line_card_member_field_failed(paths, key, "notice", exc)
+    return member
+
+
+def _log_line_card_member_field_failed(paths: dict[str, Path], key: str, field: str, exc: Exception) -> None:
+    append_dispatch_log(paths, {
+        "type": "line_card_member_field_failed",
+        "incidentKey": key,
+        "field": field,
+        "error": truncate(str(exc), 300),
+    })
 
 
 def send_daily_line_card(
@@ -6025,7 +6062,7 @@ def send_daily_line_card(
             raise
         except Exception as exc:  # noqa: BLE001 - relay 19 S4: one bad member never stops the card
             check = line_check_failed(paths, key, machine, bot, exc)
-            member = {"incidentKey": key, "verdict": check.verdict, "reason": check.reason}
+            member = failed_line_card_member(paths, key, record, check, current)
             needs_relink = str(record.get("status") or "") == "awaiting_physical"
         group = groups.setdefault((check.host, bot.lower()), {
             "bot": card_plain(bot, 40),

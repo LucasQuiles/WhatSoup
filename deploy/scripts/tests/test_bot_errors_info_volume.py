@@ -459,6 +459,59 @@ def test_line_card_packet_keeps_every_field_of_each_members_old_notice(mod):
         assert record["clearRequirement"][:60] in body
 
 
+def test_a_member_whose_recheck_raises_keeps_its_record_and_old_notice(mod, monkeypatch):
+    # Relay 20 M2: the could-not-check member of a recheck that raised keeps
+    # the record and the old notice like every other member (contract A).
+    key = "hub-1|inferred-line|instance_logged_out"
+    record = _physical(OLD - 86400, OLD, suppressedCount=2)
+    _write_state(mod, {key: record})
+    sends = _sends(mod)
+
+    def _check(self, machine, bot, record=None):
+        raise TypeError("bad record")
+
+    monkeypatch.setattr(mod.LineChecker, "check", _check)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    assert "inferred-line (hub-1)" in card
+    packet = mod.read_notice_packet(mod.state_paths(), card.rsplit("Ref: ", 1)[1])
+    [group] = packet["included"]
+    [member] = group["members"]
+    assert member["incidentKey"] == key and member["verdict"] == "could_not_check"
+    for field in ("status", "lastSummary", "openedAt", "lastSeenAt", "failureCode", "suppressedCount"):
+        assert member["record"][field] == record[field], field
+    old_notice = mod.stale_incident_event(key, record, NOW, ignore_cadence=True)
+    assert member["notice"]["noticeId"] == mod.notice_id_of(old_notice)
+    assert f"incident_key={key}" in member["notice"]["body"]
+    assert member["notice"]["bodyFields"]
+
+
+def test_a_member_whose_old_notice_cannot_be_built_still_keeps_its_record(mod, monkeypatch):
+    # Relay 20 M2: each of record and notice is built in its own guard, so a
+    # second error never stops the card or drops the other field.
+    key = "hub-1|inferred-line|instance_logged_out"
+    record = _physical(OLD - 86400, OLD)
+    _write_state(mod, {key: record})
+    sends = _sends(mod)
+
+    def _raise(*a, **k):
+        raise TypeError("bad record")
+
+    monkeypatch.setattr(mod.LineChecker, "check", _raise)
+    monkeypatch.setattr(mod, "stale_incident_event", _raise)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    [group] = mod.read_notice_packet(mod.state_paths(), card.rsplit("Ref: ", 1)[1])["included"]
+    [member] = group["members"]
+    assert member["record"]["openedAt"] == record["openedAt"]
+    assert "notice" not in member
+    assert "line_card_member_field_failed" in _log_types(mod)
+
+
 def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypatch):
     monkeypatch.setattr(mod, "read_fleet_lines_for_recheck", lambda: mod.FleetLinesRead(None, "fleet_api_status_503"))
     _write_state(mod, {"hub-1|linked-line|instance_logged_out": _physical(OLD - 86400, OLD)})
