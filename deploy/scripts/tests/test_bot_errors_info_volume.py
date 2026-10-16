@@ -221,6 +221,14 @@ def test_linked_line_without_recovery_proof_stays_open_and_listed(mod, evidence)
     assert key in _state(mod)["openIncidents"]
 
 
+def test_a_fail_health_line_is_never_a_recovery_proof(mod):
+    # Relay 20 S-d: only a passing health line can carry the recovery proof.
+    record = _physical(OLD - 86400, OLD)
+    probe = _healthy_probe("linked-line", outbound_at=int(record["openedAt"]) + 3600)
+    assert mod.line_recovery_proof({**record, "lastEvidence": probe}, "linked-line") == "outbound send after the incident"
+    assert mod.line_recovery_proof({**record, "lastEvidence": f"FAIL {probe}"}, "linked-line") is None
+
+
 def test_linked_line_with_a_sustained_stable_connection_is_retired(mod):
     now = int(time.time())
     key = "hub-1|linked-line|whatsapp_device_bond_lost"

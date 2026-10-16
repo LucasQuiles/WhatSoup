@@ -5744,7 +5744,8 @@ def read_fleet_lines_for_recheck() -> FleetLinesRead:
     return read_fleet_lines(profile, timeout=LINE_RECHECK_TIMEOUT_SECONDS)
 
 
-_LINE_HEALTH_PROBE_RE = re.compile(r"^(?:FAIL )?health\s+([^:\s]+):\s+(.+)$")
+# Relay 20 S-d: a passing health line only; a FAIL line is never a proof.
+_LINE_HEALTH_PROBE_RE = re.compile(r"^health\s+([^:\s]+):\s+(.+)$")
 
 
 def line_recovery_proof(record: dict[str, Any], bot: str) -> str | None:
@@ -5755,7 +5756,8 @@ def line_recovery_proof(record: dict[str, Any], bot: str) -> str | None:
     daily_health_recovered_incident_keys asks of it: a verified WhatsApp
     recovery plus a send after the incident (has_post_incident_outbound_proof)
     or a sustained stable connection (has_sustained_connection_stability).
-    /api/lines carries neither, so "linked, confirmed" alone never retires.
+    The proof is read only from the incident's own health reading, never from
+    the /api/lines row, so "linked, confirmed" alone never retires.
     """
     opened = max(int_field(record, "openedAt"), int_field(record, "eventCreatedAtEpoch"))
     for raw_line in alert_text(record.get("lastEvidence")).splitlines():
