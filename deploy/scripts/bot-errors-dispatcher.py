@@ -296,7 +296,7 @@ FLAP_SEEN_EVENT_MAX_IDS = positive_env_int("BOT_ERRORS_FLAP_SEEN_EVENT_MAX_IDS",
 # whenever the storm is not resolvable, so the attempt budget is per resolve
 # phase. Keep FLAP_STABLE_SECONDS >= FLAP_RESOLVE_RETRY_MAX_SECONDS so one retry
 # wait never outlasts the stable period that gates the resolve.
-FLAP_RESOLVE_BACKOFF_FIELDS = ("resolveAttempts", "lastResolveErrorAt", "nextResolveAt")
+FLAP_RESOLVE_BACKOFF_FIELDS = ("resolveAttempts", "lastResolveErrorAt", "nextResolveAt", "packetPendingTries")
 FLAP_RESOLVE_RETRY_BASE_SECONDS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_RETRY_BASE_SECONDS", 30)
 FLAP_RESOLVE_RETRY_MAX_SECONDS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_RETRY_MAX_SECONDS", 3600)
 FLAP_RESOLVE_MAX_ATTEMPTS = positive_env_int("BOT_ERRORS_FLAP_RESOLVE_MAX_ATTEMPTS", 10)
@@ -6584,6 +6584,17 @@ def move_to_dead_letter(
     original_name: str,
 ) -> Path:
     """Move an event that exhausted all delivery attempts into dead-letter/."""
+    dest = write_dead_letter_record(paths, event, original_name)
+    try:
+        claimed.unlink()
+    except FileNotFoundError:
+        pass
+    fsync_parent(dest)
+    return dest
+
+
+def write_dead_letter_record(paths: dict[str, Path], event: dict[str, Any], original_name: str) -> Path:
+    """Publish one dead-letter record for an event; the dead-letter meta-alert pages it."""
     delivery = event.setdefault("delivery", {})
     if isinstance(delivery, dict):
         delivery["status"] = "dead_letter"
@@ -6613,11 +6624,6 @@ def move_to_dead_letter(
         operation_id=publication_operation,
     )
     require_all_advance([publication])
-    try:
-        claimed.unlink()
-    except FileNotFoundError:
-        pass
-    fsync_parent(dest)
     return dest
 
 
@@ -8489,6 +8495,27 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                     # resolve budget, so it is never dropped with no packet.
                     errors += 1
                     changed = True
+                    prior_tries = entry.get("packetPendingTries")
+                    tries = (prior_tries if isinstance(prior_tries, int) and not isinstance(prior_tries, bool) else 0) + 1
+                    if tries >= BOT_ERRORS_DELIVERY_MAX_ATTEMPTS:
+                        # Relay 21 S4: capped like the information requeue. The
+                        # resolve is dead-lettered, so the dead-letter meta-alert
+                        # pages, and the storm entry goes.
+                        dead_path = write_dead_letter_record(
+                            paths,
+                            flap_resolve_event(str(key), entry, now, underlying_open),
+                            f"flap-resolve-{safe_segment(str(key))}",
+                        )
+                        flap_state.pop(key, None)
+                        append_dispatch_log(paths, {
+                            "type": "flap_resolve_dead_lettered",
+                            "incidentKey": key,
+                            "path": str(dead_path),
+                            "tries": tries,
+                            "error": truncate(str(exc), 300),
+                        })
+                        continue
+                    entry["packetPendingTries"] = tries
                     entry["lastResolveErrorAt"] = now
                     entry["nextResolveAt"] = now + DAILY_CARD_RETRY_SECONDS
                     append_dispatch_log(paths, {

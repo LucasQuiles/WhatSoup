@@ -351,6 +351,9 @@ def test_a_pending_packet_never_spends_the_flap_budget(tmp_path, monkeypatch):
     # resolve. It keeps the entry and retries later; it never counts toward
     # FLAP_RESOLVE_MAX_ATTEMPTS, so the storm is never dropped with no packet.
     mod, clock = _load(tmp_path / "packet-pending", monkeypatch)
+    # Relay 21 S4 caps the pending tries; above the resolve budget here, so the
+    # loop still shows that a pending packet never spends that budget.
+    monkeypatch.setattr(mod, "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", mod.FLAP_RESOLVE_MAX_ATTEMPTS + 5)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
 
@@ -373,3 +376,33 @@ def test_a_pending_packet_never_spends_the_flap_budget(tmp_path, monkeypatch):
     _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1 and _entry(mod, paths) is None
+
+
+def test_a_flap_resolve_whose_packet_stays_pending_is_dead_lettered_with_a_page(tmp_path, monkeypatch):
+    # Relay 21 S4: the pending retry ran every 900 s forever and paged no one.
+    # After BOT_ERRORS_DELIVERY_MAX_ATTEMPTS tries the resolve is dead-lettered
+    # and the storm entry goes; the dead-letter meta-alert pages.
+    mod, clock = _load(tmp_path / "packet-pending-cap", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+
+    def _pending(*_a, **_k):
+        raise mod.NoticePacketPending("no packet for deferred flap-resolved notice")
+
+    monkeypatch.setattr(mod, "defer_information_notice", _pending)
+    for _ in range(mod.BOT_ERRORS_DELIVERY_MAX_ATTEMPTS - 1):
+        assert mod.sweep_flap_storms(paths) == (0, 1)
+        entry = _entry(mod, paths)
+        assert entry is not None
+        clock.now = entry["nextResolveAt"]
+    assert not list(paths["dead_letter"].glob("*.json"))
+
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+
+    assert _entry(mod, paths) is None
+    [dead] = list(paths["dead_letter"].glob("*.json"))
+    record = json.loads(dead.read_text(encoding="utf-8"))
+    assert record["event"]["source"] == "flap_storm_resolved"
+    assert record["delivery"]["status"] == "dead_letter"
+    assert "flap_resolve_dead_lettered" in _kinds(paths)
+    assert mod.queue_dead_letter_meta_alert(paths, clock.now) == 1
