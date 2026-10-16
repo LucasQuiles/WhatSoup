@@ -526,6 +526,100 @@ def test_failed_line_card_is_retried_later_the_same_day(mod):
     assert len(sends) == 1
 
 
+# --- Relay 19 S1: a packet-only notice stays pending until its packet exists ----
+
+
+def _break_packet_store(mod) -> Path:
+    packets = mod.state_paths()["packets"]
+    packets.parent.mkdir(parents=True, exist_ok=True)
+    if packets.is_dir():
+        packets.rmdir()
+    packets.write_text("not a directory", encoding="utf-8")
+    return packets
+
+
+def _mend_packet_store(packets: Path) -> None:
+    packets.unlink()
+
+
+def test_line_retirement_waits_for_its_packet(mod):
+    now = int(time.time())
+    key = "host-2|retired-line|whatsapp_device_bond_lost"
+    _write_state(mod, {key: _physical(now - 9 * 86400, now - 8 * 86400)})
+    sends = _sends(mod)
+    packets = _break_packet_store(mod)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+
+    state = _state(mod)
+    assert key in state["openIncidents"], "no packet, no retirement"
+    assert key not in state.get("lineRecheckRetired", {})
+    assert "line_recheck_retire_pending" in _log_types(mod)
+    assert sends == []
+
+    _mend_packet_store(packets)
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+    state = _state(mod)
+    assert key not in state["openIncidents"]
+    ref = state["lineRecheckRetired"][key]["ref"]
+    assert mod.read_notice_packet(mod.state_paths(), ref)["incidentKey"] == key
+
+
+def test_information_deferral_waits_for_its_packet(mod):
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    packets = _break_packet_store(mod)
+    event = _info_event("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "self_restart_completed")
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", event)
+
+    ok, detail = mod.process_one(path, paths)
+
+    assert (ok, detail) == (False, "information_deferral_pending")
+    assert sends == []
+    assert not _state(mod).get("informationSummary", {}).get("pending")
+    assert [p for p in paths["suppressed"].iterdir() if not p.name.startswith(".")] == []
+    queued = json.loads(path.read_text(encoding="utf-8"))
+    assert queued["delivery"]["status"] == "queued"
+    assert queued["delivery"]["nextAttemptAtEpoch"] > int(time.time())
+    assert "information_deferral_pending" in _log_types(mod)
+
+    _mend_packet_store(packets)
+    queued["delivery"]["nextAttemptAtEpoch"] = 0
+    path.write_text(json.dumps(queued), encoding="utf-8")
+    assert mod.process_one(path, paths) == (True, "suppressed")
+    [entry] = _state(mod)["informationSummary"]["pending"]
+    assert entry["noticeId"] == event["id"] and entry["ref"]
+
+
+def test_auto_close_summary_waits_for_its_packet(mod):
+    now = int(time.time())
+    key = "hub-1|worker|runtime-tool-error:provider-cli:Bash"
+    _write_state(mod, {key: {
+        "status": "stale",
+        "severity": "warning",
+        "openedAt": now - 5 * 86400,
+        "lastSeenAt": now - 5 * 86400,
+        "lastSummary": "Agent tool failure: Bash",
+    }})
+    _sends(mod)
+    packets = _break_packet_store(mod)
+
+    _sent, _failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert err is not None
+    state = _state(mod)
+    assert key not in state["openIncidents"]
+    assert state["staleAutocloseDigest"]["pendingCount"] == 1, "the close stays counted for the next try"
+    assert not state.get("informationSummary", {}).get("pending")
+
+    _mend_packet_store(packets)
+    assert mod.sweep_stale_incidents(mod.state_paths())[2] is None
+    state = _state(mod)
+    assert state["staleAutocloseDigest"]["pendingCount"] == 0
+    [entry] = state["informationSummary"]["pending"]
+    assert entry["ref"] and entry["count"] == 1
+
+
 # --- C1: auto-close -----------------------------------------------------------
 
 

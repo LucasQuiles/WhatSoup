@@ -5056,6 +5056,15 @@ class NoticeRefExhausted(RuntimeError):
     """Every Ref candidate of a notice already names a different notice."""
 
 
+class NoticePacketPending(RuntimeError):
+    """A packet-only notice (deferral, line retirement) whose packet could not be written.
+
+    Relay 19 S1: such a notice has no message, so its packet is its only full
+    record. It stays pending -- the event in the queue, the incident open, the
+    close counted -- until a later try writes the packet.
+    """
+
+
 def notice_id_of(event: dict[str, Any]) -> str:
     value = event.get("id")
     if isinstance(value, str) and value.strip():
@@ -5401,7 +5410,8 @@ def defer_information_notice(
 ) -> str | None:
     """Write the notice's packet and queue one line for the daily summary; send nothing.
 
-    Never raises: a packet failure still counts the notice in the summary.
+    Raises NoticePacketPending when the packet cannot be written (relay 19 S1):
+    nothing is queued, and the caller keeps the notice pending for a retry.
     """
     _text, ref = notice_message(
         event,
@@ -5409,6 +5419,8 @@ def defer_information_notice(
         paths=paths,
         extra={"disposition": "daily information summary", **dict(extra or {})},
     )
+    if ref is None:
+        raise NoticePacketPending(f"no packet for deferred {safe_segment(notice_kind)} notice")
     try:
         title = card_title(event, classify_event(event))
     except EnvelopeError:
@@ -5750,7 +5762,7 @@ def retire_line_incident(
     check: LineCheck,
     current: int,
 ) -> str | None:
-    """Close one incident on a recheck: packet first, no message."""
+    """Close one incident on a recheck: packet first, no message. None (still open) without a packet."""
     event = stale_incident_event(key, record, current, ignore_cadence=True) or {
         **new_event_fields("observation", "info"),
         "id": f"line-recheck-{safe_segment(key)}-{current}",
@@ -5764,6 +5776,15 @@ def retire_line_incident(
         paths=paths,
         extra={"disposition": check.verdict, "lineCheck": check.projection(), "incidentKey": key},
     )
+    if ref is None:
+        # Relay 19 S1: the packet is the retirement's only record; without it
+        # the incident stays open and the next recheck tries again.
+        append_dispatch_log(paths, {
+            "type": "line_recheck_retire_pending",
+            "incidentKey": key,
+            "disposition": check.verdict,
+        })
+        return None
     incident_state.setdefault("openIncidents", {}).pop(key, None)
     last_sent = incident_state.get("lastSentAt")
     if isinstance(last_sent, dict):
@@ -5885,6 +5906,7 @@ def send_daily_line_card(
     for key, record, machine, bot in members:
         check = checker.check(machine, bot, record)
         if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
+            # Retired, or pending its packet (S1): either way not a card line.
             retire_line_incident(paths, incident_state, key, record, check, current)
             continue
         group = groups.setdefault((check.host, bot.lower()), {
@@ -8511,7 +8533,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         if line_member is not None:
             check = line_checker.check(*line_member, record)
             if check.verdict in (LINE_CLEARED_ON_RECHECK, LINE_RETIRED):
-                retire_line_incident(paths, incident_state, str(key), record, check, current)
+                if retire_line_incident(paths, incident_state, str(key), record, check, current) is None:
+                    # Pending its packet (S1): no cadence advance, the next sweep retries.
+                    continue
             else:
                 mark_stale_incident_deferred(record, event, current, check)
                 append_dispatch_log(paths, {
@@ -11765,6 +11789,53 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     require_advance(publication)
 
 
+def requeue_pending_information_notice(
+    paths: dict[str, Path],
+    path: Path,
+    claimed: Path,
+    event: dict[str, Any],
+    incident: "IncidentStateCycle | None",
+    incident_state: dict[str, Any],
+    exc: Exception,
+) -> tuple[bool, str]:
+    """Relay 19 S1: an information notice whose packet could not be written goes
+    back to the outbox for a later try instead of being archived as deferred.
+
+    The try does not spend a delivery attempt; the event is retried after
+    DAILY_CARD_RETRY_SECONDS, as the transient-transport carve-out requeues.
+    """
+    delivery = event.get("delivery") if isinstance(event.get("delivery"), dict) else {}
+    delivery["attempts"] = max(int(delivery.get("attempts") or 0) - 1, 0)
+    delivery["status"] = "queued"
+    delivery["nextAttemptAtEpoch"] = int(time.time()) + DAILY_CARD_RETRY_SECONDS
+    event["delivery"] = delivery
+    target = _durable_target(claimed)
+    observation = observe_json(target)
+    publication = publish_state_json(
+        target,
+        event,
+        component="dispatcher.process_information_pending_state",
+        operation_id=operation_id(
+            target, event, component="dispatcher.process_information_pending_state", predecessor=observation.version
+        ),
+        expected=observation.version,
+        generation=(observation.version.generation or 0) + 1,
+    )
+    require_all_advance([publication])
+    _commit_incident_state(paths, incident, incident_state)
+    retry_path = safe_child_path(paths["outbox"], path.name)
+    os.replace(claimed, retry_path)
+    fsync_parent(retry_path)
+    append_dispatch_log(paths, {
+        "type": "information_deferral_pending",
+        "eventId": event.get("id"),
+        "path": str(retry_path),
+        "nextAttemptAtEpoch": delivery["nextAttemptAtEpoch"],
+        "error": truncate(str(exc), 300),
+    })
+    return False, "information_deferral_pending"
+
+
 def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle | None = None) -> tuple[bool, str]:
     _require_incident_cycle_if_adopted(paths, incident, helper="process_one")
     # #2484: ready() already verified the leaf is regular and readable, but
@@ -12040,13 +12111,16 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         # Relay 16 C3: information only with no earlier page -- packet now,
         # one line in the daily summary, no card of its own. Archived with
         # the suppressed events.
-        defer_information_notice(
-            paths,
-            incident_state,
-            event,
-            notice_kind="outbox",
-            extra={"outbox": {"file": path.name, "disposition": "suppressed/ (daily information summary)"}},
-        )
+        try:
+            defer_information_notice(
+                paths,
+                incident_state,
+                event,
+                notice_kind="outbox",
+                extra={"outbox": {"file": path.name, "disposition": "suppressed/ (daily information summary)"}},
+            )
+        except NoticePacketPending as exc:
+            return requeue_pending_information_notice(paths, path, claimed, event, incident, incident_state, exc)
         suppress_reason = INFO_SUMMARY_DEFERRED_REASON
     if suppress_reason:
         event = mark_suppressed(event, suppress_reason)
