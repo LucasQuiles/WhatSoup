@@ -5066,8 +5066,8 @@ def _paged_event_from_record(record: dict[str, Any], event: dict[str, Any]) -> d
         "severity": "critical",
         "id": record.get("eventId"),
         "createdAt": record.get("eventCreatedAt"),
-        "summary": record.get("lastSummary") or "",
-        "evidence": record.get("lastEvidence") or "",
+        "summary": alert_text(record.get("lastSummary")),
+        "evidence": alert_text(record.get("lastEvidence")),
     })
     return page
 
