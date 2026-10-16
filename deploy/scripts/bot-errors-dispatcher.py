@@ -4943,10 +4943,31 @@ def card_is_information_only(event: dict[str, Any], classification: Any) -> bool
     return classification.kind == "observation" and requested_action_text(event) == NONACTIONABLE_ACTION
 
 
+def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resolved: dict[str, Any]) -> str:
+    """Short resolved card for information that follows a page the group saw."""
+    if "recovered" not in title.lower():
+        title = card_plain(f"Recovered: {title}")
+    lines = [f"{CARD_ICON_RECOVERED} *{title}*", card_where(event)]
+    cause = card_plain(resolved.get("pagedSummary") or "")
+    if cause:
+        lines.append(f"Cause: {cause}")
+    opened = resolved.get("openedAt")
+    created = _card_epoch(event.get("createdAt"))
+    if isinstance(opened, int) and not isinstance(opened, bool) and created is not None and created >= opened:
+        lines.append(f"Handling: recovered after {_card_duration(created - opened)} open")
+    else:
+        lines.append("Handling: recovered")
+    lines.extend([CARD_NO_ACTION, f"Ref: {ref}"])
+    return "\n".join(lines)
+
+
 def format_card(event: dict[str, Any], ref: str) -> str:
     """The human card for one notice (relay 10 target card, relay 16 B)."""
     classification = classify_event(event)
     title = card_title(event, classification)
+    resolved = event.get(RESOLVES_PAGE_FIELD)
+    if isinstance(resolved, dict) and card_is_information_only(event, classification):
+        return format_resolved_page_card(event, ref, title, resolved)
     if classification.kind == "incident_recovery":
         icon = CARD_ICON_RECOVERED
     elif card_is_information_only(event, classification):
@@ -5256,6 +5277,9 @@ LINE_CARD_MAX_LINES = 15
 LINE_RECHECK_RETIRED_MAX = 200
 DAILY_CARD_RETRY_SECONDS = 900
 INFO_SUMMARY_DEFERRED_REASON = "information-only notice folded into the daily information summary"
+# Set on an information-only notice that follows a page the group already saw
+# for the same incident: it is a state change and gets its own resolved card.
+RESOLVES_PAGE_FIELD = "resolvesPage"
 LINE_CLEARED_ON_RECHECK = "cleared on recheck"
 LINE_RETIRED = "line retired"
 # Sources whose clear requirement is the line's linkage; daily-health-fail for
@@ -5311,6 +5335,17 @@ def information_summary_defers(event: dict[str, Any]) -> bool:
         return card_is_information_only(event, classify_event(event))
     except EnvelopeError:
         return False
+
+
+def paged_open_incident(event: dict[str, Any], incident_state: dict[str, Any]) -> dict[str, Any] | None:
+    """The open incident of this notice's key when the group was already paged for it."""
+    open_incidents = incident_state.get("openIncidents")
+    if not isinstance(open_incidents, dict):
+        return None
+    record = open_incidents.get(incident_key(event))
+    if isinstance(record, dict) and int_field(record, "lastNotifiedAt") > 0:
+        return record
+    return None
 
 
 def defer_information_notice(
@@ -11865,9 +11900,22 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         })
     absorb_daily_health_signal(event, incident_state)
     suppress_reason = should_suppress_send(event, incident_state)
+    paged = None
     if not suppress_reason and information_summary_defers(event):
-        # Relay 16 C3: information only -- packet now, one line in the daily
-        # summary, no card of its own. Archived with the suppressed events.
+        paged = paged_open_incident(event, incident_state)
+    if paged is not None:
+        # Information that follows a page the group already saw (e.g. a
+        # recovery after its critical card) is a real state change: its own
+        # short resolved card, at once, naming the page it resolves.
+        event[RESOLVES_PAGE_FIELD] = {
+            "incidentKey": incident_key(event),
+            "pagedSummary": alert_text(paged.get("lastSummary")),
+            "openedAt": int_field(paged, "openedAt") or None,
+        }
+    elif not suppress_reason and information_summary_defers(event):
+        # Relay 16 C3: information only with no earlier page -- packet now,
+        # one line in the daily summary, no card of its own. Archived with
+        # the suppressed events.
         defer_information_notice(
             paths,
             incident_state,

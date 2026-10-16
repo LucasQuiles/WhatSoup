@@ -516,3 +516,53 @@ def test_a_notice_deferred_twice_keeps_one_summary_entry(mod):
     second = mod.defer_information_notice(paths, state, dict(event), notice_kind="outbox")
     assert first == second
     assert [entry["noticeId"] for entry in state["informationSummary"]["pending"]] == [event["id"]]
+
+
+def _recovered_observation(event_id: str) -> dict:
+    event = _info_event(event_id, "remote-writefail-ack-failed")
+    event.update({
+        "machine": "hub-1",
+        "instance": "bot-errors-collector",
+        "summary": "remote writefail ack recovered: mini5",
+        "evidence": "remote=mini5 writefail_ack_all_cleared=true",
+        "diagnostics": {"remote": "mini5:/srv/bot-errors"},
+    })
+    return event
+
+
+def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_once(mod):
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _recovered_observation("99999999-9999-4999-8999-999999999999")
+    opened = NOW - 2 * 3600
+    _write_state(mod, {mod.incident_key(event): {
+        "status": "open",
+        "openedAt": opened,
+        "lastNotifiedAt": opened,
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+    }})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
+    assert mod.process_one(path, paths) == (True, "sent")
+    [card] = sends
+    lines = card.split("\n")
+    assert lines[0] == "✅ *remote writefail ack recovered: mini5*"
+    assert "Cause: BOT ERRORS collector cannot terminal-ack remote writefail: mini5" in lines
+    assert lines[-2] == "You: No action needed" and lines[-1].startswith("Ref: ")
+    assert not any(line.startswith("ℹ️") for line in lines)
+    assert not _state(mod).get("informationSummary", {}).get("pending")
+    assert [p for p in paths["suppressed"].iterdir() if not p.name.startswith(".")] == []
+
+
+def test_information_with_no_earlier_page_still_goes_to_the_daily_summary(mod):
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _recovered_observation("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    # An open record the group was never paged for does not count as a page.
+    _write_state(mod, {mod.incident_key(event): {"status": "open", "openedAt": OLD}})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
+    assert mod.process_one(path, paths) == (True, "suppressed")
+    assert sends == []
+    [pending] = _state(mod)["informationSummary"]["pending"]
+    assert pending["noticeId"] == event["id"]
+    [archived] = [p for p in paths["suppressed"].iterdir() if not p.name.startswith(".")]
+    assert json.loads(archived.read_text())["delivery"]["suppressedReason"] == mod.INFO_SUMMARY_DEFERRED_REASON

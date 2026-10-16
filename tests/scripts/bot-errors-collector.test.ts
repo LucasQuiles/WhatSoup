@@ -1052,18 +1052,16 @@ print(Path(found).name if found else "NONE")
       env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
-    // The writefail ack recovery observation (#2405) is information only, so
-    // relay 16 C3 folds it into the daily summary: no extra sent event.
-    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(2);
+    // The writefail ack recovery observation (#2405) follows the critical
+    // ack-failure card the group already saw, so it is a state change: its
+    // own resolved card at once, not a line in the daily summary.
+    expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(3);
+    expect((readCapture(capturePath).match(/remote writefail ack recovered/g) ?? [])).toHaveLength(1);
     const recovered = readdirSync(join(tmpRoot, 'suppressed'))
       .filter((file) => file !== '.durable-json.lock')
-      .map((file) => JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as {
-        summary?: string;
-        delivery?: { suppressedReason?: string };
-      })
+      .map((file) => JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as { summary?: string })
       .filter((event) => String(event.summary).startsWith('remote writefail ack recovered'));
-    expect(recovered).toHaveLength(1);
-    expect(recovered[0]?.delivery?.suppressedReason).toContain('daily information summary');
+    expect(recovered).toHaveLength(0);
     expect((readCapture(capturePath).match(/remote writefail critical/g) ?? [])).toHaveLength(1);
   });
 
