@@ -1304,9 +1304,9 @@ def _recovered_observation(event_id: str) -> dict:
     event.update({
         "machine": "hub-1",
         "instance": "bot-errors-collector",
-        "summary": "remote writefail ack recovered: mini5",
-        "evidence": "remote=mini5 writefail_ack_all_cleared=true",
-        "diagnostics": {"remote": "mini5:/srv/bot-errors"},
+        "summary": "remote writefail ack recovered: host-5",
+        "evidence": "remote=host-5 writefail_ack_all_cleared=true",
+        "diagnostics": {"remote": "host-5:/srv/bot-errors"},
     })
     return event
 
@@ -1320,7 +1320,7 @@ def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_on
         "status": "open",
         "openedAt": opened,
         "lastNotifiedAt": opened,
-        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: host-5",
         "ownerRequest": None,
     }})
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
@@ -1332,7 +1332,7 @@ def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_on
     # Relay 20 M3: it is information (contract B): the information icon and
     # at most four lines.
     assert len(lines) <= 4
-    assert lines[0] == "ℹ️ *remote writefail ack recovered: mini5*"
+    assert lines[0] == "ℹ️ *remote writefail ack recovered: host-5*"
     assert lines[1] == "Where: hub-1 - bot-errors-collector"
     assert lines[2] == "You: No action needed; the earlier alert stays open until its own clear arrives (open for 2h 0m)"
     assert lines[-1].startswith("Ref: ")
@@ -1346,19 +1346,19 @@ def test_information_after_a_page_never_says_recovered_while_the_incident_stays_
     paths = mod.state_paths()
     sends = _sends(mod)
     event = _recovered_observation("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
-    event["summary"] = "remote writefail ack retried: mini5"
+    event["summary"] = "remote writefail ack retried: host-5"
     opened = NOW - 2 * 3600
     _write_state(mod, {mod.incident_key(event): {
         "status": "open",
         "openedAt": opened,
         "lastNotifiedAt": opened,
-        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: host-5",
     }})
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.retried.json", event)
     assert mod.process_one(path, paths) == (True, "sent")
     [card] = sends
     assert "recovered" not in card.lower()
-    assert card.split("\n", 1)[0] == "ℹ️ *remote writefail ack retried: mini5*"
+    assert card.split("\n", 1)[0] == "ℹ️ *remote writefail ack retried: host-5*"
     assert "the earlier alert stays open" in card
     assert mod.incident_key(event) in _state(mod)["openIncidents"], "an observation never closes the incident"
 
@@ -1374,7 +1374,7 @@ def test_information_after_a_page_that_asked_the_owner_keeps_the_owner_request(m
         "status": "open",
         "openedAt": opened,
         "lastNotifiedAt": opened,
-        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: host-5",
         "ownerRequest": "You: Action needed: do the owner step in the packet",
     }})
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
@@ -1442,7 +1442,7 @@ def test_an_old_page_record_with_no_known_request_never_says_no_action_needed(mo
         "status": "open",
         "openedAt": opened,
         "lastNotifiedAt": opened,
-        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: host-5",
     }})
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
     assert mod.process_one(path, paths) == (True, "sent")
@@ -1464,7 +1464,7 @@ def test_information_after_a_page_names_the_page_ref_on_the_you_line(mod):
         "eventKind": "incident_alert",
         "eventType": "alert",
         "severity": "critical",
-        "summary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "summary": "BOT ERRORS collector cannot terminal-ack remote writefail: host-5",
     }
     _page_card, page_ref = mod.notice_message(page, notice_kind="outbox", paths=paths)
     assert page_ref
