@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { captureCards, readCapture } from '../helpers/bot-errors-notice.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 
 /** Custom replacer that sorts object keys recursively to match Python's _canonical_bytes. */
@@ -33,7 +34,8 @@ const GITHUB_TOKEN_SAMPLE = ['ghp', 'abcdefghijklmnopqrstuvwxyz1234567890'].join
 const JWT_SAMPLE = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjMifQ', 'signaturepart1234567890'].join('.');
 const PRIVATE_KEY_SAMPLE = ['-----BEGIN ', 'PRIVATE KEY-----', '\nabc\n', '-----END ', 'PRIVATE KEY-----'].join('');
 const URL_USERINFO_SAMPLE = `https://user:pass@${'example'}.com/path`;
-const REDACTED_URL_USERINFO = `https://[REDACTED] at ${'example'}.com/path`;
+// P2: the credential is redacted; the host's "@" is no mention risk and stays.
+const REDACTED_URL_USERINFO = `https://[REDACTED]@${'example'}.com/path`;
 const AT_SIGN = '@';
 const TEST_SERVICE_NAME = `whatsoup${AT_SIGN}15551230001.service`;
 const TEST_CHAT_JID = `q${AT_SIGN}s.whatsapp.net`;
@@ -63,7 +65,7 @@ function writeEvent(root: string, severity = 'critical', overrides: Record<strin
 
 function captureMessages(path: string): string[] {
   if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8')
+  return readCapture(path)
     .split('\n')
     .filter((line) => line.trim())
     .map((line) => (JSON.parse(line) as { text: string }).text);
@@ -278,9 +280,9 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    expect(readFileSync(capturePath, 'utf8')).toContain('dispatcher_attempts: 1');
-    expect(readFileSync(capturePath, 'utf8')).toContain('dispatch_log:');
-    expect(readFileSync(capturePath, 'utf8')).toContain('requested_action: Q investigate, remediate');
+    expect(readCapture(capturePath)).toContain('dispatcher_attempts: 1');
+    expect(readCapture(capturePath)).toContain('dispatch_log:');
+    expect(readCapture(capturePath)).toContain('requested_action: Q investigate, remediate');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "sent"');
     const sentFiles = readdirSync(sent);
     expect(sentFiles).toHaveLength(1);
@@ -406,17 +408,19 @@ describe('bot-errors-dispatcher', () => {
 
     const result = dispatchCaptured(tmpRoot, capturePath);
 
-    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT INFO');
-    expect(readFileSync(capturePath, 'utf8')).not.toContain('BOT RECOVERY');
-    const sent = join(tmpRoot, 'sent');
-    const [file] = readdirSync(sent);
-    const event = JSON.parse(readFileSync(join(sent, file!), 'utf8')) as Record<string, unknown>;
+    // Relay 16 C3: an information-only observation has no card of its own; it is
+    // archived with the suppressed events and counted in the daily summary.
+    expect(result).toMatchObject({ processed: 1, sent: 0, suppressed: 1, failed: 0 });
+    expect(existsSync(capturePath)).toBe(false);
+    const suppressed = join(tmpRoot, 'suppressed');
+    const [file] = readdirSync(suppressed);
+    const event = JSON.parse(readFileSync(join(suppressed, file!), 'utf8')) as Record<string, unknown>;
     expect(event).toMatchObject({
       schemaVersion: 2,
       eventKind: 'observation',
       eventType: 'observation',
       severity: 'info',
+      delivery: { suppressedReason: expect.stringContaining('daily information summary') },
     });
   });
 
@@ -484,7 +488,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(recovered)).toMatchObject({ processed: 1, sent: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/socket unavailable must stay durable/g)).toHaveLength(1);
+    expect(readCapture(capturePath).match(/socket unavailable must stay durable/g)).toHaveLength(1);
     expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
     expect(readdirSync(sent)).toHaveLength(1);
   });
@@ -527,7 +531,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, reclaimed: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/crash mid-claim must replay once/g)).toHaveLength(1);
+    expect(readCapture(capturePath).match(/crash mid-claim must replay once/g)).toHaveLength(1);
     expect(dataEntries(processing)).toHaveLength(0);
     expect(readdirSync(sent)).toHaveLength(1);
     const [sentFile] = readdirSync(sent);
@@ -553,10 +557,19 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    const rendered = readFileSync(capturePath, 'utf8');
-    expect(rendered).toContain('BOT INFO - attempt counter test');
-    expect(rendered).toContain('requested_action: none');
-    expect(rendered).not.toContain('requested_action: Q investigate');
+    // Relay 16 C3: no card of its own; the full body lives in the notice packet.
+    expect(existsSync(capturePath)).toBe(false);
+    const packets = join(tmpRoot, 'packets');
+    const packetFiles = dataEntries(packets);
+    expect(packetFiles).toHaveLength(1);
+    const packet = JSON.parse(readFileSync(join(packets, packetFiles[0]!), 'utf8')) as {
+      body: string;
+      disposition: string;
+    };
+    expect(packet.disposition).toBe('daily information summary');
+    expect(packet.body).toContain('BOT INFO - attempt counter test');
+    expect(packet.body).toContain('requested_action: none');
+    expect(packet.body).not.toContain('requested_action: Q investigate');
   });
 
   it('suppresses daily-health info sends with a distinct auditable disposition', () => {
@@ -741,7 +754,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, suppressed: 0, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT WARNING - BOT ERRORS daily health found issues');
+    expect(readCapture(capturePath)).toContain('BOT WARNING - BOT ERRORS daily health found issues');
   });
 
   it('collapses same-fingerprint storms into one manifest-backed digest', () => {
@@ -774,7 +787,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 13, failed: 0 });
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = readCapture(capturePath);
     expect(rendered.match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
     expect(rendered).toContain('affected_hosts: 13');
     expect(rendered).toContain('affected_host_list:');
@@ -840,8 +853,8 @@ describe('bot-errors-dispatcher', () => {
     expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, stormCollapsed: 3, failed: 0 });
     const messages = captureMessages(capturePath);
     expect(messages).toHaveLength(2);
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERRORS storm collapse');
-    expect(readFileSync(capturePath, 'utf8')).toContain('mini4 tool call failed differently');
+    expect(readCapture(capturePath)).toContain('BOT ERRORS storm collapse');
+    expect(readCapture(capturePath)).toContain('mini4 tool call failed differently');
     expect(readdirSync(collapsed)).toHaveLength(3);
   });
 
@@ -870,7 +883,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 2, sent: 2, stormCollapsed: 6, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(2);
+    expect(readCapture(capturePath).match(/BOT ERRORS storm collapse/g)).toHaveLength(2);
   });
 
   it('collapses storms that straddle a fixed bucket boundary inside the sliding window', () => {
@@ -899,7 +912,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    expect(readCapture(capturePath).match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
   });
 
   it('collapses trickle storms across a fixed boundary when the rolling span is inside the window', () => {
@@ -928,7 +941,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERRORS storm collapse');
+    expect(readCapture(capturePath)).toContain('BOT ERRORS storm collapse');
   });
 
   it('reuses an already-queued storm digest after a crash before collapsing later originals', () => {
@@ -970,7 +983,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(replay)).toMatchObject({ processed: 1, sent: 1, stormCollapsed: 3, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
+    expect(readCapture(capturePath).match(/BOT ERRORS storm collapse/g)).toHaveLength(1);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "storm_digest_reused"');
     expect(readdirSync(outbox).filter((file) => file.endsWith('.json'))).toHaveLength(0);
     expect(readdirSync(collapsed)).toHaveLength(16);
@@ -1047,7 +1060,7 @@ describe('bot-errors-dispatcher', () => {
       recoveryDeduped: 11,
       failed: 0,
     });
-    expect(readFileSync(capturePath, 'utf8').match(/BOT RECOVERY/g)).toHaveLength(1);
+    expect(readCapture(capturePath).match(/BOT RECOVERY/g)).toHaveLength(1);
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "recovery_duplicate_suppressed"');
     expect(readdirSync(sent)).toHaveLength(1);
     expect(readdirSync(suppressed)).toHaveLength(11);
@@ -1198,7 +1211,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 3, sent: 3, suppressed: 0, recoveryDeduped: 0, failed: 0 });
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = readCapture(capturePath);
     expect(rendered.match(/BOT RECOVERY/g)).toHaveLength(2);
     expect(rendered).toContain('BOT ERROR - flapping source restored');
   });
@@ -1292,7 +1305,7 @@ describe('bot-errors-dispatcher', () => {
       recoveredBeforeDelivery: 1,
     });
     expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = readCapture(capturePath);
     expect(rendered).toContain('BOT RECOVERY');
     expect(rendered).not.toContain('BOT ERROR');
   });
@@ -1339,7 +1352,7 @@ describe('bot-errors-dispatcher', () => {
       recoveredBeforeDelivery: 1,
     });
     expect(dataEntries(join(tmpRoot, 'outbox'))).toHaveLength(0);
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = readCapture(capturePath);
     expect(rendered).toContain('BOT RECOVERY');
     expect(rendered).not.toContain('BOT ERROR');
   });
@@ -1508,7 +1521,7 @@ describe('bot-errors-dispatcher', () => {
       failed: 0,
     });
     expect(readdirSync(suppressed)).toHaveLength(2);
-    const rendered = readFileSync(capturePath, 'utf8');
+    const rendered = readCapture(capturePath);
     expect(rendered.match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
     expect(rendered).toContain('refused_events:2');
     expect(rendered).not.toContain(tmpRoot);
@@ -1541,7 +1554,7 @@ describe('bot-errors-dispatcher', () => {
       testProvenanceMetaAlerted: 0,
       failed: 0,
     });
-    expect(readFileSync(capturePath, 'utf8').match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
+    expect(readCapture(capturePath).match(/dispatcher refused test-provenance events/g)).toHaveLength(1);
   });
 
   it('recovers writefail breadcrumbs into the normal dispatch path', () => {
@@ -1564,9 +1577,9 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('BOT ERROR - recovered from writefail');
-    expect(readFileSync(capturePath, 'utf8')).toContain('writefail_recovered:');
-    expect(readFileSync(capturePath, 'utf8')).toContain('already redacted phone=[REDACTED PHONE]');
+    expect(readCapture(capturePath)).toContain('BOT ERROR - recovered from writefail');
+    expect(readCapture(capturePath)).toContain('writefail_recovered:');
+    expect(readCapture(capturePath)).toContain('already redacted phone=[REDACTED PHONE]');
     expect(readFileSync(dispatchLog, 'utf8')).toContain('"type": "writefail_recovered"');
     expect(readdirSync(recovered)).toHaveLength(1);
     const sentFiles = readdirSync(sent);
@@ -1681,7 +1694,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('substring collision must still send');
+    expect(readCapture(capturePath)).toContain('substring collision must still send');
     expect(readdirSync(sent)).toHaveLength(2);
   });
 
@@ -1713,7 +1726,7 @@ describe('bot-errors-dispatcher', () => {
     });
 
     expect(JSON.parse(output)).toMatchObject({ processed: 1, sent: 1, writefailRecovered: 1, failed: 0 });
-    expect(readFileSync(capturePath, 'utf8')).toContain('stable id new occurrence should recover');
+    expect(readCapture(capturePath)).toContain('stable id new occurrence should recover');
     expect(readdirSync(sent)).toHaveLength(2);
   });
 
@@ -1766,7 +1779,7 @@ describe('bot-errors-dispatcher', () => {
     expect(sentFiles[0]).toMatch(/\.sent$/);
     const sentEvent = JSON.parse(readFileSync(join(sent, sentFiles[0]!), 'utf8')) as { id: string };
     expect(sentEvent.id).toBe(eventId);
-    expect(readFileSync(capturePath, 'utf8')).toContain('long recovered writefail filename');
+    expect(readCapture(capturePath)).toContain('long recovered writefail filename');
   });
 
   it('renders at-sign-bearing diagnostics mention-safely', () => {
@@ -1799,9 +1812,21 @@ describe('bot-errors-dispatcher', () => {
       },
     });
 
-    const rendered = readFileSync(capturePath, 'utf8');
-    expect(rendered).toContain('whatsoup at [REDACTED PHONE].service');
-    expect(rendered).toContain('q at s.whatsapp.net');
+    const rendered = readCapture(capturePath);
+    // P2 (relay 10): only an "@" before a digit or "+" is a mention risk. The
+    // phone number is redacted first, so the unit name keeps its "@", and so
+    // does the chat id (it stays in the packet; the card never carries it).
+    expect(rendered).toContain('whatsoup@[REDACTED PHONE].service');
+    expect(rendered).toContain('q@s.whatsapp.net');
+    expect(rendered).not.toMatch(/@[0-9+]/);
+    const cards = captureCards(capturePath);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatch(/^🔴 \*/);
+    expect(cards[0]).not.toContain(TEST_CHAT_JID);
+    expect(cards[0]).not.toMatch(/@[0-9+]/);
+    for (const secret of [AWS_KEY_SAMPLE, GITHUB_TOKEN_SAMPLE, URL_USERINFO_SAMPLE, PHONE_SAMPLE]) {
+      expect(cards[0]).not.toContain(secret);
+    }
     expect(rendered).toContain('[REDACTED AWS ACCESS KEY]');
     expect(rendered).toContain('[REDACTED GITHUB TOKEN]');
     expect(rendered).toContain('[REDACTED JWT]');
@@ -1809,7 +1834,6 @@ describe('bot-errors-dispatcher', () => {
     expect(rendered).toContain(REDACTED_URL_USERINFO);
     expect(rendered).toContain('[REDACTED PHONE]');
     expect(rendered).not.toContain(TEST_SERVICE_NAME.replace(/\.service$/, ''));
-    expect(rendered).not.toContain(TEST_CHAT_JID);
     expect(rendered).not.toContain(AWS_KEY_SAMPLE);
     expect(rendered).not.toContain(GITHUB_TOKEN_SAMPLE);
     expect(rendered).not.toContain('eyJhbGci');
@@ -2146,7 +2170,7 @@ describe('release-proof drill: two-run alert/clear traversal', () => {
     for (const queue of ['outbox', 'processing', 'writefail', 'dead-letter', 'quarantine']) {
       expect(dirCount(tmpRoot, queue), `${queue} not drained`).toBe(0);
     }
-    const rendered = readFileSync(capture, 'utf8');
+    const rendered = readCapture(capture);
     expect(rendered).toContain('release-proof drill alert');
   });
 });

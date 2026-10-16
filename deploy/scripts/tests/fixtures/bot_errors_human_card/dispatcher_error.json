@@ -1,0 +1,41 @@
+{
+  "family": "dispatcher_error",
+  "description": "Synthetic dispatcher event; legacy_body is the pre-change format_event rendering.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "incident_alert",
+    "eventType": "alert",
+    "severity": "critical",
+    "id": "6a1f0e52-3b7d-4c11-9a0e-2f4d5c6b7a81",
+    "createdAt": "2026-10-15T09:00:00.000Z",
+    "machine": "mac-host-2.local",
+    "instance": "fixture-bot",
+    "source": "primary_model_unusable",
+    "summary": {
+      "failureClass": "provider_auth_failure",
+      "length": 58,
+      "correlationDigest": "3c9d2e1000000000000000000000000000000000000000000000000000000000"
+    },
+    "evidence": {
+      "failureClass": "unknown",
+      "length": 240,
+      "correlationDigest": "77aa01b200000000000000000000000000000000000000000000000000000000"
+    },
+    "process": {
+      "pid": 4242
+    },
+    "diagnostics": {
+      "queue": "/srv/bot-errors-fixture/outbox",
+      "logHints": [
+        "journalctl --user -u whatsoup@fixture-bot --since '30 minutes ago'"
+      ]
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "queued"
+    }
+  },
+  "legacy_body": "BOT ERROR - fixture-bot: primary model unusable (provider_auth_failure) [digest 3c9d2e10]\n  > summary_confined: provider_auth_failure - 58 chars - digest 3c9d2e10\n  > severity: critical\n  > machine: mac-host-2.local\n  > instance: fixture-bot\n  > source: primary_model_unusable\n  > incident_key: mac-host-2.local|fixture-bot|primary_model_unusable\n  > event: 6a1f0e52-3b7d-4c11-9a0e-2f4d5c6b7a81\n  > created: 2026-10-15T09:00:00.000Z\n  > dispatcher_attempts: 1\n  > pid: 4242\n  > log_1: journalctl --user -u whatsoup at fixture-bot --since '30 minutes ago'\n  > queue: /srv/bot-errors-fixture/outbox\n  > evidence: unknown - 240 chars - digest 77aa01b2\n  > requested_action: Q investigate, remediate, and report disposition in BOT ERRORS.",
+  "card": "🔴 *fixture-bot: primary model unusable (provider auth failure)*\nWhere: mac-host-2.local - fixture-bot\nImpact not yet confirmed\nHandling: Q investigating\nYou: No action needed\nRef: 566cb4a1",
+  "p2_changes_body": true
+}

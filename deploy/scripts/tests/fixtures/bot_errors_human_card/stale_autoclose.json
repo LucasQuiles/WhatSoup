@@ -1,0 +1,29 @@
+{
+  "family": "stale_autoclose",
+  "description": "Reconstructed from one delivered BOT INFO message (2026-10-14/15); host names, private bot names and state paths neutralised. format_event renders this event to exactly legacy_body.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "observation",
+    "eventType": "observation",
+    "severity": "info",
+    "id": "stale-autoclose-1792080781",
+    "createdAt": "2026-10-15T16:13:01Z",
+    "machine": "bot-errors",
+    "instance": "dispatcher",
+    "source": "stale-autoclose",
+    "summary": "Auto-closed 1 non-actionable stale incident(s)",
+    "evidence": "stale_autoclose=true\nclosed_count=1\nclosed_keys=unknown|q|runtime-tool-error:claude-cli:Bash\nreason=non-actionable incidents AGED OUT past escalate horizon; removed from open state to bound incident state. recovery UNVERIFIED (silence is not proof of repair — esp. if the monitoring path was down); each will REOPEN automatically if the condition still fails on the next run.",
+    "diagnostics": {
+      "dispatchLog": "/srv/bot-errors-fixture/logs/dispatch.jsonl",
+      "queue": "/srv/bot-errors-fixture"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "stale-autoclose",
+      "nextAttemptAtEpoch": 0,
+      "lastError": null
+    }
+  },
+  "legacy_body": "BOT INFO - Auto-closed 1 non-actionable stale incident(s)\n  > severity: info\n  > machine: bot-errors\n  > instance: dispatcher\n  > source: stale-autoclose\n  > incident_key: bot-errors|dispatcher|stale-autoclose\n  > event: stale-autoclose-1792080781\n  > created: 2026-10-15T16:13:01Z\n  > dispatcher_attempts: 1\n  > queue: /srv/bot-errors-fixture\n  > dispatch_log: /srv/bot-errors-fixture/logs/dispatch.jsonl\n  > evidence: stale_autoclose=true\nclosed_count=1\nclosed_keys=unknown|q|runtime-tool-error:claude-cli:Bash\nreason=non-actionable incidents AGED OUT past escalate horizon; removed from open state to bound incident state. recovery UNVERIFIED (silence is not proof of repair — esp. if the monitoring path was down); each will REOPEN automatically if the condition still fails on the next run.\n  > requested_action: none — informational event; no Q remediation required.",
+  "card": "ℹ️ *Closed 1 old alert that stopped reporting; it reopens if the problem returns*\nWhere: bot-errors - dispatcher\nYou: No action needed\nRef: 26e70693"
+}

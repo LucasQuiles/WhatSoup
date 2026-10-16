@@ -16,7 +16,7 @@ _TESTS = Path(__file__).resolve().parent
 if str(_TESTS) not in sys.path:
     sys.path.insert(0, str(_TESTS))
 
-from support.dispatcher_fixtures import load_module_from_path
+from support.dispatcher_fixtures import expand_notice, load_module_from_path
 
 # Property examples only format fresh events; the loaded module has no per-example
 # state. Tests that vary the cap explicitly set it on every example.
@@ -217,8 +217,11 @@ def test_warning_only_evidence_survives_routine_prefix(dispatcher):
 
 
 def test_budget_uses_redacted_and_at_expanded_unicode_text(dispatcher):
-    finding = "FAIL credential " + "界@" * 230 + " complete-filename.env"
+    # P2: only an "@" before a digit or "+" (a mention risk) is expanded to " at ",
+    # so the fixture keeps one before "+" to still grow the text past its budget.
+    finding = "FAIL credential " + "界@+" * 230 + " complete-filename.env"
     expected = dispatcher.redact(finding).replace("@", " at ")
+    assert expected == dispatcher.neutralize_mentions(dispatcher.redact(finding))
     event = daily_event("OK " + "x" * 1200 + "\n" + finding)
 
     text = dispatcher.format_event(event)
@@ -421,7 +424,8 @@ def _run_credential_case(tmp_path, mode, classification):
             records = [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
             (tmp_path / "delivered.json").write_text(json.dumps(records), encoding="utf-8")
             assert len(records) == 1
-            text = records[0]["text"]
+            # The group line is a card; the full body is in the packet its Ref names.
+            text = expand_notice({"packets": state / "packets"}, records[0]["text"])
             for evidence in (event["evidence"], text):
                 matches = [line for line in evidence.splitlines() if "FAIL credential:" in line]
                 assert len(matches) == 1

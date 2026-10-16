@@ -1,0 +1,47 @@
+{
+  "family": "stale_logged_out",
+  "description": "Reconstructed from one delivered BOT INFO message (2026-10-14/15); host names, private bot names and state paths neutralised. format_event renders this event to exactly legacy_body.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "observation",
+    "eventType": "observation",
+    "severity": "info",
+    "id": "stale-unknown_q_instance_logged_out-1792050899",
+    "createdAt": "2026-10-15T07:54:59Z",
+    "machine": "unknown",
+    "instance": "q",
+    "source": "instance_logged_out",
+    "summary": "Stale incident digest: q: WhatsApp session logged out [digest a651c416]",
+    "evidence": "stale_digest=true\nincident_stale=true\nincident_key=unknown|q|instance_logged_out\nincident_status=stale\nprevious_status=stale\nopened=2026-09-30T07:49:41Z\nlast_seen=2026-09-30T07:49:42Z\nquiet_seconds=1296317\nsuppressed_duplicates=98\nrenotify_cadence_seconds=86400",
+    "diagnostics": {
+      "logHints": [
+        "journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"
+      ],
+      "dispatchLog": "/srv/bot-errors-fixture/logs/dispatch.jsonl",
+      "queue": "/srv/bot-errors-fixture"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "stale-renotify",
+      "nextAttemptAtEpoch": 0,
+      "lastError": null
+    },
+    "criticalAsset": {
+      "asset": {
+        "kind": "whatsapp_linked_device",
+        "instance": "q",
+        "owner": "whatsoup"
+      },
+      "failure": {
+        "code": "WEAK_LOGGED_OUT_SIGNAL",
+        "domain": "account_linkage",
+        "recoverability": "manual_relink_required",
+        "confidence": "probable",
+        "operatorAction": "Q verify whether the source recovered without a clear or disappeared; keep the incident de-escalated unless fresh alerts resume.",
+        "clearRequirement": "connected WhatsApp state, present non-empty auth bond, and successful outbound send after creds mtime and after the incident"
+      }
+    }
+  },
+  "legacy_body": "BOT INFO - Stale incident digest: q: WhatsApp session logged out [digest a651c416]\n  > severity: info\n  > machine: unknown\n  > instance: q\n  > source: instance_logged_out\n  > incident_key: unknown|q|instance_logged_out\n  > asset_kind: whatsapp_linked_device\n  > failure_code: WEAK_LOGGED_OUT_SIGNAL\n  > failure_domain: account_linkage\n  > recoverability: manual_relink_required\n  > confidence: probable\n  > event: stale-unknown_q_instance_logged_out-1792050899\n  > created: 2026-10-15T07:54:59Z\n  > dispatcher_attempts: 1\n  > log_1: journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'\n  > queue: /srv/bot-errors-fixture\n  > dispatch_log: /srv/bot-errors-fixture/logs/dispatch.jsonl\n  > clear_requirement: connected WhatsApp state, present non-empty auth bond, and successful outbound send after creds mtime and after the incident\n  > evidence: stale_digest=true\nincident_stale=true\nincident_key=unknown|q|instance_logged_out\nincident_status=stale\nprevious_status=stale\nopened=2026-09-30T07:49:41Z\nlast_seen=2026-09-30T07:49:42Z\nquiet_seconds=1296317\nsuppressed_duplicates=98\nrenotify_cadence_seconds=86400\n  > requested_action: Lucas physical relink or decommission required; Q should preserve the auth bond, avoid unsafe credential replay, monitor for reconnect/decommission clear, and report disposition.",
+  "card": "🟡 *Q: WhatsApp session logged out, open since 09-30*\nWhere: q\nImpact not yet confirmed\nHandling: waiting on a relink or retirement of the WhatsApp line\nYou: Action needed: relink the WhatsApp line or retire it\nRef: 6f8aeb48"
+}

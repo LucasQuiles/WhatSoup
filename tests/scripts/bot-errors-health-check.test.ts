@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
+import { readCapture } from '../helpers/bot-errors-notice.ts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
@@ -385,8 +386,8 @@ describe('bot-errors-health-check', () => {
     });
 
     expect(dispatch.status).toBe(0);
-    expect(readFileSync(capture, 'utf8')).toContain('BOT ERRORS daily health found issues');
-    expect(readFileSync(capture, 'utf8')).toContain('writefail_recovered');
+    expect(readCapture(capture)).toContain('BOT ERRORS daily health found issues');
+    expect(readCapture(capture)).toContain('writefail_recovered');
     expect(readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'))).toHaveLength(1);
   });
 

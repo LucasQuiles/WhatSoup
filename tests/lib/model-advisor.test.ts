@@ -22,6 +22,7 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
 }));
 
 import { emitAlert, emitAlertChecked, clearAlertSource } from '../../src/lib/emit-alert.ts';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 import {
   loadRecoveryMarkers,
   setRecoveryMarker,
@@ -47,6 +48,10 @@ import {
 
 const emitAlertMock = vi.mocked(emitAlert);
 const clearAlertSourceMock = vi.mocked(clearAlertSource);
+
+// The notified-set dedupe key now persists with the recovery marker, so a marker
+// one test leaves must not decide whether a later test's alert is emitted.
+usePerTestBotErrorsMarkerIsolation();
 
 beforeEach(() => {
   __resetModelAdvisorForTest();
@@ -848,5 +853,93 @@ describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', (
     expect(clears).toHaveLength(1);
     expect(readMarkers().has('model-currency:test-bot')).toBe(false);
     setIntervalSpy.mockRestore();
+  });
+});
+
+describe('restart does not re-send an unchanged model-currency set', () => {
+  const advisory = {
+    model: 'claude-opus-4-6',
+    role: 'conversation',
+    level: 'upgrade-available' as const,
+    recommended: 'claude-opus-4-8',
+    message: 'upgrade available',
+  };
+  const degradedScan = {
+    mode: 'degraded' as const,
+    attemptedVendors: ['anthropic'],
+    degradedVendors: [{ vendor: 'anthropic', status: 401, reason: 'HTTP 401' }],
+    fetchedCount: 0,
+  };
+  const emitsFor = (source: string) => emitAlertMock.mock.calls.filter((c) => c[1] === source);
+  const clearsFor = (source: string) => clearAlertSourceMock.mock.calls.filter((c) => c[1] === source);
+
+  it('a restart with the same advisory set emits nothing', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+
+    __resetModelAdvisorForTest(); // restart: in-memory dedupe key is gone
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(true);
+  });
+
+  it('a restart with a changed advisory set emits it', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [{ ...advisory, recommended: 'claude-opus-4-9' }]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+
+    // ...and the changed set is the one now remembered across the next restart.
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [{ ...advisory, recommended: 'claude-opus-4-9' }]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+  });
+
+  it('the persisted set is per instance', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-S', [advisory]);
+    expect(emitsFor('model-currency').map((c) => c[0])).toEqual(['instance-R', 'instance-S']);
+  });
+
+  it('a clean check after an adopted restart still clears the source', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [advisory]); // adopted, not re-sent
+    notifyModelAdvisories('instance-R', []);
+    expect(clearsFor('model-currency')).toEqual([['instance-R', 'model-currency']]);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(false);
+  });
+
+  it('a marker written before the key was persisted still lets the set emit', () => {
+    setRecoveryMarker('model-currency:instance-R');
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+  });
+
+  it('a rejected emit persists no key, so the next restart emits again', () => {
+    vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+  });
+
+  it('the live-scan degradation is not re-sent after a restart, and its recovery still clears', () => {
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    __resetModelAdvisorForTest();
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    expect(emitsFor('model-currency-live-scan')).toHaveLength(1);
+
+    notifyModelLiveScanStatus('instance-R', {
+      mode: 'degraded',
+      attemptedVendors: ['anthropic'],
+      degradedVendors: [{ vendor: 'anthropic', status: 500, reason: 'HTTP 500' }],
+      fetchedCount: 0,
+    });
+    expect(emitsFor('model-currency-live-scan')).toHaveLength(2);
+
+    notifyModelLiveScanStatus('instance-R', { ...degradedScan, mode: 'live', degradedVendors: [], fetchedCount: 1 });
+    expect(clearsFor('model-currency-live-scan')).toEqual([['instance-R', 'model-currency-live-scan']]);
   });
 });

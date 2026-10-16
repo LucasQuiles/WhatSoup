@@ -90,6 +90,9 @@ FILES=(
   # fleet_config.py: the health-check and watchdog profile loaders and the
   # bot_errors_roster roster loader resolve their files through it.
   "deploy/scripts/lib/fleet_config.py"
+  # fleet_lines.py: the health check and the dispatcher read the local fleet
+  # API's line list through it (relay 16 line recheck).
+  "deploy/scripts/lib/fleet_lines.py"
   "deploy/scripts/lib/health_reader.py"
   "deploy/scripts/lib/owner_route.py"
   "deploy/scripts/lib/producer_cadence_receipt.py"

@@ -188,7 +188,8 @@ class _Bench:
         def send(text: str, *args: Any, **kwargs: Any) -> None:
             self.attempts.append(outcome)
             if outcome == "ok":
-                self.delivered.append(text)
+                # The group line carries a card; its body is in the packet its Ref names.
+                self.delivered.append(dispatcher_fixtures.expand_notice(self.paths, text))
                 return None
             if outcome == "transient":
                 raise RuntimeError("WhatsApp is temporarily disconnected")
@@ -564,7 +565,9 @@ def test_a_retried_escalated_warning_is_raised_once_not_once_per_attempt(tmp_pat
     assert bench.attempts == [outcome, "ok"]
     assert len(bench.delivered) == 1
     delivered = bench.delivered[0].splitlines()
-    assert delivered[0] == "BOT ERROR - " + ESCALATED_PREFIX + RELEASE_SUMMARY
+    # The card's title, and the full body's headline in the packet its Ref names.
+    assert delivered[0] == "🔴 *" + ESCALATED_PREFIX + RELEASE_SUMMARY + "*"
+    assert "BOT ERROR - " + ESCALATED_PREFIX + RELEASE_SUMMARY in delivered
     assert SEVERITY_LINE.format("error") in delivered
     assert SEVERITY_LINE.format("critical") not in delivered
     assert bench.archived(path)["severity"] == "error"

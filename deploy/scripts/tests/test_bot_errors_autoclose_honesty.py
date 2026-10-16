@@ -118,8 +118,11 @@ def test_autoclose_digest_is_truthful_not_self_healed(tmp_path):
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
     assert sent == 0 and failed == 0 and err is None
-    assert len(sends) == 1
-    digest = sends[0]
+    # Relay 16 C1: the digest is no message; it is a packet and a summary line.
+    assert sends == []
+    digests = dispatcher_fixtures.deferred_notice_bodies(mod, "stale-autoclose")
+    assert len(digests) == 1
+    digest = digests[0]
     # Truthful: must NOT assert the incident self-healed.
     assert "self-healed" not in digest.lower()
     # Truthful: must state recovery was not verified and that it reopens if real.
@@ -285,8 +288,17 @@ def test_bond_lost_family_is_not_unverified_autoclosed_even_if_suppression_confi
 
         sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
-        assert sent == 1 and failed == 0 and err is None
-        assert sends, "protected source should renotify instead of silently auto-closing"
+        assert failed == 0 and err is None
+        if source == "signal_cli_unregistered":
+            assert sent == 1
+            assert sends, "protected source should renotify instead of silently auto-closing"
+        else:
+            # Relay 16 C2: a logged-out / bond-lost line is rechecked instead of
+            # renotified on its own; one it cannot clear stays open for the
+            # daily line card -- never silently auto-closed.
+            assert sent == 0 and sends == []
+            log = dispatcher_fixtures.dispatch_log_records(mod.state_paths())
+            assert [record.get("type") for record in log].count("stale_renotify_deferred_to_line_card") == 1
         state = json.loads((mod.state_paths()["incident_state"]).read_text())
         assert key in state["openIncidents"]
         assert key not in state.get("staleAutocloseHistory", {})
@@ -356,11 +368,13 @@ def test_1429_no_recovery_proof_bounded_close_after_cap(tmp_path):
     # Bounded fallback fires: the incident is closed (removed) with a digest.
     open_now = json.loads((mod.state_paths()["incident_state"]).read_text())["openIncidents"]
     assert key not in open_now
-    assert len(sends) == 1
+    assert sends == []  # relay 16 C1: the digest is no message
+    digests = dispatcher_fixtures.deferred_notice_bodies(mod, "stale-autoclose")
+    assert len(digests) == 1
     # The close is CLEARLY LABELED as unverified/bounded (not verified-recovery,
     # not self-healed) both in the digest and the dispatch log.
-    assert "self-healed" not in sends[0].lower()
-    assert "unverified" in sends[0].lower()
+    assert "self-healed" not in digests[0].lower()
+    assert "unverified" in digests[0].lower()
     suppressed = _suppressed_log_entries(mod)
     assert suppressed[-1]["willAutoClose"] is True
     assert suppressed[-1]["boundedUnverifiedClose"] is True
@@ -385,7 +399,8 @@ def test_1429_verified_recovery_closes_as_recovered(tmp_path):
     assert sent == 0 and failed == 0 and err is None
     open_now = json.loads((mod.state_paths()["incident_state"]).read_text())["openIncidents"]
     assert key not in open_now, "verified recovery must close on the age-out path"
-    assert len(sends) == 1
+    assert sends == []  # relay 16 C1: the digest is no message
+    assert len(dispatcher_fixtures.deferred_notice_bodies(mod, "stale-autoclose")) == 1
     # Closed as recovered, NOT held and NOT a bounded-unverified close.
     suppressed = _suppressed_log_entries(mod)
     assert suppressed[-1]["willAutoClose"] is True

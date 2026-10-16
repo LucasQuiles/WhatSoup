@@ -1,0 +1,39 @@
+{
+  "family": "dispatcher_warning",
+  "description": "Synthetic dispatcher event; legacy_body is the pre-change format_event rendering.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "incident_alert",
+    "eventType": "alert",
+    "severity": "warning",
+    "id": "0b7c4d2e-91aa-4f3e-8c55-1d2e3f4a5b6c",
+    "createdAt": "2026-10-15T09:05:00.000Z",
+    "machine": "mac-host-2.local",
+    "instance": "fixture-bot",
+    "source": "outbound_flood",
+    "summary": {
+      "failureClass": "unknown",
+      "length": 72,
+      "correlationDigest": "5e6f7a8b00000000000000000000000000000000000000000000000000000000"
+    },
+    "evidence": {
+      "failureClass": "unknown",
+      "length": 130,
+      "correlationDigest": "9c0d1e2f00000000000000000000000000000000000000000000000000000000"
+    },
+    "process": {
+      "pid": 4242
+    },
+    "diagnostics": {
+      "queue": "/srv/bot-errors-fixture/outbox",
+      "count": 42,
+      "unexpectedField": "free text that must never reach the card"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "queued"
+    }
+  },
+  "legacy_body": "BOT WARNING - fixture-bot: outbound flood threshold tripped [digest 5e6f7a8b]\n  > summary_confined: unknown - 72 chars - digest 5e6f7a8b\n  > severity: warning\n  > machine: mac-host-2.local\n  > instance: fixture-bot\n  > source: outbound_flood\n  > incident_key: mac-host-2.local|fixture-bot|outbound_flood\n  > event: 0b7c4d2e-91aa-4f3e-8c55-1d2e3f4a5b6c\n  > created: 2026-10-15T09:05:00.000Z\n  > dispatcher_attempts: 1\n  > pid: 4242\n  > queue: /srv/bot-errors-fixture/outbox\n  > evidence: unknown - 130 chars - digest 9c0d1e2f\n  > requested_action: Q investigate, remediate, and report disposition in BOT ERRORS.",
+  "card": "🟠 *fixture-bot: outbound flood threshold tripped (count 42)*\nWhere: mac-host-2.local - fixture-bot\nImpact not yet confirmed\nHandling: Q investigating\nYou: No action needed\nRef: a33f98a8"
+}

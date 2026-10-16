@@ -37,6 +37,10 @@ sys.path.insert(0, str(_SCRIPTS / "lib"))
 
 from lib import controller_state as cs  # noqa: E402
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from support.dispatcher_fixtures import expand_notice  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_noop_commit", _SCRIPT)
 disp = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
 spec.loader.exec_module(disp)  # type: ignore[union-attr]
@@ -380,7 +384,8 @@ def quiet_held_incident(adopted, monkeypatch):
     }.items():
         monkeypatch.setattr(disp, name, value)
     sends = []
-    monkeypatch.setattr(disp, "send_whatsapp", sends.append)
+    # The group line is a card; its body is in the packet its Ref names.
+    monkeypatch.setattr(disp, "send_whatsapp", lambda text, *a, **k: sends.append(expand_notice(adopted, text)))
     key = "host-a|bot-errors-health|daily-health-fail:instance-x"
     with _dispatcher_session(adopted) as session:
         loaded = session.load()
@@ -421,6 +426,17 @@ def test_unchanged_stale_hold_avoids_state_writes_across_restarts(quiet_held_inc
     assert after["openIncidents"][key]["autocloseFirstHeldAt"] == before["openIncidents"][key]["autocloseFirstHeldAt"]
 
 
+def _autoclose_digests(paths) -> list[str]:
+    """Relay 16 C1: an auto-close digest is no message; it is a packet and one
+    line of the daily information summary. Its bodies, read through their Refs."""
+    pending = (_primary(paths).get("informationSummary") or {}).get("pending") or []
+    return [
+        disp.read_notice_packet(paths, entry["ref"])["body"]
+        for entry in pending
+        if entry.get("noticeKind") == "stale-autoclose"
+    ]
+
+
 def test_stale_hold_cap_is_checked_before_diagnostic_cadence(quiet_held_incident, monkeypatch):
     paths, key, clock, sends = quiet_held_incident
     monkeypatch.setattr(disp, "AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS", 45)
@@ -428,7 +444,9 @@ def test_stale_hold_cap_is_checked_before_diagnostic_cadence(quiet_held_incident
     clock[0] += 60
     assert _sweep_held(paths).mutations()
     assert key not in _primary(paths)["openIncidents"]
-    assert len(sends) == 1 and "unverified" in sends[0].lower()
+    digests = _autoclose_digests(paths)
+    assert sends == []
+    assert len(digests) == 1 and "unverified" in digests[0].lower()
 
 
 def test_verified_recovery_is_checked_before_diagnostic_cadence(quiet_held_incident):
@@ -443,7 +461,8 @@ def test_verified_recovery_is_checked_before_diagnostic_cadence(quiet_held_incid
         )
     assert _sweep_held(paths, recover).mutations()
     assert key not in _primary(paths)["openIncidents"]
-    assert len(sends) == 1
+    assert sends == []
+    assert len(_autoclose_digests(paths)) == 1
 
 
 def test_actionable_stale_alert_does_not_wait_for_diagnostic_cadence(quiet_held_incident):

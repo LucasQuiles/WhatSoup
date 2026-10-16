@@ -1,0 +1,553 @@
+"""Human card + machine packet for BOT ERRORS notices (relay 10 P1/P2/P4, relay 16 A/B/D/E).
+
+A notice reaches WhatsApp as a short plain card; the full body, every field in it
+and the whole event go first to one JSON packet named by the card's Ref.
+
+Golden cards live in ``fixtures/bot_errors_human_card/``. Nine are reconstructed
+from delivered BOT INFO messages, one per family: ``format_event`` renders each
+event to exactly the message that was delivered (``legacy_body``), so the card is
+built from the same event state the old body came from. The rest are synthetic
+dispatcher events (ERROR, WARNING, RECOVERY, resolved, mention safety). Fixtures
+carry no chat ids, phone numbers of real lines, secrets or real host names.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from hypothesis import example, given, strategies as st
+
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from bot_errors_property_support import properties  # noqa: E402
+from support import dispatcher_fixtures  # noqa: E402
+
+_SCRIPT = _TESTS_DIR.parent / "bot-errors-dispatcher.py"
+_FIXTURES = _TESTS_DIR / "fixtures" / "bot_errors_human_card"
+
+_ENV_KEYS = ["BOT_ERRORS_STATE_DIR", "BOT_ERRORS_EMAIL_FALLBACK", "BOT_ERRORS_DRY_SEND_CAPTURE"]
+_clean_env = dispatcher_fixtures.make_env_scrub_fixture(_ENV_KEYS)
+
+# Q's pause-bypass patterns for the BOT ERRORS group (RE2, flag i, matched on the
+# first 4096 characters). Kept here as a test constant on purpose: the test must
+# not read any private configuration. Python ``re`` with IGNORECASE is equivalent
+# for these patterns. The live third pattern names Q's own two line identifiers
+# ("@" + one of two fixed digit strings); this public repository carries no line
+# identifiers, so it is widened here to any "@" + digit run. The wider pattern
+# admits everything the live one does, so equal admission under it is the
+# stricter gate, and the cards and bodies must carry no such run at all.
+Q_PAUSE_BYPASS_PATTERNS = (
+    r"^BOT ERROR - ",
+    r"^\s*@?q[:,]\s",
+    r"@\d{6,}\b",
+    r"^🔴 \*",
+    r"^🔴 ⚡ ",
+)
+_Q_PATTERNS = [re.compile(pattern, re.IGNORECASE) for pattern in Q_PAUSE_BYPASS_PATTERNS]
+
+
+def q_admits(text: str) -> bool:
+    head = text[:4096]
+    return any(pattern.search(head) for pattern in _Q_PATTERNS)
+
+
+def _load(name: str = "bot_errors_dispatcher_human_card"):
+    spec = importlib.util.spec_from_file_location(name, _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+_mod = _load()
+
+
+def _goldens() -> list[dict]:
+    return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(_FIXTURES.glob("*.json"))]
+
+
+_GOLDENS = _goldens()
+_GOLDEN_IDS = [golden["family"] for golden in _GOLDENS]
+_INFO_FAMILIES = {
+    "self_restart_completed",
+    "provider_fallback_restored",
+    "provider_fallback_reverted",
+    "model_currency",
+    "recovery_debt_attention",
+    "flap_storm_closed",
+    "stale_autoclose",
+}
+# Real delivered messages, one per BOT INFO family (relay 16 tests and gates).
+_REAL_FAMILIES = _INFO_FAMILIES | {"stale_logged_out", "stale_awaiting_physical"}
+_DISPATCHER_FAMILIES = {"dispatcher_error", "dispatcher_warning", "dispatcher_recovery", "dispatcher_resolved"}
+
+# Card hygiene (relay 16 B): no paths, event ids, digests, pids, incident keys or
+# schema words. The Ref value itself is 8 hex and is checked separately.
+_FORBIDDEN_CARD_PATTERNS = [
+    re.compile(r"(?:^|[\s(])(?:~|/)[\w.@-]*/"),  # a path
+    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE),  # event id
+    re.compile(r"\bdigest\b", re.IGNORECASE),
+    re.compile(r"\bchars\b", re.IGNORECASE),
+    re.compile(r"\bpid\b", re.IGNORECASE),
+    re.compile(r"\|"),  # incident keys are machine|instance|source
+    re.compile(
+        r"\b(?:summary_confined|incident_key|severity|alert_source|dispatcher_attempts|dispatch_log|"
+        r"requested_action|clear_requirement|failure_code|failure_domain|recoverability|asset_kind|"
+        r"journalctl|queue|evidence|source)\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _card_body_without_ref(card: str) -> str:
+    return "\n".join(line for line in card.split("\n") if not line.startswith("Ref: "))
+
+
+@pytest.fixture
+def state(tmp_path):
+    os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path)
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp_path.chmod(0o700)
+    return _mod.state_paths()
+
+
+# --- Golden cards -----------------------------------------------------------
+
+
+def test_every_family_has_a_golden() -> None:
+    assert set(_GOLDEN_IDS) >= _REAL_FAMILIES | _DISPATCHER_FAMILIES | {"mention_safety"}
+
+
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_golden_card(golden: dict) -> None:
+    event = golden["event"]
+    ref = _mod.notice_ref_candidates(_mod.notice_id_of(event))[0]
+    assert _mod.format_card(event, ref) == golden["card"]
+    assert golden["card"].endswith(f"\nRef: {ref}")
+
+
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_golden_event_still_renders_its_delivered_body(golden: dict) -> None:
+    # The card is rendered from the event the old body came from: for the real
+    # families legacy_body IS the delivered message (host and paths neutralised).
+    # The one intended body change is P2: a unit name keeps its "@".
+    body = _mod.format_event(golden["event"])
+    if golden.get("p2_changes_body"):
+        # The old body rewrote EVERY "@" to " at "; now only a mention risk is.
+        assert body != golden["legacy_body"]
+        assert body.replace("@", " at ") == golden["legacy_body"]
+    else:
+        assert body == golden["legacy_body"]
+
+
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_card_carries_no_machine_fields(golden: dict) -> None:
+    body = _card_body_without_ref(golden["card"])
+    for pattern in _FORBIDDEN_CARD_PATTERNS:
+        assert not pattern.search(body), (pattern.pattern, golden["card"])
+    assert re.fullmatch(r"Ref: [0-9a-f]{8}", golden["card"].split("\n")[-1])
+    assert len(golden["card"]) <= 600
+    first = golden["card"].split("\n", 1)[0]
+    assert not first.rstrip("*").rstrip().endswith(":")
+
+
+@pytest.mark.parametrize("golden", [g for g in _GOLDENS if g["family"] in _INFO_FAMILIES], ids=lambda g: g["family"])
+def test_information_card_is_at_most_four_lines(golden: dict) -> None:
+    lines = golden["card"].split("\n")
+    assert len(lines) <= 4
+    assert lines[0].startswith("ℹ️ *")
+    assert lines[1].startswith("Where: ")
+    assert "You: No action needed" in lines
+
+
+def test_action_cards_carry_every_target_line() -> None:
+    for golden in _GOLDENS:
+        if golden["family"] in _INFO_FAMILIES:
+            continue
+        lines = golden["card"].split("\n")
+        assert lines[1].startswith("Where: ")
+        assert any(line.startswith("Handling: ") for line in lines), golden["family"]
+        assert any(line.startswith("You: ") for line in lines), golden["family"]
+        if not golden["card"].startswith("✅"):
+            assert any(line.startswith("Impact") for line in lines), golden["family"]
+
+
+def test_title_catalog_meanings() -> None:
+    by_family = {g["family"]: g["card"].split("\n", 1)[0] for g in _GOLDENS}
+    assert by_family["self_restart_completed"] == "ℹ️ *Q restarted and is back online*"
+    assert by_family["provider_fallback_restored"] == "ℹ️ *Q restarted while on its backup AI provider*"
+    assert by_family["provider_fallback_reverted"] == "ℹ️ *Q is back on its main AI provider*"
+    assert by_family["model_currency"] == "ℹ️ *Q: newer AI model available*"
+    assert by_family["recovery_debt_attention"] == "ℹ️ *Q has unfinished recovery work*"
+    assert "alerts stopped; the problem behind them is still open" in by_family["flap_storm_closed"]
+
+
+def test_catalog_variants_follow_the_event() -> None:
+    base = dict(next(g for g in _GOLDENS if g["family"] == "provider_fallback_reverted")["event"])
+    plain = dict(base, evidence="reason=window-elapsed turnsServed=3")
+    probed = dict(base, evidence="reason=primary-probe-ok turnsServed=3")
+    assert "(checked healthy)" not in _mod.format_card(plain, "00000000")
+    assert "*Q is back on its main AI provider (checked healthy)*" in _mod.format_card(probed, "00000000")
+
+    currency = dict(next(g for g in _GOLDENS if g["family"] == "model_currency")["event"])
+    retiring = dict(currency, eventKind="incident_alert", eventType="alert", severity="warning")
+    assert "*Q: AI model in use is being retired*" in _mod.format_card(retiring, "00000000")
+    live = dict(retiring, source="model-currency-live-scan")
+    assert "*Q: AI model list could not be read; using the built-in list*" in _mod.format_card(live, "00000000")
+
+    debt = dict(next(g for g in _GOLDENS if g["family"] == "recovery_debt_attention")["event"])
+    debt["diagnostics"] = {**debt["diagnostics"], "count": 3}
+    assert "*Q has unfinished recovery work (3)*" in _mod.format_card(debt, "00000000")
+
+    other_bot = dict(next(g for g in _GOLDENS if g["family"] == "self_restart_completed")["event"], instance="ar-bot")
+    assert "*ar-bot restarted and is back online*" in _mod.format_card(other_bot, "00000000")
+
+
+def test_unknown_source_gets_a_plain_title_without_digests() -> None:
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"])
+    event["source"] = "some_new_probe:sub-check"
+    first = _mod.format_card(event, "00000000").split("\n", 1)[0]
+    assert first.startswith("🔴 *fixture-bot: some new probe sub check")
+    assert "digest" not in first and "chars" not in first
+
+
+# --- Q routing gate (relay 16 E) -----------------------------------------------
+
+
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_q_admission_is_unchanged(golden: dict) -> None:
+    old, new = golden["legacy_body"], golden["card"]
+    assert q_admits(new) == q_admits(old)
+    if old.startswith("BOT ERROR - "):
+        assert q_admits(new)
+        assert new.startswith("🔴 *")
+    else:
+        assert not new.startswith(("🔴 *", "🔴 ⚡ "))
+        assert not re.match(r"^\s*@?q[:,]\s", new, re.IGNORECASE)
+
+
+_MATRIX_KINDS = {"alert": "incident_alert", "observation": "observation", "clear": "incident_recovery"}
+_MATRIX_TYPES = (("alert", "critical"), ("alert", "error"), ("alert", "warning"), ("observation", "info"), ("clear", "info"))
+_MATRIX_SOURCES = st.one_of(
+    st.sampled_from(("primary_model_unusable", "self_restart_completed", "q", "instance_logged_out")),
+    st.from_regex(r"[a-z][a-z_-]{0,24}", fullmatch=True),
+)
+# Summaries that try to look addressed to Q or to mention a number, plus a
+# confined (legacy object) summary.
+_MATRIX_SUMMARIES = st.one_of(
+    st.just({"failureClass": "unknown", "length": 12, "correlationDigest": "ab" * 32}),
+    st.builds(
+        lambda lead, digits, tail: f"{lead}{digits} {tail}".strip(),
+        st.sampled_from(("q: ", "Q, ", "@q ", "Q: please check @", "@", "")),
+        st.from_regex(r"[0-9]{0,15}", fullmatch=True),
+        st.text(alphabet=st.characters(codec="ascii", categories=("L", "N", "Zs")), max_size=30),
+    ),
+)
+
+
+@properties
+@given(kind=st.sampled_from(_MATRIX_TYPES), source=_MATRIX_SOURCES, summary=_MATRIX_SUMMARIES)
+@example(kind=("alert", "critical"), source="q", summary="Q, please check @15550001234")
+@example(kind=("observation", "info"), source="self_restart_completed", summary="q: worker stalled")
+def test_q_admission_matrix(kind: tuple[str, str], source: str, summary) -> None:
+    """Q admits a notice exactly when it is a critical/error alert, in the old body and in the card alike."""
+    event_type, severity = kind
+    event = {
+        "schemaVersion": 2,
+        "eventKind": _MATRIX_KINDS[event_type],
+        "eventType": event_type,
+        "severity": severity,
+        "id": f"matrix-{event_type}-{severity}",
+        "createdAt": "2026-10-15T10:00:00Z",
+        "instance": "q",
+        "source": source,
+        "summary": summary,
+    }
+    card = _mod.format_card(event, "00000000")
+    old_body = _mod.format_event(event)
+    expected = event_type == "alert" and severity in {"critical", "error"}
+    assert old_body.startswith("BOT ERROR - ") == expected
+    assert q_admits(old_body) == expected, old_body
+    assert q_admits(card) == expected, card
+
+
+# --- P2: mention safety ---------------------------------------------------------
+
+
+# A systemd template-unit name. Built at runtime: its "@" + ".service" shape is
+# an e-mail address to the repository's publication guard.
+_AT = "@"
+_UNIT = f"whatsoup{_AT}fixture-bot.service"
+
+
+def test_mention_risk_is_neutralised_and_unit_names_survive() -> None:
+    assert _mod.neutralize_mentions(f"{_UNIT} failed") == f"{_UNIT} failed"
+    assert _mod.neutralize_mentions("ping @15550001111") == "ping  at 15550001111"
+    assert _mod.neutralize_mentions("ping @+15550001111") == "ping  at +15550001111"
+    golden = next(g for g in _GOLDENS if g["family"] == "mention_safety")
+    assert f"whatsoup{_AT}fixture-bot exited" in golden["card"]
+    assert not re.search(r"@[0-9+]", golden["card"])
+    body = _mod.format_event(golden["event"])
+    assert f"whatsoup{_AT}fixture-bot exited" in body
+    assert not re.search(r"@[0-9+]", body)
+    event = dict(golden["event"], summary=f"{_UNIT} exited 1; paging @15550001111")
+    card = _mod.format_card(event, "00000000")
+    assert _UNIT in card and "@1555" not in card
+    assert _UNIT in _mod.format_event(event)
+
+
+# --- P4: confined summaries -----------------------------------------------------
+
+
+def test_confined_cause_uses_only_allowlisted_fields() -> None:
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"])
+    event["diagnostics"] = {
+        "provider": "anthropic",
+        "model": "model with spaces /and/a/path",
+        "unit": _UNIT,
+        "port": 9090,
+        "count": "7",
+        "operatorNote": "free text the card must never show",
+    }
+    assert _mod.card_cause(event) == "provider auth failure; provider anthropic; port 9090"
+    card = _mod.format_card(event, "00000000")
+    assert "free text" not in card and "operatorNote" not in card and "spaces" not in card
+    assert "summary_confined" not in card
+
+
+def test_unknown_failure_class_is_dropped() -> None:
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_warning")["event"])
+    assert "unknown" not in _mod.format_card(event, "00000000").lower()
+    event["diagnostics"] = {}
+    assert _mod.card_cause(event) is None
+
+
+# --- A: machine packet ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_packet_round_trip(state, golden: dict) -> None:
+    event = golden["event"]
+    text, ref = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    assert text == golden["card"]
+    packet = _mod.read_notice_packet(state, ref)
+    assert packet is not None
+    assert packet["ref"] == ref and packet["noticeId"] == event["id"]
+    assert packet["card"] == text
+    assert packet["event"] == event
+    body = _mod.format_event(event)
+    assert packet["body"] == body
+    # Every field of today's body is in the packet, by label and value.
+    packet_fields = [(field["label"], field["value"]) for field in packet["bodyFields"]]
+    assert packet_fields[0] == ("headline", body.split("\n", 1)[0])
+    for line in body.split("\n")[1:]:
+        match = re.match(r"^  > (?P<label>[A-Za-z0-9_]+): ?(?P<value>.*)$", line)
+        if match:
+            assert any(
+                label == match.group("label") and value.split("\n", 1)[0] == match.group("value")
+                for label, value in packet_fields
+            ), match.group("label")
+    rebuilt = "\n".join(
+        [packet_fields[0][1]] + [f"  > {label}: {value}" if value else f"  > {label}:" for label, value in packet_fields[1:]]
+    )
+    assert rebuilt == body
+
+
+def test_packet_cli_prints_the_packet_and_exits_one_when_absent(state, tmp_path) -> None:
+    golden = next(g for g in _GOLDENS if g["family"] == "self_restart_completed")
+    _text, ref = _mod.notice_message(golden["event"], notice_kind="fixture", paths=state)
+    env = {**os.environ, "BOT_ERRORS_STATE_DIR": str(tmp_path)}
+    found = subprocess.run(
+        [sys.executable, str(_SCRIPT), "packet", ref], capture_output=True, text=True, env=env, timeout=60
+    )
+    assert found.returncode == 0, found.stderr
+    assert json.loads(found.stdout)["ref"] == ref
+    missing_ref = "0" * 8 if ref != "0" * 8 else "1" * 8
+    absent = subprocess.run(
+        [sys.executable, str(_SCRIPT), "packet", missing_ref], capture_output=True, text=True, env=env, timeout=60
+    )
+    assert absent.returncode == 1
+    assert absent.stdout == ""
+    bad = subprocess.run(
+        [sys.executable, str(_SCRIPT), "packet", "../x"], capture_output=True, text=True, env=env, timeout=60
+    )
+    assert bad.returncode == 2
+
+
+@pytest.mark.parametrize("golden", _GOLDENS, ids=_GOLDEN_IDS)
+def test_format_card_cli_prints_only_the_card_the_group_gets(golden: dict, state, tmp_path) -> None:
+    # --format-card goes to standard output: it must print the scrubbed card the
+    # send path sends, byte for byte, and nothing from the event beyond it.
+    sent, _ref = _mod.notice_message(golden["event"], notice_kind="fixture", paths=state)
+    event_file = tmp_path / "event.json"
+    event_file.write_text(json.dumps(golden["event"]), encoding="utf-8")
+    cli_state = tmp_path / "cli-state"
+    cli_state.mkdir(mode=0o700)
+    printed = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--format-card", str(event_file)],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "BOT_ERRORS_STATE_DIR": str(cli_state)},
+        timeout=60,
+    )
+    assert printed.returncode == 0, printed.stderr
+    assert printed.stdout == sent + "\n"
+    assert list(cli_state.iterdir()) == []
+
+
+def test_ref_collision_never_overwrites_another_notice(state) -> None:
+    golden = next(g for g in _GOLDENS if g["family"] == "dispatcher_error")
+    event = golden["event"]
+    first, second = _mod.notice_ref_candidates(event["id"])[:2]
+    squatter = dict(event, id="another-notice-entirely")
+    squatter_packet = _mod.build_notice_packet(squatter, ref=first, notice_kind="fixture", card="x")
+    _mod.write_notice_packet(state, squatter_packet)
+    before = _mod.notice_packet_path(state, first).read_bytes()
+
+    text, ref = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    assert ref == second
+    assert text.endswith(f"Ref: {second}")
+    assert _mod.notice_packet_path(state, first).read_bytes() == before
+    assert _mod.read_notice_packet(state, first)["noticeId"] == "another-notice-entirely"
+    assert _mod.read_notice_packet(state, second)["noticeId"] == event["id"]
+
+    # A direct write of different content at a taken Ref is refused.
+    with pytest.raises(_mod.NoticeRefExhausted):
+        _mod.write_notice_packet(state, _mod.build_notice_packet(event, ref=first, notice_kind="fixture", card="y"))
+    assert _mod.notice_packet_path(state, first).read_bytes() == before
+
+
+def test_cards_of_one_incident_get_their_own_refs_and_packets(state) -> None:
+    # One incident (one incident_key), two cards with different subjects.
+    first = json.loads(json.dumps(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"]))
+    second = json.loads(json.dumps(first))
+    second["id"] = "9f8e7d6c-5b4a-4c3d-8e2f-1a0b9c8d7e6f"
+    second["createdAt"] = "2026-10-15T15:00:00.000Z"
+    second["summary"] = {"failureClass": "provider_timeout", "length": 31, "correlationDigest": "5d" * 32}
+    assert _mod.incident_key(first) == _mod.incident_key(second)
+
+    text_one, ref_one = _mod.notice_message(first, notice_kind="fixture", paths=state)
+    before = _mod.notice_packet_path(state, ref_one).read_bytes()
+    text_two, ref_two = _mod.notice_message(second, notice_kind="fixture", paths=state)
+    assert ref_one != ref_two
+    assert text_one.split("\n", 1)[0] != text_two.split("\n", 1)[0]
+    assert _mod.notice_packet_path(state, ref_one).read_bytes() == before
+    packet_one = _mod.read_notice_packet(state, ref_one)
+    packet_two = _mod.read_notice_packet(state, ref_two)
+    assert packet_one["noticeId"] == first["id"] and packet_two["noticeId"] == second["id"]
+    assert packet_one["incidentKey"] == packet_two["incidentKey"] == _mod.incident_key(first)
+    assert packet_one["incidentRef"] == packet_two["incidentRef"]
+    assert packet_one["incidentRef"] not in (ref_one, ref_two)
+
+
+def test_dispatcher_made_notices_of_one_incident_get_their_own_refs(state) -> None:
+    now = int(time.time())
+    key = "mac-host-1.local|fixture-bot|whatsapp_device_bond_lost"
+    record = {
+        "status": "awaiting_physical",
+        "openedAt": now - 5 * 86400,
+        "lastSeenAt": now - 4 * 86400,
+        "failureCode": "WA_AUTH_BOND_SERVER_REVOKED",
+        "recoverability": "manual_relink_required",
+        "assetKind": "whatsapp_linked_device",
+    }
+    day_one = _mod.stale_incident_event(key, dict(record), now)
+    day_two = _mod.stale_incident_event(key, dict(record), now + 86400)
+    _text, ref_one = _mod.notice_message(day_one, notice_kind="stale-digest", paths=state)
+    _text, ref_two = _mod.notice_message(day_two, notice_kind="stale-digest", paths=state)
+    assert ref_one != ref_two
+    assert {
+        _mod.read_notice_packet(state, ref)["incidentKey"] for ref in (ref_one, ref_two)
+    } == {key}
+
+
+def test_retried_notice_keeps_its_ref_and_updates_its_packet(state) -> None:
+    event = json.loads(json.dumps(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"]))
+    _text, ref = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    event["delivery"]["attempts"] = 2
+    _text2, ref2 = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    assert ref2 == ref
+    assert _mod.read_notice_packet(state, ref)["event"]["delivery"]["attempts"] == 2
+
+
+def test_unwritable_packet_store_falls_back_to_the_full_body(state) -> None:
+    state["packets"].parent.mkdir(parents=True, exist_ok=True)
+    state["packets"].write_text("not a directory")
+    event = next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"]
+    text, ref = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    assert ref is None
+    assert text == _mod.format_event(event)
+    assert q_admits(text)
+    records = dispatcher_fixtures.dispatch_log_records(state)
+    assert any(record.get("type") == "notice_packet_failed" for record in records)
+
+
+def test_packets_older_than_retention_are_pruned(state) -> None:
+    for family in ("dispatcher_error", "dispatcher_warning"):
+        _mod.notice_message(next(g for g in _GOLDENS if g["family"] == family)["event"], notice_kind="fixture", paths=state)
+    packets = sorted(state["packets"].glob("*.json"))
+    assert len(packets) == 2
+    old = time.time() - _mod.NOTICE_PACKET_RETENTION_SECONDS - 60
+    os.utime(packets[0], (old, old))
+    assert _mod.NOTICE_PACKET_RETENTION_SECONDS >= 30 * 86400
+    assert _mod.prune_notice_packets(state) == 1
+    assert sorted(state["packets"].glob("*.json")) == packets[1:]
+
+
+def test_outbox_send_carries_the_card_and_the_packet_names_the_sent_file(state, monkeypatch) -> None:
+    paths = _mod.setup_dirs()
+    sends: list[str] = []
+    monkeypatch.setattr(_mod, "send_whatsapp", lambda text, *a, **k: sends.append(text))
+    event = json.loads(json.dumps(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"]))
+    event["delivery"] = {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0}
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261015T090000Z.fixture-bot.error.json", event)
+
+    ok, detail = _mod.process_one(path, paths)
+    assert ok and detail == "sent", detail
+    assert len(sends) == 1
+    card = sends[0]
+    assert card.startswith("🔴 *fixture-bot: primary model unusable")
+    ref = card.rsplit("Ref: ", 1)[1]
+    packet = _mod.read_notice_packet(paths, ref)
+    assert packet["noticeKind"] == "outbox"
+    sent_files = [p for p in paths["sent"].iterdir() if p.is_file()]
+    assert [str(p) for p in sent_files] == [packet["outbox"]["sentPath"]]
+    assert packet["outbox"]["file"] == path.name
+
+
+def test_stale_digest_notice_is_a_card_with_a_packet(state, monkeypatch) -> None:
+    paths = _mod.setup_dirs()
+    sends: list[str] = []
+    monkeypatch.setattr(_mod, "send_whatsapp", lambda text, *a, **k: sends.append(text))
+    now = int(time.time())
+    # A stale renotify goes out on its own only when a standing action remains
+    # outside the line-recheck family (relay 16 C2): here a primary-phone check.
+    key = "mac-host-1.local|fixture-bot|daily-health:primary_phone:fixture-bot"
+    state_doc = dispatcher_fixtures.empty_state()
+    state_doc["openIncidents"][key] = {
+        "status": "awaiting_physical",
+        "severity": "critical",
+        "openedAt": now - 3 * 86400,
+        "lastSeenAt": now - 2 * 86400,
+        "lastSummary": "unknown - 40 chars - digest 0a1b2c3d",
+        "failureCode": "WA_AUTH_BOND_SERVER_REVOKED",
+        "recoverability": "manual_relink_required",
+        "assetKind": "whatsapp_linked_device",
+    }
+    paths["incident_state"].write_text(json.dumps(state_doc))
+    paths["incident_state"].chmod(0o600)
+    sent, failed, _err = _mod.sweep_stale_incidents(paths)
+    assert (sent, failed) == (1, 0)
+    card = sends[0]
+    assert "digest" not in card and "|" not in card
+    packet = _mod.read_notice_packet(paths, card.rsplit("Ref: ", 1)[1])
+    assert packet["noticeKind"] == "stale-digest"
+    assert any(field["label"] == "incident_key" and field["value"] == key for field in packet["bodyFields"])

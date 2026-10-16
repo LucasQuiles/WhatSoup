@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readCapture } from '../helpers/bot-errors-notice.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
@@ -337,8 +338,8 @@ describe('bot-errors-runner', () => {
       encoding: 'utf8',
     });
     expect(dispatch.status).toBe(0);
-    expect(readFileSync(capture, 'utf8')).toContain('runner outbox failed');
-    expect(readFileSync(capture, 'utf8')).toContain('writefail_recovered');
+    expect(readCapture(capture)).toContain('runner outbox failed');
+    expect(readCapture(capture)).toContain('writefail_recovered');
     expect(readdirSync(join(tmpRoot, 'sent')).filter((name) => name.endsWith('.sent'))).toHaveLength(1);
   });
 

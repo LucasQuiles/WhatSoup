@@ -1,0 +1,37 @@
+{
+  "family": "provider_fallback_restored",
+  "description": "Reconstructed from one delivered BOT INFO message (2026-10-14/15); host names, private bot names and state paths neutralised. format_event renders this event to exactly legacy_body.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "observation",
+    "eventType": "observation",
+    "severity": "info",
+    "id": "c9e878e2-ae71-4dc2-aece-97b73cb247c6",
+    "createdAt": "2026-10-15T07:11:52.816Z",
+    "instance": "q",
+    "source": "provider_fallback_restored",
+    "summary": {
+      "failureClass": "unknown",
+      "length": 47,
+      "correlationDigest": "da09684200000000000000000000000000000000000000000000000000000000"
+    },
+    "evidence": {
+      "failureClass": "unknown",
+      "length": 105,
+      "correlationDigest": "6be1ba0c00000000000000000000000000000000000000000000000000000000"
+    },
+    "process": {
+      "pid": 1206456
+    },
+    "diagnostics": {
+      "queue": "/srv/bot-errors-fixture/outbox",
+      "dispatchLog": "/srv/bot-errors-fixture/logs/dispatch.jsonl"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "queued"
+    }
+  },
+  "legacy_body": "BOT INFO - q: provider fallback restored [digest da096842]\n  > summary_confined: unknown - 47 chars - digest da096842\n  > severity: info\n  > instance: q\n  > source: provider_fallback_restored\n  > incident_key: unknown|q|provider_fallback_restored\n  > event: c9e878e2-ae71-4dc2-aece-97b73cb247c6\n  > created: 2026-10-15T07:11:52.816Z\n  > dispatcher_attempts: 1\n  > pid: 1206456\n  > queue: /srv/bot-errors-fixture/outbox\n  > dispatch_log: /srv/bot-errors-fixture/logs/dispatch.jsonl\n  > evidence: unknown - 105 chars - digest 6be1ba0c\n  > requested_action: none — informational event; no Q remediation required.",
+  "card": "ℹ️ *Q restarted while on its backup AI provider*\nWhere: q\nYou: No action needed\nRef: fa322993"
+}

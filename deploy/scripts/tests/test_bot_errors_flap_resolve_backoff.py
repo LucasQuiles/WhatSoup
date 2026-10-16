@@ -8,6 +8,11 @@ per cycle (~12.5k failed sends on one host). A failed resolve send now records
 resolveAttempts / lastResolveErrorAt / nextResolveAt, skips the entry until
 nextResolveAt, and after FLAP_RESOLVE_MAX_ATTEMPTS drops the entry with one
 flap_resolve_abandoned record.
+
+Relay 16 C3: the resolve notice is no longer a WhatsApp message of its own. It
+is published by defer_information_notice (packet + one line of the daily
+information summary), so these tests drive that publication step where they
+used to drive the send; the backoff contract is unchanged.
 """
 from __future__ import annotations
 
@@ -123,12 +128,22 @@ def _failing_sender(sent: list):
     return _send
 
 
+def _publish_via(mod, monkeypatch, sender) -> None:
+    """Route the resolve publication through `sender(text)` (raise = publication failed)."""
+
+    def _publish(_paths, _state, event, **_kwargs):
+        sender(mod.format_event(event))
+        return None
+
+    monkeypatch.setattr(mod, "defer_information_notice", _publish)
+
+
 def test_failed_resolve_records_backoff_and_skips_until_due(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "skip", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     sent: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender(sent))
+    _publish_via(mod, monkeypatch, _failing_sender(sent))
 
     assert mod.sweep_flap_storms(paths) == (0, 1)
     assert len(sent) == 1
@@ -155,7 +170,7 @@ def test_backoff_doubles_and_caps(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "cap", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
 
     delays: list = []
     for _ in range(9):
@@ -172,7 +187,7 @@ def test_entry_is_abandoned_after_max_attempts(tmp_path, monkeypatch):
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     sent: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender(sent))
+    _publish_via(mod, monkeypatch, _failing_sender(sent))
 
     total_errors = 0
     for attempt in range(1, 11):
@@ -207,13 +222,13 @@ def test_success_after_failures_pops_the_entry(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "recover", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
     for _ in range(3):
         mod.sweep_flap_storms(paths)
         clock.now = _entry(mod, paths).get("nextResolveAt", clock.now)
 
     delivered: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1
     assert _entry(mod, paths) is None
@@ -228,7 +243,7 @@ def test_entry_without_backoff_fields_resolves_on_first_sweep(tmp_path, monkeypa
     _seed_resolvable_storm(mod, paths)
     assert not {"resolveAttempts", "nextResolveAt", "lastResolveErrorAt"} & set(_entry(mod, paths))
     delivered: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
 
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1
@@ -241,7 +256,7 @@ def test_log_growth_is_bounded_by_attempts_not_cycles(tmp_path, monkeypatch):
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     sent: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender(sent))
+    _publish_via(mod, monkeypatch, _failing_sender(sent))
 
     cycles = 1000  # ~8.3 h of 30 s dispatcher cycles
     for i in range(cycles):
@@ -278,7 +293,7 @@ def test_non_finite_resolve_attempts_is_a_first_attempt(tmp_path, monkeypatch, v
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     _inject_on_next_load(mod, monkeypatch, resolveAttempts=value)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
 
     assert mod.sweep_flap_storms(paths) == (0, 1)
     entry = _entry(mod, paths)
@@ -293,7 +308,7 @@ def test_infinite_next_resolve_at_does_not_skip(tmp_path, monkeypatch):
     _seed_resolvable_storm(mod, paths)
     _inject_on_next_load(mod, monkeypatch, nextResolveAt=float("inf"))
     delivered: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
 
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1
@@ -304,7 +319,7 @@ def test_backoff_resets_when_the_storm_retrips(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "retrip", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
     for _ in range(3):
         mod.sweep_flap_storms(paths)
         clock.now = _entry(mod, paths).get("nextResolveAt", clock.now)
