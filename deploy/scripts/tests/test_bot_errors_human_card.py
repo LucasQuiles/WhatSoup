@@ -388,16 +388,24 @@ def test_card_plain_is_bounded_on_a_long_nested_bracket_input(text: str) -> None
     assert len(plain) <= _mod.CARD_TITLE_LIMIT
 
 
-@pytest.mark.parametrize("text", [
-    ("12" + "(" * 10 + ")" * 10 + "345") * 40,
-    ("12" + "(" * 10 + ")" * 10 + "345@") * 40,
-], ids=["digits", "mention"])
-def test_card_plain_worst_case_reaches_the_pass_cap_and_the_fallback(monkeypatch, text: str) -> None:
+@pytest.mark.parametrize(("text", "fallback_only"), [
+    (("12" + "(" * 10 + ")" * 10 + "345") * 40, False),
+    (("12" + "(" * 10 + ")" * 10 + "345@") * 40, False),
+    (("@" + "(" * 8 + ")" * 8 + "123" + "(" * 8 + ")" * 8 + "456 ") * 30, True),
+], ids=["digits", "mention", "fallback-only"])
+def test_card_plain_worst_case_reaches_the_pass_cap_and_the_fallback(monkeypatch, text: str, fallback_only: bool) -> None:
     # Relay 23 W3: the N1 inputs are all emptied by the first pass. These are
     # one token of 960 characters or more with 10 nested empty bracket pairs
     # between digit groups: each pass removes one level, so the eighth pass
     # still changes the text and the fallback runs.
     assert len(text) >= _mod.CARD_SCRUB_INPUT_FACTOR * _mod.CARD_TITLE_LIMIT
+    if fallback_only:
+        # Relay 25 Y5: exactly 8 levels. The eighth pass rebuilds "@123456", so
+        # only the fallback strip removes the long number and the at-digit.
+        rebuilt = _mod.neutralize_mentions(_mod.redact(text))[: _mod.CARD_SCRUB_INPUT_FACTOR * _mod.CARD_TITLE_LIMIT]
+        for _ in range(_mod.CARD_SCRUB_MAX_PASSES):
+            rebuilt = _mod._card_scrub_once(rebuilt)
+        assert re.search(r"\d{6,}", rebuilt) and _AT_DIGIT.search(rebuilt), rebuilt[:80]
     passes: list[int] = []
     strips: list[int] = []
     scrub_once = _mod._card_scrub_once
