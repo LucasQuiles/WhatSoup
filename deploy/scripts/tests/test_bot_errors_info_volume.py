@@ -1189,6 +1189,52 @@ def test_an_old_page_record_with_no_known_request_never_says_no_action_needed(mo
     assert lines[2].startswith("You: Any request in the earlier alert still stands; the earlier alert stays open"), lines
 
 
+def test_information_after_a_page_names_the_page_ref_on_the_you_line(mod):
+    # Relay 21 S3: the card pointed only to its own Ref, whose packet does not
+    # hold the page's step. It now names the page's Ref, still in four lines.
+    paths = mod.state_paths()
+    event = _recovered_observation("abcdabcd-abcd-4bcd-8bcd-abcdabcdab11")
+    page = {
+        **event,
+        "id": "abcdabcd-abcd-4bcd-8bcd-abcdabcdab12",
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "critical",
+        "summary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+    }
+    _page_card, page_ref = mod.notice_message(page, notice_kind="outbox", paths=paths)
+    assert page_ref
+    sends = _sends(mod)
+    opened = NOW - 3600
+    for request, expected in (
+        ("You: Action needed: do the owner step in the packet",
+         f"You: The earlier request still stands: do the owner step in the packet; the alert stays open; see Ref {page_ref}"),
+        (None, None),
+    ):
+        _write_state(mod, {mod.incident_key(event): {
+            "status": "open",
+            "openedAt": opened,
+            "lastNotifiedAt": opened,
+            "eventId": page["id"],
+            "lastSummary": page["summary"],
+            "ownerRequest": request,
+        }})
+        sends.clear()
+        event = {**event, "id": event["id"][:-2] + ("21" if request else "22")}
+        path = dispatcher_fixtures.write_outbox_event(paths, f"20261016080000.collector.{len(event['id'])}.json", event)
+        assert mod.process_one(path, paths) == (True, "sent")
+        [card] = sends
+        lines = card.split("\n")
+        assert len(lines) <= 4, lines
+        if expected:
+            assert lines[2] == expected
+        else:
+            assert lines[2].startswith("You: No action needed") and lines[2].endswith(f"; see Ref {page_ref}"), lines
+        assert lines[3].startswith("Ref: ") and lines[3] != f"Ref: {page_ref}"
+        packet = mod.read_notice_packet(paths, lines[3][len("Ref: "):])
+        assert packet is not None
+
+
 def test_a_delivered_page_records_its_owner_request_and_a_later_page_without_one_clears_it(mod):
     state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
     page = {

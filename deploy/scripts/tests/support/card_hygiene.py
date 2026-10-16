@@ -3,8 +3,8 @@
 A card carries no paths (absolute, or relative and file-like; checked by
 ``card_path_tokens``, not by the scrubber's regex), event ids,
 digests, pids, incident keys, long numbers, key=value fields, schema words or
-"@" + digit. The Ref value is 8 hex and is checked separately; the Ref line is
-left out of the pattern check.
+"@" + digit. The Ref value is 8 hex and is checked separately; the Ref line and
+a "see Ref" pointer are left out of the pattern check.
 
 ``install_card_hygiene_hook`` wraps a loaded dispatcher module's card renderers
 so that EVERY card a test renders through them is checked, not only the goldens.
@@ -42,8 +42,12 @@ CARD_RENDERERS = (
 )
 
 
+_INLINE_REF = re.compile(r"\bsee Ref [0-9a-f]{8}\b")
+
+
 def card_body_without_ref(card: str) -> str:
-    return "\n".join(line for line in card.split("\n") if not line.startswith("Ref: "))
+    """The card without its Ref line or a "see Ref" pointer (relay 21 S3): both are 8 hex."""
+    return "\n".join(_INLINE_REF.sub("see Ref", line) for line in card.split("\n") if not line.startswith("Ref: "))
 
 
 # Paths are checked token by token, not with the scrubber's regex (relay 21

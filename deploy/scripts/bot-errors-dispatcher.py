@@ -5104,7 +5104,7 @@ def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resol
     never adds "Recovered" or the recovered icon. Relay 20 M3: it is an
     information card (contract B): the information icon, at most four lines,
     and an owner request the page made still stands. The page it follows is
-    named in the packet (resolvesPage).
+    named in the packet (resolvesPage) and, by its Ref, on the You line.
     """
     request = resolved.get("ownerRequest")
     if isinstance(request, str) and request.startswith(CARD_YOU_ACTION_PREFIX):
@@ -5123,6 +5123,10 @@ def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resol
         created = _card_epoch(event.get("createdAt"))
         if isinstance(opened, int) and not isinstance(opened, bool) and created is not None and created >= opened:
             you += f" (open for {_card_duration(created - opened)})"
+    # Relay 21 S3: the page's own Ref holds its step; this card's Ref does not.
+    page_ref = resolved.get("pageRef")
+    if isinstance(page_ref, str) and NOTICE_REF_RE.match(page_ref):
+        you += f"; see Ref {page_ref}"
     return card_text([f"{CARD_ICON_INFO} *{title}*", card_where(event), you, f"Ref: {ref}"])
 
 
@@ -5244,6 +5248,17 @@ def allocate_notice_ref(paths: dict[str, Path], notice_id: str) -> str:
         if existing is not None and existing.get("noticeId") == notice_id:
             return ref
     raise NoticeRefExhausted(f"no free notice Ref for {safe_segment(notice_id)}")
+
+
+def existing_notice_ref(paths: dict[str, Path], notice_id: Any) -> str | None:
+    """The Ref whose packet holds this notice, or None; read only, never allocates."""
+    if not isinstance(notice_id, str) or not notice_id.strip():
+        return None
+    for ref in notice_ref_candidates(notice_id.strip()):
+        packet = read_notice_packet(paths, ref)
+        if packet is not None and packet.get("noticeId") == notice_id.strip():
+            return ref
+    return None
 
 
 def body_fields(body: str) -> list[dict[str, str]]:
@@ -12407,6 +12422,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             "openedAt": int_field(paged, "openedAt") or None,
             "ownerRequest": owner_request,
             "ownerRequestKnown": owner_request_known,
+            "pageRef": existing_notice_ref(paths, paged.get("eventId")),
         }
     elif not suppress_reason and information_summary_defers(event):
         # Relay 16 C3: information only with no earlier page -- packet now,
