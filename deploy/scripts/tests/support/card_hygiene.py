@@ -50,9 +50,20 @@ def card_hygiene_violations(card: str) -> list[str]:
     return [pattern.pattern for pattern in FORBIDDEN_CARD_PATTERNS if pattern.search(body)]
 
 
+class CardHygieneViolation(BaseException):
+    """A card carried a machine field.
+
+    A BaseException on purpose: the dispatcher renders cards inside
+    ``except Exception`` fallbacks (notice_message sends the full body when a
+    card or packet fails), which would swallow an AssertionError and hide the
+    violation behind a fallback. This one reaches the test.
+    """
+
+
 def assert_card_hygiene(card: str) -> None:
     violations = card_hygiene_violations(card)
-    assert not violations, (violations, card)
+    if violations:
+        raise CardHygieneViolation(violations, card)
 
 
 def install_card_hygiene_hook(module: Any, monkeypatch: Any = None) -> list[str]:

@@ -5506,11 +5506,14 @@ def information_summary_lines(entries: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def format_information_summary_card(lines: list[str], ref: str) -> str:
+def format_information_summary_card(lines: list[str], ref: str, dropped: int = 0) -> str:
     shown = lines[:INFO_SUMMARY_MAX_LINES]
     card = [f"{CARD_ICON_INFO} *Information since the last summary: {len(lines)}*", *shown]
     if len(lines) > len(shown):
         card.append(f"{CARD_CLIP} {len(lines) - len(shown)} more in the packet")
+    if dropped > 0:
+        # Relay 19 S5: notices that fell off a full queue are counted, not hidden.
+        card.append(f"{CARD_CLIP} {dropped} older notices not listed: the summary was full")
     card.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
     return card_text(card)
 
@@ -5528,6 +5531,8 @@ def send_daily_information_summary(
     if not pending or day is None:
         return 0
     lines = information_summary_lines(pending)
+    dropped = section.get("droppedFromSummary")
+    dropped = dropped if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0 else 0
     event = {
         **new_event_fields("observation", "info"),
         "id": f"information-summary-{day}-{current}",
@@ -5547,8 +5552,8 @@ def send_daily_information_summary(
         event,
         notice_kind="information-summary",
         paths=paths,
-        extra={"included": pending, "lines": lines},
-        render=lambda summary_ref: format_information_summary_card(lines, summary_ref),
+        extra={"included": pending, "lines": lines, "droppedFromSummary": dropped},
+        render=lambda summary_ref: format_information_summary_card(lines, summary_ref, dropped),
     )
     try:
         confirmed = send_daily_card_text(text)
@@ -5558,6 +5563,7 @@ def send_daily_information_summary(
         append_dispatch_log(paths, {"type": "information_summary_failed", "error": truncate(str(exc), 300)})
         return 0
     section["pending"] = []
+    section.pop("droppedFromSummary", None)
     section["lastSentDay"] = day
     section["lastSentAt"] = current
     section["lastRef"] = ref
@@ -7652,16 +7658,21 @@ def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any]
     return True
 
 
-def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, Any]:
+def stale_autoclose_summary_event(keys: list[str], current: int, count: int | None = None) -> dict[str, Any]:
     """One consolidated digest for a batch of auto-closed non-actionable stale
     incidents (Pattern A safety valve + §10 C5). Recoveries are summarized and
-    consolidated — never 200 individual alerts."""
+    consolidated — never 200 individual alerts.
+
+    ``count`` is the true number closed when ``keys`` is only a sample (the
+    accumulator keeps the last 200 keys; relay 19 S5).
+    """
+    closed = count if isinstance(count, int) and not isinstance(count, bool) and count >= len(keys) else len(keys)
     preview = ", ".join(keys[:10])
-    if len(keys) > 10:
-        preview += f", +{len(keys) - 10} more"
+    if closed > 10:
+        preview += f", +{closed - min(len(keys), 10)} more"
     additions = [
         "stale_autoclose=true",
-        f"closed_count={len(keys)}",
+        f"closed_count={closed}",
         f"closed_keys={preview}",
         "reason=non-actionable incidents AGED OUT past escalate horizon; "
         "removed from open state to bound incident state. recovery UNVERIFIED "
@@ -7676,7 +7687,7 @@ def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, An
         "instance": "dispatcher",
         "source": "stale-autoclose",
         "summary": (
-            f"Auto-closed {len(keys)} non-actionable stale incident(s) — "
+            f"Auto-closed {closed} non-actionable stale incident(s) — "
             "aged out, recovery unverified (reopens if still failing)"
         ),
         "evidence": "\n".join(additions),
@@ -8692,7 +8703,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
         if should_emit_autoclose_digest(accum, current):
             digest_keys = list(accum.get("pendingKeys") or [])
             digest_count = int(accum.get("pendingCount") or len(digest_keys))
-            summary_event = stale_autoclose_summary_event(digest_keys, current)
+            summary_event = stale_autoclose_summary_event(digest_keys, current, count=digest_count)
             summary_event["summary"] = (
                 f"Auto-closed {digest_count} non-actionable stale incident(s)"
             )

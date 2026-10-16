@@ -383,7 +383,7 @@ def test_the_hygiene_hook_checks_every_rendered_card() -> None:
     event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_warning")["event"], summary="pid=4242 x")
     _mod.format_card(event, "00000000")
     assert len(_RENDERED_CARDS) == before + 1
-    with pytest.raises(AssertionError):
+    with pytest.raises(card_hygiene.CardHygieneViolation):
         card_hygiene.assert_card_hygiene("ℹ️ *worker pid 4242 at /tmp*\nRef: 00000000")
 
 

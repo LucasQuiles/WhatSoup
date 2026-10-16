@@ -769,6 +769,44 @@ def test_auto_close_sends_nothing_writes_a_packet_and_counts_in_the_summary(mod)
     assert "Closed 1 old alert that stopped reporting; it reopens if the problem returns" in card
 
 
+def test_auto_close_counts_every_pending_close_not_the_key_sample(mod):
+    # Relay 19 S5: pendingKeys keeps a 200-key sample; pendingCount is the truth.
+    sample = [f"hub-1|worker-{index}|runtime-tool-error:provider-cli:Bash" for index in range(200)]
+    _write_state(mod, {}, staleAutocloseDigest={
+        "pendingKeys": sample, "pendingCount": 350, "firstPendingAt": OLD, "lastDigestAt": 0,
+    })
+    sends = _sends(mod)
+
+    assert mod.sweep_stale_incidents(mod.state_paths()) == (0, 0, None)
+
+    [entry] = _state(mod)["informationSummary"]["pending"]
+    assert entry["count"] == 350
+    packet = mod.read_notice_packet(mod.state_paths(), entry["ref"])
+    assert "closed_count=350" in packet["body"]
+    assert mod.send_daily_information_summary(mod.state_paths(), now=NOW) == 1
+    [card] = sends
+    assert "Closed 350 old alerts that stopped reporting; they reopen if the problem returns" in card
+
+
+def test_summary_shows_the_notices_dropped_when_its_queue_was_full(mod):
+    paths = mod.state_paths()
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", _info_event(
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "self_restart_completed"))
+    assert mod.process_one(path, paths) == (True, "suppressed")
+    state = _state(mod)
+    state["informationSummary"]["droppedFromSummary"] = 7
+    mod.state_paths()["incident_state"].write_text(json.dumps(state), encoding="utf-8")
+    sends = _sends(mod)
+
+    assert mod.send_daily_information_summary(paths, now=NOW) == 1
+
+    [card] = sends
+    assert f"{mod.CARD_CLIP} 7 older notices not listed: the summary was full" in card.split("\n")
+    packet = mod.read_notice_packet(paths, card.rsplit("Ref: ", 1)[1])
+    assert packet["droppedFromSummary"] == 7
+    assert _state(mod)["informationSummary"].get("droppedFromSummary", 0) == 0
+
+
 # --- C3: information-only notices -----------------------------------------------
 
 
