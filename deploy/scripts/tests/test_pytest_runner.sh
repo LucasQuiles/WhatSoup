@@ -225,8 +225,12 @@ SH
     done
   done
 
-  # Valid behavior still reaches the real final marker and all seven Python
-  # suites, including the receipt test outside the curated array.
+  # Valid behavior reaches the final marker and each intended Python suite
+  # exactly once, including the receipt and fleet tests outside the curated array.
+  local expected_trace="$bin/expected-trace"
+  printf '%s\n' "${CURATED_SENTINEL_TEST_FILES[@]}" \
+    deploy/scripts/receipts/tests/test_capture_runtime_receipt.py \
+    deploy/scripts/fleet/tests > "$expected_trace"
   for scenario in valid exact-floor; do
     : > "$trace"
     rc=0
@@ -238,7 +242,7 @@ SH
     ) > "$output" 2>&1 || rc=$?
     [ "$rc" -eq 0 ] || fail "valid coverage $scenario failed with exit $rc"
     grep -q '^ALL_SENTINEL_PLAN1_PLAN2_TESTS_PASS$' "$output" || fail "valid coverage $scenario did not complete the gate"
-    [ "$(wc -l < "$trace" | tr -d ' ')" -eq 7 ] || fail "valid coverage $scenario skipped a Python suite"
+    diff -u "$expected_trace" "$trace" || fail "valid coverage $scenario changed the Python suite sequence"
   done
 }
 

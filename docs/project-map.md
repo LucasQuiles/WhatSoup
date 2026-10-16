@@ -1,7 +1,7 @@
 # Project Map - WhatSoup
 
-Navigation and runtime inventory reviewed: 2026-10-06 at source revision
-`59cc562bc`. Verify the relevant implementation before changing behavior.
+Navigation and runtime inventory reviewed: 2026-10-12 at source revision
+`f87d57bda`. Verify the relevant implementation before changing behavior.
 
 This map orients future documentation and feature-sweep work. It is a source
 tree and docs ownership map, not a replacement for generated work indexes or the source-checked tool and public-surface references.
@@ -36,7 +36,7 @@ no-systemd fallback.
 | `src/memory/` | Memory consolidation scheduler and types. | `docs/explainers/byok-memory-config-migration.md` |
 | `src/fleet/` | HTTP API, health polling, realtime events, ops routes, credentials, update checks, console serving. | `README.md`, `docs/runbook.md`, `docs/public-surface.md` |
 | `console/src/` | Fleet console pages, primitives, design system usage, realtime hooks, API client. | `docs/console-guide.md`, `docs/design-system/README.md` |
-| `deploy/` | systemd units, launchd templates, bot-errors services, hooks, setup scripts. | `docs/runbook.md`, `docs/runbooks/macos-launchd-deployment.md` |
+| `deploy/` | systemd units, launchd templates, bot-errors services, hooks, setup scripts, and `deploy/scripts/fleet/` portable fleet probe/observer/deadman modules. Fleet targets and observer configuration are private explicit inputs; release/continuity activation and rollback are in `docs/runbooks/release-deployment.md`. | `docs/runbook.md`, `docs/runbooks/macos-launchd-deployment.md`, `docs/runbooks/release-deployment.md` |
 | `scripts/` | Guards, doc drift checks, release gates, migrations, maintenance scripts. | `docs/contributing/quality-guardrails-checklist.md`, `docs/architecture/fitness-taxonomy.md` |
 | `tools/` | Auxiliary guard/probe packages. | Per-tool README files. |
 | `tools/qsesh/` | Python session source adapters, extraction, archive, scan, metrics and distillation. | Source contracts in `qsesh/cli.py`, `qsesh/config.py` and package tests; `package.json` owns `test:qsesh` / `lint:qsesh`. Historical planning snapshots are not current execution instructions. |

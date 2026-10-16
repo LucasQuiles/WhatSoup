@@ -650,6 +650,11 @@ export const fitnessRules = [
         // dispatch (default_probes) with launchctl equivalents on darwin —
         // exactly the fallback this rule demands, invisible to its lexical scan.
         'deploy/scripts/lib/target_provenance.py',
+        // The remote probe checks launchd plists first; systemctl is confined to
+        // elif sys.platform == 'linux'. The fleet suite exercises both platforms.
+        'deploy/scripts/fleet/fleet_probe_remote.py',
+        // Synthetic service-manager fixtures, like the existing deploy tests.
+        'deploy/scripts/fleet/tests/',
         'deploy/scripts/tests/',
       ],
     },
