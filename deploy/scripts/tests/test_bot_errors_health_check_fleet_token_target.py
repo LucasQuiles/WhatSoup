@@ -162,3 +162,42 @@ def test_a_proxy_setting_in_the_environment_is_not_used_for_the_instance_health_
 
     assert proxy_seen == [], "the health token went through the proxy"
     assert [entry["authorization"] for entry in local_seen] == ["Bearer synthetic-health-token"]
+
+
+_MALFORMED = "SYNTHmalformedtoken0123\nX"
+
+
+def _assert_no_token_bytes(line: str) -> None:
+    for fragment in ("SYNTH", "malformed", "token0123", "Bearer"):
+        assert fragment not in line, line
+
+
+def test_a_malformed_fleet_token_never_reaches_the_report_line(fleet_profile, tmp_path):
+    # Relay 25 Y3: a token with a line break makes http.client raise
+    # "Invalid header value" holding the full "Bearer <token>" bytes. The line
+    # names the exception type only.
+    profile_for, servers = fleet_profile
+    local, local_seen = _serve("127.0.0.1", _lines_reply)
+    servers.append(local)
+    profile = profile_for(f"http://127.0.0.1:{local.server_address[1]}")
+    Path(profile["fleetApiTokenFile"]).write_text(json.dumps({"active": _MALFORMED, "accept": []}), encoding="utf-8")
+
+    [line] = _mod.fleet_api_inventory(profile)
+
+    assert local_seen == []
+    assert line.startswith("FAIL fleet_api: fleet_api_probe_failed"), line
+    assert line.endswith("error=ValueError"), line
+    _assert_no_token_bytes(line)
+
+
+def test_a_malformed_health_token_never_reaches_the_report_line(fleet_profile, monkeypatch):
+    _profile_for, servers = fleet_profile
+    local, local_seen = _serve("127.0.0.1", lambda _h: (200, {"Content-Type": "application/json"}, b"{}"))
+    servers.append(local)
+    monkeypatch.setenv("WHATSOUP_HEALTH_TOKEN", _MALFORMED)
+
+    line = _mod.probe_health(local.server_address[1], "primary-bot")
+
+    assert local_seen == []
+    assert line == f"FAIL http://127.0.0.1:{local.server_address[1]}/health ValueError", line
+    _assert_no_token_bytes(line)

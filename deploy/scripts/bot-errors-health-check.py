@@ -3962,7 +3962,8 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
     except URLError as exc:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:
-        return f"FAIL {url} {exc}"
+        # Relay 25 Y3: the text of a header error holds the "Bearer <token>" bytes; name the type only.
+        return f"FAIL {url} {type(exc).__name__}"
 
 
 def provider_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -7051,7 +7052,7 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
     except URLError as exc:
         return [f"FAIL fleet_api: fleet_api_unreachable endpoint={endpoint} token_source={token_source} error={exc.reason}"]
     except Exception as exc:  # noqa: BLE001
-        return [f"FAIL fleet_api: fleet_api_probe_failed endpoint={endpoint} token_source={token_source} error={str(exc)[:160]}"]
+        return [f"FAIL fleet_api: fleet_api_probe_failed endpoint={endpoint} token_source={token_source} error={type(exc).__name__}"]
 
 
 def read_instance_config(cfg: Path) -> tuple[dict[str, Any] | None, str | None]:
