@@ -4985,20 +4985,23 @@ def card_is_information_only(event: dict[str, Any], classification: Any) -> bool
 
 
 def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resolved: dict[str, Any]) -> str:
-    """Short resolved card for information that follows a page the group saw."""
-    if "recovered" not in title.lower():
-        title = card_plain(f"Recovered: {title}")
-    lines = [f"{CARD_ICON_RECOVERED} *{title}*", card_where(event)]
-    cause = card_plain(resolved.get("pagedSummary") or "")
-    if cause:
-        lines.append(f"Cause: {cause}")
+    """Short card for information that follows a page the group saw.
+
+    Relay 19 S8: an information observation never closes the incident
+    (mark_incident_sent closes only on a clear), so this card says what
+    happened in the producer's words and that the alert is still open; it
+    never adds "Recovered" or the recovered icon.
+    """
+    lines = [f"{CARD_ICON_NOTICE} *{title}*", card_where(event)]
+    paged = card_plain(resolved.get("pagedSummary") or "")
+    if paged:
+        lines.append(f"Follows: {paged}")
     opened = resolved.get("openedAt")
     created = _card_epoch(event.get("createdAt"))
+    handling = "Handling: the alert stays open until its own clear arrives"
     if isinstance(opened, int) and not isinstance(opened, bool) and created is not None and created >= opened:
-        lines.append(f"Handling: recovered after {_card_duration(created - opened)} open")
-    else:
-        lines.append("Handling: recovered")
-    lines.extend([CARD_YOU_NO_ACTION, f"Ref: {ref}"])
+        handling += f" (open {_card_duration(created - opened)})"
+    lines.extend([handling, CARD_YOU_NO_ACTION, f"Ref: {ref}"])
     return card_text(lines)
 
 

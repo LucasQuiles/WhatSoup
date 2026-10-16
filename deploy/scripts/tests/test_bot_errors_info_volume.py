@@ -943,12 +943,36 @@ def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_on
     assert mod.process_one(path, paths) == (True, "sent")
     [card] = sends
     lines = card.split("\n")
-    assert lines[0] == "✅ *remote writefail ack recovered: mini5*"
-    assert "Cause: BOT ERRORS collector cannot terminal-ack remote writefail: mini5" in lines
+    # Relay 19 S8: the observation does not close the incident, so the card
+    # says what happened (the producer's words) and that it is still open.
+    assert lines[0] == "🟡 *remote writefail ack recovered: mini5*"
+    assert "Follows: BOT ERRORS collector cannot terminal-ack remote writefail: mini5" in lines
+    assert lines[-3] == "Handling: the alert stays open until its own clear arrives"
     assert lines[-2] == "You: No action needed" and lines[-1].startswith("Ref: ")
-    assert not any(line.startswith("ℹ️") for line in lines)
+    assert not any(line.startswith(("ℹ️", "✅")) for line in lines)
+    assert mod.incident_key(event) in _state(mod)["openIncidents"]
     assert not _state(mod).get("informationSummary", {}).get("pending")
     assert [p for p in paths["suppressed"].iterdir() if not p.name.startswith(".")] == []
+
+
+def test_information_after_a_page_never_says_recovered_while_the_incident_stays_open(mod):
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _recovered_observation("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+    event["summary"] = "remote writefail ack retried: mini5"
+    opened = NOW - 2 * 3600
+    _write_state(mod, {mod.incident_key(event): {
+        "status": "open",
+        "openedAt": opened,
+        "lastNotifiedAt": opened,
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+    }})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.retried.json", event)
+    assert mod.process_one(path, paths) == (True, "sent")
+    [card] = sends
+    assert "recovered" not in card.lower()
+    assert card.split("\n", 1)[0] == "🟡 *remote writefail ack retried: mini5*"
+    assert mod.incident_key(event) in _state(mod)["openIncidents"], "an observation never closes the incident"
 
 
 def test_information_with_no_earlier_page_still_goes_to_the_daily_summary(mod):
