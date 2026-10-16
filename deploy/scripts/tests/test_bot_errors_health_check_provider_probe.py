@@ -409,7 +409,9 @@ class _FakeProc:
         self.stdout = stdout
 
 
-def _arm_presence(monkeypatch, *, ocw_env_present, keychain_returncode, keychain_stdout, keyfile_present=False):
+def _arm_presence(
+    monkeypatch, *, ocw_env_present, keychain_returncode, keychain_stdout, keyfile_present=False, opencode_auth=None
+):
     keychain_calls = []
     keyfile_checks = []
     monkeypatch.setattr(_mod, "HOST_PLATFORM", "darwin")
@@ -417,6 +419,9 @@ def _arm_presence(monkeypatch, *, ocw_env_present, keychain_returncode, keychain
     monkeypatch.setattr(_mod, "dry_credential_status", lambda _service: None)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(_mod, "secret_file_has_service_key", lambda _service, _env_key: ocw_env_present)
+    # The host's own OpenCode login file must not decide the result.
+    monkeypatch.setattr(_mod, "opencode_auth_credential_value", lambda _service, _source_env=None: opencode_auth)
+
     def fake_keyfile(service, source_env=None):
         assert source_env is None
         keyfile_checks.append(service)
