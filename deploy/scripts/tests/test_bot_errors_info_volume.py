@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import calendar
 import functools
+import http.server
 import importlib.util
 import json
 import os
 import re
 import sys
+import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -572,6 +575,130 @@ def test_live_fleet_api_is_not_read_under_a_test_runner(mod, monkeypatch):
     monkeypatch.undo()  # the real reader
     assert os.environ.get("PYTEST_CURRENT_TEST")
     assert mod.read_fleet_lines_for_recheck().lines is None
+
+
+# --- Relay 22 A2: the fleet token goes only to the local fleet API -----------------
+
+_FLEET_ENV = ("BOT_ERRORS_FLEET_API_URL", "BOT_ERRORS_FLEET_TOKEN_FILE", "BOT_ERRORS_FLEET_API_PORT", "FLEET_BIND_ADDRESS")
+_PROXY_ENV = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY")
+
+
+def _serve(host: str, reply):
+    """A one-thread HTTP server on `host` that records each request's path and token header."""
+    seen: list[dict] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - the stdlib handler name
+            seen.append({"path": self.path, "authorization": self.headers.get("Authorization")})
+            status, headers, body = reply(self)
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer((host, 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def _lines_reply(_handler):
+    return 200, {"Content-Type": "application/json"}, json.dumps({"lines": [LINES["linked-line"]]}).encode()
+
+
+@pytest.fixture
+def fleet_profile(tmp_path, monkeypatch):
+    for key in _FLEET_ENV + _PROXY_ENV:
+        monkeypatch.delenv(key, raising=False)
+    token = tmp_path / "fleet-tokens.json"
+    token.write_text(json.dumps({"active": "synthetic-fleet-token"}), encoding="utf-8")
+    token.chmod(0o600)
+    servers: list = []
+    yield lambda url: {"expectFleetApi": True, "fleetApiTokenFile": str(token), "fleetApiUrl": url}, servers
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_redirect_to_another_host_sends_no_token_and_gives_a_reason(mod, fleet_profile):
+    profile_for, servers = fleet_profile
+    other, other_seen = _serve("127.0.0.2", _lines_reply)
+    target = f"http://127.0.0.2:{other.server_address[1]}/api/lines"
+    local, local_seen = _serve("127.0.0.1", lambda _h: (302, {"Location": target}, b""))
+    servers.extend([other, local])
+
+    read = mod.read_fleet_lines(profile_for(f"http://127.0.0.1:{local.server_address[1]}"), timeout=5)
+
+    assert other_seen == [], "the redirect was followed and the token went with it"
+    assert [entry["authorization"] for entry in local_seen] == ["Bearer synthetic-fleet-token"]
+    assert read.lines is None and read.error == "fleet_api_redirect_refused"
+
+
+def test_a_proxy_setting_in_the_environment_is_not_used(mod, fleet_profile, monkeypatch):
+    profile_for, servers = fleet_profile
+    proxy, proxy_seen = _serve("127.0.0.1", _lines_reply)
+    local, local_seen = _serve("127.0.0.1", _lines_reply)
+    servers.extend([proxy, local])
+    for key in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(key, f"http://127.0.0.1:{proxy.server_address[1]}")
+    # urlopen caches one opener per process and reads the proxy settings when it
+    # builds it; drop the cache so this case does not depend on test order.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+
+    read = mod.read_fleet_lines(profile_for(f"http://127.0.0.1:{local.server_address[1]}"), timeout=5)
+
+    assert proxy_seen == [], "the request and its token went through the proxy"
+    assert [entry["path"] for entry in local_seen] == ["/api/lines"]
+    assert read.error is None and set(read.lines or {}) == {"linked-line"}
+
+
+@pytest.mark.parametrize("via", ["environment", "profile"])
+@pytest.mark.parametrize("url", ["http://192.0.2.55:9099", "https://127.0.0.1:9099", "http://fleet.example:9099"])
+def test_an_override_to_another_host_is_refused_with_no_request(mod, fleet_profile, monkeypatch, via, url):
+    profile_for, _servers = fleet_profile
+    profile = profile_for(url)
+    if via == "environment":
+        profile.pop("fleetApiUrl")
+        monkeypatch.setenv("BOT_ERRORS_FLEET_API_URL", url)
+    requests: list = []
+
+    read = mod.read_fleet_lines(profile, timeout=5, opener=lambda request, **k: requests.append(request))
+
+    assert requests == [], "a request left for a host the token must never reach"
+    assert read.lines is None and read.error == "fleet_api_host_refused"
+
+
+def test_the_default_bind_host_is_still_read_with_the_token(mod, fleet_profile):
+    profile_for, _servers = fleet_profile
+    profile = {**profile_for(""), "fleetApi": {"bindAddress": "192.0.2.10", "port": 9098}}
+    profile.pop("fleetApiUrl")
+    requests: list = []
+
+    class _Reply:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, _limit):
+            return json.dumps([LINES["linked-line"]]).encode()
+
+    def _opener(request, **_k):
+        requests.append(request)
+        return _Reply()
+
+    read = mod.read_fleet_lines(profile, timeout=5, opener=_opener)
+
+    assert [request.full_url for request in requests] == ["http://192.0.2.10:9098/api/lines"]
+    assert requests[0].get_header("Authorization") == "Bearer synthetic-fleet-token"
+    assert set(read.lines or {}) == {"linked-line"}
 
 
 def test_failed_line_card_is_retried_later_the_same_day(mod):

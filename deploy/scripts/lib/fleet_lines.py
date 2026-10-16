@@ -20,6 +20,7 @@ incident's own health reading (relay 19 B1), and fails closed without it.
 from __future__ import annotations
 
 import errno
+import ipaddress
 import json
 import os
 import socket
@@ -27,7 +28,9 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 try:  # imported as ``lib.fleet_lines`` by the deploy scripts
     from lib.fleet_config import (
@@ -121,6 +124,48 @@ def fleet_api_url(profile: dict[str, Any]) -> str:
         or fleet_api_default_url(profile)
     )
     return fleet_api_endpoint(raw_url)
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
+    """True unless ``url`` is plain http on a loopback host or the default bind's host.
+
+    Relay 22 A2: the URL can come from an environment or profile override, and
+    the fleet token goes with the request, so any other host (or scheme, or a
+    URL carrying user info) is refused before a request is built.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        has_user_info = parts.username is not None or parts.password is not None
+        parts.port  # noqa: B018 - a bad port raises ValueError here
+    except ValueError:
+        return True
+    if parts.scheme != "http" or not host or has_user_info:
+        return True
+    if _is_loopback_host(host):
+        return False
+    return host != urlsplit(fleet_api_default_url(profile)).hostname
+
+
+class _RedirectRefused(HTTPRedirectHandler):
+    """Never follow a redirect: the Authorization header would go with it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - stdlib signature
+        return None
+
+
+def fleet_api_opener() -> Callable[..., Any]:
+    """An opener with no proxy (environment settings are ignored) and no redirect following."""
+    return build_opener(ProxyHandler({}), _RedirectRefused()).open
 
 
 def fleet_token_path(profile: dict[str, Any]) -> str:
@@ -257,15 +302,20 @@ def read_fleet_lines(
     profile: dict[str, Any],
     *,
     timeout: float,
-    opener: Callable[..., Any] = urlopen,
+    opener: Callable[..., Any] | None = None,
 ) -> FleetLinesRead:
     """GET the local /api/lines with the fleet token; rows keyed by line name.
 
     Every failure is a reason, never a raise: a recheck that cannot read the
-    list must say "could not check", not stop a cycle.
+    list must say "could not check", not stop a cycle. The token goes only to
+    the local fleet API (relay 22 A2): no proxy, no redirect followed, and no
+    request at all to another host.
     """
     if not profile_flag(profile, "expectFleetApi", False):
         return FleetLinesRead(None, "fleet_api_not_expected_on_this_host")
+    url = fleet_api_url(profile)
+    if fleet_api_token_target_refused(url, profile):
+        return FleetLinesRead(None, "fleet_api_host_refused")
     try:
         raw, read_error = read_fleet_token_text(Path(fleet_token_path(profile)).expanduser())
         if read_error is not None:
@@ -273,10 +323,15 @@ def read_fleet_lines(
         token, _accept_count, token_error = parse_fleet_token(json.loads(raw or ""))
         if token_error is not None:
             return FleetLinesRead(None, token_error)
-        request = Request(fleet_api_url(profile), method="GET", headers={"Authorization": f"Bearer {token}"})
-        with opener(request, timeout=timeout) as response:
+        request = Request(url, method="GET", headers={"Authorization": f"Bearer {token}"})
+        with (opener or fleet_api_opener())(request, timeout=timeout) as response:
             status = int(getattr(response, "status", 200))
             body = response.read(FLEET_LINES_MAX_BYTES).decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        exc.close()
+        if 300 <= exc.code < 400:
+            return FleetLinesRead(None, "fleet_api_redirect_refused")
+        return FleetLinesRead(None, f"fleet_api_unreadable:{type(exc).__name__}")
     except Exception as exc:  # noqa: BLE001 - any failure is "could not check"
         return FleetLinesRead(None, f"fleet_api_unreadable:{type(exc).__name__}")
     if status < 200 or status >= 300:
