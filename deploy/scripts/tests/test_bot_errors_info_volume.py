@@ -110,6 +110,28 @@ def mod(tmp_path, monkeypatch):
     return loaded
 
 
+class _PinnedTime:
+    """The dispatcher's ``time`` module with ``time()`` fixed at one instant (relay 25 Y2)."""
+
+    def __init__(self, now: int) -> None:
+        self._now = now
+
+    def time(self) -> float:
+        return float(self._now)
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)
+
+
+@pytest.fixture
+def pinned_clock(mod, monkeypatch):
+    # Relay 25 Y2: one clock per test. The dispatcher reads time.time() where it takes no ``now``
+    # (sweep_stale_incidents), so a test that sends a daily card at NOW pins that clock to NOW
+    # too and builds its records from NOW. With the real clock such a test fails from NOW + 3 days.
+    monkeypatch.setattr(mod, "time", _PinnedTime(NOW))
+    return NOW
+
+
 def _sends(mod) -> list[str]:
     sends: list[str] = []
     mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
@@ -199,12 +221,12 @@ def test_linked_line_with_a_send_after_the_incident_is_retired_on_recheck_withou
     "health other-line: 200 status=healthy wa_connected=true state=connected auth_bond_status=present "
     "auth_bond_creds_exists=true auth_bond_creds_size=512 lifecycle_process_uptime_seconds=99999 reconnect_attempts=0",
 ])
-def test_linked_line_without_recovery_proof_stays_open_and_listed(mod, evidence):
+def test_linked_line_without_recovery_proof_stays_open_and_listed(mod, evidence, pinned_clock):
     # Relay 19 B1: "linked, confirmed" alone is not the clear requirement of a
     # protected bond-loss incident (server-revoked bond, manual relink). Only
     # the recovery path's proof (a send after the incident, or a sustained
     # stable connection) retires it; otherwise it stays open and on the card.
-    now = int(time.time())
+    now = NOW
     key = "hub-1|linked-line|whatsapp_device_bond_lost"
     record = _physical(now - 5 * 86400, now - 4 * 86400)
     if evidence is not None:
@@ -233,8 +255,8 @@ def test_a_fail_health_line_is_never_a_recovery_proof(mod):
     assert mod.line_recovery_proof({**record, "lastEvidence": f"FAIL {probe}"}, "linked-line") is None
 
 
-def test_linked_line_with_a_sustained_stable_connection_is_retired(mod):
-    now = int(time.time())
+def test_linked_line_with_a_sustained_stable_connection_is_retired(mod, pinned_clock):
+    now = NOW
     key = "hub-1|linked-line|whatsapp_device_bond_lost"
     record = _physical(now - 5 * 86400, now - 4 * 86400)
     record["lastEvidence"] = _healthy_probe("linked-line", uptime=mod.SUSTAINED_STABILITY_MIN_UPTIME_SECONDS)
@@ -247,8 +269,8 @@ def test_linked_line_with_a_sustained_stable_connection_is_retired(mod):
     assert state["lineRecheckRetired"][key]["disposition"] == "cleared on recheck"
 
 
-def test_roster_retired_line_closes_as_line_retired_and_never_reaches_the_card(mod):
-    now = int(time.time())
+def test_roster_retired_line_closes_as_line_retired_and_never_reaches_the_card(mod, pinned_clock):
+    now = NOW
     key = "host-2|retired-line|whatsapp_device_bond_lost"
     _write_state(mod, {key: _physical(now - 9 * 86400, now - 8 * 86400)})
     sends = _sends(mod)
@@ -268,7 +290,7 @@ def test_roster_retired_line_closes_as_line_retired_and_never_reaches_the_card(m
     assert sends == []
 
 
-def test_same_name_retired_on_one_host_is_never_retired_where_ambiguous_or_always_on(mod):
+def test_same_name_retired_on_one_host_is_never_retired_where_ambiguous_or_always_on(mod, pinned_clock):
     # "shared" is blocked on host-2 but always_on on hub-1.
     _write_state(mod, {
         "host-2|shared|instance_logged_out": _physical(OLD - 86400, OLD),
@@ -308,7 +330,7 @@ def test_unlinked_line_is_deferred_and_listed_once_in_the_daily_card(mod):
     assert len(mod.fleet_reads) == 1
 
 
-def test_daily_card_merges_one_bot_and_separates_could_not_check(mod):
+def test_daily_card_merges_one_bot_and_separates_could_not_check(mod, pinned_clock):
     _write_state(mod, {
         "hub-1|logged-line|instance_logged_out": _physical(OLD - 2 * 86400, OLD),
         "hub-1|logged-line|whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
@@ -408,7 +430,7 @@ def test_two_producer_keys_for_one_linked_line_are_each_rechecked_and_close_with
     assert len(mod.fleet_reads) == 1, "one live line read per sweep, not per key"
 
 
-def test_two_producer_keys_for_a_line_on_another_host_are_one_could_not_check_line(mod):
+def test_two_producer_keys_for_a_line_on_another_host_are_one_could_not_check_line(mod, pinned_clock):
     incidents = _two_producer_pair("host-2", "far-pair-line")
     _write_state(mod, incidents)
     sends = _sends(mod)
@@ -434,7 +456,7 @@ def test_two_producer_keys_for_a_line_on_another_host_are_one_could_not_check_li
     assert group["reasons"] == ["line is on another host"] * 2
 
 
-def test_line_card_packet_keeps_every_field_of_each_members_old_notice(mod):
+def test_line_card_packet_keeps_every_field_of_each_members_old_notice(mod, pinned_clock):
     # Relay 19 B5: one grouped card replaces a per-incident notice per member;
     # its packet keeps, per member, the record and the old notice's full body.
     incidents = _two_producer_pair("host-2", "far-pair-line")
@@ -471,7 +493,7 @@ def test_line_card_packet_keeps_every_field_of_each_members_old_notice(mod):
         assert record["clearRequirement"][:60] in body
 
 
-def test_a_member_whose_recheck_raises_keeps_its_record_and_old_notice(mod, monkeypatch):
+def test_a_member_whose_recheck_raises_keeps_its_record_and_old_notice(mod, monkeypatch, pinned_clock):
     # Relay 20 M2: the could-not-check member of a recheck that raised keeps
     # the record and the old notice like every other member (contract A).
     key = "hub-1|inferred-line|instance_logged_out"
@@ -500,7 +522,7 @@ def test_a_member_whose_recheck_raises_keeps_its_record_and_old_notice(mod, monk
     assert member["notice"]["bodyFields"]
 
 
-def test_a_member_whose_old_notice_cannot_be_built_still_keeps_its_record(mod, monkeypatch):
+def test_a_member_whose_old_notice_cannot_be_built_still_keeps_its_record(mod, monkeypatch, pinned_clock):
     # Relay 20 M2: each of record and notice is built in its own guard, so a
     # second error never stops the card or drops the other field.
     key = "hub-1|inferred-line|instance_logged_out"
@@ -524,7 +546,7 @@ def test_a_member_whose_old_notice_cannot_be_built_still_keeps_its_record(mod, m
     assert "line_card_member_field_failed" in _log_types(mod)
 
 
-def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypatch):
+def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypatch, pinned_clock):
     monkeypatch.setattr(mod, "read_fleet_lines_for_recheck", lambda: mod.FleetLinesRead(None, "fleet_api_status_503"))
     _write_state(mod, {"hub-1|linked-line|instance_logged_out": _physical(OLD - 86400, OLD)})
     sends = _sends(mod)
@@ -537,7 +559,7 @@ def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypa
     assert "linked-line (hub-1) since " in card and "(could not check the line)" in card
 
 
-def test_could_not_check_lines_with_no_requested_action_need_no_one(mod):
+def test_could_not_check_lines_with_no_requested_action_need_no_one(mod, pinned_clock):
     # "No action needed" only when no listed line asks for one (relay 19 B2).
     _write_state(mod, {
         "host-2|far-line|instance_logged_out": {"status": "stale", "openedAt": OLD - 86400, "lastSeenAt": OLD},
@@ -553,7 +575,7 @@ def test_could_not_check_lines_with_no_requested_action_need_no_one(mod):
     assert lines[2:4] == ["Handling: Q to check these lines", "You: No action needed"]
 
 
-def test_remote_bond_loss_awaiting_relink_asks_the_owner_beside_unchecked_lines(mod):
+def test_remote_bond_loss_awaiting_relink_asks_the_owner_beside_unchecked_lines(mod, pinned_clock):
     _write_state(mod, {
         "host-2|far-line|whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
         "hub-1|inferred-line|instance_logged_out": {"status": "stale", "openedAt": OLD - 86400, "lastSeenAt": OLD},
@@ -701,7 +723,7 @@ def test_the_default_bind_host_is_still_read_with_the_token(mod, fleet_profile):
     assert set(read.lines or {}) == {"linked-line"}
 
 
-def test_failed_line_card_is_retried_later_the_same_day(mod):
+def test_failed_line_card_is_retried_later_the_same_day(mod, pinned_clock):
     _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
 
     def _boom(text, *a, **k):
@@ -839,7 +861,7 @@ def test_auto_close_summary_waits_for_its_packet(mod):
 # --- Relay 19 S4: one bad record or roster never stops the rest ------------------
 
 
-def test_a_bad_member_record_is_could_not_check_and_the_card_still_goes_out(mod):
+def test_a_bad_member_record_is_could_not_check_and_the_card_still_goes_out(mod, pinned_clock):
     _write_state(mod, {
         "hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD),
         # An opened time no clock can print (time.gmtime overflows); a float
@@ -949,7 +971,7 @@ def _ambiguous_sends(mod, phase: str) -> list[str]:
     return tries
 
 
-def test_ambiguous_line_card_send_is_not_resent_that_day(mod):
+def test_ambiguous_line_card_send_is_not_resent_that_day(mod, pinned_clock):
     _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
     tries = _ambiguous_sends(mod, mod.JSON_RPC_POST_REQUEST_PHASE)
 
@@ -961,7 +983,7 @@ def test_ambiguous_line_card_send_is_not_resent_that_day(mod):
     assert len(tries) == 1
 
 
-def test_ambiguous_summary_send_is_not_resent_that_day(mod):
+def test_ambiguous_summary_send_is_not_resent_that_day(mod, pinned_clock):
     paths = mod.state_paths()
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", _info_event(
         "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "self_restart_completed"))
@@ -976,7 +998,7 @@ def test_ambiguous_summary_send_is_not_resent_that_day(mod):
     assert len(tries) == 1
 
 
-def test_a_send_that_failed_before_the_request_is_still_retried(mod):
+def test_a_send_that_failed_before_the_request_is_still_retried(mod, pinned_clock):
     _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
     tries = _ambiguous_sends(mod, mod.JSON_RPC_HANDSHAKE_PHASE)
 
@@ -1016,7 +1038,7 @@ def _defer_info_notice(mod, event_id: str) -> None:
 
 
 @pytest.mark.parametrize("card", ["informationSummary", "lineCheckCard"])
-def test_a_reply_without_acceptance_proof_is_unconfirmed_and_the_next_card_names_its_ref(mod, monkeypatch, card):
+def test_a_reply_without_acceptance_proof_is_unconfirmed_and_the_next_card_names_its_ref(mod, monkeypatch, card, pinned_clock):
     paths = mod.state_paths()
     send = mod.send_daily_information_summary if card == "informationSummary" else mod.send_daily_line_card
     _write_state(mod, {"hub-1|logged-line|instance_logged_out": _physical(OLD - 86400, OLD)})
@@ -1042,7 +1064,7 @@ def test_a_reply_without_acceptance_proof_is_unconfirmed_and_the_next_card_names
     assert _state(mod)[card]["lastSendUnconfirmed"] is False
 
 
-def test_a_named_rejection_of_the_summary_keeps_its_notices_for_a_retry(mod, monkeypatch):
+def test_a_named_rejection_of_the_summary_keeps_its_notices_for_a_retry(mod, monkeypatch, pinned_clock):
     paths = mod.state_paths()
     _defer_info_notice(mod, "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
     tries = _rpc_replies(mod, monkeypatch, [{"sent": False}, ACCEPTED])
@@ -1103,8 +1125,8 @@ def test_every_id_built_from_a_long_key_tells_the_two_keys_apart(mod, monkeypatc
 # --- C1: auto-close -----------------------------------------------------------
 
 
-def test_auto_close_sends_nothing_writes_a_packet_and_counts_in_the_summary(mod):
-    now = int(time.time())
+def test_auto_close_sends_nothing_writes_a_packet_and_counts_in_the_summary(mod, pinned_clock):
+    now = NOW
     key = "hub-1|worker|runtime-tool-error:provider-cli:Bash"
     _write_state(mod, {key: {
         "status": "stale",
@@ -1130,7 +1152,7 @@ def test_auto_close_sends_nothing_writes_a_packet_and_counts_in_the_summary(mod)
     assert "Closed 1 old alert that stopped reporting; it reopens if the problem returns" in card
 
 
-def test_auto_close_counts_every_pending_close_not_the_key_sample(mod):
+def test_auto_close_counts_every_pending_close_not_the_key_sample(mod, pinned_clock):
     # Relay 19 S5: pendingKeys keeps a 200-key sample; pendingCount is the truth.
     sample = [f"hub-1|worker-{index}|runtime-tool-error:provider-cli:Bash" for index in range(200)]
     _write_state(mod, {}, staleAutocloseDigest={
@@ -1149,7 +1171,7 @@ def test_auto_close_counts_every_pending_close_not_the_key_sample(mod):
     assert "Closed 350 old alerts that stopped reporting; they reopen if the problem returns" in card
 
 
-def test_summary_shows_the_notices_dropped_when_its_queue_was_full(mod):
+def test_summary_shows_the_notices_dropped_when_its_queue_was_full(mod, pinned_clock):
     paths = mod.state_paths()
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", _info_event(
         "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "self_restart_completed"))
@@ -1188,7 +1210,7 @@ def _info_event(event_id: str, source: str, *, severity: str = "info") -> dict:
     }
 
 
-def test_information_events_between_summaries_become_one_summary_at_13z(mod):
+def test_information_events_between_summaries_become_one_summary_at_13z(mod, pinned_clock):
     paths = mod.state_paths()
     sends = _sends(mod)
     events = [
@@ -1250,7 +1272,7 @@ def test_warning_and_action_notices_keep_their_own_card(mod):
     assert "informationSummary" not in _state(mod) or not _state(mod)["informationSummary"].get("pending")
 
 
-def test_failed_summary_keeps_its_notices_for_a_retry(mod):
+def test_failed_summary_keeps_its_notices_for_a_retry(mod, pinned_clock):
     paths = mod.state_paths()
     path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.q.info.json", _info_event(
         "77777777-7777-4777-8777-777777777777", "self_restart_completed"))
