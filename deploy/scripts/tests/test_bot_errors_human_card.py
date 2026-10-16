@@ -389,6 +389,43 @@ def test_card_plain_is_bounded_on_a_long_nested_bracket_input(text: str) -> None
 
 
 @pytest.mark.parametrize("text", [
+    ("12" + "(" * 10 + ")" * 10 + "345") * 40,
+    ("12" + "(" * 10 + ")" * 10 + "345@") * 40,
+], ids=["digits", "mention"])
+def test_card_plain_worst_case_reaches_the_pass_cap_and_the_fallback(monkeypatch, text: str) -> None:
+    # Relay 23 W3: the N1 inputs are all emptied by the first pass. These are
+    # one token of 960 characters or more with 10 nested empty bracket pairs
+    # between digit groups: each pass removes one level, so the eighth pass
+    # still changes the text and the fallback runs.
+    assert len(text) >= _mod.CARD_SCRUB_INPUT_FACTOR * _mod.CARD_TITLE_LIMIT
+    passes: list[int] = []
+    strips: list[int] = []
+    scrub_once = _mod._card_scrub_once
+    strip_long = _mod._card_strip_long_numbers
+
+    def _count_pass(value: str) -> str:
+        passes.append(1)
+        return scrub_once(value)
+
+    def _count_strip(value: str) -> str:
+        strips.append(1)
+        return strip_long(value)
+
+    monkeypatch.setattr(_mod, "_card_scrub_once", _count_pass)
+    monkeypatch.setattr(_mod, "_card_strip_long_numbers", _count_strip)
+    started = time.perf_counter()
+    plain = _mod.card_plain(text)
+    elapsed = time.perf_counter() - started
+    print(f"card_plain worst case: {elapsed * 1000:.1f} ms")
+    assert len(passes) == _mod.CARD_SCRUB_MAX_PASSES
+    assert len(strips) == _mod.CARD_SCRUB_MAX_PASSES + 1, "the fallback strip ran"
+    assert elapsed < 1.0, elapsed
+    assert not re.search(r"\d{6,}", plain), plain
+    assert not _AT_DIGIT.search(plain), plain
+    assert len(plain) <= _mod.CARD_TITLE_LIMIT
+
+
+@pytest.mark.parametrize("text", [
     "chat 1,234,567,890,123 stalled",
     "chat 1 234 567 890 123 stalled",
     "phone +1 555 000 1111 linked",
