@@ -4696,11 +4696,22 @@ CARD_IMPACT_UNCONFIRMED = "Impact not yet confirmed"
 # Card-only scrubbing. The card never carries paths, event ids, digests,
 # confined renderings, pids, long numbers, key=value fields or incident keys;
 # those stay in the packet (relay 16 B, relay 19 B4).
+# A path segment that looks like a file or folder: one with a dot extension
+# ("agent.json", ".env") or a common folder word. Relay 20 M1.
+_CARD_FILE_SEGMENT = (
+    r"(?:[\w-]*\.[A-Za-z][\w.-]*"
+    r"|(?:logs?|config|conf|src|lib|tmp|temp|var|etc|bin|data|state|deploy|scripts?|tests?|build|dist"
+    r"|home|cache|packets|outbox|node_modules)(?![\w.-]))"
+)
 _CARD_PATH_RE = re.compile(
-    # An absolute or home path of one segment or more ("/tmp", "~/a/b"), or a
-    # relative path of three segments or more ("src/lib/x.ts").
+    # An absolute or home path of one segment or more ("/tmp", "~/a/b"), a
+    # relative path of three segments or more ("src/lib/x.ts"), or a relative
+    # path of two segments with a file-like one ("logs/error.log",
+    # "config/agent.json"). Plain words joined by a slash ("and/or",
+    # "read/write", "3/4") stay.
     r"(?<![\w.@-])(?:~[\w.@-]*)?/[\w.@-]+(?:/[\w.@-]*)*"
     r"|(?<![\w./-])[\w.-]+(?:/[\w.-]+){2,}/?"
+    rf"|(?<![\w./-])(?:{_CARD_FILE_SEGMENT}/[\w.-]+|[\w.-]+/{_CARD_FILE_SEGMENT})/?"
 )
 _CARD_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _CARD_ULID_RE = re.compile(r"\b[0-9A-HJKMNP-TV-Z]{26}\b")
@@ -4772,7 +4783,9 @@ def card_bot_name(event: dict[str, Any]) -> str:
 
 def card_where(event: dict[str, Any]) -> str:
     machine = card_plain(event.get("machine") or event.get("machineName") or "", 60)
-    instance = safe_alert_label(event.get("instance"))
+    # Relay 20 M1: the instance goes through card_plain like the machine, so a
+    # long digit run in a label never reaches the Where line.
+    instance = card_plain(safe_alert_label(event.get("instance")) or "", 60)
     instance = instance if instance and instance.lower() != "unknown" else ""
     has_machine = bool(machine) and machine.lower() != "unknown"
     if has_machine and instance:

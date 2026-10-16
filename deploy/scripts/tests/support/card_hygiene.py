@@ -1,8 +1,9 @@
 """Card hygiene for every BOT ERRORS card a test renders (relay 16 B, relay 19 B3/B4; not deployed).
 
-A card carries no paths, event ids, digests, pids, incident keys, long numbers,
-key=value fields, schema words or "@" + digit. The Ref value is 8 hex and is
-checked separately; the Ref line is left out of the pattern check.
+A card carries no paths (absolute, or relative and file-like), event ids,
+digests, pids, incident keys, long numbers, key=value fields, schema words or
+"@" + digit. The Ref value is 8 hex and is checked separately; the Ref line is
+left out of the pattern check.
 
 ``install_card_hygiene_hook`` wraps a loaded dispatcher module's card renderers
 so that EVERY card a test renders through them is checked, not only the goldens.
@@ -15,8 +16,20 @@ import functools
 import re
 from typing import Any
 
+# A path segment that looks like a file or folder: a dot extension or a common
+# folder word (relay 20 M1). Plain words joined by a slash ("and/or", "3/4") pass.
+_FILE_SEGMENT = (
+    r"(?:[\w-]*\.[A-Za-z][\w.-]*"
+    r"|(?:logs?|config|conf|src|lib|tmp|temp|var|etc|bin|data|state|deploy|scripts?|tests?|build|dist"
+    r"|home|cache|packets|outbox|node_modules)(?![\w.-]))"
+)
+
 FORBIDDEN_CARD_PATTERNS = [
-    re.compile(r"(?:^|[\s(=])(?:~[\w.@-]*)?/[\w.@-]+"),  # a path, one segment or more
+    re.compile(r"(?:^|[\s(=])(?:~[\w.@-]*)?/[\w.@-]+"),  # an absolute path, one segment or more
+    re.compile(r"(?<![\w./-])[\w.-]+(?:/[\w.-]+){2,}"),  # a relative path, three segments or more
+    re.compile(  # a relative path of two segments, one of them file-like
+        rf"(?<![\w./-])(?:{_FILE_SEGMENT}/[\w.-]+|[\w.-]+/{_FILE_SEGMENT})"
+    ),
     re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE),  # event id
     re.compile(r"\bdigest\b", re.IGNORECASE),
     re.compile(r"\bchars\b", re.IGNORECASE),

@@ -387,6 +387,42 @@ def test_the_hygiene_hook_checks_every_rendered_card() -> None:
         card_hygiene.assert_card_hygiene("ℹ️ *worker pid 4242 at /tmp*\nRef: 00000000")
 
 
+@pytest.mark.parametrize(("summary", "path"), [
+    ("failed reading config/agent.json", "config/agent.json"),
+    ("see logs/error.log", "logs/error.log"),
+])
+def test_two_segment_relative_paths_never_reach_the_card(summary: str, path: str) -> None:
+    # Relay 20 M1: a relative path of two segments that looks like a file (a
+    # segment with a dot extension, or a folder word) is a path too.
+    for card in _producer_text_cards(summary):
+        assert path not in card and "/" not in card_hygiene.card_body_without_ref(card), card
+    assert _mod.card_plain(summary) == summary.rsplit(" ", 1)[0]
+
+
+def test_plain_words_joined_by_a_slash_stay_on_the_card() -> None:
+    text = "read and/or write 3/4 of the read/write checks"
+    assert _mod.card_plain(text) == text
+    card_hygiene.assert_card_hygiene(f"ℹ️ *{text}*\nRef: 00000000")
+
+
+def test_an_instance_with_a_long_digit_run_gives_no_digit_run_on_the_where_line() -> None:
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_warning")["event"], instance="bot-15550001111")
+    where = _mod.card_where(event)
+    assert where.startswith("Where: ") and not re.search(r"\d{6,}", where), where
+    card = _mod.format_card(event, "00000000")
+    assert not re.search(r"\d{6,}", card_hygiene.card_body_without_ref(card)), card
+
+
+@pytest.mark.parametrize("card", [
+    "ℹ️ *failed reading config/agent.json*\nRef: 00000000",
+    "ℹ️ *see logs/error.log*\nRef: 00000000",
+    "ℹ️ *re-sent from src/lib/bot.ts*\nRef: 00000000",
+])
+def test_the_hygiene_hook_fails_on_relative_paths(card: str) -> None:
+    with pytest.raises(card_hygiene.CardHygieneViolation):
+        card_hygiene.assert_card_hygiene(card)
+
+
 # --- P4: confined summaries -----------------------------------------------------
 
 
