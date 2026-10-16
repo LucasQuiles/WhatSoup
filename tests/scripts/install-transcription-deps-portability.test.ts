@@ -19,6 +19,7 @@ import path from 'node:path';
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const scriptPath = path.join(repoRoot, 'scripts', 'install-transcription-deps.sh');
 const scriptSource = fs.readFileSync(scriptPath, 'utf8');
+const lockPolicySource = fs.readFileSync(path.join(repoRoot, 'deploy', 'lib', 'python-lock-policy.sh'), 'utf8');
 const tempRoots: string[] = [];
 
 function makeTempRoot(prefix: string): string {
@@ -51,11 +52,69 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
     })
     .join('\n');
   const pathPrefix = extraPath ? `export PATH="${extraPath}${inheritPath ? ':$PATH' : ''}"\n` : '';
-  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}${helpers}\n${body}`], {
+  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}${lockPolicySource}\n${helpers}\n${body}`], {
     encoding: 'utf8',
     cwd: repoRoot,
   });
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+function runVenvPreparationSnippet(): { status: number; marker: string; stderr: string } {
+  const start = scriptSource.indexOf('if ! PYTHON_BIN="$(resolve_python)"; then');
+  const end = scriptSource.indexOf('\n\nif ! sha256_matches', start);
+  if (start === -1 || end === -1) throw new Error('venv preparation block not found');
+
+  const root = makeTempRoot('itd-venv-upgrade-');
+  const venv = path.join(root, 'transcription-venv');
+  const marker = path.join(root, 'refreshed');
+  const hostPython = path.join(root, 'python3.13');
+  fs.mkdirSync(path.join(venv, 'bin'), { recursive: true });
+  writeExecutable(
+    path.join(venv, 'bin'),
+    'python',
+    '#!/bin/sh\nif [ "$1" = "-c" ]; then printf \'%s\\n\' \'cpython:3.12.9\'; exit 0; fi\nexit 0\n',
+  );
+  writeExecutable(root, 'python3.13', `#!/bin/sh
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  target="$3"
+  mkdir -p "$target/bin"
+  cat > "$target/bin/python" <<'PYTHON'
+#!/bin/sh
+if [ "$1" = "-c" ]; then printf '%s\\n' 'cpython:3.13.16'; exit 0; fi
+exit 0
+PYTHON
+  chmod 755 "$target/bin/python"
+  printf '%s\\n' refreshed > "$REFRESH_MARKER"
+  exit 0
+fi
+exit 1
+`);
+
+  const snippet = scriptSource.slice(start, end);
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+HOST_PYTHON="$1"
+VENV="$2"
+REPO_ROOT="$3"
+${lockPolicySource}
+resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
+whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1"; }
+${snippet}`,
+      'venv-preparation-test',
+      hostPython,
+      venv,
+      repoRoot,
+    ],
+    {
+      encoding: 'utf8',
+      cwd: repoRoot,
+      env: { ...process.env, REFRESH_MARKER: marker },
+    },
+  );
+  return { status: result.status ?? -1, marker, stderr: result.stderr ?? '' };
 }
 
 afterEach(() => {
@@ -67,8 +126,8 @@ afterEach(() => {
 
 describe('install-transcription-deps.sh — source-level portability invariants', () => {
   it('does not hardcode an absolute Homebrew python path', () => {
-    // The original defect: PYTHON_BIN="/opt/homebrew/bin/python3.12", which does
-    // not exist on Linux, Intel macOS, or a Mac without the python@3.12 formula.
+    // The original defect: PYTHON_BIN="/opt/homebrew/bin/python@…", which does
+    // not exist on Linux, Intel macOS, or a Mac without the matching formula.
     expect(scriptSource).not.toMatch(/PYTHON_BIN\s*=\s*"?\/opt\/homebrew/);
   });
 
@@ -149,28 +208,55 @@ process.stdout.write(createHash('sha256').update(readFileSync(process.argv[2])).
 describe('install-transcription-deps.sh — resolve_python', () => {
   it('skips an interpreter that cannot build a venv', () => {
     const shim = makeTempRoot('itd-badpy-');
-    writeExecutable(shim, 'python3.12', '#!/bin/sh\nexit 1\n');
+    writeExecutable(shim, 'python3.13', '#!/bin/sh\nexit 1\n');
     const res = runWithHelpers('resolve_python', shim);
-    // Either it finds a working interpreter elsewhere on PATH, or it fails —
-    // but it must never hand back the one that cannot import venv.
+    // Either it finds a qualified runtime elsewhere on PATH, or it fails — but
+    // it must never hand back the candidate that could not build a venv.
     if (res.status === 0) {
-      expect(res.stdout.trim()).not.toBe(path.join(shim, 'python3.12'));
+      expect(res.stdout.trim()).not.toBe(path.join(shim, 'python3.13'));
     }
   });
 
-  it('honours WHATSOUP_TRANSCRIPTION_PYTHON when it is usable', () => {
+  it('honours a qualified WHATSOUP_TRANSCRIPTION_PYTHON override', () => {
+    const shim = makeTempRoot('itd-qualified-py-');
+    writeExecutable(shim, 'python3.13', [
+      '#!/bin/sh',
+      'case "$1" in',
+      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exit 0 ;; esac ;;",
+      'esac',
+    ].join('\n'));
     const res = runWithHelpers(
-      'WHATSOUP_TRANSCRIPTION_PYTHON="$(command -v python3)" resolve_python',
+      `WHATSOUP_TRANSCRIPTION_PYTHON="${path.join(shim, 'python3.13')}" resolve_python`,
+      shim,
     );
     expect(res.status).toBe(0);
-    expect(res.stdout.trim()).not.toBe('');
+    expect(res.stdout.trim()).toBe(path.join(shim, 'python3.13'));
   });
 
-  it('falls through a broken override instead of failing outright', () => {
+  it('fails closed when no candidate has the locked CPython identity', () => {
+    const shim = makeTempRoot('itd-unqualified-py-');
+    const unqualifiedPython = [
+      '#!/bin/sh',
+      'case "$1" in',
+      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.15' ;; *) exit 0 ;; esac ;;",
+      'esac',
+    ].join('\n');
+    writeExecutable(shim, 'python3.13', unqualifiedPython);
+    writeExecutable(shim, 'python3', unqualifiedPython);
     const res = runWithHelpers(
       'WHATSOUP_TRANSCRIPTION_PYTHON=/nonexistent/python resolve_python',
+      shim,
+      false,
     );
-    expect(res.status).toBe(0);
-    expect(res.stdout.trim()).not.toBe('/nonexistent/python');
+    expect(res.status).not.toBe(0);
+    expect(res.stdout.trim()).toBe('');
+  });
+});
+
+describe('install-transcription-deps.sh — managed venv upgrades', () => {
+  it('refreshes an existing venv with the qualified interpreter before the locked install', () => {
+    const res = runVenvPreparationSnippet();
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
   });
 });

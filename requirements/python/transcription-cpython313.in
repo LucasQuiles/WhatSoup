@@ -1,0 +1,5 @@
+# Direct inputs for the transcription venv. Resolve with the exact command in
+# requirements/python/README.md; the lock files, not this input, are installed.
+faster-whisper==1.2.1
+huggingface-hub==1.10.2
+ctranslate2==4.7.1

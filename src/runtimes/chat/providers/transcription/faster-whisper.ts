@@ -17,7 +17,7 @@ export function resolvePython(): string | null {
   const candidates = [
     // env-allowed: host-local toolchain; absence drives the managed-venv auto-probe chain
     process.env.WHATSOUP_FASTER_WHISPER_PYTHON,
-    join(VENV_ROOT, 'bin/python3.12'),
+    join(VENV_ROOT, 'bin/python3.13'),
     join(VENV_ROOT, 'bin/python3'),
     join(VENV_ROOT, 'bin/python'),
   ].filter((value): value is string => Boolean(value));

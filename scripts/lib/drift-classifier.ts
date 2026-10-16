@@ -217,6 +217,7 @@ const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClas
       p === '.nvmrc' ||
       p.endsWith('/package-lock.json') ||
       p.endsWith('/package.json') ||
+      p.startsWith('requirements/python/') ||
       p === 'Dockerfile' ||
       /^tsconfig(\.[a-z]+)?\.json$/.test(p) ||
       p === 'docker-compose.yml' ||

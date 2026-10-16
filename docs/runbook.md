@@ -45,7 +45,8 @@ accepts only `y` or `yes`; automation must additionally pass `--yes`. Without
 | Profile | Required capabilities |
 |---|---|
 | `runtime` | Exact `.nvmrc` Node and npm, Git, and the platform service manager |
-| `quality` | Runtime plus Python 3.12+, ripgrep, zsh, and ShellCheck |
+| `compatibility` | Runtime plus the host tools used by the Node compatibility suite; omits the version-invariant locked Python stack |
+| `quality` | Runtime plus Python 3.13, ripgrep, zsh, and ShellCheck |
 | `release` | Quality plus GNU timeout and, on Linux, external `flock` |
 
 Host readiness requires Node `24.15.0` and matching native/process
@@ -62,9 +63,11 @@ selects packages. The installer rejects a failed Python probe before creating it
 managed environment and requires the post-install doctor to pass. These checks
 do not prove a service is running or that a particular agent runtime can use it.
 
-Quality and release setup create a private managed interpreter at
+Quality and release setup require CPython `3.13.16`, then create a private managed interpreter at
 `${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
-and install `pytest`, `pytest-cov`, Hypothesis, and pinned Ruff there. WhatSoup's
+and install the committed, hash-locked `pytest`, `pytest-cov`, Hypothesis, and Ruff graph there.
+Host package managers can provide the `3.13` command but do not prove its patch
+level; the installer fails closed when it is not `3.13.16`. WhatSoup's
 JavaScript release-proof tests supply a hermetic `flock` fixture on macOS, where
 external `flock` is not a host requirement. Linux release operations still
 require the real `util-linux` implementation.

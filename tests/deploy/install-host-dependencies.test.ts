@@ -107,9 +107,10 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), fakeTimeoutBody());
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
-  executable(join(bin, 'python3.12'), [
+  executable(join(bin, 'python3.13'), [
     'case "${1:-}" in',
-    "  --version) printf '%s\\n' 'Python 3.12.13'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  --version) printf '%s\\n' 'Python 3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  -c) printf '%s\\n' 'cpython:3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',
@@ -191,7 +192,28 @@ describe('explicit host dependency installer', () => {
       platform: 'darwin',
       manager: 'brew',
       mode: 'plan',
-      packages: ['git', 'python@3.12', 'ripgrep', 'zsh', 'shellcheck'],
+      packages: ['git', 'python@3.13', 'ripgrep', 'zsh', 'shellcheck'],
+    });
+    expect(ledger(fx)).toEqual([]);
+  });
+
+  it('plans compatibility test tools without installing the locked Python stack', () => {
+    const fx = fixture('Linux');
+    const result = runInstaller(fx, [
+      '--profile',
+      'compatibility',
+      '--node-policy',
+      'compatibility',
+      '--manager',
+      'apt',
+      '--json',
+    ]);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(receipt(result)).toMatchObject({
+      profile: 'compatibility',
+      nodePolicy: 'compatibility',
+      packages: ['git', 'ripgrep', 'zsh', 'shellcheck'],
     });
     expect(ledger(fx)).toEqual([]);
   });
@@ -268,9 +290,9 @@ describe('explicit host dependency installer', () => {
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(ledger(fx)).toEqual([
-      'brew install git python@3.12 ripgrep zsh shellcheck',
+      'brew install git python@3.13 ripgrep zsh shellcheck',
       `python -m venv ${join(fx.home, 'quality-venv')}`,
-      'python -m pip install pytest pytest-cov hypothesis ruff==0.15.10',
+      `python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${join(repoRoot, 'requirements/python/quality-cpython313-darwin-arm64.txt')}`,
     ]);
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });
@@ -282,8 +304,8 @@ describe('explicit host dependency installer', () => {
     const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
-    expect(ledger(fx)).toEqual(['brew install git python@3.12 ripgrep zsh shellcheck']);
-    expect(result.stderr).toContain('Python 3.12 or newer is required');
+    expect(ledger(fx)).toEqual(['brew install git python@3.13 ripgrep zsh shellcheck']);
+    expect(result.stderr).toContain('CPython 3.13.16 is required');
   });
 
   it('does not install packages after a failed platform discovery', () => {
@@ -314,7 +336,7 @@ describe('explicit host dependency installer', () => {
     fx.env.FAKE_NODE_VERSION = '25.4.0';
     const result = runInstaller(fx, [
       '--profile',
-      'quality',
+      'compatibility',
       '--node-policy',
       'compatibility',
       '--manager',
@@ -324,6 +346,7 @@ describe('explicit host dependency installer', () => {
     ]);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(ledger(fx)).toEqual(['brew install git ripgrep zsh shellcheck']);
     expect(result.stderr).toContain('"outcome":"compatibility_only"');
   });
 

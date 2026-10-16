@@ -1304,7 +1304,7 @@ describe('quality workflow composition', () => {
   });
 
   it('uses the shared quality installer before Python-backed gates run', () => {
-    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
+    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup CPython 3.13.16');
     const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
     const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
 
@@ -1312,10 +1312,26 @@ describe('quality workflow composition', () => {
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
-    expect(qualityWorkflow).toContain("python-version: '3.12'");
+    expect(qualityWorkflow).toContain("python-version: '3.13.16'");
+    expect(qualityWorkflow).toContain('name: Verify locked Python runtime');
     expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
     expect(qualityWorkflow).not.toContain('Install Python and Linux quality prerequisites');
     expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
+  });
+
+  it('selects macOS Python locks through the shared policy', () => {
+    const macosStart = qualityWorkflow.indexOf('  bot-errors-health-macos:');
+    const macos = qualityWorkflow.slice(macosStart);
+
+    expect(macos).toContain('. deploy/lib/python-lock-policy.sh');
+    expect(macos).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" "$GITHUB_WORKSPACE" quality');
+    expect(macos).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
+    expect(macos).not.toContain('quality-cpython313-darwin-arm64.txt');
+  });
+
+  it('clean-installs the Linux transcription lock through the shared policy', () => {
+    expect(qualityWorkflow).toContain('name: Verify Linux transcription lock installation');
+    expect(qualityWorkflow).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
   });
 
   it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
@@ -1333,7 +1349,9 @@ describe('quality workflow composition', () => {
     expect(compatibility).not.toContain('coverage:check');
     expect(compatibility).not.toContain('guard:');
     expect(compatibility).not.toContain('Playwright');
-    expect(compatibility).not.toContain('Setup Python');
+    expect(compatibility).not.toContain('setup-python');
+    expect(compatibility).toContain('install-host-dependencies.sh --profile compatibility --node-policy compatibility');
+    expect(compatibility).toContain('whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility');
     expect(compatibility).not.toContain('test-integrity');
     expect(compatibility).not.toContain('ci-disk-reclaim');
   });

@@ -147,6 +147,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:public-surface-drift',
       'npm run guard:work-index',
       'npm run guard:node-pin-consistency',
+      'npm run guard:python-dependency-lock',
       'npm run guard:source-runtime-drift',
       'npm run guard:fleet-bot-hardening-parity',
       'npm run guard:bot-errors-runtime-manifest',
@@ -185,6 +186,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:work-index',
       'npm run guard:doc-tally',
       'npm run guard:node-pin-consistency',
+      'npm run guard:python-dependency-lock',
       'npm run guard:source-runtime-drift',
       'npm run guard:arc-binding-drift',
       'npm run guard:fleet-bot-hardening-parity',
@@ -1029,13 +1031,13 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     'r.outcome !== "pass"',
   ]);
   requireNamedStep(compat, 'Install compatibility host dependencies', 'quality (25.x)', [
-    'bash deploy/scripts/install-host-dependencies.sh --profile quality --node-policy compatibility --apply --yes --json',
-    '>> "$GITHUB_PATH"',
+    'bash deploy/scripts/install-host-dependencies.sh --profile compatibility --node-policy compatibility --apply --yes --json',
   ]);
   requireNamedStep(compat, 'Host dependency profile (compatibility-only)', 'quality (25.x)', [
     'set -o pipefail',
-    'bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --node-policy compatibility --json',
+    'bash deploy/scripts/whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility --json',
     'tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"',
+    'r.profile !== "compatibility"',
     'r.outcome !== "compatibility_only"',
   ]);
 
