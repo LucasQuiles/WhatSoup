@@ -274,8 +274,10 @@ def test_same_name_retired_on_one_host_is_never_retired_where_ambiguous_or_alway
     assert "unknown|shared|instance_logged_out" in state["openIncidents"]
     assert "host-2|far-line|instance_logged_out" in state["openIncidents"]
     [card] = sends
-    assert card.startswith("🟡 *WhatsApp lines that could not be checked: 2*")
+    # Both records await a physical relink: the card keeps that action (relay 19 B2).
+    assert card.startswith("🟡 *WhatsApp lines needing a relink: 2*")
     assert "far-line (host-2)" in card and "shared (unknown host)" in card
+    assert "You: Action needed: relink or retire each line that needs a QR relink (Lucas)" in card
 
 
 def test_unlinked_line_is_deferred_and_listed_once_in_the_daily_card(mod):
@@ -300,7 +302,8 @@ def test_daily_card_merges_one_bot_and_separates_could_not_check(mod):
         "hub-1|logged-line|whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
         "hub-1|logged-line|daily-health:whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
         "hub-1|bot-errors-health|daily-health-fail:logged-line": _physical(OLD - 86400, OLD),
-        "hub-1|inferred-line|instance_logged_out": _physical(OLD - 86400, OLD),
+        # A stale logout with no standing action: listed as could not check.
+        "hub-1|inferred-line|instance_logged_out": {"status": "stale", "openedAt": OLD - 86400, "lastSeenAt": OLD},
         "hub-1|linked-line|whatsapp_device_bond_lost": _proven(_physical(OLD - 86400, OLD), "linked-line"),
         # Not stale yet: no recheck, not listed.
         "hub-1|far-line|instance_logged_out": _physical(NOW - 3600, NOW - 600),
@@ -402,9 +405,13 @@ def test_two_producer_keys_for_a_line_on_another_host_are_one_could_not_check_li
 
     [card] = sends
     lines = card.split("\n")
-    assert lines[0] == "🟡 *WhatsApp lines that could not be checked: 1*"
-    assert lines[1] == "far-pair-line (host-2)"
-    assert "Action needed" not in card and "relink" not in card
+    # Relay 19 B2: a line on another host cannot be checked here, but its
+    # records still await a physical relink, so the card keeps that action,
+    # who takes it and on which host.
+    assert lines[0] == "🟡 *WhatsApp lines needing a relink: 1*"
+    assert lines[1] == "far-pair-line (host-2) since 09-03: needs a QR relink on host-2 (could not check the line)"
+    assert lines[2] == "You: Action needed: relink or retire each line that needs a QR relink (Lucas)"
+    assert "No action needed" not in card
     state = _state(mod)
     for key in incidents:
         assert key in state["openIncidents"], "could not check never retires"
@@ -424,8 +431,42 @@ def test_unreadable_fleet_api_is_could_not_check_and_never_retires(mod, monkeypa
 
     assert "hub-1|linked-line|instance_logged_out" in _state(mod)["openIncidents"]
     [card] = sends
-    assert card.startswith("🟡 *WhatsApp lines that could not be checked: 1*")
-    assert "linked-line (hub-1)" in card
+    assert card.startswith("🟡 *WhatsApp lines needing a relink: 1*")
+    assert "linked-line (hub-1) since " in card and "(could not check the line)" in card
+
+
+def test_could_not_check_lines_with_no_requested_action_need_no_one(mod):
+    # "No action needed" only when no listed line asks for one (relay 19 B2).
+    _write_state(mod, {
+        "host-2|far-line|instance_logged_out": {"status": "stale", "openedAt": OLD - 86400, "lastSeenAt": OLD},
+    })
+    sends = _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    lines = card.split("\n")
+    assert lines[0] == "🟡 *WhatsApp lines that could not be checked: 1*"
+    assert lines[1] == "far-line (host-2)"
+    assert lines[2:4] == ["Handling: Q to check these lines", "You: No action needed"]
+
+
+def test_remote_bond_loss_awaiting_relink_asks_the_owner_beside_unchecked_lines(mod):
+    _write_state(mod, {
+        "host-2|far-line|whatsapp_device_bond_lost": _physical(OLD - 86400, OLD),
+        "hub-1|inferred-line|instance_logged_out": {"status": "stale", "openedAt": OLD - 86400, "lastSeenAt": OLD},
+    })
+    sends = _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    lines = card.split("\n")
+    since = time.strftime("%m-%d", time.gmtime(OLD - 86400))
+    assert lines[0] == "🟡 *WhatsApp lines needing a relink: 1*"
+    assert lines[1] == f"far-line (host-2) since {since}: needs a QR relink on host-2 (could not check the line)"
+    assert lines[2] == "Could not check 1: inferred-line (hub-1)"
+    assert lines[3] == "You: Action needed: relink or retire each line that needs a QR relink (Lucas)"
 
 
 def test_live_fleet_api_is_not_read_under_a_test_runner(mod, monkeypatch):

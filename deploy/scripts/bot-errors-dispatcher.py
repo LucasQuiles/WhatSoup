@@ -5324,6 +5324,7 @@ INFO_SUMMARY_DEFERRED_REASON = "information-only notice folded into the daily in
 RESOLVES_PAGE_FIELD = "resolvesPage"
 LINE_CLEARED_ON_RECHECK = "cleared on recheck"
 LINE_RETIRED = "line retired"
+LINE_UNKNOWN_HOST = "unknown host"
 # Sources whose clear requirement is the line's linkage; daily-health-fail for
 # the same bot joins them only while it awaits physical action.
 LINE_RECHECK_SOURCES = frozenset({"instance_logged_out", "whatsapp_device_bond_lost"})
@@ -5702,7 +5703,7 @@ class LineChecker:
 
     def check(self, machine: str, bot: str, record: dict[str, Any] | None = None) -> LineCheck:
         roster = self.roster()
-        display_host = card_plain(machine, 40) if machine and machine.lower() != "unknown" else "unknown host"
+        display_host = card_plain(machine, 40) if machine and machine.lower() != "unknown" else LINE_UNKNOWN_HOST
         if roster is None:
             return LineCheck(LINE_COULD_NOT_CHECK, display_host, bot, "roster unreadable")
         resolved = roster.resolve(machine, bot)
@@ -5805,17 +5806,34 @@ def _line_card_since(records: list[dict[str, Any]]) -> str | None:
     return time.strftime("%m-%d", time.gmtime(min(opened))) if opened else None
 
 
+def line_group_needs_relink(group: dict[str, Any]) -> bool:
+    """A confirmed logout, or a line whose own incident still asks for a physical relink."""
+    return group["verdict"] == LINE_LOGGED_OUT or bool(group.get("needsRelink"))
+
+
+def _line_card_relink_line(group: dict[str, Any]) -> str:
+    since = f" since {group['since']}" if group["since"] else ""
+    on_host = f" on {group['host']}" if group["host"] != LINE_UNKNOWN_HOST else ""
+    text = f"{group['bot']} ({group['host']}){since}: needs a QR relink{on_host}"
+    if group["verdict"] != LINE_LOGGED_OUT:
+        # Relay 19 B2: not confirmed live, but the incident's own requested
+        # action (awaiting physical) still stands, so the action stays.
+        linked = any(str(reason).startswith("linked, confirmed") for reason in group["reasons"])
+        text += " (linked; no send seen since)" if linked else " (could not check the line)"
+    return text
+
+
 def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
-    logged_out = [group for group in groups if group["verdict"] == LINE_LOGGED_OUT]
-    unchecked = [group for group in groups if group["verdict"] != LINE_LOGGED_OUT]
+    relink = [group for group in groups if line_group_needs_relink(group)]
+    unchecked = [group for group in groups if not line_group_needs_relink(group)]
+    confirmed = all(group["verdict"] == LINE_LOGGED_OUT for group in relink)
     lines: list[str] = []
-    if logged_out:
-        lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines logged out: {len(logged_out)}*")
-        for group in logged_out[:LINE_CARD_MAX_LINES]:
-            since = f" since {group['since']}" if group["since"] else ""
-            lines.append(f"{group['bot']} ({group['host']}){since}: needs a QR relink on {group['host']}")
-        if len(logged_out) > LINE_CARD_MAX_LINES:
-            lines.append(f"{CARD_CLIP} {len(logged_out) - LINE_CARD_MAX_LINES} more in the packet")
+    if relink:
+        noun = "logged out" if confirmed else "needing a relink"
+        lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines {noun}: {len(relink)}*")
+        lines.extend(_line_card_relink_line(group) for group in relink[:LINE_CARD_MAX_LINES])
+        if len(relink) > LINE_CARD_MAX_LINES:
+            lines.append(f"{CARD_CLIP} {len(relink) - LINE_CARD_MAX_LINES} more in the packet")
     else:
         lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines that could not be checked: {len(unchecked)}*")
     if unchecked:
@@ -5823,10 +5841,11 @@ def format_line_card(groups: list[dict[str, Any]], ref: str) -> str:
         shown = ", ".join(names[:LINE_CARD_MAX_LINES])
         if len(names) > LINE_CARD_MAX_LINES:
             shown += f", {CARD_CLIP}"
-        lines.append(f"Could not check {len(unchecked)}: {shown}" if logged_out else shown)
-    if logged_out:
+        lines.append(f"Could not check {len(unchecked)}: {shown}" if relink else shown)
+    if relink:
         # Who acts, per the incidents' own requested action (physical_action_text).
-        lines.append("You: Action needed: relink or retire each logged-out line (Lucas)")
+        each = "each logged-out line" if confirmed else "each line that needs a QR relink"
+        lines.append(f"You: Action needed: relink or retire {each} (Lucas)")
     else:
         lines.append("Handling: Q to check these lines")
         lines.append(CARD_YOU_NO_ACTION)
@@ -5872,12 +5891,20 @@ def send_daily_line_card(
             "bot": card_plain(bot, 40),
             "host": check.host,
             "verdict": check.verdict,
+            "needsRelink": False,
             "reasons": [],
             "keys": [],
             "records": [],
         })
         if check.verdict == LINE_LOGGED_OUT:
             group["verdict"] = LINE_LOGGED_OUT
+        # Relay 19 B2: the member keeps its own requested action.
+        stale_event = stale_incident_event(key, record, current, ignore_cadence=True)
+        if stale_event is not None:
+            needs_relink = requested_action_text(stale_event) == physical_action_text()
+        else:
+            needs_relink = str(record.get("status") or "") == "awaiting_physical"
+        group["needsRelink"] = group["needsRelink"] or needs_relink
         group["reasons"].append(check.reason)
         group["keys"].append(key)
         group["records"].append(record)
@@ -5886,12 +5913,14 @@ def send_daily_line_card(
         section.pop("lastAttemptAt", None)
         _commit_incident_state(paths, incident, incident_state)
         return 0
-    ordered = sorted(groups.values(), key=lambda group: (group["verdict"] != LINE_LOGGED_OUT, group["host"], group["bot"]))
+    ordered = sorted(groups.values(), key=lambda group: (
+        not line_group_needs_relink(group), group["verdict"] != LINE_LOGGED_OUT, group["host"], group["bot"],
+    ))
     for group in ordered:
         group["since"] = _line_card_since(group.pop("records"))
     included = [
         {"bot": group["bot"], "host": group["host"], "verdict": group["verdict"], "since": group["since"],
-         "reasons": group["reasons"], "incidentKeys": group["keys"]}
+         "needsRelink": line_group_needs_relink(group), "reasons": group["reasons"], "incidentKeys": group["keys"]}
         for group in ordered
     ]
     logged_out = sum(1 for group in ordered if group["verdict"] == LINE_LOGGED_OUT)
