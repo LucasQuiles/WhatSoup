@@ -5047,7 +5047,12 @@ NOTICE_REF_RE = re.compile(r"^[0-9a-f]{8}$")
 # so a Ref always resolves to exactly one packet and no packet is overwritten
 # by another notice.
 NOTICE_REF_PROBES = 16
-NOTICE_PACKET_RETENTION_SECONDS = max(86400, env_int("BOT_ERRORS_PACKET_RETENTION_SECONDS", 30 * 86400))
+# Relay 16 A: packets are kept at least 30 days; the setting may only lengthen it (relay 19 S3).
+NOTICE_PACKET_RETENTION_FLOOR_SECONDS = 30 * 86400
+NOTICE_PACKET_RETENTION_SECONDS = max(
+    NOTICE_PACKET_RETENTION_FLOOR_SECONDS,
+    env_int("BOT_ERRORS_PACKET_RETENTION_SECONDS", NOTICE_PACKET_RETENTION_FLOOR_SECONDS),
+)
 NOTICE_PACKET_PRUNE_MAX = 500
 _BODY_FIELD_RE = re.compile(r"^  > (?P<label>[A-Za-z0-9_]+): ?(?P<value>.*)$")
 

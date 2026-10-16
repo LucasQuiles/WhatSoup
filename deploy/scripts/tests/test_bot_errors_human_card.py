@@ -585,6 +585,19 @@ def test_packets_older_than_retention_are_pruned(state) -> None:
     assert sorted(state["packets"].glob("*.json")) == packets[1:]
 
 
+@pytest.mark.parametrize(("configured", "expected"), [
+    ("1", 30 * 86400),
+    ("86400", 30 * 86400),
+    (str(30 * 86400 - 1), 30 * 86400),
+    (str(90 * 86400), 90 * 86400),
+])
+def test_packet_retention_has_a_thirty_day_floor(monkeypatch, configured: str, expected: int) -> None:
+    # Relay 19 S3: the operator may keep packets longer, never under 30 days.
+    monkeypatch.setenv("BOT_ERRORS_PACKET_RETENTION_SECONDS", configured)
+    loaded = _load(f"bot_errors_dispatcher_retention_{configured}")
+    assert loaded.NOTICE_PACKET_RETENTION_SECONDS == expected
+
+
 def test_outbox_send_carries_the_card_and_the_packet_names_the_sent_file(state, monkeypatch) -> None:
     paths = _mod.setup_dirs()
     sends: list[str] = []
