@@ -4691,6 +4691,8 @@ CARD_CLIP = "…"
 # Not "CARD_NO_...": CodeQL reads card.?no as a card number and flags every
 # print of a card that carries this fixed line (alert 82 on PR #3815).
 CARD_YOU_NO_ACTION = "You: No action needed"
+CARD_YOU_ACTION_PREFIX = "You: Action needed: "
+CARD_YOU_RELINK = f"{CARD_YOU_ACTION_PREFIX}relink the WhatsApp line or retire it"
 CARD_IMPACT_UNCONFIRMED = "Impact not yet confirmed"
 
 # Card-only scrubbing. The card never carries paths, event ids, digests,
@@ -4984,7 +4986,7 @@ def card_handling(event: dict[str, Any], classification: Any) -> tuple[str, str]
     if action == physical_action_text():
         return (
             "Handling: waiting on a relink or retirement of the WhatsApp line",
-            "You: Action needed: relink the WhatsApp line or retire it",
+            CARD_YOU_RELINK,
         )
     if action == physical_candidate_action_text():
         return "Handling: Q checking whether the logout repeats", CARD_YOU_NO_ACTION
@@ -5009,25 +5011,48 @@ def card_is_information_only(event: dict[str, Any], classification: Any) -> bool
     return classification.kind == "observation" and requested_action_text(event) == NONACTIONABLE_ACTION
 
 
+def card_owner_request(event: dict[str, Any]) -> str | None:
+    """The You line of this event's card when it asks the owner to act, else None."""
+    _handling, you = card_handling(event, classify_event(event))
+    return you if you.startswith(CARD_YOU_ACTION_PREFIX) else None
+
+
+def paged_owner_request(record: dict[str, Any]) -> str | None:
+    """What the page of an open incident asked the owner to do, if anything.
+
+    A record written before ownerRequest existed still shows a relink request
+    by its awaiting_physical status.
+    """
+    request = record.get("ownerRequest")
+    if isinstance(request, str) and request.startswith(CARD_YOU_ACTION_PREFIX):
+        return request
+    if str(record.get("status") or "") == "awaiting_physical":
+        return CARD_YOU_RELINK
+    return None
+
+
 def format_resolved_page_card(event: dict[str, Any], ref: str, title: str, resolved: dict[str, Any]) -> str:
-    """Short card for information that follows a page the group saw.
+    """Information card for a notice that follows a page the group saw.
 
     Relay 19 S8: an information observation never closes the incident
     (mark_incident_sent closes only on a clear), so this card says what
     happened in the producer's words and that the alert is still open; it
-    never adds "Recovered" or the recovered icon.
+    never adds "Recovered" or the recovered icon. Relay 20 M3: it is an
+    information card (contract B): the information icon, at most four lines,
+    and an owner request the page made still stands. The page it follows is
+    named in the packet (resolvesPage).
     """
-    lines = [f"{CARD_ICON_NOTICE} *{title}*", card_where(event)]
-    paged = card_plain(resolved.get("pagedSummary") or "")
-    if paged:
-        lines.append(f"Follows: {paged}")
-    opened = resolved.get("openedAt")
-    created = _card_epoch(event.get("createdAt"))
-    handling = "Handling: the alert stays open until its own clear arrives"
-    if isinstance(opened, int) and not isinstance(opened, bool) and created is not None and created >= opened:
-        handling += f" (open {_card_duration(created - opened)})"
-    lines.extend([handling, CARD_YOU_NO_ACTION, f"Ref: {ref}"])
-    return card_text(lines)
+    request = resolved.get("ownerRequest")
+    if isinstance(request, str) and request.startswith(CARD_YOU_ACTION_PREFIX):
+        step = card_plain(request[len(CARD_YOU_ACTION_PREFIX):])
+        you = f"You: The earlier request still stands: {step}; the alert stays open"
+    else:
+        you = f"{CARD_YOU_NO_ACTION}; the earlier alert stays open until its own clear arrives"
+        opened = resolved.get("openedAt")
+        created = _card_epoch(event.get("createdAt"))
+        if isinstance(opened, int) and not isinstance(opened, bool) and created is not None and created >= opened:
+            you += f" (open for {_card_duration(created - opened)})"
+    return card_text([f"{CARD_ICON_INFO} *{title}*", card_where(event), you, f"Ref: {ref}"])
 
 
 def format_card(event: dict[str, Any], ref: str) -> str:
@@ -7239,6 +7264,17 @@ def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) ->
             # A record opened before tokens existed gets one on its next delivery;
             # that delivery does not advance, and the next renotify intent names it.
             updated_record[GENERATION_TOKEN_FIELD] = new_delivery_token()
+        # Relay 20 M3: what this page asked the owner, so a later information
+        # card that follows it keeps the request. Card wording never blocks
+        # the delivery record: on an error the earlier request stays.
+        try:
+            owner_request = card_owner_request(event)
+        except Exception:  # noqa: BLE001
+            owner_request = updated_record.get("ownerRequest")
+        if owner_request:
+            updated_record["ownerRequest"] = owner_request
+        else:
+            updated_record.pop("ownerRequest", None)
         became_awaiting_physical = update_awaiting_physical_tracking(event, updated_record, current)
         announced_for = delivery_field(event, DELIVERY_ANNOUNCE_INTENT_FIELD)
         # Only a delivered announcement for this transition acknowledges it. A
@@ -12264,6 +12300,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             "incidentKey": incident_key(event),
             "pagedSummary": alert_text(paged.get("lastSummary")),
             "openedAt": int_field(paged, "openedAt") or None,
+            "ownerRequest": paged_owner_request(paged),
         }
     elif not suppress_reason and information_summary_defers(event):
         # Relay 16 C3: information only with no earlier page -- packet now,

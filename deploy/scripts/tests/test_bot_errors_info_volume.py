@@ -985,7 +985,7 @@ def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_on
     paths = mod.state_paths()
     sends = _sends(mod)
     event = _recovered_observation("99999999-9999-4999-8999-999999999999")
-    opened = NOW - 2 * 3600
+    opened = _iso_epoch(event["createdAt"]) - 2 * 3600
     _write_state(mod, {mod.incident_key(event): {
         "status": "open",
         "openedAt": opened,
@@ -998,11 +998,14 @@ def test_information_after_a_page_the_group_saw_gets_its_own_resolved_card_at_on
     lines = card.split("\n")
     # Relay 19 S8: the observation does not close the incident, so the card
     # says what happened (the producer's words) and that it is still open.
-    assert lines[0] == "🟡 *remote writefail ack recovered: mini5*"
-    assert "Follows: BOT ERRORS collector cannot terminal-ack remote writefail: mini5" in lines
-    assert lines[-3] == "Handling: the alert stays open until its own clear arrives"
-    assert lines[-2] == "You: No action needed" and lines[-1].startswith("Ref: ")
-    assert not any(line.startswith(("ℹ️", "✅")) for line in lines)
+    # Relay 20 M3: it is information (contract B): the information icon and
+    # at most four lines.
+    assert len(lines) <= 4
+    assert lines[0] == "ℹ️ *remote writefail ack recovered: mini5*"
+    assert lines[1] == "Where: hub-1 - bot-errors-collector"
+    assert lines[2] == "You: No action needed; the earlier alert stays open until its own clear arrives (open for 2h 0m)"
+    assert lines[-1].startswith("Ref: ")
+    assert "Recovered" not in card and not any(line.startswith(("✅", "🟡")) for line in lines)
     assert mod.incident_key(event) in _state(mod)["openIncidents"]
     assert not _state(mod).get("informationSummary", {}).get("pending")
     assert [p for p in paths["suppressed"].iterdir() if not p.name.startswith(".")] == []
@@ -1024,8 +1027,75 @@ def test_information_after_a_page_never_says_recovered_while_the_incident_stays_
     assert mod.process_one(path, paths) == (True, "sent")
     [card] = sends
     assert "recovered" not in card.lower()
-    assert card.split("\n", 1)[0] == "🟡 *remote writefail ack retried: mini5*"
+    assert card.split("\n", 1)[0] == "ℹ️ *remote writefail ack retried: mini5*"
+    assert "the earlier alert stays open" in card
     assert mod.incident_key(event) in _state(mod)["openIncidents"], "an observation never closes the incident"
+
+
+def test_information_after_a_page_that_asked_the_owner_keeps_the_owner_request(mod):
+    # Relay 20 M3 (Opus N9): when the page it follows asked the owner to act,
+    # the information card says that request still stands, never "No action needed".
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _recovered_observation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    opened = NOW - 3600
+    _write_state(mod, {mod.incident_key(event): {
+        "status": "open",
+        "openedAt": opened,
+        "lastNotifiedAt": opened,
+        "lastSummary": "BOT ERRORS collector cannot terminal-ack remote writefail: mini5",
+        "ownerRequest": "You: Action needed: do the owner step in the packet",
+    }})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
+    assert mod.process_one(path, paths) == (True, "sent")
+    [card] = sends
+    lines = card.split("\n")
+    assert len(lines) <= 4 and lines[0].startswith("ℹ️ *")
+    assert lines[2] == "You: The earlier request still stands: do the owner step in the packet; the alert stays open"
+    assert "No action needed" not in card and "Recovered" not in card
+
+
+def test_a_relink_page_with_no_stored_request_still_keeps_the_relink_request(mod):
+    # A record written before ownerRequest existed: its awaiting_physical status
+    # is the relink request the page made.
+    paths = mod.state_paths()
+    sends = _sends(mod)
+    event = _recovered_observation("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    opened = NOW - 3600
+    _write_state(mod, {mod.incident_key(event): {
+        "status": "awaiting_physical",
+        "openedAt": opened,
+        "lastNotifiedAt": opened,
+        "lastSummary": "linked-device bond lost",
+    }})
+    path = dispatcher_fixtures.write_outbox_event(paths, "20261016080000.collector.recovered.json", event)
+    assert mod.process_one(path, paths) == (True, "sent")
+    [card] = sends
+    assert "You: The earlier request still stands: relink the WhatsApp line or retire it; the alert stays open" in card
+
+
+def test_a_delivered_page_records_its_owner_request_and_a_later_page_without_one_clears_it(mod):
+    state = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    page = {
+        "schemaVersion": 2,
+        "eventKind": "incident_alert",
+        "eventType": "alert",
+        "severity": "critical",
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "createdAt": "2026-10-16T08:00:00Z",
+        "machine": "hub-1",
+        "instance": "fixture-bot",
+        "source": "health_body_degraded",
+        "summary": "fixture-bot degraded",
+        "criticalAsset": {"failure": {"operatorAction": "Lucas to restore the provider sign-in"}},
+    }
+    mod.mark_incident_sent(page, state)
+    record = state["openIncidents"][mod.incident_key(page)]
+    assert record["ownerRequest"] == "You: Action needed: do the owner step in the packet"
+    later = {key: value for key, value in page.items() if key != "criticalAsset"}
+    later["id"] = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee0"
+    mod.mark_incident_sent(later, state)
+    assert "ownerRequest" not in state["openIncidents"][mod.incident_key(page)]
 
 
 def test_information_with_no_earlier_page_still_goes_to_the_daily_summary(mod):
