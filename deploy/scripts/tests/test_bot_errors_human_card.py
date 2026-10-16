@@ -240,6 +240,11 @@ _SCRUBBED_PIECES = (
     "/tmp/x/",
     "~/a/b/",
     "unknown - 40 chars - digest 0a1b2c3d",
+    # Relay 20 M4: emptied brackets and digit runs split by a removed piece.
+    "()",
+    "[]",
+    "123*456*",
+    "12_34*",
 )
 # Summaries that try to look addressed to Q or to mention a number, plus a
 # confined (legacy object) summary. The text draws punctuation the scrubber
@@ -353,6 +358,16 @@ def test_no_card_line_gets_an_at_digit_from_a_scrubbed_piece(piece: str, digits:
         for line in card.split("\n"):
             assert not _AT_DIGIT.search(line), (text, line)
         assert not q_admits(card) or card.startswith("🔴 *"), card
+
+
+@pytest.mark.parametrize("text", ["worker 123*456*789 stalled", "ping @()123*456 now", "ping @[]4242 now"])
+def test_card_plain_never_rebuilds_a_long_number_or_an_at_digit(text: str) -> None:
+    # Relay 20 M4: a removal or cleanup after the last strip used to join a
+    # digit run or an "@" to digits again; card_plain repeats until stable.
+    plain = _mod.card_plain(text)
+    assert not re.search(r"\d{6,}", plain), (text, plain)
+    assert not _AT_DIGIT.search(plain), (text, plain)
+    assert plain.split(" ", 1)[0] in {"worker", "ping"}
 
 
 _MACHINE_FIELD_SUMMARIES = (

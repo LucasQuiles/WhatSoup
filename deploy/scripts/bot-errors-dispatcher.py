@@ -4736,9 +4736,8 @@ CARD_CAUSE_LABEL_FIELDS = ("provider", "model", "unit")
 CARD_CAUSE_COUNT_FIELDS = ("port", "count")
 
 
-def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
-    """One line of plain card text: redacted, mention-safe, no paths, ids or digests."""
-    text = neutralize_mentions(redact(value))
+def _card_scrub_once(text: str) -> str:
+    """One pass of the card removals and the cleanup of what they leave behind."""
     text = _CONFINED_DISPLAY_RE.sub("", text)
     text = _CARD_CONFINED_LOOSE_RE.sub("", text)
     text = _CARD_DIGEST_TAG_RE.sub("", text)
@@ -4763,7 +4762,20 @@ def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
     text = re.sub(r"([;,:])(?:\s*[;,:])+", r"\1", text)
     text = re.sub(r"\s+", " ", text).lstrip(" :;,-—)").strip()
     # Audit r3: a first line never ends at a colon (or any dangling separator).
-    text = text.rstrip(" :;,-—(").strip()
+    return text.rstrip(" :;,-—(").strip()
+
+
+def card_plain(value: Any, limit: int = CARD_TITLE_LIMIT) -> str:
+    """One line of plain card text: redacted, mention-safe, no paths, ids or digests."""
+    text = neutralize_mentions(redact(value))
+    # Relay 20 M4: a removal or cleanup can rebuild what an earlier strip
+    # removed ("123*456*789" -> a long number, "@()4242" -> "@4242"), so the
+    # pass repeats until the text stops changing. Each pass that changes the
+    # text removes an "@", an "_" or characters and adds neither, so this ends.
+    previous = None
+    while text != previous:
+        previous = text
+        text = _card_scrub_once(text)
     if len(text) > limit:
         text = text[: limit - 1].rstrip(" :;,-—(") + CARD_CLIP
     return text
