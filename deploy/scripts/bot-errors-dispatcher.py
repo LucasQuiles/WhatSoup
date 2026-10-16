@@ -13402,7 +13402,19 @@ def run_once(max_events: int) -> dict[str, Any]:
                 else:
                     failed += 1
                     last_error = detail
-            stale_renotified, stale_failed, stale_error = sweep_stale_incidents(paths, touched_incident_keys, incident=_incident_cycle)
+            # Relay 20 S-b: guarded like the daily cards below, so one bad
+            # incident never stops the flap sweep, the cards or prune; the
+            # failure is counted in this cycle's failed total.
+            try:
+                stale_renotified, stale_failed, stale_error = sweep_stale_incidents(
+                    paths, touched_incident_keys, incident=_incident_cycle
+                )
+            except ControllerStateRequired:
+                raise
+            except Exception as exc:  # noqa: BLE001 - housekeeping never costs the cycle
+                stale_renotified, stale_failed = 0, 1
+                stale_error = f"stale sweep failed: {truncate(str(exc), 300)}"
+                append_dispatch_log(paths, {"type": "stale_sweep_failed", "error": truncate(str(exc), 300)})
             if stale_failed:
                 failed += stale_failed
                 last_error = stale_error

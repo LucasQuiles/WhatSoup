@@ -747,6 +747,37 @@ def test_a_recheck_that_raises_is_could_not_check_and_the_sweep_goes_on(mod, mon
     assert "line_recheck_member_failed" in _log_types(mod)
 
 
+def test_a_stale_sweep_that_raises_never_stops_the_rest_of_the_cycle(mod, monkeypatch):
+    # Relay 20 S-b: run_once guards the stale sweep as it guards the daily
+    # cards, so one bad incident never stops the flap sweep, the cards or prune.
+    calls: list[str] = []
+
+    def _boom(*_a, **_k):
+        raise TypeError("bad incident")
+
+    def _spy(name: str):
+        real = getattr(mod, name)
+
+        def wrapped(*a, **k):
+            calls.append(name)
+            return real(*a, **k)
+
+        return wrapped
+
+    monkeypatch.setattr(mod, "sweep_stale_incidents", _boom)
+    for name in ("sweep_flap_storms", "send_daily_line_card", "send_daily_information_summary",
+                 "prune_suppressed", "prune_notice_packets"):
+        monkeypatch.setattr(mod, name, _spy(name))
+    _sends(mod)
+
+    result = mod.run_once(max_events=25)
+
+    assert calls == ["sweep_flap_storms", "send_daily_line_card", "send_daily_information_summary",
+                     "prune_suppressed", "prune_notice_packets"]
+    assert result["staleFailed"] == 1 and result["failed"] >= 1
+    assert "stale_sweep_failed" in _log_types(mod)
+
+
 @pytest.mark.parametrize("instances", [5, "far-line", None, {"name": "x"}])
 def test_a_roster_with_a_non_list_instances_value_never_aborts_the_sweep(mod, tmp_path, instances):
     broken = json.loads(json.dumps(ROSTER))
