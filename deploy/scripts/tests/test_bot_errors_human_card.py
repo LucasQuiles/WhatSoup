@@ -441,6 +441,35 @@ def test_long_numbers_written_with_separators_never_reach_the_card(text: str) ->
 
 
 @pytest.mark.parametrize("text", [
+    "chat abc123,456,789,012def stalled",
+    "chat x1 555 000 1111y stalled",
+    "chat id1.234.567.890 stalled",
+    "chat ref1-234-567-890 stalled",
+    "chat 123,456,789,012def stalled",
+    "chat 1 555 000 1111x stalled",
+    "chat 1.234.567.890v stalled",
+    "chat 1-555-000-1111x stalled",
+], ids=["both-comma", "both-space", "start-dot", "start-dash", "end-comma", "end-space", "end-dot", "end-dash"])
+def test_separated_long_numbers_go_when_a_letter_touches_them(text: str) -> None:
+    # Relay 25 Y1: a letter touching either end kept the whole run, because the
+    # match had to start and end at a word boundary.
+    plain = _mod.card_plain(text)
+    assert not re.search(r"\d", plain), plain
+    assert plain.startswith("chat ") and plain.endswith(" stalled"), plain
+
+
+@pytest.mark.parametrize("text", [
+    "since x2026-10-16y today",
+    "count x10,000,000y queued",
+    "count 1,234,567q queued",
+    "count n10 000 000 queued",
+])
+def test_counts_and_dates_with_a_letter_touching_them_stay_on_the_card(text: str) -> None:
+    # Relay 25 Y1: the fix must not strip more. 8 digits or fewer stay.
+    assert _mod.card_plain(text) == text
+
+
+@pytest.mark.parametrize("text", [
     "count 1,234,567 queued",
     "count 10,000,000 queued",
     "since 2026-10-16 08:00 today",

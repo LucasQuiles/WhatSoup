@@ -4745,8 +4745,9 @@ _CARD_LONG_NUMBER_TOKEN_RE = re.compile(r"(?:(?<!\S)at\s+)?\S*\d{6,}\S*")
 # Relay 21 N4: digit groups joined by one separator ("1,234,567,890,123",
 # "+1 555 000 1111", "1-555-000-1111"). The run goes when it holds
 # CARD_SEPARATED_NUMBER_DIGITS digits or more; a dispatcher-built count (capped
-# at 10,000,000, 8 digits) and a date (8 digits) stay.
-_CARD_SEPARATED_NUMBER_RE = re.compile(r"(?<![\w+])\+?\d+(?P<sep>[,. -])\d+(?:(?P=sep)\d+)*(?!\w)")
+# at 10,000,000, 8 digits) and a date (8 digits) stay. Relay 25 Y1: the run is
+# bounded by digits only, so a letter touching either end does not keep it.
+_CARD_SEPARATED_NUMBER_RE = re.compile(r"(?<![\d+])\+?\d+(?P<sep>[,. -])\d+(?:(?P=sep)\d+)*(?!\d)")
 CARD_SEPARATED_NUMBER_DIGITS = 9
 
 
