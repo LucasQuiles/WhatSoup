@@ -4019,6 +4019,19 @@ def safe_segment(value: str) -> str:
     return (cleaned or "unknown")[:80]
 
 
+KEY_ID_DIGEST_HEX = 12
+
+
+def key_id_segment(key: str) -> str:
+    """The part of an event id built from an incident key: the cut key, then a digest of the full key.
+
+    Relay 22 A3: safe_segment cuts to 80 characters, so two keys that agree in
+    their first 80 cleaned characters would give one event id (and one notice
+    id) in one sweep; the 12-hex sha256 of the whole key keeps them apart.
+    """
+    return f"{safe_segment(key)}-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:KEY_ID_DIGEST_HEX]}"
+
+
 def safe_filename(value: str, max_length: int = 180) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", value.strip()).strip("_")
     cleaned = cleaned or "unknown"
@@ -5313,6 +5326,10 @@ def build_notice_packet(
     }
     if extra:
         packet.update(json_snapshot(dict(extra)))
+        # Relay 22 A3: a notice rebuilt from a stored key names that key, since
+        # incident_key() of the rebuilt event cuts a long source at 80 characters.
+        if isinstance(packet.get("incidentKey"), str):
+            packet["incidentRef"] = incident_ref(packet["incidentKey"])
     return packet
 
 
@@ -5965,7 +5982,7 @@ def retire_line_incident(
     """Close one incident on a recheck: packet first, no message. None (still open) without a packet."""
     event = stale_incident_event(key, record, current, ignore_cadence=True) or {
         **new_event_fields("observation", "info"),
-        "id": f"line-recheck-{safe_segment(key)}-{current}",
+        "id": f"line-recheck-{key_id_segment(key)}-{current}",
         "createdAt": iso_from_epoch(current),
         **incident_event_fields_from_key(key),
         "summary": f"Line recheck: {key}",
@@ -7998,7 +8015,7 @@ def stale_incident_event(
     fields = incident_event_fields_from_key(key)
     event = {
         **new_event_fields("observation", severity),
-        "id": f"stale-{safe_segment(key)}-{current}",
+        "id": f"stale-{key_id_segment(key)}-{current}",
         "createdAt": now_iso(),
         **fields,
         "summary": title,
@@ -8272,7 +8289,7 @@ def flap_storm_event(key: str, entry: dict[str, Any], severity: str, now: int) -
     ]
     return {
         **new_event_fields("alert", severity),
-        "id": f"flap-storm-{safe_segment(key)}-{now}",
+        "id": f"flap-storm-{key_id_segment(key)}-{now}",
         "createdAt": now_iso(),
         **fields,
         "source": "flap_storm",
@@ -8327,7 +8344,7 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int,
         additions.append("underlying_incident_open=true")
     return {
         **new_event_fields("observation", "info"),
-        "id": f"flap-resolved-{safe_segment(key)}-{now}",
+        "id": f"flap-resolved-{key_id_segment(key)}-{now}",
         "createdAt": now_iso(),
         **fields,
         "source": "flap_storm_resolved",
@@ -8532,7 +8549,7 @@ def sweep_flap_storms(paths: dict[str, Path], incident: IncidentStateCycle | Non
                         dead_path = write_dead_letter_record(
                             paths,
                             flap_resolve_event(str(key), entry, now, underlying_open),
-                            f"flap-resolve-{safe_segment(str(key))}",
+                            f"flap-resolve-{key_id_segment(str(key))}",
                         )
                         flap_state.pop(key, None)
                         append_dispatch_log(paths, {
@@ -8894,7 +8911,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 "failed": failed,
             })
             break
-        text, _stale_ref = notice_message(event, notice_kind="stale-digest", paths=paths)
+        text, _stale_ref = notice_message(
+            event, notice_kind="stale-digest", paths=paths, extra={"incidentKey": str(key)}
+        )
         try:
             send_whatsapp(text)
         except Exception as exc:

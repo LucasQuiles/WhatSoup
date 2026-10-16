@@ -1055,6 +1055,51 @@ def test_a_named_rejection_of_the_summary_keeps_its_notices_for_a_retry(mod, mon
     assert len(tries) == 2 and _state(mod)["informationSummary"]["pending"] == []
 
 
+# --- Relay 22 A3: two long incident keys never share a notice id -------------------
+
+# Equal in their first 100 characters, so equal after safe_segment's 80-character cut.
+_LONG_PREFIX = "hub-1|worker|flap_storm:" + "x" * 90
+LONG_KEYS = (_LONG_PREFIX + "-one", _LONG_PREFIX + "-two")
+
+
+def test_two_long_keys_in_one_sweep_get_two_notice_ids_refs_and_packets(mod):
+    assert LONG_KEYS[0][:100] == LONG_KEYS[1][:100]
+    now = int(time.time())
+    _write_state(mod, {key: {
+        "status": "open", "severity": "warning", "openedAt": now - 3 * 86400, "lastSeenAt": now - 3 * 86400,
+    } for key in LONG_KEYS})
+    sends = _sends(mod)
+
+    mod.sweep_stale_incidents(mod.state_paths())
+
+    assert len(sends) == 2
+    refs = [card.split("\n")[-1] for card in sends]
+    assert len(set(refs)) == 2, "both cards name one Ref: the second packet replaced the first"
+    packets = _packets(mod)
+    assert sorted(packet["incidentKey"] for packet in packets) == sorted(LONG_KEYS)
+    assert len({packet["noticeId"] for packet in packets}) == 2
+
+
+@pytest.mark.parametrize("builder", ["flap-storm", "flap-resolved", "line-recheck"])
+def test_every_id_built_from_a_long_key_tells_the_two_keys_apart(mod, monkeypatch, builder):
+    paths = mod.state_paths()
+    now = int(time.time())
+    entry = {"cumulativeCount": 5, "firstTripAt": now - 600, "lastTripAt": now - 60, "stormAt": now - 600}
+    refs = []
+    for key in LONG_KEYS:
+        if builder == "line-recheck":
+            # The id a line retirement builds when the incident has no stale digest.
+            monkeypatch.setattr(mod, "stale_incident_event", lambda *a, **k: None)
+            check = mod.LineCheck(mod.LINE_RETIRED, "hub-1", "worker", "roster expected=blocked")
+            refs.append(mod.retire_line_incident(paths, {"openIncidents": {}}, key, {}, check, now))
+            continue
+        event = (mod.flap_storm_event(key, entry, "warning", now) if builder == "flap-storm"
+                 else mod.flap_resolve_event(key, entry, now))
+        refs.append(mod.notice_message(event, notice_kind=builder, paths=paths)[1])
+    assert None not in refs and len(set(refs)) == 2, "the two keys got one notice id"
+    assert len({packet["noticeId"] for packet in _packets(mod)}) == 2
+
+
 # --- C1: auto-close -----------------------------------------------------------
 
 
