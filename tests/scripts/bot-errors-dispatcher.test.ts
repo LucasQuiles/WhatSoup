@@ -178,6 +178,25 @@ function seedOpenIncident(root: string, key: string, openedEpoch = Math.floor(Da
   });
 }
 
+// Relay 24 X2: both daily cards go out at or after 13:00Z (INFO_SUMMARY_HOUR_UTC),
+// so a test that asserts "no card" or "no incident change" passed before 13:00Z
+// and failed after it. Record today's cards as already sent so those tests never
+// depend on the clock; the card hour itself is pinned with a fixed time in
+// deploy/scripts/tests/test_bot_errors_info_volume.py. Returns the seeded bytes.
+function seedDailyCardsSent(root: string): string {
+  const day = new Date().toISOString().slice(0, 10);
+  const payloadPatch = {
+    informationSummary: { pending: [], lastSentDay: day },
+    lineCheckCard: { lastSentDay: day },
+  };
+  execFileSync('python3', ['deploy/scripts/patch-incident-state.py', root, JSON.stringify(payloadPatch)], {
+    cwd: process.cwd(),
+    env: { ...process.env, BOT_ERRORS_STATE_DIR: root },
+    encoding: 'utf8',
+  });
+  return readFileSync(join(root, 'incident-state.json'), 'utf8');
+}
+
 function writeWritefail(root: string, eventOverrides: Record<string, unknown> = {}) {
   const writefail = join(root, 'writefail');
   mkdirSync(writefail, { recursive: true, mode: 0o700 });
@@ -294,6 +313,7 @@ describe('bot-errors-dispatcher', () => {
   it('quarantines a contradictory v1 clear before delivery or incident mutation', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
+    const seeded = seedDailyCardsSent(tmpRoot);
     writeEvent(tmpRoot, 'critical', {
       id: 'contradictory-critical-clear',
       eventType: 'clear',
@@ -309,12 +329,13 @@ describe('bot-errors-dispatcher', () => {
     const quarantine = readdirSync(join(tmpRoot, 'quarantine'));
     expect(quarantine.some((entry) => entry.endsWith('.invalid-envelope'))).toBe(true);
     expect(quarantine.some((entry) => entry.includes('.invalid_kind_severity.invalid-envelope'))).toBe(true);
-    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+    expect(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')).toBe(seeded);
   });
 
   it('quarantines a v1 payload carrying a v2 kind before it can clear state', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
+    const seeded = seedDailyCardsSent(tmpRoot);
     writeEvent(tmpRoot, 'info', {
       id: 'mixed-version-clear',
       eventKind: 'incident_alert',
@@ -330,12 +351,13 @@ describe('bot-errors-dispatcher', () => {
     expect(existsSync(capturePath)).toBe(false);
     const quarantine = readdirSync(join(tmpRoot, 'quarantine'));
     expect(quarantine.some((entry) => entry.includes('.unexpected_legacy_event_kind.invalid-envelope'))).toBe(true);
-    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+    expect(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')).toBe(seeded);
   });
 
   it('quarantines every unsupported ingress variant with a bounded reason', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
+    const seeded = seedDailyCardsSent(tmpRoot);
     const cases: Array<{ id: string; expectedReason: string; overrides: Record<string, unknown> }> = [
       {
         id: 'missing-event-type',
@@ -392,12 +414,13 @@ describe('bot-errors-dispatcher', () => {
         quarantine.some((entry) => entry.includes(`.${testCase.expectedReason}.invalid-envelope`)),
       ).toBe(true);
     }
-    expect(existsSync(join(tmpRoot, 'incident-state.json'))).toBe(false);
+    expect(readFileSync(join(tmpRoot, 'incident-state.json'), 'utf8')).toBe(seeded);
   });
 
   it('normalizes a legacy informational alert as an observation instead of a recovery', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
+    seedDailyCardsSent(tmpRoot);
     writeEvent(tmpRoot, 'info', {
       id: 'legacy-info-observation',
       eventType: 'alert',
@@ -546,6 +569,7 @@ describe('bot-errors-dispatcher', () => {
   it('renders info events as informational with no remediation request', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatcher-'));
     const capturePath = join(tmpRoot, 'sent-message.txt');
+    seedDailyCardsSent(tmpRoot);
     writeEvent(tmpRoot, 'info');
 
     execFileSync('python3', ['deploy/scripts/bot-errors-dispatcher.py', '--once'], {
