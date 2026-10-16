@@ -240,7 +240,7 @@ and end with an alphanumeric character. Exit code 2 on violation.
 | `bot-errors-runner.py` | Per-bot error runner: invokes the agent loop, captures failures, emits alert events to the local outbox. |
 | `bot-errors-emit.py` | Alert emission helper: builds alert event JSON (severity, dedupe key, evidence) and writes it to the local outbox. |
 | `bot-errors-health-check.py` | Daily health probe: inventories each instance/service, derives FAIL/WARN lines (auth-bond, queue age, DNS, tooling, config), emits a daily-health summary event. Largest script; hosts the auth-bond daily-layer derivation. |
-| `bot-errors-collector.py` | Hub-side relay collector: claims remote hosts' outboxes over ssh, relays events into the hub's incoming queue. Hosts the per-host claim loop. Per-remote `consecutiveFailures` drives two independent, threshold-gated signals off the same counter: `relay_host_down`/`relay_host_recovered` at `RELAY_BACKOFF_FAILURE_THRESHOLD` (backoff-schedule entry/exit) and, earlier and lower-confidence, a typed `collector_remote_unreachable` alert at `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` (default 2) naming the remote, its failure count, last error class, and last-success age — cleared with a real `eventType="clear"` on the next successful collection, so a persistently uncollectable remote (spoke events aging unseen in its outbox) escalates through the normal dispatcher incident path instead of silently stalling. |
+| `bot-errors-collector.py` | Hub-side relay collector: claims remote hosts' outboxes over ssh, relays events into the hub's incoming queue. Hosts the per-host claim loop. Per-remote `consecutiveFailures` drives one three-tier escalation ladder, each tier closing the one below it: `remote-claim-failed` (warning) on a single failed claim; `collector_remote_unreachable` (warning) at `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` (default 2), naming the remote, its failure count, last error class, and last-success age; and `relay_host_down` (critical) at `RELAY_BACKOFF_FAILURE_THRESHOLD` (backoff-schedule entry), re-asserted (marked `renotify`) on each later failed attempt, with retries capped at a nominal 900 s, until its same-source recovery clear. A persistently uncollectable remote (spoke events aging unseen in its outbox) therefore escalates through the normal dispatcher incident path instead of silently stalling; see "Collector remote-claim escalation ladder" below. |
 | `bot-errors-dispatcher.py` | Hub-side delivery + suppression engine: dedupe keys, throttle/renotify, storm-collapse, forceNotify policy, WhatsApp + email-fallback delivery. |
 | `bot-errors-heartbeat-watchdog.py` | Independent five-minute watchdog of the hub lanes (`q_loop`, dispatcher, collector, daily health, queue backlog, local services/health, and unattended browser-debug resource trees). Stale per-host daily-health evidence reuses the collector's durable reachability receipt (diagnosis, failure count, last success, and Tailscale online/last-seen) without running a duplicate network probe. The only `forceNotify`-privileged source; browser-debug incidents are explicitly non-paging. |
 | `bot-errors-q-loop.py` | The hub's agent loop driver. |
@@ -582,29 +582,104 @@ each defaulting to 50 MiB) trims the file to its newest records when an append
 would pass it, and the private mode, no-follow and lock discipline stay the
 same (#2135, #3700).
 
-### Collector capture-failure escalation: per-transition semantics
+### Collector remote-claim escalation ladder
 
-`collector_remote_unreachable` (alert at `consecutiveFailures >= BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD`,
-default 2) is deliberately **per-transition-honest**, not flap-suppressing: it
-alerts on every new failure episode and clears on every genuinely successful
-collection, one collection at a time. It does not require the same N
-consecutive successes that `relay_host_down`'s backoff recovery does
-(`recovery_successes`, default 2) before clearing — a single successful
-collection resolves the capture failure for that moment, and the escalation
-reflects that honestly.
+Every failed outbox claim moves one remote up a single ladder. Each tier closes
+the tier below it before it opens, so with an escalate threshold below 3 (the
+default is 2) one remote holds at most one open collector incident at a time:
 
-This means a remote that flaps through `RELAY_BACKOFF_FAILURE_THRESHOLD`
-(default 3) can produce more `collector_remote_unreachable` transitions than
-`relay_host_down` transitions over the same window: `relay_host_down` stays
-open across a single recovering poll (it needs the fuller N-successes
-streak), while the escalation clears and can re-open on the very next
-failure. **This asymmetry is intentional**, not a bug — the two signals have
-different thresholds and different confirmation semantics by design, so
-behaving differently under a flap is expected. A genuinely flapping remote is
-bounded by the dispatcher's existing flap-storm machinery
+| Tier | Source | Opens at | Severity | Closed by |
+|------|--------|----------|----------|-----------|
+| 1 | `remote-claim-failed` | the first failed claim | warning | tier 2 ("superseded by escalation"), or `recovery_successes` (default 2) consecutive successes |
+| 2 | `collector_remote_unreachable` | `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` (default 2) failures | warning | tier 3 ("superseded by relay host down"), or the next successful claim ("capture recovered") |
+| 3 | `relay_host_down` | `RELAY_BACKOFF_FAILURE_THRESHOLD` (3) failures | critical | `recovery_successes` consecutive successes (same-source clear, "relay host recovered") |
+
+With `BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD` at 3 or more, tier 2
+never opens (tier 3 opens first, at the third failure), and tier-3 entry closes
+only tier 2, so tiers 1 and 3 can be open together until the remote recovers.
+
+A `--best-effort-remote` drops tiers 1 and 3 to info while
+`BOT_ERRORS_BEST_EFFORT_INFO_TIER` is on (default), and its tier 3 is not
+re-asserted.
+
+**Tier 3 and the dispatcher.** The dispatcher holds `relay_host_down` as a
+transient (Pattern H) and delivers it only when a later `relay_host_down` for the
+same remote arrives at least `BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS` (default
+1800) after the dispatcher first processed one. Promotion sends at the stronger
+of the held record's first severity and the promoting event's own, so it never
+lowers a severity, and a record held at warning before an upgrade still pages
+critical. Nothing sweeps held records on a timer, so the collector re-asserts
+tier 3 on every later failed attempt of the down episode. Each re-assertion
+carries `renotify: true`: it repeats one open condition, so the dispatcher's
+flap scan does not count it as a trip. Re-assertions therefore never add up to
+a flap storm, even when a backlog of them is processed in one pass after a
+dispatcher outage; for that key only tier-3 entry counts, once per down
+episode.
+
+Every retry of a down remote is capped at 900 s from tier-3 entry: the backoff
+schedule's 300 and 900 s steps, then 900 s in place of 3600 s. Attempts land
+about 300, 1200 and 2100 s after entry and about every 900 s after that, so the
+first re-assertion at or past any promote window comes about 900 s after it at
+most. These timings are nominal: each interval is 900 s, plus up to one claim
+timeout (30 s by default, because the next attempt is timed from when the claim
+failed), plus up to one poll (30 s) before a poll reaches the deadline. The
+collector does not read `BOT_ERRORS_TRANSIENT_PROMOTE_SECONDS`, so a value that
+differs between the two running services cannot shift its schedule. A remote
+already down when the capped collector starts keeps the deadline the previous
+collector stored, up to 3600 s ahead, so every tier-3 poll decision also holds
+that stored deadline to the last attempt plus 900 s (to the first poll plus
+900 s when the last attempt is not recorded).
+
+With the defaults and 30 s polls, counted from the first failed poll, a remote
+that stays down is asserted at about 1 minute (entry), 6, 21 and 36 minutes,
+then about every 15 minutes. The 36-minute re-assertion promotes and delivers
+one critical; if dispatcher latency makes it miss the window, the next one,
+about 15 minutes later, promotes. With a 600 s window the critical comes at
+about 21 minutes, and with 7200 s at about 126 minutes. The cap means a remote
+that comes back is seen within about 15 minutes, and its recovery clears the
+critical one poll later (`recovery_successes`, default 2). The cost is that a
+down remote is attempted every 15 minutes instead of hourly, and each attempt
+runs serially in the collection cycle: an SSH claim of up to the claim timeout,
+the reachability probe, and the writefail claim (also up to the claim timeout)
+unless the reachability diagnosis skips it.
+
+After promotion the re-assertions are suppressed duplicates of the open
+incident, so they never page by themselves; the dispatcher's still-open
+renotify (`BOT_ERRORS_INCIDENT_RENOTIFY_SECONDS`, 6 h, doubling) still applies.
+At one duplicate per 15 minutes (a little more in practice, since each interval
+also includes the failed attempt itself), `BOT_ERRORS_INCIDENT_ESCALATE_SUPPRESSED`
+(72) is reached about 18 hours after promotion, before the 24-hour age
+escalation. Escalation only relabels a renotify, which is due 6, 18 and 42 hours
+after the critical; the label may land on the 18-hour one instead of the
+42-hour one, and never adds a page.
+
+A `--best-effort-remote` with the info tier on keeps the plain schedule: its
+info observation is never held or promoted.
+
+What reaches the group for an outage-class failure:
+
+- a blip that recovers before tier 3 promotes: the tier-1 and tier-2 warnings
+  and the clears that close them; no critical, and the held tier 3 and its
+  recovery stay silent;
+- an outage past about 36 minutes: the same, plus one critical
+  `relay_host_down`, and its recovery within about 15 minutes of the remote
+  returning.
+
+An SSH timeout to a peer that Tailscale reports online
+(`reachabilityDiagnosis=tailscale_online_ssh_timeout`) is held by Pattern D at
+tiers 1 and 2 as well, and their clears retire silently. With
+`BOT_ERRORS_RELAY_FLAP_COALESCE=0` or `BOT_ERRORS_TRANSIENT_TIERING=0`, tier 3
+is an outage at entry and pages critical about one minute in; the
+re-assertions are then suppressed duplicates.
+
+Below tier 3, tier 2 is per-transition-honest: it clears on the literal next
+successful collection, not after `recovery_successes`. Once tier 3 has opened,
+tier 2 does not reopen for the rest of the down episode, even across a single
+recovering poll; only a full recovery (`recovery_successes` consecutive
+successes) starts a new episode at tier 1. A genuinely flapping remote below
+tier 3 is bounded by the dispatcher's flap-storm machinery
 (`BOT_ERRORS_FLAP_TRIP_THRESHOLD`/`BOT_ERRORS_FLAP_WINDOW_SECONDS`, default 5
-trips per 600s, collapses into one storm digest) rather than by holding this
-event open across a real recovery.
+trips per 600s, collapses into one storm digest).
 
 When a storm's "resolved" notice fails to send, the dispatcher retries it with
 exponential backoff (`BOT_ERRORS_FLAP_RESOLVE_RETRY_BASE_SECONDS`, default 30,
@@ -615,13 +690,13 @@ doubling per failure up to `BOT_ERRORS_FLAP_RESOLVE_RETRY_MAX_SECONDS`, default
 ends suppression of that storm's member alerts: they go through normal
 per-event handling again instead of being consolidated into the storm.
 
-One implication worth flagging for on-call: because `collector_remote_unreachable`
-(threshold 2) and `relay_host_down` (threshold 3) are different sources —
-and therefore different dispatcher incident keys — **one persistently dead
-remote opens two separate incidents**, not one. This is intentional (each
-signal has its own threshold/confirmation semantics, per above), but it
-means the notification count for a single dead host is 2, not 1; don't
-read the second page as a different host.
+For on-call: one dead remote produces several lines for the same host, one
+tier at a time, not several incidents. Tier 2 closes tier 1, and tier 3 closes
+tier 2, so with an escalate threshold below 3 at most one collector incident
+per remote is open (at 3 or more, tiers 1 and 3 can be open together; see the
+ladder table above). The tier-1 and
+tier-2 warnings, the clears that close them, and the critical about
+36 minutes in all name the same remote; don't read them as different hosts.
 
 
 ## Per-conversation incident scoping
@@ -1463,8 +1538,10 @@ write/hash failure, raw secret output, or authorization ambiguity remains a hard
 - macOS bot/relay hosts: running copies at `~/LAB/WhatSoup/deploy/scripts/`
   (health job + bots read from this tree).
 - Linux collector hub: the collector/dispatcher/heartbeat copies under
-  the hub's deploy path; restart collector, dispatcher, and q-loop after
-  deploying long-running code.
+  the hub's deploy path; restart the dispatcher before the collector, then
+  q-loop after deploying long-running code. Starting the collector first can
+  let the old dispatcher promote a held outage at warning; later critical
+  re-assertions can then wait for the six-hour reminder.
 
 The deploy contract is:
 
@@ -1485,7 +1562,8 @@ The deploy contract is:
    that row as a hook exception; for an accepted hook exception, run the manual drift-hook
    simulation below and record its expected successful shape instead of treating hook
    activation as complete.
-6. Restart long-running hub services after copying code. Timer-invoked health, deadman,
+6. Restart the dispatcher before the collector after copying long-running hub code.
+   Timer-invoked health, deadman,
    and heartbeat jobs load the new code on their next fire. Confirm restarted services report
    active state through the service manager plus `/health` or equivalent independent probe
    before proceeding; abort on restart failure unless the owner pre-accepted the row as an
