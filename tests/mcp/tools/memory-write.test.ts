@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { isToolErrorPayload } from '../../../src/mcp/types.ts';
 import { PineconeMemory, type MemoryRecord } from '../../../src/runtimes/chat/providers/pinecone.ts';
+import { Database } from '../../../src/core/database.ts';
+import { RemoteMemoryLifecycle } from '../../../src/core/remote-memory-lifecycle.ts';
 
 // Kept as a sentinel: memory_write must leave provider operation logging to
 // PineconeMemory and must not create a second tool-local event.
@@ -15,13 +17,14 @@ vi.mock('../../../src/logger.ts', async () => {
 import { registerMemoryWriteTools, type MemoryWriter } from '../../../src/mcp/tools/memory-write.ts';
 import type { ToolDeclaration, SessionContext } from '../../../src/mcp/types.ts';
 import { fakeClock } from '../../../src/lib/clock.ts';
+import { memoryWriteLifecycleStub } from '../../helpers/memory-write-lifecycle.ts';
 
-function setup(opts: { upsert?: MemoryWriter['upsert']; clock?: ReturnType<typeof fakeClock> } = {}) {
+function setup(opts: { upsert?: MemoryWriter['upsertDirectMemory']; clock?: ReturnType<typeof fakeClock> } = {}) {
   const tools: ToolDeclaration[] = [];
   const register = (t: ToolDeclaration) => tools.push(t);
   const upsert = vi.fn(opts.upsert ?? (async () => {}));
-  const writer: MemoryWriter = { upsert };
-  registerMemoryWriteTools(register, () => writer, opts.clock);
+  const writer: MemoryWriter = { upsertDirectMemory: upsert };
+  registerMemoryWriteTools(register, memoryWriteLifecycleStub(), () => writer, opts.clock);
   const tool = tools.find((t) => t.name === 'memory_write')!;
   return { tool, upsert };
 }
@@ -35,6 +38,267 @@ const chatSession = (over: Partial<SessionContext> = {}): SessionContext => ({
 });
 
 describe('memory_write tool', () => {
+  it('commits a lifecycle write intent before provider execution and finalizes it on success', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot',
+        indexName: 'test-memory-index',
+        now: () => 1_700_000_000_000,
+      });
+      const tools: ToolDeclaration[] = [];
+      let stateDuringProviderCall: string | undefined;
+      const writer: MemoryWriter = {
+        upsertDirectMemory: async () => {
+          stateDuringProviderCall = (db.raw.prepare(
+            'SELECT state FROM remote_memory_lifecycle',
+          ).get() as { state: string } | undefined)?.state;
+        },
+      };
+
+      (registerMemoryWriteTools as unknown as (
+        register: (tool: ToolDeclaration) => void,
+        lifecycle: RemoteMemoryLifecycle,
+        writerFactory: () => MemoryWriter,
+        clock: ReturnType<typeof fakeClock>,
+      ) => void)((tool) => tools.push(tool), lifecycle, () => writer, fakeClock(1_700_000_000_000));
+      const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
+
+      const result = await tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'lifecycle protected fact', memory_type: 'preference' },
+        chatSession(),
+      );
+
+      expect(stateDuringProviderCall).toBe('write_intent');
+      expect(result).toMatchObject({ status: 'written' });
+      expect(db.raw.prepare('SELECT state FROM remote_memory_lifecycle').get()).toMatchObject({ state: 'active' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('tombstones a provider-success/local-finalization ambiguity and reconciles it immediately', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot', indexName: 'test-memory-index', now: () => 1_700_000_000_000,
+      });
+      const tools: ToolDeclaration[] = [];
+      const writer: MemoryWriter = { upsertDirectMemory: async () => {} };
+      vi.spyOn(lifecycle, 'markWriteFinalized').mockImplementationOnce(() => {
+        throw new Error('local receipt finalization failed');
+      });
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        lifecycle,
+        () => writer,
+        fakeClock(1_700_000_000_000),
+      );
+      const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
+
+      const result = await tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'provider success has to be erased', memory_type: 'preference' },
+        chatSession(),
+      );
+
+      expect(isToolErrorPayload(result)).toBe(true);
+      expect(db.raw.prepare('SELECT state, erase_requested_at FROM remote_memory_lifecycle').get()).toMatchObject({
+        state: 'erase_pending', erase_requested_at: 1_700_000_000_000,
+      });
+      const deleteRecord = vi.fn(async () => {});
+      expect(await lifecycle.processDue({ deleteRecord, recordExists: async () => false }, 'ambiguity-reconcile')).toBe('verified_absent');
+      expect(deleteRecord).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rearms erasure when a late admitted write follows verified absence', async () => {
+    let now = 1_700_000_000_000;
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot', indexName: 'test-memory-index', now: () => now,
+      });
+      const tools: ToolDeclaration[] = [];
+      let remoteRecordPresent = false;
+      let beginUpsert!: () => void;
+      let releaseUpsert!: () => void;
+      const upsertBegan = new Promise<void>((resolve) => { beginUpsert = resolve; });
+      const release = new Promise<void>((resolve) => { releaseUpsert = resolve; });
+      const writer: MemoryWriter = {
+        upsertDirectMemory: async (_records, context) => {
+          await context.beforeProviderAttempt();
+          beginUpsert();
+          await release;
+          remoteRecordPresent = true;
+        },
+      };
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        lifecycle,
+        () => writer,
+        fakeClock(now),
+      );
+      const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
+
+      const write = tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'late provider write must be erased', memory_type: 'preference' },
+        chatSession(),
+      );
+      await upsertBegan;
+      const stored = db.raw.prepare('SELECT remote_record_id FROM remote_memory_lifecycle').get() as { remote_record_id: string };
+
+      now += 1_000;
+      lifecycle.requestErase({ scope: 'conversation', conversationKey: '12345@s.whatsapp.net' });
+      const deleteRecord = vi.fn(async () => { remoteRecordPresent = false; });
+      const recordExists = vi.fn(async () => remoteRecordPresent);
+      expect(await lifecycle.processDue({ deleteRecord, recordExists }, 'first-erase')).toBe('verified_absent');
+      expect(lifecycle.get(stored.remote_record_id)).toMatchObject({ state: 'absence_verified', attemptCount: 1 });
+
+      now += 1_000;
+      releaseUpsert();
+      expect(isToolErrorPayload(await write)).toBe(true);
+      expect(db.raw.prepare(`
+        SELECT state, erase_scope, erase_requested_at, provider_acknowledged_at,
+               absence_verified_at, lease_owner, lease_expires_at, failure_code,
+               next_attempt_at, attempt_count, write_finalized_at, updated_at
+          FROM remote_memory_lifecycle
+      `).get()).toEqual({
+        state: 'erase_pending',
+        erase_scope: 'conversation',
+        erase_requested_at: 1_700_000_001_000,
+        provider_acknowledged_at: null,
+        absence_verified_at: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        failure_code: null,
+        next_attempt_at: 1_700_000_002_000,
+        attempt_count: 0,
+        // No local finalization occurred after the tombstone won, so this
+        // must remain absent instead of fabricating a success receipt.
+        write_finalized_at: null,
+        updated_at: 1_700_000_002_000,
+      });
+      expect(lifecycle.registerWrite({
+        remoteRecordId: stored.remote_record_id,
+        conversationKey: '12345@s.whatsapp.net',
+        senderJid: 'phil@s.whatsapp.net',
+        memoryType: 'preference',
+      }).admitted).toBe(false);
+
+      expect(await lifecycle.processDue({ deleteRecord, recordExists }, 'second-erase')).toBe('verified_absent');
+      expect(deleteRecord).toHaveBeenCalledTimes(2);
+      expect(recordExists).toHaveBeenCalledTimes(2);
+      expect(lifecycle.get(stored.remote_record_id)).toMatchObject({ state: 'absence_verified', attemptCount: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('refuses a delayed provider retry after erasure is tombstoned', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot', indexName: 'test-memory-index', now: () => 1_700_000_000_000,
+      });
+      const tools: ToolDeclaration[] = [];
+      let providerAttempts = 0;
+      const writer: MemoryWriter = {
+        upsertDirectMemory: async (_records, context) => {
+          await context.beforeProviderAttempt();
+          providerAttempts += 1;
+          lifecycle.requestErase({ scope: 'conversation', conversationKey: '12345@s.whatsapp.net' });
+          await context.beforeProviderAttempt();
+          providerAttempts += 1;
+        },
+      };
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        lifecycle,
+        () => writer,
+        fakeClock(1_700_000_000_000),
+      );
+      const tool = tools.find((candidate) => candidate.name === 'memory_write')!;
+
+      const result = await tool.handler(
+        { chatJid: '12345@s.whatsapp.net', text: 'retry must not recreate this record', memory_type: 'preference' },
+        chatSession(),
+      );
+
+      expect(isToolErrorPayload(result)).toBe(true);
+      expect(providerAttempts).toBe(1);
+      expect(db.raw.prepare('SELECT state FROM remote_memory_lifecycle').get()).toMatchObject({ state: 'erase_pending' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('registers a sensitive owner-only remote-memory erasure tool when a lifecycle is present', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const tools: ToolDeclaration[] = [];
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot',
+        indexName: 'test-memory-index',
+      });
+      (registerMemoryWriteTools as unknown as (
+        register: (tool: ToolDeclaration) => void,
+        lifecycle: RemoteMemoryLifecycle,
+        writerFactory: () => MemoryWriter,
+        clock: ReturnType<typeof fakeClock>,
+      ) => void)((tool) => tools.push(tool), lifecycle, () => ({ upsertDirectMemory: async () => {} }), fakeClock());
+
+      expect(tools.find((tool) => tool.name === 'erase_remote_memory')).toMatchObject({
+        scope: 'global',
+        targetMode: 'caller-supplied',
+        sensitive: true,
+        core: false,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports bounded reconciliation states and rejects irrelevant erasure scope fields', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const tools: ToolDeclaration[] = [];
+      const lifecycle = new RemoteMemoryLifecycle(db, {
+        accountId: 'test-bot', indexName: 'test-memory-index',
+      });
+      lifecycle.registerWrite({
+        remoteRecordId: 'preference_aaaaaaaaaaaaaaaaaaaaaaaa',
+        conversationKey: '12345@s.whatsapp.net',
+        senderJid: 'phil@s.whatsapp.net',
+        memoryType: 'preference',
+      });
+      registerMemoryWriteTools(
+        (tool) => tools.push(tool),
+        lifecycle,
+        () => ({ upsertDirectMemory: async () => {} }),
+        fakeClock(),
+      );
+      const erase = tools.find((tool) => tool.name === 'erase_remote_memory')!;
+
+      await expect(erase.handler({ scope: 'account' }, { tier: 'global' })).resolves.toMatchObject({
+        scope: 'account', matched: 1, queued: 1, states: { erase_pending: 1 },
+      });
+      await expect(erase.handler(
+        { scope: 'account', sender_jid: 'phil@s.whatsapp.net' },
+        { tier: 'global' },
+      )).rejects.toThrow(/account scope does not accept/);
+    } finally {
+      db.close();
+    }
+  });
+
   it('registers a chat-scoped injected non-core tool', () => {
     const { tool } = setup();
     expect(tool).toBeDefined();
@@ -50,7 +314,7 @@ describe('memory_write tool', () => {
       chatSession(),
     );
     expect(upsert).toHaveBeenCalledTimes(1);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records).toHaveLength(1);
     const r = records[0];
     expect(r.text).toBe('Phil prefers email over calls');
@@ -68,7 +332,7 @@ describe('memory_write tool', () => {
     expect(res).not.toHaveProperty('id');
     expect(upsert.mock.calls[0]?.[1]).toEqual({
       operationId: (res as { operation_id: string }).operation_id,
-      operation: 'memory_write',
+      beforeProviderAttempt: expect.any(Function),
     });
   });
 
@@ -86,7 +350,7 @@ describe('memory_write tool', () => {
       chatSession(),
     );
 
-    const r = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0];
+    const r = upsert.mock.calls[0]![0][0];
     expect(
       { createdAt: r.createdAt, updatedAt: r.updatedAt },
       'record timestamps came from the wall clock, so the injected Clock is not actually consulted',
@@ -121,7 +385,7 @@ describe('memory_write tool', () => {
       { chatJid: '12345@s.whatsapp.net', text: 'x', memory_type: 'user_fact', senderJid: 'spoofed@evil' } as Record<string, unknown>,
       chatSession({ actorJid: 'real@s.whatsapp.net' }),
     );
-    const r = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0];
+    const r = upsert.mock.calls[0]![0][0];
     expect(r.senderJid).toBe('real@s.whatsapp.net');
   });
 
@@ -130,8 +394,8 @@ describe('memory_write tool', () => {
     const args = { chatJid: '12345@s.whatsapp.net', text: 'same fact', memory_type: 'user_fact' as const };
     await tool.handler(args, chatSession());
     await tool.handler(args, chatSession());
-    const id1 = (upsert.mock.calls[0] as [MemoryRecord[]])[0][0].id;
-    const id2 = (upsert.mock.calls[1] as [MemoryRecord[]])[0][0].id;
+    const id1 = upsert.mock.calls[0]![0][0].id;
+    const id2 = upsert.mock.calls[1]![0][0].id;
     expect(id1).toBe(id2);
     expect(id1.startsWith('user_fact_')).toBe(true);
   });
@@ -157,7 +421,7 @@ describe('memory_write tool', () => {
     );
 
     expect(upsert).toHaveBeenCalledTimes(1);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records).toHaveLength(1);
     const r = records[0];
     expect(r).toMatchObject({
@@ -222,11 +486,11 @@ describe('memory_write tool', () => {
 
   it('uses the default Pinecone writer factory when no test writer is injected', async () => {
     const tools: ToolDeclaration[] = [];
-    const upsertSpy = vi.spyOn(PineconeMemory.prototype, 'upsert').mockResolvedValue(undefined);
+    const upsertSpy = vi.spyOn(PineconeMemory.prototype, 'upsertDirectMemory').mockResolvedValue(undefined);
     const originalApiKey = process.env.PINECONE_API_KEY;
     process.env.PINECONE_API_KEY = 'test-pinecone-key';
     try {
-      registerMemoryWriteTools((t) => tools.push(t));
+      registerMemoryWriteTools((t) => tools.push(t), memoryWriteLifecycleStub());
       const tool = tools.find((t) => t.name === 'memory_write')!;
 
       const res = await tool.handler(
@@ -237,7 +501,7 @@ describe('memory_write tool', () => {
       expect(upsertSpy).toHaveBeenCalledTimes(1);
       const [records, operation] = upsertSpy.mock.calls[0] as [
         MemoryRecord[],
-        { operationId: string; operation: 'memory_write' },
+        { operationId: string; beforeProviderAttempt: () => void | Promise<void> },
       ];
       expect(records[0]).toMatchObject({
         chatJid: '12345@s.whatsapp.net',
@@ -247,7 +511,7 @@ describe('memory_write tool', () => {
       });
       expect(operation).toEqual({
         operationId: (res as { operation_id: string }).operation_id,
-        operation: 'memory_write',
+        beforeProviderAttempt: expect.any(Function),
       });
       expect(res).toMatchObject({
         operation_id: expect.stringMatching(/^[a-f0-9]{32}$/),
@@ -287,7 +551,7 @@ describe('memory_write tool', () => {
     );
 
     expect(isToolErrorPayload(res)).toBe(false);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records[0]).toMatchObject({
       chatJid: '12345',
       senderJid: 'phil@s.whatsapp.net',
@@ -352,7 +616,7 @@ describe('memory_write — conversation-bound sessions (per-chat actor socket)',
       boundSession({ conversationKey: 'diverged-top-level' }),
     );
     expect(isToolErrorPayload(res)).toBe(false);
-    const [records] = upsert.mock.calls[0] as [MemoryRecord[]];
+    const records = upsert.mock.calls[0]![0];
     expect(records[0].chatJid).toBe('12345'); // binding key — not params.chatJid, not the diverged mirror
     expect(records[0].senderJid).toBe('phil@s.whatsapp.net');
   });

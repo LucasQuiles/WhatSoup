@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Implementation Tasks
 
-**Status:** Active specification — source reconciliation at `59cc562bc` (2026-10-06), schema 66. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — source reconciliation updated 2026-10-14 at schema 67. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-66 base, terminal recovery is planned as 67 and the provider lifecycle ledger as 68; recheck before implementation.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-67 base, terminal recovery is planned as 68 and the provider lifecycle ledger as 69; recheck before implementation.
 
 > **REQUIRED COMPANION SKILL:** superpowers:spec-driven-development
 
@@ -46,10 +46,10 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
    terminal closure. The prerequisite also gives blocked/exhausted/expired/orphaned/terminal-
    non-echoed recovery owners a five-minute fail-closed abandonment path that closes
    the inbound, preserves evidence/replay veto, and releases scope without asserting
-   delivery truth. Implement that prerequisite as forward migration 67 on canonical
-   schema 66; do not alter historical migrations or merge the stale
+   delivery truth. Implement that prerequisite as forward migration 68 on canonical
+   schema 67; do not alter historical migrations or merge the stale
    DGX recovery branch wholesale.
-4. Migration 53 is now part of the schema-66 source baseline. Preserve its
+4. Migration 53 is now part of the schema-67 source baseline. Preserve its
    exact-head review and fleet-compatibility obligations; source presence does
    not prove live deployment. Reconcile that evidence, then land the terminal-
    recovery prerequisite and rebase before implementing the lifecycle ledger
@@ -105,16 +105,16 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
 - **Fleet drift:** Installed artifacts are compared to repository manifests. No raw
   reinstall, state replacement, or uncoordinated restart is permitted.
 - **Rollback:** After activation the runtime is roll-forward-only; before activation,
-  rollback permits the immutable migration-68 marker but requires no activation row,
+  rollback permits the immutable migration-69 marker but requires no activation row,
   zero rows across the other nine lifecycle tables, zero nonterminal inbound rows,
   zero active agent sessions, and runtime proof of no provider request/process. A downgrade
-  otherwise requires full v68 write compatibility or drain/read-only rejection of
+  otherwise requires full v69 write compatibility or drain/read-only rejection of
   every new provider turn. Pre-activation rollout requires a quiesced SQLite backup,
   integrity check, scratch restore proof, and checkpoint. Unresolved evidence and
   migration history are never manually/in-place deleted or rewritten. The sole
   exception is the verified preactivation whole-database restore, which returns both
-  data and schema history to the exact schema-67 backup fingerprint and removes the source
-  v68 row as part of that atomic state replacement. Unknown fleet fingerprints stop rollout.
+  data and schema history to the exact schema-68 backup fingerprint and removes the source
+  v69 row as part of that atomic state replacement. Unknown fleet fingerprints stop rollout.
 
 ## Validation Strategy
 
@@ -136,8 +136,8 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
 
 ## Tasks
 
-#### TSK-010: Land migration-67 canonical terminal no-send/recovery-owner prerequisites
-- **Status:** pending — canonical source is at schema 66; the specified canonical `not_sent` and bounded terminal-closure prerequisite remains open, with forward allocation 67
+#### TSK-010: Land migration-68 canonical terminal no-send/recovery-owner prerequisites
+- **Status:** pending — canonical source is at schema 67; the specified canonical `not_sent` and bounded terminal-closure prerequisite remains open, with forward allocation 68
 - **Traces-from:** REQ-006, CON-002, CON-004, DES-006
 - **Owns-AC:** REQ-006.AC-06, CON-002.AC-06, CON-004.AC-07
 - **Checks:** CHK-075, CHK-076, CHK-078
@@ -163,13 +163,13 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     `failed_permanent` is not accepted as no-transmission truth and cannot cause a
     repeating durable-failure incident.
   - [ ] Reserve `outbound_ops.status='not_sent'` for typed pre-send rejection and keep
-    the exact op ID/status in terminal `deliveryKind=not_sent`. Migration 67 permits
+    the exact op ID/status in terminal `deliveryKind=not_sent`. Migration 68 permits
     terminal aggregate no-send only for positively proved single-op answers; 1:N stays
-    partial/uncertain until migration 68's immutable sealed expected set proves every
+    partial/uncertain until migration 69's immutable sealed expected set proves every
     required sibling not-sent. Cover missing/late-created siblings and crash-between-
     chunks; any echoed/submitted/maybe-sent/pending/sending/quarantined/generic-failure
     sibling dominates. Prove no-send never clears provider/tool/lifecycle replay veto.
-  - [ ] Base this work on canonical schema 66 and allocate forward migration 67 for
+  - [ ] Base this work on canonical schema 67 and allocate forward migration 68 for
     canonical outbound/terminal `not_sent`, immutable transfer
     deadlines, and append-only `turn_recovery_terminal_closures` witnesses. The unique
     witness retains exact terminal/job/inbound/op identity, nullable job for valid
@@ -193,7 +193,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     Completed witnesses
     make claim/renew/promote/reassign/requeue/worker queries ineligible while remaining
     durable history/retention roots.
-  - [ ] Add a declared closure-eligibility index and migration-67 storage accounting.
+  - [ ] Add a declared closure-eligibility index and migration-68 storage accounting.
     Prune oldest first only after the bound inbound, terminal, optional job, selected
     op, and every late-echo/conflict row are terminal, no live owner/reference remains,
     and the canonical cutoff passes; delete the witness last in the guarded aggregate.
@@ -216,7 +216,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     contract but must not redefine terminal outbound truth inside this PR.
 
 #### TSK-001: Verify canonical schema lineage and deployment evidence
-- **Status:** in progress — audited source is at schema 66. The historical base `482b707d716aee5641db25d40c2a954caee5d78f` understood migrations through 46 and included the schema-ceiling guard plus CHK-071. Migration 53 is now in source; verify its exact-head review/publication evidence and current fleet compatibility rather than treating it as an unpublished change.
+- **Status:** in progress — audited source is at schema 67. The historical base `482b707d716aee5641db25d40c2a954caee5d78f` understood migrations through 46 and included the schema-ceiling guard plus CHK-071. Migration 53 is now in source; verify its exact-head review/publication evidence and current fleet compatibility rather than treating it as an unpublished change.
 - **Traces-from:** CON-005, DES-008, DES-009
 - **Owns-AC:** CON-005.AC-01, CON-005.AC-05
 - **Checks:** CHK-001, CHK-071
@@ -240,7 +240,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
   - [x] Add the marked `CHK-071` conformance case under
     `tests/spec-conformance/provider-event-lifecycle/` so real SQLite future-schema
     rejection and the then-current allocation were checked. Rerun that
-    conformance case against the shared 66/67/68 allocation before accepting
+    conformance case against the shared 67/68/69 allocation before accepting
     the forward implementation; a historical checkbox is not current proof.
   - [x] Add or relocate the remaining marked `CHK-001` plan-stage conformance case
     without duplicating existing migration unit coverage.
@@ -250,7 +250,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     drain/read-only gate. When database max migration exceeds the binary maximum,
     preserve backup/inspection but reject every provider turn.
   - [ ] After exact-head review and publication, deploy and verify the guard fleet-wide
-    before any schema-67/68 writer; record and prohibit older pre-guard binary
+    before any schema-68/69 writer; record and prohibit older pre-guard binary
     fingerprints as rollback targets.
   - [x] Preserve recovery retention roots required by the installed tables; remove
     incident-specific labels and regenerate current-main indexes/manifests only.
@@ -265,7 +265,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     publication, required checks and canonical merge hash for migration 53,
     separately from PR #1768. Source inclusion does not prove those acceptance
     receipts; retain missing evidence as open without republishing the migration.
-  - [ ] After TSK-010 merges migration 67, rebase this lifecycle branch onto
+  - [ ] After TSK-010 merges migration 68, rebase this lifecycle branch onto
     current canonical source and the exact terminal-recovery prerequisite merge
     before TSK-002; do not begin fixtures on a base missing either prerequisite.
 
@@ -316,7 +316,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     add and commit their own marked failing `CHK` cases immediately before the
     corresponding production slice, so no task inherits an ownerless broad RED suite.
 
-#### TSK-003: Add migration 68 and the durable receipt ledger
+#### TSK-003: Add migration 69 and the durable receipt ledger
 - **Status:** pending
 - **Traces-from:** REQ-002, CON-001, CON-002, CON-004, CON-007, DES-002, DES-003
 - **Owns-AC:** REQ-002.AC-03, REQ-002.AC-13, CON-001.AC-01, CON-001.AC-03, CON-002.AC-01, CON-002.AC-02, CON-002.AC-03, CON-002.AC-07, CON-004.AC-01, CON-004.AC-02, CON-004.AC-03, CON-004.AC-04, CON-004.AC-05, CON-004.AC-06, CON-007.AC-01, CON-007.AC-03
@@ -325,7 +325,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
   - [ ] Add only TSK-003's marked migration/durability `CHK` cases from the fixture
     scaffold, run them to capture the expected RED assertions, and commit that RED
     slice before changing production schema or durability code.
-  - [ ] Add `src/core/database-migration-68.ts` and register it in
+  - [ ] Add `src/core/database-migration-69.ts` and register it in
     `src/core/database.ts`; create an initially empty
     `provider_lifecycle_activation` plus content-free `provider_request_attempts`,
     immutable `provider_attempt_handoffs`, append-only `provider_request_segments`
@@ -762,7 +762,7 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     Explicitly ignore legacy/zero-byte DB decoys and perform no raw setup or overwrite.
   - [ ] Extend the existing deploy preflight/cutover path and managed compatibility
     metadata with a fail-closed schema-ceiling gate. Before starting a selected
-    runtime artifact, it proves that artifact is v68 write-compatible; otherwise it
+    runtime artifact, it proves that artifact is v69 write-compatible; otherwise it
     keeps the instance drained/read-only and rejects all new provider turns. The
     rollback selector refuses an older unproved artifact even if it can read the
     database. Cover the empty-on-migration activation table, its atomic first-attempt
@@ -775,16 +775,16 @@ SHAs, migration-53 publication steps, or fleet claims is a fresh deployment rece
     schema fingerprinting, roll-forward activation, quiesced application-consistent
     SQLite backup, source/backup integrity, scratch restore/fingerprint proof,
     pre-activation checkpoint/rollback (the sole state-replacement exception is the
-    exact verified schema-67 (pre-v68) backup while still quiesced with no activation marker,
+    exact verified schema-68 (pre-v69) backup while still quiesced with no activation marker,
     zero rows in the other nine named lifecycle tables, zero nonterminal inbound rows,
     zero active agent sessions, and runtime proof of no provider request/process;
-    the migration-68 marker may exist in the source; the whole-database restore returns
-    schema history to the exact schema-67 backup fingerprint and is the sole allowed removal
+    the migration-69 marker may exist in the source; the whole-database restore returns
+    schema history to the exact schema-68 backup fingerprint and is the sole allowed removal
     of that row; never manually/in-place delete/rewrite migration history; verify restore
     integrity/fingerprint before restart; never restore after activation),
     capacity/backpressure/storage governors, provider version/build gating, staged targeted update, and the
     prohibition on raw reinstall/state replacement/uncoordinated restart. Require a
-    downgrade to be fully v68 write-compatible or drain/read-only with all new
+    downgrade to be fully v69 write-compatible or drain/read-only with all new
     provider turns rejected.
   - [ ] Reverify merged PR #1747 (`5c52f571`, merge `77cd0718`) for active, pending,
     rejected, retry-owned, published-context, and non-settling teardown evidence. File

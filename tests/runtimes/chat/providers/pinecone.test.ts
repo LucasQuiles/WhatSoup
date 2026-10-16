@@ -4,9 +4,13 @@ import { WhatSoupError as AppError } from '../../../../src/errors.ts';
 // Mock index methods — set up before mock factory so factory can reference them
 const mockSearchRecords = vi.fn();
 const mockUpsertRecords = vi.fn();
+const mockDeleteOne = vi.fn();
+const mockFetch = vi.fn();
 const mockRerank = vi.fn();
 const { mockPineconeLogger } = vi.hoisted(() => ({ mockPineconeLogger: {} as Record<string, ReturnType<typeof vi.fn>> }));
 const mockIndex = {
+  deleteOne: mockDeleteOne,
+  fetch: mockFetch,
   searchRecords: mockSearchRecords,
   upsertRecords: mockUpsertRecords,
 };
@@ -56,7 +60,14 @@ vi.mock('../../../../src/lib/keyring.ts', () => ({
 }));
 
 import { Pinecone } from '@pinecone-database/pinecone';
-import { PineconeMemory, MemoryRecord, decayScore, applyDecay, getPineconeReadiness } from '../../../../src/runtimes/chat/providers/pinecone.ts';
+import {
+  PineconeMemory,
+  MemoryRecord,
+  decayScore,
+  applyDecay,
+  getPineconeReadiness,
+  _testing as pineconeTesting,
+} from '../../../../src/runtimes/chat/providers/pinecone.ts';
 import * as configModule from '../../../../src/config.ts';
 import { OPERATOR_PINECONE_PROJECT_ID } from '../../../../src/lib/pinecone-project-guard.ts';
 
@@ -688,6 +699,24 @@ describe('PineconeMemory', () => {
       ]]);
     });
 
+    it('rechecks direct-memory admission before retrying the provider', async () => {
+      const beforeProviderAttempt = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('write tombstoned'));
+      mockUpsertRecords.mockRejectedValueOnce(new Error('transient provider failure'));
+
+      try {
+        await expect(memory.upsertDirectMemory([makeMemoryRecord()], {
+          beforeProviderAttempt,
+        })).rejects.toMatchObject({ code: 'PINECONE_UNAVAILABLE' });
+
+        expect(beforeProviderAttempt).toHaveBeenCalledTimes(2);
+        expect(mockUpsertRecords).toHaveBeenCalledTimes(1);
+      } finally {
+        pineconeTesting.reset();
+      }
+    });
+
     it('blocks upsert for non-q instances without a project guard', async () => {
       (configModule.config as any).botName = 'mini3';
       try {
@@ -900,6 +929,65 @@ describe('PineconeMemory', () => {
           ],
         },
       ]]);
+    });
+  });
+
+  describe('direct remote-memory lifecycle operations', () => {
+    it('propagates a lifecycle abort signal through both delete and fetch transports', async () => {
+      const clientConfig = vi.mocked(Pinecone).mock.calls[0][0] as {
+        fetchApi?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+      };
+      const observedSignals: Array<AbortSignal | null | undefined> = [];
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        observedSignals.push(init?.signal);
+        return new Response('{}', { status: 200 });
+      });
+      mockDeleteOne.mockImplementation(async () => { await clientConfig.fetchApi?.('https://example.invalid/delete'); });
+      mockFetch.mockImplementation(async () => {
+        await clientConfig.fetchApi?.('https://example.invalid/fetch');
+        return { records: {} };
+      });
+      const controller = new AbortController();
+
+      try {
+        await memory.deleteRemoteMemoryRecord('preference_0123456789abcdef01234567', controller.signal);
+        await memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567', controller.signal);
+        expect(observedSignals).toEqual([controller.signal, controller.signal]);
+        controller.abort();
+        expect(observedSignals.every((signal) => signal?.aborted)).toBe(true);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('deletes and checks records through the configured default namespace', async () => {
+      mockDeleteOne.mockResolvedValueOnce(undefined);
+      mockFetch.mockResolvedValueOnce({ records: {} });
+      mockFetch.mockResolvedValueOnce({ records: { 'preference_0123456789abcdef01234567': {} } });
+
+      await memory.deleteRemoteMemoryRecord('preference_0123456789abcdef01234567');
+      await expect(memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567')).resolves.toBe(false);
+      await expect(memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567')).resolves.toBe(true);
+
+      expect(mockDeleteOne).toHaveBeenCalledWith({ id: 'preference_0123456789abcdef01234567' });
+      expect(mockFetch).toHaveBeenNthCalledWith(1, { ids: ['preference_0123456789abcdef01234567'] });
+      expect(mockFetch).toHaveBeenNthCalledWith(2, { ids: ['preference_0123456789abcdef01234567'] });
+    });
+
+    it('applies the project guard to delete and fetch before provider calls', async () => {
+      (configModule.config as any).botName = 'mini3';
+      try {
+        await expect(memory.deleteRemoteMemoryRecord('preference_0123456789abcdef01234567')).rejects.toMatchObject({
+          code: 'PINECONE_UNAVAILABLE',
+        });
+        await expect(memory.remoteMemoryRecordExists('preference_0123456789abcdef01234567')).rejects.toMatchObject({
+          code: 'PINECONE_UNAVAILABLE',
+        });
+        expect(mockDeleteOne).not.toHaveBeenCalled();
+        expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        delete (configModule.config as any).botName;
+      }
     });
   });
 

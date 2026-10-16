@@ -48,6 +48,8 @@ import type { RuntimeConnection } from '../transport/runtime-connection.ts';
 import { createProfileRegistry } from '../core/profiles.ts';
 import { createOutboundSendsWriter } from '../core/outbound-sends.ts';
 import { GroupMembershipCache } from '../core/memory-scope.ts';
+import { RemoteMemoryLifecycle } from '../core/remote-memory-lifecycle.ts';
+import { resolveApiKey } from '../lib/api-key-resolver.ts';
 import type { KnowledgeSearchDeps } from './tools/knowledge.ts';
 
 const log = createChildLogger('register-all');
@@ -137,6 +139,9 @@ export function registerAllTools(
   const getSock = () => connection.getSocket() as ExtendedBaileysSocket | null;
   const profileRegistry = createProfileRegistry(config.profiles ?? {});
   const outboundSendsWriter = createOutboundSendsWriter({ db: db.raw, line: config.botName });
+  const remoteMemoryLifecycle = config.pineconeIndex
+    ? new RemoteMemoryLifecycle(db, { accountId: config.botName, indexName: config.pineconeIndex })
+    : undefined;
 
   const failures: ModuleRegistrationFailure[] = [];
 
@@ -236,7 +241,8 @@ export function registerAllTools(
   // Pattern 2 — DB-dependent. The `register` argument is bound to this module's
   // core flag so registry.register throws abort the module (issue #510).
   runModule('chat-management', true, (register) => chatManagement.registerChatManagementTools(db, getSock, register));
-  runModule('chat-operations', true, (register) => chatOperations.registerChatOperationTools(db, getSock, register));
+  runModule('chat-operations', true, (register) =>
+    chatOperations.registerChatOperationTools(db, getSock, register, remoteMemoryLifecycle));
   runModule('search', true, (register) => searchTools.registerSearchTools(db, register));
 
   // Pattern 3 — socket+callback. Same core-aware register binding as Pattern 2.
@@ -276,10 +282,21 @@ export function registerAllTools(
   // operator project for `q` when its config sets none).
   const memWriteApiKeyEnv =
     (memoryPinecone as { apiKeyEnv?: string } | undefined)?.apiKeyEnv ?? 'PINECONE_API_KEY';
-  // env-allowed: memory-write API key resolver; secret surface stays env-late
-  if (config.pineconeIndex && process.env[memWriteApiKeyEnv]) {
+  const memWriteApiKeyService = (memoryPinecone as { apiKeyService?: string } | undefined)?.apiKeyService;
+  if (remoteMemoryLifecycle) {
     runModule('memory-write', false, (register) =>
-      memoryWriteTools.registerMemoryWriteTools(register),
+      memoryWriteTools.registerRemoteMemoryEraseTool(register, remoteMemoryLifecycle));
+  }
+  // The resolver covers a configured keyring service before its env fallback.
+  // Registration only exposes writing when a credential is presently usable;
+  // erasure remains available above so an outage cannot hide reconciliation.
+  if (
+    remoteMemoryLifecycle
+    && config.pineconeIndex
+    && resolveApiKey({ service: memWriteApiKeyService, envVar: memWriteApiKeyEnv })
+  ) {
+    runModule('memory-write', false, (register) =>
+      memoryWriteTools.registerMemoryWriteTools(register, remoteMemoryLifecycle, undefined, undefined, false),
     );
   }
 

@@ -78,6 +78,7 @@ import {
 import {
   registerMemoryWriteTools,
 } from '../../../../src/mcp/tools/memory-write.ts';
+import { memoryWriteLifecycleStub } from '../../../helpers/memory-write-lifecycle.ts';
 import type {
   SessionContext,
   ToolDeclaration,
@@ -117,7 +118,7 @@ const privateSession: SessionContext = {
 
 function registerTool(memory: PineconeMemory): ToolDeclaration {
   const tools: ToolDeclaration[] = [];
-  registerMemoryWriteTools((tool) => tools.push(tool), () => memory);
+  registerMemoryWriteTools((tool) => tools.push(tool), memoryWriteLifecycleStub(), () => memory);
   return tools.find((tool) => tool.name === 'memory_write')!;
 }
 

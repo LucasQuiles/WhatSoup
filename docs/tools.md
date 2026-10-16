@@ -1,8 +1,8 @@
 # WhatSoup MCP Tool API Reference
 
-Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
+Complete reference for all 171 MCP tools exposed by WhatSoup. Tools are grouped by module. Each tool lists its scope, replay policy, and parameters extracted from the Zod schema.
 
-> **Conditionally-registered tools.** Of the 170 documented tools, 166 are always registered at startup and 4 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
+> **Conditionally-registered tools.** Of the 171 documented tools, 166 are always registered at startup and 5 are conditionally registered. Conditional tools are tagged `core: false` in their `ToolDeclaration` so that absence on an instance which does not meet the gate is tolerated rather than fatal (see `src/mcp/types.ts`).
 >
 > **`knowledge_search`** is registered only when all of the following hold:
 >
@@ -20,16 +20,18 @@ Complete reference for all 170 MCP tools exposed by WhatSoup. Tools are grouped 
 > - the runtime is not in `sandboxPerChat` mode, and
 > - the runtime is not in `sandbox` mode.
 >
-> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and the
-> environment variable named by `memory.pinecone.apiKeyEnv` (default
-> `PINECONE_API_KEY`) is set. This registration gate is separate from the
-> credential resolver used by `knowledge_search`.
+> **`memory_write`** is registered when `config.pineconeIndex` is non-empty and
+> the shared API-key resolver can resolve `memory.pinecone.apiKeyService` or the
+> configured `memory.pinecone.apiKeyEnv` (default `PINECONE_API_KEY`).
+> **`erase_remote_memory`** needs only the configured index, so it remains
+> available to queue reconciliation during a credential outage. These gates are
+> separate from the credential resolver used by `knowledge_search`.
 >
 > **`restart_self`** is registered when the runtime is neither sandboxed nor in
 > `sandboxPerChat` mode and a `restartSelf` capability is supplied. Control-plane
 > peers are not required for this tool. Calls also require an authenticated admin.
 >
-> The total of 170 describes the full declaration surface, including all four
+> The total of 171 describes the full declaration surface, including all five
 > conditional tools. An instance's available tools depend on registration gates,
 > session scope and authorization. Instance names do not confer these capabilities.
 
@@ -91,10 +93,10 @@ Conversation-bound sessions have an additional registry allowlist and target bou
 | [scheduling.ts](#schedulingts) | 5 |
 | [audit.ts](#auditts) | 3 |
 | [substrate.ts](#substratets) | 23 |
-| [memory-write.ts](#memory-writets) | 1 |
-| **Total** | **170** |
+| [memory-write.ts](#memory-writets) | 2 |
+| **Total** | **171** |
 
-> The total above (`170`) includes `168` declarations in the per-module
+> The total above (`171`) includes `169` declarations in the per-module
 > `src/mcp/tools/*.ts` factories and two runtime declarations:
 > [`emit_heal_result`](#emit_heal_result) and [`restart_self`](#restart_self).
 > `registerRuntimeInlineTools` wires both from `AgentRuntime.start()`; their
@@ -3334,7 +3336,7 @@ Agent-facing episodic memory write into the configured per-person Pinecone index
 
 Persist a durable memory about the current conversation into the instance's configured Pinecone memory index (`memory.pinecone.index`) via the integrated-embedding upsert path. Intended for agent instances, which do not run the chat-runtime enrichment poller.
 
-> **Conditional registration.** Registered only when a Pinecone API key is available (`memory.pinecone.apiKeyEnv`, default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The project guard (configured, or the operator project for `q` when none is configured) is enforced by `PineconeMemory.upsert`. Records land in the default namespace `__default__` of the memory index, which `knowledge_search` always includes for that index, ranked this chat first and held to the group boundary in groups. See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
+> **Conditional registration.** Registered only when a Pinecone key resolves through `memory.pinecone.apiKeyService` or `memory.pinecone.apiKeyEnv` (default `PINECONE_API_KEY`) and a Pinecone index is configured. `core: false` — absence is tolerated. The project guard (configured, or the operator project for `q` when none is configured) is enforced by `PineconeMemory.upsert`. Records land in the default namespace `__default__` of the memory index, which `knowledge_search` always includes for that index, ranked this chat first and held to the group boundary in groups. See `src/mcp/register-all.ts` and `src/mcp/tools/memory-write.ts`.
 
 | | |
 |---|---|
@@ -3356,11 +3358,43 @@ Persist a durable memory about the current conversation into the instance's conf
 
 **Returns on success:** `{ operation_id, status: "written", memory_type }`, where `operation_id` is an opaque correlation reference. The internal record ID is not returned.
 
-**Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied.
+**Returns on provider failure:** `{ error: "memory_write failed", code, retryable, operation_id }`, where `code` is a stable memory-operation failure code and no provider exception prose is exposed. The conversation and speaker are derived from the session, never caller-supplied. Before the provider upsert, WhatSoup records content-free lifecycle provenance for the existing deterministic record ID (`memory_type` plus the legacy short hash of conversation, type, and text), configured index and default namespace. That ID is a protected sensitive fingerprint used to reconcile existing direct writes; it is not cryptographically opaque and must not be exposed as a content privacy boundary. A later accepted erasure tombstone blocks both the first provider attempt and PineconeMemory's one retry.
+
+The code boundary is enforced by `npm run guard:security-boundaries`. Direct
+memory writes must use `upsertDirectMemory` with a required
+`beforeProviderAttempt` callback; raw provider upserts stay in the Pinecone
+adapter, and `memory_write` registration stays in the composition root with a
+required lifecycle authority. The guard and its planted bypass tests run in the
+branch, release, and hosted quality pipelines.
 
 Although the wire-schema enum still includes `self_fact`, this handler rejects
 that value. Global self-identity memory must come from a trusted path; conversation
 input cannot use this tool to author it.
+
+---
+
+### erase_remote_memory
+
+Queue erasure of direct `memory_write` records from the configured account and Pinecone index. This is a sensitive, owner-authorized operation; the central tool registry verifies the calling admin before the handler runs. The caller cannot select a provider, index, or namespace.
+
+| | |
+|---|---|
+| **Scope** | `global` |
+| **Target Mode** | `caller-supplied` |
+| **Replay Policy** | `unsafe` |
+| **Sensitive** | `true` |
+
+**Parameters**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| scope | string (enum) | required | `account`, `sender`, or `conversation` |
+| sender_jid | string | sender only | Normalized stored sender identity; required for `sender` scope |
+| conversation_key | string | conversation only | Normalized stored conversation key; required for `conversation` scope |
+
+**Returns:** `{ scope, matched, queued, states }`, where `states` is a bounded aggregate of lifecycle states for the requested scope and contains no record IDs or memory content. Repeating the same request is safe: `queued` reports only rows newly tombstoned. The local lifecycle receipt distinguishes a provider delete acknowledgement from a separate fetch that verifies the record is currently absent; a not-found fetch is verified absence. The hourly lifecycle timer queues expiry with a two-hour safety margin before the 90-day retention boundary, even while credentials are unavailable, and bounds each delete or fetch call to 30 seconds with abort propagation. Timeouts and other partial failures remain queued with bounded retry evidence. Verified-absence receipts are retained for 90 days for audit, then pruned; unresolved and `retry_exhausted` receipts are retained for reconciliation.
+
+Provider acknowledgement or current fetch absence does not prove deletion from provider backups, replicas, caches, or downstream processors. Those systems have their own retention and deletion controls. Direct writes from before the lifecycle migration have no reconstructed local receipt, so this tool can only reconcile rows accepted after the migration.
 
 ---
 

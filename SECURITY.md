@@ -42,6 +42,20 @@ A source fix or closed issue does not establish deployment or operational
 protection. Reports about a live instance can require separate owner-authorized
 configuration and deployment checks.
 
+## Repository-enforced boundaries
+
+Security invariants that can be expressed mechanically belong in repository
+guards, companion bypass tests, and the branch, release, and hosted quality
+gates. `npm run guard:security-boundaries` currently enforces the direct remote
+memory write path: MCP code cannot call a generic or raw provider upsert, the
+composition root must supply the lifecycle authority, each provider attempt
+must recheck admission, and the exact canonical boundary inventory is pinned.
+The guard exits inconclusive when it cannot inspect the source inventory.
+
+Every guard-family script must have a wired companion test that proves a
+failure case; `npm run guard:guard-test-coverage -- --semantic-mode enforce`
+checks that contract.
+
 ## Safe research
 
 Use accounts, instances, and data that you own or have permission to test. Stop

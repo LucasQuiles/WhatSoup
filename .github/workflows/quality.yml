@@ -340,6 +340,9 @@ jobs:
       - name: Grant resolver inventory guard
         run: npm run guard:grant-resolver
 
+      - name: Security boundary guard
+        run: npm run guard:security-boundaries
+
       - name: Resolved-override inventory guard
         run: npm run guard:resolved-override
 

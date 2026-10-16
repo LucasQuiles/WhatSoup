@@ -79,6 +79,8 @@ async function importMainWithMocks(options: {
   messageCount?: number;
   grantReconcileError?: Error;
   expectStartupFailure?: boolean;
+  remoteMemoryApiKey?: string;
+  remoteMemoryApiKeyService?: string;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -95,7 +97,7 @@ async function importMainWithMocks(options: {
   const existingPaths = new Set(options.existingPaths ?? []);
   const processOn = installProcessOnCapture();
   const logger = { ...singletonLoggerMock(), fatal: vi.fn() };
-  const dbRows = [
+  const dbRows: Array<Record<string, string>> = [
     { sender_jid: '15551230000@s.whatsapp.net', sender_name: 'Ada' },
   ];
   const db = {
@@ -123,6 +125,10 @@ async function importMainWithMocks(options: {
     stop: vi.fn(),
     getHealthSnapshot: vi.fn(() => ({ running: true })),
   };
+  const remoteMemoryLifecycle = {
+    requestErase: vi.fn(),
+  };
+  const remoteMemoryLifecycleTimer = { start: vi.fn(), stop: vi.fn() };
   const messageScheduler = { recoverStale: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const triggerPoller = { start: vi.fn(), stop: vi.fn() };
   const grantManager = {
@@ -178,7 +184,11 @@ async function importMainWithMocks(options: {
         dryRun: false,
       },
       sweep: { beadProposeMin: 0.55, beadUpdateMin: 0.80, lookbackHours: 48, reviewByDays: 7, overdueProposalAlertThreshold: 10 },
-      pinecone: { allowedIndexes: [] },
+      pinecone: {
+        allowedIndexes: [],
+        apiKeyEnv: 'PINECONE_API_KEY',
+        ...(options.remoteMemoryApiKeyService ? { apiKeyService: options.remoteMemoryApiKeyService } : {}),
+      },
       fileWatch: { allowedRoots: [] },
     },
     advanced: { enableRelayMessage: false, enableResync: false, relayMaxPayloadBytes: 1_048_576, enableUrlWatch: false },
@@ -238,6 +248,8 @@ async function importMainWithMocks(options: {
     mediaRetentionTimer,
     processTmpRetentionTimer,
     databaseRetentionTimer,
+    remoteMemoryLifecycle,
+    remoteMemoryLifecycleTimer,
     messageScheduler,
     triggerPoller,
     durability,
@@ -277,6 +289,7 @@ async function importMainWithMocks(options: {
     resolveLatestPluginDir: vi.fn((dir: string) => `${dir}-latest`),
     resolveAgentModel: vi.fn(() => 'claude-sonnet'),
     PineconeMemory: vi.fn(function () {}),
+    resolveApiKey: vi.fn(() => options.remoteMemoryApiKey ?? ''),
     getPineconeReadiness: vi.fn(async () => ({
       index: 'mw-mind',
       state: options.pineconeState ?? 'ready',
@@ -366,6 +379,15 @@ async function importMainWithMocks(options: {
     DatabaseRetentionTimer: vi.fn(function () {
       return databaseRetentionTimer;
     }),
+    RemoteMemoryLifecycle: vi.fn(function () {
+      return remoteMemoryLifecycle;
+    }),
+    RemoteMemoryLifecycleTimer: vi.fn(function (
+      _lifecycle: unknown,
+      _providerFactory: () => unknown,
+    ) {
+      return remoteMemoryLifecycleTimer;
+    }),
     persistIntroSentFlag: vi.fn(),
     MessageScheduler: vi.fn(function () {
       return messageScheduler;
@@ -383,6 +405,7 @@ async function importMainWithMocks(options: {
   };
 
   vi.doMock('../src/config.ts', () => ({ config }));
+  vi.doMock('../src/lib/api-key-resolver.ts', () => ({ resolveApiKey: mocks.resolveApiKey }));
   vi.doMock('../src/logger.ts', () => ({
     default: logger,
     createChildLogger: vi.fn(() => logger),
@@ -391,6 +414,10 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/core/database.ts', () => ({
     Database,
     storeDecryptionFailure: mocks.storeDecryptionFailure,
+  }));
+  vi.doMock('../src/core/remote-memory-lifecycle.ts', () => ({
+    RemoteMemoryLifecycle: mocks.RemoteMemoryLifecycle,
+    RemoteMemoryLifecycleTimer: mocks.RemoteMemoryLifecycleTimer,
   }));
   vi.doMock('../src/runtimes/chat/rate-limits-db.ts', () => ({
     cleanupOldRateLimits: mocks.cleanupOldRateLimits,
@@ -716,10 +743,36 @@ describe('main bootstrap', () => {
     });
 
     h.connection.emit('chatCleared', 'chat@s.whatsapp.net');
+    type ConversationInvalidator = (conversationKeys: readonly string[]) => void;
+    const clearCalls = h.clearChatAndDeleteHandoffArtifact.mock.calls as unknown as Array<
+      [unknown, string, ConversationInvalidator | undefined]
+    >;
+    const clearInvalidator = clearCalls[0]?.[2];
+    expect(clearInvalidator).toEqual(expect.any(Function));
+    clearInvalidator?.(['conversation:chat@s.whatsapp.net']);
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation', conversationKey: 'conversation:chat@s.whatsapp.net',
+    });
+
+    h.connection.emit('messageDeleted', ['revoked-message']);
+    const revokeCalls = h.deleteMessagesAndHandoffArtifacts.mock.calls as unknown as Array<
+      [unknown, readonly string[], ConversationInvalidator | undefined]
+    >;
+    const revokeInvalidator = revokeCalls[0]?.[2];
+    expect(revokeInvalidator).toEqual(clearInvalidator);
+    revokeInvalidator?.(['conversation:chat@s.whatsapp.net']);
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation', conversationKey: 'conversation:chat@s.whatsapp.net',
+    });
     expect(h.clearChatAndDeleteHandoffArtifact).toHaveBeenCalledWith(
       h.db,
       'conversation:chat@s.whatsapp.net',
-      undefined,
+      clearInvalidator,
+    );
+    expect(h.deleteMessagesAndHandoffArtifacts).toHaveBeenCalledWith(
+      h.db,
+      ['revoked-message'],
+      revokeInvalidator,
     );
 
     h.clearChatAndDeleteHandoffArtifact.mockImplementationOnce(() => {
@@ -732,7 +785,7 @@ describe('main bootstrap', () => {
     expect(h.deleteMessagesAndHandoffArtifacts).toHaveBeenCalledWith(
       h.db,
       ['revoked-a', 'revoked-b'],
-      undefined,
+      revokeInvalidator,
     );
 
     h.connection.emit('historyMessages', 'not-array');
@@ -867,7 +920,29 @@ describe('main bootstrap', () => {
     expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
   });
 
-  it('wires agent clear and revoke events to fence distillation before artifact deletion', async () => {
+  it('uses a service-only credential for lifecycle provider recovery and reuses the recovered client', async () => {
+    const h = await importMainWithMocks({
+      remoteMemoryApiKey: 'keyring-only-value',
+      remoteMemoryApiKeyService: 'pinecone-instance-keyring',
+    });
+    const providerFactory = h.RemoteMemoryLifecycleTimer.mock.calls[0]?.[1];
+    expect(providerFactory).toBeDefined();
+    if (!providerFactory) return;
+
+    h.PineconeMemory.mockClear();
+    const first = providerFactory();
+    const second = providerFactory();
+
+    expect(h.resolveApiKey).toHaveBeenCalledWith({
+      service: 'pinecone-instance-keyring',
+      envVar: 'PINECONE_API_KEY',
+    });
+    expect(first).not.toBeNull();
+    expect(second).toBe(first);
+    expect(h.PineconeMemory).toHaveBeenCalledOnce();
+  });
+
+  it('uses one canonical key set to fence distillation and request remote erasure before deletion', async () => {
     const h = await importMainWithMocks({ instanceConfig: { type: 'agent' } });
     const runtime = h.agentInstances[0];
     expect(runtime).toBeDefined();
@@ -883,6 +958,10 @@ describe('main bootstrap', () => {
     expect(runtime!.invalidateHandoffArtifacts).toHaveBeenCalledWith([
       'conversation:agent-chat@s.whatsapp.net',
     ]);
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation',
+      conversationKey: 'conversation:agent-chat@s.whatsapp.net',
+    });
 
     h.connection.emit('messageDeleted', ['revoked-agent-message']);
     const revokeCalls = h.deleteMessagesAndHandoffArtifacts.mock.calls as unknown as Array<
@@ -895,6 +974,14 @@ describe('main bootstrap', () => {
       'conversation:revoke-a',
       'conversation:revoke-b',
     ]);
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation',
+      conversationKey: 'conversation:revoke-a',
+    });
+    expect(h.remoteMemoryLifecycle.requestErase).toHaveBeenCalledWith({
+      scope: 'conversation',
+      conversationKey: 'conversation:revoke-b',
+    });
   });
 
   it('logs Pinecone bootstrap state without the configured index', async () => {
