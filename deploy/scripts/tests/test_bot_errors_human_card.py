@@ -22,11 +22,13 @@ import time
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, strategies as st
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
+from bot_errors_property_support import properties  # noqa: E402
 from support import dispatcher_fixtures  # noqa: E402
 
 _SCRIPT = _TESTS_DIR.parent / "bot-errors-dispatcher.py"
@@ -232,41 +234,49 @@ def test_q_admission_is_unchanged(golden: dict) -> None:
         assert not re.match(r"^\s*@?q[:,]\s", new, re.IGNORECASE)
 
 
-_MATRIX_SOURCES = ("primary_model_unusable", "self_restart_completed", "q", "instance_logged_out")
-_MATRIX_SUMMARIES = (
-    {"failureClass": "unknown", "length": 12, "correlationDigest": "ab" * 32},
-    "q: worker stalled",
-    "Q, please check @15550001234",
-    "@15550004321000 mention",
+_MATRIX_KINDS = {"alert": "incident_alert", "observation": "observation", "clear": "incident_recovery"}
+_MATRIX_TYPES = (("alert", "critical"), ("alert", "error"), ("alert", "warning"), ("observation", "info"), ("clear", "info"))
+_MATRIX_SOURCES = st.one_of(
+    st.sampled_from(("primary_model_unusable", "self_restart_completed", "q", "instance_logged_out")),
+    st.from_regex(r"[a-z][a-z_-]{0,24}", fullmatch=True),
+)
+# Summaries that try to look addressed to Q or to mention a number, plus a
+# confined (legacy object) summary.
+_MATRIX_SUMMARIES = st.one_of(
+    st.just({"failureClass": "unknown", "length": 12, "correlationDigest": "ab" * 32}),
+    st.builds(
+        lambda lead, digits, tail: f"{lead}{digits} {tail}".strip(),
+        st.sampled_from(("q: ", "Q, ", "@q ", "Q: please check @", "@", "")),
+        st.from_regex(r"[0-9]{0,15}", fullmatch=True),
+        st.text(alphabet=st.characters(codec="ascii", categories=("L", "N", "Zs")), max_size=30),
+    ),
 )
 
 
-@pytest.mark.parametrize(
-    "event_type,severity",
-    [("alert", "critical"), ("alert", "error"), ("alert", "warning"), ("observation", "info"), ("clear", "info")],
-)
-def test_q_admission_matrix(event_type: str, severity: str) -> None:
-    for source in _MATRIX_SOURCES:
-        for summary in _MATRIX_SUMMARIES:
-            event = {
-                "schemaVersion": 2,
-                "eventKind": {"alert": "incident_alert", "observation": "observation", "clear": "incident_recovery"}[
-                    event_type
-                ],
-                "eventType": event_type,
-                "severity": severity,
-                "id": f"matrix-{event_type}-{severity}-{source}",
-                "createdAt": "2026-10-15T10:00:00Z",
-                "instance": "q",
-                "source": source,
-                "summary": summary,
-            }
-            card = _mod.format_card(event, "00000000")
-            old_body = _mod.format_event(event)
-            expected = event_type == "alert" and severity in {"critical", "error"}
-            assert old_body.startswith("BOT ERROR - ") == expected
-            assert q_admits(old_body) == expected, old_body
-            assert q_admits(card) == expected, card
+@properties
+@given(kind=st.sampled_from(_MATRIX_TYPES), source=_MATRIX_SOURCES, summary=_MATRIX_SUMMARIES)
+@example(kind=("alert", "critical"), source="q", summary="Q, please check @15550001234")
+@example(kind=("observation", "info"), source="self_restart_completed", summary="q: worker stalled")
+def test_q_admission_matrix(kind: tuple[str, str], source: str, summary) -> None:
+    """Q admits a notice exactly when it is a critical/error alert, in the old body and in the card alike."""
+    event_type, severity = kind
+    event = {
+        "schemaVersion": 2,
+        "eventKind": _MATRIX_KINDS[event_type],
+        "eventType": event_type,
+        "severity": severity,
+        "id": f"matrix-{event_type}-{severity}",
+        "createdAt": "2026-10-15T10:00:00Z",
+        "instance": "q",
+        "source": source,
+        "summary": summary,
+    }
+    card = _mod.format_card(event, "00000000")
+    old_body = _mod.format_event(event)
+    expected = event_type == "alert" and severity in {"critical", "error"}
+    assert old_body.startswith("BOT ERROR - ") == expected
+    assert q_admits(old_body) == expected, old_body
+    assert q_admits(card) == expected, card
 
 
 # --- P2: mention safety ---------------------------------------------------------
