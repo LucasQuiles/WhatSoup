@@ -191,6 +191,15 @@ npm --silent run release:activate -- \
   changed the database schema (see "Rollback against a migrated database"
   below). `receipt.json` in the backup directory records the outcome.
 
+  The rollback checks the schema only. With `deferredTurnAdmission` enabled,
+  a planned stop of the new release hands undispatched turns to deferred-turn
+  obligations, and a rollback to a release without the deferred-turn drain
+  (#3295 S3) does not honor them: the old release's start-up recovery fails
+  each handed-off turn, as its own planned stop would, and the obligation rows
+  stay open until a later upgrade quarantines them without replay. Enable
+  `deferredTurnAdmission` only after a verified activation, outside the
+  automatic rollback window.
+
 Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
 `--release` as its path and carries a full commit; the new release has
