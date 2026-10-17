@@ -8,6 +8,7 @@
 // never ride the active turn's outbound queue, where it would count as that
 // turn's visible answer.
 
+import { acceptPlannedStopTurnLoss } from './helpers/planned-stop-loss.ts';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -350,7 +351,7 @@ describe('#2949 queued receipt through the real per_chat admission path', () => 
     for (const session of sessionDoubles) {
       if (session.turnInFlight) session.emit({ type: 'result', text: 'late' });
     }
-    await runtime?.shutdown();
+    await runtime?.shutdown().catch(acceptPlannedStopTurnLoss);
     db.close();
     vi.restoreAllMocks();
   });

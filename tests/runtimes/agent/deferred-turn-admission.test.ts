@@ -15,6 +15,7 @@
 // The outstanding recovery job is created through the REAL
 // `finalizeTurnTerminal` transfer path — not a hand-inserted row.
 
+import { PlannedStopTurnLossError } from '../../../src/runtimes/agent/planned-stop-drain.ts';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -737,7 +738,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     const first = await arriveFollower('waiting-shutdown-a', { contentType: 'document' });
     const second = await arriveFollower('waiting-shutdown-b', { contentType: 'document' });
     const { queue } = await waitForLiveQueue(first);
-    await runtime.shutdown();
+    await expect(runtime.shutdown()).rejects.toBeInstanceOf(PlannedStopTurnLossError);
     engine.matchEcho('wamid-original-answer');
     await queue.idle();
     expect([status(first), status(second)]).toEqual(['failed', 'failed']);
@@ -835,7 +836,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     engine.matchEcho('wamid-original-answer');
     await ready;
     try {
-      await runtime.shutdown();
+      await expect(runtime.shutdown()).rejects.toBeInstanceOf(PlannedStopTurnLossError);
     } finally {
       release();
     }
@@ -908,7 +909,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     await persisted;
     clock.mockRestore();
     try {
-      await runtime.shutdown();
+      await expect(runtime.shutdown()).rejects.toBeInstanceOf(PlannedStopTurnLossError);
     } finally {
       release();
     }

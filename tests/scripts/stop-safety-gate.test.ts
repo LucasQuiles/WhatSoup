@@ -15,7 +15,9 @@
 // mean the instance could never be restarted again — including the restart that
 // clears a wedge. Liveness uses the SAME 15-minute threshold the reply-guarantee
 // observer already uses to call an open inbound stale (DEFAULT_STALE_SECONDS),
-// read from the other side: within the window is live work, beyond it is debt.
+// read from the other side: within the window is live work. Beyond it a row is
+// debt only with persisted evidence that nothing still runs it (#3703); a row
+// without that evidence blocks as unverified.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -41,8 +43,27 @@ function createFixtureDb(): { dbPath: string; db: DatabaseSync } {
   db.exec(`
     CREATE TABLE inbound_events (
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_key TEXT NOT NULL DEFAULT 'chat-a',
       processing_status TEXT NOT NULL DEFAULT 'pending',
       received_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE turn_terminal_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_key TEXT NOT NULL,
+      inbound_seq INTEGER,
+      attempt_kind TEXT NOT NULL
+    );
+    CREATE TABLE turn_recovery_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_inbound_seq INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      claim_expires_at TEXT
+    );
+    CREATE TABLE deferred_turn_obligations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inbound_seq INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      claim_expires_at TEXT
     );
     CREATE TABLE outbound_ops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,12 +76,20 @@ function createFixtureDb(): { dbPath: string; db: DatabaseSync } {
   return { dbPath, db };
 }
 
-/** Insert one inbound row `agoSeconds` in the past. */
-function insertInbound(db: DatabaseSync, status: string, agoSeconds: number): void {
-  db.prepare(`
-    INSERT INTO inbound_events (processing_status, received_at)
-    VALUES (?, datetime('now', ?))
-  `).run(status, `-${agoSeconds} seconds`);
+/** Insert one inbound row `agoSeconds` in the past; returns its seq. */
+function insertInbound(db: DatabaseSync, status: string, agoSeconds: number, conversationKey = 'chat-a'): number {
+  const row = db.prepare(`
+    INSERT INTO inbound_events (conversation_key, processing_status, received_at)
+    VALUES (?, ?, datetime('now', ?))
+    RETURNING seq
+  `).get(conversationKey, status, `-${agoSeconds} seconds`) as { seq: number };
+  return row.seq;
+}
+
+/** A turn of `seq` reached a terminal record. */
+function insertTerminal(db: DatabaseSync, seq: number, attemptKind = 'completed', conversationKey = 'chat-a'): void {
+  db.prepare('INSERT INTO turn_terminal_records (conversation_key, inbound_seq, attempt_kind) VALUES (?, ?, ?)')
+    .run(conversationKey, seq, attemptKind);
 }
 
 afterEach(() => {
@@ -98,11 +127,13 @@ describe('stop-safety gate', () => {
     expect(verdict.liveTurns.staleIgnored).toBe(0);
   });
 
-  it('does NOT block on stale wedged rows — a wedged instance stays restartable', () => {
+  it('does NOT block on stale wedged rows a later turn of the same chat has passed — a wedged instance stays restartable', () => {
     const { dbPath, db } = createFixtureDb();
-    // q's real debt: 11 `processing` rows from weeks ago. Blocking on these
-    // would make the wedge unrecoverable by restart.
+    // q's real debt: `processing` rows from weeks ago, in chats that kept
+    // working afterwards. Blocking on these would make the wedge unrecoverable
+    // by restart.
     for (const ago of [86_400, 172_800, 1_209_600]) insertInbound(db, 'processing', ago);
+    insertTerminal(db, insertInbound(db, 'complete', 3_600));
     db.close();
 
     const verdict = inspectStopSafety(dbPath);
@@ -111,6 +142,83 @@ describe('stop-safety gate', () => {
     expect(verdict.reason).toBe('stop_safe');
     expect(verdict.liveTurns.inFlight).toBe(0);
     expect(verdict.liveTurns.staleIgnored).toBe(3);
+    expect(verdict.liveTurns.olderUnverified).toBe(0);
+  });
+
+  // #3703: the 15-minute horizon must not silently exclude an actually active
+  // older turn. q instance, 2026-10-13: group inbounds 87114, 87145 and 87146
+  // stayed open 16-22 min while their turns progressed. At minute 20 such a row
+  // was `processing`, counted only in staleIgnored, and the stop was allowed.
+  it('does NOT allow a stop while an older open turn may still be active (#3703 horizon)', () => {
+    const { dbPath, db } = createFixtureDb();
+    insertInbound(db, 'processing', 20 * 60);
+    db.close();
+
+    const verdict = inspectStopSafety(dbPath);
+
+    expect(verdict.decision).toBe('block');
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe('older_turns_unverified');
+    expect(verdict.liveTurns).toMatchObject({ inFlight: 0, staleIgnored: 0, olderUnverified: 1 });
+  });
+
+  it('a later row that closed without a turn (paused chat, policy) does not prove an older turn dead', () => {
+    const { dbPath, db } = createFixtureDb();
+    insertInbound(db, 'processing', 20 * 60);
+    insertInbound(db, 'complete', 60);
+    insertTerminal(db, insertInbound(db, 'failed', 30), 'admission_rejected');
+    insertTerminal(db, insertInbound(db, 'complete', 3_600, 'chat-b'), 'completed', 'chat-b');
+    db.close();
+
+    const verdict = inspectStopSafety(dbPath);
+
+    expect(verdict.reason).toBe('older_turns_unverified');
+    expect(verdict.liveTurns.olderUnverified).toBe(1);
+  });
+
+  it('treats an older row as stale when it has its own terminal record or a durable pending owner', () => {
+    const { dbPath, db } = createFixtureDb();
+    insertTerminal(db, insertInbound(db, 'processing', 20 * 60, 'chat-b'), 'failed', 'chat-b');
+    const recovered = insertInbound(db, 'processing', 25 * 60, 'chat-c');
+    db.prepare("INSERT INTO turn_recovery_jobs (source_inbound_seq, state) VALUES (?, 'pending')").run(recovered);
+    const deferred = insertInbound(db, 'processing', 30 * 60, 'chat-d');
+    db.prepare("INSERT INTO deferred_turn_obligations (inbound_seq, status) VALUES (?, 'pending')").run(deferred);
+    db.close();
+
+    const verdict = inspectStopSafety(dbPath);
+
+    expect(verdict.reason).toBe('stop_safe');
+    expect(verdict.liveTurns).toMatchObject({ inFlight: 0, staleIgnored: 3, olderUnverified: 0 });
+  });
+
+  it('BLOCKS on an older row under a live recovery or deferred claim, even when a later turn passed it', () => {
+    const { dbPath, db } = createFixtureDb();
+    const replaying = insertInbound(db, 'processing', 40 * 60);
+    insertTerminal(db, insertInbound(db, 'complete', 30 * 60));
+    db.prepare("INSERT INTO turn_recovery_jobs (source_inbound_seq, state, claim_expires_at) VALUES (?, 'claimed', datetime('now', '+120 seconds'))")
+      .run(replaying);
+    const claimed = insertInbound(db, 'processing', 20 * 60, 'chat-b');
+    db.prepare("INSERT INTO deferred_turn_obligations (inbound_seq, status, claim_expires_at) VALUES (?, 'claimed', datetime('now', '+120 seconds'))")
+      .run(claimed);
+    db.close();
+
+    const verdict = inspectStopSafety(dbPath);
+
+    expect(verdict.reason).toBe('live_turns_in_flight');
+    expect(verdict.liveTurns.inFlight).toBe(2);
+  });
+
+  it('an expired claim is not live evidence', () => {
+    const { dbPath, db } = createFixtureDb();
+    const replaying = insertInbound(db, 'processing', 40 * 60);
+    db.prepare("INSERT INTO turn_recovery_jobs (source_inbound_seq, state, claim_expires_at) VALUES (?, 'claimed', datetime('now', '-60 seconds'))")
+      .run(replaying);
+    db.close();
+
+    const verdict = inspectStopSafety(dbPath);
+
+    expect(verdict.reason).toBe('older_turns_unverified');
+    expect(verdict.liveTurns).toMatchObject({ inFlight: 0, olderUnverified: 1 });
   });
 
   it('counts every open disposition as live, not just processing', () => {
@@ -137,10 +245,16 @@ describe('stop-safety gate', () => {
 
   it('honours a custom window on both sides of the boundary', () => {
     const { dbPath, db } = createFixtureDb();
-    insertInbound(db, 'processing', 120);
+    const seq = insertInbound(db, 'processing', 120);
     db.close();
 
-    expect(inspectStopSafety(dbPath, { liveWindowSeconds: 300 }).decision).toBe('block');
+    expect(inspectStopSafety(dbPath, { liveWindowSeconds: 300 }).liveTurns.inFlight).toBe(1);
+    // Outside the window the row needs evidence to be stale; with none it stays unverified.
+    expect(inspectStopSafety(dbPath, { liveWindowSeconds: 60 }).liveTurns).toMatchObject({ inFlight: 0, olderUnverified: 1 });
+
+    const writable = new DatabaseSync(dbPath);
+    insertTerminal(writable, seq, 'failed');
+    writable.close();
     expect(inspectStopSafety(dbPath, { liveWindowSeconds: 60 }).decision).toBe('allow');
   });
 

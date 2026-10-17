@@ -18,12 +18,14 @@ import type {
   TurnRecoveryReplayDispatchResult,
 } from './turn-recovery-supervisor.ts';
 import { createTurnRecoverySupervisorForRuntime, dispatchTurnRecoveryReplayForJob, shutdownTurnRecoverySupervisorSafely, getTurnRecoveryHealthDetails } from './turn-recovery-dispatch.ts';
+import { DeferredTurnDrain } from './deferred-turn-drain.ts';
 import { resolveCatchupReconcileDep } from '../../core/turn-recovery-catchup-config.ts';
 import { TurnRecoveryDeadman } from './turn-recovery-deadman.ts';
 import { splitInputTokenUsage, type AgentEvent } from './stream-parser.ts';
 import {
   classifyProviderFailure,
   detectAutoSwitchNotice,
+  extractUsageLimitResetTime,
   isProviderAuthRequiredMessage,
 } from './failure-taxonomy.ts';
 import {
@@ -56,7 +58,7 @@ import { registerRuntimeInlineTools } from './runtime-tool-registrations.ts';
 import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/heal.ts';
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
-import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { classifyErrorForInbound, RuntimeAdmissionClosedError } from '../../core/inbound-failure-class.ts';
 import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
@@ -135,6 +137,7 @@ import {
   type SessionCrashInfo,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
+import { PLANNED_STOP_DRAIN_MS, PlannedStopQueueCloseError, plannedStopIntakeDecision, plannedStopLossFailures, waitForPlannedStopDrain } from './planned-stop-drain.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
 import { TurnChronologyTracker, type TurnDeliveryKind } from './turn-chronology.ts';
 import {
@@ -222,6 +225,7 @@ import { ProbeErrorThrottle } from '../../lib/probe-error-throttle.ts';
 import { TurnQueue, type QueuedTurn, type TurnRejectReason } from './turn-queue.ts';
 import { QueuedTurnReceiptNotifier } from './runtime-queued-receipt.ts';
 import {
+  FRESH_TURN_REPLAY_SAFE,
   markRuntimeTurnReplayUnsafe,
   type RuntimeTurnContext,
 } from './runtime-turn-context.ts';
@@ -549,6 +553,7 @@ import {
 // `./failure-taxonomy.ts`. They are imported above for internal use and re-exported
 // here so existing importers (e.g. tests) keep `runtime.ts` as their entry point.
 export {
+  extractUsageLimitResetTime,
   isUsageLimitMessage,
   isProviderAuthRequiredMessage,
   isRateLimitResultMessage,
@@ -563,80 +568,6 @@ import { errorMessage } from '../../lib/error-message.ts';
 
 
 
-
-/**
- * Extract the usage-limit reset time from a provider usage-limit message.
- *
- * Claude usage-limit notices often name when the cap resets — e.g.
- *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
- *   "will be available at 11pm", or a raw Unix-epoch seconds value.
- * The fallback state machine uses this to schedule auto-revert to the primary
- * provider. Parsing is conservative: anything it cannot confidently interpret
- * yields `null`, and the caller then applies a default rolling-window estimate.
- *
- * Returned times are always in the future relative to `now` — a clock time like
- * "3pm" that has already passed today is rolled forward to tomorrow.
- *
- * @param text the usage-limit message text
- * @param now  injectable clock for deterministic tests (defaults to Date.now)
- * @returns the reset Date, or null when unparseable
- */
-export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
-  if (typeof text !== 'string' || text.length === 0) return null;
-  const lower = text.toLowerCase();
-
-  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
-  //    "come back at 9:30am", "try again at 11 pm".
-  //    Parsed FIRST so an explicit clock cue always wins over an incidental
-  //    long number elsewhere in the message (e.g. an order/quota figure).
-  //    The trailing (?!\d) prevents the clock hour from matching the leading
-  //    digits of a longer number (e.g. "5551234567").
-  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
-  const m = lower.match(cue);
-  if (m) {
-    let hour = Number.parseInt(m[1]!, 10);
-    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
-    const meridiem = m[3];
-    if (
-      Number.isFinite(hour) &&
-      Number.isFinite(minute) &&
-      hour >= 0 &&
-      minute >= 0 &&
-      minute < 60 &&
-      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
-    ) {
-      if (meridiem === 'pm' && hour < 12) hour += 12;
-      if (meridiem === 'am' && hour === 12) hour = 0;
-      const candidate = new Date(now);
-      candidate.setHours(hour, minute, 0, 0);
-      // A clock time already past today rolls forward to tomorrow.
-      if (candidate.getTime() <= now.getTime()) {
-        candidate.setDate(candidate.getDate() + 1);
-      }
-      return candidate;
-    }
-  }
-
-  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
-  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
-  //    directly follow a reset cue, so an incidental long number (order/quota
-  //    figure) is never mistaken for a reset time.
-  const epochMatch = lower.match(
-    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
-  );
-  if (epochMatch) {
-    const seconds = epochMatch[1]!;
-    const millis = epochMatch[2];
-    const epochMs = millis
-      ? Number.parseInt(seconds + millis, 10)
-      : Number.parseInt(seconds, 10) * 1000;
-    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
-      return new Date(epochMs);
-    }
-  }
-
-  return null;
-}
 
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
@@ -2099,6 +2030,8 @@ export class AgentRuntime implements Runtime {
   private readonly turnRecoveryDeadman: TurnRecoveryDeadman;
   private readonly runtimeTurnHost: RuntimeTurnCoordinatorPort & RuntimeResultHandlerPort;
   private readonly runtimeTurnCoordinator: RuntimeTurnCoordinator;
+  /** #3295 S3: dispatches deferred-turn obligations (flag-gated; started in setDurability). */
+  private readonly deferredTurnDrain: DeferredTurnDrain;
   private readonly modelPinHost: ModelPinPort;
   private readonly routing: RuntimeRoutingCoordinator;
   private readonly fallback: RuntimeFallbackCoordinator;
@@ -2128,6 +2061,12 @@ export class AgentRuntime implements Runtime {
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
+  /** #3703: set when a planned stop closes intake (before its message-handler drain). */
+  private plannedStopIntakeClosed = false;
+  /** #3295 S3: accepted messages left open during the stop, before closure, because no deferred owner could hold them. */
+  private plannedStopIntakeRetained = 0;
+  /** #3703: bound on the planned-stop drain of dispatched turns. */
+  private readonly plannedStopDrainMs: number;
 
   // Startup events are deferred until main's strict-readiness controller runs.
   private pendingStartupEvent: StartupNotificationEvent | null = null;
@@ -2707,6 +2646,7 @@ export class AgentRuntime implements Runtime {
       getModel: () => handoffDistillModel(),
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
+    this.plannedStopDrainMs = Math.max(0, options?.plannedStopDrainMs ?? PLANNED_STOP_DRAIN_MS);
     this.shared = this.sessionScope === 'shared';
     this.cwd = options?.cwd;
     this.configSystemPrompt = options?.configSystemPrompt;
@@ -2772,6 +2712,22 @@ export class AgentRuntime implements Runtime {
     this.turnQueue = this.createGlobalTurnQueue();
     this.runtimeTurnHost = this.createRuntimeTurnHost();
     this.runtimeTurnCoordinator = new RuntimeTurnCoordinator(this.runtimeTurnHost);
+    this.deferredTurnDrain = new DeferredTurnDrain({
+      enabled: () => this.sessionScope === 'per_chat' && this.deferredTurnAdmissionEnabled(),
+      getDurability: () => this.durability, isShuttingDown: () => this.shutdownRequested,
+      coordinator: this.runtimeTurnCoordinator, requireSessionToolScopeKey: (s) => this.requireSessionToolScopeKey(s),
+      prepareTarget: (jid) => {
+        const mapKey = this.resolvePerChatMapKey(jid);
+        this.ensureSessionAndQueueSync(jid, mapKey);
+        const session = this.chatSessions.get(mapKey);
+        return session ? { mapKey, session } : null;
+      },
+      // The chat's ordinary TurnQueue (live admission, FIFO, planned-stop rules).
+      enqueueTurn: (mapKey, turn, dispatch) => {
+        this.runtimeTurnCoordinator.registerDeferredDispatch(turn.runtimeContext!, dispatch);
+        return this.enqueuePerChatRuntimeTurn(mapKey, turn);
+      },
+    });
     this.modelPinHost = this.createModelPinHost();
     this.sessionLifecycleHost = this.createSessionLifecycleHost();
     this.chatTransportHost = this.createChatTransportHost();
@@ -3139,6 +3095,7 @@ export class AgentRuntime implements Runtime {
       instanceName: runtime.instanceName,
       get sessionScope() { return runtime.sessionScope; },
       deferredTurnAdmissionEnabled: () => runtime.deferredTurnAdmissionEnabled(),
+      kickDeferredTurnDrain: () => runtime.deferredTurnDrain.kick(),
       shared: runtime.shared,
       runtimeTurnSupervisor: runtime.runtimeTurnSupervisor,
       sessionOwnership: runtime.sessionOwnership,
@@ -3357,6 +3314,7 @@ export class AgentRuntime implements Runtime {
     for (const q of this.outboundQueues.values()) q.setDurability(engine);
     for (const q of this.chatQueues.values()) q.setDurability(engine);
     this.turnRecoverySupervisor.start(); // PRESTAGE-T4; idempotent
+    this.deferredTurnDrain.start(); // #3295 S3; idempotent, first pass on a timer turn
     this.turnRecoveryDeadman.start();
 
     // #3374 ask 2: when the W2 sweep durably reclaims a stale open inbound, a
@@ -4727,12 +4685,30 @@ export class AgentRuntime implements Runtime {
     } catch (err) {
       return Promise.reject(err);
     }
-    if (this.shutdownRequested) {
-      return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
-    }
     const initialClassification = msg.content === null
       ? null
       : classifyInput(msg.content, { routingAliases: config.nlRouting });
+    const plannedStopIntake = this.shutdownRequested;
+    if (plannedStopIntake) {
+      const decision = plannedStopIntakeDecision({
+        intakeClosed: this.plannedStopIntakeClosed,
+        deferredOwner: this.sessionScope === 'per_chat' && !this.sandboxPerChat
+          && this.deferredTurnAdmissionEnabled() && this.durability !== null,
+        msg,
+        classification: initialClassification?.type,
+        // The envelope the handoff would store: a fresh turn's text (plain
+        // messages are forwarded unchanged) under the store's own contract.
+        replay: { replaySafe: FRESH_TURN_REPLAY_SAFE, text: msg.content },
+      });
+      if (decision === 'closed') return Promise.reject(new RuntimeAdmissionClosedError());
+      if (decision === 'unownable') {
+        // Already journaled by ingest, but the deferred store cannot hold its
+        // envelope. Leave the inbound open: startup recovery gives it an
+        // operator catch-up owner. The stop still does not report clean.
+        this.plannedStopIntakeRetained += 1;
+        return Promise.resolve();
+      }
+    }
     const tracksRouteRecycle = (
       initialClassification?.type === 'local'
       && (
@@ -4740,7 +4716,8 @@ export class AgentRuntime implements Runtime {
         || initialClassification.command === 'reset'
       )
     );
-    const processing = this.handleMessageInner(msg, tracksRouteRecycle);
+    // #3703: planned-stop intake is awaited through its queue admission (handler drain covers the handoff).
+    const processing = this.handleMessageInner(msg, tracksRouteRecycle || plannedStopIntake);
     this.activeMessageHandlers.add(processing);
     if (tracksRouteRecycle) {
       const scopeKey = this.sessionScope === 'per_chat'
@@ -6339,6 +6316,8 @@ export class AgentRuntime implements Runtime {
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
       try {
         await this.sendTurnToSession(retrySession, chatJid, text, currentMapKey, actorJid, () => {
+          // #3295 S3: a drained turn's durable dispatch commit precedes publication.
+          this.runtimeTurnCoordinator.commitDeferredDispatch(runtimeContext);
           completion.value = beginDispatchedTurn(
             retrySession,
             scopeRef?.value ?? currentMapKey,
@@ -6357,6 +6336,8 @@ export class AgentRuntime implements Runtime {
     const completion: { value: RuntimeTurnCompletion | null } = { value: null };
     try {
       await this.sendTurnToSession(session, chatJid, text, mapKey, actorJid, () => {
+        // #3295 S3: a drained turn's durable dispatch commit precedes publication.
+        this.runtimeTurnCoordinator.commitDeferredDispatch(runtimeContext);
         completion.value = beginDispatchedTurn(
           session,
           scopeRef?.value ?? mapKey,
@@ -8073,7 +8054,6 @@ export class AgentRuntime implements Runtime {
       sandboxPerChat: this.sandboxPerChat,
     }, 'AgentRuntime shutting down');
     const startedAt = Date.now();
-    const shutdownDeadlineAt = startedAt + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS;
 
     if (this.controlSessionTimeout) {
       clearTimeout(this.controlSessionTimeout);
@@ -8095,6 +8075,7 @@ export class AgentRuntime implements Runtime {
     // -- that's a different, narrower race this stop() call does not (and
     // cannot) close by itself.
     this.turnRecoverySupervisor.stop();
+    this.deferredTurnDrain.stop();
     this.capabilityObligationRuntime?.stop();
     if (this.queueSweepTimer) {
       clearInterval(this.queueSweepTimer);
@@ -8108,6 +8089,25 @@ export class AgentRuntime implements Runtime {
       clearInterval(this.zombieSessionSweepTimer);
       this.zombieSessionSweepTimer = null;
     }
+    // #3703: planned-stop drain. Undispatched turns are taken now so none is
+    // dispatched during the drain; dispatched turns get a bounded window to
+    // finish. Everything still held afterwards is finalized below, and any
+    // journaled loss makes this shutdown fail instead of report clean.
+    const { turns: heldPendingTurns, closeFailures } = this.plannedStopDrainMs > 0
+      ? this.runtimeTurnCoordinator.takePendingTurnsForPlannedStop()
+      : { turns: [], closeFailures: [] };
+    if (closeFailures.length > 0) {
+      log.error({ closeFailures: closeFailures.length }, 'planned stop could not close runtime turn queues');
+      shutdownFailures.push(new PlannedStopQueueCloseError(closeFailures));
+    }
+    if (this.plannedStopDrainMs > 0 && this.runtimeTurnCoordinator.hasActiveRuntimeTurns()) {
+      const drained = await waitForPlannedStopDrain(
+        () => this.runtimeTurnCoordinator.hasActiveRuntimeTurns(),
+        startedAt + this.plannedStopDrainMs,
+      );
+      log.info({ drained, drainMs: systemClock.now() - startedAt }, 'planned-stop drain of dispatched turns ended');
+    }
+    const shutdownDeadlineAt = systemClock.now() + RUNTIME_TURN_SHUTDOWN_FINALIZATION_TIMEOUT_MS;
     this.handoffDistill.shutdown();
     if (this.revertTimer) {
       clearTimeout(this.revertTimer);
@@ -8138,14 +8138,21 @@ export class AgentRuntime implements Runtime {
     // per-scope auto-compact bookkeeping (cumulative health counters persist).
     this.autoCompact.shutdown();
 
+    let lostJournaledTurns = 0;
     try {
-      await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(shutdownDeadlineAt);
+      ({ lostJournaledTurns } = await this.runtimeTurnCoordinator.finalizeActiveRuntimeTurnsForShutdown(
+        shutdownDeadlineAt,
+        heldPendingTurns,
+      ));
     } catch (err) {
       shutdownFailures.push(err);
       preserveRuntimeTurnState = true;
       log.error({ err }, 'active runtime turns could not finalize during shutdown');
     }
     this.pendingSystemResults.clear();
+    this.plannedStopIntakeClosed = true; // #3703: later messages are refused; earlier ones finish in the drain below
+    // #3703 / #3295 S3: journaled loss, or accepted messages left open for recovery, fail the stop.
+    shutdownFailures.push(...plannedStopLossFailures(log, { lostJournaledTurns, retainedForRecovery: this.plannedStopIntakeRetained }));
     if (!preserveRuntimeTurnState) {
       // E20 slice 1 (#3315): the handler join is bounded by the SAME absolute
       // deadline the coordinator above and the recycle lifecycle below honor.

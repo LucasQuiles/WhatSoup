@@ -37,7 +37,12 @@ const OPEN_INBOUND_STATUSES = ['pending', 'processing', 'turn_done'] as const;
  * The recency scoping is the whole point: q holds open inbounds from weeks ago,
  * and a bare "any open inbound blocks the stop" rule would make a wedged
  * instance permanently unrestartable — including the restart that clears the
- * wedge. Stale rows are counted and reported, never blocking.
+ * wedge.
+ *
+ * Age alone does not prove a row dead, though (#3703): turns that progress for
+ * 16-22 minutes are routine. An open row older than the window is stale debt
+ * only when persisted ownership evidence shows nothing in this process still
+ * runs it; otherwise it blocks as unverified. See classifyOlderOpenInbounds.
  */
 export const LIVE_TURN_WINDOW_SECONDS = 15 * 60;
 
@@ -79,13 +84,23 @@ export interface StopSafetyVerdict {
   schemaVersion: 1;
   ok: boolean;
   decision: 'allow' | 'block';
-  reason: 'stop_safe' | 'live_turns_in_flight' | 'missing_database' | 'preflight_error';
+  reason:
+    | 'stop_safe'
+    | 'live_turns_in_flight'
+    | 'older_turns_unverified'
+    | 'missing_database'
+    | 'preflight_error';
   quickCheck: 'ok' | 'not_applicable';
   liveTurns: {
-    /** Open inbounds received inside the window — stopping now loses these. */
+    /**
+     * Open inbounds received inside the window, plus older ones under a live
+     * recovery or deferred claim — stopping now loses these.
+     */
     inFlight: number;
-    /** Open inbounds older than the window: stale debt, deliberately not blocking. */
+    /** Older open inbounds with evidence that nothing in this process runs them: stale debt, not blocking. */
     staleIgnored: number;
+    /** Older open inbounds with no such evidence: not proven dead, so they block. */
+    olderUnverified: number;
     windowSeconds: number;
   };
 }
@@ -241,12 +256,84 @@ export function inspectRestartSafety(dbPath: string): RestartSafetyVerdict {
   }
 }
 
+function hasTable(db: DatabaseSync, table: string): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined;
+}
+
+function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+    .some((row) => row.name === column);
+}
+
+/**
+ * #3703: classify open inbounds older than the liveness window from persisted
+ * ownership evidence only (the same rows the #3560 ownership snapshot reads).
+ *
+ *  liveClaim  — an unexpired recovery-job claim or deferred-obligation claim
+ *               runs it in this process now: stopping loses it.
+ *  stale      — evidence that nothing in this process runs it: it already has
+ *               a terminal record, a turn of a later inbound of the same
+ *               conversation has a terminal record (turns of one conversation
+ *               run in order, so this one is no longer being worked), or a
+ *               pending recovery job / deferred obligation owns it durably and
+ *               resumes it after the restart.
+ *  unverified — none of the above. Age alone is not proof of death: a live
+ *               turn can stay open past the window, so these block.
+ *
+ * Evidence a database lacks (older schema) is simply absent; it never turns
+ * an unverified row into a stale one.
+ */
+function classifyOlderOpenInbounds(
+  db: DatabaseSync,
+  modifier: string,
+): { liveClaim: number; stale: number; unverified: number } {
+  const liveClaim: string[] = [];
+  const stale: string[] = [];
+  if (hasTable(db, 'turn_recovery_jobs')) {
+    liveClaim.push(`EXISTS (SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = o.seq
+      AND j.state = 'claimed' AND j.claim_expires_at > datetime('now'))`);
+    stale.push(`EXISTS (SELECT 1 FROM turn_recovery_jobs j WHERE j.source_inbound_seq = o.seq
+      AND j.state = 'pending')`);
+  }
+  if (hasTable(db, 'deferred_turn_obligations')) {
+    liveClaim.push(`EXISTS (SELECT 1 FROM deferred_turn_obligations d WHERE d.inbound_seq = o.seq
+      AND d.status = 'claimed' AND d.claim_expires_at > datetime('now'))`);
+    stale.push(`EXISTS (SELECT 1 FROM deferred_turn_obligations d WHERE d.inbound_seq = o.seq
+      AND d.status = 'pending')`);
+  }
+  if (hasTable(db, 'turn_terminal_records')) {
+    stale.push('EXISTS (SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq = o.seq)');
+    // A later inbound of the same conversation that a turn actually ran. A
+    // bare later `complete` is not enough: paused-chat and policy rows close
+    // at receipt while an earlier turn is still running.
+    if (hasColumn(db, 'inbound_events', 'conversation_key')) {
+      stale.push(`EXISTS (SELECT 1 FROM turn_terminal_records t WHERE t.conversation_key = o.conversation_key
+        AND t.inbound_seq > o.seq AND t.attempt_kind <> 'admission_rejected')`);
+    }
+  }
+  const anyOf = (predicates: string[]): string => (predicates.length === 0 ? '0' : predicates.join(' OR '));
+  const row = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN live THEN 1 ELSE 0 END), 0) AS live_claim,
+      COALESCE(SUM(CASE WHEN NOT live AND proven THEN 1 ELSE 0 END), 0) AS stale,
+      COALESCE(SUM(CASE WHEN NOT live AND NOT proven THEN 1 ELSE 0 END), 0) AS unverified
+    FROM (
+      SELECT (${anyOf(liveClaim)}) AS live, (${anyOf(stale)}) AS proven
+      FROM inbound_events o
+      WHERE o.processing_status IN (${sqlList(OPEN_INBOUND_STATUSES)})
+        AND o.received_at < datetime('now', ?)
+    )
+  `).get(modifier) as { live_claim: number; stale: number; unverified: number };
+  return { liveClaim: Number(row.live_claim), stale: Number(row.stale), unverified: Number(row.unverified) };
+}
+
 /**
  * Is it safe to STOP this instance right now? Read-only, and never throws on a
  * missing database — a database that does not exist cannot hold live work.
  *
- * Blocks only on OPEN inbounds received within the liveness window. Stale open
- * rows are reported in `staleIgnored` and never block, so wedge recovery by
+ * Blocks on OPEN inbounds received within the liveness window, and on older
+ * open inbounds not proven dead (classifyOlderOpenInbounds). Older rows proven
+ * dead are reported in `staleIgnored` and never block, so wedge recovery by
  * restart stays possible.
  */
 export function inspectStopSafety(
@@ -261,7 +348,7 @@ export function inspectStopSafety(
       decision: 'allow',
       reason: 'missing_database',
       quickCheck: 'not_applicable',
-      liveTurns: { inFlight: 0, staleIgnored: 0, windowSeconds },
+      liveTurns: { inFlight: 0, staleIgnored: 0, olderUnverified: 0, windowSeconds },
     };
   }
 
@@ -284,24 +371,23 @@ export function inspectStopSafety(
       WHERE processing_status IN (${openStatuses})
         AND received_at >= datetime('now', ?)
     `).get(modifier) as unknown as CountRow;
-    const stale = db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM inbound_events
-      WHERE processing_status IN (${openStatuses})
-        AND received_at < datetime('now', ?)
-    `).get(modifier) as unknown as CountRow;
+    const older = classifyOlderOpenInbounds(db, modifier);
 
     const liveTurns = {
-      inFlight: Number(inFlight.count),
-      staleIgnored: Number(stale.count),
+      inFlight: Number(inFlight.count) + older.liveClaim,
+      staleIgnored: older.stale,
+      olderUnverified: older.unverified,
       windowSeconds,
     };
-    const blocked = liveTurns.inFlight > 0;
+    const reason: StopSafetyVerdict['reason'] = liveTurns.inFlight > 0
+      ? 'live_turns_in_flight'
+      : liveTurns.olderUnverified > 0 ? 'older_turns_unverified' : 'stop_safe';
+    const blocked = reason !== 'stop_safe';
     return {
       schemaVersion: 1,
       ok: !blocked,
       decision: blocked ? 'block' : 'allow',
-      reason: blocked ? 'live_turns_in_flight' : 'stop_safe',
+      reason,
       quickCheck,
       liveTurns,
     };

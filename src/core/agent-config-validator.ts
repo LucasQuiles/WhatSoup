@@ -31,6 +31,7 @@ import { validateServiceIdentityConfig } from '../lib/service-identity-config.ts
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
 import { validateTurnRecoveryCatchupReconcileConfig } from './turn-recovery-catchup-config.ts';
+import { validateDeferredTurnAdmissionConfig } from './deferred-turn-admission-config.ts';
 import {
   fallbackEntryKey,
   isSameAsPrimaryFallbackEntry,
@@ -992,6 +993,9 @@ function validateAgentOptions(
 
   const catchupErr = validateTurnRecoveryCatchupReconcileConfig(opts['turnRecoveryCatchupReconcile']);
   if (catchupErr) return err(catchupErr.field, catchupErr.message);
+
+  const deferredTurnErr = validateDeferredTurnAdmissionConfig(opts['deferredTurnAdmission']);
+  if (deferredTurnErr) return err(deferredTurnErr.field, deferredTurnErr.message);
 
   // provider: must be a canonical ID from the shared registry (#447). The
   // session.ts switches throw on unknown IDs, so rejecting drift here gives

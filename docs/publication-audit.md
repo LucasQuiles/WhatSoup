@@ -15,15 +15,15 @@ markers and re-run the command — the result is a fixed point, so the resolutio
 rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 `npm run work-index:regen`.
 
-**Total classification rows:** 407
+**Total classification rows:** 408
 
 | Classification | Count |
 |---|---:|
 | PUBLIC | 198 |
-| PRIVATE-ARCHIVE | 209 |
+| PRIVATE-ARCHIVE | 210 |
 | SANITIZE | 0 |
 | DELETE | 0 |
-| Total | 407 |
+| Total | 408 |
 
 | Path | Classification | Rationale |
 |---|---|---|
@@ -216,6 +216,7 @@ rather than a hand-count. `docs/work-index.{json,md}` has the same property via
 | `docs/superpowers/specs/provider-event-lifecycle/provider-contract-claude-code-2.1.207.json` | PRIVATE-ARCHIVE | Sanitized provider schema/correlation evidence; retained for internal conformance review and excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | PRIVATE-ARCHIVE | Internal protocol requirements; retained in the repository but excluded from public publication by default. |
 | `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | PRIVATE-ARCHIVE | Internal implementation plan; retained in the repository but excluded from public publication by default. |
+| `docs/superpowers/specs/2026-10-13-3703-planned-stop-handoff-design.md` | PRIVATE-ARCHIVE | Internal test-probe design and incident scope note; retained in the repository but excluded from public publication by default. |
 | `docs/triage/CLUSTER-agent-safety.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
 | `docs/triage/CLUSTER-console-observability.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |
 | `docs/triage/CLUSTER-console-transport.md` | PRIVATE-ARCHIVE | Internal wave-2 triage catalog: a cluster grouping plus per-issue summaries, tracking (not closing) internal issue numbers; retained in the repository but excluded from public publication by default. |

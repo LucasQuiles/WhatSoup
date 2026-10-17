@@ -6,7 +6,7 @@ import {
 import { allFromStatement } from '../lib/db-query.ts';
 import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
-import { DeferredTurnStore } from './deferred-turn-store.ts';
+import { DEFERRED_TURN_MAX_ATTEMPTS, DeferredTurnStore } from './deferred-turn-store.ts';
 import type { CapabilityDecisionOutcome, CapabilityDecisionParams } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
@@ -752,6 +752,7 @@ type DurabilityStatements = {
   markToolReplayed: PreparedStatement;
   markRecoveredToolQuarantined: PreparedStatement;
   getProcessingInboundEvents: PreparedStatement;
+  getProcessingInboundEventsWithDeferredOwners: PreparedStatement;
   getTurnDoneInboundEvents: PreparedStatement;
   getTerminalOutboundForInbound: PreparedStatement;
   getOpenInboundWithEchoedTerminal: PreparedStatement;
@@ -1235,6 +1236,24 @@ export class DurabilityEngine {
          WHERE i.processing_status = 'processing'
            AND NOT EXISTS (
              SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )`,
+      ),
+      // #3295 S3, used only while the deferred owner is enabled: an inbound
+      // owned by a pre-commit deferred obligation (pending with attempts left,
+      // or claimed) was never dispatched; the deferred drain owns it across the
+      // restart, so crash recovery must not fail it. A committed or exhausted
+      // obligation does not exempt its row.
+      getProcessingInboundEventsWithDeferredOwners: prepare(
+        `SELECT i.seq FROM inbound_events i
+         WHERE i.processing_status = 'processing'
+           AND NOT EXISTS (
+             SELECT 1 FROM turn_terminal_records t WHERE t.inbound_seq_key = i.seq
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM deferred_turn_obligations d
+             WHERE d.inbound_seq = i.seq
+               AND (d.status = 'claimed'
+                 OR (d.status = 'pending' AND d.attempt_count < ${DEFERRED_TURN_MAX_ATTEMPTS}))
            )`,
       ),
       // QR-035: events stranded at 'turn_done' (turn completed but
@@ -2808,8 +2827,22 @@ export class DurabilityEngine {
 
   // ── Recovery engine ──
 
-  /** Recover interrupted sessions, deliveries, tools, and inbound turns before reconnect. */
-  preConnectRecovery(): RecoveryStats {
+  /**
+   * Recover interrupted sessions, deliveries, tools, and inbound turns before reconnect.
+   *
+   * `deferredTurnOwnerEnabled` (#3295 S3) must equal the runtime's deferred
+   * owner (per_chat and `agentOptions.deferredTurnAdmission` on; main.ts
+   * resolves both from one setting, see deferred-turn-admission-config.ts).
+   * Enabled: an inbound held by a pre-commit deferred obligation stays open for
+   * the drain. Disabled (the default): no owner will run or settle any
+   * obligation, so owned inbounds are failed like any other interrupted turn
+   * and every open obligation is closed `terminal_quarantined` — pre-commit
+   * rows `owner_disabled`, committed rows `owner_disabled_after_commit` (replay
+   * vetoed, never completed). Nothing is left non-terminal or holding a
+   * `processing` row.
+   */
+  preConnectRecovery(options: { readonly deferredTurnOwnerEnabled?: boolean } = {}): RecoveryStats {
+    const deferredTurnOwnerEnabled = options.deferredTurnOwnerEnabled === true;
     log.info('preConnectRecovery: starting');
     const recoveryRun = this.recoveryEvidence.begin(
       'preConnectRecovery',
@@ -2924,7 +2957,10 @@ export class DurabilityEngine {
 
     // Step 4: Mark inbound `processing` events with no terminal outbound ops as failed
     try {
-      const processingEvents = this.statements.getProcessingInboundEvents.all() as Array<{ seq: number }>;
+      const processingEvents = (deferredTurnOwnerEnabled
+        ? this.statements.getProcessingInboundEventsWithDeferredOwners
+        : this.statements.getProcessingInboundEvents
+      ).all() as Array<{ seq: number }>;
 
       for (const ev of processingEvents) {
         // Check if there's any terminal outbound op linked to this inbound
@@ -2966,6 +3002,19 @@ export class DurabilityEngine {
     } catch (err) {
       log.error({ err }, 'preConnectRecovery: unsafe failure recording pending catch-up');
       recoveryRun.failImmediately('record_pending_operator_catchup', err);
+    }
+
+    // #3295 S3: with the deferred owner disabled nothing will run or settle an
+    // open obligation; close them all after their sources were handled above.
+    if (!deferredTurnOwnerEnabled) {
+      try {
+        const closed = this.deferredTurns.closeForDisabledOwner();
+        if (closed > 0) log.warn({ closed }, 'preConnectRecovery: deferred owner disabled — open deferred-turn obligations quarantined');
+      } catch (err) {
+        recoveryRun.recordFailure('close_deferred_obligations_owner_disabled', err);
+        log.warn({ errorClass: err instanceof Error ? err.name : 'non-error' },
+          'preConnectRecovery: error closing deferred-turn obligations with the owner disabled');
+      }
     }
 
     // QR-035: finalize no-reply turns stranded after markTurnDone.

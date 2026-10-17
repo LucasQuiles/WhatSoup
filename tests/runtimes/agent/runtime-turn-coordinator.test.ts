@@ -6,6 +6,7 @@ import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { AttemptOutcome } from '../../../src/runtimes/agent/turn-terminal.ts';
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
+import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
 
 const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 
@@ -272,5 +273,90 @@ describe('turnFinalizationBookkeeping — checkpoint status ownership (#3658)', 
     } finally {
       db.close();
     }
+  });
+});
+
+describe('takePendingTurnsForPlannedStop — teardown ownership (#3703)', () => {
+  function queuedTurn(id: string): QueuedTurn {
+    return {
+      sourceMessageId: id,
+      receivedAtUnixSeconds: 1_780_000_000,
+      conversationKey: `key-${id}`,
+      chatJid: `${id}@s.whatsapp.net`,
+      senderJid: `${id}@s.whatsapp.net`,
+      senderName: null,
+      text: id,
+      isGroup: false,
+      contentType: 'text',
+    };
+  }
+
+  /** A queue with no processor keeps admitted turns pending. */
+  function queueHolding(...ids: string[]): { queue: TurnQueue; turns: QueuedTurn[] } {
+    const queue = new TurnQueue();
+    const turns = ids.map(queuedTurn);
+    for (const turn of turns) expect(queue.enqueue(turn)).toBe(true);
+    return { queue, turns };
+  }
+
+  function coordinatorWith(turnQueue: TurnQueue, perChat: Array<[string, TurnQueue]>): RuntimeTurnCoordinator {
+    return new RuntimeTurnCoordinator(coordinatorPortDouble({
+      turnQueue,
+      perChatTurnQueues: new Map(perChat),
+    }));
+  }
+
+  it('leaves a queue owned by a kill teardown to that lifecycle and reports no failure', async () => {
+    const global = queueHolding('g1');
+    const owned = new TurnQueue();
+    const coordinator = coordinatorWith(global.queue, [['chat-owned', owned]]);
+    const transaction = await coordinator.terminalizePerChatTurnQueueForKill('chat-owned');
+    const close = vi.spyOn(owned, 'closeAndTakePendingTurns');
+
+    const result = coordinator.takePendingTurnsForPlannedStop();
+
+    expect(result.closeFailures).toEqual([]);
+    expect(result.turns).toEqual(global.turns);
+    expect(close).not.toHaveBeenCalled();
+    // The teardown receipt is untouched: its own lifecycle can still commit it.
+    expect(() => owned.commitTeardown(transaction.receipt!)).not.toThrow();
+  });
+
+  it('returns a close failure of a queue no coordinator teardown owns instead of treating it as teardown', () => {
+    const global = queueHolding('g1');
+    const unowned = queueHolding('u1');
+    // Same throw the queue raises under teardown, but no coordinator teardown owns it.
+    unowned.queue.beginTeardown();
+    const coordinator = coordinatorWith(global.queue, [['chat-unowned', unowned.queue]]);
+
+    const result = coordinator.takePendingTurnsForPlannedStop();
+
+    expect(result.turns).toEqual(global.turns);
+    expect(result.closeFailures).toHaveLength(1);
+    expect(String(result.closeFailures[0])).toContain('teardown transaction is active');
+  });
+
+  it('keeps turns harvested from earlier queues when a later queue fails to close', () => {
+    const global = queueHolding('g1');
+    const first = queueHolding('a1', 'a2');
+    const failing = queueHolding('b1');
+    const last = queueHolding('c1');
+    const failure = new Error('injected close failure');
+    vi.spyOn(failing.queue, 'closeAndTakePendingTurns').mockImplementation(() => {
+      throw failure;
+    });
+    const coordinator = coordinatorWith(global.queue, [
+      ['chat-a', first.queue],
+      ['chat-b', failing.queue],
+      ['chat-c', last.queue],
+    ]);
+
+    const result = coordinator.takePendingTurnsForPlannedStop();
+
+    expect(result.turns).toEqual([...global.turns, ...first.turns, ...last.turns]);
+    expect(result.closeFailures).toEqual([failure]);
+    // Closed queues admit nothing new during the drain.
+    expect(first.queue.enqueue(queuedTurn('a3'))).toBe(false);
+    expect(last.queue.enqueue(queuedTurn('c2'))).toBe(false);
   });
 });

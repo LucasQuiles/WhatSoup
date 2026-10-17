@@ -50,9 +50,11 @@ export interface ActivationHost {
   uid: number;
   /**
    * Run a program with argv (never a shell string). Non-zero exit is a result,
-   * not a throw. `timeoutMs` kills the child with SIGKILL when it expires; only
-   * the #2481 binding sample passes it (and `env`), after the activation
-   * outcome is final, and every other caller runs unbounded as before.
+   * not a throw. `timeoutMs` kills the child with SIGKILL when it expires and
+   * the result carries `timedOut`; the result still waits for the child to
+   * settle. Two callers pass it: the #3703 stop gate (the remaining stop-wait
+   * budget, before any switch) and the #2481 binding sample (with `env`, after
+   * the activation outcome is final). Every other caller runs unbounded.
    */
   exec(file: string, args: readonly string[], options?: ExecOptions): Promise<ExecResult>;
   isProcessAlive(pid: number): boolean;

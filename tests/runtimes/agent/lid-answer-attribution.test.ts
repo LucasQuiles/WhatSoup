@@ -18,6 +18,7 @@
 // and file-system writes. The transport's echo arrives as soon as a send is
 // marked submitted, unless a case turns it off.
 
+import { PlannedStopTurnLossError } from '../../../src/runtimes/agent/planned-stop-drain.ts';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { ClientOutputPolicyRegistry } from '../../../src/core/client-output-policy-config.ts';
@@ -734,6 +735,15 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
   }
 
   /**
+   * #3703: the case leaves its turn context published, so shutdown finalizes it
+   * failed_terminal and must report that loss instead of a clean stop.
+   */
+  async function expectLossyShutdown(): Promise<void> {
+    await expect(live().shutdown()).rejects.toBeInstanceOf(PlannedStopTurnLossError);
+    runtime = undefined;
+  }
+
+  /**
    * Settles each double's open provider dispatch with its own completeProviderTurn.
    * A replaced double's dispatch cannot be settled by a result event, which the
    * runtime routes to the current session. In single scope shutdown joins that
@@ -1174,7 +1184,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
       } finally {
         settleOpenProviderTurns();
       }
-      await expectCleanShutdown();
+      await expectLossyShutdown();
       expect(sendsSince(mark)).toEqual([[LID_JID, 'fallback reply']]);
     });
 
@@ -1218,7 +1228,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
         } finally {
           settleOpenProviderTurns();
         }
-        await expectCleanShutdown();
+        await expectLossyShutdown();
         expect(sendsSince(mark)).toEqual([]);
       },
     );
@@ -1261,7 +1271,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
         } finally {
           settleOpenProviderTurns();
         }
-        await expectCleanShutdown();
+        await expectLossyShutdown();
         expect(sendsSince(mark)).toEqual([[LID_JID, 'fallback reply']]);
       },
     );
@@ -1285,7 +1295,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
       } finally {
         settleOpenProviderTurns();
       }
-      await expectCleanShutdown();
+      await expectLossyShutdown();
       expect(sendsSince(mark)).toEqual([]);
     });
 
@@ -1322,7 +1332,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
         } finally {
           settleOpenProviderTurns();
         }
-        await expectCleanShutdown();
+        await expectLossyShutdown();
         expect(sendsSince(mark)).toEqual([]);
       },
     );
@@ -1358,7 +1368,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
       sends: [[A_JID, 'system text']],
       bEvidenceOnA: false,
     });
-    await expectCleanShutdown();
+    await expectLossyShutdown();
     expect(sendsSince(mark)).toEqual([[A_JID, 'system text']]);
   });
 });

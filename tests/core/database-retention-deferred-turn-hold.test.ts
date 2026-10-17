@@ -153,6 +153,27 @@ describe('database retention — deferred-turn obligation hold (#3295 C10)', () 
     },
   );
 
+  it('never deletes an aged open or failed source, or the envelope, of a pending obligation (#3295 S3 flag-off shape)', () => {
+    const openSeq = (db.raw.prepare(`
+      INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, received_at)
+      VALUES ('open-in', 'conv-1', 'chat@g.us', 'processing', datetime('now', '-40 days'))
+      RETURNING seq
+    `).get() as { seq: number }).seq;
+    insertObligation(openSeq, 'pending');
+    const failedSeq = (db.raw.prepare(`
+      INSERT INTO inbound_events (message_id, conversation_key, chat_jid, processing_status, completed_at)
+      VALUES ('failed-in', 'conv-1', 'chat@g.us', 'failed', datetime('now', '-40 days'))
+      RETURNING seq
+    `).get() as { seq: number }).seq;
+    insertObligation(failedSeq, 'pending');
+
+    const result = sweep();
+
+    expect(result.inboundEvents).toBe(0);
+    expect(survivingMessageIds()).toEqual(['open-in', 'failed-in']);
+    expect((db.raw.prepare('SELECT COUNT(*) AS n FROM deferred_turn_obligations').get() as { n: number }).n).toBe(2);
+  });
+
   it('an inbound with no obligation is deleted exactly as before', () => {
     insertAgedInbound('plain-in');
 

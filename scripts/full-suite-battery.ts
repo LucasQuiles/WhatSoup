@@ -66,6 +66,14 @@ export interface BoundedBatteryOptions {
   /** Terminal-grace bound (ms) after a kill before declaring INCONCLUSIVE; overridable for tests. */
   graceMs?: number;
   /**
+   * Opt-in polite stop (#3808). When set, the bound and a wrapper signal first send SIGTERM to the
+   * group and escalate to SIGKILL only after this many ms. A caller whose child is ITSELF a bounded
+   * runner (push-gate running `npm test`, which runs this battery around a detached vitest group)
+   * needs this: an immediate group SIGKILL would kill the inner runner before it can reap its own
+   * detached group, leaving that group running unowned. Unset keeps the immediate SIGKILL.
+   */
+  termGraceMs?: number;
+  /**
    * Injected group-signal function (defaults to `process.kill`). Present so a test can force a
    * reap FAILURE (e.g. EPERM) deterministically — a real EPERM needs a privilege boundary that
    * cannot be arranged in-process (round-20 finding 4). Signature matches `process.kill`.
@@ -140,6 +148,12 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     let settled = false;
     let reapError: string | undefined;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+    // Termination evidence for the immediate child when it closed DURING the termGraceMs
+    // window. Recorded rather than acted on (the grace it was promised must still elapse),
+    // and consumed by the escalation step as the settlement proof a successful group kill
+    // is not.
+    let graceClose: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     const pid = child.pid;
 
     // Kill the whole group. Returns true if the group is gone (killed now, or already
@@ -148,10 +162,10 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     // swallowed every error, turning an EPERM into an unbounded wait).
     const killSignal = options.kill ?? process.kill;
     const probeGroup = options.probeGroup ?? probeGroupMembership;
-    const killGroup = (): boolean => {
+    const signalGroup = (signal: NodeJS.Signals): boolean => {
       if (pid === undefined) return true;
       try {
-        killSignal(-pid, 'SIGKILL'); // negative pid → the whole group
+        killSignal(-pid, signal); // negative pid → the whole group
         return true;
       } catch (err) {
         const code = (err as NodeJS.ErrnoException).code;
@@ -173,12 +187,14 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
         return false;
       }
     };
+    const killGroup = (): boolean => signalGroup(SIGNAL.KILL);
 
     const finish = (outcome: BoundedBatteryOutcome, code: number | null, signal: NodeJS.Signals | null, wrappedExit: number): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (escalationTimer !== undefined) clearTimeout(escalationTimer);
       process.off(SIGNAL.TERM, onSignal);
       process.off(SIGNAL.INT, onSignal);
       process.off(SIGNAL.HUP, onSignal);
@@ -198,13 +214,44 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       }, graceMs);
     };
 
+    // Stop the whole tree. Without termGraceMs: SIGKILL now. With it: SIGTERM now and SIGKILL
+    // after termGraceMs unless `close` settles first (its handler still sweeps the group). The
+    // escalation timer is not unref'd for the same reason as the terminal grace below. A failed
+    // SIGTERM is not final: the SIGKILL attempt that follows classifies the reap.
+    const stopGroup = (why: string): void => {
+      if (options.termGraceMs === undefined) {
+        killGroup(); // kill the whole tree; a successful kill normally makes `close` fire
+        // round-19 finding 4: arm the terminal grace UNCONDITIONALLY — even a successful group
+        // kill may not be followed by a `close` (e.g. an escaped descendant holding a stdio
+        // pipe), so never wait forever for a `close` that may not come.
+        armTerminalGrace(why);
+        return;
+      }
+      if (settled || escalationTimer !== undefined) return;
+      signalGroup(SIGNAL.TERM);
+      escalationTimer = setTimeout(() => {
+        escalationTimer = undefined;
+        if (settled) return;
+        // A successful killGroup() — including its ESRCH "already gone" form — proves the kill
+        // was DELIVERED, never that the run is reaped or settled. `close` is the settlement
+        // evidence, exactly as the unconditional terminal grace above (round-19 finding 4)
+        // requires. The earlier form finished a successful kill as an ordinary timeout (124)
+        // the instant killGroup() returned true, so a run whose child NEVER closed — the class
+        // termGraceMs exists for — was indistinguishable from a reaped one and the promised
+        // grace was never actually waited out. Finish on close evidence; otherwise let the
+        // bounded terminal grace decide (INCONCLUSIVE, 125), never a normal timeout.
+        const reaped = killGroup();
+        if (reaped && graceClose !== undefined) {
+          finish(timedOut ? 'timedOut' : 'inconclusive', null, null, timedOut ? 124 : 125);
+        } else {
+          armTerminalGrace(why);
+        }
+      }, options.termGraceMs);
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      killGroup(); // kill the whole tree; a successful kill normally makes `close` fire
-      // round-19 finding 4: arm the terminal grace UNCONDITIONALLY — even a successful group
-      // kill may not be followed by a `close` (e.g. an escaped descendant holding a stdio
-      // pipe), so never wait forever for a `close` that may not come.
-      armTerminalGrace('bound fired — awaiting group reap / close');
+      stopGroup('bound fired — awaiting group reap / close');
     }, options.timeoutMs);
     timer.unref?.();
 
@@ -212,8 +259,7 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     // arm the SAME terminal grace so the wrapper itself resolves non-zero rather than hanging
     // on a `close` that a failed/partial kill may never deliver (round-19 finding 4).
     const onSignal = (): void => {
-      killGroup();
-      armTerminalGrace('wrapper received a termination signal — awaiting reap / close');
+      stopGroup('wrapper received a termination signal — awaiting reap / close');
     };
     process.on(SIGNAL.TERM, onSignal);
     process.on(SIGNAL.INT, onSignal);
@@ -227,6 +273,7 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (escalationTimer !== undefined) clearTimeout(escalationTimer);
       process.off(SIGNAL.TERM, onSignal);
       process.off(SIGNAL.INT, onSignal);
       process.off(SIGNAL.HUP, onSignal);
@@ -234,6 +281,15 @@ export function runBoundedBattery(options: BoundedBatteryOptions): Promise<Bound
     });
 
     child.on('close', (code, signal) => {
+      if (escalationTimer !== undefined) {
+        // Graceful stop in progress (termGraceMs): the immediate child closed on our SIGTERM
+        // before the escalation timer fired. Do NOT SIGKILL here — the inner runner is still
+        // settling its separately detached group. The escalation timer reaps and resolves
+        // after termGraceMs, giving it the grace period it was promised. RECORD the close:
+        // it is the only settlement evidence the escalation step may act on.
+        graceClose = { code, signal };
+        return;
+      }
       // Reap the group on EVERY exit — a grandchild can survive the leader's clean exit.
       const reaped = killGroup();
       // round-20 finding 4: a REAP FAILURE dominates a timeout. If the group could not be

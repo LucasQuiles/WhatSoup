@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PlannedStopTurnLossError } from '../../../src/runtimes/agent/planned-stop-drain.ts';
 import { Database } from '../../../src/core/database.ts';
 import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
 import {
@@ -1901,7 +1902,7 @@ describe('runtime terminal coordinator integration', () => {
         };
       });
 
-      await runtime.shutdown();
+      await expect(runtime.shutdown()).rejects.toBeInstanceOf(PlannedStopTurnLossError);
 
       expect(supervisorSnapshot).toEqual({
         sessionShutdownComplete: true,
@@ -2006,7 +2007,7 @@ describe('runtime terminal coordinator integration', () => {
       ).catch(() => {});
       await Promise.resolve();
 
-      await Promise.all([runtime.shutdown(), send]);
+      await Promise.all([expect(runtime.shutdown()).rejects.toBeInstanceOf(PlannedStopTurnLossError), send]);
 
       expect(session.spawnSession).not.toHaveBeenCalled();
       expect(session.sendTurn).not.toHaveBeenCalled();
@@ -2094,8 +2095,11 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
+      // No planned-stop drain: this case pins finalization order, and its
+      // active turn never completes.
       const { runtime, state } = makeRuntimeState(db, {
         sessionScope: 'per_chat',
+        plannedStopDrainMs: 0,
       });
       const durability = durabilityMock();
       const mapKey = '15550190032';
@@ -2148,7 +2152,7 @@ describe('runtime terminal coordinator integration', () => {
       await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledTimes(1));
       expect(state.runtimeTurnCoordinator.enqueuePerChatRuntimeTurn(mapKey, queued(late))).toBe(false);
       releaseSessionShutdown();
-      await shuttingDown;
+      await expect(shuttingDown).rejects.toBeInstanceOf(PlannedStopTurnLossError);
       await runtimeQueue.idle();
 
       expect(session.sendTurn).not.toHaveBeenCalledWith(first.replay.text);

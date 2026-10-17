@@ -184,7 +184,7 @@ describe('release:activate --plan', () => {
     expect(plists[0]!.edits).toEqual([`WorkingDirectory: ${fixture.oldRelease} -> ${fixture.newRelease}`]);
     const steps = (result.json.actions as Array<{ step: string }>).map((action) => action.step);
     expect(steps).toEqual([
-      'create-backup-dir', 'backup-database', 'record-schema-level', 'record-symlink', 'backup-plists', 'write-staged-plists',
+      'create-backup-dir', 'backup-database', 'record-schema-level', 'record-symlink', 'backup-plists', 'write-staged-plists', 'stop-gate',
       'switch-symlink', 'install-plists', 'reload', 'reload', 'reload', 'verify', 'rollback-on-failure',
     ]);
     expect(result.stdout).not.toContain(TOKEN);

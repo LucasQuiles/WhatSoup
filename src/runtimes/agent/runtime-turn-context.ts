@@ -31,6 +31,14 @@ function freezeContext(params: CreateRuntimeTurnContextParams): RuntimeTurnConte
   });
 }
 
+/**
+ * A fresh, never-dispatched turn's replay envelope is replay-safe; it becomes
+ * replay-unsafe only once dispatch effects begin (markRuntimeTurnReplayUnsafe).
+ * Read by turn creation and by admission checks that must decide before the
+ * turn exists whether it could be durably owned (#3703 planned-stop intake).
+ */
+export const FRESH_TURN_REPLAY_SAFE = true;
+
 export function createRuntimeTurnContext(
   params: CreateRuntimeTurnContextParams,
 ): RuntimeTurnContext {

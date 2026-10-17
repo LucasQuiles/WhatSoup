@@ -351,6 +351,80 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
   );
 }
 
+/**
+ * Extract the usage-limit reset time from a provider usage-limit message.
+ *
+ * Claude usage-limit notices often name when the cap resets — e.g.
+ *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
+ *   "will be available at 11pm", or a raw Unix-epoch seconds value.
+ * The fallback state machine uses this to schedule auto-revert to the primary
+ * provider. Parsing is conservative: anything it cannot confidently interpret
+ * yields `null`, and the caller then applies a default rolling-window estimate.
+ *
+ * Returned times are always in the future relative to `now` — a clock time like
+ * "3pm" that has already passed today is rolled forward to tomorrow.
+ *
+ * @param text the usage-limit message text
+ * @param now  injectable clock for deterministic tests (defaults to Date.now)
+ * @returns the reset Date, or null when unparseable
+ */
+export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
+  if (typeof text !== 'string' || text.length === 0) return null;
+  const lower = text.toLowerCase();
+
+  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
+  //    "come back at 9:30am", "try again at 11 pm".
+  //    Parsed FIRST so an explicit clock cue always wins over an incidental
+  //    long number elsewhere in the message (e.g. an order/quota figure).
+  //    The trailing (?!\d) prevents the clock hour from matching the leading
+  //    digits of a longer number (e.g. "5551234567").
+  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
+  const m = lower.match(cue);
+  if (m) {
+    let hour = Number.parseInt(m[1]!, 10);
+    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
+    const meridiem = m[3];
+    if (
+      Number.isFinite(hour) &&
+      Number.isFinite(minute) &&
+      hour >= 0 &&
+      minute >= 0 &&
+      minute < 60 &&
+      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
+    ) {
+      if (meridiem === 'pm' && hour < 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      const candidate = new Date(now);
+      candidate.setHours(hour, minute, 0, 0);
+      // A clock time already past today rolls forward to tomorrow.
+      if (candidate.getTime() <= now.getTime()) {
+        candidate.setDate(candidate.getDate() + 1);
+      }
+      return candidate;
+    }
+  }
+
+  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
+  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
+  //    directly follow a reset cue, so an incidental long number (order/quota
+  //    figure) is never mistaken for a reset time.
+  const epochMatch = lower.match(
+    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
+  );
+  if (epochMatch) {
+    const seconds = epochMatch[1]!;
+    const millis = epochMatch[2];
+    const epochMs = millis
+      ? Number.parseInt(seconds + millis, 10)
+      : Number.parseInt(seconds, 10) * 1000;
+    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
+      return new Date(epochMs);
+    }
+  }
+
+  return null;
+}
+
 /** Detect context-window overflow errors from agent providers. */
 export function isPromptTooLongMessage(text: string): boolean {
   const lower = text.toLowerCase();

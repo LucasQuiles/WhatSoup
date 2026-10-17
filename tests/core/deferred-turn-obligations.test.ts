@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Database } from '../../src/core/database.ts';
+import { DurabilityEngine } from '../../src/core/durability.ts';
 import {
   DEFERRED_TURN_MAX_ATTEMPTS,
   DeferredTurnClaimFenceError,
@@ -395,6 +396,266 @@ describe('deferred turn obligations (#3295 S1)', () => {
 
       store.terminalizeCompleted(claimed!.id, fence);
       expect(store.hasNonTerminalObligation(SCOPE, 51)).toBe(false);
+    });
+  });
+
+  // #3295 S3: the drain's store surface and the restart ownership of an
+  // obligation's source inbound, against real journaled inbound rows.
+  describe('drain support (#3295 S3)', () => {
+    let engine: DurabilityEngine;
+
+    beforeEach(() => {
+      engine = new DurabilityEngine(db);
+    });
+
+    function journal(id: string, conversationKey = CONVERSATION_KEY): number {
+      return engine.journalInbound(id, conversationKey, DELIVERY_JID, 'agent');
+    }
+
+    function inboundStatus(seq: number): string {
+      return (db.raw.prepare('SELECT processing_status FROM inbound_events WHERE seq = ?').get(seq) as {
+        processing_status: string;
+      }).processing_status;
+    }
+
+    function commitHead(token: string, conversationKey = CONVERSATION_KEY) {
+      const claimed = store.claimNextEligible(SCOPE, { conversationKey, claimToken: token, ttlSeconds: 300 })!;
+      const fence = { claimToken: token, claimEpoch: claimed.claimEpoch };
+      store.markDispatchCommit(claimed.id, fence);
+      return { claimed, fence };
+    }
+
+    it('lists exactly one head per conversation, the lowest open sequence', () => {
+      const a1 = journal('wamid-h-a1');
+      const b1 = journal('wamid-h-b1', '15550100002');
+      const a2 = journal('wamid-h-a2');
+      store.enqueueDeferredObligation(enqueueInput(a1));
+      store.enqueueDeferredObligation(enqueueInput(b1, { conversationKey: '15550100002' }));
+      store.enqueueDeferredObligation(enqueueInput(a2));
+
+      expect(store.listOpenHeads(SCOPE).map((head) => [head.conversationKey, head.inboundSeq, head.status]))
+        .toEqual([[CONVERSATION_KEY, a1, 'pending'], ['15550100002', b1, 'pending']]);
+
+      // A committed head stays the head: it holds its queue, never skipped.
+      commitHead('claim-h');
+      expect(store.listOpenHeads(SCOPE).find((head) => head.conversationKey === CONVERSATION_KEY))
+        .toMatchObject({ inboundSeq: a1, status: 'dispatched_commit' });
+    });
+
+    it('reports a source open only while it is open and has no terminal record', () => {
+      const open = journal('wamid-src-open');
+      const failed = journal('wamid-src-failed');
+      engine.markInboundFailed(failed);
+      expect(store.isSourceOpen(open)).toBe(true);
+      expect(store.isSourceOpen(failed)).toBe(false);
+      expect(store.isSourceOpen(999_999)).toBe(false);
+    });
+
+    it('settles a committed obligation only once its source is terminal, and never a pre-commit one', () => {
+      const seq = journal('wamid-settle');
+      store.enqueueDeferredObligation(enqueueInput(seq));
+      const { claimed } = commitHead('claim-s');
+
+      // Source still open: held, replay vetoed, nothing changes.
+      expect(store.settleDispatchedObligation(claimed.id)).toBeNull();
+      expect(store.listOpenObligations(SCOPE)).toEqual([
+        expect.objectContaining({ id: claimed.id, status: 'dispatched_commit' }),
+      ]);
+
+      engine.completeInbound(seq, 'response_sent');
+      expect(store.settleDispatchedObligation(claimed.id)).toBe('completed');
+      expect(store.hasNonTerminalObligation(SCOPE, seq)).toBe(false);
+      expect(store.settleDispatchedObligation(claimed.id)).toBeNull();
+
+      // A failed source closes as source_failed; pending/claimed rows never settle.
+      const failedSeq = journal('wamid-settle-failed');
+      store.enqueueDeferredObligation(enqueueInput(failedSeq));
+      const pendingSeq = journal('wamid-settle-pending');
+      store.enqueueDeferredObligation(enqueueInput(pendingSeq));
+      const committed = commitHead('claim-f');
+      engine.markInboundFailed(failedSeq);
+      engine.markInboundFailed(pendingSeq);
+      expect(store.settleDispatchedObligation(committed.claimed.id)).toBe('source_failed');
+      // A failed turn never closes as completed: it is quarantined with the honest reason.
+      expect(db.raw.prepare('SELECT status, terminal_reason FROM deferred_turn_obligations WHERE id = ?')
+        .get(committed.claimed.id)).toEqual({ status: 'terminal_quarantined', terminal_reason: 'source_failed' });
+      const pendingId = store.listOpenObligations(SCOPE)[0]!.id;
+      expect(store.settleDispatchedObligation(pendingId)).toBeNull();
+      expect(store.listOpenObligations(SCOPE)).toEqual([
+        expect.objectContaining({ id: pendingId, status: 'pending' }),
+      ]);
+    });
+
+    it('crash recovery leaves a pre-commit owned inbound open and fails committed, exhausted and unowned ones', () => {
+      const pending = journal('wamid-rc-pending');
+      const claimedSeq = journal('wamid-rc-claimed', '15550100002');
+      const committed = journal('wamid-rc-committed', '15550100003');
+      const exhausted = journal('wamid-rc-exhausted', '15550100004');
+      const unowned = journal('wamid-rc-unowned');
+      store.enqueueDeferredObligation(enqueueInput(pending));
+      store.enqueueDeferredObligation(enqueueInput(claimedSeq, { conversationKey: '15550100002' }));
+      store.claimNextEligible(SCOPE, { conversationKey: '15550100002', claimToken: 'claim-rc', ttlSeconds: 300 });
+      store.enqueueDeferredObligation(enqueueInput(committed, { conversationKey: '15550100003' }));
+      commitHead('claim-rc-commit', '15550100003');
+      store.enqueueDeferredObligation(enqueueInput(exhausted, { conversationKey: '15550100004' }));
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-rc-x${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: '15550100004', claimToken: token, ttlSeconds: 300 })!;
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+
+      new DurabilityEngine(db).preConnectRecovery({ deferredTurnOwnerEnabled: true });
+
+      expect(inboundStatus(pending)).toBe('processing');
+      expect(inboundStatus(claimedSeq)).toBe('processing');
+      expect(inboundStatus(committed)).toBe('failed');
+      expect(inboundStatus(exhausted)).toBe('failed');
+      expect(inboundStatus(unowned)).toBe('failed');
+    });
+
+    it('with the deferred owner disabled (flag off), crash recovery fails owned inbounds and closes every open obligation, committed ones included', () => {
+      const pending = journal('wamid-off-pending');
+      const claimedSeq = journal('wamid-off-claimed', '15550100002');
+      const committed = journal('wamid-off-committed', '15550100003');
+      store.enqueueDeferredObligation(enqueueInput(pending));
+      store.enqueueDeferredObligation(enqueueInput(claimedSeq, { conversationKey: '15550100002' }));
+      store.claimNextEligible(SCOPE, { conversationKey: '15550100002', claimToken: 'claim-off', ttlSeconds: 300 });
+      store.enqueueDeferredObligation(enqueueInput(committed, { conversationKey: '15550100003' }));
+      const { claimed: committedRow, fence: committedFence } = commitHead('claim-off-commit', '15550100003');
+
+      // No argument: the owner is disabled, matching a runtime without the flag.
+      new DurabilityEngine(db).preConnectRecovery();
+
+      for (const seq of [pending, claimedSeq, committed]) expect(inboundStatus(seq)).toBe('failed');
+      const rows = db.raw.prepare(
+        'SELECT inbound_seq, status, terminal_reason FROM deferred_turn_obligations ORDER BY inbound_seq',
+      ).all();
+      expect(rows).toEqual([
+        { inbound_seq: pending, status: 'terminal_quarantined', terminal_reason: 'owner_disabled' },
+        { inbound_seq: claimedSeq, status: 'terminal_quarantined', terminal_reason: 'owner_disabled' },
+        // Post-commit with no owner to settle it: closed quarantined (never left
+        // dispatched_commit, never completed); being terminal, never replayed.
+        { inbound_seq: committed, status: 'terminal_quarantined', terminal_reason: 'owner_disabled_after_commit' },
+      ]);
+      expect(store.hasNonTerminalObligation(SCOPE, committed)).toBe(false);
+      expect(() => store.requeueClaim(committedRow.id, committedFence, 'replay_attempt')).toThrow();
+      expect(store.settleDispatchedObligation(committedRow.id)).toBeNull();
+    });
+
+    it('with the deferred owner disabled, a committed obligation whose source already completed or failed before the restart closes quarantined, never completed', () => {
+      const delivered = journal('wamid-off-delivered');
+      const failedEarlier = journal('wamid-off-failed', '15550100002');
+      store.enqueueDeferredObligation(enqueueInput(delivered));
+      store.enqueueDeferredObligation(enqueueInput(failedEarlier, { conversationKey: '15550100002' }));
+      commitHead('claim-off-delivered');
+      commitHead('claim-off-failed', '15550100002');
+      // The turns ran their course, but no owner settled the obligations before the stop.
+      engine.completeInbound(delivered, 'response_sent');
+      engine.markInboundFailed(failedEarlier);
+
+      new DurabilityEngine(db).preConnectRecovery({ deferredTurnOwnerEnabled: false });
+
+      expect(inboundStatus(delivered)).toBe('complete');
+      expect(inboundStatus(failedEarlier)).toBe('failed');
+      expect(db.raw.prepare(
+        'SELECT inbound_seq, status, terminal_reason FROM deferred_turn_obligations ORDER BY inbound_seq',
+      ).all()).toEqual([
+        { inbound_seq: delivered, status: 'terminal_quarantined', terminal_reason: 'owner_disabled_after_commit' },
+        { inbound_seq: failedEarlier, status: 'terminal_quarantined', terminal_reason: 'owner_disabled_after_commit' },
+      ]);
+    });
+
+    it('with the deferred owner enabled, crash recovery closes no obligation (the drain owns them)', () => {
+      const pending = journal('wamid-on-pending');
+      const committed = journal('wamid-on-committed', '15550100003');
+      store.enqueueDeferredObligation(enqueueInput(pending));
+      store.enqueueDeferredObligation(enqueueInput(committed, { conversationKey: '15550100003' }));
+      commitHead('claim-on-commit', '15550100003');
+
+      new DurabilityEngine(db).preConnectRecovery({ deferredTurnOwnerEnabled: true });
+
+      expect(inboundStatus(pending)).toBe('processing');
+      expect(db.raw.prepare(
+        'SELECT inbound_seq, status FROM deferred_turn_obligations ORDER BY inbound_seq',
+      ).all()).toEqual([
+        { inbound_seq: pending, status: 'pending' },
+        { inbound_seq: committed, status: 'dispatched_commit' },
+      ]);
+    });
+
+    it('reports an eligible older head only for the same conversation', () => {
+      const head = journal('wamid-fifo-head');
+      const later = journal('wamid-fifo-later');
+      store.enqueueDeferredObligation(enqueueInput(head));
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, later)).toBe(true);
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, head)).toBe(false);
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, '15550100002', later)).toBe(false);
+      // An exhausted head is not eligible: it cannot run, so it never holds live input.
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-fifo-x${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds: 300 })!;
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, later)).toBe(false);
+    });
+
+    it('holds live input behind runnable work queued behind an exhausted head (no FIFO bypass)', () => {
+      const head = journal('wamid-fifo-x-head');
+      const behind = journal('wamid-fifo-x-behind');
+      const live = journal('wamid-fifo-x-live');
+      store.enqueueDeferredObligation(enqueueInput(head));
+      store.enqueueDeferredObligation(enqueueInput(behind));
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-fifo-xh${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds: 300 })!;
+        expect(row.inboundSeq).toBe(head);
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+      // The exhausted head cannot run, but `behind` is older than the live input and can.
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, live)).toBe(true);
+      expect(store.hasEligibleOpenHeadBefore(SCOPE, CONVERSATION_KEY, behind)).toBe(false);
+    });
+
+    it('closes an exhausted pending head without a fence and never a runnable or claimed row', () => {
+      const exhausted = journal('wamid-exh-close');
+      const runnable = journal('wamid-exh-runnable', '15550100002');
+      store.enqueueDeferredObligation(enqueueInput(exhausted));
+      store.enqueueDeferredObligation(enqueueInput(runnable, { conversationKey: '15550100002' }));
+      for (let attempt = 0; attempt < DEFERRED_TURN_MAX_ATTEMPTS; attempt += 1) {
+        const token = `claim-exh${attempt}`;
+        const row = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: token, ttlSeconds: 300 })!;
+        store.requeueClaim(row.id, { claimToken: token, claimEpoch: row.claimEpoch }, 'dispatch_failed');
+      }
+      const [exhaustedRow, runnableRow] = store.listOpenObligations(SCOPE);
+      expect(store.terminalizeExhaustedHead(runnableRow!.id)).toBeNull();
+      expect(store.terminalizeExhaustedHead(exhaustedRow!.id)).toEqual({
+        inboundSeq: exhausted, sourceMessageId: `wamid-deferred-${exhausted}`, deliveryJid: DELIVERY_JID,
+      });
+      expect(store.listOpenObligations(SCOPE).map((o) => o.inboundSeq)).toEqual([runnable]);
+    });
+
+    it('renews only a live claim and restores a lapsed claim only to its original claimant', () => {
+      const seq = journal('wamid-lease-store');
+      store.enqueueDeferredObligation(enqueueInput(seq));
+      const claimed = store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: 'claim-lease', ttlSeconds: -1 })!;
+      const fence = { claimToken: 'claim-lease', claimEpoch: claimed.claimEpoch };
+      expect(store.renewClaim(claimed.id, { ...fence, claimToken: 'claim-other' }, 600)).toBe(false);
+      expect(store.renewClaim(claimed.id, fence, 600)).toBe(true);
+      expect(store.expireStaleClaims(SCOPE)).toBe(0);
+
+      db.raw.prepare("UPDATE deferred_turn_obligations SET claim_expires_at = datetime('now', '-1 seconds') WHERE id = ?").run(claimed.id);
+      expect(store.expireStaleClaims(SCOPE)).toBe(1);
+      // A swept claim is not renewed (renewal never revives it) ...
+      expect(store.renewClaim(claimed.id, fence, 600)).toBe(false);
+      // ... but its claimant may restore it while nobody re-claimed it.
+      expect(store.restoreLapsedClaim(claimed.id, { ...fence, claimEpoch: fence.claimEpoch + 1 }, 600)).toBe(false);
+      expect(store.restoreLapsedClaim(claimed.id, fence, 600)).toBe(true);
+      expect(store.listOpenObligations(SCOPE)[0]).toMatchObject({ status: 'claimed', attemptCount: 1 });
+      store.requeueClaim(claimed.id, fence, 'dispatch_failed');
+
+      // Once another claimant took it, the old claimant cannot restore it.
+      store.claimNextEligible(SCOPE, { conversationKey: CONVERSATION_KEY, claimToken: 'claim-next', ttlSeconds: 600 });
+      expect(store.restoreLapsedClaim(claimed.id, fence, 600)).toBe(false);
     });
   });
 });

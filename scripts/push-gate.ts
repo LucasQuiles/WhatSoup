@@ -15,19 +15,41 @@
  *  - the legacy `unset WHATSOUP_SKIP_*` preamble is preserved by deleting
  *    those variables from the environment before any step spawns.
  *
+ * Lifetime contract (#3808): every step runs as its own process group under its own
+ * wall-clock bound (DEFAULT_STEP_TIMEOUT_MS, the per-step 600s #3133 intended; a step
+ * that runs the full-suite battery gets the battery's bound plus settle time, so the
+ * battery attributes its own timeout). A step that outlives its bound, and any step
+ * running when the gate is told to stop, gets SIGTERM then SIGKILL, so nested bounded
+ * runners reap their own groups first. There is no whole-gate cap: gateLifetimeMs() is
+ * derived from the step bounds and is what an OUTER caller must allow.
+ *
  * Registry discipline (enforced by tests/scripts/push-gate-manifest.test.ts):
  * every `guard:*` script in package.json is either a step in one of the two
  * pipelines or explicitly listed in CI_ONLY_GUARDS with a reason — a silent
  * gate-drop is a test failure, not a scrolling accident.
  */
-import { spawn } from 'node:child_process';
+import { constants as osConstants } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { SIGNAL } from '../src/lib/signals.ts';
+import { resolveBatteryTimeoutMs, runBoundedBattery } from './full-suite-battery.ts';
 
 export interface GateStep {
   readonly name: string;
   readonly cmd: string;
+  /**
+   * 'battery': the step's own command runs scripts/full-suite-battery.ts, which bounds and
+   * reaps the vitest run itself; the step bound is derived from the battery bound.
+   */
+  readonly bound?: 'battery';
 }
+
+/** Per-step bound (#3133: "600s bounds a hang without tripping real steps"). */
+export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
+/** SIGTERM-to-SIGKILL window: covers the battery's own reap grace (5s) and its ps probe (5s). */
+export const STEP_TERM_GRACE_MS = 15_000;
+/** Settle allowance per step after SIGKILL (the runner's terminal grace plus margin). */
+export const STEP_SETTLE_MS = 10_000;
 
 /** Legacy `unset` preamble, preserved as an environment mutation in main(). */
 export const NEUTRALIZED_SKIP_VARS = [
@@ -143,6 +165,7 @@ export const CURATED_TEST_PATHS = [
 
 const guard = (name: string): GateStep => ({ name, cmd: `npm run ${name}` });
 const step = (name: string, cmd: string): GateStep => ({ name, cmd });
+const batteryStep = (name: string, cmd: string): GateStep => ({ name, cmd, bound: 'battery' });
 
 /** verify:push:branch — exact legacy order (semantic:shadow sits mid-block). */
 export const BRANCH_STEPS: readonly GateStep[] = [
@@ -196,7 +219,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:lint:src'),
   step('typecheck:all', 'npm run typecheck:all'),
   step('typecheck:scripts', 'npm run typecheck:scripts'),
-  step('curated-tests', `npm test -- ${CURATED_TEST_PATHS.join(' ')} --pool=forks`),
+  batteryStep('curated-tests', `npm test -- ${CURATED_TEST_PATHS.join(' ')} --pool=forks`),
   step('verify:console-design', 'npm run verify:console-design'),
   guard('guard:design-system-hygiene'),
   guard('guard:harness-maintenance'),
@@ -254,7 +277,7 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   step('console-ci', 'bash scripts/run-with-pinned-npm.sh --prefix console ci'),
   step('console-lint', 'bash scripts/run-with-pinned-npm.sh --prefix console run lint'),
   step('typecheck:all', 'npm run typecheck:all'),
-  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
+  batteryStep('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('console-build', 'bash scripts/run-with-pinned-npm.sh --prefix console run build'),
   step('verify:console-design:live', 'npm run verify:console-design:live'),
   step('verify:console-browser', 'npm run verify:console-browser'),
@@ -312,6 +335,31 @@ export function pushGateChildEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+export function stepsForLane(lane: string | undefined): readonly GateStep[] | undefined {
+  return lane === 'branch' ? BRANCH_STEPS : lane === 'release' ? RELEASE_STEPS : undefined;
+}
+
+/**
+ * A step's wall-clock bound. A battery step gets the battery's bound (read from the same
+ * env var the battery reads, which the child env passes through) plus the TERM grace and
+ * settle time, so the battery's own bound fires first. An invalid override makes the
+ * battery refuse at once (EX_USAGE), so the default bound applies to that step.
+ */
+export function stepTimeoutMs(gateStep: GateStep, env: NodeJS.ProcessEnv = process.env): number {
+  if (gateStep.bound !== 'battery') return DEFAULT_STEP_TIMEOUT_MS;
+  const battery = resolveBatteryTimeoutMs(env.WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS);
+  const batteryMs = battery.ok ? battery.timeoutMs : DEFAULT_STEP_TIMEOUT_MS;
+  return batteryMs + STEP_TERM_GRACE_MS + STEP_SETTLE_MS;
+}
+
+/** Longest a lane can run with every step at its bound: what an outer caller must allow. */
+export function gateLifetimeMs(steps: readonly GateStep[], env: NodeJS.ProcessEnv = process.env): number {
+  return steps.reduce(
+    (total, gateStep) => total + stepTimeoutMs(gateStep, env) + STEP_TERM_GRACE_MS + STEP_SETTLE_MS,
+    0,
+  );
+}
+
 function formatElapsed(ms: number): string {
   const seconds = Math.round(ms / 100) / 10;
   return `${seconds.toFixed(1)}s`;
@@ -331,48 +379,104 @@ function tokenize(cmd: string): { exe: string; args: string[] } {
   return { exe, args };
 }
 
-function runStep(gateStep: GateStep): Promise<number> {
-  return new Promise((resolvePromise) => {
-    const { exe, args } = tokenize(gateStep.cmd);
-    const child = spawn(exe, args, {
-      stdio: 'inherit',
+export interface StepRun {
+  readonly outcome: 'passed' | 'failed' | 'timedOut' | 'inconclusive';
+  readonly exitCode: number;
+  readonly detail?: string;
+}
+
+export interface RunGateOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly stdio?: 'inherit' | 'ignore' | 'pipe';
+  /** Test seams for the bound and the TERM-to-KILL window; production uses the manifest values. */
+  readonly timeoutMsFor?: (gateStep: GateStep) => number;
+  readonly termGraceMs?: number;
+}
+
+async function runStep(gateStep: GateStep, options: RunGateOptions): Promise<StepRun> {
+  const { exe, args } = tokenize(gateStep.cmd);
+  const timeoutMs = options.timeoutMsFor?.(gateStep) ?? stepTimeoutMs(gateStep, options.env);
+  try {
+    const result = await runBoundedBattery({
+      command: exe,
+      args,
+      timeoutMs,
       env: pushGateChildEnv(),
+      stdio: options.stdio ?? 'inherit',
+      termGraceMs: options.termGraceMs ?? STEP_TERM_GRACE_MS,
     });
-    child.on('close', (code) => resolvePromise(code ?? 1));
-    child.on('error', () => resolvePromise(1));
-  });
+    if (result.outcome === 'timedOut') {
+      return { outcome: 'timedOut', exitCode: 124, detail: `timed out at its ${formatElapsed(timeoutMs)} bound` };
+    }
+    if (result.outcome === 'inconclusive') {
+      return { outcome: 'inconclusive', exitCode: 125, detail: `INCONCLUSIVE: ${result.reapError ?? 'group not proven reaped'}` };
+    }
+    return { outcome: result.outcome, exitCode: result.wrappedExit };
+  } catch (error) {
+    return { outcome: 'failed', exitCode: 1, detail: `spawn failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+const STOP_SIGNALS = [SIGNAL.TERM, SIGNAL.INT, SIGNAL.HUP] as const;
+
+/**
+ * Run a lane fail-fast. Exit codes: 0 all passed; 1 a step failed; 124 a step timed out;
+ * 125 a step's group could not be proven reaped; 128+n the gate received signal n (it stops
+ * the running step and starts no further step, even if that step then exits 0).
+ */
+export async function runGate(lane: string, steps: readonly GateStep[], options: RunGateOptions = {}): Promise<number> {
+  let stopSignal: NodeJS.Signals | undefined;
+  const onStop = (signal: NodeJS.Signals): void => {
+    stopSignal ??= signal;
+  };
+  for (const signal of STOP_SIGNALS) process.on(signal, onStop);
+  try {
+    const startedAt = Date.now();
+    let completed = 0;
+    for (const gateStep of steps) {
+      if (stopSignal !== undefined) break;
+      const stepStarted = Date.now();
+      const run = await runStep(gateStep, options);
+      const elapsed = Date.now() - stepStarted;
+      if (stopSignal !== undefined) {
+        console.error(
+          `push-gate(${lane}): STOPPED by ${stopSignal} during step ${completed + 1}/${steps.length}`
+            + ` [${gateStep.name}] after ${formatElapsed(elapsed)} (step exit ${run.exitCode});`
+            + ` ${steps.length - completed - 1} step(s) not run`,
+        );
+        break;
+      }
+      if (run.outcome !== 'passed') {
+        console.error(
+          `push-gate(${lane}): FAIL at step ${completed + 1}/${steps.length}`
+            + ` [${gateStep.name}] after ${formatElapsed(elapsed)} (exit ${run.exitCode}`
+            + `${run.detail === undefined ? '' : `; ${run.detail}`});`
+            + ` ${steps.length - completed - 1} step(s) not run`,
+        );
+        return run.outcome === 'failed' ? 1 : run.exitCode;
+      }
+      completed += 1;
+      console.log(`push-gate(${lane}): [${completed}/${steps.length}] ${gateStep.name} ok (${formatElapsed(elapsed)})`);
+    }
+    if (stopSignal !== undefined) return 128 + (osConstants.signals[stopSignal] ?? 0);
+
+    console.log(
+      `push-gate(${lane}): ${completed}/${steps.length} steps passed in ${formatElapsed(Date.now() - startedAt)}`,
+    );
+    return 0;
+  } finally {
+    for (const signal of STOP_SIGNALS) process.off(signal, onStop);
+  }
 }
 
 export async function main(argv: readonly string[]): Promise<number> {
   const lane = argv[0];
-  const steps = lane === 'branch' ? BRANCH_STEPS : lane === 'release' ? RELEASE_STEPS : undefined;
-  if (!steps) {
+  const steps = stepsForLane(lane);
+  if (lane === undefined || !steps) {
     console.error('Usage: push-gate.ts <branch|release>');
     return 64;
   }
-
-  const startedAt = Date.now();
-  let completed = 0;
-  for (const gateStep of steps) {
-    const stepStarted = Date.now();
-    const code = await runStep(gateStep);
-    const elapsed = Date.now() - stepStarted;
-    if (code !== 0) {
-      console.error(
-        `push-gate(${lane}): FAIL at step ${completed + 1}/${steps.length}`
-          + ` [${gateStep.name}] after ${formatElapsed(elapsed)} (exit ${code});`
-          + ` ${steps.length - completed - 1} step(s) not run`,
-      );
-      return 1;
-    }
-    completed += 1;
-    console.log(`push-gate(${lane}): [${completed}/${steps.length}] ${gateStep.name} ok (${formatElapsed(elapsed)})`);
-  }
-
-  console.log(
-    `push-gate(${lane}): ${completed}/${steps.length} steps passed in ${formatElapsed(Date.now() - startedAt)}`,
-  );
-  return 0;
+  return runGate(lane, steps);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
