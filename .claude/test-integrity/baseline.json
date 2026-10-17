@@ -1,6 +1,6 @@
 {
-  "captured_at": "2026-08-16T05:58:08+00:00",
-  "captured_at_sha": "6286d8d818cd2092e0c787e9f384fdcbd03497bb",
+  "captured_at": "2026-10-16T19:44:47+00:00",
+  "captured_at_sha": "fddc35ea0a90cef96d6ecc3b322e5684272b7a39",
   "findings": [
     {
       "content_signature": "da9a6c104ed4baefc18af51a4351a9aa256d3462f7ba658917adc5664f4249f4",
@@ -15,6 +15,13 @@
       "line": 3483,
       "rule_id": "py-property-test-suggestion",
       "signature": "07134d3d0edd640b27f7551a44b4c250cb1a65457f29761e1bfea84e6fb8e687"
+    },
+    {
+      "content_signature": "561e6e9097923da1acd77b48f5a761bfb269ac7a0d68576073e78ba3f2a97aa2",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 451,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "07c1904a8135e5a10cd11ba14320835f520cb41cecef29781e20e76d8783d04b"
     },
     {
       "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
@@ -66,13 +73,6 @@
       "signature": "191aca8e5bf4c7498de7313a7545464ee7d226ac92fcfc2582366c5b315dc6c2"
     },
     {
-      "content_signature": "76f98654cceb4b1187c69608bcbd29586b831e0c0c304c1b7f6943838a79f002",
-      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
-      "line": 161,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "1c5612655319551f1d8ee60fef61a730413c1c17fb431577311dde112a3e245c"
-    },
-    {
       "content_signature": "3e913a6d7b2e5b441177255842abe271135064ce2a99e06b10919f660c26bd13",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 1457,
@@ -80,11 +80,25 @@
       "signature": "1dd66b392a73ca7817c9d2c75e7631461a8830fb392a4566cedc1447ceb4e41f"
     },
     {
+      "content_signature": "d94aa9a8bc2500ab341c25e7bec9915d34ce6b03cddb80a5eb6754eddd90f6c9",
+      "file": "deploy/scripts/tests/test_bot_errors_info_volume.py",
+      "line": 217,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "1ec3d9fe2cb32f2caee6a2bc7989d079a30702d505ec651f0e9edb9ea886b936"
+    },
+    {
       "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
       "file": "deploy/scripts/tests/test_controller_state.py",
       "line": 5434,
       "rule_id": "py-property-test-suggestion",
       "signature": "1f41a5700c73b65a3ffbd072d1ebea7425f31fca50cf4223fee35997022c408b"
+    },
+    {
+      "content_signature": "9e57ed9023bf72b5b2df4d6a6e61fd4045eacc5634f5980d3a2cfd406dcfaba4",
+      "file": "deploy/scripts/tests/test_bot_errors_inhibition.py",
+      "line": 216,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "242909844ddc5addfaf2ab9467d7080b11ec22e101363d989d57d7944010cd90"
     },
     {
       "content_signature": "14eaaae25c1a7448c8e8c3d81d8e018a4d3fc31ae88577e15d6521b2bf065ef2",
@@ -108,18 +122,18 @@
       "signature": "2b6604d0a5904e634265bda2501f79491c471bee7d4e26310d0ef905933a4aff"
     },
     {
+      "content_signature": "15135dd9135d486cc472fc9737646db6749c9f8cdbd70c26557fab0eef53573a",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 436,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "2cb1f7d005630ee1d7aefb5c9ec59d46b53939d67095e469133687f87f5e6148"
+    },
+    {
       "content_signature": "e656ff858ce6461ec3a4f7cdef73cf5f70f5e4970fa2bc9979f7a79e3857f086",
       "file": "tools/qsesh/tests/test_opencode_source.py",
       "line": 447,
       "rule_id": "py-property-test-suggestion",
       "signature": "3011183583b92fe8e012727b680169239993094f5bb99477c87a92b224fa2971"
-    },
-    {
-      "content_signature": "2176a895a02bb581744b922c2e30f383ffecfa76ff47769fd92868ae5f34cc45",
-      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
-      "line": 170,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "3132fa2456f27480ff8bd82e20153ab5f2009e3b57658d1e69c0a11dbb78faf4"
     },
     {
       "content_signature": "6ea2b9a42e96ee3122f28d61b14f11dd55ed32d79a066c2b4f7e561ac31a6573",
@@ -134,13 +148,6 @@
       "line": 5533,
       "rule_id": "py-property-test-suggestion",
       "signature": "388ec163b4e3369a949e80e4bb8bf0cb60e78f970d5dfaa5cf0110b84758d16b"
-    },
-    {
-      "content_signature": "dadd4331bc400109787d47638a13b2819e1b85262c3ff3b297859e5e7cf8abed",
-      "file": "deploy/scripts/tests/test_controller_log.py",
-      "line": 468,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "3a6551f2db812f272666635dfab6c313e79ab7e5200a8131e77f1b16e23d11fc"
     },
     {
       "content_signature": "4a4ac12d3a5609e0611c21e060efdde5a5fdd0b72d3c47e63156f4213e733490",
@@ -169,6 +176,13 @@
       "line": 251,
       "rule_id": "py-property-test-suggestion",
       "signature": "3f319e985452715ca98b444a92f8fa374867875f639835757bc7a2aeaadcf354"
+    },
+    {
+      "content_signature": "ff2054244db812090573d26c136378ec67f4014be25c30334ae1ee1d395df2cf",
+      "file": "deploy/scripts/tests/test_bot_errors_info_volume.py",
+      "line": 682,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "49008f84cf6ebf121f6736e004152d093924e182a03168444c95f854705b3103"
     },
     {
       "content_signature": "7dd23ebd944a0ef7d52ac33c09f14ed425565b7ff80126f3624245ee9260dbc8",
@@ -213,6 +227,20 @@
       "signature": "55d3293d4f5a6c8ccea6615b5e9f7067602831015fa5d226bffbc78586765762"
     },
     {
+      "content_signature": "92393fa47ef574931d60b019fcdddedb139594a69a2aacdc7393761f01f8868e",
+      "file": "deploy/scripts/tests/test_bot_errors_info_volume.py",
+      "line": 1105,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "5718e0b91343db8abfdc0374004ec5916f3794fef59bee3682929f5fd6ae04f0"
+    },
+    {
+      "content_signature": "c43f793a851492038dc3a75829bbc6e0ddb56acaafb1215a2d7383ac81de7ac5",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 489,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "58570abb5c977596c1ddb861016ddee1e20bcf73d18eea71ffa90d75fa6bc60e"
+    },
+    {
       "content_signature": "29e36964b14b79ce5129f26d4d302c0161d87221e778313fa157219df8d2a106",
       "file": "deploy/scripts/tests/test_bot_errors_gui_session_monitor.py",
       "line": 200,
@@ -234,11 +262,25 @@
       "signature": "5c2e680ea036ee27abaa81f28b91a9bae82b577447aff0450ff7551289f5ee60"
     },
     {
+      "content_signature": "324a059a8849f572e03ae3a710040358503943d719d511e82136803cf02333ae",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 469,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "63e667133d14502b0c69658c0e4005d710037e11127e2c2a2cd52eedf9397898"
+    },
+    {
       "content_signature": "780c51499950d57e3f943b432fe4f29b5b95cade78160dfc0b48db14f2db3e43",
       "file": "tools/qsesh/tests/test_config.py",
       "line": 254,
       "rule_id": "py-property-test-suggestion",
       "signature": "6cbfd1927569651cf6a4c212a79fee2c6f6ed16d4751ae3d001e88ba77bc98df"
+    },
+    {
+      "content_signature": "acaaa46a378381597f9d0b9cdd89cf30ce5758da0ca2e95a555c7b3836057f5c",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 646,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "6f2dfea601a8d68bd8ac1674b245bb8295ce11898941518bcc1e79bda5c83aa8"
     },
     {
       "content_signature": "00f30d89ffb976b569e965fd65f194dee39e78d7b151dd4129a392f9312df3f1",
@@ -269,11 +311,11 @@
       "signature": "7a5cf3803267f0068d01a46792ed0c258a29eeeec2757999ee62eabfacde6f31"
     },
     {
-      "content_signature": "c43f793a851492038dc3a75829bbc6e0ddb56acaafb1215a2d7383ac81de7ac5",
-      "file": "deploy/scripts/tests/test_controller_log.py",
-      "line": 486,
+      "content_signature": "3015431e9ada1300755889d0b8cc823e52ff187194e958914e8a6723aeeba8b6",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 364,
       "rule_id": "py-property-test-suggestion",
-      "signature": "7e16b735e4610f939172e032edd6d16bd54375f1ae0f96bb0a115c4e7ab0ccaa"
+      "signature": "7b25927ac96c9f602c71ef187848a45b5c24724e136c73284cbf298abeb24c5c"
     },
     {
       "content_signature": "fbe0592507bf1764bc04817cf8bab9818ad021868a9c31a8c9f02c172dc52149",
@@ -311,6 +353,20 @@
       "signature": "968a260144a32346b953c9e670b4ed47dcef971209a0f885479f16ae536c2b0b"
     },
     {
+      "content_signature": "a5994e113c55cb55f06cb1914eb29c1b65a5ef3e887a84b9bdf5a95bb9c34a9d",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 579,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "972f2d2f5c7476d9aac9f9514508f55428de607546b7a40f8c3bd60f25e89d68"
+    },
+    {
+      "content_signature": "76f98654cceb4b1187c69608bcbd29586b831e0c0c304c1b7f6943838a79f002",
+      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
+      "line": 167,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "998f693cea3e5ffdd565c6f1580590a87db86050cf5653ed5111488ba0c96e58"
+    },
+    {
       "content_signature": "35cd23ecf0e349f79ebd3bce16be39c81bcd283df64a8cabee640487236c9906",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 220,
@@ -325,11 +381,25 @@
       "signature": "9ae0149b124e16c192fa1b7308da5896d598e37bedda6b430cc39e982227633e"
     },
     {
+      "content_signature": "3d23b21bbf595537a3a3f815e74286dac2297166906632eabb00877c99e6b5a3",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 353,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "9b3b042f82440a23d709753114399e1e4347245ef64bec6f37b5efff33f109d6"
+    },
+    {
       "content_signature": "48b9dd70d393ae659ec33b632aa5c3049b832bb37434470219fd5769588d1377",
       "file": "tools/qsesh/tests/test_source_boundary.py",
       "line": 433,
       "rule_id": "py-property-test-suggestion",
       "signature": "9caed0f2673f4f590c1b662d22fcfc238459c1b98738c5bdc9b8bd1c4df96822"
+    },
+    {
+      "content_signature": "dadd4331bc400109787d47638a13b2819e1b85262c3ff3b297859e5e7cf8abed",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 471,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "9f26ae4053cd800f5233d4b14842c7b35ff9025f45e281e87c33061b435fec56"
     },
     {
       "content_signature": "81429ec372c4c04fca3450c48c0b14a91e0adc02e92dd086997b712991bcd1a4",
@@ -379,6 +449,13 @@
       "line": 89,
       "rule_id": "py-property-test-suggestion",
       "signature": "aa10a11182889892365453f3a9720cb344483e18dfcac9892ce3447dd6376574"
+    },
+    {
+      "content_signature": "0cb1062579fbc5d5e200af159489222b8e728f42ea9b07f124fa54c6e01f5396",
+      "file": "deploy/scripts/tests/test_controller_log.py",
+      "line": 454,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "af34f8ad94b7017860973692e6be7ba9a32bcb4a2216484c590973ffcb3d5dbc"
     },
     {
       "content_signature": "f246bd1864dc4d799c57e90d67435dc101c7f3ca9f5efbe10932534c4734fbe1",
@@ -458,6 +535,20 @@
       "signature": "cabb6e9cc8b5c5d1260dbd09eba19365066997f237211a1a681f8b0f3d8610ec"
     },
     {
+      "content_signature": "f5302108cc8be5b90722b4e39203667369835936ae20708a6339a792dfbcbb19",
+      "file": "deploy/scripts/tests/test_bot_errors_health_check_fleet_token_target.py",
+      "line": 128,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "d00d845592995f97ea9fda9c98a2d3288e853502ae5c5c1504a402f417df24d6"
+    },
+    {
+      "content_signature": "76bdfef477622ea1d7c0550b5ca4cf1f2b8f2ebb2ad595efc8809a40aa9fb8e7",
+      "file": "deploy/scripts/tests/test_bot_errors_human_card.py",
+      "line": 480,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "d1108806f6349e3d182fa23ccc8a522803d99b2c8addcdc2444bbf72f63dd562"
+    },
+    {
       "content_signature": "7dec4cdf3e88d09813fe5e26376a494800e3f4859343c1d699f6cd4609cc82cc",
       "file": "tools/qsesh/tests/test_source_boundary.py",
       "line": 935,
@@ -528,13 +619,6 @@
       "signature": "e0de5c6340f3b7cfcfff99115d4c0716343d1e83e0c1734fb11ae30788dac2c9"
     },
     {
-      "content_signature": "9e57ed9023bf72b5b2df4d6a6e61fd4045eacc5634f5980d3a2cfd406dcfaba4",
-      "file": "deploy/scripts/tests/test_bot_errors_inhibition.py",
-      "line": 219,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "eb5bb6f5cfd7561578d1952f6bedb2c284b77f2dadd7c7dbfc9dcd30440316c6"
-    },
-    {
       "content_signature": "628b8c6658847786404df5eccdcff11c38817916b5aa18c1518f35afa3f9ed6b",
       "file": "tools/qsesh/tests/test_extract_opencode.py",
       "line": 282,
@@ -549,18 +633,18 @@
       "signature": "efe97cb0dae3c2f900b3c0336efed12d2c68ac240ef0df2b886fbdf135e0b6b4"
     },
     {
+      "content_signature": "2176a895a02bb581744b922c2e30f383ffecfa76ff47769fd92868ae5f34cc45",
+      "file": "deploy/scripts/tests/test_bot_errors_maintenance.py",
+      "line": 176,
+      "rule_id": "py-property-test-suggestion",
+      "signature": "f085c1b4cb1c7a72398cd18751c52276aa6e87a29656664f8375806922003124"
+    },
+    {
       "content_signature": "3b90fb5f1b5fa4dcbeb732504e82a621eb3998139d977d7b687635511be16715",
       "file": "tools/qsesh/tests/test_distill.py",
       "line": 368,
       "rule_id": "py-property-test-suggestion",
       "signature": "f0b1d0e17599da0673f92a07262cc7569cbf6deea629f211cd540e2d25327e9d"
-    },
-    {
-      "content_signature": "0cb1062579fbc5d5e200af159489222b8e728f42ea9b07f124fa54c6e01f5396",
-      "file": "deploy/scripts/tests/test_controller_log.py",
-      "line": 451,
-      "rule_id": "py-property-test-suggestion",
-      "signature": "f3c89c62f88153a8df685c406b5cff4179ff3d7243141481b843ece7f6340b11"
     },
     {
       "content_signature": "e75083dda7835644cab41e7ae4b5cd8b4e7884f2db9dc00568af17d34d242fd1",
