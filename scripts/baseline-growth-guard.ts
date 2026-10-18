@@ -72,7 +72,7 @@ const EXIT_INCONCLUSIVE = 2;
 
 /** Output cap for one OID-sized Git answer (rev-parse, merge-base). */
 const MAX_GIT_IDENTITY_BYTES = 64 * 1024;
-// Bounds the owned helper's user-space read, including process setup. This leaves
+// Bounds one owned helper's startup and complete working-document set read. This leaves
 // room for a responsive 1.25-second read while still terminating a stalled reader.
 // Parent pathname metadata and an OS-uninterruptible operation can outlive it.
 const WORKING_DOCUMENT_READ_TIMEOUT_MS = 2_000;
@@ -93,36 +93,67 @@ function assertRepoRootUnchanged(repoRoot: string, expected: RootIdentity): void
   }
 }
 
-function readWorkingDocument(
+class WorkingDocumentReadError extends Error {
+  readonly relativePath: string | null;
+
+  constructor(message: string, relativePath: string | null) {
+    super(message);
+    this.name = 'WorkingDocumentReadError';
+    this.relativePath = relativePath;
+  }
+}
+
+function readWorkingDocuments(
   repoRoot: string,
-  relativePath: string,
+  relativePaths: readonly string[],
   rootIdentity: RootIdentity,
-): Buffer | null {
+): ReadonlyMap<string, Buffer | null> {
+  if (relativePaths.length === 0 || new Set(relativePaths).size !== relativePaths.length) {
+    throw new Error('working document paths are invalid');
+  }
   assertRepoRootUnchanged(repoRoot, rootIdentity);
   const result = spawnSync(
     process.execPath,
-    ['--experimental-strip-types', workingDocumentReader, repoRoot, relativePath],
+    ['--experimental-strip-types', workingDocumentReader, repoRoot, ...relativePaths],
     {
       encoding: 'buffer',
       timeout: WORKING_DOCUMENT_READ_TIMEOUT_MS,
       killSignal: SIGNAL.KILL,
-      maxBuffer: MAX_EXACT_SINGLE_BLOB_BYTES + 1,
+      maxBuffer: relativePaths.length * (MAX_EXACT_SINGLE_BLOB_BYTES + 5),
     },
   );
   assertRepoRootUnchanged(repoRoot, rootIdentity);
   if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') {
-    throw new Error('working document reader deadline elapsed');
+    throw new WorkingDocumentReadError('working document reader deadline elapsed', null);
   }
   if (result.signal !== null || result.status !== 0 || result.error !== undefined) {
     const diagnostic = result.stderr.toString('utf8').trim();
-    throw new Error(diagnostic || 'working document reader could not complete');
+    const match = /^(\d+):(.+)$/.exec(diagnostic);
+    const index = match === null ? -1 : Number(match[1]);
+    throw new WorkingDocumentReadError(
+      (match?.[2] ?? diagnostic) || 'working document reader could not complete',
+      Number.isSafeInteger(index) && index >= 0 && index < relativePaths.length
+        ? relativePaths[index]!
+        : null,
+    );
   }
   const stdout = result.stdout;
-  if (stdout.length === 1 && stdout[0] === 0) return null;
-  if (stdout.length === 0 || stdout[0] !== 1 || stdout.length > MAX_EXACT_SINGLE_BLOB_BYTES + 1) {
-    throw new Error('working document reader returned an invalid result');
+  const documents = new Map<string, Buffer | null>();
+  let offset = 0;
+  for (const relativePath of relativePaths) {
+    if (offset + 5 > stdout.length) throw new Error('working document reader returned an invalid result');
+    const kind = stdout[offset]!;
+    const length = stdout.readUInt32BE(offset + 1);
+    offset += 5;
+    if ((kind !== 0 && kind !== 1) || length > MAX_EXACT_SINGLE_BLOB_BYTES || offset + length > stdout.length) {
+      throw new Error('working document reader returned an invalid result');
+    }
+    if (kind === 0 && length !== 0) throw new Error('working document reader returned an invalid result');
+    documents.set(relativePath, kind === 0 ? null : Buffer.from(stdout.subarray(offset, offset + length)));
+    offset += length;
   }
-  return Buffer.from(stdout.subarray(1));
+  if (offset !== stdout.length) throw new Error('working document reader returned an invalid result');
+  return documents;
 }
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -298,14 +329,11 @@ function weighText(path: string, text: string, sha256: string): Weighing {
   }
 }
 
-function weighWorkingTree(path: string, repoRoot: string, rootIdentity: RootIdentity): Weighing {
-  try {
-    const bytes = readWorkingDocument(repoRoot, path, rootIdentity);
-    if (bytes === null) return { kind: 'absent' };
-    return weighText(path, UTF8.decode(bytes), createHash('sha256').update(bytes).digest('hex'));
-  } catch (error) {
-    return { kind: 'error', message: errorMessage(error) };
-  }
+function weighWorkingDocument(path: string, documents: ReadonlyMap<string, Buffer | null>): Weighing {
+  const bytes = documents.get(path);
+  if (bytes === undefined) return { kind: 'error', message: 'working document result is missing' };
+  if (bytes === null) return { kind: 'absent' };
+  return weighText(path, UTF8.decode(bytes), createHash('sha256').update(bytes).digest('hex'));
 }
 
 /** What one exact read of a path at a commit produced, before any weighing. */
@@ -573,13 +601,34 @@ function main(): number {
     return EXIT_INCONCLUSIVE;
   }
 
+  let workingDocuments: ReadonlyMap<string, Buffer | null> | null = null;
+  if (candidateReads === null) {
+    try {
+      workingDocuments = readWorkingDocuments(
+        repoRoot,
+        [GROWTH_WAIVERS_PATH, ...registryPaths],
+        rootIdentity,
+      );
+    } catch (error) {
+      const path = error instanceof WorkingDocumentReadError ? error.relativePath : null;
+      const subject = path === GROWTH_WAIVERS_PATH
+        ? `candidate ${GROWTH_WAIVERS_PATH}`
+        : path === null
+          ? 'candidate working documents'
+          : `candidate baseline ${path}`;
+      console.error(`FAIL(inconclusive): ${subject} is invalid: ${errorMessage(error)}`);
+      return EXIT_INCONCLUSIVE;
+    }
+  }
+
   // Validate proposed authority, but only the merge-base document can grant a waiver.
   try {
-    if (candidateReads === null) {
-      const bytes = readWorkingDocument(repoRoot, GROWTH_WAIVERS_PATH, rootIdentity);
+    if (workingDocuments !== null) {
+      const bytes = workingDocuments.get(GROWTH_WAIVERS_PATH);
+      if (bytes === undefined) throw new Error('working document result is missing');
       if (bytes !== null) parseWaiverDocument(JSON.parse(UTF8.decode(bytes)));
     } else {
-      const proposed = candidateReads.get(GROWTH_WAIVERS_PATH);
+      const proposed = candidateReads?.get(GROWTH_WAIVERS_PATH);
       if (proposed?.kind === 'error') throw new Error(proposed.message);
       if (proposed?.kind === 'text') parseWaiverDocument(JSON.parse(proposed.text));
     }
@@ -590,9 +639,9 @@ function main(): number {
 
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighExactRead(entry.path, baseReads.get(entry.path));
-    const atHead = candidateReads === null
-      ? weighWorkingTree(entry.path, repoRoot, rootIdentity)
-      : weighExactRead(entry.path, candidateReads.get(entry.path));
+    const atHead = workingDocuments !== null
+      ? weighWorkingDocument(entry.path, workingDocuments)
+      : weighExactRead(entry.path, candidateReads?.get(entry.path));
     if (
       entry.initialWeight !== undefined
       && (

@@ -82,25 +82,50 @@ function readWorkingDocument(repoRoot: string, relativePath: string): Buffer | n
   }
 }
 
-function main(): number {
-  const [repoRoot, relativePath] = process.argv.slice(2);
-  if (typeof repoRoot !== 'string' || typeof relativePath !== 'string' || process.argv.length !== 4) return 2;
-  try {
-    const bytes = readWorkingDocument(repoRoot, relativePath);
-    writeSync(1, bytes === null ? Buffer.from([0]) : Buffer.concat([Buffer.from([1]), bytes]));
-    return 0;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'working document reader failed';
-    const diagnostic = message.includes('parent changed')
-      ? 'working document parent changed'
-      : message.includes('repository root')
-        ? 'repository root changed'
-        : message.includes('deadline')
-          ? 'working document reader deadline elapsed'
-          : 'working document reader failed';
-    writeSync(2, `${diagnostic}\n`);
-    return 2;
+function writeAll(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('working document reader output failed');
+    offset += written;
   }
+}
+
+function diagnosticFor(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'working document reader failed';
+  return message.includes('parent changed')
+    ? 'working document parent changed'
+    : message.includes('repository root')
+      ? 'repository root changed'
+      : message.includes('deadline')
+        ? 'working document reader deadline elapsed'
+        : 'working document reader failed';
+}
+
+function main(): number {
+  const [repoRoot, ...relativePaths] = process.argv.slice(2);
+  if (
+    typeof repoRoot !== 'string'
+    || relativePaths.length === 0
+    || relativePaths.some((path) => typeof path !== 'string')
+    || new Set(relativePaths).size !== relativePaths.length
+  ) return 2;
+  for (const [index, relativePath] of relativePaths.entries()) {
+    try {
+      const bytes = readWorkingDocument(repoRoot, relativePath);
+      const header = Buffer.alloc(5);
+      if (bytes !== null) {
+        header[0] = 1;
+        header.writeUInt32BE(bytes.length, 1);
+      }
+      writeAll(1, header);
+      if (bytes !== null) writeAll(1, bytes);
+    } catch (error) {
+      writeAll(2, Buffer.from(`${index}:${diagnosticFor(error)}\n`));
+      return 2;
+    }
+  }
+  return 0;
 }
 
 process.exit(main());

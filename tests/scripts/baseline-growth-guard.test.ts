@@ -503,6 +503,36 @@ syncBuiltinESMExports();
     },
   );
 
+  it('uses one bounded reader helper for the working-document set', () => {
+    const dir = makeRepo(2);
+    const parent = join(dir, '.claude/test-integrity');
+    const path = join(parent, 'baseline.json');
+    const outside = tmp.make('baseline-startup-outside');
+    mkdirSync(parent);
+    writeFileSync(path, JSON.stringify({ findings: [] }));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'baseline fixture']);
+    renameSync(path, join(outside, 'original.json'));
+    symlinkSync(join(outside, 'original.json'), path);
+    const marker = join(tmp.make('reader-startup-marker'), 'pids');
+    const hook = join(tmp.make('reader-startup-delay-hook'), 'hook.mjs');
+    writeFileSync(hook, `import { appendFileSync } from 'node:fs';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  appendFileSync(${JSON.stringify(marker)}, \`${'${process.pid}'}\\n\`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 180);
+}
+`);
+    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+    const result = spawnSync(process.execPath,
+      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 2_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
+    expect(readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
   it.each(['before-open', 'after-read'])(
     'refuses a working-tree baseline parent replaced %s', (when) => {
       const dir = makeRepo(2);
