@@ -243,6 +243,9 @@ export function addDegradationSilenceProof(
 export interface DegradationLatchEntry {
   latchedAtMs: number;
   reasons: ReadonlySet<string>;
+  /** Start of the current unbroken run of clean direct re-probes of every
+   * latched reason (releaseDegradationLatchOnReprobe); absent when none. */
+  reprobeClearSinceMs?: number;
 }
 
 /** Status reasons a successful primary-provider turn is evidence AGAINST: the
@@ -365,7 +368,8 @@ export interface PrimaryRouteForRelease {
   modelRef: string | null;
 }
 
-/** Recovery proof for the #2280 silence latch. The latch is released ONLY on
+/** Turn-receipt proof for the #2280 silence latch (the other channel is
+ * releaseDegradationLatchOnReprobe). This one releases ONLY on
  * a successful EXACT-PRIMARY-ROUTE turn receipt from the still-current
  * session, strictly newer than the latch point, and only when every latched
  * reason is turn-provable (TURN_PROVABLE_STATUS_REASONS — a turn proves the
@@ -393,8 +397,8 @@ export interface PrimaryRouteForRelease {
  * hazard of the #2280 mechanism, which is loss of the latch, not a release
  * channel; nothing here treats a restart as proof. Deletes the latch entry
  * and returns true when the proof holds. Seam note: this predicate is the
- * whole release contract — an alternative (e.g. N consecutive clean
- * evaluations) can replace it without touching the call site. */
+ * whole turn-receipt contract — an alternative can replace it without
+ * touching the call site. */
 export function releaseDegradationLatchOnRecoveryProof(
   recentlyDegraded: Map<string, DegradationLatchEntry>,
   instanceName: string,
@@ -423,6 +427,76 @@ export function releaseDegradationLatchOnRecoveryProof(
     return false; // rotated/dead/unknown session incarnation — not live-route evidence
   }
   if (receiptAt <= latch.latchedAtMs) return false; // predates the latch — stale proof
+  recentlyDegraded.delete(instanceName);
+  return true;
+}
+
+/** How long every latched reason must stay positively re-probed clear before
+ * releaseDegradationLatchOnReprobe releases. Release needs a clean re-probe
+ * at both ends of the window and on every evaluation in between, so one
+ * sample between two flaps of a recurring fault does not release. It is kept
+ * short because a recurrence after release arms a new latch and is reported
+ * again. At the fleet poller's 5 s cadence it is about 12 clean polls. */
+export const LATCH_REPROBE_OBSERVATION_MS = MS_PER_MINUTE;
+
+/** Positive reads, from this evaluation, of the state a latched reason names.
+ * Each is true only when its source was read and reported clean. A source
+ * that did not report (no auth bond, no enrichment run, no memory getter) is
+ * silence and stays false. */
+export interface LatchReprobeEvidence {
+  connected: boolean;
+  /** A present auth bond classifying as no auth failure. */
+  authBondClear: boolean;
+  /** An enrichment run inside the staleness bound. */
+  enrichmentFresh: boolean;
+  memoryReadinessClear: boolean;
+  memoryContextClear: boolean;
+  memoryConsolidationClear: boolean;
+}
+
+function latchedReasonReprobedClear(reason: string, evidence: LatchReprobeEvidence): boolean {
+  // Recomputed on every evaluation, so absence from a quiet one clears it.
+  if (DIRECTLY_REPROBED_STATUS_REASONS.has(reason)) return true;
+  if (reason === 'connection_disconnected' || reason === 'connection_recovering') return evidence.connected;
+  if (reason.startsWith('auth_failure.')) return evidence.authBondClear;
+  if (reason === 'enrichment_stale') return evidence.enrichmentFresh;
+  if (reason.startsWith('memory_readiness_')) return evidence.memoryReadinessClear;
+  if (reason.startsWith('memory_context_')) return evidence.memoryContextClear;
+  if (reason.startsWith('memory_consolidation_')) return evidence.memoryConsolidationClear;
+  // No direct probe: the turn pipeline (turn-receipt proof only), child-reported
+  // runtime and enrichment-runtime state, identity, and the late sources.
+  return false;
+}
+
+/** #3562: the release channel for a latch that no turn receipt can prove,
+ * including every latch on an instance without turn capability (passive,
+ * chat). `evidence` is non-null only on a full-visibility evaluation that
+ * observed no status reason before the silence proof. Pass null on any
+ * other evaluation, and the window restarts. Releases, deleting the entry,
+ * only when every latched reason was re-probed clear on each evaluation for
+ * LATCH_REPROBE_OBSERVATION_MS. Elapsed time with no evaluation, an empty
+ * latched set, and a source that went silent never release. A reason with
+ * no direct probe keeps whatever proof it needed before. */
+export function releaseDegradationLatchOnReprobe(
+  recentlyDegraded: Map<string, DegradationLatchEntry>,
+  instanceName: string,
+  evidence: LatchReprobeEvidence | null,
+  nowMs: number,
+): boolean {
+  const latch = recentlyDegraded.get(instanceName);
+  if (latch === undefined) return false;
+  const witnessed = evidence !== null
+    && latch.reasons.size > 0
+    && [...latch.reasons].every((reason) => latchedReasonReprobedClear(reason, evidence));
+  if (!witnessed) {
+    delete latch.reprobeClearSinceMs;
+    return false;
+  }
+  if (latch.reprobeClearSinceMs === undefined) {
+    latch.reprobeClearSinceMs = nowMs;
+    return false;
+  }
+  if (nowMs - latch.reprobeClearSinceMs < LATCH_REPROBE_OBSERVATION_MS) return false;
   recentlyDegraded.delete(instanceName);
   return true;
 }
@@ -2394,10 +2468,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // the released latch (advanced point, prior set ∪ observed reasons), so
       // the release only sticks (and is only logged) when the evaluation ends
       // quiet. Non-null exactly when a release happened this evaluation,
-      // carrying the released latch's prior reason set for restoration — one
-      // variable, so the release flag and the captured set cannot desync (a
-      // release implies the entry existed, so the set is always available).
-      let releasedLatchReasons: ReadonlySet<string> | null = null;
+      // carrying the released latch's prior reason set for restoration and
+      // the proof that released it — one variable, so the release flag and
+      // the captured set cannot desync (a release implies the entry existed,
+      // so the set is always available).
+      let releasedLatch: {
+        reasons: ReadonlySet<string>;
+        proof: 'primary_turn_receipt' | 'direct_reprobe';
+      } | null = null;
       if (authFailureIsUnhealthy) {
         status = 'unhealthy';
         statusReasons = [`auth_failure.${authFailureClass}`];
@@ -2434,7 +2512,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         // If statusReasons is empty but the instance was recently degraded,
         // keep it degraded until explicit recovery evidence is observed. The
         // evidence that DOES release the latch is a fresh successful
-        // primary-provider turn receipt strictly newer than the latch point,
+        // primary-provider turn receipt strictly newer than the latch point
+        // (or, #3562, a direct re-probe held across its window),
         // checked BEFORE the silence proof so a genuinely recovered instance
         // flips healthy on this evaluation. Primary identity is judged against
         // the fallback-state SNAPSHOT: a non-null fallbackActiveUntil means
@@ -2447,6 +2526,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         wentThroughDegradedPath = true;
         latchArmEligible = statusReasons.some(isLatchable);
         // Release is still attempted only on an evaluation with no early reason.
+        const priorLatch = recentlyDegraded.get(deps.instanceName);
+        let reprobeEvidence: LatchReprobeEvidence | null = null;
         if (statusReasons.length === 0) {
           const primaryRoute =
             fallbackState !== null && fallbackState.fallbackActiveUntil === null
@@ -2455,7 +2536,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
                   modelRef: turnCapability?.primary_model ?? null,
                 }
               : null;
-          const priorLatch = recentlyDegraded.get(deps.instanceName);
           if (
             priorLatch !== undefined
             && releaseDegradationLatchOnRecoveryProof(
@@ -2465,8 +2545,24 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               primaryRoute,
             )
           ) {
-            releasedLatchReasons = priorLatch.reasons;
+            releasedLatch = { reasons: priorLatch.reasons, proof: 'primary_turn_receipt' };
           }
+          reprobeEvidence = {
+            connected: isConnected,
+            authBondClear: connectionState.authBond?.status === 'present' && authFailureClass === 'none',
+            enrichmentFresh: enrichmentStaleness !== null && !enrichmentIsStale,
+            memoryReadinessClear: memoryReadiness !== null && !memoryReadinessIsDegraded,
+            memoryContextClear: memoryContext !== null && !memoryContextIsDegraded,
+            memoryConsolidationClear: memoryConsolidation !== null && !memoryConsolidationIsDegraded,
+          };
+        }
+        // #3562: any other evaluation (null evidence) restarts the window.
+        if (
+          priorLatch !== undefined
+          && releasedLatch === null
+          && releaseDegradationLatchOnReprobe(recentlyDegraded, deps.instanceName, reprobeEvidence, systemClock.now())
+        ) {
+          releasedLatch = { reasons: priorLatch.reasons, proof: 'direct_reprobe' };
         }
         silenceUnprovenLatched = addDegradationSilenceProof(statusReasons, recentlyDegraded, deps.instanceName);
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
@@ -2949,10 +3045,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             ? new Set(realReasons)
             : new Set([...existingLatch.reasons, ...realReasons]);
           recentlyDegraded.set(deps.instanceName, { latchedAtMs: systemClock.now(), reasons });
-        } else if (releasedLatchReasons !== null) {
+        } else if (releasedLatch !== null) {
           recentlyDegraded.set(deps.instanceName, {
             latchedAtMs: systemClock.now(),
-            reasons: new Set([...releasedLatchReasons, ...realReasons]),
+            reasons: new Set([...releasedLatch.reasons, ...realReasons]),
           });
         } else if (latchArmEligible && status === 'degraded') {
           const reasons = new Set(realReasons);
@@ -2961,8 +3057,13 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           log.info({ instance: deps.instanceName, reasons: [...reasons].sort() }, 'degradation silence latch set');
           recentlyDegraded.set(deps.instanceName, { latchedAtMs: systemClock.now(), reasons });
         }
-      } else if (releasedLatchReasons !== null) {
-        log.info({ instance: deps.instanceName }, 'degradation silence latch released: fresh primary-turn receipt');
+      } else if (releasedLatch !== null) {
+        log.info(
+          { instance: deps.instanceName, reasons: [...releasedLatch.reasons].sort(), proof: releasedLatch.proof },
+          releasedLatch.proof === 'direct_reprobe'
+            ? 'degradation silence latch released: direct re-probe'
+            : 'degradation silence latch released: fresh primary-turn receipt',
+        );
       }
 
       const body = JSON.stringify({

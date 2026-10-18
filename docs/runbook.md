@@ -749,6 +749,9 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   complete within the bound latches as before.
 - **Log.** The `degradation silence latch set` line carries `reasons`, the
   sorted latched reason codes, so a latch-only reading names what armed it.
+  Each `degradation silence latch released: …` line carries the released
+  `reasons` and the `proof` that released them (`primary_turn_receipt` or
+  `direct_reprobe`).
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and updates the latched reason set: a
   full-visibility evaluation REPLACES the set with what it observed (a reason
@@ -767,15 +770,34 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   — a turn proves the turn pipeline, never enrichment/memory/durability).
   Strictly-newer is the only temporal guard; a genuine receipt does not
   expire by wall clock.
+- **Release by direct re-probe (#3562).** A latch that no turn can prove,
+  including every latch on a passive or Chat instance, releases when every
+  latched reason has been re-probed clean on every evaluation for one minute
+  (`LATCH_REPROBE_OBSERVATION_MS`). A clean re-probe is a full-visibility
+  evaluation with no status reason, on which each latched reason is backed by
+  a positive read of its own source. The sources are: a connected transport
+  for the connection classes; a present auth bond classifying as no auth
+  failure for `auth_failure.*`; an enrichment run inside the staleness bound
+  for `enrichment_stale`; a reported, non-degraded memory state for each
+  `memory_*` family. A directly re-probed member, held by a latch from an
+  older release, counts as clean whenever it is absent. Any other
+  evaluation restarts the minute, and so does a source that stops reporting,
+  because that is silence and not a clean read. Elapsed time with no
+  evaluation releases nothing, because the window needs a clean re-probe at
+  both ends. Reasons without a direct probe keep the proof they needed
+  before. These are the turn-pipeline reasons, child-reported runtime and
+  `enrichment_runtime_degraded`, the identity reasons, and the late sources.
 - **Restart amnesia (known hazard, not a channel).** The latch is
   process-lifetime, in-memory state: a process restart clears it without any
   recovery proof. Nothing treats a restart as proof; the loss is a documented
   hazard of the mechanism.
-- **Known open limit: Chat instances.** Chat instances expose no
-  turn-capability evidence, so a silence-latched Chat instance has NO release
-  channel and stays `degraded` until restart. A mixed-reason latch whose set
-  contains a non-turn-provable reason likewise holds until the underlying
-  condition is fixed and the process restarts.
+- **Known open limit: reasons with no release channel.** A latch holding a
+  reason that is neither turn-provable nor directly re-probed (for example
+  `runtime.recent_crashes`, `runtime.turn_queue_halted`,
+  `enrichment_runtime_degraded`, a late source, or a passive or Chat
+  instance's `runtime_degraded`) holds until the underlying condition is
+  fixed and the process restarts. So does a mixed latch in which no single
+  channel can prove every reason.
 
 ### Watchdog provider-credential states
 
