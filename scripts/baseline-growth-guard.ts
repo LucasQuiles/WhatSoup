@@ -110,7 +110,9 @@ function readWorkingDocument(
     },
   );
   assertRepoRootUnchanged(repoRoot, rootIdentity);
-  if (result.error?.code === 'ETIMEDOUT') throw new Error('working document reader deadline elapsed');
+  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') {
+    throw new Error('working document reader deadline elapsed');
+  }
   if (result.signal !== null || result.status !== 0 || result.error !== undefined) {
     const diagnostic = result.stderr.toString('utf8').trim();
     throw new Error(diagnostic || 'working document reader could not complete');
