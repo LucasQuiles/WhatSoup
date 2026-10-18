@@ -234,10 +234,11 @@ describe('push-gate manifest registry (#2224)', () => {
     }
   });
 
-  it('applies the requested worker count after the gate child environment boundary', async () => {
+  it.each([undefined, '1', '2', '4'])('applies worker count %s after the gate child environment boundary', async (requested) => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
     const prior = process.env.VITEST_MAX_WORKERS;
-    process.env.VITEST_MAX_WORKERS = '2';
+    if (requested === undefined) delete process.env.VITEST_MAX_WORKERS;
+    else process.env.VITEST_MAX_WORKERS = requested;
     try {
       const output = execFileSync(process.execPath, ['--input-type=module', '-e', `
         import { createVitest } from 'vitest/node';
@@ -252,7 +253,19 @@ describe('push-gate manifest registry (#2224)', () => {
           await vitest.close();
         }
       `], { env: pushGateChildEnv(), encoding: 'utf8', timeout: 8_000 });
-      expect(JSON.parse(output)).toEqual({ maxWorkers: 2, testTimeout: 10_000, pool: 'forks' });
+      expect(JSON.parse(output)).toEqual({ maxWorkers: requested === undefined ? 4 : Number(requested), testTimeout: 10_000, pool: 'forks' });
+    } finally {
+      if (prior === undefined) delete process.env.VITEST_MAX_WORKERS;
+      else process.env.VITEST_MAX_WORKERS = prior;
+    }
+  });
+
+  it.each(['8', '0', '-1', '1.5', '2x', '', ' 2', '02', '50%', 'NaN', 'Infinity'])('rejects invalid or increased worker count %s before launching a gate child', async (requested) => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    const prior = process.env.VITEST_MAX_WORKERS;
+    process.env.VITEST_MAX_WORKERS = requested;
+    try {
+      expect(() => pushGateChildEnv()).toThrow('VITEST_MAX_WORKERS must be an integer from 1 through 4');
     } finally {
       if (prior === undefined) delete process.env.VITEST_MAX_WORKERS;
       else process.env.VITEST_MAX_WORKERS = prior;

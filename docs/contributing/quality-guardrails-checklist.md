@@ -120,7 +120,9 @@ with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
 ## Layer 2 — Local pre-push guards
 
-The shared push and release runner forwards `VITEST_MAX_WORKERS` to Vitest.
+The shared push and release runner accepts `VITEST_MAX_WORKERS` as an integer
+from 1 through 4 and forwards it to Vitest. Other values fail before any gate
+child starts. Omitting it preserves the repository default of four workers.
 On a busy host, set `VITEST_MAX_WORKERS=2` to reduce test concurrency from the
 repository default of four workers. This changes worker count only; it does
 not skip tests, raise their timeouts, or remove gate stages. The runner still
