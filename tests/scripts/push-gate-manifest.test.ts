@@ -234,7 +234,7 @@ describe('push-gate manifest registry (#2224)', () => {
     }
   });
 
-  it.each([undefined, '1', '2', '4'])('applies worker count %s after the gate child environment boundary', async (requested) => {
+  it.each([undefined, '1', '2', '3', '4'])('applies worker count %s after the gate child environment boundary', async (requested) => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
     const prior = process.env.VITEST_MAX_WORKERS;
     if (requested === undefined) delete process.env.VITEST_MAX_WORKERS;

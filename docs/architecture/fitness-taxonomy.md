@@ -257,9 +257,14 @@ Hash-bound authority uses `{ "schemaVersion": 2, "grants": [...] }` without a le
 `waivers` property. Version 1 documents remain readable for existing grants but cannot
 contain hash constraints. Mixed envelopes and unknown versions are rejected. Older guard
 code rejects the version 2 document because it has no `waivers` array; it cannot silently
-ignore the digest and grant a generic numeric allowance. Rollback must restore both the
-guard and a compatible authority document; reverting only the guard makes growth that
-needs this authority INCONCLUSIVE. Unchanged or shrinking baselines need no waiver.
+ignore the digest and grant a generic numeric allowance. Deploy the guard and authority
+from the same revision through the [release snapshot workflow](../runbooks/release-deployment.md).
+The exporter stages tracked code and configuration from one exact commit, checks their
+manifest, and publishes the complete directory with a rename. Do not copy the version 2
+authority document into an older checkout. Rollback must select a complete compatible
+snapshot or restore both the guard and its authority document together; reverting only
+the guard makes growth that needs this authority INCONCLUSIVE. Unchanged or shrinking
+baselines need no waiver.
 
 The PR #3815 allowance is bound to the complete proposed baseline in
 [`tests/fixtures/baseline-growth/pr3815-test-integrity.json`](../../tests/fixtures/baseline-growth/pr3815-test-integrity.json).
