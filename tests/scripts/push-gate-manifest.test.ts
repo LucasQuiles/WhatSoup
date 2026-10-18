@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
@@ -27,8 +28,8 @@ import {
  * Accepted-risk note (coverage-honesty, LabRatQ challenge): a guard that is
  * renamed consistently in BOTH package.json and the manifest passes this
  * registry — rename coherence is reviewed by humans, not asserted here.
- * Hermeticity: all assertions are source/disk reads — no wall-clock, no
- * network, no machine state.
+ * Hermeticity: source/disk reads and a local Vitest configuration probe;
+ * no network or host service state.
  */
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
@@ -230,6 +231,31 @@ describe('push-gate manifest registry (#2224)', () => {
         if (wasPresent) process.env[envName] = priorValue;
         else delete process.env[envName];
       }
+    }
+  });
+
+  it('applies the requested worker count after the gate child environment boundary', async () => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    const prior = process.env.VITEST_MAX_WORKERS;
+    process.env.VITEST_MAX_WORKERS = '2';
+    try {
+      const output = execFileSync(process.execPath, ['--input-type=module', '-e', `
+        import { createVitest } from 'vitest/node';
+        const vitest = await createVitest('test', { watch: false, run: true, pool: 'forks' });
+        try {
+          console.log(JSON.stringify({
+            maxWorkers: vitest.config.maxWorkers,
+            testTimeout: vitest.config.testTimeout,
+            pool: vitest.config.pool,
+          }));
+        } finally {
+          await vitest.close();
+        }
+      `], { env: pushGateChildEnv(), encoding: 'utf8', timeout: 8_000 });
+      expect(JSON.parse(output)).toEqual({ maxWorkers: 2, testTimeout: 10_000, pool: 'forks' });
+    } finally {
+      if (prior === undefined) delete process.env.VITEST_MAX_WORKERS;
+      else process.env.VITEST_MAX_WORKERS = prior;
     }
   });
 });

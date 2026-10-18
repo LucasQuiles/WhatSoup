@@ -296,13 +296,14 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
  * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…); WHATSOUP_*
  * vars pass through EXCEPT the neutralized skip-vars — which implements the
  * legacy `unset WHATSOUP_SKIP_*` preamble structurally rather than by
- * mutation: the skips simply never reach the children.
+ * mutation: the skips simply never reach the children. Vitest's worker-count
+ * setting also passes through so resource limits reach both test lanes.
  */
 export function pushGateChildEnv(): NodeJS.ProcessEnv {
   const env = cleanGitEnv();
   for (const [key, value] of Object.entries(process.env)) {
     if (
-      key.startsWith('WHATSOUP_')
+      (key.startsWith('WHATSOUP_') || key === 'VITEST_MAX_WORKERS')
       && value !== undefined
       && !(NEUTRALIZED_SKIP_VARS as readonly string[]).includes(key)
     ) {
