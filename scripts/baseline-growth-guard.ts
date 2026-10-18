@@ -235,7 +235,7 @@ function weighText(path: string, text: string, sha256: string): Weighing {
     return {
       kind: 'weight',
       value: weighBaseline(entry.shape, document),
-      identities: baselineIdentities(entry.shape, document),
+      identities: baselineIdentities(entry.shape, document, entry.id),
       sha256,
     };
   } catch (error) {

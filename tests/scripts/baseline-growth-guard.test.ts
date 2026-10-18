@@ -315,7 +315,9 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
   function writeWaivers(dir: string, waiver: Record<string, unknown>): void {
     writeFileSync(
       join(dir, '.claude/fitness/growth-waivers.json'),
-      `${JSON.stringify({ schemaVersion: 1, waivers: [waiver] }, null, 2)}\n`,
+      `${JSON.stringify(waiver.expectedBaselineSha256 === undefined
+        ? { schemaVersion: 1, waivers: [waiver] }
+        : { schemaVersion: 2, grants: [waiver] }, null, 2)}\n`,
     );
   }
 
@@ -437,8 +439,8 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     git(dir, ['commit', '-qm', 'grant valid baseline authority']);
     const base = git(dir, ['rev-parse', 'HEAD']).trim();
     writeFileSync(path, reviewed);
-    const malformed = Buffer.from(JSON.stringify({ schemaVersion: 1,
-      waivers: [{ ...waiver, reason: 'invalid-UTF8-here' }] }));
+    const malformed = Buffer.from(JSON.stringify({ schemaVersion: 2,
+      grants: [{ ...waiver, reason: 'invalid-UTF8-here' }] }));
     const marker = malformed.indexOf('invalid-UTF8-here');
     expect(marker).toBeGreaterThan(0);
     malformed[marker] = 0xff;
@@ -455,9 +457,67 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expect(result.out).not.toMatch(/WAIVED/);
   });
 
+  it.each(['working', 'pinned'])('requires explicit identity authority for the actual PR3815 fixture (%s)', (mode) => {
+    for (const admitsNewIdentities of [false, true]) {
+      const dir = makeRepo(2);
+      const path = join(dir, '.claude/test-integrity/baseline.json');
+      mkdirSync(dirname(path), { recursive: true });
+      const fixture = (name: string) => readFileSync(join(repoRoot,
+        `tests/fixtures/baseline-growth/${name}.json`));
+      const reviewed = fixture('pr3815-test-integrity');
+      writeFileSync(path, fixture('pr3815-base-test-integrity'));
+      writeWaivers(dir, { ...activeWaiver(93), path: '.claude/test-integrity/baseline.json',
+        admitsNewIdentities, expectedBaselineSha256: createHash('sha256').update(reviewed).digest('hex') });
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'grant reviewed Test Integrity allowance']);
+      const base = git(dir, ['rev-parse', 'HEAD']).trim();
+      writeFileSync(path, reviewed);
+      const args = ['--repo', dir, '--base', base];
+      if (mode === 'pinned') {
+        git(dir, ['add', '-A']);
+        git(dir, ['commit', '-qm', 'reviewed Test Integrity growth']);
+        args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+      }
+      const result = runGuard(args);
+      expect(result.status, result.out).toBe(admitsNewIdentities ? 0 : 1);
+      if (!admitsNewIdentities) expect(result.out).toMatch(/introduced 12 baseline identity/);
+      expect(result.out.includes('WAIVED')).toBe(admitsNewIdentities);
+      if (admitsNewIdentities) {
+        writeFileSync(path, reviewed.toString('utf8').replace('test_bot_errors_human_card.py', 'unreviewed.py'));
+        const substituted = runGuard(['--repo', dir, '--base', base]);
+        expect(substituted.status, substituted.out).toBe(1);
+        expect(substituted.out).not.toMatch(/WAIVED/);
+      }
+    }
+  });
+
+  it('blocks same-count Test Integrity substitution and rejects malformed findings', () => {
+    const dir = makeRepo(2);
+    const path = join(dir, '.claude/test-integrity/baseline.json');
+    mkdirSync(dirname(path), { recursive: true });
+    const baseline = JSON.parse(readFileSync(join(repoRoot,
+      'tests/fixtures/baseline-growth/pr3815-base-test-integrity.json'), 'utf8'));
+    writeFileSync(path, JSON.stringify(baseline));
+    writeWaivers(dir, { ...activeWaiver(93), path: '.claude/test-integrity/baseline.json' });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'numeric-only Test Integrity allowance']);
+    baseline.findings[0].content_signature = 'f'.repeat(64);
+    writeFileSync(path, JSON.stringify(baseline));
+    const substituted = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(substituted.status, substituted.out).toBe(1);
+    expect(substituted.out).toMatch(/identity/);
+    delete baseline.findings[0].content_signature;
+    writeFileSync(path, JSON.stringify(baseline));
+    const malformed = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(malformed.status, malformed.out).toBe(2);
+    expect(malformed.out).toMatch(/inconclusive/i);
+  });
+
   it('pins the PR3815 waiver to its reviewed 93-entry baseline and two-day window', () => {
     const document = JSON.parse(readFileSync(join(repoRoot, GROWTH_WAIVERS_PATH), 'utf8'));
-    const entries = document.waivers.filter((w: { issue: string }) =>
+    expect(document.schemaVersion).toBe(2);
+    expect(document).not.toHaveProperty('waivers');
+    const entries = document.grants.filter((w: { issue: string }) =>
       w.issue === 'https://github.com/LucasQuiles/WhatSoup/pull/3815');
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
@@ -467,7 +527,7 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
       expiresAt: '2026-10-19',
       expectedBaselineSha256: '9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7',
     });
-    expect(entries[0].admitsNewIdentities).not.toBe(true);
+    expect(entries[0].admitsNewIdentities).toBe(true);
     const reviewed = readFileSync(join(repoRoot,
       'tests/fixtures/baseline-growth/pr3815-test-integrity.json'));
     expect(createHash('sha256').update(reviewed).digest('hex')).toBe(entries[0].expectedBaselineSha256);

@@ -236,7 +236,10 @@ When a change would push a grandfathered file past its ceiling:
    the guard reads them from the **merge base only** (a PR can never author its own
    authorization), `maxWeight` is an **absolute cap** (self-spending — once the widening
    lands, the cap equals the base and authorizes nothing further), they **expire**
-   (`expiresAt`), and identity introductions require the separately reviewed
+   (`expiresAt`). Entry-array baselines compare complete entry identities; Test Integrity
+   compares `(file, rule_id, content_signature)` identities, preserving duplicate counts
+   and ignoring line-position changes. Other shapes retain numeric weight comparison.
+   Identity introductions require the separately reviewed
    `admitsNewIdentities: true` authority. An optional `expectedBaselineSha256` binds the
    waiver to the exact reviewed candidate baseline bytes in addition to the cap and date
    window; different contents do not spend that waiver. The digest covers original bytes,
@@ -244,6 +247,14 @@ When a change would push a grandfathered file past its ceiling:
    validated but cannot grant authority. A malformed waiver document is INCONCLUSIVE,
    not ignored. A widening remains
    an exceptional, standalone act — never a side effect of a feature branch.
+
+Hash-bound authority uses `{ "schemaVersion": 2, "grants": [...] }` without a legacy
+`waivers` property. Version 1 documents remain readable for existing grants but cannot
+contain hash constraints. Mixed envelopes and unknown versions are rejected. Older guard
+code rejects the version 2 document because it has no `waivers` array; it cannot silently
+ignore the digest and grant a generic numeric allowance. Rollback must restore both the
+guard and a compatible authority document; reverting only the guard makes growth that
+needs this authority INCONCLUSIVE. Unchanged or shrinking baselines need no waiver.
 
 The PR #3815 allowance is bound to the complete proposed baseline in
 [`tests/fixtures/baseline-growth/pr3815-test-integrity.json`](../../tests/fixtures/baseline-growth/pr3815-test-integrity.json).
@@ -255,7 +266,10 @@ change with recorded line positions. The twelve additional findings are all
 `py-property-test-suggestion` advisories: eight in `test_bot_errors_human_card.py`,
 three in `test_bot_errors_info_volume.py`, and one in
 `test_bot_errors_health_check_fleet_token_target.py`. The fixture supplies review evidence;
-it is not active baseline authority. The waiver's existing cap and expiry still apply.
+it is not active baseline authority. The historical 81-finding fixture is retained beside
+it so regression tests verify the preserved multiset and the twelve additions. The waiver
+explicitly grants `admitsNewIdentities: true` for this exact payload; its existing cap and
+expiry still apply.
 
 Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
 to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time

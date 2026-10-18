@@ -20,6 +20,8 @@
  * five distinct shapes, and a line count would move on reformatting while missing a raised
  * ceiling.
  */
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -27,6 +29,7 @@ import {
   type BaselineFinding,
   type BaselineShape,
   applyWaivers,
+  baselineIdentities,
   compareWeights,
   parseWaiverDocument,
   weighBaseline,
@@ -96,6 +99,62 @@ describe('weighBaseline — one number per shape, higher means more tolerated de
     expect(() => weigh('single-array-object', {})).toThrow(/findings/i);
     expect(() => weigh('count-map', { rules: { a: 'not-a-number' } })).toThrow(/numeric/i);
     expect(() => weigh('entry-array', null)).toThrow();
+  });
+});
+
+describe('Test Integrity baseline identities', () => {
+  const finding = { file: 'tests/example.py', rule_id: 'advisory',
+    content_signature: 'a'.repeat(64), line: 10, signature: 'b'.repeat(64) };
+  const identities = (doc: unknown) => baselineIdentities('single-array-object', doc, 'test-integrity');
+
+  it('ignores line movement but detects changed file, rule, content and multiplicity', () => {
+    const original = identities({ findings: [finding] });
+    expect(original).toHaveLength(1);
+    expect(identities({ findings: [{ ...finding, line: 20, signature: 'c'.repeat(64) }] }))
+      .toEqual(original);
+    for (const change of [{ file: 'tests/other.py' }, { rule_id: 'other' },
+      { content_signature: 'd'.repeat(64) }]) {
+      expect(identities({ findings: [{ ...finding, ...change }] })).not.toEqual(original);
+    }
+    expect(identities({ findings: [finding, finding] })).toEqual([...original!, ...original!]);
+    expect(baselineIdentities('single-array-object', { findings: [finding] }, 'service-units'))
+      .toBeUndefined();
+  });
+
+  it.each([null, [], {}, { findings: 'invalid' }, { findings: [null] },
+    { findings: [{ ...finding, file: '' }] }, { findings: [{ ...finding, rule_id: 3 }] },
+    { findings: [{ ...finding, content_signature: undefined }] }].map((doc) => [doc]))('rejects malformed findings %j', (doc) => {
+    expect(() => identities(doc)).toThrow(/test-integrity/);
+  });
+
+  it('proves the reviewed fixture retains 81 identities and adds the 12 declared advisories', () => {
+    const read = (name: string) => JSON.parse(readFileSync(new URL(
+      `../fixtures/baseline-growth/${name}.json`, import.meta.url), 'utf8'));
+    const base = read('pr3815-base-test-integrity');
+    const target = read('pr3815-test-integrity');
+    const remaining = [...identities(target)!];
+    expect(identities(base)).toHaveLength(81);
+    for (const identity of identities(base)!) {
+      const index = remaining.indexOf(identity);
+      expect(index, identity).toBeGreaterThanOrEqual(0);
+      remaining.splice(index, 1);
+    }
+    expect(remaining).toHaveLength(12);
+    const additions = target.findings.filter((f: typeof finding) =>
+      remaining.includes(identities({ findings: [f] })![0]!));
+    expect(additions).toHaveLength(12);
+    expect(additions.every((f: typeof finding) => f.rule_id === 'py-property-test-suggestion')).toBe(true);
+    const counts = Object.fromEntries(['test_bot_errors_human_card.py', 'test_bot_errors_info_volume.py',
+      'test_bot_errors_health_check_fleet_token_target.py'].map((file) => [file,
+      additions.filter((f: typeof finding) => f.file.endsWith(`/${file}`)).length]));
+    expect(counts).toEqual({ 'test_bot_errors_human_card.py': 8, 'test_bot_errors_info_volume.py': 3,
+      'test_bot_errors_health_check_fleet_token_target.py': 1 });
+    const moved = base.findings.filter((f: typeof finding) => !target.findings.some((g: typeof finding) =>
+      g.signature === f.signature));
+    expect(moved).toHaveLength(6);
+    expect(moved.every((f: typeof finding) => target.findings.some((g: typeof finding) =>
+      g.file === f.file && g.rule_id === f.rule_id && g.content_signature === f.content_signature
+      && g.line !== f.line))).toBe(true);
   });
 });
 
@@ -252,5 +311,48 @@ describe('applyWaivers — identity admission requires the explicit opt-in', () 
     expect(() =>
       parseWaiverDocument({ waivers: [{ ...baseWaiver, admitsNewIdentities: 'yes' }] }),
     ).toThrow(/admitsNewIdentities/);
+  });
+});
+
+describe('waiver document compatibility', () => {
+  const waiver = {
+    path: '.claude/test-integrity/baseline.json',
+    maxWeight: 93,
+    reason: 'reviewed regression matrices',
+    issue: 'https://example.invalid/pull/1',
+    grantedAt: '2026-10-17',
+    expiresAt: '2026-10-19',
+  };
+  const pinned = { ...waiver, expectedBaselineSha256: 'a'.repeat(64) };
+
+  it('preserves legacy numeric documents with and without an explicit version', () => {
+    expect(parseWaiverDocument({ waivers: [waiver] })).toEqual([waiver]);
+    expect(parseWaiverDocument({ schemaVersion: 1, waivers: [waiver] })).toEqual([waiver]);
+  });
+
+  it('reads hash-bound grants from a version 2 envelope', () => {
+    expect(parseWaiverDocument({ schemaVersion: 2, grants: [pinned] })).toEqual([pinned]);
+  });
+
+  it('rejects a hash constraint in the legacy envelope that old readers would ignore', () => {
+    expect(() => parseWaiverDocument({ schemaVersion: 1, waivers: [pinned] }))
+      .toThrow(/version 2/);
+    expect(() => parseWaiverDocument({ waivers: [pinned] })).toThrow(/version 2/);
+  });
+
+  it('rejects mixed envelopes even when the legacy grant is less restrictive', () => {
+    expect(() => parseWaiverDocument({ schemaVersion: 2, grants: [pinned], waivers: [waiver] }))
+      .toThrow(/legacy|waivers/);
+    expect(() => parseWaiverDocument({ schemaVersion: 1, grants: [pinned], waivers: [waiver] }))
+      .toThrow(/version|grants/);
+  });
+
+  it.each([0, 3, '2', null])('rejects unsupported schema version %j', (schemaVersion) => {
+    expect(() => parseWaiverDocument({ schemaVersion, waivers: [waiver] }))
+      .toThrow(/version/);
+  });
+
+  it('requires an array in the version 2 envelope', () => {
+    expect(() => parseWaiverDocument({ schemaVersion: 2, grants: {} })).toThrow(/grants/);
   });
 });
