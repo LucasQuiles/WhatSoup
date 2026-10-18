@@ -121,12 +121,14 @@ with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 ## Layer 2 — Local pre-push guards
 
 The shared push and release runner accepts `VITEST_MAX_WORKERS` as an integer
-from 1 through 4 and forwards it to Vitest. Other values fail before any gate
-child starts. Omitting it preserves the repository default of four workers.
-On a busy host, set `VITEST_MAX_WORKERS=2` to reduce test concurrency from the
-repository default of four workers. This changes worker count only; it does
-not skip tests, raise their timeouts, or remove gate stages. The runner still
-excludes the four skip variables listed in `NEUTRALIZED_SKIP_VARS`.
+from 1 through 4 and forwards it to gate children. Other values fail before
+any gate child starts. Omitting it preserves each suite's own configuration;
+the root Node suite in `vitest.config.ts` defaults to four workers. On a busy
+host, `VITEST_MAX_WORKERS=2` reduces that suite's concurrency to two workers.
+The auxiliary guard and browser suites use separate configurations; their
+concurrency controls still apply. The override does not skip tests, raise
+timeouts, or remove gate stages. The runner still excludes the four skip
+variables listed in `NEUTRALIZED_SKIP_VARS`.
 
 Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
 update—including delete-only pushes—it requires a complete Git-estate scan and
@@ -229,7 +231,7 @@ the primary worktree's potentially stale or in-flight hook bytes.
 | Push target | Composite script | Required checks |
 |---|---|---|
 | Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
-| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks` (4 parallel workers from `vitest.config.ts`, matching CI), and coverage thresholds |
+| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks` (four workers by default in the root `vitest.config.ts`, matching CI; `VITEST_MAX_WORKERS=1`, `2`, or `3` lowers that concurrency), and coverage thresholds |
 | Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
 
 Before branch or release verification starts, the dispatcher checks that the
