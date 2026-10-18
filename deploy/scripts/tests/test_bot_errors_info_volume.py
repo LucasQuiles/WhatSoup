@@ -648,8 +648,8 @@ def fleet_profile(tmp_path, monkeypatch):
 
 def test_a_redirect_to_another_host_sends_no_token_and_gives_a_reason(mod, fleet_profile):
     profile_for, servers = fleet_profile
-    other, other_seen = _serve("127.0.0.2", _lines_reply)
-    target = f"http://127.0.0.2:{other.server_address[1]}/api/lines"
+    other, other_seen = _serve("127.0.0.1", _lines_reply)
+    target = f"http://localhost:{other.server_address[1]}/api/lines"
     local, local_seen = _serve("127.0.0.1", lambda _h: (302, {"Location": target}, b""))
     servers.extend([other, local])
 
