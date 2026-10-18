@@ -244,8 +244,9 @@ When a change would push a grandfathered file past its ceiling:
    waiver to the exact reviewed candidate baseline bytes in addition to the cap and date
    window; different contents do not spend that waiver. The digest covers original bytes,
    before UTF-8 decoding, including any byte-order mark. Candidate waiver documents are
-   validated but cannot grant authority. Working-tree waiver validation refuses symbolic
-   links (including parent directories), devices and other non-regular files, and uses the
+   validated but cannot grant authority. Working-tree baseline and waiver validation share
+   one reader that refuses symbolic links (including parent directories), executable files,
+   devices and other non-regular files, and uses the
    same 4 MiB byte limit as exact Git blob reads. Parent identities are rechecked after
    opening and reading the file. This detects replacements still present at either check;
    Node's pathname APIs cannot exclude a directory swapped away and restored between checks.

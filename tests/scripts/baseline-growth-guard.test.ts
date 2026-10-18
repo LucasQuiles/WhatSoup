@@ -13,6 +13,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -453,6 +454,99 @@ syncBuiltinESMExports();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
       expect(result.stderr).toMatch(/candidate.*waiver.*invalid.*parent/i);
+    },
+  );
+
+  it.each(['symlink', 'dangling-symlink', 'directory', 'fifo', 'oversized', 'executable', 'parent-symlink'])(
+    'refuses an unsafe working-tree baseline (%s) without waiting on its contents', (kind) => {
+      const dir = makeRepo(2);
+      const parent = join(dir, '.claude/test-integrity');
+      const path = join(parent, 'baseline.json');
+      const outside = tmp.make('baseline-outside');
+      const valid = JSON.stringify({ findings: [] });
+      mkdirSync(parent);
+      writeFileSync(path, valid);
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'baseline fixture']);
+      if (kind === 'parent-symlink') {
+        renameSync(parent, join(outside, 'integrity'));
+        symlinkSync(join(outside, 'integrity'), parent);
+      } else {
+        renameSync(path, join(outside, 'original.json'));
+        if (kind === 'symlink') {
+          symlinkSync(join(outside, 'original.json'), path);
+        } else if (kind === 'dangling-symlink') {
+          symlinkSync(join(outside, 'missing.json'), path);
+        } else if (kind === 'directory') {
+          mkdirSync(path);
+        } else if (kind === 'fifo') {
+          execFileSync('mkfifo', [path]);
+        } else {
+          writeFileSync(path, valid + (kind === 'oversized' ? ' '.repeat(4 * 1024 * 1024) : ''));
+          if (kind === 'executable') chmodSync(path, 0o755);
+        }
+      }
+      const result = spawnSync(process.execPath,
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
+    },
+  );
+
+  it.each(['before-open', 'after-read'])(
+    'refuses a working-tree baseline parent replaced %s', (when) => {
+      const dir = makeRepo(2);
+      const parent = join(dir, '.claude/test-integrity');
+      const path = join(parent, 'baseline.json');
+      const outside = tmp.make('baseline-parent-race');
+      const valid = JSON.stringify({ findings: [] });
+      mkdirSync(parent);
+      writeFileSync(path, valid);
+      writeFileSync(join(outside, 'baseline.json'), valid);
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'baseline fixture']);
+      const hook = join(tmp.make('baseline-race-hook'), 'hook.mjs');
+      writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const target = ${JSON.stringify(path)};
+const leaf = fs.statSync(target);
+let swapped = false;
+const swap = () => {
+  if (swapped) return;
+  swapped = true;
+  fs.renameSync(${JSON.stringify(parent)}, ${JSON.stringify(join(dir, 'original-integrity'))});
+  fs.symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(parent)});
+};
+const open = fs.openSync;
+fs.openSync = (path, ...args) => {
+  if (${JSON.stringify(when)} === 'before-open' && path === target) swap();
+  return open(path, ...args);
+};
+const readFile = fs.readFileSync;
+fs.readFileSync = (path, ...args) => {
+  if (${JSON.stringify(when)} === 'before-open' && path === target) swap();
+  const bytes = readFile(path, ...args);
+  if (${JSON.stringify(when)} === 'after-read' && path === target) swap();
+  return bytes;
+};
+const read = fs.readSync;
+fs.readSync = (...args) => {
+  const count = read(...args);
+  if (${JSON.stringify(when)} === 'after-read' && count > 0 && fs.fstatSync(args[0]).ino === leaf.ino) swap();
+  return count;
+};
+syncBuiltinESMExports();
+`);
+      const result = spawnSync(process.execPath,
+        ['--import', hook, '--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
     },
   );
 

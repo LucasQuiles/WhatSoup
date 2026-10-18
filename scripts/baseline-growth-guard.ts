@@ -33,7 +33,7 @@
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
 import { createHash } from 'node:crypto';
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -71,18 +71,18 @@ const EXIT_INCONCLUSIVE = 2;
 /** Output cap for one OID-sized Git answer (rev-parse, merge-base). */
 const MAX_GIT_IDENTITY_BYTES = 64 * 1024;
 
-function readWorkingWaiver(repoRoot: string): Buffer | null {
+function readWorkingDocument(repoRoot: string, relativePath: string, label: string): Buffer | null {
   let path = repoRoot;
   const parents: { path: string; dev: number; ino: number }[] = [];
   const validateParents = () => {
     for (const parent of parents) {
       const observed = lstatSync(parent.path);
       if (!observed.isDirectory() || observed.dev !== parent.dev || observed.ino !== parent.ino) {
-        throw new Error('waiver parent changed while reading');
+        throw new Error(`${label} parent changed while reading`);
       }
     }
   };
-  const parts = GROWTH_WAIVERS_PATH.split('/');
+  const parts = relativePath.split('/');
   for (const [index, part] of parts.entries()) {
     path = resolve(path, part);
     const stat = lstatSync(path, { throwIfNoEntry: false });
@@ -91,20 +91,20 @@ function readWorkingWaiver(repoRoot: string): Buffer | null {
       return null;
     }
     if (index < parts.length - 1) {
-      if (!stat.isDirectory()) throw new Error('waiver parent must be a directory, not a symbolic link');
+      if (!stat.isDirectory()) throw new Error(`${label} parent must be a directory, not a symbolic link`);
       parents.push({ path, dev: stat.dev, ino: stat.ino });
       continue;
     }
     if (!stat.isFile() || (stat.mode & 0o111) !== 0) {
-      throw new Error('waiver must be a regular non-executable file');
+      throw new Error(`${label} must be a regular non-executable file`);
     }
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       validateParents();
       const opened = fstatSync(fd);
       if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino
-          || opened.mode !== stat.mode) throw new Error('waiver changed before reading');
-      if (opened.size > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error('waiver exceeds byte limit');
+          || opened.mode !== stat.mode) throw new Error(`${label} changed before reading`);
+      if (opened.size > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error(`${label} exceeds byte limit`);
       const bytes = Buffer.alloc(MAX_EXACT_SINGLE_BLOB_BYTES + 1);
       let total = 0;
       while (total < bytes.length) {
@@ -112,10 +112,10 @@ function readWorkingWaiver(repoRoot: string): Buffer | null {
         if (count === 0) break;
         total += count;
       }
-      if (total > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error('waiver exceeds byte limit');
+      if (total > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error(`${label} exceeds byte limit`);
       const after = fstatSync(fd);
       if (total !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
-          || after.ctimeMs !== opened.ctimeMs) throw new Error('waiver changed while reading');
+          || after.ctimeMs !== opened.ctimeMs) throw new Error(`${label} changed while reading`);
       validateParents();
       return bytes.subarray(0, total);
     } finally {
@@ -299,10 +299,9 @@ function weighText(path: string, text: string, sha256: string): Weighing {
 }
 
 function weighWorkingTree(path: string, repoRoot: string): Weighing {
-  const abs = resolve(repoRoot, path);
-  if (!existsSync(abs)) return { kind: 'absent' };
   try {
-    const bytes = readFileSync(abs);
+    const bytes = readWorkingDocument(repoRoot, path, 'baseline');
+    if (bytes === null) return { kind: 'absent' };
     return weighText(path, UTF8.decode(bytes), createHash('sha256').update(bytes).digest('hex'));
   } catch (error) {
     return { kind: 'error', message: errorMessage(error) };
@@ -529,7 +528,7 @@ function main(): number {
   // Validate proposed authority, but only the merge-base document can grant a waiver.
   try {
     if (candidateReads === null) {
-      const bytes = readWorkingWaiver(repoRoot);
+      const bytes = readWorkingDocument(repoRoot, GROWTH_WAIVERS_PATH, 'waiver');
       if (bytes !== null) parseWaiverDocument(JSON.parse(UTF8.decode(bytes)));
     } else {
       const proposed = candidateReads.get(GROWTH_WAIVERS_PATH);
