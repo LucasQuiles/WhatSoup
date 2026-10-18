@@ -11,6 +11,7 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdirSync,
   readFileSync,
@@ -325,6 +326,71 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     issue: 'https://example.invalid/issues/1',
     grantedAt: '2020-01-01',
     expiresAt: '2199-01-01',
+  });
+
+  it('binds a numeric waiver to exact reviewed baseline bytes, including pinned candidates', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const reviewed = readFileSync(join(dir, '.claude/fitness/baseline.json'));
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant exact baseline growth']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'), reviewed);
+    const accepted = runGuard(['--repo', dir, '--base', base]);
+    expect(accepted.status, accepted.out).toBe(0);
+    expect(accepted.out).toMatch(/WAIVED/);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'reviewed growth']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const pinned = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(pinned.status, pinned.out).toBe(0);
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'),
+      reviewed.toString().replace('src/big.ts', 'src/unreviewed.ts'));
+    const substituted = runGuard(['--repo', dir, '--base', base]);
+    expect(substituted.status, substituted.out).toBe(1);
+    expect(substituted.out).not.toMatch(/WAIVED/);
+  });
+
+  it('rejects malformed candidate waiver constraints without granting candidate authority', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const reviewed = readFileSync(join(dir, '.claude/fitness/baseline.json'));
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant exact baseline growth']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'), reviewed);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256: 'not-a-sha256' });
+    const working = runGuard(['--repo', dir, '--base', base]);
+    expect(working.status, working.out).toBe(2);
+    expect(working.out).toMatch(/candidate.*waiver|waiver.*candidate/i);
+    expect(working.out).not.toMatch(/WAIVED/);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'malformed candidate authority']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const pinned = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(pinned.status, pinned.out).toBe(2);
+    expect(pinned.out).not.toMatch(/WAIVED/);
+  });
+
+  it('pins the PR3815 waiver to its reviewed 93-entry baseline and two-day window', () => {
+    const document = JSON.parse(readFileSync(join(repoRoot, GROWTH_WAIVERS_PATH), 'utf8'));
+    const entries = document.waivers.filter((w: { issue: string }) =>
+      w.issue === 'https://github.com/LucasQuiles/WhatSoup/pull/3815');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      path: '.claude/test-integrity/baseline.json',
+      maxWeight: 93,
+      grantedAt: '2026-10-17',
+      expiresAt: '2026-10-19',
+      expectedBaselineSha256: '9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7',
+    });
+    expect(entries[0].admitsNewIdentities).not.toBe(true);
   });
 
   it('WAIVES (exit 0) numeric growth within an active waiver present at the base', () => {

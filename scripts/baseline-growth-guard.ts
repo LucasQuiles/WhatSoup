@@ -32,6 +32,7 @@
  *   2  INCONCLUSIVE — a revision or document could not be read, so growth cannot be ruled
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -221,7 +222,7 @@ function baseRelationError(baseOid: string, candidateOid: string, repoRoot: stri
  * broken row loud instead of invisible.
  */
 type Weighing =
-  | { kind: 'weight'; value: number; identities?: string[] }
+  | { kind: 'weight'; value: number; identities?: string[]; sha256: string }
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
@@ -234,6 +235,7 @@ function weighText(path: string, text: string): Weighing {
       kind: 'weight',
       value: weighBaseline(entry.shape, document),
       identities: baselineIdentities(entry.shape, document),
+      sha256: createHash('sha256').update(text).digest('hex'),
     };
   } catch (error) {
     return { kind: 'error', message: errorMessage(error) };
@@ -463,7 +465,22 @@ function main(): number {
   const baseReads = readExactFiles(baseOid, [...registryPaths, GROWTH_WAIVERS_PATH], repoRoot);
   const candidateReads = candidateOid === null
     ? null
-    : readExactFiles(candidateOid, registryPaths, repoRoot);
+    : readExactFiles(candidateOid, [...registryPaths, GROWTH_WAIVERS_PATH], repoRoot);
+
+  // Validate proposed authority, but only the merge-base document can grant a waiver.
+  try {
+    if (candidateReads === null) {
+      const path = resolve(repoRoot, GROWTH_WAIVERS_PATH);
+      if (existsSync(path)) parseWaiverDocument(JSON.parse(readFileSync(path, 'utf8')));
+    } else {
+      const proposed = candidateReads.get(GROWTH_WAIVERS_PATH);
+      if (proposed?.kind === 'error') throw new Error(proposed.message);
+      if (proposed?.kind === 'text') parseWaiverDocument(JSON.parse(proposed.text));
+    }
+  } catch (error) {
+    console.error(`FAIL(inconclusive): candidate ${GROWTH_WAIVERS_PATH} is invalid: ${errorMessage(error)}`);
+    return EXIT_INCONCLUSIVE;
+  }
 
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighExactRead(entry.path, baseReads.get(entry.path));
@@ -512,6 +529,7 @@ function main(): number {
         atBase.kind === 'weight' ? atBase.identities : undefined,
       headIdentities:
         atHead.kind === 'weight' ? atHead.identities : undefined,
+      headSha256: atHead.kind === 'weight' ? atHead.sha256 : undefined,
     });
   }
 

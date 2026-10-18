@@ -307,6 +307,7 @@ export interface WeighedBaseline {
   baseIdentities?: readonly string[];
   /** Candidate entry multiset; every occurrence must exist in baseIdentities. */
   headIdentities?: readonly string[];
+  headSha256?: string;
 }
 
 export interface BaselineFinding {
@@ -314,6 +315,7 @@ export interface BaselineFinding {
   path: string;
   base: number | null;
   head: number | null;
+  headSha256?: string;
   /** head - base when both are known; `null` otherwise. */
   delta: number | null;
   /** True when the comparison could not be made at all. Report, never pass. */
@@ -445,6 +447,8 @@ export interface GrowthWaiver {
    * Absent or false preserves the identity law unchanged.
    */
   admitsNewIdentities?: boolean;
+  /** Exact reviewed candidate baseline bytes; absent keeps the numeric-only contract. */
+  expectedBaselineSha256?: string;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -487,6 +491,12 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
     if (admitsNewIdentities !== undefined && typeof admitsNewIdentities !== 'boolean') {
       throw new BaselineShapeError(`growth-waivers[${i}]: admitsNewIdentities must be a boolean when present`);
     }
+    const { expectedBaselineSha256 } = w as Record<string, unknown>;
+    if (expectedBaselineSha256 !== undefined
+      && (typeof expectedBaselineSha256 !== 'string'
+        || !/^[0-9a-f]{64}$/.test(expectedBaselineSha256))) {
+      throw new BaselineShapeError(`growth-waivers[${i}]: expectedBaselineSha256 must be a lowercase SHA-256`);
+    }
     return {
       path,
       maxWeight,
@@ -495,6 +505,7 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
       grantedAt: grantedAt as string,
       expiresAt: expiresAt as string,
       ...(admitsNewIdentities === undefined ? {} : { admitsNewIdentities }),
+      ...(expectedBaselineSha256 === undefined ? {} : { expectedBaselineSha256 }),
     };
   });
 }
@@ -524,6 +535,8 @@ export function applyWaivers(
         && !f.inconclusive
         && f.head !== null
         && f.head <= candidate.maxWeight
+        && (candidate.expectedBaselineSha256 === undefined
+          || candidate.expectedBaselineSha256 === f.headSha256)
         && candidate.grantedAt <= todayIso
         && todayIso <= candidate.expiresAt,
     );

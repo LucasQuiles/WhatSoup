@@ -236,8 +236,12 @@ When a change would push a grandfathered file past its ceiling:
    the guard reads them from the **merge base only** (a PR can never author its own
    authorization), `maxWeight` is an **absolute cap** (self-spending — once the widening
    lands, the cap equals the base and authorizes nothing further), they **expire**
-   (`expiresAt`), only numeric weight growth is waivable (identity introductions never
-   are), and a malformed waiver document is INCONCLUSIVE, not ignored. A widening remains
+   (`expiresAt`), and identity introductions require the separately reviewed
+   `admitsNewIdentities: true` authority. An optional `expectedBaselineSha256` binds the
+   waiver to the exact reviewed candidate baseline bytes in addition to the cap and date
+   window; different contents do not spend that waiver. Candidate waiver documents are
+   validated but cannot grant authority. A malformed waiver document is INCONCLUSIVE,
+   not ignored. A widening remains
    an exceptional, standalone act — never a side effect of a feature branch.
 
 Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
