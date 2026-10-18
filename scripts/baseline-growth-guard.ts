@@ -33,7 +33,7 @@
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,6 +54,7 @@ import { readExactBlobs } from './lib/ci-control/git-blob-input.ts';
 import {
   ExactGitInputError,
   FULL_OID,
+  MAX_EXACT_SINGLE_BLOB_BYTES,
   UTF8,
   assertNoLegacyGrafts,
   gitBytes,
@@ -69,6 +70,60 @@ const EXIT_INCONCLUSIVE = 2;
 
 /** Output cap for one OID-sized Git answer (rev-parse, merge-base). */
 const MAX_GIT_IDENTITY_BYTES = 64 * 1024;
+
+function readWorkingWaiver(repoRoot: string): Buffer | null {
+  let path = repoRoot;
+  const parents: { path: string; dev: number; ino: number }[] = [];
+  const validateParents = () => {
+    for (const parent of parents) {
+      const observed = lstatSync(parent.path);
+      if (!observed.isDirectory() || observed.dev !== parent.dev || observed.ino !== parent.ino) {
+        throw new Error('waiver parent changed while reading');
+      }
+    }
+  };
+  const parts = GROWTH_WAIVERS_PATH.split('/');
+  for (const [index, part] of parts.entries()) {
+    path = resolve(path, part);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (stat === undefined) {
+      validateParents();
+      return null;
+    }
+    if (index < parts.length - 1) {
+      if (!stat.isDirectory()) throw new Error('waiver parent must be a directory, not a symbolic link');
+      parents.push({ path, dev: stat.dev, ino: stat.ino });
+      continue;
+    }
+    if (!stat.isFile() || (stat.mode & 0o111) !== 0) {
+      throw new Error('waiver must be a regular non-executable file');
+    }
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      validateParents();
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino
+          || opened.mode !== stat.mode) throw new Error('waiver changed before reading');
+      if (opened.size > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error('waiver exceeds byte limit');
+      const bytes = Buffer.alloc(MAX_EXACT_SINGLE_BLOB_BYTES + 1);
+      let total = 0;
+      while (total < bytes.length) {
+        const count = readSync(fd, bytes, total, bytes.length - total, total);
+        if (count === 0) break;
+        total += count;
+      }
+      if (total > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error('waiver exceeds byte limit');
+      const after = fstatSync(fd);
+      if (total !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
+          || after.ctimeMs !== opened.ctimeMs) throw new Error('waiver changed while reading');
+      validateParents();
+      return bytes.subarray(0, total);
+    } finally {
+      closeSync(fd);
+    }
+  }
+  return null;
+}
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -474,8 +529,8 @@ function main(): number {
   // Validate proposed authority, but only the merge-base document can grant a waiver.
   try {
     if (candidateReads === null) {
-      const path = resolve(repoRoot, GROWTH_WAIVERS_PATH);
-      if (existsSync(path)) parseWaiverDocument(JSON.parse(UTF8.decode(readFileSync(path))));
+      const bytes = readWorkingWaiver(repoRoot);
+      if (bytes !== null) parseWaiverDocument(JSON.parse(UTF8.decode(bytes)));
     } else {
       const proposed = candidateReads.get(GROWTH_WAIVERS_PATH);
       if (proposed?.kind === 'error') throw new Error(proposed.message);

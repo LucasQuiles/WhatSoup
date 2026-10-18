@@ -380,6 +380,82 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expect(pinned.out).not.toMatch(/WAIVED/);
   });
 
+  it.each(['symlink', 'dangling-symlink', 'directory', 'fifo', 'oversized', 'parent-symlink'])(
+    'refuses an unsafe working-tree waiver (%s) without waiting on its contents', (kind) => {
+      const dir = makeRepo(2);
+      const path = join(dir, GROWTH_WAIVERS_PATH);
+      const outside = tmp.make('waiver-outside');
+      const valid = JSON.stringify({ schemaVersion: 2, grants: [] });
+      if (kind === 'symlink') {
+        writeFileSync(join(outside, 'authority.json'), valid);
+        symlinkSync(join(outside, 'authority.json'), path);
+      } else if (kind === 'dangling-symlink') {
+        symlinkSync(join(outside, 'missing.json'), path);
+      } else if (kind === 'directory') {
+        mkdirSync(path);
+      } else if (kind === 'fifo') {
+        execFileSync('mkfifo', [path]);
+      } else if (kind === 'oversized') {
+        writeFileSync(path, valid + ' '.repeat(4 * 1024 * 1024));
+      } else {
+        writeFileSync(path, valid);
+        renameSync(join(dir, '.claude/fitness'), join(outside, 'fitness'));
+        symlinkSync(join(outside, 'fitness'), join(dir, '.claude/fitness'));
+      }
+      const result = spawnSync(process.execPath,
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(result.stderr).toMatch(/candidate.*waiver.*invalid/i);
+    },
+  );
+
+  it.each(['after-parent-stat', 'after-read'])(
+    'refuses a working-tree waiver parent replaced %s', (when) => {
+      const dir = makeRepo(2);
+      const parent = join(dir, '.claude/fitness');
+      const outside = tmp.make('waiver-parent-race');
+      const valid = JSON.stringify({ schemaVersion: 2, grants: [] });
+      writeFileSync(join(dir, GROWTH_WAIVERS_PATH), when === 'after-parent-stat' ? '{invalid' : valid);
+      writeFileSync(join(outside, 'growth-waivers.json'), valid);
+      writeFileSync(join(outside, 'boundary-baseline.json'), readFileSync(join(parent, 'boundary-baseline.json')));
+      const hook = join(tmp.make('waiver-race-hook'), 'hook.mjs');
+      writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const leaf = fs.statSync(${JSON.stringify(join(dir, GROWTH_WAIVERS_PATH))});
+let swapped = false;
+const swap = () => {
+  if (swapped) return;
+  swapped = true;
+  fs.renameSync(${JSON.stringify(parent)}, ${JSON.stringify(join(dir, 'original-fitness'))});
+  fs.symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(parent)});
+};
+const stat = fs.lstatSync;
+fs.lstatSync = (path, ...args) => {
+  const observed = stat(path, ...args);
+  if (${JSON.stringify(when)} === 'after-parent-stat' && path === ${JSON.stringify(parent)}) swap();
+  return observed;
+};
+const read = fs.readSync;
+fs.readSync = (...args) => {
+  const count = read(...args);
+  if (${JSON.stringify(when)} === 'after-read' && count > 0 && fs.fstatSync(args[0]).ino === leaf.ino) swap();
+  return count;
+};
+syncBuiltinESMExports();
+`);
+      const result = spawnSync(process.execPath,
+        ['--import', hook, '--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(result.stderr).toMatch(/candidate.*waiver.*invalid.*parent/i);
+    },
+  );
+
   it.each(['working', 'pinned'] as const)('rejects raw-byte BOM substitution in a %s candidate', (mode) => {
     const dir = makeRepo(2);
     writeFitness(dir, 500);
