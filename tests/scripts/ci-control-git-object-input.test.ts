@@ -1404,6 +1404,7 @@ describe('exact commit metadata', () => {
     ]);
     assertImportSurface('scripts/lib/ci-control/git-input-core.ts', [
         '../../../src/lib/git-env.ts',
+        './input-limits.ts',
         './trusted-git.ts',
         'node:child_process',
         'node:crypto',
@@ -1412,6 +1413,7 @@ describe('exact commit metadata', () => {
         'node:perf_hooks',
         'node:util',
     ]);
+    assertImportSurface('scripts/lib/ci-control/input-limits.ts', []);
   });
 
   it('#2843: resolveGit() uses resolveTrustedGit() — fails closed when no candidate exists', () => {
