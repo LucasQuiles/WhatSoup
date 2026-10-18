@@ -14,6 +14,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -85,6 +86,11 @@ function runGuard(args: string[]): { status: number | null; out: string } {
     { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
   );
   return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+/** Test fixtures must not let PATH lookup or a stalled helper hang the suite. */
+function makeFifo(path: string): void {
+  execFileSync('/usr/bin/mkfifo', [path], { timeout: 1_000 });
 }
 
 describe('baseline growth guard — the red proof', () => {
@@ -395,7 +401,7 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
       } else if (kind === 'directory') {
         mkdirSync(path);
       } else if (kind === 'fifo') {
-        execFileSync('mkfifo', [path]);
+        makeFifo(path);
       } else if (kind === 'oversized') {
         writeFileSync(path, valid + ' '.repeat(4 * 1024 * 1024));
       } else {
@@ -447,9 +453,10 @@ fs.readSync = (...args) => {
 };
 syncBuiltinESMExports();
 `);
+      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
       const result = spawnSync(process.execPath,
-        ['--import', hook, '--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -480,7 +487,7 @@ syncBuiltinESMExports();
         } else if (kind === 'directory') {
           mkdirSync(path);
         } else if (kind === 'fifo') {
-          execFileSync('mkfifo', [path]);
+          makeFifo(path);
         } else {
           writeFileSync(path, valid + (kind === 'oversized' ? ' '.repeat(4 * 1024 * 1024) : ''));
           if (kind === 'executable') chmodSync(path, 0o755);
@@ -540,15 +547,125 @@ fs.readSync = (...args) => {
 };
 syncBuiltinESMExports();
 `);
+      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
       const result = spawnSync(process.execPath,
-        ['--import', hook, '--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
       expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
     },
   );
+
+  it('is INCONCLUSIVE when the repository root is replaced between the Git base and working candidate', () => {
+    const dir = makeRepo(2);
+    const replacement = makeRepo(1);
+    const original = `${dir}-original`;
+    writeBoundary(dir, 3); // A real candidate growth must never be hidden by a new root.
+    const hook = join(tmp.make('root-race-hook'), 'hook.mjs');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const root = ${JSON.stringify(dir)};
+const target = ${JSON.stringify(join(dir, '.claude'))};
+const replacement = ${JSON.stringify(replacement)};
+const original = ${JSON.stringify(original)};
+let swapped = false;
+const lstat = fs.lstatSync;
+fs.lstatSync = (path, ...args) => {
+  if (!swapped && path === target) {
+    swapped = true;
+    fs.renameSync(root, original);
+    fs.symlinkSync(replacement, root);
+  }
+  return lstat(path, ...args);
+};
+syncBuiltinESMExports();
+`);
+    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+    const result = spawnSync(process.execPath,
+      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    rmSync(dir, { recursive: true, force: true });
+    renameSync(original, dir);
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, out).toBe(2);
+    expect(out).toMatch(/repository root.*(changed|must be a directory)|root.*replaced/i);
+  });
+
+  it('fails closed by its reader deadline and reaps a helper stalled on a regular file', () => {
+    const dir = makeRepo(2);
+    const marker = join(tmp.make('reader-pid'), 'pid');
+    const hook = join(tmp.make('reader-stall-hook'), 'hook.mjs');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  fs.readSync = () => {
+    fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+    while (true) {}
+  };
+  syncBuiltinESMExports();
+}
+`);
+    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+    const started = Date.now();
+    const result = spawnSync(process.execPath,
+      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+    const elapsed = Date.now() - started;
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, out).toBe(2);
+    expect(out).toMatch(/working document.*deadline|reader.*deadline/i);
+    expect(elapsed).toBeLessThan(2_500);
+    expect(existsSync(marker)).toBe(true);
+    const pid = Number(readFileSync(marker, 'utf8'));
+    let processAlive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      processAlive = false;
+      expect((error as NodeJS.ErrnoException).code).toBe('ESRCH');
+    }
+    expect(processAlive).toBe(false);
+  });
+
+  it('allows a responsive regular-file reader that finishes within the bounded deadline', () => {
+    const dir = makeRepo(2);
+    const delayedDocument = join(dir, '.claude/fitness/boundary-baseline.json');
+    const hook = join(tmp.make('reader-responsive-delay-hook'), 'hook.mjs');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  const delayedDocument = fs.statSync(${JSON.stringify(delayedDocument)});
+  const read = fs.readSync;
+  let delayed = false;
+  fs.readSync = (...args) => {
+    if (!delayed && fs.fstatSync(args[0]).ino === delayedDocument.ino) {
+      delayed = true;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_250);
+    }
+    return read(...args);
+  };
+  syncBuiltinESMExports();
+}
+`);
+    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+    const started = Date.now();
+    const result = spawnSync(process.execPath,
+      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 5_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+    const elapsed = Date.now() - started;
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, out).toBe(0);
+    expect(elapsed).toBeGreaterThanOrEqual(1_200);
+    expect(elapsed).toBeLessThan(4_000);
+  });
 
   it.each(['working', 'pinned'] as const)('rejects raw-byte BOM substitution in a %s candidate', (mode) => {
     const dir = makeRepo(2);

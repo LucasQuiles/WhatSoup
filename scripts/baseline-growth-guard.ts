@@ -33,7 +33,8 @@
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, statSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -70,59 +71,55 @@ const EXIT_INCONCLUSIVE = 2;
 
 /** Output cap for one OID-sized Git answer (rev-parse, merge-base). */
 const MAX_GIT_IDENTITY_BYTES = 64 * 1024;
+// Bounds the owned helper's user-space read, including process setup. This leaves
+// room for a responsive 1.25-second read while still terminating a stalled reader.
+// Parent pathname metadata and an OS-uninterruptible operation can outlive it.
+const WORKING_DOCUMENT_READ_TIMEOUT_MS = 2_000;
+const workingDocumentReader = fileURLToPath(new URL('./lib/ci-control/working-document-reader.ts', import.meta.url));
 
-function readWorkingDocument(repoRoot: string, relativePath: string, label: string): Buffer | null {
-  let path = repoRoot;
-  const parents: { path: string; dev: number; ino: number }[] = [];
-  const validateParents = () => {
-    for (const parent of parents) {
-      const observed = lstatSync(parent.path);
-      if (!observed.isDirectory() || observed.dev !== parent.dev || observed.ino !== parent.ino) {
-        throw new Error(`${label} parent changed while reading`);
-      }
-    }
-  };
-  const parts = relativePath.split('/');
-  for (const [index, part] of parts.entries()) {
-    path = resolve(path, part);
-    const stat = lstatSync(path, { throwIfNoEntry: false });
-    if (stat === undefined) {
-      validateParents();
-      return null;
-    }
-    if (index < parts.length - 1) {
-      if (!stat.isDirectory()) throw new Error(`${label} parent must be a directory, not a symbolic link`);
-      parents.push({ path, dev: stat.dev, ino: stat.ino });
-      continue;
-    }
-    if (!stat.isFile() || (stat.mode & 0o111) !== 0) {
-      throw new Error(`${label} must be a regular non-executable file`);
-    }
-    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      validateParents();
-      const opened = fstatSync(fd);
-      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino
-          || opened.mode !== stat.mode) throw new Error(`${label} changed before reading`);
-      if (opened.size > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error(`${label} exceeds byte limit`);
-      const bytes = Buffer.alloc(MAX_EXACT_SINGLE_BLOB_BYTES + 1);
-      let total = 0;
-      while (total < bytes.length) {
-        const count = readSync(fd, bytes, total, bytes.length - total, total);
-        if (count === 0) break;
-        total += count;
-      }
-      if (total > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error(`${label} exceeds byte limit`);
-      const after = fstatSync(fd);
-      if (total !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
-          || after.ctimeMs !== opened.ctimeMs) throw new Error(`${label} changed while reading`);
-      validateParents();
-      return bytes.subarray(0, total);
-    } finally {
-      closeSync(fd);
-    }
+type RootIdentity = { dev: number; ino: number };
+
+function captureRepoRoot(repoRoot: string): RootIdentity {
+  const root = lstatSync(repoRoot);
+  if (!root.isDirectory()) throw new Error('repository root must be a directory, not a symbolic link');
+  return { dev: root.dev, ino: root.ino };
+}
+
+function assertRepoRootUnchanged(repoRoot: string, expected: RootIdentity): void {
+  const observed = captureRepoRoot(repoRoot);
+  if (observed.dev !== expected.dev || observed.ino !== expected.ino) {
+    throw new Error('repository root changed while reading');
   }
-  return null;
+}
+
+function readWorkingDocument(
+  repoRoot: string,
+  relativePath: string,
+  rootIdentity: RootIdentity,
+): Buffer | null {
+  assertRepoRootUnchanged(repoRoot, rootIdentity);
+  const result = spawnSync(
+    process.execPath,
+    ['--experimental-strip-types', workingDocumentReader, repoRoot, relativePath],
+    {
+      encoding: 'buffer',
+      timeout: WORKING_DOCUMENT_READ_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: MAX_EXACT_SINGLE_BLOB_BYTES + 1,
+    },
+  );
+  assertRepoRootUnchanged(repoRoot, rootIdentity);
+  if (result.error?.code === 'ETIMEDOUT') throw new Error('working document reader deadline elapsed');
+  if (result.signal !== null || result.status !== 0 || result.error !== undefined) {
+    const diagnostic = result.stderr.toString('utf8').trim();
+    throw new Error(diagnostic || 'working document reader could not complete');
+  }
+  const stdout = result.stdout;
+  if (stdout.length === 1 && stdout[0] === 0) return null;
+  if (stdout.length === 0 || stdout[0] !== 1 || stdout.length > MAX_EXACT_SINGLE_BLOB_BYTES + 1) {
+    throw new Error('working document reader returned an invalid result');
+  }
+  return Buffer.from(stdout.subarray(1));
 }
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -298,9 +295,9 @@ function weighText(path: string, text: string, sha256: string): Weighing {
   }
 }
 
-function weighWorkingTree(path: string, repoRoot: string): Weighing {
+function weighWorkingTree(path: string, repoRoot: string, rootIdentity: RootIdentity): Weighing {
   try {
-    const bytes = readWorkingDocument(repoRoot, path, 'baseline');
+    const bytes = readWorkingDocument(repoRoot, path, rootIdentity);
     if (bytes === null) return { kind: 'absent' };
     return weighText(path, UTF8.decode(bytes), createHash('sha256').update(bytes).digest('hex'));
   } catch (error) {
@@ -438,11 +435,22 @@ function main(): number {
     return EXIT_INCONCLUSIVE;
   }
 
+  let rootIdentity: RootIdentity;
+  try {
+    rootIdentity = captureRepoRoot(repoRoot);
+  } catch {
+    console.error(
+      'FAIL(inconclusive): the --repo root is not a stable directory, so baseline growth cannot be ruled out.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+
   // Refuse graft metadata before any Git command runs: grafts rewrite ancestry, so the merge
   // base and the ancestor check below could otherwise both be answered from a false history.
   // Only the typed code is printed, never the repository path (#3669).
   try {
     assertNoLegacyGrafts(repoRoot);
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
   } catch (error) {
     const code = error instanceof ExactGitInputError
       ? error.code
@@ -458,6 +466,7 @@ function main(): number {
   // fails, and those failures would read as an unfetched revision or a non-ancestor base.
   try {
     gitBytes(repoRoot, ['--version'], 'ci.input.git-control-unavailable', MAX_GIT_IDENTITY_BYTES);
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
   } catch (error) {
     const code = error instanceof ExactGitInputError
       ? error.code
@@ -474,6 +483,12 @@ function main(): number {
   let candidateOid: string | null = null;
   if (options.candidate !== null) {
     candidateOid = resolveCommit(options.candidate, repoRoot);
+    try {
+      assertRepoRootUnchanged(repoRoot, rootIdentity);
+    } catch {
+      console.error('FAIL(inconclusive): repository root changed while resolving the candidate.');
+      return EXIT_INCONCLUSIVE;
+    }
     if (candidateOid === null) {
       console.error(
         `FAIL(inconclusive): candidate revision ${options.candidate} could not be resolved to a ` +
@@ -485,6 +500,12 @@ function main(): number {
   }
 
   const base = resolveBase(options.base, repoRoot, candidateOid ?? 'HEAD');
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed while resolving the base.');
+    return EXIT_INCONCLUSIVE;
+  }
   if (base === null) {
     console.error(
       'FAIL(inconclusive): could not resolve a merge base against origin/main or main, so ' +
@@ -497,6 +518,12 @@ function main(): number {
   // Resolved on every run, not only a pinned one: the exact tree reads below take a full
   // commit OID, never a name that a ref update could move between reads.
   const baseOid = resolveCommit(base, repoRoot);
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed while resolving the base.');
+    return EXIT_INCONCLUSIVE;
+  }
   if (baseOid === null) {
     console.error(
       `FAIL(inconclusive): base revision ${base} could not be resolved to a commit, so ` +
@@ -508,6 +535,12 @@ function main(): number {
   // Only meaningful for an explicit candidate — see baseRelationError.
   if (candidateOid !== null) {
     const relationError = baseRelationError(baseOid, candidateOid, repoRoot);
+    try {
+      assertRepoRootUnchanged(repoRoot, rootIdentity);
+    } catch {
+      console.error('FAIL(inconclusive): repository root changed while checking revision ancestry.');
+      return EXIT_INCONCLUSIVE;
+    }
     if (relationError !== null) {
       console.error(`FAIL(inconclusive): ${relationError}.`);
       return EXIT_INCONCLUSIVE;
@@ -521,14 +554,26 @@ function main(): number {
   // replace-ref, graft and blob-mode refusals as the baselines it can authorize.
   const registryPaths = BASELINE_REGISTRY.map((entry) => entry.path);
   const baseReads = readExactFiles(baseOid, [...registryPaths, GROWTH_WAIVERS_PATH], repoRoot);
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed after reading the Git base.');
+    return EXIT_INCONCLUSIVE;
+  }
   const candidateReads = candidateOid === null
     ? null
     : readExactFiles(candidateOid, [...registryPaths, GROWTH_WAIVERS_PATH], repoRoot);
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed while reading the candidate.');
+    return EXIT_INCONCLUSIVE;
+  }
 
   // Validate proposed authority, but only the merge-base document can grant a waiver.
   try {
     if (candidateReads === null) {
-      const bytes = readWorkingDocument(repoRoot, GROWTH_WAIVERS_PATH, 'waiver');
+      const bytes = readWorkingDocument(repoRoot, GROWTH_WAIVERS_PATH, rootIdentity);
       if (bytes !== null) parseWaiverDocument(JSON.parse(UTF8.decode(bytes)));
     } else {
       const proposed = candidateReads.get(GROWTH_WAIVERS_PATH);
@@ -543,7 +588,7 @@ function main(): number {
   for (const entry of BASELINE_REGISTRY) {
     const atBase = weighExactRead(entry.path, baseReads.get(entry.path));
     const atHead = candidateReads === null
-      ? weighWorkingTree(entry.path, repoRoot)
+      ? weighWorkingTree(entry.path, repoRoot, rootIdentity)
       : weighExactRead(entry.path, candidateReads.get(entry.path));
     if (
       entry.initialWeight !== undefined

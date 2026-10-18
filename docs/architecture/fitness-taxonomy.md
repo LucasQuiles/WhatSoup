@@ -250,6 +250,11 @@ When a change would push a grandfathered file past its ceiling:
    same 4 MiB byte limit as exact Git blob reads. Parent identities are rechecked after
    opening and reading the file. This detects replacements still present at either check;
    Node's pathname APIs cannot exclude a directory swapped away and restored between checks.
+   The reader runs in an owned helper process with a two-second deadline. A timed-out
+   user-space document read terminates and reaps that direct helper, then reports
+   INCONCLUSIVE. The deadline does not bound parent pathname metadata calls or a filesystem
+   operation that the operating system cannot interrupt, and working-tree mode remains a
+   diagnostic rather than an atomic snapshot. CI uses exact immutable Git objects instead.
    A malformed waiver document is INCONCLUSIVE,
    not ignored. A widening remains
    an exceptional, standalone act — never a side effect of a feature branch.
