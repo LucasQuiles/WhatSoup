@@ -378,6 +378,83 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expect(pinned.out).not.toMatch(/WAIVED/);
   });
 
+  it.each(['working', 'pinned'] as const)('rejects raw-byte BOM substitution in a %s candidate', (mode) => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const path = join(dir, '.claude/fitness/baseline.json');
+    const reviewed = readFileSync(path);
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant original baseline bytes']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), reviewed]));
+    const args = ['--repo', dir, '--base', base];
+    if (mode === 'pinned') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'substitute different baseline bytes']);
+      args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(1);
+    expect(result.out).not.toMatch(/WAIVED/);
+  });
+
+  it.each(['working', 'pinned'] as const)('accepts reviewed raw-byte BOM content in a %s candidate', (mode) => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const path = join(dir, '.claude/fitness/baseline.json');
+    const reviewed = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), readFileSync(path)]);
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant exact BOM-bearing baseline bytes']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, reviewed);
+    const args = ['--repo', dir, '--base', base];
+    if (mode === 'pinned') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'retain exact reviewed bytes']);
+      args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(0);
+    expect(result.out).toMatch(/WAIVED/);
+  });
+
+  it.each(['working', 'pinned'] as const)('rejects an invalid UTF-8 candidate waiver in %s mode', (mode) => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const path = join(dir, '.claude/fitness/baseline.json');
+    const reviewed = readFileSync(path);
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    const waiver = { ...activeWaiver(501), expectedBaselineSha256 };
+    writeFitness(dir, 100);
+    writeWaivers(dir, waiver);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant valid baseline authority']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, reviewed);
+    const malformed = Buffer.from(JSON.stringify({ schemaVersion: 1,
+      waivers: [{ ...waiver, reason: 'invalid-UTF8-here' }] }));
+    const marker = malformed.indexOf('invalid-UTF8-here');
+    expect(marker).toBeGreaterThan(0);
+    malformed[marker] = 0xff;
+    writeFileSync(join(dir, GROWTH_WAIVERS_PATH), malformed);
+    const args = ['--repo', dir, '--base', base];
+    if (mode === 'pinned') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'malformed candidate waiver encoding']);
+      args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toMatch(/candidate.*waiver|waiver.*candidate/i);
+    expect(result.out).not.toMatch(/WAIVED/);
+  });
+
   it('pins the PR3815 waiver to its reviewed 93-entry baseline and two-day window', () => {
     const document = JSON.parse(readFileSync(join(repoRoot, GROWTH_WAIVERS_PATH), 'utf8'));
     const entries = document.waivers.filter((w: { issue: string }) =>
@@ -391,6 +468,10 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
       expectedBaselineSha256: '9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7',
     });
     expect(entries[0].admitsNewIdentities).not.toBe(true);
+    const reviewed = readFileSync(join(repoRoot,
+      'tests/fixtures/baseline-growth/pr3815-test-integrity.json'));
+    expect(createHash('sha256').update(reviewed).digest('hex')).toBe(entries[0].expectedBaselineSha256);
+    expect(JSON.parse(reviewed.toString('utf8')).findings).toHaveLength(93);
   });
 
   it('WAIVES (exit 0) numeric growth within an active waiver present at the base', () => {

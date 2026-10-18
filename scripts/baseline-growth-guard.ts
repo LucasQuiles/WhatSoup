@@ -58,6 +58,7 @@ import {
   assertNoLegacyGrafts,
   gitBytes,
   readExactTreeEntries,
+  type ExactBlobV1,
   type ExactTreeEntryV1,
 } from './lib/ci-control/git-input-core.ts';
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
@@ -226,7 +227,7 @@ type Weighing =
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
-function weighText(path: string, text: string): Weighing {
+function weighText(path: string, text: string, sha256: string): Weighing {
   const entry = BASELINE_REGISTRY.find((b) => b.path === path);
   if (!entry) return { kind: 'error', message: `${path} is not in BASELINE_REGISTRY` };
   try {
@@ -235,7 +236,7 @@ function weighText(path: string, text: string): Weighing {
       kind: 'weight',
       value: weighBaseline(entry.shape, document),
       identities: baselineIdentities(entry.shape, document),
-      sha256: createHash('sha256').update(text).digest('hex'),
+      sha256,
     };
   } catch (error) {
     return { kind: 'error', message: errorMessage(error) };
@@ -245,18 +246,17 @@ function weighText(path: string, text: string): Weighing {
 function weighWorkingTree(path: string, repoRoot: string): Weighing {
   const abs = resolve(repoRoot, path);
   if (!existsSync(abs)) return { kind: 'absent' };
-  let text: string;
   try {
-    text = readFileSync(abs, 'utf8');
+    const bytes = readFileSync(abs);
+    return weighText(path, UTF8.decode(bytes), createHash('sha256').update(bytes).digest('hex'));
   } catch (error) {
     return { kind: 'error', message: errorMessage(error) };
   }
-  return weighText(path, text);
 }
 
 /** What one exact read of a path at a commit produced, before any weighing. */
 type ExactRead =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; sha256: string }
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
@@ -308,10 +308,10 @@ function readExactFiles(
     }
   }
 
-  let bytesByOid: ReadonlyMap<string, Uint8Array>;
+  let blobsByOid: ReadonlyMap<string, ExactBlobV1>;
   try {
-    bytesByOid = new Map(
-      readExactBlobs(repoRoot, blobOids).map(({ oid, bytes }) => [oid, bytes] as const),
+    blobsByOid = new Map(
+      readExactBlobs(repoRoot, blobOids).map((blob) => [blob.oid, blob] as const),
     );
   } catch (error) {
     return failRemaining(error);
@@ -319,13 +319,17 @@ function readExactFiles(
 
   for (const entry of entries) {
     if (results.has(entry.path)) continue;
-    const bytes = entry.objectOid === null ? undefined : bytesByOid.get(entry.objectOid);
-    if (bytes === undefined) {
+    const blob = entry.objectOid === null ? undefined : blobsByOid.get(entry.objectOid);
+    if (blob === undefined) {
       results.set(entry.path, { kind: 'error', message: 'no exact blob bytes were read' });
       continue;
     }
     try {
-      results.set(entry.path, { kind: 'text', text: UTF8.decode(bytes) });
+      results.set(entry.path, {
+        kind: 'text',
+        text: UTF8.decode(blob.bytes),
+        sha256: blob.contentSha256.slice('sha256:'.length),
+      });
     } catch {
       results.set(entry.path, { kind: 'error', message: 'blob is not valid UTF-8' });
     }
@@ -335,7 +339,7 @@ function readExactFiles(
 
 function weighExactRead(path: string, read: ExactRead | undefined): Weighing {
   if (read === undefined) return { kind: 'error', message: 'no exact read result' };
-  return read.kind === 'text' ? weighText(path, read.text) : read;
+  return read.kind === 'text' ? weighText(path, read.text, read.sha256) : read;
 }
 
 function main(): number {
@@ -471,7 +475,7 @@ function main(): number {
   try {
     if (candidateReads === null) {
       const path = resolve(repoRoot, GROWTH_WAIVERS_PATH);
-      if (existsSync(path)) parseWaiverDocument(JSON.parse(readFileSync(path, 'utf8')));
+      if (existsSync(path)) parseWaiverDocument(JSON.parse(UTF8.decode(readFileSync(path))));
     } else {
       const proposed = candidateReads.get(GROWTH_WAIVERS_PATH);
       if (proposed?.kind === 'error') throw new Error(proposed.message);

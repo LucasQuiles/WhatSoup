@@ -239,10 +239,23 @@ When a change would push a grandfathered file past its ceiling:
    (`expiresAt`), and identity introductions require the separately reviewed
    `admitsNewIdentities: true` authority. An optional `expectedBaselineSha256` binds the
    waiver to the exact reviewed candidate baseline bytes in addition to the cap and date
-   window; different contents do not spend that waiver. Candidate waiver documents are
+   window; different contents do not spend that waiver. The digest covers original bytes,
+   before UTF-8 decoding, including any byte-order mark. Candidate waiver documents are
    validated but cannot grant authority. A malformed waiver document is INCONCLUSIVE,
    not ignored. A widening remains
    an exceptional, standalone act — never a side effect of a feature branch.
+
+The PR #3815 allowance is bound to the complete proposed baseline in
+[`tests/fixtures/baseline-growth/pr3815-test-integrity.json`](../../tests/fixtures/baseline-growth/pr3815-test-integrity.json).
+Its SHA-256 is `9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7`.
+Compared with `.claude/test-integrity/baseline.json` at
+`90d7124de79be303e361d89acb4d1db99bd06fb9`, it retains all 81 findings by file, rule,
+and content signature, including their multiplicities. Six line-sensitive signatures
+change with recorded line positions. The twelve additional findings are all
+`py-property-test-suggestion` advisories: eight in `test_bot_errors_human_card.py`,
+three in `test_bot_errors_info_volume.py`, and one in
+`test_bot_errors_health_check_fleet_token_target.py`. The fixture supplies review evidence;
+it is not active baseline authority. The waiver's existing cap and expiry still apply.
 
 Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
 to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time
