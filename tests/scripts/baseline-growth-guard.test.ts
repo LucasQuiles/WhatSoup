@@ -745,6 +745,35 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     expect(result.out).toMatch(/WAIVED/);
   });
 
+  it.each(['working', 'pinned', 'base'] as const)('reports invalid UTF-8 baseline bytes as inconclusive in %s mode', (mode) => {
+    const dir = makeRepo(2);
+    const path = join(dir, '.claude/fitness/boundary-baseline.json');
+    const valid = readFileSync(path);
+    const malformed = Buffer.from(valid);
+    const marker = malformed.indexOf('f0.ts');
+    expect(marker).toBeGreaterThan(0);
+    malformed[marker] = 0xff;
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, malformed);
+    const args = ['--repo', dir, '--base', base];
+    if (mode !== 'working') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'invalid baseline encoding']);
+      const invalid = git(dir, ['rev-parse', 'HEAD']).trim();
+      if (mode === 'pinned') args.push('--candidate', invalid);
+      else {
+        args[3] = invalid;
+        writeFileSync(path, valid);
+      }
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toMatch(/FAIL\(inconclusive\)/);
+    expect(result.out).toContain(`boundary-baseline.json (${mode === 'base' ? 'base' : 'candidate'})`);
+    expect(result.out).toMatch(/UTF-8/);
+    expect(result.out).not.toMatch(/WAIVED|PASS/);
+  });
+
   it.each(['working', 'pinned'] as const)('rejects an invalid UTF-8 candidate waiver in %s mode', (mode) => {
     const dir = makeRepo(2);
     writeFitness(dir, 500);

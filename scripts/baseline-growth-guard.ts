@@ -333,7 +333,13 @@ function weighWorkingDocument(path: string, documents: ReadonlyMap<string, Buffe
   const bytes = documents.get(path);
   if (bytes === undefined) return { kind: 'error', message: 'working document result is missing' };
   if (bytes === null) return { kind: 'absent' };
-  return weighText(path, UTF8.decode(bytes), createHash('sha256').update(bytes).digest('hex'));
+  let text: string;
+  try {
+    text = UTF8.decode(bytes);
+  } catch {
+    return { kind: 'error', message: 'baseline is not valid UTF-8' };
+  }
+  return weighText(path, text, createHash('sha256').update(bytes).digest('hex'));
 }
 
 /** What one exact read of a path at a commit produced, before any weighing. */
