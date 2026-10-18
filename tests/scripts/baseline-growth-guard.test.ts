@@ -603,7 +603,7 @@ syncBuiltinESMExports();
 import { syncBuiltinESMExports } from 'node:module';
 if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   fs.readSync = () => {
-    fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+    fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
     while (true) {}
   };
   syncBuiltinESMExports();
@@ -614,15 +614,17 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     const result = spawnSync(process.execPath,
       ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
       { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
-    const elapsed = Date.now() - started;
+    const finished = Date.now();
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(result.status, out).toBe(2);
     expect(out).toMatch(/working document.*deadline|reader.*deadline/i);
-    expect(elapsed).toBeLessThan(2_500);
     expect(existsSync(marker)).toBe(true);
-    const pid = Number(readFileSync(marker, 'utf8'));
+    const { pid, startedAt } = JSON.parse(readFileSync(marker, 'utf8')) as { pid: number; startedAt: number };
+    expect(startedAt).toBeGreaterThanOrEqual(started);
+    expect(startedAt).toBeLessThanOrEqual(finished);
+    expect(finished - startedAt).toBeLessThan(2_500);
     let processAlive = true;
     try {
       process.kill(pid, 0);

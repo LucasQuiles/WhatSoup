@@ -39,6 +39,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { errorMessage } from '../src/lib/error-message.ts';
+import { SIGNAL } from '../src/lib/signals.ts';
 import {
   BASELINE_REGISTRY,
   type BaselineFinding,
@@ -104,7 +105,7 @@ function readWorkingDocument(
     {
       encoding: 'buffer',
       timeout: WORKING_DOCUMENT_READ_TIMEOUT_MS,
-      killSignal: 'SIGKILL',
+      killSignal: SIGNAL.KILL,
       maxBuffer: MAX_EXACT_SINGLE_BLOB_BYTES + 1,
     },
   );
