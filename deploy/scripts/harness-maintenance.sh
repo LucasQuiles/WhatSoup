@@ -805,13 +805,30 @@ process.stdin.on("data", (d) => hash.update(d)).on("end", () => process.stdout.w
 }
 
 # claude_config_dir_resolved <config dir or empty>: the directory the agent CLI reads for it (empty
-# is the default $HOME/.claude), with symlinks resolved when it exists.
+# is the default $HOME/.claude), with symlinks resolved. A dir that does not exist yet resolves
+# through its nearest existing parent, so /alias/x and /real/x match when alias -> real. A relative
+# value is returned as given.
 claude_config_dir_resolved() {
-  local dir="${1:-$HOME/.claude}" real
-  if [ -d "$dir" ] && real="$(cd "$dir" 2>/dev/null && pwd -P)"; then
-    printf '%s\n' "$real"
+  local dir="${1:-$HOME/.claude}" base rest="" real
+  case "$dir" in
+    /*) ;;
+    *)
+      printf '%s\n' "$dir"
+      return 0 ;;
+  esac
+  while [ "$dir" != "/" ] && [ "${dir%/}" != "$dir" ]; do
+    dir="${dir%/}"
+  done
+  base="$dir"
+  while [ -n "$base" ] && [ ! -d "$base" ]; do
+    rest="/${base##*/}$rest"
+    base="${base%/*}"
+  done
+  if real="$(cd "${base:-/}" 2>/dev/null && pwd -P)"; then
+    real="${real%/}$rest"
+    printf '%s\n' "${real:-/}"
   else
-    printf '%s\n' "${dir%/}"
+    printf '%s\n' "$dir"
   fi
 }
 

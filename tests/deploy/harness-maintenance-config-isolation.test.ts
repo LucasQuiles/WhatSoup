@@ -102,6 +102,17 @@ describe('agent CLI login isolation of the maintenance job', () => {
     expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: alias }), "resolves to alpha's config dir");
   }, T);
 
+  it('refuses when a not-yet-created job config dir resolves through a symlinked parent to an instance dir', () => {
+    const h = makeHarness();
+    const real = path.join(h.home, 'real');
+    const alias = path.join(h.home, 'alias');
+    mkdirSync(real);
+    symlinkSync(real, alias);
+    // Neither config dir exists yet; only their parents do.
+    withInstance(h, path.join(real, 'bot-config'));
+    expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: path.join(alias, 'bot-config') }), "resolves to alpha's config dir");
+  }, T);
+
   it('refuses when the job config dir is unset', () => {
     const h = withInstance(makeHarness());
     delete h.env.CLAUDE_CONFIG_DIR;
