@@ -1309,8 +1309,16 @@ is not proof of delivery. A known rejection restores the prior pending notices
 and retry cadence. If the initial hold cannot be persisted, no send is attempted.
 If the daily packet cannot be stored, its pending notices remain eligible and
 the card retries on the existing cadence without sending a packetless fallback.
-Packet pruning holds one directory descriptor through enumeration, deletion and
-syncing, so replacement of the packet directory cannot redirect deletion.
+Known daily-card rejection or packet-storage failure remains visible in dispatcher
+health while its retry is pending, including cycles throttled by the retry delay.
+A daily helper exception also records a failure without preventing the sibling card.
+Packet pruning examines at most 500 entries per cycle and resumes its directory
+iterator on the next daemon cycle. It retains packets for at least 30 days and
+holds one directory descriptor through enumeration, deletion and syncing, so
+replacement of the packet directory cannot redirect deletion. The iterator closes
+on exhaustion, error or directory change; process restart begins a new scan.
+This bounds per-cycle entry work, not individual filesystem-call duration or total
+retained bytes; repeated process restarts can delay reaching later entries.
 
 Generic meta-alerts report an uncertain group result as `sent_unconfirmed` and
 still try email. Credential meta-alerts preserve their existing once-per-day

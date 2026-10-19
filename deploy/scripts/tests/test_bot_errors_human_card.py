@@ -101,7 +101,8 @@ def state(tmp_path):
     os.environ["BOT_ERRORS_STATE_DIR"] = str(tmp_path)
     (tmp_path / "logs").mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp_path.chmod(0o700)
-    return _mod.state_paths()
+    yield _mod.state_paths()
+    _mod.prune_notice_packets({})
 
 
 # --- Golden cards -----------------------------------------------------------
@@ -997,7 +998,7 @@ def test_packet_pruning_keeps_directory_custody_during_replacement(state, monkey
     os.utime(packet, (old, old))
     os.utime(victim, (old, old))
     identity = directory.stat()
-    real_listdir, real_unlink = os.listdir, os.unlink
+    real_scandir, real_unlink = os.scandir, os.unlink
     swapped = False
 
     def replace_directory():
@@ -1007,7 +1008,7 @@ def test_packet_pruning_keeps_directory_custody_during_replacement(state, monkey
             directory.symlink_to(outside, target_is_directory=True)
             swapped = True
 
-    def list_during_replacement(path):
+    def scan_during_replacement(path):
         if isinstance(path, int):
             current = os.fstat(path)
             matches = (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
@@ -1015,16 +1016,96 @@ def test_packet_pruning_keeps_directory_custody_during_replacement(state, monkey
             matches = Path(path) == directory
         if swap_at == "enumeration" and matches:
             replace_directory()
-        return real_listdir(path)
+        return real_scandir(path)
 
     def unlink_during_replacement(path, *, dir_fd=None):
         if swap_at == "unlink" and Path(path).name == packet.name:
             replace_directory()
         return real_unlink(path, dir_fd=dir_fd)
 
-    monkeypatch.setattr(os, "listdir", list_during_replacement)
+    monkeypatch.setattr(os, "scandir", scan_during_replacement)
     monkeypatch.setattr(os, "unlink", unlink_during_replacement)
     _mod.prune_notice_packets(state)
     assert swapped, "the controlled directory replacement was not reached"
     assert victim.read_text() == '{"kind":"outside"}'
     assert not (original / packet.name).exists()
+
+
+def test_packet_pruning_bounds_inspection_and_resumes_past_young_packets(state, monkeypatch):
+    directory = state["packets"]
+    directory.mkdir(mode=0o700)
+    young = []
+    for index in range(_mod.NOTICE_PACKET_PRUNE_MAX + 3):
+        packet = directory / f"{index:08x}.json"
+        packet.write_text("{}")
+        young.append(packet)
+    expired = []
+    old = time.time() - _mod.NOTICE_PACKET_RETENTION_SECONDS - 60
+    for index in range(3):
+        packet = directory / f"fffffff{index}.json"
+        packet.write_text("{}")
+        os.utime(packet, (old, old))
+        expired.append(packet)
+    real_stat = os.stat
+    inspected = []
+
+    def count_inspection(path, *, dir_fd=None, follow_symlinks=True):
+        if dir_fd is not None and str(path).endswith(".json"):
+            inspected.append(str(path))
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", count_inspection)
+    removed = 0
+    for _ in range(2):
+        before = len(inspected)
+        removed += _mod.prune_notice_packets(state)
+        assert len(inspected) - before <= _mod.NOTICE_PACKET_PRUNE_MAX
+    assert removed == len(expired)
+    assert len(inspected) == len(set(inspected)) == len(young) + len(expired)
+    assert all(packet.exists() for packet in young)
+    assert all(not packet.exists() for packet in expired)
+
+
+def test_packet_pruning_replaces_its_scan_when_directory_identity_changes(state, monkeypatch):
+    directory = state["packets"]
+    directory.mkdir(mode=0o700)
+    for index in range(_mod.NOTICE_PACKET_PRUNE_MAX + 1):
+        (directory / f"{index:08x}.json").write_text("{}")
+    assert _mod.prune_notice_packets(state) == 0
+    directory.rename(directory.with_name("old-packets"))
+    directory.mkdir(mode=0o700)
+    packet = directory / "ffffffff.json"
+    packet.write_text("{}")
+    old = time.time() - _mod.NOTICE_PACKET_RETENTION_SECONDS - 60
+    os.utime(packet, (old, old))
+    assert _mod.prune_notice_packets(state) == 1
+    assert not packet.exists()
+
+
+@pytest.mark.parametrize("stop", ["missing", "error", "exhausted"])
+def test_packet_pruning_closes_owned_scan(state, monkeypatch, stop):
+    directory = state["packets"]
+    directory.mkdir(mode=0o700)
+    for index in range(_mod.NOTICE_PACKET_PRUNE_MAX + 1):
+        (directory / f"{index:08x}.json").write_text("{}")
+    _mod.prune_notice_packets(state)
+    _, directory_fd, entries = _mod._notice_packet_prune_scan
+    if stop == "missing":
+        _mod.prune_notice_packets({})
+    elif stop == "error":
+        real_stat = os.stat
+
+        def fail_entry_stat(path, *, dir_fd=None, follow_symlinks=True):
+            if dir_fd == directory_fd:
+                raise OSError("controlled packet metadata failure")
+            return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(os, "stat", fail_entry_stat)
+        with pytest.raises(OSError, match="controlled packet metadata failure"):
+            _mod.prune_notice_packets(state)
+    else:
+        _mod.prune_notice_packets(state)
+    assert _mod._notice_packet_prune_scan is None
+    with pytest.raises(OSError):
+        os.fstat(directory_fd)
+    assert next(entries, None) is None

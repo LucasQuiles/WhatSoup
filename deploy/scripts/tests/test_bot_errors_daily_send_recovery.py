@@ -1,5 +1,8 @@
 """Daily-card recovery across legacy and controller-backed state publication."""
 from contextlib import contextmanager
+import importlib.util
+import json
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +11,7 @@ import test_bot_errors_info_volume as support
 mod = support.mod
 pinned_clock = support.pinned_clock
 _clean_env = support._clean_env
+_HEALTH_SCRIPT = Path(__file__).resolve().parents[1] / 'bot-errors-health-check.py'
 
 
 @contextmanager
@@ -46,6 +50,123 @@ def persisted_section(mod, adopted, card):
     with daily_cycle(mod, adopted) as cycle:
         payload = cycle.payload if cycle else mod.load_incident_state(mod.state_paths())
         return dict(payload[card])
+
+
+def seed_run_once_daily_card(mod, adopted, card):
+    incidents = {}
+    if card == 'lineCheckCard':
+        incidents = {
+            'hub-1|logged-line|instance_logged_out': support._physical(
+                support.OLD - 86400, support.OLD
+            ),
+        }
+    support._write_state(mod, incidents)
+    if card == 'informationSummary':
+        support._defer_info_notice(mod, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    if adopted:
+        seed = mod.load_incident_state(mod.state_paths())
+        with daily_cycle(mod, True) as cycle:
+            cycle.payload.clear()
+            cycle.payload.update(seed)
+            cycle.commit()
+
+
+def dispatcher_health_line():
+    spec = importlib.util.spec_from_file_location('daily_card_health_check', _HEALTH_SCRIPT)
+    health = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(health)
+    return next(line for line in health.queue_inventory() if 'dispatcher_state:' in line)
+
+
+@pytest.mark.parametrize('card', ['informationSummary', 'lineCheckCard'])
+@pytest.mark.parametrize('adopted', [False, True], ids=['compat', 'adopted'])
+def test_run_once_keeps_daily_retry_failure_health_visible_until_delivery(
+    mod, monkeypatch, pinned_clock, card, adopted,
+):
+    seed_run_once_daily_card(mod, adopted, card)
+    tries = support._rpc_replies(mod, monkeypatch, [{'sent': False}, support.ACCEPTED])
+    sibling_name = 'send_daily_line_card' if card == 'informationSummary' else 'send_daily_information_summary'
+    sibling = getattr(mod, sibling_name)
+    sibling_calls = []
+
+    def observe_sibling(*args, **kwargs):
+        sibling_calls.append(True)
+        return sibling(*args, **kwargs)
+
+    monkeypatch.setattr(mod, sibling_name, observe_sibling)
+
+    first = mod.run_once(10)
+
+    assert first['failed'] == 1
+    assert first['lastError'] == f'daily card retry pending: {card}'
+    state = json.loads(mod.state_paths()['state'].read_text(encoding='utf-8'))
+    assert state['failed'] == 1
+    assert state['lastError'] == first['lastError']
+    assert dispatcher_health_line().startswith('WARN dispatcher_state:')
+    assert len(tries) == 1
+
+    mod.time._now = support.NOW + 60
+    throttled = mod.run_once(10)
+
+    assert throttled['failed'] == 1
+    assert throttled['lastError'] == first['lastError']
+    assert len(tries) == 1
+    assert dispatcher_health_line().startswith('WARN dispatcher_state:')
+
+    mod.time._now = support.NOW + mod.DAILY_CARD_RETRY_SECONDS
+    recovered = mod.run_once(10)
+
+    assert recovered['failed'] == 0
+    assert recovered['lastError'] is None
+    assert len(tries) == 2
+    assert persisted_section(mod, adopted, card).get('lastAttemptAt') is None
+    assert not dispatcher_health_line().startswith('WARN dispatcher_state:')
+    assert sibling_calls == [True, True, True]
+
+
+@pytest.mark.parametrize('adopted', [False, True], ids=['compat', 'adopted'])
+def test_run_once_records_daily_intent_publication_failure_and_recovers(
+    mod, monkeypatch, pinned_clock, adopted,
+):
+    seed_run_once_daily_card(mod, adopted, 'lineCheckCard')
+    tries = support._rpc_replies(mod, monkeypatch, [support.ACCEPTED])
+    commit = mod._commit_incident_state
+    sibling = mod.send_daily_information_summary
+    sibling_calls = []
+
+    def fail_line_intent(paths, incident, state):
+        section = state.get('lineCheckCard')
+        if isinstance(section, dict) and section.get('lastSentDay') == support.DAY:
+            raise OSError('cannot persist daily intent')
+        return commit(paths, incident, state)
+
+    def observe_sibling(*args, **kwargs):
+        sibling_calls.append(True)
+        return sibling(*args, **kwargs)
+
+    monkeypatch.setattr(mod, '_commit_incident_state', fail_line_intent)
+    monkeypatch.setattr(mod, 'send_daily_information_summary', observe_sibling)
+
+    failed = mod.run_once(10)
+
+    assert failed['failed'] == 1
+    assert failed['lastError'] == 'daily card failed: lineCheckCard'
+    state = json.loads(mod.state_paths()['state'].read_text(encoding='utf-8'))
+    assert state['failed'] == 1
+    assert 'cannot persist daily intent' not in state['lastError']
+    assert dispatcher_health_line().startswith('WARN dispatcher_state:')
+    assert tries == []
+
+    monkeypatch.setattr(mod, '_commit_incident_state', commit)
+    mod.time._now = support.NOW + 60
+    recovered = mod.run_once(10)
+
+    assert recovered['failed'] == 0
+    assert recovered['lastError'] is None
+    assert len(tries) == 1
+    assert not dispatcher_health_line().startswith('WARN dispatcher_state:')
+    assert sibling_calls == [True, True]
 
 
 @pytest.mark.parametrize('card', ['informationSummary', 'lineCheckCard'])

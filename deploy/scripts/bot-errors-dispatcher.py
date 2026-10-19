@@ -5420,22 +5420,63 @@ def notice_message(
         return (body if body is not None else format_event(event)), None
 
 
+_notice_packet_prune_scan: tuple[Path, int, Any] | None = None
+
+
+def close_notice_packet_prune_scan() -> None:
+    global _notice_packet_prune_scan
+    scan, _notice_packet_prune_scan = _notice_packet_prune_scan, None
+    if scan is not None:
+        try:
+            scan[2].close()
+        finally:
+            os.close(scan[1])
+
+
 def prune_notice_packets(paths: dict[str, Path], now: int | None = None) -> int:
-    """Drop packets older than the retention window (>= 30 days), bounded per cycle."""
+    """Inspect at most 500 entries per cycle, retaining packets for at least 30 days."""
+    global _notice_packet_prune_scan
     directory = paths.get("packets")
     if directory is None:
+        close_notice_packet_prune_scan()
         return 0
     try:
-        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        identity = directory.lstat()
     except OSError:
+        close_notice_packet_prune_scan()
         return 0
+    if not stat.S_ISDIR(identity.st_mode):
+        close_notice_packet_prune_scan()
+        return 0
+    if _notice_packet_prune_scan is not None:
+        scan_path, directory_fd, _ = _notice_packet_prune_scan
+        held = os.fstat(directory_fd)
+        if scan_path != directory or (held.st_dev, held.st_ino) != (identity.st_dev, identity.st_ino):
+            close_notice_packet_prune_scan()
+    if _notice_packet_prune_scan is None:
+        try:
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return 0
+        try:
+            entries = os.scandir(directory_fd)
+        except BaseException:
+            os.close(directory_fd)
+            raise
+        _notice_packet_prune_scan = (directory, directory_fd, entries)
+    _, directory_fd, entries = _notice_packet_prune_scan
     current = int(time.time()) if now is None else now
     horizon = current - NOTICE_PACKET_RETENTION_SECONDS
     pruned = 0
+    exhausted = False
     try:
-        # Keep lookup, unlink and sync on the same directory if its pathname moves.
-        for name in sorted(os.listdir(directory_fd)):
-            if pruned >= NOTICE_PACKET_PRUNE_MAX:
+        # Retain the iterator across daemon cycles so young packets cannot starve
+        # later entries. Lookup, unlink and sync keep the same directory custody.
+        for _ in range(NOTICE_PACKET_PRUNE_MAX):
+            try:
+                name = next(entries).name
+            except StopIteration:
+                exhausted = True
                 break
             if not name.endswith(".json"):
                 continue
@@ -5449,8 +5490,11 @@ def prune_notice_packets(paths: dict[str, Path], now: int | None = None) -> int:
                 continue
         if pruned:
             os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    except BaseException:
+        close_notice_packet_prune_scan()
+        raise
+    if exhausted:
+        close_notice_packet_prune_scan()
     if pruned:
         append_dispatch_log(paths, {
             "type": "notice_packets_pruned",
@@ -13689,17 +13733,31 @@ def run_once(max_events: int) -> dict[str, Any]:
             # Relay 16 C2/C3: the two daily cards (13:00Z, once a UTC day, only
             # when there is something to say). A card that cannot go out is
             # retried later in the day; neither ever stops the cycle.
-            for daily_card in (send_daily_line_card, send_daily_information_summary):
+            for daily_state_key, daily_card in (
+                (LINE_CARD_STATE_KEY, send_daily_line_card),
+                (INFO_SUMMARY_STATE_KEY, send_daily_information_summary),
+            ):
                 try:
                     daily_card(paths, incident=_incident_cycle)
                 except ControllerStateRequired:
                     raise
                 except Exception as exc:  # noqa: BLE001 - housekeeping never costs the cycle
+                    failed += 1
+                    last_error = f"daily card failed: {daily_state_key}"
                     append_dispatch_log(paths, {
                         "type": "daily_card_failed",
                         "card": daily_card.__name__,
                         "error": truncate(str(exc), 300),
                     })
+                    continue
+                section = _incident_cycle.payload.get(daily_state_key)
+                if isinstance(section, dict) and isinstance(section.get("lastAttemptAt"), int):
+                    # The card helpers write this existing durable marker only
+                    # for a known send rejection or packet-persistence failure.
+                    # Keep it health-visible through retry throttling until a
+                    # later successful send (or an empty line card) clears it.
+                    failed += 1
+                    last_error = f"daily card retry pending: {daily_state_key}"
 
             # --- F5: dead-letter meta-alert (at most once per hour when dir non-empty) ---
             dead_letter_meta_alerted = queue_dead_letter_meta_alert(paths, int(time.time()))
