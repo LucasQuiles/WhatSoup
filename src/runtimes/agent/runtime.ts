@@ -4587,11 +4587,10 @@ export class AgentRuntime implements Runtime {
       } : null,
     });
 
-    // Heal the claude file-store credential from the keychain BEFORE the first
-    // turn can run, so a keychain-only refresh (native login) can't false-arm
-    // the provider fallback on turn 1 (the recovery probe path heals for the
-    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
-    // the file store is already current. Fail-open by contract.
+    // Check, before the first turn, whether the claude login is held in the
+    // bot's own keychain item only or also in a plaintext file store (a second
+    // live copy that can wipe the login); detection only, nothing is written.
+    // No-op off-darwin / when no config dir is set. Fail-open by contract.
     if (this.agentProvider === 'claude-cli') {
       ensureClaudeFileStoreCredential();
     }

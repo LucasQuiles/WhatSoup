@@ -1,17 +1,18 @@
-// Keychain item selection for the claude file-store heal.
+// Keychain item selection for the claude credential-store check.
 //
 // The claude CLI stores the login for a config dir under its own keychain item:
-// the bare service name when CLAUDE_CONFIG_DIR is unset, and
-// `<bare>-<first 8 hex of sha256(CLAUDE_CONFIG_DIR)>` when it is set. The heal
-// only runs when CLAUDE_CONFIG_DIR is set, so it may read exactly one item: the
-// bot's own suffixed item. Reading the bare item (the operator's default login)
-// or discovering any other suffixed item (another bot's or the maintenance
-// job's login) could copy a different account's token into the bot's file store.
+// the bare service name when neither dir variable is set, and
+// `<bare>-<first 8 hex of sha256(dir)>` otherwise, where dir is
+// CLAUDE_SECURESTORAGE_CONFIG_DIR when set and CLAUDE_CONFIG_DIR else. The
+// check reads exactly one item: the bot's own. Reading the bare item (the
+// operator's default login) or discovering any other suffixed item (another
+// bot's or the maintenance job's login) would describe a different login.
 // These tests pin that contract: one `find-generic-password` for the own item,
 // no `dump-keychain` discovery, never the bare item.
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   claudeCredentialServiceFor,
+  claudeCredentialServiceForEnv,
   ensureClaudeFileStoreCredential,
   readKeychainViaSecurity,
   type ClaudeFileStoreHealDeps,
@@ -24,6 +25,9 @@ const CONFIG_DIR = '/tmp/wsheal/.claude';
 // Independent oracle: `printf %s /tmp/wsheal/.claude | shasum -a 256 | cut -c1-8`.
 const OWN = `${SVC}-a05f6ba6`;
 const OTHER = `${SVC}-9821b58b`;
+const SECURE_DIR = '/tmp/wsheal-secure/.claude';
+// Independent oracle: `printf %s /tmp/wsheal-secure/.claude | shasum -a 256 | cut -c1-8`.
+const SECURE = `${SVC}-197a7c7a`;
 const NOW = 1_783_000_000_000;
 
 type ExecCall = string[];
@@ -65,10 +69,7 @@ function deps(over: Partial<ClaudeFileStoreHealDeps> = {}): ClaudeFileStoreHealD
     env: { CLAUDE_CONFIG_DIR: CONFIG_DIR },
     now: () => NOW,
     readFileStore: () => null,
-    writeFileStore: vi.fn(),
     log: { info: () => {}, warn: () => {} },
-    expectedAccountId: 'test-expected-account',
-    verifyAccountId: () => true,
     ...over,
   };
 }
@@ -81,6 +82,25 @@ describe('claudeCredentialServiceFor', () => {
   it('hashes the string exactly as set: a trailing slash is a different item', () => {
     // `printf %s /tmp/wsheal/.claude/ | shasum -a 256 | cut -c1-8`
     expect(claudeCredentialServiceFor(`${CONFIG_DIR}/`)).toBe(`${SVC}-f507d060`);
+  });
+});
+
+describe('claudeCredentialServiceForEnv', () => {
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR overrides CLAUDE_CONFIG_DIR for the item suffix', () => {
+    // `printf %s /tmp/wsheal-secure/.claude | shasum -a 256 | cut -c1-8`
+    expect(claudeCredentialServiceForEnv({
+      CLAUDE_CONFIG_DIR: CONFIG_DIR,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: SECURE_DIR,
+    })).toBe(SECURE);
+  });
+
+  it('uses CLAUDE_CONFIG_DIR when CLAUDE_SECURESTORAGE_CONFIG_DIR is unset', () => {
+    expect(claudeCredentialServiceForEnv({ CLAUDE_CONFIG_DIR: CONFIG_DIR })).toBe(OWN);
+  });
+
+  it('names the bare item when neither is set, or CLAUDE_SECURESTORAGE_CONFIG_DIR is set but empty', () => {
+    expect(claudeCredentialServiceForEnv({})).toBe(SVC);
+    expect(claudeCredentialServiceForEnv({ CLAUDE_CONFIG_DIR: CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR: '' })).toBe(SVC);
   });
 });
 
@@ -119,54 +139,41 @@ describe('readKeychainViaSecurity', () => {
 });
 
 describe('ensureClaudeFileStoreCredential keychain item selection', () => {
-  it('bare item present and own item absent: no heal and no write', () => {
+  it('bare item present and own item absent: reads only the own item', () => {
     const kc = keychain({ [SVC]: blob(NOW + 60_000) });
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: kc.read, writeFileStore }));
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: kc.read }));
     expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
     expect(kc.asked).toEqual([OWN]);
   });
 
-  it('two suffixed items including the own one: reads and heals from the own one only', () => {
+  it('two suffixed items including the own one: reads the own one only', () => {
     const kc = keychain({ [OTHER]: blob(NOW + 120_000), [OWN]: blob(NOW + 60_000) });
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: kc.read, writeFileStore }));
-    expect(r).toMatchObject({ outcome: 'healed', keychainExpiresAt: NOW + 60_000 });
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: kc.read }));
+    expect(r).toMatchObject({ outcome: 'skipped-cli-reads-own-item', keychainExpiresAt: NOW + 60_000 });
     expect(kc.asked).toEqual([OWN]);
-    expect(writeFileStore).toHaveBeenCalledTimes(1);
   });
 
-  const refusals: Array<[string, () => boolean | null, string]> = [
-    ['identity mismatch', () => false, 'refused-identity-mismatch'],
-    ['identity unverifiable', () => null, 'refused-identity-unverifiable'],
-  ];
-  it.each(refusals)('own item with %s: refuses before any write', (_label, verifyAccountId, outcome) => {
-    const kc = keychain({ [OWN]: blob(NOW + 60_000) });
-    const writeFileStore = vi.fn();
-    const backupFileStore = vi.fn(() => '/tmp/backup.json');
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR set: checks that item and the file store in that dir', () => {
+    const kc = keychain({ [OWN]: blob(NOW + 60_000), [SECURE]: blob(NOW + 90_000) });
+    const filePaths: string[] = [];
     const r = ensureClaudeFileStoreCredential(deps({
+      env: { CLAUDE_CONFIG_DIR: CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR: SECURE_DIR },
       readKeychain: kc.read,
-      verifyAccountId,
-      writeFileStore,
-      backupFileStore,
+      readFileStore: (path) => { filePaths.push(path); return null; },
     }));
-    expect(r.outcome).toBe(outcome);
-    expect(writeFileStore).not.toHaveBeenCalled();
-    expect(backupFileStore).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ outcome: 'skipped-cli-reads-own-item', keychainExpiresAt: NOW + 90_000 });
+    expect(kc.asked).toEqual([SECURE]);
+    expect(filePaths).toEqual([`${SECURE_DIR}/.credentials.json`]);
   });
 
-  it('own item without an expected-identity receipt: refuses before any write', () => {
-    const kc = keychain({ [OWN]: blob(NOW + 60_000) });
-    const writeFileStore = vi.fn();
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR alone (no CLAUDE_CONFIG_DIR) still selects its own item', () => {
+    const kc = keychain({ [SECURE]: blob(NOW + 90_000) });
     const r = ensureClaudeFileStoreCredential(deps({
+      env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: SECURE_DIR },
       readKeychain: kc.read,
-      expectedAccountId: undefined,
-      verifyAccountId: undefined,
-      writeFileStore,
     }));
-    expect(r.outcome).toBe('refused-no-expected-identity');
-    expect(writeFileStore).not.toHaveBeenCalled();
+    expect(r.outcome).toBe('skipped-cli-reads-own-item');
+    expect(kc.asked).toEqual([SECURE]);
   });
 
   it('unset CLAUDE_CONFIG_DIR: reads no keychain item at all', () => {

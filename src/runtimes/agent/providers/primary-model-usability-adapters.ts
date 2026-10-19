@@ -53,8 +53,9 @@ export interface PrimaryModelProbeAdapterDeps {
   resolveApiKey?: (opts: ResolveApiKeyOptions) => string;
   fetch?: typeof fetch;
   /**
-   * Self-heal the claude file-store credential from the keychain before a
-   * claude-cli probe (see claude-filestore-heal.ts). Injectable for tests.
+   * Check which store the claude CLI serves the login from before a
+   * claude-cli probe; detection only (see claude-filestore-heal.ts).
+   * Injectable for tests.
    */
   ensureClaudeFileStoreCredential?: () => ClaudeFileStoreHealResult;
   /**
@@ -213,17 +214,15 @@ async function probeCliModel(
   }
   if (!binary) return { status: 'provider_unavailable' };
 
-  // Before probing claude-cli, ensure the file store the CLI is pinned to (via
-  // CLAUDE_CONFIG_DIR) actually holds a usable token, mirroring it from the
-  // keychain when stale/missing. Without this the probe false-negatives to
-  // credential_unavailable whenever a native login refreshed only the keychain
-  // — arming the fallback and preventing revert. No-op off-darwin / when
-  // CLAUDE_CONFIG_DIR is unset / when the file store is already current.
+  // Before probing claude-cli, check whether the login is held in the bot's
+  // own keychain item only or also in a plaintext file store (a second live
+  // copy that can wipe the login). Detection only: nothing is written, and no
+  // outcome is a probe failure. No-op off-darwin / when no config dir is set.
   if (provider !== 'opencode-cli') {
     onStage?.('credential-heal');
-    // Best-effort: the heal is fail-open by contract, but guard the call site too
-    // so no future/injected heal fault can ever break the probe (a broken probe
-    // would strand the fallback — the exact failure mode this change fixes).
+    // Best-effort: the check is fail-open by contract, but guard the call site
+    // too so no future/injected fault can ever break the probe (a broken probe
+    // would strand the fallback).
     try {
       (deps.ensureClaudeFileStoreCredential ?? ensureClaudeFileStoreCredential)();
     } catch {

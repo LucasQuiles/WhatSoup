@@ -59,7 +59,7 @@ afterEach(() => {
 function adapterDeps(probeSpawn: typeof import('node:child_process').spawn, over: Partial<PrimaryModelProbeAdapterDeps> = {}): PrimaryModelProbeAdapterDeps {
   return {
     getProviderBinary: () => 'claude',
-    ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-file-store-current' }),
+    ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
     probeBinaryCommand: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options, probeSpawn),
     claudeRefreshLockGrace: () => null,
     log: quietLog,

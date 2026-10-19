@@ -1,187 +1,151 @@
+// The claude credential-store check (claude-filestore-heal.ts) is detection
+// only. With CLAUDE_CONFIG_DIR set the CLI reads the bot's own hashed keychain
+// item, so a plaintext copy in the file store is a second live copy of the
+// refresh token that trails every rotation; a slow keychain read makes the CLI
+// fall back to that copy, post a stale refresh token and wipe the login. The
+// check therefore never writes any store: it reports whether the CLI reads its
+// own item, and flags (once per state change) when a file store holds a token
+// beside it. Fixtures only: injected readers, no keychain, no real store.
 import { describe, expect, it, vi } from 'vitest';
 import {
   ensureClaudeFileStoreCredential,
+  resetClaudeCredentialStoreStateForTests,
   type ClaudeFileStoreHealDeps,
 } from '../../../../src/runtimes/agent/providers/claude-filestore-heal.ts';
 
 const NOW = 1_783_000_000_000;
-const silentLog = { info: () => {}, warn: () => {} };
+const ACCESS_SENTINEL = 'access-token-sentinel-3c1d';
+const REFRESH_SENTINEL = 'refresh-token-sentinel-77ae';
 
-function oauth(expiresAt: number | null, token = 'tok'): Record<string, unknown> {
-  return { accessToken: token, refreshToken: 'r', ...(expiresAt === null ? {} : { expiresAt }) };
+function blob(expiresAt: number | null, token: string | null = ACCESS_SENTINEL): string {
+  return JSON.stringify({
+    claudeAiOauth: {
+      ...(token === null ? {} : { accessToken: token }),
+      refreshToken: REFRESH_SENTINEL,
+      ...(expiresAt === null ? {} : { expiresAt }),
+    },
+  });
 }
 
-function baseDeps(over: Partial<ClaudeFileStoreHealDeps> = {}): ClaudeFileStoreHealDeps {
+function capture() {
+  const lines: Array<{ level: 'info' | 'warn'; obj: unknown; msg: string }> = [];
+  return {
+    lines,
+    log: {
+      info: (obj: unknown, msg: string) => { lines.push({ level: 'info', obj, msg }); },
+      warn: (obj: unknown, msg: string) => { lines.push({ level: 'warn', obj, msg }); },
+    },
+  };
+}
+
+let dirSeq = 0;
+function deps(over: Partial<ClaudeFileStoreHealDeps> = {}): ClaudeFileStoreHealDeps {
+  dirSeq += 1;
   return {
     platform: 'darwin',
-    env: { CLAUDE_CONFIG_DIR: '/tmp/wsheal/.claude' },
+    env: { CLAUDE_CONFIG_DIR: `/tmp/wsheal-unit-${dirSeq}/.claude` },
     now: () => NOW,
-    readKeychain: () => JSON.stringify({ mcpOAuth: { k: 1 }, claudeAiOauth: oauth(NOW + 60_000) }),
+    readKeychain: () => blob(NOW + 3_600_000),
     readFileStore: () => null,
-    writeFileStore: vi.fn(),
-    log: silentLog,
-    // #3020: owner-reviewed expected-account identity receipt. Existing tests
-    // exercise the heal mechanics (merge policy, expiry, etc.) with a matching
-    // identity — verifyAccountId returns true so the heal proceeds.
-    expectedAccountId: 'test-expected-account',
-    verifyAccountId: () => true,
+    log: { info: () => {}, warn: () => {} },
     ...over,
   };
 }
 
-describe('ensureClaudeFileStoreCredential', () => {
-  it('no-ops off darwin', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({ platform: 'linux', writeFileStore }));
-    expect(r.outcome).toBe('skipped-not-darwin');
-    expect(writeFileStore).not.toHaveBeenCalled();
+describe('ensureClaudeFileStoreCredential (detection only)', () => {
+  it('is a no-op off darwin', () => {
+    const readKeychain = vi.fn(() => blob(NOW + 60_000));
+    expect(ensureClaudeFileStoreCredential(deps({ platform: 'linux', readKeychain })).outcome).toBe('skipped-not-darwin');
+    expect(readKeychain).not.toHaveBeenCalled();
   });
 
-  it('no-ops when CLAUDE_CONFIG_DIR is unset', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({ env: {}, writeFileStore }));
-    expect(r.outcome).toBe('skipped-no-config-dir');
-    expect(writeFileStore).not.toHaveBeenCalled();
+  it('is a no-op when neither CLAUDE_CONFIG_DIR nor CLAUDE_SECURESTORAGE_CONFIG_DIR is set', () => {
+    const readKeychain = vi.fn(() => blob(NOW + 60_000));
+    expect(ensureClaudeFileStoreCredential(deps({ env: {}, readKeychain })).outcome).toBe('skipped-no-config-dir');
+    expect(readKeychain).not.toHaveBeenCalled();
   });
 
-  it('no-ops when the keychain has no token', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({ readKeychain: () => null, writeFileStore }));
+  it('own item usable and no file store: the CLI reads its own item, nothing is written', () => {
+    const r = ensureClaudeFileStoreCredential(deps());
+    expect(r).toEqual({ outcome: 'skipped-cli-reads-own-item', keychainExpiresAt: NOW + 3_600_000, fileStoreExpiresAt: null });
+  });
+
+  it.each([
+    ['missing', null],
+    ['expired', blob(NOW - 1)],
+    ['older than the own item', blob(NOW + 60_000)],
+    ['without an access token', blob(NOW + 60_000, null)],
+  ] as const)('own item usable and file store %s: still no mirror (no write seam exists)', (_label, fileStore) => {
+    const r = ensureClaudeFileStoreCredential(deps({ readFileStore: () => fileStore }));
+    expect(['skipped-cli-reads-own-item', 'two-stores-detected']).toContain(r.outcome);
+    expect(r.outcome).not.toBe('healed');
+  });
+
+  it('own item absent: the CLI falls back to the file store on its own; nothing is written', () => {
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: () => null, readFileStore: () => blob(NOW + 60_000) }));
     expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
   });
 
-  it('does not heal from an already-expired keychain token', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(NOW - 1) }),
-      writeFileStore,
-    }));
+  it('own item expired counts as not usable', () => {
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: () => blob(NOW - 1) }));
     expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
   });
 
-  it('heals when the file store is missing the claude token, preserving other keys', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readFileStore: () => JSON.stringify({ mcpOAuth: { keep: true } }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('healed');
-    expect(writeFileStore).toHaveBeenCalledTimes(1);
-    const [path, data] = writeFileStore.mock.calls[0];
-    expect(path).toBe('/tmp/wsheal/.claude/.credentials.json');
-    const written = JSON.parse(data);
-    expect(written.mcpOAuth).toEqual({ keep: true });          // preserved
-    expect(written.claudeAiOauth.accessToken).toBe('tok');      // healed from keychain
-    expect(written.claudeAiOauth.expiresAt).toBe(NOW + 60_000);
+  it('unparseable own item counts as absent', () => {
+    expect(ensureClaudeFileStoreCredential(deps({ readKeychain: () => '{not json' })).outcome).toBe('skipped-no-keychain-token');
   });
 
-  it('heals when the file-store token is expired', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readFileStore: () => JSON.stringify({ claudeAiOauth: oauth(NOW - 10_000, 'old') }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('healed');
-    expect(JSON.parse(writeFileStore.mock.calls[0][1]).claudeAiOauth.accessToken).toBe('tok');
-  });
-
-  it('heals when the keychain token is strictly newer', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(NOW + 120_000, 'new') }),
-      readFileStore: () => JSON.stringify({ claudeAiOauth: oauth(NOW + 60_000, 'cur') }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('healed');
-    expect(JSON.parse(writeFileStore.mock.calls[0][1]).claudeAiOauth.accessToken).toBe('new');
-  });
-
-  it('does NOT downgrade a fresher file-store token', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(NOW + 30_000, 'kc') }),
-      readFileStore: () => JSON.stringify({ claudeAiOauth: oauth(NOW + 90_000, 'fresher') }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('shadow-detected'); // #2784: file fresher than keychain → shadow
-    expect(writeFileStore).not.toHaveBeenCalled();
-  });
-
-  it('is fail-open: a throwing write returns skipped-error and does not throw', () => {
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      writeFileStore: () => { throw new Error('disk full'); },
-    }));
+  it('a reader that throws is contained (fail-open)', () => {
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: () => { throw new Error('security exploded'); } }));
     expect(r.outcome).toBe('skipped-error');
   });
+});
 
-  it('is fail-open on malformed keychain JSON', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({ readKeychain: () => '{not json', writeFileStore }));
-    expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
+describe('two-store detection', () => {
+  it('flags a token in the file store beside a usable own item, with expiries only', () => {
+    resetClaudeCredentialStoreStateForTests();
+    const h = capture();
+    const r = ensureClaudeFileStoreCredential(deps({ readFileStore: () => blob(NOW + 60_000), log: h.log }));
+    expect(r).toEqual({ outcome: 'two-stores-detected', keychainExpiresAt: NOW + 3_600_000, fileStoreExpiresAt: NOW + 60_000 });
+    expect(h.lines).toHaveLength(1);
+    expect(h.lines[0]!.level).toBe('warn');
+    expect(h.lines[0]!.obj).toMatchObject({
+      outcome: 'two-stores-detected',
+      keychainExpiresAt: NOW + 3_600_000,
+      fileStoreExpiresAt: NOW + 60_000,
+    });
+    const text = JSON.stringify(h.lines);
+    expect(text).not.toContain(ACCESS_SENTINEL);
+    expect(text).not.toContain(REFRESH_SENTINEL);
   });
 
-  it('treats an empty-string keychain accessToken as no token (no false heal)', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: { accessToken: '', expiresAt: NOW + 60_000 } }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
+  it('logs once per state change, not on every probe', () => {
+    resetClaudeCredentialStoreStateForTests();
+    const h = capture();
+    const base = deps({ log: h.log });
+    const twoStores = { ...base, readFileStore: () => blob(NOW + 60_000) };
+    const ownOnly = { ...base, readFileStore: () => null };
+
+    ensureClaudeFileStoreCredential(twoStores);
+    ensureClaudeFileStoreCredential(twoStores);
+    ensureClaudeFileStoreCredential(twoStores);
+    expect(h.lines.filter((l) => l.level === 'warn')).toHaveLength(1);
+
+    // The second store went away: one info line, then quiet again.
+    ensureClaudeFileStoreCredential(ownOnly);
+    ensureClaudeFileStoreCredential(ownOnly);
+    expect(h.lines).toHaveLength(2);
+    expect(h.lines[1]!.obj).toMatchObject({ outcome: 'skipped-cli-reads-own-item' });
+
+    // And it came back: flagged again.
+    ensureClaudeFileStoreCredential(twoStores);
+    expect(h.lines.filter((l) => l.level === 'warn')).toHaveLength(2);
   });
 
-  it('treats a non-object keychain claudeAiOauth as no token', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: 'oops-a-string' }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
-  });
-
-  it('treats expiresAt exactly equal to now as expired (boundary, no resurrection)', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(NOW) }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('skipped-no-keychain-token');
-    expect(writeFileStore).not.toHaveBeenCalled();
-  });
-
-  it('heals a missing file token even when the keychain token has no recorded expiry', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(null, 'no-exp') }),
-      readFileStore: () => null,
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('healed');
-    expect(JSON.parse(writeFileStore.mock.calls[0][1]).claudeAiOauth.accessToken).toBe('no-exp');
-  });
-
-  it('does NOT downgrade when neither token records an expiry (cannot prove keychain newer)', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readKeychain: () => JSON.stringify({ claudeAiOauth: oauth(null, 'kc') }),
-      readFileStore: () => JSON.stringify({ claudeAiOauth: oauth(null, 'disk') }),
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('skipped-file-store-current');
-    expect(writeFileStore).not.toHaveBeenCalled();
-  });
-
-  it('is fail-open when readFileStore itself throws', () => {
-    const writeFileStore = vi.fn();
-    const r = ensureClaudeFileStoreCredential(baseDeps({
-      readFileStore: () => { throw new Error('EACCES'); },
-      writeFileStore,
-    }));
-    expect(r.outcome).toBe('skipped-error');
-    expect(writeFileStore).not.toHaveBeenCalled();
+  it('a first check with only the own item logs nothing', () => {
+    resetClaudeCredentialStoreStateForTests();
+    const h = capture();
+    ensureClaudeFileStoreCredential(deps({ log: h.log }));
+    expect(h.lines).toEqual([]);
   });
 });

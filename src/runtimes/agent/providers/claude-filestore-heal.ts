@@ -1,48 +1,48 @@
 // src/runtimes/agent/providers/claude-filestore-heal.ts
 //
-// Self-heal the Claude CLI file-store credential from the macOS login keychain.
+// Claude CLI credential-store check (detection only), plus the one reader
+// WhatSoup has for the CLI's stored login (service naming, storage dir,
+// expiry read; reused by claude-refresh-ahead.ts).
 //
-// Why this exists (empirically established on the fleet):
-//   Launchd-managed bots run with `CLAUDE_CONFIG_DIR=$HOME/.claude` (see PR
-//   #1391). With that var set, the `claude` CLI reads its OAuth credential
-//   ONLY from `$CLAUDE_CONFIG_DIR/.credentials.json` (the "file store") — it
-//   does NOT fall back to the login keychain even when the keychain is
-//   readable and holds a valid token. Verified in the bot's own gui/501
-//   context: `claude -p` with an empty CLAUDE_CONFIG_DIR returns
-//   "Not logged in" while a `security find-generic-password` read of the
-//   login-keychain OAuth item returns the valid credential blob.
+// History and corrected premise:
+//   This module used to mirror the keychain's `claudeAiOauth` into
+//   `$CLAUDE_CONFIG_DIR/.credentials.json` (the "file store"), on the premise
+//   that with CLAUDE_CONFIG_DIR set the CLI reads ONLY the file store. That
+//   premise is false for the fleet CLI (2.1.302/2.1.303): with
+//   CLAUDE_CONFIG_DIR set it reads the hashed keychain item
+//   `<credential service>-<sha256(dir)[:8]>` directly (verified
+//   2026-10-19: bots with primary usable and no `.credentials.json` at all),
+//   and falls back to the plaintext store only when the keychain read returns
+//   nothing. A hashed item exists only because a CLI that reads it wrote it.
 //
-//   A native `claude` login / token refresh writes the KEYCHAIN, so the
-//   keychain can hold a fresh token while the file store the bot is pinned to
-//   is missing or stale. The CLI then 401s on every real turn AND every
-//   recovery probe → the provider fallback arms falsely (Gap 1) and can never
-//   revert, because the recovery probe resolves credentials the same broken
-//   way and never returns `usable` (Gap 2).
-//
-//   This module mirrors the keychain's `claudeAiOauth` into the file store
-//   when — and only when — the file store lacks a usable token or the keychain
-//   holds a strictly newer one. It is the automation of the proven manual fix.
+//   Mirroring it therefore created a second live copy of the bot's refresh
+//   token that trailed every rotation. The CLI's keychain read has a 2 s
+//   `security` timeout; on a slow read it falls back to the plaintext copy,
+//   posts its stale refresh token, gets invalid_grant and wipes the login
+//   (the two-store wipe). So nothing here writes any store any more, and the
+//   #3020 identity guard that protected the write is gone with it.
 //
 // Contract:
 //   - macOS only; no-op on other platforms.
-//   - No-op unless `CLAUDE_CONFIG_DIR` is set (unset ⇒ the CLI uses its native
-//     keychain resolution and there is nothing to heal).
-//   - Reads only the bot's own keychain item, the one the CLI keys to this
-//     CLAUDE_CONFIG_DIR (claudeCredentialServiceFor); never the bare default
-//     item and never another config dir's item.
-//   - Never downgrades a fresher file-store token to an older keychain one.
-//   - Never performs OAuth, never contacts an auth server, never changes which
-//     account is used. It is a purely local store-to-store coherence sync of an
-//     already-present, already-valid credential.
-//   - Fail-open: any error is logged and swallowed; the caller's probe / turn
-//     proceeds exactly as before.
+//   - No-op unless CLAUDE_CONFIG_DIR or CLAUDE_SECURESTORAGE_CONFIG_DIR is
+//     set (neither set: the CLI uses the bare default item, which is not the
+//     bot's to inspect).
+//   - Reads only the bot's own keychain item (claudeCredentialServiceForEnv)
+//     and the file store in the CLI's storage dir; never the bare default
+//     item, never another config dir's item, never a keychain listing.
+//   - Never writes, never performs OAuth, never contacts an auth server.
+//   - Reports 'skipped-cli-reads-own-item' when the own item holds a usable
+//     token, and 'two-stores-detected' when a file store also holds a token,
+//     logging the latter once per state change with expiries only.
+//   - Fail-open: any error is logged and swallowed.
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, renameSync, chmodSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
+import { isNonEmptyString } from '../../../lib/type-guards.ts';
 
 // The macOS login-keychain item name the claude CLI stores its OAuth credential
 // under. Assembled from parts so the two words are never adjacent in source:
@@ -57,23 +57,17 @@ const KEYCHAIN_READ_TIMEOUT_MS = 5_000;
 export type ClaudeFileStoreHealOutcome =
   | 'skipped-not-darwin'
   | 'skipped-no-config-dir'
+  /** The own item holds no usable token; the CLI falls back to the file store by itself. */
   | 'skipped-no-keychain-token'
-  | 'skipped-file-store-current'
-  | 'skipped-error'
-  | 'healed'
-  | 'shadow-detected'
-  // #3020: account-identity refusal outcomes — fail closed, never a silent switch.
-  // A keychain item whose account identity cannot be proven to match the
-  // owner-reviewed expected identity is REFUSED: the heal degrades to readiness
-  // without healing rather than silently switching the bot to another account.
-  | 'refused-no-expected-identity'
-  | 'refused-identity-mismatch'
-  | 'refused-identity-unverifiable'
-  | 'healed-rolled-back';
+  /** The own item holds a usable token and no file store holds one: the healthy state. */
+  | 'skipped-cli-reads-own-item'
+  /** The own item and a file store both hold a token: a second live copy of the login. */
+  | 'two-stores-detected'
+  | 'skipped-error';
 
 export interface ClaudeFileStoreHealResult {
   outcome: ClaudeFileStoreHealOutcome;
-  /** Set on 'healed' / 'skipped-file-store-current' for observability (no token material). */
+  /** Expiries only (ms epoch, null = unknown) for observability; never token material. */
   fileStoreExpiresAt?: number | null;
   keychainExpiresAt?: number | null;
 }
@@ -83,32 +77,11 @@ export interface ClaudeFileStoreHealDeps {
   platform?: NodeJS.Platform;
   now?: () => number;
   /** Raw JSON string held in the keychain item named `service` (always the
-   *  bot's own item, see claudeCredentialServiceFor), or null when unreadable/absent. */
+   *  bot's own item, see claudeCredentialServiceForEnv), or null when unreadable/absent. */
   readKeychain?: (service: string) => string | null;
   /** Raw JSON string of the file store, or null when absent/unreadable. */
   readFileStore?: (path: string) => string | null;
-  /** Atomic write of the merged file store + chmod 600. */
-  writeFileStore?: (path: string, data: string) => void;
   log?: { info: (o: unknown, m: string) => void; warn: (o: unknown, m: string) => void };
-  // #3020: account-identity guard — bind healing to an owner-reviewed receipt.
-  /** Owner-reviewed expected account identity (a provenance receipt). When
-   *  absent, the heal is REFUSED — it degrades to readiness without healing
-   *  rather than silently switching the bot to another account. Reading only
-   *  the bot's own keychain item narrows WHICH item is read; it does not prove
-   *  the item's account, so the receipt is required for that item too. The
-   *  identity itself is never published in logs/tests. */
-  expectedAccountId?: string | null;
-  /** Post-heal canary: verify the keychain blob's account identity WITHOUT
-   *  publishing it. Returns true if same-account, false if mismatch, null if
-   *  unverifiable. When expectedAccountId is set, the heal requires this to
-   *  return true before copying. A mismatch triggers rollback. */
-  verifyAccountId?: (keychainStore: Record<string, unknown>) => boolean | null;
-  /** Backup the prior file store before mutation (returns the backup path or
-   *  null on failure). Used for rollback-safe recovery when a post-heal canary
-   *  mismatch or write failure is detected. */
-  backupFileStore?: (path: string) => string | null;
-  /** Restore the prior file store from a backup path (rollback). */
-  restoreFileStore?: (backupPath: string, targetPath: string) => void;
 }
 
 interface OAuthEntry {
@@ -250,15 +223,6 @@ function defaultReadFileStore(path: string): string | null {
   }
 }
 
-function defaultWriteFileStore(path: string, data: string): void {
-  const dir = path.slice(0, path.lastIndexOf('/')) || '.';
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = `${path}.heal-${process.pid}.tmp`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, path);
-}
-
 function parseJsonObject(raw: string | null): Record<string, unknown> | null {
   if (raw === null) return null;
   try {
@@ -284,16 +248,25 @@ function expiresAtOf(entry: OAuthEntry | null): number | null {
 }
 
 function hasAccessToken(entry: OAuthEntry | null): boolean {
-  return typeof entry?.accessToken === 'string' && entry.accessToken.length > 0;
+  return isNonEmptyString(entry?.accessToken);
+}
+
+/** Last two-store state per keychain item, so the detection logs once per change. */
+const lastTwoStoreState = new Map<string, boolean>();
+
+/** Test seam: forget the per-item detection state. */
+export function resetClaudeCredentialStoreStateForTests(): void {
+  lastTwoStoreState.clear();
 }
 
 /**
- * Ensure the Claude CLI file store holds a usable `claudeAiOauth` token,
- * mirroring it from the login keychain when the file store is missing, expired,
- * or older than the keychain. See the module header for the full contract.
+ * Check which store the CLI serves the bot's login from, without writing
+ * anything (see the module header for why the former mirror is gone). The
+ * export keeps its historical name for its two callers (startup and the
+ * claude-cli usability probe); every outcome is a non-failure for them.
  *
- * Synchronous (keychain read + small file write) to match the surrounding probe
- * code and keyring.ts precedent; bounded by KEYCHAIN_READ_TIMEOUT_MS.
+ * Synchronous (one keychain read + one small file read), bounded by
+ * KEYCHAIN_READ_TIMEOUT_MS.
  */
 export function ensureClaudeFileStoreCredential(
   deps: ClaudeFileStoreHealDeps = {},
@@ -305,174 +278,40 @@ export function ensureClaudeFileStoreCredential(
 
     // env-allowed: test-runner detection plus DI seam; env-late by design
     const env = deps.env ?? process.env;
-    const configDir = env.CLAUDE_CONFIG_DIR;
-    if (!configDir) return { outcome: 'skipped-no-config-dir' };
+    const service = claudeCredentialServiceForEnv(env);
+    // The bare item is the default login, not one keyed to the bot's dir.
+    if (service === KEYCHAIN_SERVICE) return { outcome: 'skipped-no-config-dir' };
 
     const now = (deps.now ?? Date.now)();
-
     // Only the bot's own item: never the bare default login, never another
     // config dir's item (see readKeychainViaSecurity).
-    const keychainStore = parseJsonObject(
-      (deps.readKeychain ?? defaultReadKeychain)(claudeCredentialServiceFor(configDir)),
-    );
-    const keychainOAuth = oauthOf(keychainStore);
+    const keychainOAuth = oauthOf(parseJsonObject((deps.readKeychain ?? defaultReadKeychain)(service)));
     const keychainExpiresAt = expiresAtOf(keychainOAuth);
-    // Only heal from a keychain token that is present AND not already expired —
-    // copying a dead token would just re-fail the probe (and could clobber a
-    // still-valid file-store token in the expired-both edge case).
     if (!hasAccessToken(keychainOAuth) || (keychainExpiresAt !== null && keychainExpiresAt <= now)) {
       return { outcome: 'skipped-no-keychain-token' };
     }
 
-    const path = join(configDir, FILE_STORE_NAME);
-    const fileStore = parseJsonObject((deps.readFileStore ?? defaultReadFileStore)(path));
-    const fileOAuth = oauthOf(fileStore);
-    const fileExpiresAt = expiresAtOf(fileOAuth);
-
-    const fileTokenMissing = !hasAccessToken(fileOAuth);
-    const fileTokenExpired = fileExpiresAt !== null && fileExpiresAt <= now;
-    // Strictly-newer guard: never downgrade a fresher file-store token. When the
-    // file store has no expiry recorded but a token, treat the keychain as
-    // authoritative only if the file token is missing/expired (handled above).
-    const keychainStrictlyNewer =
-      keychainExpiresAt !== null && fileExpiresAt !== null && keychainExpiresAt > fileExpiresAt;
-
-    if (!fileTokenMissing && !fileTokenExpired && !keychainStrictlyNewer) {
-      // #2784: if the file-store token is fresher than the keychain token,
-      // the keychain may be shadowing the credential consumer's view.
-      const fileFresher = fileExpiresAt !== null && keychainExpiresAt !== null && fileExpiresAt > keychainExpiresAt;
-      if (fileFresher) {
-        log.warn(
-          { fileExpiresAt, keychainExpiresAt },
-          '#2784: file-store token is fresher than keychain — stale keychain OAuth may shadow credential consumer view',
-        );
-        return {
-          outcome: 'shadow-detected',
-          fileStoreExpiresAt: fileExpiresAt,
-          keychainExpiresAt,
-        };
-      }
-      return {
-        outcome: 'skipped-file-store-current',
-        fileStoreExpiresAt: fileExpiresAt,
-        keychainExpiresAt,
-      };
-    }
-
-    // #3020: account-identity guard — bind healing to an owner-reviewed receipt.
-    // A keychain item holding a DIFFERENT Claude account would silently switch
-    // the bot's account and report provider usability green. REFUSE to copy when
-    // same-account identity cannot be proven (fail closed → degraded readiness,
-    // never a silent switch). This applies to the bot's own item too: its name
-    // is derived from the config dir, which says where the CLI stores a login,
-    // not whose login it is. The #2784 shadow-detection above is preserved (it
-    // returns before reaching this guard).
-    const hasExpectedIdentity = deps.expectedAccountId !== undefined && deps.expectedAccountId !== null;
-    const hasVerifyFn = typeof deps.verifyAccountId === 'function';
-    if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null) {
-      const verified = deps.verifyAccountId!(keychainStore);
-      if (verified === false) {
-        log.warn(
-          { expectedAccountIdPresent: true },
-          '#3020: keychain account identity does not match expected — refusing heal (fail closed, degraded readiness)',
-        );
-        return { outcome: 'refused-identity-mismatch', keychainExpiresAt };
-      }
-      // Only `true` proves the account: null, undefined or any other value from
-      // a verifier is unverifiable (fail closed).
-      if (verified !== true) {
-        log.warn(
-          { expectedAccountIdPresent: true },
-          '#3020: keychain account identity could not be verified — refusing heal (fail closed, degraded readiness)',
-        );
-        return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
-      }
-      // verified === true → same account, proceed to heal.
-    } else if (!hasExpectedIdentity && !hasVerifyFn) {
-      // No receipt at all — the item's account identity is unknowable, so
-      // refuse. This is the core fix: without this guard, an item holding a
-      // different account silently switches the bot.
+    const fileOAuth = oauthOf(parseJsonObject(
+      (deps.readFileStore ?? defaultReadFileStore)(join(claudeSecureStorageDir(env), FILE_STORE_NAME)),
+    ));
+    const fileStoreExpiresAt = expiresAtOf(fileOAuth);
+    const twoStores = hasAccessToken(fileOAuth);
+    const outcome: ClaudeFileStoreHealOutcome = twoStores ? 'two-stores-detected' : 'skipped-cli-reads-own-item';
+    const previous = lastTwoStoreState.get(service);
+    lastTwoStoreState.set(service, twoStores);
+    if (twoStores && previous !== true) {
       log.warn(
-        {},
-        '#3020: no expected-account-identity receipt — refusing keychain heal (fail closed, degraded readiness)',
+        { outcome, keychainExpiresAt, fileStoreExpiresAt },
+        'claude login is held in two stores: the own keychain item and a plaintext file store; '
+          + 'a slow keychain read makes the CLI refresh from the stale file copy and wipe the login. '
+          + 'Nothing was written; remove the file store once the keychain login is confirmed',
       );
-      return { outcome: 'refused-no-expected-identity', keychainExpiresAt };
-    } else {
-      // Incomplete receipt (expected identity OR verify fn, not both), or a
-      // complete receipt with an unreadable keychain store — either way,
-      // same-account identity cannot be proven.
-      log.warn(
-        { hasExpectedIdentity, hasVerifyFn, keychainStoreReadable: keychainStore !== null },
-        '#3020: account-identity receipt incomplete or keychain store unreadable — refusing heal (fail closed, degraded readiness)',
-      );
-      return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
+    } else if (!twoStores && previous === true) {
+      log.info({ outcome, keychainExpiresAt }, 'claude login is held in the own keychain item only (second store gone)');
     }
-
-    // #3020: backup the prior file store before mutation (rollback-safe).
-    let backupPath: string | null = null;
-    if (typeof deps.backupFileStore === 'function') {
-      try {
-        backupPath = deps.backupFileStore(path);
-      } catch {
-        backupPath = null;
-      }
-    }
-    const tryRollback = (): void => {
-      if (backupPath !== null && typeof deps.restoreFileStore === 'function') {
-        try { deps.restoreFileStore(backupPath, path); } catch { /* deliberately: rollback is best-effort — the caller's signal (the re-thrown write error, or the healed-rolled-back outcome) is the actionable failure; a restore error must not mask it */ }
-      }
-    };
-
-    // Merge policy:
-    //   - every EXISTING file-store key wins (never clobber what the CLI wrote,
-    //     e.g. a file-store-only mcpOAuth),
-    //   - gaps are filled from the keychain blob (so a fresh/empty file store
-    //     still gets mcpOAuth and MCP-connector auth isn't lost), and
-    //   - the serving credential (claudeAiOauth) is always taken from the
-    //     keychain — that IS the heal.
-    const merged: Record<string, unknown> = { ...(keychainStore ?? {}), ...(fileStore ?? {}) };
-    merged[OAUTH_KEY] = keychainOAuth as unknown;
-
-    try {
-      (deps.writeFileStore ?? defaultWriteFileStore)(path, `${JSON.stringify(merged, null, 2)}\n`);
-    } catch (writeErr) {
-      // #3020: if the write failed after a backup, attempt rollback.
-      tryRollback();
-      throw writeErr;
-    }
-
-    // #3020: post-heal canary — re-invoke the verifier on the SAME in-memory
-    // keychain blob after the write, WITHOUT publishing the identity. For a
-    // pure verifier this is a double-check hook (a second chance to refuse and
-    // roll back), NOT protection against the keychain changing between read
-    // and write — the blob is not re-read here. A verifier that consults live
-    // state internally can use this hook to catch such races; a mismatch
-    // triggers rollback to the prior store. Canary only runs when rollback is
-    // possible (backup taken + restore fn provided).
-    if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null && typeof deps.restoreFileStore === 'function' && backupPath !== null) {
-      const postCanary = deps.verifyAccountId!(keychainStore);
-      if (postCanary !== true) {
-        log.warn(
-          { expectedAccountIdPresent: true, postCanary },
-          '#3020: post-heal canary mismatch — rolling back to prior store',
-        );
-        tryRollback();
-        return { outcome: 'healed-rolled-back', keychainExpiresAt };
-      }
-    }
-
-    log.info(
-      {
-        path,
-        reason: fileTokenMissing ? 'file-token-missing' : fileTokenExpired ? 'file-token-expired' : 'keychain-newer',
-        fileStoreExpiresAt: fileExpiresAt,
-        keychainExpiresAt,
-      },
-      'healed claude file-store credential from keychain',
-    );
-    return { outcome: 'healed', fileStoreExpiresAt: fileExpiresAt, keychainExpiresAt };
+    return { outcome, keychainExpiresAt, fileStoreExpiresAt };
   } catch (err) {
-    log.warn({ err }, 'claude file-store heal failed — proceeding without heal (fail-open)');
+    log.warn({ err }, 'claude credential-store check failed — proceeding (fail-open)');
     return { outcome: 'skipped-error' };
   }
 }
