@@ -685,7 +685,7 @@ describe('createPrimaryModelProbeAdapters', () => {
         'Reply with OK only.',
       ],
       expect.any(Object),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+      { cwd: '/agent-cwd', timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
@@ -787,7 +787,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', '-m', 'openai/configured-primary', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { timeoutMs: 15_000 },
+      { timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
@@ -814,7 +814,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+      { cwd: '/agent-cwd', timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 

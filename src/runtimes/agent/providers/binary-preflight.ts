@@ -130,12 +130,30 @@ export interface BinaryAuthStatusResult {
   output: string;
 }
 
+/** How a probe child ended, reported once by {@link BinaryCommandProbeOptions.onExited}. */
+export interface BinaryCommandProbeExit {
+  /** Undefined when the spawn failed and no process ever existed. */
+  pid: number | undefined;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  /** The probe's own kill timer (`timeoutMs`) fired and terminated the child. */
+  killedByTimeout: boolean;
+  /** The caller's abort signal terminated the child. */
+  killedByAbort: boolean;
+  /** No process was started (spawn threw or emitted an error before a pid). */
+  spawnFailed: boolean;
+}
+
 export interface BinaryCommandProbeOptions {
   cwd?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
   /** Called once spawn is proven absent or the child emits close. */
   onProcessClosed?: () => void;
+  /** Called once, right after spawn returned a child (pid undefined if the spawn failed). */
+  onSpawned?: (pid: number | undefined) => void;
+  /** Called once when the child closes or its spawn is proven to have failed. */
+  onExited?: (exit: BinaryCommandProbeExit) => void;
 }
 
 /** Grace period between the timeout kill (SIGTERM) and the SIGKILL escalation. */
@@ -186,7 +204,25 @@ export async function probeBinaryCommand(
     let processClosedNotified = false;
     let terminationStarted = false;
     let abortRequested = false;
+    let killTimerFired = false;
+    let exitNotified = false;
     let abortListener: (() => void) | undefined;
+    let childPid: number | undefined;
+
+    const notifyExited = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean): void => {
+      if (exitNotified) return;
+      exitNotified = true;
+      try {
+        options.onExited?.({
+          pid: childPid,
+          exitCode,
+          signal,
+          killedByTimeout: killTimerFired,
+          killedByAbort: abortRequested,
+          spawnFailed,
+        });
+      } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
+    };
 
     const notifyProcessClosed = (): void => {
       if (processClosedNotified) return;
@@ -225,9 +261,14 @@ export async function probeBinaryCommand(
       });
     } catch {
       notifyProcessClosed();
+      notifyExited(null, null, true);
       settle({ status: 'failed', output: '' });
       return;
     }
+    childPid = child.pid;
+    try {
+      options.onSpawned?.(childPid);
+    } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
 
     const terminate = (): void => {
       if (terminationStarted) return;
@@ -241,6 +282,7 @@ export async function probeBinaryCommand(
 
     const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
     killTimer = setTimeout(() => {
+      killTimerFired = true;
       terminate();
       settle({ status: 'failed', output: combinedOutput() });
     }, timeoutMs);
@@ -272,6 +314,7 @@ export async function probeBinaryCommand(
       if (child.pid === undefined) {
         removeAbortListener();
         notifyProcessClosed();
+        notifyExited(null, null, true);
       }
       // Once caller cancellation owns a spawned child, `close` is the shared
       // terminal event for both result settlement and lease release. An
@@ -282,11 +325,12 @@ export async function probeBinaryCommand(
       }
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       clearTimeout(killTimer);
       clearTimeout(killEscalationTimer);
       removeAbortListener();
       notifyProcessClosed();
+      notifyExited(code, signal, false);
       settle({ status: !abortRequested && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
     });
   });
