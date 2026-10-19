@@ -27,6 +27,7 @@
 import type { DiagnosticProbe, DiagnosticProbeResult } from '../diagnostic-bundle.ts';
 import type { BinaryAuthStatusResult, BinaryCommandProbeOptions } from './binary-preflight.ts';
 import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
+import { refreshAheadStillRunning } from './claude-refresh-ahead.ts';
 import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -106,9 +107,14 @@ export function makeAccountAuthStatusProbe(
     // deadline may abandon this finding meanwhile; the refresh still finishes,
     // and the killable spawn below is then skipped.
     if (isClaude && deps.refreshAhead && !signal.aborted) {
+      let refreshed: unknown;
       try {
-        await deps.refreshAhead(binary, env);
+        refreshed = await deps.refreshAhead(binary, env);
       } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
+      // Never start the killable probe while the refresh child still runs.
+      if (refreshAheadStillRunning(refreshed)) {
+        return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: login refresh still running`, data: { mode: 'binary', provider: target.provider } };
+      }
     }
     // The orchestrator may have already abandoned us; skip the spawn if so.
     if (signal.aborted) {
