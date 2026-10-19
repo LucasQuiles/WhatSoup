@@ -5016,7 +5016,7 @@ def card_title(event: dict[str, Any], classification: Any) -> str:
 def card_impact(event: dict[str, Any]) -> str:
     storm = event.get("storm") if isinstance(event.get("storm"), dict) else {}
     hosts = storm.get("affectedHosts")
-    if isinstance(hosts, int) and not isinstance(hosts, bool) and hosts > 0:
+    if isinstance(hosts, int) and not isinstance(hosts, bool) and 0 < hosts <= 10_000_000:
         return f"Impact: {hosts:,} host{'s' if hosts != 1 else ''} affected"
     return CARD_IMPACT_UNCONFIRMED
 
@@ -6057,8 +6057,9 @@ def line_group_needs_relink(group: dict[str, Any]) -> bool:
 
 def _line_card_relink_line(group: dict[str, Any]) -> str:
     since = f" since {group['since']}" if group["since"] else ""
-    on_host = f" on {group['host']}" if group["host"] != LINE_UNKNOWN_HOST else ""
-    text = f"{group['bot']} ({group['host']}){since}: needs a QR relink{on_host}"
+    host = card_plain(group["host"], 40) or LINE_UNKNOWN_HOST
+    on_host = f" on {host}" if host != LINE_UNKNOWN_HOST else ""
+    text = f"{group['bot']} ({host}){since}: needs a QR relink{on_host}"
     if group["verdict"] != LINE_LOGGED_OUT:
         # Relay 19 B2: not confirmed live, but the incident's own requested
         # action (awaiting physical) still stands, so the action stays.
@@ -6081,9 +6082,10 @@ def format_line_card(groups: list[dict[str, Any]], ref: str, missed: str | None 
     else:
         lines.append(f"{CARD_ICON_NOTICE} *WhatsApp lines that could not be checked: {len(unchecked):,}*")
     if unchecked:
-        names = [f"{group['bot']} ({group['host']})" for group in unchecked]
-        shown = ", ".join(names[:LINE_CARD_MAX_LINES])
-        if len(names) > LINE_CARD_MAX_LINES:
+        names = [f"{group['bot']} ({card_plain(group['host'], 40) or LINE_UNKNOWN_HOST})"
+                 for group in unchecked[:LINE_CARD_MAX_LINES]]
+        shown = ", ".join(names)
+        if len(unchecked) > LINE_CARD_MAX_LINES:
             shown += f", {CARD_CLIP}"
         lines.append(f"Could not check {len(unchecked):,}: {shown}" if relink else shown)
     if missed:

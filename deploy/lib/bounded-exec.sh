@@ -615,7 +615,7 @@ whatsoup_run_bounded() {
 
     (
       set +m
-      local timer_pid="" monitor_pid="" guard_status=0 command_authorized=0 watchdog_authorized=0
+      local timer_pid="" monitor_pid="" guard_grace_sleep_pid="" guard_status=0 command_authorized=0 watchdog_authorized=0
       _bounded_wait_for_budget() {
         local remaining="$budget" chunk
         while [ "$remaining" -gt 0 ]; do
@@ -627,8 +627,11 @@ whatsoup_run_bounded() {
       _bounded_guard_cleanup() {
         [ -z "$timer_pid" ] || kill -9 "$timer_pid" 2>/dev/null
         [ -z "$monitor_pid" ] || kill -9 "$monitor_pid" 2>/dev/null
+        [ -z "$guard_grace_sleep_pid" ] || kill -9 "$guard_grace_sleep_pid" 2>/dev/null
         [ -z "$timer_pid" ] || wait "$timer_pid" 2>/dev/null
         [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null
+        [ -z "$guard_grace_sleep_pid" ] || wait "$guard_grace_sleep_pid" 2>/dev/null
+        guard_grace_sleep_pid=""
       }
       _bounded_guard_exit() {
         # Derive the report from the durable claim, not the status set after
@@ -735,12 +738,15 @@ whatsoup_run_bounded() {
       fi
       # Only an authenticated record needs the worker's timeout-entry path.
       [ "$authorization_state" -eq 0 ] && kill -USR1 "$worker_pid" 2>/dev/null
-      if ! sleep "$grace"; then
+      sleep "$grace" &
+      guard_grace_sleep_pid=$!
+      if ! wait "$guard_grace_sleep_pid"; then
         _bounded_guard_kill_authorized
         _bounded_guard_end_worker
         guard_status=2
         _bounded_guard_exit
       fi
+      guard_grace_sleep_pid=""
       _bounded_guard_kill_authorized
       if [ "$authorization_state" -eq 0 ]; then
         sleep "$grace" &

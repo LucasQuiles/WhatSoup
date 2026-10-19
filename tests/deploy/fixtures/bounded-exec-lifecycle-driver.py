@@ -262,6 +262,10 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     break
                 time.sleep(0.01)
             if control is None: raise RuntimeError('timeout control record unavailable')
+            blocked = root / 'timeout-ps-blocked'
+            while not blocked.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not blocked.exists(): raise RuntimeError('timeout ps barrier unavailable')
             timeout_path = root / ('whatsoup-bounded-timeout.%s.%s' % (child.pid, control.name.rsplit('.', 1)[1]))
             victim = root / 'timeout-victim'
             victim.write_text('unchanged')
@@ -343,19 +347,18 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
             command_pid = int(fields['command_pid'])
             process_members = members(session)
+            if mode == 'authorized-guard-stuck':
+                custody_deadline = time.monotonic() + 3
+                command_held = root / 'authorized-guard-stuck-command-held'
+                while time.monotonic() < custody_deadline:
+                    process_members = members(session)
+                    if command_held.exists() and any(item['pid'] == command_pid for item in process_members):
+                        break
+                    time.sleep(0.01)
+                if not command_held.exists() or not any(item['pid'] == command_pid for item in process_members):
+                    raise RuntimeError('authorized command custody unavailable')
+                record['command_custody_established'] = True
             worker = next((item['ppid'] for item in process_members if item['pid'] == command_pid), None)
-            if worker is None and mode == 'authorized-guard-stuck':
-                # The successful command can already have exited before the
-                # worker reaches its cleanup FIFO. In this fixture-only mode,
-                # recover the worker as the only direct child process-group
-                # leader without a live child; the guard still owns its timer.
-                group_leaders = [
-                    item for item in process_members
-                    if item['pid'] != child.pid and item['pid'] == item['pgid']
-                    and not any(candidate['ppid'] == item['pid'] for candidate in process_members)
-                ]
-                if len(group_leaders) == 1:
-                    worker = group_leaders[0]['pid']
             worker_record = next((item for item in members(session) if item['pid'] == worker), None)
             if worker is None or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
@@ -368,6 +371,9 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
+            if mode == 'authorized-guard-stuck':
+                (root / 'authorized-guard-stuck-command-release').write_text('release')
+                record['command_released_after_guard_stop'] = True
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
                 time.sleep(0.01)
             if not (root / 'authorization-rm-ready').exists(): raise RuntimeError('worker cleanup did not retain authorization')

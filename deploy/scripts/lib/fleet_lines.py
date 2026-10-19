@@ -54,6 +54,7 @@ except ImportError:  # loaded by file path, without deploy/scripts on sys.path
 
 
 FLEET_LINES_MAX_BYTES = 256 * 1024
+FLEET_TOKEN_MAX_BYTES = 4096
 DEFAULT_FLEET_TOKEN_FILE = Path.home() / ".config/whatsoup/fleet-tokens.json"
 
 
@@ -236,9 +237,19 @@ def read_fleet_token_text(
                 return None, f"token_mode_too_open mode={mode:o}"
             if not mode & 0o400:
                 return None, f"token_owner_read_required mode={mode:o}"
-            with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
-                file_fd = -1
-                return handle.read(), None
+            if st.st_size > FLEET_TOKEN_MAX_BYTES:
+                return None, "token_too_large"
+            raw = bytearray()
+            remaining = FLEET_TOKEN_MAX_BYTES + 1
+            while remaining:
+                chunk = os.read(file_fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                remaining -= len(chunk)
+            if len(raw) > FLEET_TOKEN_MAX_BYTES:
+                return None, "token_too_large"
+            return bytes(raw).decode("utf-8"), None
         finally:
             if file_fd >= 0:
                 os.close(file_fd)

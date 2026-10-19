@@ -166,6 +166,46 @@ def test_action_cards_carry_every_target_line() -> None:
             assert any(line.startswith("Impact") for line in lines), golden["family"]
 
 
+@pytest.mark.parametrize("verdict", [_mod.LINE_LOGGED_OUT, _mod.LINE_COULD_NOT_CHECK])
+@pytest.mark.parametrize("host", [
+    "host-a\nUnexpected instruction",
+    "/private/config.json",
+    "abc123def4567890",
+    "host-" + "x" * 100_000,
+    "host-a",
+], ids=["newline", "path", "identifier", "oversized", "ordinary"])
+def test_line_card_bounds_and_scrubs_roster_host(host: str, verdict: str) -> None:
+    group = {"host": host, "bot": "fixture-bot", "verdict": verdict,
+             "since": None, "reasons": [], "needsRelink": False}
+    card = _mod.format_line_card([group], "00000000")
+    assert len(card) < 600
+    assert len(card.splitlines()) == (4 if verdict == _mod.LINE_LOGGED_OUT else 5)
+    assert card.endswith("\nRef: 00000000")
+    assert "You: " in card
+    assert not card_hygiene.card_hygiene_violations(card)
+    if host == "host-a":
+        assert "fixture-bot (host-a)" in card
+    assert group["host"] == host, "display sanitization must preserve the packet's identity"
+
+
+@pytest.mark.parametrize("hosts, expected", [
+    (1, "Impact: 1 host affected"),
+    (10_000_000, "Impact: 10,000,000 hosts affected"),
+    (10_000_001, "Impact not yet confirmed"),
+    (10 ** 5000, "Impact not yet confirmed"),
+    (True, "Impact not yet confirmed"),
+    (-1, "Impact not yet confirmed"),
+], ids=["one", "maximum", "over-limit", "huge", "boolean", "negative"])
+def test_card_bounds_affected_host_count(hosts: int, expected: str) -> None:
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"])
+    event["storm"] = {"affectedHosts": hosts}
+    card = _mod.format_card(event, "00000000")
+    assert expected in card.splitlines()
+    assert len(card) <= 600
+    assert any(line.startswith("You: ") for line in card.splitlines())
+    assert card.endswith("\nRef: 00000000")
+
+
 def test_title_catalog_meanings() -> None:
     by_family = {g["family"]: g["card"].split("\n", 1)[0] for g in _GOLDENS}
     assert by_family["self_restart_completed"] == "ℹ️ *Q restarted and is back online*"

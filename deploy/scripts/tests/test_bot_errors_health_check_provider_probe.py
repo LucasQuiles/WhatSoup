@@ -384,6 +384,76 @@ def test_read_fleet_token_requires_owner_read_permission(monkeypatch, tmp_path):
         assert error == f"token_owner_read_required mode={mode:o}"
 
 
+def test_read_fleet_token_rejects_oversized_regular_file(tmp_path):
+    token_file = tmp_path / "fleet-tokens-too-large.json"
+    token_file.write_bytes(b"x" * (4096 + 1))
+    token_file.chmod(0o600)
+
+    raw, error = _mod.read_fleet_token_text(token_file)
+
+    assert raw is None
+    assert error == "token_too_large"
+
+
+def test_read_fleet_token_accepts_exact_byte_limit(tmp_path):
+    token_file = tmp_path / "fleet-tokens-exact-limit.json"
+    token_file.write_bytes(b"x" * 4096)
+    token_file.chmod(0o600)
+
+    raw, error = _mod.read_fleet_token_text(token_file)
+
+    assert raw == "x" * 4096
+    assert error is None
+
+
+def test_read_fleet_token_counts_utf8_bytes_for_limit(tmp_path):
+    token_file = tmp_path / "fleet-tokens-utf8-limit.json"
+    text = "☃" * 1366
+    token_file.write_bytes(text.encode("utf-8"))
+    token_file.chmod(0o600)
+
+    raw, error = _mod.read_fleet_token_text(token_file)
+
+    assert len(text) < 4096
+    assert len(text.encode("utf-8")) > 4096
+    assert raw is None
+    assert error == "token_too_large"
+
+
+def test_read_fleet_token_bounds_read_when_file_grows_after_fstat(monkeypatch, tmp_path):
+    token_file = tmp_path / "fleet-tokens-grown-after-fstat.json"
+    token_file.write_bytes(b"x" * 4096)
+    token_file.chmod(0o600)
+    real_fstat = _mod.os.fstat
+    real_read = _mod.os.read
+    read_sizes = []
+    grew = False
+
+    def grow_after_fstat(file_descriptor):
+        nonlocal grew
+        result = real_fstat(file_descriptor)
+        if not grew:
+            grew = True
+            with token_file.open("ab") as handle:
+                handle.write(b"y" * 128)
+        return result
+
+    def read_and_measure(file_descriptor, size):
+        chunk = real_read(file_descriptor, size)
+        read_sizes.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(_mod.os, "fstat", grow_after_fstat)
+    monkeypatch.setattr(_mod.os, "read", read_and_measure)
+
+    raw, error = _mod.read_fleet_token_text(token_file)
+
+    assert grew is True
+    assert sum(read_sizes) <= 4096 + 1
+    assert raw is None
+    assert error == "token_too_large"
+
+
 def test_required_credential_inventory_rejects_group_read_permissions(tmp_path):
     credential = tmp_path / "fleet-tokens.json"
     credential.write_text('{"active":"fixture-active-token","accept":[]}\n', encoding="utf-8")

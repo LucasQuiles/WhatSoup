@@ -386,12 +386,25 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   });
   it('returns refusal when an otherwise successful worker outlives a stuck guard handoff', () => {
     const result = runLifecycleProbe('authorized-guard-stuck');
+    expect(result.command_custody_established, JSON.stringify(result)).toBe(true);
+    expect(result.command_released_after_guard_stop, JSON.stringify(result)).toBe(true);
     expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
     expect(result.guard_term_held, JSON.stringify(result)).toBe(true);
     expect(result.guard_sleep_held, JSON.stringify(result)).toBe(true);
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expectLifecycleIsolation(result);
+  });
+  it('runs the first-grace TERM handler before hard force escalation', () => {
+    const result = runLifecycleProbe('guard-first-grace-term-boundary');
+    const evidence = JSON.stringify(result);
+
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    expect(result.stdout, evidence).toContain('guard_grace_entered=true');
+    expect(result.stdout, evidence).toContain('rc=124 output=');
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
     expectLifecycleIsolation(result);
   });
   it('fails closed after a worker-cleanup deadline handoff is replaced with a FIFO', () => {
