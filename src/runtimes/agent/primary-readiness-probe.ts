@@ -14,7 +14,10 @@ import { shortHash } from '../../lib/short-hash.ts';
 import { getProviderBinary } from './session.ts';
 import { homedir } from 'node:os';
 import type { ServingContextReceipt } from './providers/primary-model-usability.ts';
-import type { PrimaryModelProbeAdapterDeps } from './providers/primary-model-usability-adapters.ts';
+import type {
+  PrimaryModelProbeAdapterDeps,
+  PrimaryModelProbeTrigger,
+} from './providers/primary-model-usability-adapters.ts';
 
 // #3017 AXIS A: periodic primary-readiness probe. The freshness window
 // (MODEL_USABILITY_FRESHNESS_MS in runtime.ts = 30min) only matters if
@@ -185,8 +188,8 @@ function deriveCredentialStoreClass(provider: string): string | null {
 /**
  * Build the PrimaryModelProbeAdapterDeps with the serving-context receipt
  * bound (AXIS C). The caller passes its existing adapter deps (cwd,
- * egressProxyPort, providerExecutionGate) and this function adds the
- * servingContext.
+ * egressProxyPort, providerExecutionGate) and the probe trigger (logged with
+ * each probe child), and this function adds the servingContext.
  */
 export function buildPrimaryProbeAdapterDeps(
   agentProvider: string,
@@ -194,12 +197,14 @@ export function buildPrimaryProbeAdapterDeps(
   cwd: string | null | undefined,
   egressProxyPort: number | undefined,
   providerExecutionGate: PrimaryModelProbeAdapterDeps['providerExecutionGate'],
+  probeTrigger?: PrimaryModelProbeTrigger,
 ): PrimaryModelProbeAdapterDeps {
   return {
     cwd: cwd ?? homedir(),
     egressProxyPort,
     providerExecutionGate,
     servingContext: buildServingContextReceipt(agentProvider, model, cwd),
+    ...(probeTrigger ? { probeTrigger } : {}),
   };
 }
 

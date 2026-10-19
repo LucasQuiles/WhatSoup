@@ -270,7 +270,9 @@ async function withCancellationDeadline<T>(
   };
   const abortFor = (kind: 'deadline' | 'caller-abort') => (): void => {
     cause ??= kind;
-    controller.abort();
+    // A deadline aborts with a TimeoutError reason (as AbortSignal.timeout does)
+    // so an adapter can tell its own deadline from a caller's cancellation.
+    controller.abort(kind === 'deadline' ? new DOMException('primary model probe deadline', 'TimeoutError') : undefined);
   };
   const onCallerAbort = abortFor('caller-abort');
   callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
