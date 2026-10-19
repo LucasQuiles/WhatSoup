@@ -830,6 +830,25 @@ def test_packet_retry_preserves_legacy_identity_without_digest(state) -> None:
     assert len(updated["noticeIdSha256"]) == 64
 
 
+def test_legacy_packet_cli_redacts_sensitive_fields_without_rewriting(state, tmp_path) -> None:
+    token = "synthetic-" + "x" * 40
+    secret = "Bearer " + token
+    packet = {"ref": "12345678", "noticeId": secret, "incidentKey": secret, "extras": {secret: [secret]}}
+    state["packets"].mkdir(mode=0o700)
+    path = state["packets"] / "12345678.json"
+    path.write_text(json.dumps(packet))
+    path.chmod(0o600)
+    before = path.read_bytes()
+    printed = subprocess.run(
+        [sys.executable, str(_SCRIPT), "packet", "12345678"], capture_output=True, text=True,
+        env={**os.environ, "BOT_ERRORS_STATE_DIR": str(tmp_path)}, timeout=60,
+    )
+    assert printed.returncode == 0, printed.stderr
+    assert json.loads(printed.stdout)["ref"] == "12345678"
+    assert token not in printed.stdout
+    assert path.read_bytes() == before
+
+
 def test_packet_cli_prints_the_packet_and_exits_one_when_absent(state, tmp_path) -> None:
     golden = next(g for g in _GOLDENS if g["family"] == "self_restart_completed")
     _text, ref = _mod.notice_message(golden["event"], notice_kind="fixture", paths=state)

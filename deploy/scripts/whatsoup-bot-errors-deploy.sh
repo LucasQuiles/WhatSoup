@@ -205,6 +205,9 @@ assert_no_symlink_path() {
   for ((i=0; i<${#parts[@]}; i++)); do
     cur="$cur/${parts[$i]}"
     if [[ -L "$cur" ]]; then echo "  SYMLINK  $rel via $cur"; return 1; fi
+    if (( i == ${#parts[@]} - 1 )) && [[ -e "$cur" && ! -f "$cur" ]]; then
+      echo "  NOTFILE  $rel via $cur"; return 1
+    fi
     if (( i < ${#parts[@]} - 1 )) && [[ -e "$cur" && ! -d "$cur" ]]; then
       echo "  NOTDIR   $rel via $cur"; return 1
     fi

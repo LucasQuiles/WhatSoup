@@ -5549,7 +5549,7 @@ def packet_command(argv: list[str]) -> int:
     if packet is None:
         print(f"no packet for Ref {argv[0]}", file=sys.stderr)
         return 1
-    print(json.dumps(packet, indent=2, sort_keys=True, ensure_ascii=False))
+    print(json.dumps(redacted_notice_value(packet), indent=2, sort_keys=True, ensure_ascii=False))
     return 0
 
 

@@ -119,6 +119,28 @@ grep -q "LAST_KNOWN_GOOD_SKIPPED=backup_not_clean" "$tmp/deploy.log" || { cat "$
 assert_backup_metadata "$backup/.bot-errors-backup.json" false null
 bash "$D" verify "$root" > "$tmp/verify.log" 2>&1 || { cat "$tmp/verify.log"; fail "deployed root did not verify"; }
 
+# A directory at a managed file path must be refused before backup or mutation.
+directory_root="$tmp/directory-runtime"
+prepare_current_root "$directory_root"
+rm -f "$directory_root/deploy/scripts/lib/fleet_lines.py"
+mkdir "$directory_root/deploy/scripts/lib/fleet_lines.py"
+printf 'preserved-directory-content\n' > "$directory_root/deploy/scripts/lib/fleet_lines.py/keep"
+cp -R "$directory_root" "$tmp/directory-before"
+if bash "$D" deploy "$directory_root" "$PWD" > "$tmp/directory-deploy.log" 2>&1; then
+  fail "deploy accepted a directory at a managed file path"
+fi
+grep -q "NOTFILE.*fleet_lines.py" "$tmp/directory-deploy.log" || { cat "$tmp/directory-deploy.log"; fail "managed directory was not reported"; }
+diff -r "$tmp/directory-before" "$directory_root" || fail "rejected directory deploy mutated target"
+[ ! -e "$tmp/.bot-errors-last-known-good-directory-runtime" ] || fail "rejected directory deploy created LKG"
+directory_backup="$tmp/directory-rollback-backup"
+copy_manifest_files "$PWD" "$directory_backup"
+: > "$directory_backup/.was-absent"
+if bash "$D" rollback "$directory_root" "$directory_backup" > "$tmp/directory-rollback.log" 2>&1; then
+  fail "rollback accepted a directory at a managed file path"
+fi
+grep -q "NOTFILE.*fleet_lines.py" "$tmp/directory-rollback.log" || { cat "$tmp/directory-rollback.log"; fail "rollback managed directory was not reported"; }
+diff -r "$tmp/directory-before" "$directory_root" || fail "rejected directory rollback mutated target"
+
 # A first release that newly manages fleet_lines.py must treat its legitimate
 # prior absence as a verified backup, create LKG, and delete the new file when
 # rolling back. Existing bytes remain hash-checked; this is not a drift waiver.
