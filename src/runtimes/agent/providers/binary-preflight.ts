@@ -289,10 +289,9 @@ export async function probeBinaryCommand(
 
     const signalChild = (): void => {
       if (childClosed) return;
-      signalSent = true;
-      try { child.kill(); } catch { /* ignore kill errors */ }
+      try { if (child.kill() === true) signalSent = true; } catch { /* ignore kill errors */ }
       killEscalationTimer = setTimeout(() => {
-        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
+        try { if (child.kill(SIGNAL.KILL) === true) signalSent = true; } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
     };
