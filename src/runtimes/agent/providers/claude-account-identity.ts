@@ -41,6 +41,9 @@ import {
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
+import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
+import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
+import { createChildLogger } from '../../../logger.ts';
 
 /** Same bound as the CLI model probe: `auth status` is local, but the CLI's
  *  own startup on a loaded host can exceed the 5 s preflight default. Exported
@@ -97,6 +100,8 @@ export interface ClaudeAccountIdentityDeps {
   refreshClaudeLoginAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
   /** Refresh-lock wait before the probe child is signalled. Injectable for tests. */
   claudeRefreshLockGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
+  /** Spawn/exit lines of the probe child (probe-lifecycle-log.ts). Injectable for tests. */
+  log?: ProbeLifecycleLog;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
@@ -201,6 +206,12 @@ export async function observeClaudeAccountIdentity(
       {
         timeoutMs: deps.timeoutMs ?? ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS,
         ...(deps.signal ? { signal: deps.signal } : {}),
+        ...probeLifecycleObservers(
+          deps.log ?? createChildLogger('account-identity-probe'),
+          CLAUDE_PROBE_EVENTS,
+          { purpose: 'account-identity', credentialService: claudeCredentialServiceLabel(env) },
+          deps.signal,
+        ),
         terminationGrace: () => (deps.claudeRefreshLockGrace
           ?? ((childEnv: NodeJS.ProcessEnv) => claudeRefreshLockGrace(childEnv, 'account-identity')))(env),
       },
