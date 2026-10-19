@@ -7688,14 +7688,13 @@ describe('degradation classification symmetry', () => {
 //       (TURN_PROVABLE_STATUS_REASONS): a turn proves the turn pipeline (turn
 //       capability, agent runtime, the connection it rode in on, and — by
 //       construction of the release guard — the end of a fallback window) —
-//       never enrichment/memory/durability/etc. FULL-VISIBILITY evaluations
-//       (the normal degraded path, which re-checks every reason source)
-//       REPLACE the latched set with their reasons — a blip that cleared
-//       before such an evaluation was observed clearing, so it is not
-//       unproven silence and must not poison the latch; SHORT-CIRCUIT
-//       evaluations (auth / not-connected / runtime-unhealthy) UNION their
-//       observed reasons in, never removing members they had no visibility
-//       to re-check. Only real EARLY-path reasons on the full-visibility
+//       never enrichment/memory/durability/etc. Every evaluation that
+//       observes real reasons UNIONS them into the latched set (#3562): a
+//       reason a later evaluation stops showing has not been proven
+//       recovered, so only a release channel removes it — this receipt for a
+//       turn-provable set, or the direct re-probe
+//       (health-silence-latch-reprobe.test.ts) for each reason it proves
+//       clear. Only real EARLY-path reasons on the full-visibility
 //       path ARM a new latch — late-source-only reasons are directly probed
 //       every evaluation and never arm.
 // Silence alone, elapsed time alone, an empty reason list alone, a stale
@@ -8169,11 +8168,11 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     }
   });
 
-  it('a non-provable blip that clears before the last real evaluation does not poison the latch', async () => {
+  it('a non-provable reason a later degraded evaluation stops showing stays latched (#3562)', async () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      // A non-provable enrichment blip arrives WHILE the turn-class
+      // A non-provable enrichment fault arrives WHILE the turn-class
       // degradation is still live...
       h.setTurnCapability(degradedTurnCapability());
       h.setRuntimeDegraded(true);
@@ -8182,20 +8181,21 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       expect(second.status_reasons).toContain('turn_capability_degraded');
       expect(second.status_reasons).toContain('enrichment_runtime_degraded');
 
-      // ...and clears while a real evaluation still observes the turn-class
-      // reason: the LAST real evaluation shows turn-class only, so the blip
-      // was observed clearing — it is not unproven silence.
+      // ...and stops being reported while a real evaluation still observes the
+      // turn-class reason. Absence from a child-reported source is not proof
+      // that it recovered, so the latch keeps it.
       h.setRuntimeDegraded(false);
       const third = JSON.parse((await healthReq(h.port)).body);
       expect(third.status).toBe('degraded');
       expect(third.status_reasons).toContain('turn_capability_degraded');
       expect(third.status_reasons).not.toContain('enrichment_runtime_degraded');
 
+      // A turn proves the turn pipeline only, so its receipt cannot release it.
       h.setTurnCapability(null);
       advanceClock(1000);
       h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       const fourth = JSON.parse((await healthReq(h.port)).body);
-      expectReleased(fourth);
+      expectLatched(fourth);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }

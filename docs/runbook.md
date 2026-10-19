@@ -751,13 +751,18 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   sorted latched reason codes, so a latch-only reading names what armed it.
   Each `degradation silence latch released: …` line carries the released
   `reasons` and the `proof` that released them (`primary_turn_receipt` or
-  `direct_reprobe`).
+  `direct_reprobe`). A `degradation silence latch narrowed: direct re-probe`
+  line carries the `reasons` the re-probe released and the `remaining` ones
+  still latched.
 - **Advance.** Every later evaluation that observes real degradation reasons
-  advances the latch point and updates the latched reason set: a
-  full-visibility evaluation REPLACES the set with what it observed (a reason
-  it saw clear is not unproven silence); a short-circuit evaluation
-  (auth-failure / disconnected / runtime-unhealthy) UNIONS its observed
-  reasons in, never removing members it had no visibility to re-check.
+  advances the latch point and UNIONS its observed reasons into the latched
+  set. No evaluation removes a member just because it no longer shows it:
+  absence is what silence looks like, so a reason leaves the set only through
+  a release channel below (#3562). A full-visibility evaluation used to
+  replace the set, so a reason that stopped being reported while another was
+  still live left the latch unproven. An evaluation that ends with a late
+  reason, or that fails (`health check failed`, HTTP 500), also undoes any
+  release or narrowing it made earlier.
 - **Release.** The latch releases only on a successful EXACT-primary-route
   turn receipt: same provider AND same model as the primary route (an
   explicit primary model requires the receipt to name that model; a
@@ -770,21 +775,27 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   — a turn proves the turn pipeline, never enrichment/memory/durability).
   Strictly-newer is the only temporal guard; a genuine receipt does not
   expire by wall clock.
-- **Release by direct re-probe (#3562).** A latch that no turn can prove,
-  including every latch on a passive or Chat instance, releases when every
-  latched reason has been re-probed clean on every evaluation for one minute
+- **Release by direct re-probe (#3562).** A latched reason that no turn can
+  prove, including every reason on a passive or Chat instance, is released
+  once it has been re-probed clean on every evaluation for one minute
   (`LATCH_REPROBE_OBSERVATION_MS`). A clean re-probe is a full-visibility
-  evaluation with no status reason, on which each latched reason is backed by
-  a positive read of its own source. The sources are: a connected transport
+  evaluation with no status reason, on which the reason is backed by a
+  positive read of its own source. The sources are: a connected transport
   for the connection classes; a present auth bond classifying as no auth
-  failure for `auth_failure.*`; an enrichment run inside the staleness bound
-  for `enrichment_stale`; a reported, non-degraded memory state for each
-  `memory_*` family. A directly re-probed member, held by a latch from an
-  older release, counts as clean whenever it is absent. Any other
-  evaluation restarts the minute, and so does a source that stops reporting,
-  because that is silence and not a clean read. Elapsed time with no
-  evaluation releases nothing, because the window needs a clean re-probe at
-  both ends. Reasons without a direct probe keep the proof they needed
+  failure, read live or from a current cached walk (a `stale` digest is not a
+  re-read), for `auth_failure.*`; an enrichment run with a valid, not-future
+  time inside the staleness bound for `enrichment_stale`; a reported,
+  non-degraded memory state for each `memory_*` family. A directly re-probed
+  member, held by a latch from an older release, counts as clean whenever it
+  is absent. Each reason has its own window. When it ends the reason leaves
+  the set and the rest stay latched for their own proof; the latch releases
+  when the set is empty, or when what is left is turn-provable and a turn
+  receipt proves it. Any other evaluation, including a failed one, restarts
+  every window, and so does a source that stops reporting, because that is
+  silence and not a clean read. Elapsed time with no evaluation releases
+  nothing, because a window needs a clean re-probe at both ends. The window
+  runs on the monotonic clock, so a wall-clock step neither shortens nor
+  lengthens it. Reasons without a direct probe keep the proof they needed
   before. These are the turn-pipeline reasons, child-reported runtime and
   `enrichment_runtime_degraded`, the identity reasons, and the late sources.
 - **Restart amnesia (known hazard, not a channel).** The latch is
@@ -796,8 +807,8 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   `runtime.recent_crashes`, `runtime.turn_queue_halted`,
   `enrichment_runtime_degraded`, a late source, or a passive or Chat
   instance's `runtime_degraded`) holds until the underlying condition is
-  fixed and the process restarts. So does a mixed latch in which no single
-  channel can prove every reason.
+  fixed and the process restarts, even after a later evaluation stops
+  reporting it.
 
 ### Watchdog provider-credential states
 

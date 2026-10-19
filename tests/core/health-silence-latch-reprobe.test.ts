@@ -6,11 +6,13 @@
  * instance that armed a latch read `degradation_silence_unproven` until the
  * process restarted, with its transport connected and its auth bond present.
  *
- * The release added for that case is a DIRECT RE-PROBE: every latched reason
- * must be backed by a positive read of the state it names on a quiet
- * evaluation, held across the observation window. Silence (a source that
- * stopped reporting), elapsed time alone and an empty reason list alone still
- * release nothing. A reason with no direct probe still needs its old proof.
+ * The release added for that case is a DIRECT RE-PROBE: a latched reason is
+ * released once a positive read of the state it names has held on every quiet
+ * evaluation across the observation window, on the monotonic clock; the rest
+ * stay latched. Silence (a source that stopped reporting, or a reason a later
+ * evaluation no longer shows), a stale read, a failed evaluation, elapsed time
+ * alone and an empty reason list alone still release nothing. A reason with
+ * no direct probe still needs its old proof.
  *
  * Each case opens ONE server and polls it repeatedly: the latch map belongs to
  * the server instance, so a fresh server per poll would reset the state under
@@ -137,8 +139,16 @@ function authBond(issues: string[] = []): Record<string, unknown> {
 }
 const AT_RISK_ISSUE = 'auth_mode_chmod_failed:creds.json:EPERM';
 
+/** A clean bond whose cached walk an event invalidated and whose refresh has not landed. */
+function staleCachedBond(): Record<string, unknown> {
+  const bond = authBond();
+  return { ...bond, treeProvenance: { ...(bond.treeProvenance as Record<string, unknown>), source: 'stale' } };
+}
+
 interface PassiveInstance {
   poll: () => Promise<Record<string, any>>;
+  /** Makes the next evaluation throw, so that poll answers 500. */
+  failNextPoll: () => Promise<number>;
   setBond: (bond: Record<string, unknown> | null) => void;
   setEnrichment: (stats: { lastRun: string | null; runtimeDegraded?: boolean }) => void;
 }
@@ -191,6 +201,7 @@ describe('GET /health — passive silence latch released by direct re-probe (#35
   async function openPassive(instanceName: string): Promise<PassiveInstance> {
     let bond: Record<string, unknown> | null = authBond();
     let enrichment: { lastRun: string | null; runtimeDegraded?: boolean } = { lastRun: null };
+    let failNext = false;
     const connectionState = () => ({
       ...emptyConnectionStateSnapshot({
         connected: true,
@@ -212,7 +223,13 @@ describe('GET /health — passive silence latch released by direct re-probe (#35
         getHealthConnectionState: connectionState,
       } as unknown as ConnectionManager,
       startedAt: Date.now() - 1_000,
-      getEnrichmentStats: () => ({ unprocessed: 0, ...enrichment }),
+      getEnrichmentStats: () => {
+        if (failNext) {
+          failNext = false;
+          throw new Error('enrichment stats read failed');
+        }
+        return { unprocessed: 0, ...enrichment };
+      },
       instanceName,
       instanceType: 'passive',
       accessMode: 'allowlist',
@@ -226,6 +243,10 @@ describe('GET /health — passive silence latch released by direct re-probe (#35
         const { status, body } = await healthReq(built.port);
         expect(status).toBe(200);
         return JSON.parse(body);
+      },
+      failNextPoll: async () => {
+        failNext = true;
+        return (await healthReq(built.port)).status;
       },
       setBond: (next) => { bond = next; },
       setEnrichment: (next) => { enrichment = next; },
@@ -355,6 +376,125 @@ describe('GET /health — passive silence latch released by direct re-probe (#35
     advance(WINDOW_MS);
     expectLatched(await p.poll());
   });
+
+  it('(B1) a degraded poll that no longer shows an unproven reason keeps it latched', async () => {
+    const p = await openPassive('passive-drop-unproven');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk', 'enrichment_runtime_degraded']);
+    // The child stops reporting the enrichment runtime fault while the bond is
+    // still at risk. Its absence is not a proof that it recovered.
+    p.setEnrichment({ lastRun: null, runtimeDegraded: false });
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+    // The bond is then re-probed clean across the window. That proves the bond
+    // only, so the enrichment runtime reason keeps the latch.
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(B1) the narrowed line names the reasons the re-probe released and the ones still latched', async () => {
+    const p = await openPassive('passive-narrowed-line');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    await p.poll();
+    p.setBond(authBond());
+    p.setEnrichment({ lastRun: null, runtimeDegraded: false });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    const narrowed = healthLogger.info.mock.calls.slice(callsBefore)
+      .filter((call) => call[1] === 'degradation silence latch narrowed: direct re-probe')
+      .map((call) => call[0]);
+    expect(narrowed).toEqual([{
+      instance: 'passive-narrowed-line',
+      reasons: ['auth_failure.auth_bond_at_risk'],
+      remaining: ['enrichment_runtime_degraded'],
+      proof: 'direct_reprobe',
+    }]);
+    expect(latchReleasedLines(callsBefore)).toEqual([]);
+  });
+
+  it('(B2) a failed poll inside the window restarts it', async () => {
+    const p = await openPassive('passive-failed-poll');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expect(await p.failNextPoll()).toBe(500);
+    advance(WINDOW_MS / 2);
+    // A clean window needs a clean re-probe on every evaluation; the failed one
+    // was not, so this read only opens a new window.
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it('(C1) a stale cached auth bond is not a clean re-probe', async () => {
+    const p = await openPassive('passive-stale-bond');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    // Reads 'present' with no issue, but from a walk an event has invalidated.
+    p.setBond(staleCachedBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    // The refresh lands: from here the bond is clean evidence again.
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it.each([
+    ['an unparseable', () => 'not-a-timestamp'],
+    ['a future', () => new Date(Date.now() + 60 * 60_000).toISOString()],
+  ])('(C2) %s enrichment run time is not a fresh run', async (_label, lastRun) => {
+    const p = await openPassive('passive-bad-enrichment-time');
+    p.setEnrichment({ lastRun: new Date(Date.now() - 11 * 60_000).toISOString() });
+    expect((await p.poll()).status_reasons).toEqual(['enrichment_stale']);
+    p.setEnrichment({ lastRun: lastRun() });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(C3) a forward wall-clock step does not shorten the window', async () => {
+    const p = await openPassive('passive-wall-step-forward');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    // Only the wall clock moves, as a host clock step does.
+    vi.setSystemTime(Date.now() + 2 * WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it('(C3) a backward wall-clock step does not lengthen the window', async () => {
+    const p = await openPassive('passive-wall-step-back');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
 });
 
 describe('releaseDegradationLatchOnReprobe — the re-probe release contract', () => {
@@ -422,6 +562,25 @@ describe('releaseDegradationLatchOnReprobe — the re-probe release contract', (
     expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 2 + WINDOW_MS)).toBe(false);
     expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + 2 * WINDOW_MS)).toBe(false);
     expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 2 + 2 * WINDOW_MS)).toBe(true);
+  });
+
+  it('(B1) a mixed latch releases only the re-probed reasons; the rest keep needing their own proof', () => {
+    const map = latch(['auth_failure.auth_bond_at_risk', 'turn_capability_degraded']);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(false);
+    expect([...map.get(NAME)!.reasons]).toEqual(['turn_capability_degraded']);
+    // What is left is turn-provable, so the turn receipt channel can now release it.
+    expect(health.releaseDegradationLatchOnRecoveryProof(
+      map,
+      NAME,
+      {
+        last_successful_turn_at: T0 + 2,
+        last_successful_turn_provider: 'claude-cli',
+        last_successful_turn_model: null,
+        last_successful_turn_session_current: true,
+      },
+      { providerId: 'claude-cli', modelRef: null },
+    )).toBe(true);
   });
 
   it('an unwitnessed evaluation inside the window restarts it', () => {
