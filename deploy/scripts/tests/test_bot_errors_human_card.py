@@ -1278,3 +1278,27 @@ def test_packet_pruning_closes_owned_scan(stop, remaining):
             assert next(entries, None) is None
         finally:
             _mod.prune_notice_packets({})
+
+
+def test_packet_publish_refuses_directory_replacement_after_private_validation(state, monkeypatch):
+    directory = state["packets"]
+    directory.mkdir(mode=0o700)
+    retained = directory.with_name("retained-packets")
+    outside = directory.with_name("outside-packets")
+    outside.mkdir(mode=0o700)
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"keep")
+    ensure = _mod.ensure_private_dir
+
+    def replace_after_validation(path):
+        ensure(path)
+        if path == directory and not retained.exists():
+            directory.rename(retained)
+            directory.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(_mod, "ensure_private_dir", replace_after_validation)
+    with pytest.raises(RuntimeError):
+        _mod.write_notice_packet(state, {"ref": "12345678", "noticeId": "race-fixture"})
+    assert sorted(p.name for p in outside.iterdir()) == ["sentinel"]
+    assert sentinel.read_bytes() == b"keep"
+    assert list(retained.iterdir()) == []

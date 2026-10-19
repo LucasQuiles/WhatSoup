@@ -5358,9 +5358,13 @@ def build_notice_packet(
     return redacted_notice_value(packet)
 
 
-def publish_notice_packet(path: Path, packet: dict[str, Any]) -> PublicationResult:
+def publish_notice_packet(path: Path, packet: dict[str, Any], *, trusted_root: Path) -> PublicationResult:
     """The single durable publication site for a notice packet."""
-    target = _durable_target(path)
+    ensure_private_dir(path.parent)
+    target = durable_json_target(
+        trusted_root=trusted_root.resolve(strict=True),
+        relative_path=path.relative_to(trusted_root),
+    )
     observation = observe_json(target)
     generation = (observation.version.generation or 0) + 1
     return publish_state_json(
@@ -5392,7 +5396,7 @@ def write_notice_packet(paths: dict[str, Path], packet: dict[str, Any]) -> Path:
         raise NoticeRefExhausted(f"notice Ref {ref} names a different notice; refusing to overwrite")
     if existing is None and (path.exists() or path.is_symlink()):
         raise RuntimeError(f"notice Ref {ref} holds an unreadable entry; refusing to overwrite")
-    require_all_advance([publish_notice_packet(path, packet)])
+    require_all_advance([publish_notice_packet(path, packet, trusted_root=paths["root"])])
     written = read_notice_packet(paths, ref)
     if written is None or notice_packet_identity(written) != notice_packet_identity(packet):
         raise RuntimeError(f"notice packet {ref} did not survive its own write")
