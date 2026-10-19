@@ -67,7 +67,8 @@ function readWorkingDocument(repoRoot: string, relativePath: string): Buffer | n
         }
         if (total > MAX_EXACT_SINGLE_BLOB_BYTES) throw new Error('working document exceeds byte limit');
         const after = fstatSync(fd);
-        if (total !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+        if (total !== opened.size || after.mode !== opened.mode || after.size !== opened.size
+          || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
           throw new Error('working document changed while reading');
         }
         validateParents();

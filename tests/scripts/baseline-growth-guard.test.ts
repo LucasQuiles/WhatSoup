@@ -665,6 +665,60 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     expect(`${result.stdout}${result.stderr}`).toMatch(/baseline.*invalid/i);
   });
 
+  it.each(['actual', 'unchanged'])(
+    'refuses a working-tree baseline mode change with %s timestamps', (timestamps) => {
+      const dir = makeRepo(2);
+      const path = join(dir, '.claude/fitness/boundary-baseline.json');
+      const hookDir = tmp.make('baseline-mode-race');
+      const hook = join(hookDir, 'hook.mjs');
+      const marker = join(hookDir, 'mutation');
+      writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  const target = ${JSON.stringify(path)};
+  const stat = fs.fstatSync;
+  const lstat = fs.lstatSync;
+  const leaf = lstat(target);
+  let changed = false;
+  const isTarget = (observed) => observed.ino === leaf.ino && observed.dev === leaf.dev;
+  const observe = (observed) => {
+    // Simulate a filesystem whose timestamp resolution hides this status change.
+    if (changed && isTarget(observed) && ${JSON.stringify(timestamps)} === 'unchanged') {
+      observed.mtimeMs = leaf.mtimeMs;
+      observed.ctimeMs = leaf.ctimeMs;
+    }
+    return observed;
+  };
+  fs.fstatSync = (fd, ...args) => observe(stat(fd, ...args));
+  fs.lstatSync = (path, ...args) => {
+    const observed = lstat(path, ...args);
+    return observed === undefined ? observed : observe(observed);
+  };
+  const read = fs.readSync;
+  fs.readSync = (fd, ...args) => {
+    const count = read(fd, ...args);
+    if (!changed && count > 0 && isTarget(stat(fd))) {
+      fs.fchmodSync(fd, leaf.mode | 0o111);
+      changed = true;
+      fs.writeFileSync(${JSON.stringify(marker)}, String(stat(fd).mode & 0o111));
+    }
+    return count;
+  };
+  syncBuiltinESMExports();
+}
+`);
+      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+      const result = spawnSync(process.execPath,
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(readFileSync(marker, 'utf8')).toBe(String(0o111));
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/baseline.*invalid/i);
+    },
+  );
+
   it('is INCONCLUSIVE when the repository root is replaced between the Git base and working candidate', () => {
     const dir = makeRepo(2);
     const replacement = makeRepo(1);
