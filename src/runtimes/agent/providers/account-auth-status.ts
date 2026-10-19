@@ -27,7 +27,7 @@
 import type { DiagnosticProbe, DiagnosticProbeResult } from '../diagnostic-bundle.ts';
 import type { BinaryAuthStatusResult, BinaryCommandProbeOptions } from './binary-preflight.ts';
 import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
-import { refreshAheadStillRunning } from './claude-refresh-ahead.ts';
+import type { ClaudeRefreshAheadResult } from './claude-refresh-ahead.ts';
 import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -50,7 +50,7 @@ export interface AccountAuthStatusDeps {
   isAuthRequiredMessage: (text: string) => boolean;
   env: NodeJS.ProcessEnv;
   /** claude-cli: refresh-ahead run before the killable auth-status child (claude-refresh-ahead.ts). */
-  refreshAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
+  refreshAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<ClaudeRefreshAheadResult | void>;
   /** claude-cli: refresh-lock wait before the auth-status child is signalled. */
   terminationGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
   /** claude-cli: spawn/exit lines of the auth-status child (probe-lifecycle-log.ts). */
@@ -107,12 +107,12 @@ export function makeAccountAuthStatusProbe(
     // deadline may abandon this finding meanwhile; the refresh still finishes,
     // and the killable spawn below is then skipped.
     if (isClaude && deps.refreshAhead && !signal.aborted) {
-      let refreshed: unknown;
+      let refreshed: ClaudeRefreshAheadResult | void = undefined;
       try {
         refreshed = await deps.refreshAhead(binary, env);
       } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
       // Never start the killable probe while the refresh child still runs.
-      if (refreshAheadStillRunning(refreshed)) {
+      if (refreshed && refreshed.outcome === 'still-running') {
         return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: login refresh still running`, data: { mode: 'binary', provider: target.provider } };
       }
     }
