@@ -24,6 +24,11 @@
 //                  CLAUDE_CONFIG_DIR the installed plist P already has, so a
 //                  re-render never strips a hand-added key. A configured value
 //                  always wins over it. A missing P preserves nothing.
+// Exception: the harness-maintenance job (Label com.whatsoup.harness-maintenance)
+// always gets its own <home>/.claude-maint, never an instance's or the installed
+// value. It runs `claude plugin list`, `claude mcp list` and the native
+// installer, which can refresh the login of the dir they see, so sharing the
+// bot's dir let the job rotate or wipe the bot's login (RCA 2026-10-18 M3).
 // No value ⇒ output is byte-identical to input. Exit 2 on an invalid config, a
 // plist without an EnvironmentVariables dict, or a --preserve-from plist that
 // mentions CLAUDE_CONFIG_DIR but that the reader refuses (fail closed: never
@@ -39,6 +44,8 @@ import { isValidInstanceName } from '../src/fleet/instance-name.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
 
 const KEY = 'CLAUDE_CONFIG_DIR';
+const MAINTENANCE_LABEL = /<key>Label<\/key>\s*<string>com\.whatsoup\.harness-maintenance<\/string>/;
+const MAINTENANCE_DIR_NAME = '.claude-maint';
 
 /**
  * Insert CLAUDE_CONFIG_DIR as the first EnvironmentVariables entry. The dict is
@@ -166,6 +173,9 @@ function readOptions(argv: readonly string[]): Options {
 
 export function run(argv: readonly string[], input: string, env: NodeJS.ProcessEnv): { output: string; warning: string | null } {
   const { preserveFrom, ...args } = readOptions(argv);
+  if (MAINTENANCE_LABEL.test(input)) {
+    return { output: injectClaudeConfigDir(input, path.join(args.home, MAINTENANCE_DIR_NAME)), warning: null };
+  }
   const resolved = resolveHostClaudeConfigDir({ ...args, env });
   // A configured value always wins. Only when config yields none (unset, or
   // several different values) does the installed plist's own value carry

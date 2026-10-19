@@ -73,10 +73,19 @@ const HARNESS_TEMPLATE = [
   '    <string>/bin/bash</string>',
   '    <string>__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh</string>',
   '  </array>',
+  '  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin</string></dict>',
   '  <key>StandardOutPath</key><string>__HOME__/logs/harness.log</string>',
   '</dict></plist>',
   '',
 ].join('\n');
+
+/** The harness-maintenance job as installed: the render plus its own CLAUDE_CONFIG_DIR, $HOME/.claude-maint. */
+function harnessInstalled(f: { repo: string; home: string }): string {
+  return subst(HARNESS_TEMPLATE, f.repo, f.home).replace(
+    '<dict><key>PATH</key>',
+    `<dict><key>CLAUDE_CONFIG_DIR</key><string>${f.home}/.claude-maint</string><key>PATH</key>`,
+  );
+}
 
 const REPLY_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'reply-guarantee')
@@ -176,7 +185,7 @@ function makeFixture(): { repo: string; launchd: string; bin: string; home: stri
 
 // Install every managed surface correctly for one bot ("tbot").
 function installAllOk(f: { repo: string; launchd: string; bin: string; home: string }): void {
-  writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'), subst(HARNESS_TEMPLATE, f.repo, f.home));
+  writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'), harnessInstalled(f));
   writeFileSync(join(f.launchd, 'com.whatsoup.reply-guarantee.plist'), subst(REPLY_TEMPLATE, f.repo, f.home));
   writeFileSync(join(f.launchd, 'com.whatsoup.tbot.plist'), plistXml('com.whatsoup.tbot', '/usr/local/bin/node', true));
   writeFileSync(join(f.launchd, 'com.whatsoup.tbot-watchdog.plist'), subst(WATCHDOG_TEMPLATE, f.repo, f.home, 'tbot'));
@@ -389,7 +398,7 @@ describe('static template surfaces (substitute-then-compare)', () => {
     const f = makeFixture();
     installAllOk(f);
     writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'),
-      subst(HARNESS_TEMPLATE, f.repo, f.home).replace('harness.sh', 'TAMPERED.sh'));
+      harnessInstalled(f).replace('harness.sh', 'TAMPERED.sh'));
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('drift: harness-maintenance');
@@ -400,7 +409,7 @@ describe('static template surfaces (substitute-then-compare)', () => {
     const f = makeFixture();
     installAllOk(f);
     writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'),
-      subst(HARNESS_TEMPLATE, f.repo, f.home).replace('harness.sh', 'TAMPERED.sh'));
+      harnessInstalled(f).replace('harness.sh', 'TAMPERED.sh'));
     const result = run(f, ['--show-diff']);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('TAMPERED');
@@ -889,7 +898,7 @@ describe('host-scope checks under explicit --instance subset', () => {
 
   it('reports drift when release-drift-check is installed but no instances exist at all', () => {
     const f = makeFixture();
-    writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'), subst(HARNESS_TEMPLATE, f.repo, f.home));
+    writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'), harnessInstalled(f));
     writeFileSync(join(f.launchd, 'com.whatsoup.reply-guarantee.plist'), subst(REPLY_TEMPLATE, f.repo, f.home));
     writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for tbot\n');
     const result = run(f);
