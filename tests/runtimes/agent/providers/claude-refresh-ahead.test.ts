@@ -398,6 +398,44 @@ describe('probeBinaryCommand termination grace', () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
+  it('a child that exits on its own during the grace is not reported as killed', async () => {
+    const child = fakeChild(4103);
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    let release!: () => void;
+    const grace = new Promise<void>((resolve) => { release = resolve; });
+    const exits: unknown[] = [];
+    void probeBinaryCommand('claude', ['-p', 'x'], {}, {
+      timeoutMs: 15_000,
+      terminationGrace: () => grace,
+      onExited: (exit) => { exits.push(exit); },
+    }, spawnImpl);
+    await vi.advanceTimersByTimeAsync(15_000);
+    child.emit('close', 0, null);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(exits).toEqual([expect.objectContaining({ exitCode: 0, signal: null, killedByTimeout: false, killedByAbort: false })]);
+  });
+
+  it('a child signalled after the grace is reported as killed by the timeout', async () => {
+    const child = fakeChild(4104);
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    let release!: () => void;
+    const grace = new Promise<void>((resolve) => { release = resolve; });
+    const exits: unknown[] = [];
+    void probeBinaryCommand('claude', ['-p', 'x'], {}, {
+      timeoutMs: 15_000,
+      terminationGrace: () => grace,
+      onExited: (exit) => { exits.push(exit); },
+    }, spawnImpl);
+    await vi.advanceTimersByTimeAsync(15_000);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(child.kill).toHaveBeenCalledOnce();
+    child.emit('close', null, 'SIGTERM');
+    expect(exits).toEqual([expect.objectContaining({ signal: 'SIGTERM', killedByTimeout: true })]);
+  });
+
   it('signals at once when no grace applies', async () => {
     const child = fakeChild(4102);
     const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
