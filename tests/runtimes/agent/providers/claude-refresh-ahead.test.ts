@@ -30,6 +30,7 @@ type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
+  unref: ReturnType<typeof vi.fn>;
 };
 
 function fakeChild(pid: number): FakeChild {
@@ -38,6 +39,7 @@ function fakeChild(pid: number): FakeChild {
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = vi.fn(() => true);
+  child.unref = vi.fn();
   return child;
 }
 
@@ -185,22 +187,41 @@ describe('refreshClaudeLoginAhead: never killed', () => {
     h.children[0]!.emit('close', 0, null);
   });
 
-  it('after the hard cap a hung child stops blocking (error line), is still not killed, and a new caller runs its own check', async () => {
+  it('after the hard cap a hung child stops blocking the wait (one error line, ticker stopped), is never killed, and while it lives no second child starts', async () => {
     const dir = configDir();
     const h = harness({ fileStore: store(START.getTime() + 1_000) });
     void refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
     await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_HARD_CAP_MS);
-    const hung = h.lines.find((l) => l.obj.event === 'claude_refresh_ahead_hung');
-    expect(hung).toBeDefined();
-    expect(hung!.obj).toMatchObject({ purpose: 'refresh-ahead', pid: 9000, elapsedMs: REFRESH_AHEAD_HARD_CAP_MS });
+    const hungLines = () => h.lines.filter((l) => l.obj.event === 'claude_refresh_ahead_hung');
+    expect(hungLines()).toHaveLength(1);
+    expect(hungLines()[0]!.obj).toMatchObject({ purpose: 'refresh-ahead', pid: 9000, elapsedMs: REFRESH_AHEAD_HARD_CAP_MS });
+    const ticks = h.lines.filter((l) => l.obj.event === 'claude_probe_still_running').length;
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(h.lines.filter((l) => l.obj.event === 'claude_probe_still_running')).toHaveLength(ticks);
+    expect(hungLines()).toHaveLength(1);
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
 
+    // Child A is still alive: a later caller is deferred at once and spawns nothing.
+    let settled: unknown = 'pending';
+    void refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps).then((r) => { settled = r; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toEqual({ outcome: 'still-running' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+
+    // Once A exits, a caller runs its own check again.
+    h.children[0]!.emit('close', 0, null);
     const next = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
     expect(h.spawnImpl).toHaveBeenCalledTimes(2);
     h.children[1]!.emit('close', 0, null);
     await expect(next).resolves.toMatchObject({ outcome: 'ran' });
-    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
+  it('unrefs the child so a hung refresh cannot keep the bot alive, while still awaiting its exit', async () => {
+    const h = harness();
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: configDir() }, h.deps);
+    expect(h.children[0]!.unref).toHaveBeenCalledOnce();
     h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toMatchObject({ outcome: 'ran' });
   });
 
   it('spawns the child detached (its own process group), output discarded', async () => {
@@ -434,6 +455,18 @@ describe('probeBinaryCommand termination grace', () => {
     expect(child.kill).toHaveBeenCalledOnce();
     child.emit('close', null, 'SIGTERM');
     expect(exits).toEqual([expect.objectContaining({ signal: 'SIGTERM', killedByTimeout: true })]);
+  });
+
+  it('a kill that returns false is not reported as a kill', async () => {
+    const child = fakeChild(4105);
+    child.kill = vi.fn(() => false);
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    const exits: unknown[] = [];
+    void probeBinaryCommand('claude', ['-p', 'x'], {}, { timeoutMs: 15_000, onExited: (exit) => { exits.push(exit); } }, spawnImpl);
+    await vi.advanceTimersByTimeAsync(17_000);
+    expect(child.kill).toHaveBeenCalled();
+    child.emit('close', 0, null);
+    expect(exits).toEqual([expect.objectContaining({ killedByTimeout: false, killedByAbort: false })]);
   });
 
   it('signals at once when no grace applies', async () => {
