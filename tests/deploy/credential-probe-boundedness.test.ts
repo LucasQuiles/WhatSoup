@@ -986,6 +986,13 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+function expectLifecycleIsolation(result: ReturnType<typeof runLifecycleProbe>) {
+  const evidence = JSON.stringify(result);
+  expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+  expect(result.survivors_before_cleanup, evidence).toEqual([]);
+  expect(result.survivors_after_cleanup, evidence).toEqual([]);
+}
+
 describe('whatsoup_run_bounded process-group lifecycle', () => {
   it.each(['fast', 'nested', 'nonzero', 'zero'] as const)('reaps every owned descendant before returning from %s', (mode) => {
     const result = runLifecycleProbe(mode);
@@ -1017,9 +1024,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const result = runLifecycleProbe(mode);
     expect(result.stdout).toContain('rc=2 output=');
     expect(result.command_started).toBe(false);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('returns after a verified command launch-gate reader dies before release', () => {
     const result = runLifecycleProbe('reader-killed-after-verification');
@@ -1028,9 +1033,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout).toContain('rc=137 output=');
     expect(result.command_started).toBe(false);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('keeps the command deadline when an optional watchdog launch reader is lost', () => {
     const result = runLifecycleProbe('watchdog-reader-killed-after-verification');
@@ -1039,26 +1042,20 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout).toContain('rc=124 output=');
     expect(result.command_started).toBe(true);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('enforces the command deadline while the supervising parent is stopped', () => {
     const result = runLifecycleProbe('parent-stopped');
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.command_alive_while_parent_stopped, JSON.stringify(result)).toBe(false);
     expect(result.stdout).toContain('rc=124 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('reaps command descendants when the supervising parent receives TERM', () => {
     const result = runLifecycleProbe('parent-terminated');
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout).toContain('rc=143 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it.each(['setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring'] as const)('bounds a TERM-ignoring setup child from helper entry: %s', (mode) => {
     const result = runLifecycleProbe(mode);
@@ -1066,9 +1063,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(false);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('fails closed and reaps setup when the outer timer sleep fails', () => {
     const result = runLifecycleProbe('setup-timer-sleep-failure');
@@ -1076,9 +1071,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(false);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('reports a worker cleanup residual instead of a deadline', () => {
     const result = runLifecycleProbe('cleanup-residual');
@@ -1088,9 +1081,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.command_started, JSON.stringify(result)).toBe(true);
     expect(result.cleanup_residual_polls, JSON.stringify(result)).toBeGreaterThan(0);
     expect(result.cleanup_residual_capture_valid, JSON.stringify(result)).toBe(true);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('refuses interrupted cleanup after the command leader is reaped before outer authorization', () => {
     const result = runLifecycleProbe('dead-leader-before-authorization');
@@ -1099,9 +1090,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.continued_guard, JSON.stringify(result)).toBe(result.stopped_guard);
     expect(result.command_pid_reaped_before_authorization, JSON.stringify(result)).toBe(true);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('keeps the deadline result when clean worker completion precedes outer authorization', () => {
     const result = runLifecycleProbe('dead-leader-clean-cleanup');
@@ -1110,9 +1099,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
     expect(result.guard_left_stopped_for_deadline_reader, JSON.stringify(result)).toBe(result.stopped_guard);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('allows bounded worker cleanup to finish after the command leader is reaped', () => {
     const result = runLifecycleProbe('dead-leader-finishing-cleanup');
@@ -1155,9 +1142,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     const result = runLifecycleProbe(status === 0 ? 'ordinary-exit-0' : status === 2 ? 'ordinary-exit-2' : 'ordinary-exit-143');
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout, JSON.stringify(result)).toContain(`rc=${status} output=payload`);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it.for(['event-order-deadline-first', 'event-order-expired-reaped', 'event-order-natural-0', 'event-order-natural-2', 'event-order-natural-143'] as const)('arbitrates real FIFO status by observed event order: %s', (mode, { task }) => {
     const result = runLifecycleProbe(mode);
@@ -1290,9 +1275,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.stopped_worker, JSON.stringify(result)).toBeTruthy();
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('does not trust a forged completion marker for a stopped worker', () => {
     const result = runLifecycleProbe('forged-completion-worker-stopped');
@@ -1300,9 +1283,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.forged_completion, JSON.stringify(result)).toBeTruthy();
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('does not lose a release sent before the worker stops', () => {
     const result = runLifecycleProbe('handshake-early-cont');
@@ -1312,9 +1293,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.command_started, JSON.stringify(result)).toBe(true);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=0 output=payload');
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it.each(['control-tokenless', 'control-duplicate-token', 'control-low-group', 'control-caller-group', 'control-external-group'] as const)('fails closed without signalling an injected group: %s', (mode) => {
     const result = runLifecycleProbe(mode);
@@ -1323,9 +1302,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.dangerous_kill_attempts, JSON.stringify(result)).toEqual([]);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   // The groups the worker created must not outlive it when the worker cannot
   // run its own cleanup. Each case checks its survivors right after its setup,
@@ -1461,9 +1438,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.outcome_victim_contents, JSON.stringify(result)).toBe('unchanged');
     expect(result.outcome_directory_children, JSON.stringify(result)).toEqual([]);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   // The fixture lets the first SIGKILL of the watchdog's group reach its leader
   // only, as when a member forks at that instant; the call must still end it.
@@ -1500,18 +1475,14 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.timeout_victim_contents, JSON.stringify(result)).toBe('unchanged');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it.each(['leader-exits', 'status-255', 'printf-override'] as const)('preserves status and cleans owned groups for %s', (mode) => {
     const result = runLifecycleProbe(mode);
     const expected = mode === 'leader-exits' ? 'rc=137 output=' : mode === 'status-255' ? 'rc=255 output=payload' : 'rc=0 output=payload';
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout, JSON.stringify(result)).toContain(expected);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   // With real timers the scheduler picks the winner near the deadline, so the
   // result must agree with the observed winner, never with wall-clock hopes: a
@@ -1706,9 +1677,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.command_partial_signal, JSON.stringify(result)).toBeTruthy();
     expect(result.exit, JSON.stringify(result)).toBe(0);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=0 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('keeps command-substitution helpers in the owned worker group', () => {
     const result = runLifecycleProbe('cleanup-child-group');
@@ -1718,9 +1687,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
       result.umask_groups.map(() => result.expected_helper_group),
     );
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   it('reaps a timer child that survives the first group signal', () => {
     const result = runLifecycleProbe('deadline-timer-descendant');
@@ -1755,9 +1722,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.terminal_foreground_group, JSON.stringify(result)).toBe(result.root_pid);
     expect(result.terminal_echo, JSON.stringify(result)).toContain('go');
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   // A watchdog that dies after creating its deadline marker but before writing
   // the token must not turn an exhausted budget into a protocol failure: the
@@ -1774,9 +1739,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.deadline_marker_observed, JSON.stringify(result)).toBe('absent');
     expect(result.deadline_watchdog_term, JSON.stringify(result)).toBe(false);
     expect(result.residual_bounded_files, JSON.stringify(result)).toEqual([]);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   // The deadline marker is exclusive: an existing file at its path is never
   // replaced by the watchdog, and an unauthenticated marker fails closed. A
@@ -1790,9 +1753,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.deadline_watchdog_term, JSON.stringify(result)).toBe(false);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.residual_bounded_files, JSON.stringify(result)).toEqual([]);
-    expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
-    expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
-    expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+    expectLifecycleIsolation(result);
   });
   // Only the publish step runs under a zero file-size limit, so the marker path
   // must go from absent straight to the full token: a copying publish leaves an
