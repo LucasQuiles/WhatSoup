@@ -144,6 +144,20 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
     refresh.children[0]!.emit('close', 0, null);
   });
 
+  it('a caller that cancelled during the refresh wait gets its cancellation, not the deferral', async () => {
+    const probe = spawnRecorder();
+    const controller = new AbortController();
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: async () => { controller.abort(); return { outcome: 'still-running' }; },
+      })),
+      { signal: controller.signal },
+    );
+    expect(result).toMatchObject({ status: 'timeout', reason: 'caller-pre-aborted' });
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+  });
+
   it('is not run for a provider other than claude-cli', async () => {
     const probe = spawnRecorder();
     const refreshAhead = vi.fn(async () => undefined);
@@ -220,6 +234,14 @@ describe('account-identity probe deferral', () => {
 });
 
 describe('diagnostic auth-status probe', () => {
+  it('reports the abort, not the deferral, when the bundle gave up during the refresh wait', async () => {
+    const controller = new AbortController();
+    const deps = authDeps({ refreshAhead: async () => { controller.abort(); return { outcome: 'still-running' }; } });
+    const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(controller.signal);
+    expect(deps.probeBinaryAuthStatus).not.toHaveBeenCalled();
+    expect(result.summary).toContain('aborted');
+  });
+
   it('does not start its killable spawn while the refresh-ahead child still runs', async () => {
     const deps = authDeps({ refreshAhead: async () => ({ outcome: 'still-running' }) });
     const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
