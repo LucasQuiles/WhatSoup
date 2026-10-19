@@ -5249,13 +5249,15 @@ def notice_packet_identity(packet: Mapping[str, Any]) -> str:
 def redacted_notice_value(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
+        next_suffix: dict[str, int] = {}
         for key, item in value.items():
             base = redact_dispatcher_text(key)
             printable = base
-            suffix = 2
+            suffix = next_suffix.get(base, 2)
             while printable in result:
                 printable = f"{base} [{suffix}]"
                 suffix += 1
+            next_suffix[base] = suffix
             result[printable] = redacted_notice_value(item)
         return result
     if isinstance(value, list):

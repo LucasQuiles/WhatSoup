@@ -1333,3 +1333,57 @@ def test_packet_cli_keeps_internal_identity_digest_private(state):
     assert digest not in printed.stdout
     assert path.read_bytes() == before
     assert _mod.existing_notice_ref(state, _GOLDENS[0]["event"]["id"]) == ref
+
+
+
+def test_packet_collision_keeps_literal_generated_suffix():
+    first = "Bearer " + "a" * 40
+    second = "Bearer " + "b" * 40
+    printable = _mod.redact_dispatcher_text(first)
+    metadata = {f"{printable} [2]": "reserved", first: "first", second: "second", printable: "literal"}
+    packet = _mod.build_notice_packet(_GOLDENS[0]["event"], ref="12345678", notice_kind="fixture", card="card", extra={"metadata": metadata})
+    assert len(packet["metadata"]) == 4
+    assert set(packet["metadata"].values()) == set(metadata.values())
+    assert packet["metadata"][f"{printable} [2]"] == "reserved"
+    encoded = json.dumps(packet)
+    assert "a" * 40 not in encoded and "b" * 40 not in encoded
+
+
+def test_packet_collision_redaction_is_stable_on_a_second_pass():
+    first = "Bearer " + "a" * 40
+    second = "Bearer " + "b" * 40
+    printable = _mod.redact_dispatcher_text(first)
+    original = {"nested": [{first: 1, second: 2, printable: 3, f"{printable} [2]": 4}]}
+    once = _mod.redacted_notice_value(original)
+    twice = _mod.redacted_notice_value(once)
+    assert twice == once
+    assert set(twice["nested"][0].values()) == {1, 2, 3, 4}
+    assert len(twice["nested"][0]) == 4
+    assert "a" * 40 not in json.dumps(twice) and "b" * 40 not in json.dumps(twice)
+
+
+def test_packet_collision_redaction_work_scales_with_input_size():
+    def measured(size):
+        source = {f"Bearer {index:040x}": index for index in range(size)}
+        steps = 0
+        code = _mod.redacted_notice_value.__code__
+        def trace(frame, event, arg):
+            nonlocal steps
+            if frame.f_code is code:
+                if event == "line":
+                    steps += 1
+                return trace
+            return None
+        previous = sys.gettrace()
+        try:
+            sys.settrace(trace)
+            visible = _mod.redacted_notice_value(source)
+        finally:
+            sys.settrace(previous)
+        assert len(visible) == size
+        assert set(visible.values()) == set(range(size))
+        assert all(key not in source for key in visible)
+        return steps
+    small = measured(128)
+    large = measured(256)
+    assert large <= 3 * small, (small, large)
