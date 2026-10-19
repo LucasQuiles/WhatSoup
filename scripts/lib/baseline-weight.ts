@@ -291,7 +291,25 @@ function canonicalJson(value: unknown): string {
 export function baselineIdentities(
   shape: BaselineShape,
   doc: unknown,
+  baselineId?: string,
 ): string[] | undefined {
+  if (baselineId === 'test-integrity') {
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)
+      || !Array.isArray((doc as { findings?: unknown }).findings)) {
+      throw new BaselineShapeError('test-integrity: expected a findings array');
+    }
+    return (doc as { findings: unknown[] }).findings.map((finding, index) => {
+      if (finding === null || typeof finding !== 'object' || Array.isArray(finding)) {
+        throw new BaselineShapeError(`test-integrity[${index}]: expected a finding object`);
+      }
+      const { file, rule_id, content_signature } = finding as Record<string, unknown>;
+      if (!isNonEmptyString(file) || !isNonEmptyString(rule_id) || !isNonEmptyString(content_signature)) {
+        throw new BaselineShapeError(`test-integrity[${index}]: file, rule_id and content_signature must be non-empty strings`);
+      }
+      // Line-sensitive signatures move during refactors without introducing new debt.
+      return canonicalJson([file, rule_id, content_signature]);
+    });
+  }
   if (shape !== 'entry-array') return undefined;
   return entryArrayEntries(doc).map(canonicalJson);
 }
@@ -307,6 +325,7 @@ export interface WeighedBaseline {
   baseIdentities?: readonly string[];
   /** Candidate entry multiset; every occurrence must exist in baseIdentities. */
   headIdentities?: readonly string[];
+  headSha256?: string;
 }
 
 export interface BaselineFinding {
@@ -314,6 +333,7 @@ export interface BaselineFinding {
   path: string;
   base: number | null;
   head: number | null;
+  headSha256?: string;
   /** head - base when both are known; `null` otherwise. */
   delta: number | null;
   /** True when the comparison could not be made at all. Report, never pass. */
@@ -445,6 +465,8 @@ export interface GrowthWaiver {
    * Absent or false preserves the identity law unchanged.
    */
   admitsNewIdentities?: boolean;
+  /** Exact reviewed candidate baseline bytes; absent keeps the numeric-only contract. */
+  expectedBaselineSha256?: string;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -454,9 +476,21 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
   if (typeof document !== 'object' || document === null || Array.isArray(document)) {
     throw new BaselineShapeError('growth-waivers: expected an object with a waivers array');
   }
-  const waivers = (document as { waivers?: unknown }).waivers;
+  const record = document as Record<string, unknown>;
+  const version = record.schemaVersion === undefined ? 1 : record.schemaVersion;
+  if (version !== 1 && version !== 2) {
+    throw new BaselineShapeError('growth-waivers: unsupported schema version');
+  }
+  if (version === 2 && Object.hasOwn(record, 'waivers')) {
+    throw new BaselineShapeError('growth-waivers: version 2 must not contain legacy waivers');
+  }
+  if (version === 1 && Object.hasOwn(record, 'grants')) {
+    throw new BaselineShapeError('growth-waivers: grants require version 2');
+  }
+  const key = version === 2 ? 'grants' : 'waivers';
+  const waivers = record[key];
   if (!Array.isArray(waivers)) {
-    throw new BaselineShapeError('growth-waivers: missing waivers array');
+    throw new BaselineShapeError(`growth-waivers: missing ${key} array`);
   }
   const registeredPaths = new Set(BASELINE_REGISTRY.map((b) => b.path));
   return waivers.map((w, i) => {
@@ -479,13 +513,25 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
       throw new BaselineShapeError(`growth-waivers[${i}]: issue must be a non-empty string`);
     }
     for (const [field, value] of [['grantedAt', grantedAt], ['expiresAt', expiresAt]] as const) {
-      if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) {
+      const timestamp = typeof value === 'string' && ISO_DATE_RE.test(value)
+        ? Date.parse(`${value}T00:00:00.000Z`)
+        : Number.NaN;
+      if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value) {
         throw new BaselineShapeError(`growth-waivers[${i}]: ${field} must be an ISO date (YYYY-MM-DD)`);
       }
     }
     const { admitsNewIdentities } = w as Record<string, unknown>;
     if (admitsNewIdentities !== undefined && typeof admitsNewIdentities !== 'boolean') {
       throw new BaselineShapeError(`growth-waivers[${i}]: admitsNewIdentities must be a boolean when present`);
+    }
+    const { expectedBaselineSha256 } = w as Record<string, unknown>;
+    if (version === 1 && expectedBaselineSha256 !== undefined) {
+      throw new BaselineShapeError(`growth-waivers[${i}]: hash constraints require version 2`);
+    }
+    if (expectedBaselineSha256 !== undefined
+      && (typeof expectedBaselineSha256 !== 'string'
+        || !/^[0-9a-f]{64}$/.test(expectedBaselineSha256))) {
+      throw new BaselineShapeError(`growth-waivers[${i}]: expectedBaselineSha256 must be a lowercase SHA-256`);
     }
     return {
       path,
@@ -495,6 +541,7 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
       grantedAt: grantedAt as string,
       expiresAt: expiresAt as string,
       ...(admitsNewIdentities === undefined ? {} : { admitsNewIdentities }),
+      ...(expectedBaselineSha256 === undefined ? {} : { expectedBaselineSha256 }),
     };
   });
 }
@@ -524,6 +571,8 @@ export function applyWaivers(
         && !f.inconclusive
         && f.head !== null
         && f.head <= candidate.maxWeight
+        && (candidate.expectedBaselineSha256 === undefined
+          || candidate.expectedBaselineSha256 === f.headSha256)
         && candidate.grantedAt <= todayIso
         && todayIso <= candidate.expiresAt,
     );

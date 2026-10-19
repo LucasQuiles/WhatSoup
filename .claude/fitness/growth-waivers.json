@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "waivers": [
+  "schemaVersion": 2,
+  "grants": [
     {
       "path": ".claude/fitness/baseline.json",
       "maxWeight": 29161,
@@ -58,6 +58,16 @@
       "issue": "https://github.com/LucasQuiles/WhatSoup/issues/2147",
       "grantedAt": "2026-09-02",
       "expiresAt": "2026-09-16"
+    },
+    {
+      "path": ".claude/test-integrity/baseline.json",
+      "maxWeight": 93,
+      "expectedBaselineSha256": "9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7",
+      "reason": "PR #3815 retains 12 explicit BOT ERRORS regression and safety matrices flagged only by advisory py-property-test-suggestion: human-card 8, info-volume 3, fleet-token target 1. Preserve their exact regression inputs and assertions. Cap at the reviewed resulting weight 81 -> 93; no further growth or other rule exemption is requested. Broader property coverage remains a separate improvement, not a condition for keeping these regression examples.",
+      "issue": "https://github.com/LucasQuiles/WhatSoup/pull/3815",
+      "grantedAt": "2026-10-17",
+      "expiresAt": "2026-10-19",
+      "admitsNewIdentities": true
     }
   ]
 }
