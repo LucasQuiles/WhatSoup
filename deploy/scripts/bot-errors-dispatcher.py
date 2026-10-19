@@ -5261,9 +5261,13 @@ def read_notice_packet(paths: dict[str, Path], ref: str) -> dict[str, Any] | Non
     except ValueError:
         return None
     try:
-        # Match the writer's private-directory and 8 MiB payload contract;
-        # keep this read free of directory creation or symlink resolution.
-        target = durable_json_target(trusted_root=path.parent.absolute(), relative_path=path.name)
+        # Canonicalize only the configured trust root (for aliases such as
+        # macOS /tmp). Packet directories and leaves remain descriptor-relative
+        # and no-follow, with the writer's private modes and 8 MiB byte limit.
+        target = durable_json_target(
+            trusted_root=paths["root"].resolve(strict=True),
+            relative_path=path.relative_to(paths["root"]),
+        )
         return observe_json(target, strict=True).payload
     except Exception:  # noqa: BLE001 - an unreadable packet reads as absent
         return None

@@ -1312,8 +1312,9 @@ the card retries on the existing cadence without sending a packetless fallback.
 Known daily-card rejection or packet-storage failure remains visible in dispatcher
 health while its retry is pending, including cycles throttled by the retry delay.
 A daily helper exception also records a failure without preventing the sibling card.
-Packet reads use the durable JSON reader's private-directory checks and inclusive
-8 MiB limit, rejecting symlinked parents and leaves. Printable packet fields and
+Packet reads canonicalize the configured state root, then use the durable JSON
+reader's private-directory checks and inclusive 8 MiB limit, rejecting symlinked
+packet directories and leaves. Printable packet fields and
 keys are redacted; a separate SHA-256 notice identity keeps retries and distinct
 notices separate when their printable identifiers redact to the same text.
 An outbox packet's archive path is corrected to the actual collision-safe destination

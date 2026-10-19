@@ -757,6 +757,16 @@ def test_packet_reader_enforces_durable_json_byte_limit(state) -> None:
     assert packet.stat().st_size == limit + 1
 
 
+def test_packet_reader_accepts_configured_root_alias(state, tmp_path) -> None:
+    alias = tmp_path / "configured-state-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    aliased = dict(state, root=alias, packets=alias / "packets")
+    event = _GOLDENS[0]["event"]
+    _, ref = _mod.notice_message(event, notice_kind="fixture", paths=aliased)
+    assert ref is not None
+    assert _mod.read_notice_packet(aliased, ref)["noticeId"] == event["id"]
+
+
 def test_packet_stores_the_redacted_event_never_the_raw_one(state, tmp_path) -> None:
     # Relay 19 S6: `packet <ref>` prints the packet, so the stored event is the
     # dispatcher's redacted payload, not json_snapshot(event).
