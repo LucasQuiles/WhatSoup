@@ -330,7 +330,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
-        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
+        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup', 'authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
             deadline = time.monotonic() + 3
             authorization = None
             while time.monotonic() < deadline:
@@ -342,7 +342,20 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if authorization is None: raise RuntimeError('outer authorization unavailable')
             fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
             command_pid = int(fields['command_pid'])
-            worker = next((item['ppid'] for item in members(session) if item['pid'] == command_pid), None)
+            process_members = members(session)
+            worker = next((item['ppid'] for item in process_members if item['pid'] == command_pid), None)
+            if worker is None and mode == 'authorized-guard-stuck':
+                # The successful command can already have exited before the
+                # worker reaches its cleanup FIFO. In this fixture-only mode,
+                # recover the worker as the only direct child process-group
+                # leader without a live child; the guard still owns its timer.
+                group_leaders = [
+                    item for item in process_members
+                    if item['pid'] != child.pid and item['pid'] == item['pgid']
+                    and not any(candidate['ppid'] == item['pid'] for candidate in process_members)
+                ]
+                if len(group_leaders) == 1:
+                    worker = group_leaders[0]['pid']
             worker_record = next((item for item in members(session) if item['pid'] == worker), None)
             if worker is None or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
@@ -394,10 +407,17 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     time.sleep(0.01)
                 record['deadline_replaced_with_fifo'] = (root / 'deadline-race-substituted').exists()
                 if not record['deadline_replaced_with_fifo']: raise RuntimeError('deadline stat/open substitution was not reached')
-            if mode in ('dead-leader-clean-cleanup', 'authorization-unreadable-after-cleanup'):
-                if mode == 'authorization-unreadable-after-cleanup':
+            if mode in ('dead-leader-clean-cleanup', 'authorization-unreadable-after-cleanup', 'authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
+                if mode in ('authorization-unreadable-after-cleanup', 'authorization-unreadable-guard-stuck'):
                     authorization.chmod(0)
                     record['authorization_unreadable'] = not os.access(authorization, os.R_OK)
+                    if mode == 'authorization-unreadable-guard-stuck':
+                        deadline_marker = root / ('whatsoup-bounded-deadline.%s.%s' % (child.pid, fields['token']))
+                        try:
+                            deadline_marker.write_text(fields['token'], encoding='utf-8', errors='strict')
+                        except FileExistsError:
+                            pass
+                        record['deadline_forced'] = deadline_marker.is_file()
                 release = os.open(root / 'authorization-rm-release', os.O_WRONLY | os.O_NONBLOCK)
                 try: os.write(release, b'release\n')
                 finally: os.close(release)
@@ -554,6 +574,8 @@ record['job_control_monitor_refused'] = (root / 'job-control-monitor-refused').e
 record['job_control_recovered'] = (root / 'job-control-recovered').exists()
 record['job_control_stop_witness'] = (root / 'job-control-stop-witness').read_text().strip() if (root / 'job-control-stop-witness').exists() else None
 record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
+record['guard_term_held'] = (root / 'guard-term-held').exists()
+record['guard_sleep_held'] = (root / 'guard-sleep-held').exists()
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['command_partial_signal'] = (root / 'command-partial-signal').read_text() if (root / 'command-partial-signal').exists() else None
 record['umask_groups'] = [int(value) for value in (root / 'umask-groups').read_text().split()] if (root / 'umask-groups').exists() else []

@@ -403,12 +403,12 @@ function observeLifecycleEventOrder(source: string): string {
   ].join('\n'));
   insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', `    wait "$worker_pid" 2>/dev/null || worker_rc=$?\n    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`);
   insert('      _bounded_read_deadline_bounded\n      deadline_rc=$?', `      _bounded_read_deadline_bounded\n      deadline_rc=$?\n      ${event('P_DEADLINE_READ deadline_rc=$deadline_rc cleanup_failed=$status_cleanup_failed')}`);
-  insert('    wait "$guard_pid" 2>/dev/null || guard_rc=$?', `    ${event('G_WAIT worker=$worker_pid guard=$guard_pid worker_rc=$worker_rc deadline_rc=$deadline_rc')}\n    wait "$guard_pid" 2>/dev/null || guard_rc=$?\n    ${event('P_GUARD_REAPED guard=$guard_pid guard_rc=$guard_rc')}`);
+  insert('    _bounded_wait_guard "$guard_term_sent"', `    ${event('G_WAIT worker=$worker_pid guard=$guard_pid worker_rc=$worker_rc deadline_rc=$deadline_rc')}\n    _bounded_wait_guard "$guard_term_sent"\n    ${event('P_GUARD_REAPED guard=$guard_pid guard_rc=$guard_rc')}`);
   insert('    _bounded_outer_cleanup\n    trap - EXIT', `    ${event('A worker=$worker_pid worker_rc=$worker_rc guard=$guard_pid guard_rc=$guard_rc deadline_rc=$deadline_rc rc=$rc')}\n    _bounded_outer_cleanup\n    trap - EXIT`);
   return source;
 }
 const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bounded-exec-lifecycle-driver.py'), 'utf8');
-function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'zero', terminal = false) {
+function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'authorization-unreadable-guard-stuck' | 'authorized-guard-stuck' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'zero', terminal = false) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
@@ -452,7 +452,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       execFileSync(resolveBinary('mkfifo')!, ['event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'event-order-poll-release'].map((name) => path.join(root, name)));
     }
   }
-  if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'dead-leader-finishing-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
+  if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'dead-leader-finishing-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup' || mode === 'authorization-unreadable-guard-stuck' || mode === 'authorized-guard-stuck') {
     execFileSync(resolveBinary('mkfifo')!, [authorizationRmRelease]);
   }
   for (const name of ['sleep', 'mktemp', 'mkfifo', 'rm', 'rmdir', 'cat', 'false', 'ps']) {
@@ -576,7 +576,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    builtin kill "$@"',
     '  }',
     '  ;; esac',
-    'case "$4" in dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup)',
+    'case "$4" in dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|authorization-unreadable-guard-stuck|authorized-guard-stuck)',
     '  rm() {',
     '    local argument marker_rc',
     '    for argument in "$@"; do',
@@ -736,7 +736,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     // TERM to the guard as well. After the reap, the outer-terminated mode holds
     // the outer at its first resume of the guard until the driver sends TERM.
     // Every status passes through.
-    'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted)',
+    'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted|authorization-unreadable-guard-stuck)',
     '  kill() {',
     '    local kill_rc=0 polls=0',
     '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
@@ -749,6 +749,24 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     '    if [ "$1" = -USR1 ] && [ -n "${worker_pid-}" ] && [ "$2" = "$worker_pid" ]; then : > "$GUARD_USR1_SENT"; fi',
     '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then : > "$OUTER_TERM_SENT"; fi',
     '    return "$kill_rc"',
+    '  }',
+    '  ;; esac',
+    'case "$4" in authorization-unreadable-guard-stuck|authorized-guard-stuck)',
+    '  sleep() {',
+    '    if [ -n "${guard_status-}" ] && [ "$1" = "$grace" ]; then',
+    '      : > "$GUARD_SLEEP_HELD"',
+    '      while [ ! -e "$GUARD_SLEEP_RELEASE" ]; do /bin/sleep 0.01; done',
+    '    fi',
+    '    command sleep "$@"',
+    '  }',
+    '  ;; esac',
+    'case "$4" in authorization-unreadable-guard-stuck|authorized-guard-stuck)',
+    '  kill() {',
+    '    if [ "$1" = -TERM ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
+    '      : > "$GUARD_TERM_HELD"',
+    '      return 0',
+    '    fi',
+    '    builtin kill "$@"',
     '  }',
     '  ;; esac',
     // Hold the worker's cleanup at its first step, the ticker wait, or the
@@ -836,7 +854,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
-    'budget=6; case "$4" in event-order-frame-*) ;; event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*|guard-trap-in-record-read|job-control-unavailable) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap) budget=1;; guard-terminated) budget=3;; zero) budget=0;; esac',
+    'budget=6; case "$4" in event-order-frame-*) ;; event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|authorization-unreadable-guard-stuck|authorized-guard-stuck|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*|guard-trap-in-record-read|job-control-unavailable) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap) budget=1;; guard-terminated) budget=3;; zero) budget=0;; esac',
     '[ "$4" != event-order-frame-tmout ] || { TMOUT=1; export -n TMOUT; }',
     // These modes count groups that outlive the call. Such a group would hold a
     // capture pipe open and keep the probe from returning, so they use a file.
@@ -894,6 +912,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     // Ignore TERM so the command outlives the watchdog budget and the real
     // watchdog writer is reached instead of being reaped before it runs, or,
     // with a valid record, outlives the guard's TERM and the worker's.
+    'if [ "$1" = authorized-guard-stuck ]; then printf payload; exit; fi',
     'case "$1" in deadline-writer-*|authorization-valid-*) trap "" TERM; value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|outcome-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|authorization-unreadable-cleanup-interrupted|guard-terminated|outer-terminated|guard-trap-in-record-read) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',
@@ -961,6 +980,9 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       GUARD_TIMER_ENTERED: path.join(root, 'guard-timer-entered'),
       AUTHORIZATION_UNREADABLE_RELEASE: path.join(root, 'authorization-unreadable-release'),
       OUTER_TERM_SENT: path.join(root, 'outer-term-sent'),
+      GUARD_TERM_HELD: path.join(root, 'guard-term-held'),
+      GUARD_SLEEP_HELD: path.join(root, 'guard-sleep-held'),
+      GUARD_SLEEP_RELEASE: path.join(root, 'guard-sleep-release'),
       OUTER_HOLDING: path.join(root, 'outer-holding'),
       BARRIER_EXPIRED: path.join(root, 'barrier-expired'),
       CLEANUP_HOLD: path.join(root, 'cleanup-hold'),
@@ -1125,6 +1147,28 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.dangerous_kill_attempts, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it('bounds a guard that does not complete TERM during unreadable authorization handoff', () => {
+    const result = runLifecycleProbe('authorization-unreadable-guard-stuck');
+    expect(result.authorization_unreadable, JSON.stringify(result)).toBe(true);
+    expect(result.deadline_forced, JSON.stringify(result)).toBe(true);
+    expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.guard_term_held, JSON.stringify(result)).toBe(true);
+    expect(result.guard_sleep_held, JSON.stringify(result)).toBe(true);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expectLifecycleIsolation(result);
+  });
+  it('returns refusal when an otherwise successful worker outlives a stuck guard handoff', () => {
+    const result = runLifecycleProbe('authorized-guard-stuck');
+    expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
+    expect(result.guard_term_held, JSON.stringify(result)).toBe(true);
+    expect(result.guard_sleep_held, JSON.stringify(result)).toBe(true);
+    expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
+    expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expectLifecycleIsolation(result);
   });
   it('fails closed after a worker-cleanup deadline handoff is replaced with a FIFO', () => {
     const result = runLifecycleProbe('deadline-fifo-after-cleanup');
