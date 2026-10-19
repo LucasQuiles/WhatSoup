@@ -217,6 +217,9 @@ export async function probeBinaryCommand(
     let abortListener: (() => void) | undefined;
     let childPid: number | undefined;
     let childClosed = false;
+    // Whether a signal was actually sent: a child that exits on its own during
+    // a termination grace was not killed, even though a timer or abort fired.
+    let signalSent = false;
 
     const notifyExited = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean): void => {
       if (exitNotified) return;
@@ -226,8 +229,8 @@ export async function probeBinaryCommand(
           pid: childPid,
           exitCode,
           signal,
-          killedByTimeout: killTimerFired,
-          killedByAbort: abortRequested,
+          killedByTimeout: killTimerFired && signalSent,
+          killedByAbort: abortRequested && signalSent,
           spawnFailed,
         });
       } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
@@ -286,6 +289,7 @@ export async function probeBinaryCommand(
 
     const signalChild = (): void => {
       if (childClosed) return;
+      signalSent = true;
       try { child.kill(); } catch { /* ignore kill errors */ }
       killEscalationTimer = setTimeout(() => {
         try { child.kill(SIGNAL.KILL); } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
