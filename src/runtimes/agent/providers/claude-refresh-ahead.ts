@@ -19,8 +19,16 @@
 //     or of unknown expiry, run one `claude auth status --json` that WhatSoup
 //     never times out and never signals, so the refresh happens in a child
 //     that always finishes. Concurrent callers for one storage dir share it.
+//     A caller waits at most REFRESH_AHEAD_WAIT_MS for it; if it is still
+//     running, the probe is deferred (no killable child is spawned) and the
+//     child keeps running. After REFRESH_AHEAD_HARD_CAP_MS the run stops
+//     blocking later callers (logged at error), still without being killed.
+//     The child runs detached (its own process group), so a signal to the
+//     bot's group at shutdown or restart cannot reach it mid-refresh.
 //   - kill grace: before signalling such a child, wait (bounded) while the
-//     refresh lock is held and fresh.
+//     refresh lock is held and fresh. The check and the signal are not
+//     atomic: a refresh that takes the lock in the few milliseconds between
+//     the last check and the signal is not protected.
 //
 // Only `claudeAiOauth.expiresAt` is read (through the heal module's reader,
 // the one keychain/file-store reader WhatSoup has). No token value is kept or
@@ -28,7 +36,7 @@
 
 import { spawn } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
 import { CLAUDE_AUTH_STATUS_ARGS } from './account-auth-status.ts';
@@ -63,11 +71,25 @@ export const REFRESH_LOCK_STALE_MS = 60_000;
  */
 export const REFRESH_LOCK_GRACE_MS = 25_000;
 
+/**
+ * Longest a probe waits for a refresh-ahead child before it is deferred.
+ * A healthy `auth status` with a refresh finishes in seconds; 60 s also
+ * covers a refresh that waits out another process's lock (stale at 60 s).
+ */
+export const REFRESH_AHEAD_WAIT_MS = 60_000;
+
+/** After this long a still-running refresh-ahead child stops blocking new callers (never killed). */
+export const REFRESH_AHEAD_HARD_CAP_MS = 10 * 60_000;
+
 const REFRESH_LOCK_POLL_MS = 250;
 const STILL_RUNNING_LOG_MS = 60_000;
 const OAUTH_REFRESH_LOCK = '.oauth_refresh.lock';
 
-type Log = { info: (o: Record<string, unknown>, m: string) => void; warn: (o: Record<string, unknown>, m: string) => void };
+type Log = {
+  info: (o: Record<string, unknown>, m: string) => void;
+  warn: (o: Record<string, unknown>, m: string) => void;
+  error: (o: Record<string, unknown>, m: string) => void;
+};
 
 export type ClaudeRefreshAheadReason = 'expiry-unknown' | 'expired' | 'within-window';
 
@@ -75,7 +97,14 @@ export type ClaudeRefreshAheadResult =
   | { outcome: 'not-needed' }
   | { outcome: 'skipped-test-runner'; reason: ClaudeRefreshAheadReason }
   | { outcome: 'spawn-failed'; reason: ClaudeRefreshAheadReason }
-  | { outcome: 'ran'; reason: ClaudeRefreshAheadReason; exitCode: number | null; signal: NodeJS.Signals | null };
+  | { outcome: 'ran'; reason: ClaudeRefreshAheadReason; exitCode: number | null; signal: NodeJS.Signals | null }
+  /** The caller's wait ended while the child still runs: defer the probe, spawn nothing killable. */
+  | { outcome: 'still-running' };
+
+/** True when a refresh-ahead result says the probe must be deferred. */
+export function refreshAheadStillRunning(result: unknown): boolean {
+  return typeof result === 'object' && result !== null && (result as { outcome?: unknown }).outcome === 'still-running';
+}
 
 export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
   now?: () => number;
@@ -86,6 +115,15 @@ export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
 
 const inFlight = new Map<string, Promise<ClaudeRefreshAheadResult>>();
 
+/**
+ * Dedupe key: the storage dir, resolved and without a trailing slash, so
+ * `/x/.claude` and `/x/.claude/` share one child. The keychain item name is
+ * still derived from the raw string, because the CLI hashes what it is given.
+ */
+function refreshAheadKey(env: NodeJS.ProcessEnv): string {
+  return resolve(claudeSecureStorageDir(env));
+}
+
 function refreshReason(expiresAt: number | null, now: number): ClaudeRefreshAheadReason | null {
   if (expiresAt === null) return 'expiry-unknown';
   if (expiresAt <= now) return 'expired';
@@ -95,7 +133,8 @@ function refreshReason(expiresAt: number | null, now: number): ClaudeRefreshAhea
 /**
  * Run one never-killed `claude auth status --json` with `env` (the env of the
  * probe child that follows) when the stored token is near, past or of unknown
- * expiry, and resolve when it exits. Callers for the same storage dir share
+ * expiry, and resolve when it exits, or with 'still-running' once the caller
+ * has waited REFRESH_AHEAD_WAIT_MS. Callers for the same storage dir share
  * one in-flight run. Never rejects.
  */
 export function refreshClaudeLoginAhead(
@@ -103,20 +142,33 @@ export function refreshClaudeLoginAhead(
   env: NodeJS.ProcessEnv,
   deps: ClaudeRefreshAheadDeps = {},
 ): Promise<ClaudeRefreshAheadResult> {
-  const key = claudeSecureStorageDir(env);
-  const existing = inFlight.get(key);
-  if (existing) return existing;
-  const run = runRefreshAhead(binary, env, deps).finally(() => {
-    if (inFlight.get(key) === run) inFlight.delete(key);
+  const key = refreshAheadKey(env);
+  let run = inFlight.get(key);
+  if (!run) {
+    const release = (): void => {
+      if (inFlight.get(key) === created) inFlight.delete(key);
+    };
+    const created: Promise<ClaudeRefreshAheadResult> = runRefreshAhead(binary, env, deps, release).finally(release);
+    run = created;
+    inFlight.set(key, created);
+  }
+  return waitBounded(run);
+}
+
+function waitBounded(run: Promise<ClaudeRefreshAheadResult>): Promise<ClaudeRefreshAheadResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<ClaudeRefreshAheadResult>((resolveWait) => {
+    timer = setTimeout(() => resolveWait({ outcome: 'still-running' }), REFRESH_AHEAD_WAIT_MS);
+    timer.unref?.();
   });
-  inFlight.set(key, run);
-  return run;
+  return Promise.race([run, waited]).finally(() => clearTimeout(timer));
 }
 
 async function runRefreshAhead(
   binary: string,
   env: NodeJS.ProcessEnv,
   deps: ClaudeRefreshAheadDeps,
+  release: () => void,
 ): Promise<ClaudeRefreshAheadResult> {
   const now = deps.now ?? (() => systemClock.now());
   // Never read a live login or start a live CLI from a test run that did not
@@ -147,10 +199,13 @@ async function runRefreshAhead(
   return new Promise<ClaudeRefreshAheadResult>((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      // No timeout, no AbortSignal, output discarded: this child always runs to its own exit.
+      // No timeout, no AbortSignal, output discarded (no pipes hold the parent):
+      // this child always runs to its own exit. Detached: its own process
+      // group, out of reach of a signal sent to the bot's group.
       child = (deps.spawnImpl ?? spawn)(binary, [...CLAUDE_AUTH_STATUS_ARGS], {
         stdio: ['ignore', 'ignore', 'ignore'],
         env,
+        detached: true,
         windowsHide: true,
       });
     } catch {
@@ -170,11 +225,21 @@ async function runRefreshAhead(
       ));
     }, STILL_RUNNING_LOG_MS);
     stillRunning.unref?.();
+    // A child that never exits must not block every later probe for this dir.
+    const hardCap = setTimeout(() => {
+      release();
+      quietly(() => log.error(
+        { event: 'claude_refresh_ahead_hung', purpose: 'refresh-ahead', pid: pid ?? null, elapsedMs: now() - startedAt },
+        'claude refresh-ahead child exceeded its hard cap; no longer blocking probes (still not killed)',
+      ));
+    }, REFRESH_AHEAD_HARD_CAP_MS);
+    hardCap.unref?.();
     let finished = false;
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean): void => {
       if (finished) return;
       finished = true;
       clearInterval(stillRunning);
+      clearTimeout(hardCap);
       quietly(() => observers.onExited(exitOf(pid, exitCode, signal, spawnFailed)));
       resolve(spawnFailed ? { outcome: 'spawn-failed', reason } : { outcome: 'ran', reason, exitCode, signal });
     };
