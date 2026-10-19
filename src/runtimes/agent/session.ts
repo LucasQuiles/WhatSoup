@@ -1350,7 +1350,8 @@ export class SessionManager {
     const grace = this.provider === 'claude-cli' && childEnv ? claudeRefreshLockGrace(childEnv, 'session-kill') : null;
     if (grace !== null) {
       const marker = generationMarker;
-      return grace.then(() => this.signalChildTree(child, signal, marker));
+      // A grace that rejects (it is documented never to) must still end in the kill.
+      return grace.catch(() => undefined).then(() => this.signalChildTree(child, signal, marker));
     }
     return this.signalChildTree(child, signal, generationMarker);
   }
