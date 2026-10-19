@@ -194,6 +194,23 @@ describe('primary model probe lifecycle log', () => {
     });
   });
 
+  it('logs a spawn line (pid null) before the exit line when spawn() throws synchronously', async () => {
+    const { lines, log } = capture();
+    const spawnImpl = vi.fn(() => { throw new Error('spawn EMFILE'); }) as unknown as typeof import('node:child_process').spawn;
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => 'claude',
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-file-store-current' }),
+      probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
+      probeTrigger: 'periodic',
+      log,
+    });
+    await adapters.probeBinaryModel!({ provider: 'claude-cli', model: null });
+
+    expect(lines.map((l) => l.obj.event)).toEqual(['primary_model_probe_spawn', 'primary_model_probe_exit']);
+    expect(lines[0]!.obj.pid).toBeNull();
+    expect(lines[1]!.obj).toMatchObject({ pid: null, spawnFailed: true, exitCode: null, signal: null, killedByProbeTimeout: false });
+  });
+
   it('names the default keychain item when the probe runs without CLAUDE_CONFIG_DIR', async () => {
     delete process.env.CLAUDE_CONFIG_DIR;
     const child = fakeChild(8484);
@@ -204,6 +221,28 @@ describe('primary model probe lifecycle log', () => {
 
     expect(lines.map((l) => l.obj.credentialService)).toEqual(['default', 'default']);
     expect(lines[1]!.obj).toMatchObject({ exitCode: 1, signal: null, killedByProbeTimeout: false });
+  });
+});
+
+describe('primary model probe lifecycle log with a real child process', () => {
+  it('carries the same non-null pid in the spawn and exit lines of a successful spawn', async () => {
+    vi.useRealTimers();
+    const { lines, log } = capture();
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => process.execPath,
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-file-store-current' }),
+      // A real spawn of node itself, which exits 0 at once; the probe's own argv is replaced.
+      probeBinaryCommand: (binary, _args, env, options) => runBinaryCommandProbe(binary, ['-e', ''], env, options),
+      probeTrigger: 'periodic',
+      log,
+    });
+    await expect(adapters.probeBinaryModel!({ provider: 'claude-cli', model: null })).resolves.toEqual({ status: 'ok' });
+
+    expect(lines.map((l) => l.obj.event)).toEqual(['primary_model_probe_spawn', 'primary_model_probe_exit']);
+    const pid = lines[0]!.obj.pid;
+    expect(typeof pid).toBe('number');
+    expect(pid as number).toBeGreaterThan(0);
+    expect(lines[1]!.obj).toMatchObject({ pid, exitCode: 0, signal: null, spawnFailed: false });
   });
 });
 
