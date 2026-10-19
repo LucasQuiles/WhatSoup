@@ -5739,20 +5739,30 @@ def send_daily_information_summary(
         extra={"included": pending, "lines": lines, "droppedFromSummary": dropped},
         render=lambda summary_ref: format_information_summary_card(lines, summary_ref, dropped, missed),
     )
-    try:
-        confirmed = send_notice_text(text)
-    except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
-        section["lastAttemptAt"] = current
-        _commit_incident_state(paths, incident, incident_state)
-        append_dispatch_log(paths, {"type": "information_summary_failed", "error": truncate(str(exc), 300)})
-        return 0
+    previous = dict(section)
     section["pending"] = []
     section.pop("droppedFromSummary", None)
     section["lastSentDay"] = day
     section["lastSentAt"] = current
     section["lastRef"] = ref
-    section["lastSendUnconfirmed"] = not confirmed
+    section["lastSendUnconfirmed"] = True
     section.pop("lastAttemptAt", None)
+    try:
+        _commit_incident_state(paths, incident, incident_state)
+    except Exception:
+        section.clear()
+        section.update(previous)
+        raise
+    try:
+        confirmed = send_notice_text(text)
+    except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
+        section.clear()
+        section.update(previous)
+        section["lastAttemptAt"] = current
+        _commit_incident_state(paths, incident, incident_state)
+        append_dispatch_log(paths, {"type": "information_summary_failed", "error": truncate(str(exc), 300)})
+        return 0
+    section["lastSendUnconfirmed"] = not confirmed
     _commit_incident_state(paths, incident, incident_state)
     append_dispatch_log(paths, {
         "type": "information_summary_sent" if confirmed else "information_summary_sent_unconfirmed",
@@ -6278,18 +6288,28 @@ def send_daily_line_card(
         extra={"included": included},
         render=lambda card_ref: format_line_card(ordered, card_ref, missed),
     )
+    previous = dict(section)
+    section["lastSentDay"] = day
+    section["lastSentAt"] = current
+    section["lastRef"] = ref
+    section["lastSendUnconfirmed"] = True
+    section.pop("lastAttemptAt", None)
+    try:
+        _commit_incident_state(paths, incident, incident_state)
+    except Exception:
+        section.clear()
+        section.update(previous)
+        raise
     try:
         confirmed = send_notice_text(text)
     except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
+        section.clear()
+        section.update(previous)
         section["lastAttemptAt"] = current
         _commit_incident_state(paths, incident, incident_state)
         append_dispatch_log(paths, {"type": "line_check_card_failed", "error": truncate(str(exc), 300)})
         return 0
-    section["lastSentDay"] = day
-    section["lastSentAt"] = current
-    section["lastRef"] = ref
     section["lastSendUnconfirmed"] = not confirmed
-    section.pop("lastAttemptAt", None)
     _commit_incident_state(paths, incident, incident_state)
     append_dispatch_log(paths, {
         "type": "line_check_card_sent" if confirmed else "line_check_card_sent_unconfirmed",

@@ -1300,6 +1300,14 @@ opening does not suppress member alerts. Stale reminders retain
 storm escalation remains eligible on its existing cadence. A quiet interval
 ends an unconfirmed storm before a later occurrence starts a new one.
 
+Daily information summaries and grouped line cards commit their packet reference
+and an unconfirmed daily hold before sending. A process interruption or failed
+state publication after acceptance therefore cannot resend the same daily card.
+The next card of that kind names the uncertain card and its retained packet.
+This can also hold a card when the process stops before the network request; it
+is not proof of delivery. A known rejection restores the prior pending notices
+and retry cadence. If the initial hold cannot be persisted, no send is attempted.
+
 Generic meta-alerts report an uncertain group result as `sent_unconfirmed` and
 still try email. Credential meta-alerts preserve their existing once-per-day
 uncertain-take behavior and its documented next-cycle commit limitation.
