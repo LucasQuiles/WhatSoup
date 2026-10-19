@@ -87,7 +87,12 @@ function captureRepoRoot(repoRoot: string): RootIdentity {
 }
 
 function assertRepoRootUnchanged(repoRoot: string, expected: RootIdentity): void {
-  const observed = captureRepoRoot(repoRoot);
+  let observed: RootIdentity;
+  try {
+    observed = captureRepoRoot(repoRoot);
+  } catch {
+    throw new Error('repository root changed or is inaccessible');
+  }
   if (observed.dev !== expected.dev || observed.ino !== expected.ino) {
     throw new Error('repository root changed while reading');
   }

@@ -337,6 +337,24 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expiresAt: '2199-01-01',
   });
 
+  it('rejects an impossible calendar date instead of granting base authority', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const reviewed = readFileSync(join(dir, '.claude/fitness/baseline.json'));
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256, expiresAt: '2199-02-29' });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'invalid calendar authority']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(dir, GROWTH_WAIVERS_PATH), JSON.stringify({ schemaVersion: 2, grants: [] }));
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'), reviewed);
+    const result = runGuard(['--repo', dir, '--base', base]);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toMatch(/expiresAt.*ISO date/);
+    expect(result.out).not.toMatch(/WAIVED/);
+  });
+
   it('binds a numeric waiver to exact reviewed baseline bytes, including pinned candidates', () => {
     const dir = makeRepo(2);
     writeFitness(dir, 500);
@@ -624,6 +642,52 @@ syncBuiltinESMExports();
     expect(result.status, out).toBe(2);
     expect(out).toMatch(/repository root.*(changed|must be a directory)|root.*replaced/i);
   });
+
+  it.each(['removed', 'inaccessible'])(
+    'redacts the root recheck when the repository becomes %s after the helper read', (failure) => {
+      const dir = makeRepo(2);
+      const moved = join(tmp.make('root-recheck-moved'), 'repository');
+      const hook = join(tmp.make('root-recheck-hook'), 'hook.mjs');
+      const marker = join(tmp.make('root-recheck-marker'), 'observed');
+      writeFileSync(hook, `import fs from 'node:fs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const spawn = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  const result = spawn(command, args, options);
+  if (args?.some((arg) => arg.endsWith('/working-document-reader.ts'))) {
+    fs.writeFileSync(${JSON.stringify(marker)}, 'helper completed');
+    if (${JSON.stringify(failure)} === 'removed') {
+      fs.renameSync(${JSON.stringify(dir)}, ${JSON.stringify(moved)});
+    } else {
+      const lstat = fs.lstatSync;
+      fs.lstatSync = (path, ...rest) => {
+        if (path === ${JSON.stringify(dir)}) {
+          throw Object.assign(new Error('EACCES: permission denied, lstat ' + path), { code: 'EACCES' });
+        }
+        return lstat(path, ...rest);
+      };
+      syncBuiltinESMExports();
+    }
+  }
+  return result;
+};
+syncBuiltinESMExports();
+`);
+      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+      const result = spawnSync(process.execPath,
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      if (existsSync(moved)) renameSync(moved, dir);
+      const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+      expect(readFileSync(marker, 'utf8')).toBe('helper completed');
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, out).toBe(2);
+      expect(out).toMatch(/FAIL\(inconclusive\).*repository root/i);
+      expect(out).not.toContain(dir);
+    },
+  );
 
   it('fails closed by its reader deadline and reaps a helper stalled on a regular file', () => {
     const dir = makeRepo(2);

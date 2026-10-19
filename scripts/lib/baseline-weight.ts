@@ -513,7 +513,10 @@ export function parseWaiverDocument(document: unknown): GrowthWaiver[] {
       throw new BaselineShapeError(`growth-waivers[${i}]: issue must be a non-empty string`);
     }
     for (const [field, value] of [['grantedAt', grantedAt], ['expiresAt', expiresAt]] as const) {
-      if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) {
+      const timestamp = typeof value === 'string' && ISO_DATE_RE.test(value)
+        ? Date.parse(`${value}T00:00:00.000Z`)
+        : Number.NaN;
+      if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value) {
         throw new BaselineShapeError(`growth-waivers[${i}]: ${field} must be an ISO date (YYYY-MM-DD)`);
       }
     }

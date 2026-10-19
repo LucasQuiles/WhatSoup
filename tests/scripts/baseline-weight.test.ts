@@ -325,6 +325,27 @@ describe('waiver document compatibility', () => {
   };
   const pinned = { ...waiver, expectedBaselineSha256: 'a'.repeat(64) };
 
+  it.each(['2026-00-01', '2026-13-01', '2026-01-00', '2026-04-31', '2026-02-29', '2100-02-29'])(
+    'rejects the impossible calendar date %s in either authority envelope', (date) => {
+      for (const field of ['grantedAt', 'expiresAt']) {
+        for (const schemaVersion of [1, 2]) {
+          const entry = { ...(schemaVersion === 1 ? waiver : pinned), [field]: date };
+          const document = schemaVersion === 1
+            ? { schemaVersion, waivers: [entry] }
+            : { schemaVersion, grants: [entry] };
+          expect(() => parseWaiverDocument(document)).toThrow(new RegExp(field));
+        }
+      }
+    },
+  );
+
+  it.each(['2024-02-29', '2000-02-29', '2026-04-30'])(
+    'preserves the valid calendar date %s', (date) => {
+      const grant = { ...pinned, grantedAt: date, expiresAt: date };
+      expect(parseWaiverDocument({ schemaVersion: 2, grants: [grant] })).toEqual([grant]);
+    },
+  );
+
   it('preserves legacy numeric documents with and without an explicit version', () => {
     expect(parseWaiverDocument({ waivers: [waiver] })).toEqual([waiver]);
     expect(parseWaiverDocument({ schemaVersion: 1, waivers: [waiver] })).toEqual([waiver]);
