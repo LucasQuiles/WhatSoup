@@ -749,11 +749,16 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   complete within the bound latches as before.
 - **Log.** The `degradation silence latch set` line carries `reasons`, the
   sorted latched reason codes, so a latch-only reading names what armed it.
-  Each `degradation silence latch released: …` line carries the released
-  `reasons` and the `proof` that released them (`primary_turn_receipt` or
-  `direct_reprobe`). A `degradation silence latch narrowed: direct re-probe`
-  line carries the `reasons` the re-probe released and the `remaining` ones
-  still latched.
+  A `degradation silence latch reasons added` line is written when a later
+  evaluation adds a reason the latch did not hold. It carries the new
+  `reasons` and the whole `latched` set. Each `degradation silence latch
+  released: …` line carries the released `reasons` and the `proof` that
+  released them (`primary_turn_receipt` or `direct_reprobe`). A `degradation
+  silence latch narrowed: direct re-probe` line carries the `reasons` the
+  re-probe released and the `remaining` ones still latched. The released and
+  narrowed lines are written only after the response body is built, so an
+  evaluation that fails after its release (HTTP 500, which undoes the
+  release) logs neither.
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and UNIONS its observed reasons into the latched
   set. No evaluation removes a member just because it no longer shows it:
@@ -763,31 +768,43 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   still live left the latch unproven. An evaluation that ends with a late
   reason, or that fails (`health check failed`, HTTP 500), also undoes any
   release or narrowing it made earlier.
-- **Release.** The latch releases only on a successful EXACT-primary-route
-  turn receipt: same provider AND same model as the primary route (an
+- **Release by turn receipt.** One release channel is a successful
+  EXACT-primary-route turn receipt: same provider AND same model as the primary route (an
   explicit primary model requires the receipt to name that model; a
   provider-default primary requires the receipt model to be absent too), from
   the still-current session (`last_successful_turn_session_current === true`;
   false or unknown fails closed), strictly newer than the latch point, and
-  only while no fallback window is live. Additionally every latched reason
-  must be turn-provable (`TURN_PROVABLE_STATUS_REASONS`: turn capability,
+  only while no fallback window is live. Additionally every reason still
+  latched (after the re-probe below has removed what it proved) must be
+  turn-provable (`TURN_PROVABLE_STATUS_REASONS`: turn capability,
   agent runtime, the connection classes, and `runtime.provider_fallback_active`
   — a turn proves the turn pipeline, never enrichment/memory/durability).
   Strictly-newer is the only temporal guard; a genuine receipt does not
   expire by wall clock.
-- **Release by direct re-probe (#3562).** A latched reason that no turn can
-  prove, including every reason on a passive or Chat instance, is released
-  once it has been re-probed clean on every evaluation for one minute
+- **Release by direct re-probe (#3562).** The other channel releases a
+  latched reason that has a direct probe, on any instance type, once it has
+  been re-probed clean on every evaluation for one minute
   (`LATCH_REPROBE_OBSERVATION_MS`). A clean re-probe is a full-visibility
   evaluation with no status reason, on which the reason is backed by a
-  positive read of its own source. The sources are: a connected transport
-  for the connection classes; a present auth bond classifying as no auth
-  failure, read live or from a current cached walk (a `stale` digest is not a
-  re-read), for `auth_failure.*`; an enrichment run with a valid, not-future
-  time inside the staleness bound for `enrichment_stale`; a reported,
-  non-degraded memory state for each `memory_*` family. A directly re-probed
-  member, held by a latch from an older release, counts as clean whenever it
-  is absent. Each reason has its own window. When it ends the reason leaves
+  positive read of its own source. The sources are:
+  - a connected transport, for the connection classes;
+  - a present auth bond classifying as no auth failure, read live or from a
+    current cached walk (a `stale` digest is not a re-read), for
+    `auth_failure.*`;
+  - for `enrichment_stale`, an enrichment run with a valid, not-future time
+    inside the staleness bound that is newer than the run seen when the latch
+    point was last set. The same run reading fresh again because the clock
+    moved is not a re-probe;
+  - a reported, non-degraded memory state, for each `memory_*` family;
+  - the late sources, which are read on every evaluation:
+    `durability_evidence_unreadable` needs both durability ledgers readable,
+    `database_retention_failed` a reported retention state that is not
+    `failed`, `schema_not_ready` the schema at the binary's migration, and
+    `pending_polls_unreadable` a readable `pending_polls` table.
+
+  The directly re-probed reasons above ("Never latched") cannot enter a
+  latch. If one were held, any quiet evaluation would count as its clean
+  read. Each reason has its own window. When it ends the reason leaves
   the set and the rest stay latched for their own proof; the latch releases
   when the set is empty, or when what is left is turn-provable and a turn
   receipt proves it. Any other evaluation, including a failed one, restarts
@@ -795,20 +812,29 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   silence and not a clean read. Elapsed time with no evaluation releases
   nothing, because a window needs a clean re-probe at both ends. The window
   runs on the monotonic clock, so a wall-clock step neither shortens nor
-  lengthens it. Reasons without a direct probe keep the proof they needed
-  before. These are the turn-pipeline reasons, child-reported runtime and
-  `enrichment_runtime_degraded`, the identity reasons, and the late sources.
+  lengthens it. The window counts evaluations, not polls. Every authenticated
+  `GET /health` is an evaluation, whoever sends it (the fleet poller every
+  5 s when it holds the instance's health token, the watchdog, health
+  checks). An unauthenticated read gets the public envelope and evaluates
+  nothing. So the number of polls inside one window depends on who polls;
+  release needs at least two clean evaluations, one at each end. Reasons
+  without a direct probe keep the proof they needed before. These are the
+  turn-pipeline reasons, child-reported runtime and
+  `enrichment_runtime_degraded`, the identity reasons, and `schema_future`.
 - **Restart amnesia (known hazard, not a channel).** The latch is
   process-lifetime, in-memory state: a process restart clears it without any
   recovery proof. Nothing treats a restart as proof; the loss is a documented
   hazard of the mechanism.
 - **Known open limit: reasons with no release channel.** A latch holding a
-  reason that is neither turn-provable nor directly re-probed (for example
-  `runtime.recent_crashes`, `runtime.turn_queue_halted`,
-  `enrichment_runtime_degraded`, a late source, or a passive or Chat
-  instance's `runtime_degraded`) holds until the underlying condition is
-  fixed and the process restarts, even after a later evaluation stops
-  reporting it.
+  reason that is neither turn-provable nor directly re-probed holds until the
+  underlying condition is fixed and the process restarts, even after a later
+  evaluation stops reporting it. Examples are `runtime.recent_crashes`,
+  `runtime.turn_queue_halted`, `enrichment_runtime_degraded`, a passive or
+  Chat instance's `runtime_degraded`, the identity reasons, and
+  `schema_future`. On an agent instance, `turn_capability_degraded` and
+  `agent_runtime_*` leave only through a turn receipt, and only when every
+  reason left in the set is turn-provable. Each such source needs its own
+  positive clear read before it can join the re-probe.
 
 ### Watchdog provider-credential states
 

@@ -8794,6 +8794,40 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     }
   });
 
+  it('(#3562) an agent auth-bond latch is released by direct re-probe past 60 s, with no turn', async () => {
+    const h = await buildLatchHarness();
+    try {
+      h.setAuthBond(makeAuthBond({ issues: ['auth_mode_chmod_failed:creds.json:EPERM'], treeProvenance: treeProvenance() }));
+      expect((await poll(h)).status_reasons).toContain('auth_failure.auth_bond_at_risk');
+      h.setAuthBond(walkedCleanBond());
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(MINUTE_MS - 1);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(1);
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('(#3562) an agent turn-class latch stays latched past 60 s of clean re-probes until a turn receipt', async () => {
+    const h = await buildLatchHarness();
+    try {
+      await seedTurnClassLatch(h);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(MINUTE_MS);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      advanceClock(5 * MINUTE_MS);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      // No re-probe reads the turn pipeline; a primary receipt still does.
+      advanceClock(1000);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
   it('the latch-set log line names the latched reason codes, sorted', async () => {
     const h = await buildLatchHarness();
     try {

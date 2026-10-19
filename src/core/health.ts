@@ -248,6 +248,11 @@ export interface DegradationLatchEntry {
    * absent when no reason has one. latchedAtMs stays wall time, because the
    * turn-receipt channel compares it with a wall-clock receipt. */
   reprobeClearSinceMs?: ReadonlyMap<string, number>;
+  /** The enrichment run time (epoch ms, as the run reported it) seen when the
+   * latch point was last set, or null when no valid run was reported then. The
+   * re-probe needs a run newer than this one before `enrichment_stale` counts
+   * as clear; absent means nothing was recorded, and no run counts as new. */
+  enrichmentRunAtLatchMs?: number | null;
 }
 
 /** Status reasons a successful primary-provider turn is evidence AGAINST: the
@@ -438,7 +443,10 @@ export function releaseDegradationLatchOnRecoveryProof(
  * at both ends of the window and on every evaluation in between, so one
  * sample between two flaps of a recurring fault does not release. It is kept
  * short because a recurrence after release arms a new latch and is reported
- * again. At the fleet poller's 5 s cadence it is about 12 clean polls. */
+ * again. The window counts authenticated evaluations, whoever sends them; an
+ * unauthenticated GET /health returns the public envelope and evaluates
+ * nothing. How many polls fall inside it depends on who polls: release needs
+ * at least two clean ones, one at each end. */
 export const LATCH_REPROBE_OBSERVATION_MS = MS_PER_MINUTE;
 
 /** Positive reads, from this evaluation, of the state a latched reason names.
@@ -450,11 +458,21 @@ export interface LatchReprobeEvidence {
   /** A present auth bond classifying as no auth failure, read live or from a
    * cached walk that is still current (not a stale one). */
   authBondClear: boolean;
-  /** An enrichment run with a valid, not-future time inside the staleness bound. */
+  /** An enrichment run with a valid, not-future time inside the staleness
+   * bound, newer than the run seen at the latch point: a new run, not the old
+   * one read against a clock that moved. */
   enrichmentFresh: boolean;
   memoryReadinessClear: boolean;
   memoryContextClear: boolean;
   memoryConsolidationClear: boolean;
+  /** The late sources, each read on every evaluation: the outbound-send and
+   * tool-durability ledgers both readable, a reported retention lifecycle
+   * that has not failed, the schema at the binary's migration, and the
+   * pending-polls table readable. */
+  durabilityEvidenceReadable: boolean;
+  databaseRetentionClear: boolean;
+  schemaReady: boolean;
+  pendingPollsReadable: boolean;
 }
 
 function latchedReasonReprobedClear(reason: string, evidence: LatchReprobeEvidence): boolean {
@@ -466,8 +484,13 @@ function latchedReasonReprobedClear(reason: string, evidence: LatchReprobeEviden
   if (reason.startsWith('memory_readiness_')) return evidence.memoryReadinessClear;
   if (reason.startsWith('memory_context_')) return evidence.memoryContextClear;
   if (reason.startsWith('memory_consolidation_')) return evidence.memoryConsolidationClear;
+  if (reason === 'durability_evidence_unreadable') return evidence.durabilityEvidenceReadable;
+  if (reason === 'database_retention_failed') return evidence.databaseRetentionClear;
+  if (reason === 'schema_not_ready') return evidence.schemaReady;
+  if (reason === 'pending_polls_unreadable') return evidence.pendingPollsReadable;
   // No direct probe: the turn pipeline (turn-receipt proof only), child-reported
-  // runtime and enrichment-runtime state, identity, and the late sources.
+  // runtime and enrichment-runtime state, identity, schema_future and the other
+  // late sources. Such a reason holds the latch until the process restarts.
   return false;
 }
 
@@ -490,8 +513,11 @@ export function releaseDegradationLatchOnReprobe(
 ): boolean {
   const latch = recentlyDegraded.get(instanceName);
   if (latch === undefined) return false;
+  const runAtLatch = latch.enrichmentRunAtLatchMs === undefined
+    ? {}
+    : { enrichmentRunAtLatchMs: latch.enrichmentRunAtLatchMs };
   if (evidence === null || latch.reasons.size === 0) {
-    recentlyDegraded.set(instanceName, { latchedAtMs: latch.latchedAtMs, reasons: latch.reasons });
+    recentlyDegraded.set(instanceName, { latchedAtMs: latch.latchedAtMs, reasons: latch.reasons, ...runAtLatch });
     return false;
   }
   const remaining = new Set<string>();
@@ -514,6 +540,7 @@ export function releaseDegradationLatchOnReprobe(
     latchedAtMs: latch.latchedAtMs,
     reasons: remaining,
     ...(clearSince.size > 0 ? { reprobeClearSinceMs: clearSince } : {}),
+    ...runAtLatch,
   });
   return false;
 }
@@ -2308,6 +2335,10 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const enrichmentStaleness = enrichmentStats.lastRun
         ? Date.now() - new Date(enrichmentStats.lastRun).getTime()
         : null;
+      // #3562: the run's own reported time, or null when there is none or it
+      // does not parse. The silence latch records it at the latch point.
+      const enrichmentLastRunMs = enrichmentStats.lastRun ? new Date(enrichmentStats.lastRun).getTime() : Number.NaN;
+      const enrichmentRunMs = Number.isFinite(enrichmentLastRunMs) ? enrichmentLastRunMs : null;
       const chatEnrichmentCycle = deps.instanceType === 'chat'
         ? normalizeChatEnrichmentCycle(runtimeSnapshot?.details ?? null)
         : null;
@@ -2464,6 +2495,98 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             },
       });
 
+      // The late sources are read here, before any status is decided, so the
+      // silence-latch re-probe below has their reads as evidence (#3562).
+      // Their reasons are still added after the early status chain.
+      //
+      // #2514: track per-probe availability so consumers can distinguish
+      // failed probes (availability=false) from successful empty results.
+      const probeAvailability: Record<string, boolean> = {};
+
+      const messagesTotal = safeDbQuery(
+        () => getMessageCount(deps.db),
+        0,
+        'failed to count messages',
+        probeAvailability, 'messages',
+      );
+
+      const pendingCount = safeDbQuery(
+        () => getPendingCount(deps.db),
+        0,
+        'failed to count pending access-list entries',
+        probeAvailability, 'pending_access_list',
+      );
+
+      const outboundSends = safeDbQuery(
+        () => readOutboundSendHealth(deps.db),
+        unreadableOutboundSendHealth(),
+        'failed to read outbound send health',
+        probeAvailability, 'outbound_sends',
+      );
+      const toolWriteLosses = deps.runtime?.getToolDurabilityTelemetrySnapshot?.() ?? null;
+      const toolDurability = safeDbQuery(
+        () => readToolDurabilityHealth(deps.db, toolWriteLosses),
+        unreadableToolDurabilityHealth(toolWriteLosses),
+        'failed to read tool durability health',
+        probeAvailability, 'tool_durability',
+      );
+      let databaseRetention: DatabaseRetentionHealth | null = null;
+      if (deps.getDatabaseRetentionHealth) {
+        try {
+          databaseRetention = deps.getDatabaseRetentionHealth();
+          noteProbeSuccess('failed to read database retention health');
+        } catch (err) {
+          logProbeFailure('failed to read database retention health', err);
+          databaseRetention = {
+            running: false,
+            state: 'failed',
+            consecutiveFailures: 1,
+            failureCode: 'retention_failed',
+            lastRunAt: null,
+            lastSuccessAt: null,
+            lastFailureAt: null,
+            lastResult: null,
+          };
+        }
+      }
+      const durabilityEvidenceUnreadable = !outboundSends.readable || !toolDurability.readable;
+      const databaseRetentionFailed = databaseRetention?.state === 'failed';
+
+      const schemaVersion = safeDbQuery(
+        () => {
+          const row = deps.db.raw.prepare('PRAGMA schema_version').get() as { schema_version: number } | undefined;
+          return row?.schema_version ?? 0;
+        },
+        0,
+        'failed to read sqlite schema_version',
+        probeAvailability, 'schema_version',
+      );
+
+      const schemaMigrationLatest = safeDbQuery(
+        () => {
+          const row = deps.db.raw
+            .prepare('SELECT COALESCE(MAX(version), 0) AS latest FROM schema_migrations')
+            .get() as { latest: number } | undefined;
+          return row?.latest ?? 0;
+        },
+        0,
+        'failed to read sqlite schema migration version',
+      );
+      const schemaReady = schemaMigrationLatest === CURRENT_SCHEMA_MIGRATION;
+      const schemaIsFuture = schemaMigrationLatest > CURRENT_SCHEMA_MIGRATION;
+
+      let pendingPollsTotal = 0;
+      let pendingPollsReadable = true;
+      try {
+        const row = deps.db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number } | undefined;
+        pendingPollsTotal = row?.cnt ?? 0;
+        noteProbeSuccess('failed to count pending polls');
+      } catch (err) {
+        // The degraded latch below still fires every poll; only the LOG is bounded (#1778).
+        pendingPollsReadable = false;
+        logProbeFailure('failed to count pending polls', err);
+      }
+
       let status: 'healthy' | 'degraded' | 'unhealthy';
       let statusReasons: string[] = [];
       // #2280: set when the silence latch keeps the instance degraded, so the
@@ -2481,8 +2604,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // #2280: a release earlier in THIS evaluation is provisional — if a
       // late-computed reason turns up before emit, latch maintenance RESTORES
       // the released latch (advanced point, prior set ∪ observed reasons), so
-      // the release only sticks (and is only logged) when the evaluation ends
-      // quiet. Non-null exactly when a release happened this evaluation,
+      // the release only sticks when the evaluation ends quiet, and is only
+      // logged once the response body is built. Non-null exactly when a release happened this evaluation,
       // carrying the reasons that release cleared and the proof that cleared
       // them, for the release log line. Restoration uses latchBeforeEvaluation.
       let releasedLatch: {
@@ -2548,6 +2671,7 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           // restarts every window. The window runs on the monotonic clock, so
           // a wall-clock step neither shortens nor lengthens it.
           const bondTree = connectionState.authBond?.treeProvenance;
+          const runAtLatch = latchBeforeEvaluation.enrichmentRunAtLatchMs;
           const reprobeEvidence: LatchReprobeEvidence | null = statusReasons.length === 0
             ? {
                 connected: isConnected,
@@ -2555,14 +2679,23 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
                 authBondClear: connectionState.authBond?.status === 'present'
                   && authFailureClass === 'none'
                   && (bondTree === undefined || bondTree.source === 'cached'),
-                // An unparseable or future run time is not a fresh run.
+                // An unparseable or future run time is not a fresh run, and the
+                // run seen at the latch point is not a new one however its age
+                // reads: only a later run is a re-probe.
                 enrichmentFresh: enrichmentStaleness !== null
                   && Number.isFinite(enrichmentStaleness)
                   && enrichmentStaleness >= 0
-                  && !enrichmentIsStale,
+                  && !enrichmentIsStale
+                  && enrichmentRunMs !== null
+                  && runAtLatch !== undefined
+                  && (runAtLatch === null || enrichmentRunMs > runAtLatch),
                 memoryReadinessClear: memoryReadiness !== null && !memoryReadinessIsDegraded,
                 memoryContextClear: memoryContext !== null && !memoryContextIsDegraded,
                 memoryConsolidationClear: memoryConsolidation !== null && !memoryConsolidationIsDegraded,
+                durabilityEvidenceReadable: !durabilityEvidenceUnreadable,
+                databaseRetentionClear: databaseRetention !== null && !databaseRetentionFailed,
+                schemaReady,
+                pendingPollsReadable,
               }
             : null;
           if (releaseDegradationLatchOnReprobe(recentlyDegraded, deps.instanceName, reprobeEvidence, performance.now())) {
@@ -2594,58 +2727,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         status = statusReasons.length > 0 ? 'degraded' : 'healthy';
       }
 
-      // #2514: track per-probe availability so consumers can distinguish
-      // failed probes (availability=false) from successful empty results.
-      const probeAvailability: Record<string, boolean> = {};
-
-      const messagesTotal = safeDbQuery(
-        () => getMessageCount(deps.db),
-        0,
-        'failed to count messages',
-        probeAvailability, 'messages',
-      );
-
-      const pendingCount = safeDbQuery(
-        () => getPendingCount(deps.db),
-        0,
-        'failed to count pending access-list entries',
-        probeAvailability, 'pending_access_list',
-      );
-
-      const outboundSends = safeDbQuery(
-        () => readOutboundSendHealth(deps.db),
-        unreadableOutboundSendHealth(),
-        'failed to read outbound send health',
-        probeAvailability, 'outbound_sends',
-      );
-      const toolWriteLosses = deps.runtime?.getToolDurabilityTelemetrySnapshot?.() ?? null;
-      const toolDurability = safeDbQuery(
-        () => readToolDurabilityHealth(deps.db, toolWriteLosses),
-        unreadableToolDurabilityHealth(toolWriteLosses),
-        'failed to read tool durability health',
-        probeAvailability, 'tool_durability',
-      );
-      let databaseRetention: DatabaseRetentionHealth | null = null;
-      if (deps.getDatabaseRetentionHealth) {
-        try {
-          databaseRetention = deps.getDatabaseRetentionHealth();
-          noteProbeSuccess('failed to read database retention health');
-        } catch (err) {
-          logProbeFailure('failed to read database retention health', err);
-          databaseRetention = {
-            running: false,
-            state: 'failed',
-            consecutiveFailures: 1,
-            failureCode: 'retention_failed',
-            lastRunAt: null,
-            lastSuccessAt: null,
-            lastFailureAt: null,
-            lastResult: null,
-          };
-        }
-      }
-      const durabilityEvidenceUnreadable = !outboundSends.readable || !toolDurability.readable;
-      const databaseRetentionFailed = databaseRetention?.state === 'failed';
       if (durabilityEvidenceUnreadable) {
         if (status === 'healthy') status = 'degraded';
         statusReasons.push('durability_evidence_unreadable');
@@ -2653,41 +2734,6 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       if (databaseRetentionFailed) {
         if (status === 'healthy') status = 'degraded';
         statusReasons.push('database_retention_failed');
-      }
-
-      const schemaVersion = safeDbQuery(
-        () => {
-          const row = deps.db.raw.prepare('PRAGMA schema_version').get() as { schema_version: number } | undefined;
-          return row?.schema_version ?? 0;
-        },
-        0,
-        'failed to read sqlite schema_version',
-        probeAvailability, 'schema_version',
-      );
-
-      const schemaMigrationLatest = safeDbQuery(
-        () => {
-          const row = deps.db.raw
-            .prepare('SELECT COALESCE(MAX(version), 0) AS latest FROM schema_migrations')
-            .get() as { latest: number } | undefined;
-          return row?.latest ?? 0;
-        },
-        0,
-        'failed to read sqlite schema migration version',
-      );
-      const schemaReady = schemaMigrationLatest === CURRENT_SCHEMA_MIGRATION;
-      const schemaIsFuture = schemaMigrationLatest > CURRENT_SCHEMA_MIGRATION;
-
-      let pendingPollsTotal = 0;
-      let pendingPollsReadable = true;
-      try {
-        const row = deps.db.raw.prepare('SELECT COUNT(*) AS cnt FROM pending_polls').get() as { cnt: number } | undefined;
-        pendingPollsTotal = row?.cnt ?? 0;
-        noteProbeSuccess('failed to count pending polls');
-      } catch (err) {
-        // The degraded latch below still fires every poll; only the LOG is bounded (#1778).
-        pendingPollsReadable = false;
-        logProbeFailure('failed to count pending polls', err);
       }
 
       if (schemaIsFuture) {
@@ -3066,36 +3112,29 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       const realReasons = statusReasons.filter(isLatchable);
       if (realReasons.length > 0) {
         if (latchBeforeEvaluation !== undefined) {
+          const reasons = new Set([...latchBeforeEvaluation.reasons, ...realReasons]);
+          const joined = [...reasons].filter((reason) => !latchBeforeEvaluation.reasons.has(reason));
+          if (joined.length > 0) {
+            log.info(
+              { instance: deps.instanceName, reasons: joined.sort(), latched: [...reasons].sort() },
+              'degradation silence latch reasons added',
+            );
+          }
           recentlyDegraded.set(deps.instanceName, {
             latchedAtMs: systemClock.now(),
-            reasons: new Set([...latchBeforeEvaluation.reasons, ...realReasons]),
+            reasons,
+            enrichmentRunAtLatchMs: enrichmentRunMs,
           });
         } else if (latchArmEligible && status === 'degraded') {
           const reasons = new Set(realReasons);
           // Bounded reason codes only (no chat or account identity), so a
           // latch-only incident names the reason that armed it.
           log.info({ instance: deps.instanceName, reasons: [...reasons].sort() }, 'degradation silence latch set');
-          recentlyDegraded.set(deps.instanceName, { latchedAtMs: systemClock.now(), reasons });
-        }
-      } else {
-        if (reprobeNarrowed.length > 0) {
-          log.info(
-            {
-              instance: deps.instanceName,
-              reasons: [...reprobeNarrowed].sort(),
-              remaining: [...(recentlyDegraded.get(deps.instanceName)?.reasons ?? releasedLatch?.reasons ?? [])].sort(),
-              proof: 'direct_reprobe',
-            },
-            'degradation silence latch narrowed: direct re-probe',
-          );
-        }
-        if (releasedLatch !== null) {
-          log.info(
-            { instance: deps.instanceName, reasons: [...releasedLatch.reasons].sort(), proof: releasedLatch.proof },
-            releasedLatch.proof === 'direct_reprobe'
-              ? 'degradation silence latch released: direct re-probe'
-              : 'degradation silence latch released: fresh primary-turn receipt',
-          );
+          recentlyDegraded.set(deps.instanceName, {
+            latchedAtMs: systemClock.now(),
+            reasons,
+            enrichmentRunAtLatchMs: enrichmentRunMs,
+          });
         }
       }
 
@@ -3317,6 +3356,31 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
           : null,
       });
 
+      // #3562: a release or narrowing is logged only now, with the evaluation
+      // ended quiet and its body built. A throw before this point lands in the
+      // catch, which undoes it, so no log line claims a release that did not stick.
+      if (realReasons.length === 0) {
+        if (reprobeNarrowed.length > 0) {
+          log.info(
+            {
+              instance: deps.instanceName,
+              reasons: [...reprobeNarrowed].sort(),
+              remaining: [...(recentlyDegraded.get(deps.instanceName)?.reasons ?? releasedLatch?.reasons ?? [])].sort(),
+              proof: 'direct_reprobe',
+            },
+            'degradation silence latch narrowed: direct re-probe',
+          );
+        }
+        if (releasedLatch !== null) {
+          log.info(
+            { instance: deps.instanceName, reasons: [...releasedLatch.reasons].sort(), proof: releasedLatch.proof },
+            releasedLatch.proof === 'direct_reprobe'
+              ? 'degradation silence latch released: direct re-probe'
+              : 'degradation silence latch released: fresh primary-turn receipt',
+          );
+        }
+      }
+
       // 'degraded' returns 200: enrichment staleness and active reconnect/cooldown
       // are warnings, not hard outages. Callers inspect the JSON body for detail.
       // Only a fully disconnected/non-recovering state warrants a 503.
@@ -3332,6 +3396,9 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
         recentlyDegraded.set(deps.instanceName, {
           latchedAtMs: latchAfterFailure.latchedAtMs,
           reasons: new Set([...(latchBeforeEvaluation?.reasons ?? []), ...latchAfterFailure.reasons]),
+          ...(latchAfterFailure.enrichmentRunAtLatchMs === undefined
+            ? {}
+            : { enrichmentRunAtLatchMs: latchAfterFailure.enrichmentRunAtLatchMs }),
         });
       }
       log.error({ err }, 'health check failed');
