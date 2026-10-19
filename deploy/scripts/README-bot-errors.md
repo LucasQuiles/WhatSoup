@@ -1283,6 +1283,27 @@ command resolves the same state directory as the dispatcher's unit. Do not
 change the roster rows of a duplicated name while that name has an open
 condition.
 
+## Side-notice delivery acceptance
+
+Flap-storm alerts, stale-incident reminders and dispatcher meta-alerts validate
+that the transport accepted the message for the requested group. A non-error
+JSON-RPC response alone is insufficient. Explicit rejection retains the existing
+retry or email fallback route.
+
+Before a flap or stale reminder leaves the process, its uncertainty is committed
+to incident state. A crash or response without acceptance proof consumes that
+scheduled attempt without recording a confirmed notification. Flap state keeps
+`unconfirmedStorm` separately from the confirmed lifecycle, so an unconfirmed
+opening does not suppress member alerts. Stale reminders retain
+`lastStaleRenotifyUnconfirmedAt` and the packet reference without advancing
+`lastNotifiedAt` or the confirmed reminder count. The ordinary next reminder or
+storm escalation remains eligible on its existing cadence. A quiet interval
+ends an unconfirmed storm before a later occurrence starts a new one.
+
+Generic meta-alerts report an uncertain group result as `sent_unconfirmed` and
+still try email. Credential meta-alerts preserve their existing once-per-day
+uncertain-take behavior and its documented next-cycle commit limitation.
+
 ## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
 
 The dispatcher sends to the chat transport before it can record that the send

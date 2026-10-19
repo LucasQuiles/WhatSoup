@@ -136,11 +136,13 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
-    """True unless ``url`` is plain http on a loopback host or the default bind's host.
+    """True unless ``url`` is plain http on a loopback host.
 
     Relay 22 A2: the URL can come from an environment or profile override, and
-    the fleet token goes with the request, so any other host (or scheme, or a
-    URL carrying user info) is refused before a request is built.
+    the fleet token goes with the request, so any non-loopback host (or scheme,
+    or a URL carrying user info) is refused before a request is built. A
+    configured non-loopback bind is not local proof: remote access must use the
+    loopback listener through its TLS front door.
     """
     try:
         parts = urlsplit(url)
@@ -151,9 +153,7 @@ def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
         return True
     if parts.scheme != "http" or not host or has_user_info:
         return True
-    if _is_loopback_host(host):
-        return False
-    return host != urlsplit(fleet_api_default_url(profile)).hostname
+    return not _is_loopback_host(host)
 
 
 class _RedirectRefused(HTTPRedirectHandler):

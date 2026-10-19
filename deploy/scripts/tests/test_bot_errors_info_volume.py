@@ -694,33 +694,20 @@ def test_an_override_to_another_host_is_refused_with_no_request(mod, fleet_profi
     assert read.lines is None and read.error == "fleet_api_host_refused"
 
 
-def test_the_default_bind_host_is_still_read_with_the_token(mod, fleet_profile):
+def test_non_loopback_default_bind_host_is_refused_before_token_read(mod, fleet_profile, tmp_path):
     profile_for, _servers = fleet_profile
     profile = {**profile_for(""), "fleetApi": {"bindAddress": "192.0.2.10", "port": 9098}}
     profile.pop("fleetApiUrl")
+    profile["fleetApiTokenFile"] = str(tmp_path / "missing-fleet-tokens.json")
     requests: list = []
-
-    class _Reply:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def read(self, _limit):
-            return json.dumps([LINES["linked-line"]]).encode()
 
     def _opener(request, **_k):
         requests.append(request)
-        return _Reply()
 
     read = mod.read_fleet_lines(profile, timeout=5, opener=_opener)
 
-    assert [request.full_url for request in requests] == ["http://192.0.2.10:9098/api/lines"]
-    assert requests[0].get_header("Authorization") == "Bearer synthetic-fleet-token"
-    assert set(read.lines or {}) == {"linked-line"}
+    assert requests == [], "a configured non-loopback bind must not receive the token"
+    assert read.lines is None and read.error == "fleet_api_host_refused"
 
 
 def test_failed_line_card_is_retried_later_the_same_day(mod, pinned_clock):

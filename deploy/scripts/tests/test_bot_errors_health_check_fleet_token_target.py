@@ -150,6 +150,29 @@ def test_an_override_to_another_host_is_refused_with_no_request(fleet_profile, m
     assert line.startswith("FAIL fleet_api: fleet_api_host_refused"), line
 
 
+def test_non_loopback_configured_bind_is_refused_before_token_read(fleet_profile, monkeypatch):
+    profile_for, _servers = fleet_profile
+    profile = profile_for("")
+    profile.pop("fleetApiUrl")
+    profile["fleetApi"] = {"bindAddress": "192.0.2.10", "port": 9098}
+    requests: list = []
+    token_reads: list = []
+    real_load = _mod.load_fleet_api_token
+
+    def _load_token(*args, **kwargs):
+        token_reads.append(1)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(_mod, "load_fleet_api_token", _load_token)
+    monkeypatch.setattr(_mod, "urlopen", lambda request, **_k: requests.append(request))
+
+    [line] = _mod.fleet_api_inventory(profile)
+
+    assert requests == [], "a configured non-loopback bind must not receive the token"
+    assert token_reads == [], "the token was read for a refused configured bind"
+    assert line.startswith("FAIL fleet_api: fleet_api_host_refused"), line
+
+
 def test_a_proxy_setting_in_the_environment_is_not_used_for_the_instance_health_call(fleet_profile, monkeypatch):
     _profile_for, servers = fleet_profile
     proxy, proxy_seen = _serve("127.0.0.1", lambda _h: (200, {"Content-Type": "application/json"}, b"{}"))

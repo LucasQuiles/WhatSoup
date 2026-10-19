@@ -5527,8 +5527,8 @@ def daily_card_due_day(section: dict[str, Any], now: int) -> str | None:
     return day
 
 
-def send_daily_card_text(text: str) -> bool:
-    """Send one daily card. True when confirmed, False when sent-unconfirmed.
+def send_notice_text(text: str) -> bool:
+    """Send one notice. True when confirmed, False when sent-unconfirmed.
 
     Relay 22 A1: confirmed needs WhatsApp's acceptance proof, as on the outbox
     path. Relay 19 S2: a request with no proven outcome -- no answer after the
@@ -5740,7 +5740,7 @@ def send_daily_information_summary(
         render=lambda summary_ref: format_information_summary_card(lines, summary_ref, dropped, missed),
     )
     try:
-        confirmed = send_daily_card_text(text)
+        confirmed = send_notice_text(text)
     except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
         section["lastAttemptAt"] = current
         _commit_incident_state(paths, incident, incident_state)
@@ -6277,7 +6277,7 @@ def send_daily_line_card(
         render=lambda card_ref: format_line_card(ordered, card_ref, missed),
     )
     try:
-        confirmed = send_daily_card_text(text)
+        confirmed = send_notice_text(text)
     except Exception as exc:  # noqa: BLE001 - retried after DAILY_CARD_RETRY_SECONDS
         section["lastAttemptAt"] = current
         _commit_incident_state(paths, incident, incident_state)
@@ -7980,7 +7980,10 @@ def stale_incident_event(
 
     awaiting_physical = previous_status == "awaiting_physical"
     renotify_seconds = AWAITING_PHYSICAL_RENOTIFY_SECONDS if awaiting_physical else INCIDENT_STALE_RENOTIFY_SECONDS
-    last_stale_notified = int_field(record, "lastStaleRenotifiedAt")
+    last_stale_notified = max(
+        int_field(record, "lastStaleRenotifiedAt"),
+        int_field(record, "lastStaleRenotifyUnconfirmedAt"),
+    )
     if not ignore_cadence and last_stale_notified and current - last_stale_notified < renotify_seconds:
         return None
     last_stale_failed = int_field(record, "lastStaleRenotifyFailedAt")
@@ -8365,8 +8368,8 @@ def flap_resolve_event(key: str, entry: dict[str, Any], now: int,
     }
 
 
-# The storm-lifecycle fields flap_evaluate writes. flap_scan_outbox restores
-# exactly these when a storm send raises; the trip fields are left advanced.
+# The lifecycle proposed by flap_evaluate is committed only after acceptance.
+# Unconfirmed attempts retain a separate projection for cadence decisions.
 FLAP_STORM_LIFECYCLE_FIELDS = ("stormAt", "stormSeverity", "lastStormEmitAt", "cadenceStep")
 
 
@@ -8422,32 +8425,46 @@ def flap_scan_outbox(paths: dict[str, Path], incident: IncidentStateCycle | None
             if flap_occurrence_already_counted(flap_entry(flap_state, key), str(event.get("id") or ""), now):
                 changed = True
                 continue
+            entry = flap_entry(flap_state, key)
+            unconfirmed = entry.get("unconfirmedStorm")
+            if isinstance(unconfirmed, dict) and flap_should_resolve({**entry, **unconfirmed}, now):
+                entry.pop("unconfirmedStorm", None)
             entry = record_flap_trip(flap_state, key, now)
             changed = True
-            # #3479: flap_evaluate advances the storm lifecycle before the
-            # send. If the send itself raises, undo that advance so the emit
-            # watermark never records an alert that did not go out (and no
-            # member event is suppressed on its behalf). The trip recorded
-            # above still counts. A send that succeeded keeps its lifecycle
-            # even if the dispatch-log append after it fails; rolling back
-            # then would re-emit a delivered alert.
-            storm_before = {field: entry[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in entry}
-            decision = flap_evaluate(entry, now)
+            # Evaluate uncertain sends for cadence only. They must not license
+            # member suppression or advance the confirmed delivery watermark.
+            evaluated = dict(entry)
+            unconfirmed = entry.get("unconfirmedStorm")
+            if isinstance(unconfirmed, dict):
+                evaluated.update({field: unconfirmed[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in unconfirmed})
+            decision = flap_evaluate(evaluated, now)
             if decision.get("emit"):
+                storm_text, storm_ref = notice_message(
+                    flap_storm_event(key, evaluated, str(decision["severity"]), now),
+                    notice_kind="flap-storm", paths=paths,
+                )
+                lifecycle = {field: evaluated[field] for field in FLAP_STORM_LIFECYCLE_FIELDS if field in evaluated}
+                prior_unconfirmed = entry.get("unconfirmedStorm")
+                entry["unconfirmedStorm"] = {**lifecycle, "ref": storm_ref}
                 try:
-                    storm_text, _storm_ref = notice_message(
-                        flap_storm_event(key, entry, str(decision["severity"]), now),
-                        notice_kind="flap-storm",
-                        paths=paths,
-                    )
-                    send_whatsapp(storm_text)
+                    _commit_incident_state(paths, incident, incident_state)
+                    confirmed = send_notice_text(storm_text)
                 except Exception:
-                    for field in FLAP_STORM_LIFECYCLE_FIELDS:
-                        if field in storm_before:
-                            entry[field] = storm_before[field]
-                        else:
-                            entry.pop(field, None)
+                    if prior_unconfirmed is None:
+                        entry.pop("unconfirmedStorm", None)
+                    else:
+                        entry["unconfirmedStorm"] = prior_unconfirmed
+                    _commit_incident_state(paths, incident, incident_state)
                     raise
+                if not confirmed:
+                    append_dispatch_log(paths, {
+                        "type": "flap_storm_unconfirmed", "incidentKey": key,
+                        "severity": decision.get("severity"), "ref": storm_ref,
+                    })
+                    continue
+                entry.update(lifecycle)
+                entry.pop("unconfirmedStorm", None)
+                _commit_incident_state(paths, incident, incident_state)
                 emitted += 1
                 append_dispatch_log(paths, {
                     "type": "flap_storm",
@@ -8927,16 +8944,28 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 "failed": failed,
             })
             break
-        text, _stale_ref = notice_message(
+        text, stale_ref = notice_message(
             event, notice_kind="stale-digest", paths=paths, extra={"incidentKey": str(key)}
         )
+        unconfirmed_fields = {
+            "lastStaleRenotifyUnconfirmedAt": current,
+            "lastStaleRenotifyUnconfirmedEventId": event.get("id"),
+            "lastStaleRenotifyUnconfirmedRef": stale_ref,
+        }
+        prior_unconfirmed = {field: record[field] for field in unconfirmed_fields if field in record}
+        record.update(unconfirmed_fields)
         try:
-            send_whatsapp(text)
+            _commit_incident_state(paths, incident, incident_state)
+            confirmed = send_notice_text(text)
         except Exception as exc:
+            for field in unconfirmed_fields:
+                record.pop(field, None)
+            record.update(prior_unconfirmed)
             failed += 1
             last_error = str(exc)
             mark_stale_incident_failed(record, event, current, str(exc))
             changed = True
+            _commit_incident_state(paths, incident, incident_state)
             append_dispatch_log(paths, {
                 "type": "stale_renotify_failed",
                 "incidentKey": key,
@@ -8944,7 +8973,19 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                 "error": str(exc),
             })
             continue
+        if not confirmed:
+            changed = True
+            failed += 1
+            last_error = "stale notification acceptance is unconfirmed"
+            append_dispatch_log(paths, {
+                "type": "stale_renotify_unconfirmed", "incidentKey": key,
+                "eventId": event.get("id"), "ref": stale_ref,
+            })
+            continue
+        for field in unconfirmed_fields:
+            record.pop(field, None)
         mark_stale_incident_notified(record, event, current)
+        _commit_incident_state(paths, incident, incident_state)
         sent += 1
         changed = True
         append_dispatch_log(paths, {
@@ -11586,10 +11627,14 @@ def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str,
     direct_error = None
     try:
         card_text, _meta_ref = notice_message(meta, notice_kind="meta", body=text)
-        send_whatsapp(card_text)
+        send_whatsapp(card_text, require_acceptance=True)
         direct_whatsapp = "sent"
     except Exception as exc:
-        direct_whatsapp = "failed"
+        direct_whatsapp = (
+            "sent_unconfirmed"
+            if isinstance(exc, AmbiguousSendOutcome) and exc.phase == JSON_RPC_POST_REQUEST_PHASE
+            else "failed"
+        )
         direct_error = str(exc)
         # #3070: classify an accepted email fallback as TERMINAL here, not
         # accepted_unconfirmed. A meta-alert has no queued event behind it
@@ -13234,7 +13279,8 @@ def credential_meta_alert(source: str, summary: str, deadline: float, *, log: An
         return None
     taken = False
     try:
-        send_whatsapp(card_text, deadline=min(deadline, time.monotonic() + CREDENTIAL_META_GROUP_SECONDS))
+        send_whatsapp(card_text, require_acceptance=True,
+                      deadline=min(deadline, time.monotonic() + CREDENTIAL_META_GROUP_SECONDS))
         return _utc_day()
     except AmbiguousSendOutcome as exc:
         # #2424: the request left and its answer did not come. Taken, so it is never sent again.
