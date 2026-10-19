@@ -253,7 +253,9 @@ When a change would push a grandfathered file past its ceiling:
    This detects replacements still present at the corresponding check;
    Node's pathname APIs cannot exclude a directory swapped away and restored between checks.
    One owned helper reads the candidate waiver and all registered working-tree baselines
-   within a shared two-second deadline, including helper startup. Each document retains
+   within a shared two-second deadline, including helper startup. It starts with an empty
+   environment, so inherited Node loader options cannot modify its reads or output.
+   This does not isolate it from a compromised parent interpreter. Each document retains
    its own 4 MiB limit. A timed-out
    user-space document read terminates and reaps that direct helper, then reports
    INCONCLUSIVE. The deadline does not bound parent pathname metadata calls or a filesystem

@@ -24,7 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
@@ -91,6 +91,26 @@ function runGuard(args: string[]): { status: number | null; out: string } {
 /** Test fixtures must not let PATH lookup or a stalled helper hang the suite. */
 function makeFifo(path: string): void {
   execFileSync('/usr/bin/mkfifo', [path], { timeout: 1_000 });
+}
+
+/** Inject faults explicitly without relying on production environment inheritance. */
+function withReaderHook(hook: string): string[] {
+  const parent = join(tmp.make('reader-parent-instrumentation'), 'parent.mjs');
+  const reader = resolve(repoRoot, 'scripts/lib/ci-control/working-document-reader.ts');
+  const hookUrl = pathToFileURL(hook).href;
+  writeFileSync(parent, `import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import ${JSON.stringify(hookUrl)};
+const spawn = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  const index = args?.indexOf(${JSON.stringify(reader)}) ?? -1;
+  const instrumented = index < 0 ? args
+    : [...args.slice(0, index), '--import', ${JSON.stringify(hookUrl)}, ...args.slice(index)];
+  return spawn(command, instrumented, options);
+};
+syncBuiltinESMExports();
+`);
+  return ['--import', parent, '--experimental-strip-types', guard];
 }
 
 describe('baseline growth guard — the red proof', () => {
@@ -472,10 +492,10 @@ fs.readSync = (...args) => {
 };
 syncBuiltinESMExports();
 `);
-      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
       const result = spawnSync(process.execPath,
-        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -541,15 +561,58 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 180);
 }
 `);
-    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
     const result = spawnSync(process.execPath,
-      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
     expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
     expect(readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('does not inherit a child loader that substitutes clean working-document frames', () => {
+    const dir = makeRepo(2);
+    const baseline = '.claude/fitness/boundary-baseline.json';
+    const clean = readFileSync(join(dir, baseline), 'utf8');
+    writeBoundary(dir, 3);
+    const fixture = tmp.make('reader-environment');
+    const marker = join(fixture, 'loader-ran');
+    const loader = join(fixture, 'loader.mjs');
+    writeFileSync(loader, `import fs from 'node:fs';
+import { resolve } from 'node:path';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  fs.writeFileSync(${JSON.stringify(marker)}, 'inherited loader');
+  for (const path of process.argv.slice(3)) {
+    let bytes = null;
+    try {
+      bytes = path === ${JSON.stringify(baseline)}
+        ? Buffer.from(${JSON.stringify(clean)})
+        : fs.readFileSync(resolve(process.argv[2], path));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const header = Buffer.alloc(5);
+    header[0] = bytes === null ? 0 : 1;
+    header.writeUInt32BE(bytes?.length ?? 0, 1);
+    fs.writeSync(1, header);
+    if (bytes !== null) fs.writeSync(1, bytes);
+  }
+  process.exit(0);
+}
+`);
+    const setup = join(fixture, 'parent.mjs');
+    // Set the option after parent startup; only an inheriting child loads it.
+    writeFileSync(setup, `process.env.NODE_OPTIONS = ${JSON.stringify(`--import=${loader}`)};\n`);
+    const result = spawnSync(process.execPath,
+      ['--import', setup, '--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(existsSync(marker)).toBe(false);
+    expect(JSON.parse(readFileSync(join(dir, baseline), 'utf8'))).toHaveLength(3);
   });
 
   it.each(['before-open', 'after-read'])(
@@ -596,10 +659,10 @@ fs.readSync = (...args) => {
 };
 syncBuiltinESMExports();
 `);
-      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
       const result = spawnSync(process.execPath,
-        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -650,10 +713,10 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   syncBuiltinESMExports();
 }
 `);
-    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
     const result = spawnSync(process.execPath,
-      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(readFileSync(marker, 'utf8')).toBe(when);
@@ -707,10 +770,10 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   syncBuiltinESMExports();
 }
 `);
-      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
       const result = spawnSync(process.execPath,
-        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(readFileSync(marker, 'utf8')).toBe(String(0o111));
@@ -743,10 +806,10 @@ fs.lstatSync = (path, ...args) => {
 };
 syncBuiltinESMExports();
 `);
-    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
     const result = spawnSync(process.execPath,
-      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     rmSync(dir, { recursive: true, force: true });
     renameSync(original, dir);
@@ -790,10 +853,10 @@ cp.spawnSync = (command, args, options) => {
 };
 syncBuiltinESMExports();
 `);
-      const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
       const result = spawnSync(process.execPath,
-        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
       if (existsSync(moved)) renameSync(moved, dir);
       const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
       expect(readFileSync(marker, 'utf8')).toBe('helper completed');
@@ -819,11 +882,11 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   syncBuiltinESMExports();
 }
 `);
-    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
     const started = Date.now();
     const result = spawnSync(process.execPath,
-      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
     const finished = Date.now();
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(result.error).toBeUndefined();
@@ -882,10 +945,10 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   syncBuiltinESMExports();
 }
 `);
-    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+
     const result = spawnSync(process.execPath,
-      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();

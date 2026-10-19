@@ -121,6 +121,7 @@ function readWorkingDocuments(
     process.execPath,
     ['--experimental-strip-types', workingDocumentReader, repoRoot, ...relativePaths],
     {
+      env: {},
       encoding: 'buffer',
       timeout: WORKING_DOCUMENT_READ_TIMEOUT_MS,
       killSignal: SIGNAL.KILL,
