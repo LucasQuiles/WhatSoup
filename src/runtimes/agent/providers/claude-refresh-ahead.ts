@@ -30,6 +30,10 @@
 //     atomic: a refresh that takes the lock in the few milliseconds between
 //     the last check and the signal is not protected.
 //
+// For a bot with neither CLAUDE_CONFIG_DIR nor CLAUDE_SECURESTORAGE_CONFIG_DIR
+// set, the expiry is read from the bare default keychain item: for that bot
+// it is its own login, the one its `claude` children use.
+//
 // Only `claudeAiOauth.expiresAt` is read (through the heal module's reader,
 // the one keychain/file-store reader WhatSoup has). No token value is kept or
 // logged, and the child's output is never captured.
