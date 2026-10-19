@@ -80,6 +80,10 @@ export type PrimaryModelProbeStage =
 export type PrimaryModelProbeStageReporter = (stage: PrimaryModelProbeStage) => void;
 
 export interface PrimaryModelProbeAdapters {
+  // Uncancellable preparation run BEFORE the probe's deadline is armed (the
+  // claude-cli refresh-ahead, see claude-refresh-ahead.ts): its time is never
+  // charged to the probe budget and nothing aborts it. Must never reject.
+  prepareBinaryModel?: (target: { provider: string; model: string | null }) => Promise<void>;
   // model: null = probe the CLI's own default model (claude-cli only) — a
   // model-less instance must still be probeable or recovery can never pass.
   // When a signal is supplied, production adapters must settle after abort so
@@ -141,6 +145,11 @@ export async function probePrimaryModelUsability(
   if (provider === 'claude-cli' || provider === 'opencode-cli') {
     if (!adapters.probeBinaryModel) {
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
+    }
+    if (adapters.prepareBinaryModel && !options.signal?.aborted) {
+      try {
+        await adapters.prepareBinaryModel({ provider, model });
+      } catch { /* deliberately: preparation is fail-open by contract; the probe runs exactly as it would without it */ }
     }
     const probe = await withCancellationDeadline(
       (signal, onStage) => adapters.probeBinaryModel!({ provider, model }, signal, onStage),

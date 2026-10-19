@@ -155,6 +155,8 @@ describe('primary model probe lifecycle log', () => {
       { timeoutMs: 5_000 },
     );
 
+    // The child spawns once the (uncancellable) refresh-ahead preparation settled.
+    await vi.advanceTimersByTimeAsync(0);
     vi.advanceTimersByTime(5_000);
     expect(child.kill).toHaveBeenCalledOnce();
     child.emit('close', null, 'SIGTERM');
@@ -181,6 +183,7 @@ describe('primary model probe lifecycle log', () => {
       { signal: controller.signal },
     );
 
+    await vi.advanceTimersByTimeAsync(0);
     vi.advanceTimersByTime(2_000);
     controller.abort();
     child.emit('close', null, 'SIGTERM');

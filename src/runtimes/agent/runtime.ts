@@ -364,7 +364,8 @@ import {
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
-import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
+import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import {
   probePrimaryModelUsability,
 } from './providers/primary-model-usability.ts';
@@ -9805,7 +9806,9 @@ export class AgentRuntime implements Runtime {
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
           getProviderBinary,
-          probeBinaryAuthStatus,
+          probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
+          refreshAhead: (binary, env) => refreshClaudeLoginAhead(binary, env),
+          terminationGrace: (env) => claudeRefreshLockGrace(env, 'diagnostic-auth-status'),
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
           // Explicit allowlist — never hand the CLI probe the full process env.
           // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads

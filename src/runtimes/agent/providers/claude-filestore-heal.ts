@@ -40,6 +40,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, chmodSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -144,6 +145,79 @@ export function claudeCredentialServiceFor(configDir: string): string {
 }
 
 /**
+ * The keychain service a `claude` child started with `env` reads its login
+ * from (rule read from the 2.1.303 CLI): CLAUDE_SECURESTORAGE_CONFIG_DIR, when
+ * set, overrides CLAUDE_CONFIG_DIR for the suffix (NFC-normalized; set but
+ * empty means the bare item); otherwise the CLAUDE_CONFIG_DIR string as set;
+ * the bare item when neither is set.
+ */
+export function claudeCredentialServiceForEnv(env: NodeJS.ProcessEnv): string {
+  const secureDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  if (secureDir !== undefined) return secureDir ? claudeCredentialServiceFor(secureDir.normalize('NFC')) : KEYCHAIN_SERVICE;
+  return env.CLAUDE_CONFIG_DIR ? claudeCredentialServiceFor(env.CLAUDE_CONFIG_DIR) : KEYCHAIN_SERVICE;
+}
+
+/** {@link claudeCredentialServiceForEnv} for log lines: 'default' names the bare item. */
+export function claudeCredentialServiceLabel(env: NodeJS.ProcessEnv): string {
+  const service = claudeCredentialServiceForEnv(env);
+  return service === KEYCHAIN_SERVICE ? 'default' : service;
+}
+
+/**
+ * The directory a `claude` child started with `env` keeps its plaintext
+ * `.credentials.json` and its OAuth refresh lock in (2.1.303): the
+ * CLAUDE_SECURESTORAGE_CONFIG_DIR when set (empty means ~/.claude), else
+ * CLAUDE_CONFIG_DIR, else ~/.claude.
+ */
+export function claudeSecureStorageDir(env: NodeJS.ProcessEnv): string {
+  const home = env.HOME || homedir();
+  const secureDir = env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  if (secureDir !== undefined) return (secureDir || join(home, '.claude')).normalize('NFC');
+  return env.CLAUDE_CONFIG_DIR || join(home, '.claude');
+}
+
+export interface ClaudeCredentialReadDeps {
+  platform?: NodeJS.Platform;
+  /** Raw JSON of the keychain item named `service`, or null. */
+  readKeychain?: (service: string) => string | null;
+  /** Raw JSON of the file store at `path`, or null. */
+  readFileStore?: (path: string) => string | null;
+}
+
+/** Where the stored login's access-token expiry was read, and its value (ms epoch; null = unknown). */
+export interface ClaudeCredentialExpiry {
+  source: 'keychain' | 'file-store' | null;
+  expiresAt: number | null;
+}
+
+/**
+ * Read only `claudeAiOauth.expiresAt` of the login a `claude` child started
+ * with `env` would use, in the CLI's order: on macOS the keychain item first,
+ * then the plaintext store in the storage dir. Nothing else leaves this
+ * function; the parsed store is dropped here.
+ */
+export function readClaudeCredentialExpiry(
+  env: NodeJS.ProcessEnv,
+  deps: ClaudeCredentialReadDeps = {},
+): ClaudeCredentialExpiry {
+  if ((deps.platform ?? process.platform) === 'darwin') {
+    const keychainOAuth = oauthOf(parseJsonObject((deps.readKeychain ?? defaultReadKeychain)(claudeCredentialServiceForEnv(env))));
+    if (keychainOAuth) return { source: 'keychain', expiresAt: expiresAtOf(keychainOAuth) };
+  }
+  const fileOAuth = oauthOf(parseJsonObject(
+    (deps.readFileStore ?? defaultReadFileStore)(join(claudeSecureStorageDir(env), FILE_STORE_NAME)),
+  ));
+  if (fileOAuth) return { source: 'file-store', expiresAt: expiresAtOf(fileOAuth) };
+  return { source: null, expiresAt: null };
+}
+
+/** Under a test runner no default seam may read a live login or start a live CLI. */
+export function underTestRunner(): boolean {
+  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
+  return Boolean(process.env.VITEST || process.env.NODE_ENV === 'test');
+}
+
+/**
  * Read the credential payload of exactly one login-keychain item, `service`
  * (the bot's own item). Returns the raw JSON payload string, or null when the
  * item is absent, unreadable or empty.
@@ -164,8 +238,7 @@ function defaultReadKeychain(service: string): string | null {
   // readKeychain/readFileStore/writeFileStore and never reach this default; any
   // suite that exercises the probe path with DEFAULT deps (real CLAUDE_CONFIG_DIR
   // fixtures) must not read a live credential nor write it to a tmp fixture dir.
-  // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
-  if (process.env.VITEST || process.env.NODE_ENV === 'test') return null;
+  if (underTestRunner()) return null;
   return readKeychainViaSecurity(defaultSecurityExec, service);
 }
 

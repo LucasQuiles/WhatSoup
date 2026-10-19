@@ -25,6 +25,7 @@
  */
 
 import type { DiagnosticProbe, DiagnosticProbeResult } from '../diagnostic-bundle.ts';
+import type { BinaryAuthStatusResult, BinaryCommandProbeOptions } from './binary-preflight.ts';
 
 export interface AccountAuthTarget {
   provider: string;
@@ -36,9 +37,18 @@ export interface AccountAuthStatusDeps {
   resolveKeyService: (provider: string, model: string | undefined, config: Record<string, unknown> | undefined) => string | null;
   lookupCredential: (service: string) => string | null;
   getProviderBinary: (provider: string) => string | null;
-  probeBinaryAuthStatus: (binary: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: 'ok' | 'failed'; output: string }>;
+  probeBinaryAuthStatus: (
+    binary: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    options?: BinaryCommandProbeOptions,
+  ) => Promise<BinaryAuthStatusResult>;
   isAuthRequiredMessage: (text: string) => boolean;
   env: NodeJS.ProcessEnv;
+  /** claude-cli: refresh-ahead run before the killable auth-status child (claude-refresh-ahead.ts). */
+  refreshAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
+  /** claude-cli: refresh-lock wait before the auth-status child is signalled. */
+  terminationGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
 }
 
 /** `claude auth status --json` — shared with the account-identity verifier
@@ -85,6 +95,16 @@ export function makeAccountAuthStatusProbe(
     if (!binary) {
       return { ok: false, confidence: 'confirmed', summary: `no binary for provider ${target.provider}`, data: { mode: 'binary', provider: target.provider } };
     }
+    const env = scrubbedEnv(deps.env);
+    const isClaude = target.provider === 'claude-cli';
+    // A due token refresh runs first in a child nothing kills. The bundle's
+    // deadline may abandon this finding meanwhile; the refresh still finishes,
+    // and the killable spawn below is then skipped.
+    if (isClaude && deps.refreshAhead && !signal.aborted) {
+      try {
+        await deps.refreshAhead(binary, env);
+      } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
+    }
     // The orchestrator may have already abandoned us; skip the spawn if so.
     if (signal.aborted) {
       return { ok: false, confidence: 'suspected', summary: `auth-status probe aborted for ${target.provider}`, data: { mode: 'binary', provider: target.provider } };
@@ -92,7 +112,10 @@ export function makeAccountAuthStatusProbe(
 
     let result: { status: 'ok' | 'failed'; output: string };
     try {
-      result = await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, scrubbedEnv(deps.env));
+      const grace = isClaude ? deps.terminationGrace : undefined;
+      result = grace
+        ? await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env, { terminationGrace: () => grace(env) })
+        : await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env);
     } catch {
       // probeBinaryAuthStatus is documented never-throw, but stay defensive.
       return { ok: false, confidence: 'suspected', summary: `auth-status probe errored for ${target.provider}`, data: { mode: 'binary', provider: target.provider } };
