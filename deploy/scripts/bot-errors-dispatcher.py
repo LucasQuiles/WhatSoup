@@ -5423,25 +5423,35 @@ def notice_message(
 def prune_notice_packets(paths: dict[str, Path], now: int | None = None) -> int:
     """Drop packets older than the retention window (>= 30 days), bounded per cycle."""
     directory = paths.get("packets")
-    if directory is None or not directory.is_dir() or directory.is_symlink():
+    if directory is None:
+        return 0
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
         return 0
     current = int(time.time()) if now is None else now
     horizon = current - NOTICE_PACKET_RETENTION_SECONDS
     pruned = 0
-    for path in sorted(directory.iterdir()):
-        if pruned >= NOTICE_PACKET_PRUNE_MAX:
-            break
-        if not path.name.endswith(".json") or not safe_is_data_entry(path):
-            continue
-        try:
-            if path.lstat().st_mtime >= horizon:
+    try:
+        # Keep lookup, unlink and sync on the same directory if its pathname moves.
+        for name in sorted(os.listdir(directory_fd)):
+            if pruned >= NOTICE_PACKET_PRUNE_MAX:
+                break
+            if not name.endswith(".json"):
                 continue
-            path.unlink()
-            pruned += 1
-        except FileNotFoundError:
-            continue
+            try:
+                entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if not stat.S_ISREG(entry.st_mode) or entry.st_mtime >= horizon:
+                    continue
+                os.unlink(name, dir_fd=directory_fd)
+                pruned += 1
+            except FileNotFoundError:
+                continue
+        if pruned:
+            os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
     if pruned:
-        fsync_parent(directory / ".prune-marker")
         append_dispatch_log(paths, {
             "type": "notice_packets_pruned",
             "pruned": pruned,
@@ -5739,6 +5749,10 @@ def send_daily_information_summary(
         extra={"included": pending, "lines": lines, "droppedFromSummary": dropped},
         render=lambda summary_ref: format_information_summary_card(lines, summary_ref, dropped, missed),
     )
+    if ref is None:
+        section["lastAttemptAt"] = current
+        _commit_incident_state(paths, incident, incident_state)
+        return 0
     previous = dict(section)
     section["pending"] = []
     section.pop("droppedFromSummary", None)
@@ -6288,6 +6302,10 @@ def send_daily_line_card(
         extra={"included": included},
         render=lambda card_ref: format_line_card(ordered, card_ref, missed),
     )
+    if ref is None:
+        section["lastAttemptAt"] = current
+        _commit_incident_state(paths, incident, incident_state)
+        return 0
     previous = dict(section)
     section["lastSentDay"] = day
     section["lastSentAt"] = current

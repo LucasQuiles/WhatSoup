@@ -375,6 +375,8 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   it('bounds a guard that does not complete TERM during unreadable authorization handoff', () => {
     const result = runLifecycleProbe('authorization-unreadable-guard-stuck');
     expect(result.authorization_unreadable, JSON.stringify(result)).toBe(true);
+    expect(result.command_custody_established, JSON.stringify(result)).toBe(true);
+    expect(result.command_released_after_guard_stop, JSON.stringify(result)).toBe(true);
     expect(result.deadline_forced, JSON.stringify(result)).toBe(true);
     expect(result.worker_cleanup_completed_before_authorization, JSON.stringify(result)).toBe(true);
     expect(result.guard_term_held, JSON.stringify(result)).toBe(true);

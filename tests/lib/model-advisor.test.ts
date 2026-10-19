@@ -27,7 +27,7 @@ import {
   loadRecoveryMarkers,
   setRecoveryMarker,
 } from '../../src/lib/recovery-authority-store.ts';
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -915,6 +915,31 @@ describe('restart does not re-send an unchanged model-currency set', () => {
     setRecoveryMarker('model-currency:instance-R');
     notifyModelAdvisories('instance-R', [advisory]);
     expect(emitsFor('model-currency')).toHaveLength(1);
+  });
+
+  it('re-emits when the persisted marker is a symlink to an injected notified key', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+    __resetModelAdvisorForTest();
+
+    const stateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    if (!stateDir) throw new Error('BOT_ERRORS_STATE_DIR is required for marker isolation');
+    const markerDir = join(stateDir, 'recovery-authority.d');
+    const markerName = readdirSync(markerDir).find((entry) => entry.endsWith('.json'));
+    if (!markerName) throw new Error('model-currency marker was not written');
+    const markerPath = join(markerDir, markerName);
+    const targetRoot = mkdtempSync(join(tmpdir(), 'ws-marker-target-'));
+    const targetPath = join(targetRoot, 'marker.json');
+    writeFileSync(targetPath, readFileSync(markerPath), { mode: 0o600 });
+    rmSync(markerPath);
+    symlinkSync(targetPath, markerPath);
+
+    try {
+      notifyModelAdvisories('instance-R', [advisory]);
+      expect(emitsFor('model-currency')).toHaveLength(2);
+    } finally {
+      rmSync(targetRoot, { recursive: true, force: true });
+    }
   });
 
   it('a rejected emit persists no key, so the next restart emits again', () => {

@@ -691,7 +691,7 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
     // Ignore TERM so the command outlives the watchdog budget and the real
     // watchdog writer is reached instead of being reaped before it runs, or,
     // with a valid record, outlives the guard's TERM and the worker's.
-    'if [ "$1" = authorized-guard-stuck ]; then printf payload; : > "$AUTHORIZED_GUARD_STUCK_COMMAND_HELD"; while [ ! -e "$AUTHORIZED_GUARD_STUCK_COMMAND_RELEASE" ]; do /bin/sleep 0.01; done; exit; fi',
+    'if [ "$1" = authorized-guard-stuck ] || [ "$1" = authorization-unreadable-guard-stuck ]; then printf payload; : > "$AUTHORIZED_GUARD_STUCK_COMMAND_HELD"; while [ ! -e "$AUTHORIZED_GUARD_STUCK_COMMAND_RELEASE" ]; do /bin/sleep 0.01; done; exit; fi',
     'case "$1" in deadline-writer-*|authorization-valid-*) trap "" TERM; value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'case "$1" in cleanup-child-group|deadline-timer-descendant|deadline-helper-*|control-*|timeout-*|outcome-*|cleanup-residual|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|authorization-unreadable-cleanup-interrupted|guard-terminated|outer-terminated|guard-trap-in-record-read|guard-first-grace-term-boundary) value="$(sleep 30)"; printf "%s" "$value"; exit;; esac',
     'if [ "$1" != nested ] && [ "$1" != zero ] && [ "$1" != watchdog-reader-killed-after-verification ] && [ "$1" != parent-stopped ] && [ "$1" != parent-terminated ]; then',

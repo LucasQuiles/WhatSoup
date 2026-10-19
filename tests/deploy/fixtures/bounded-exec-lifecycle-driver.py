@@ -347,7 +347,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
             command_pid = int(fields['command_pid'])
             process_members = members(session)
-            if mode == 'authorized-guard-stuck':
+            if mode in ('authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
                 custody_deadline = time.monotonic() + 3
                 command_held = root / 'authorized-guard-stuck-command-held'
                 while time.monotonic() < custody_deadline:
@@ -371,7 +371,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
-            if mode == 'authorized-guard-stuck':
+            if mode in ('authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
                 (root / 'authorized-guard-stuck-command-release').write_text('release')
                 record['command_released_after_guard_stop'] = True
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:

@@ -136,3 +136,67 @@ def test_meta_delivery_classification_survives_durable_logging(mod, monkeypatch,
     record = next(record for record in records if record['recordKind'] == 'quarantine')
     assert len(tries) == 1
     assert record['details']['directWhatsapp'] == expected
+
+
+def block_packets(mod):
+    packets = mod.state_paths()['packets']
+    backup = packets.with_name('retained-packets')
+    if packets.exists():
+        packets.rename(backup)
+    packets.write_text('synthetic packet storage failure')
+    return packets, backup
+
+
+def restore_packets(blocked):
+    packets, backup = blocked
+    packets.unlink()
+    if backup.exists():
+        backup.rename(packets)
+
+
+@pytest.mark.parametrize('card', ['informationSummary', 'lineCheckCard'])
+def test_daily_card_packet_failure_preserves_same_day_retry(mod, monkeypatch, daily_case, card):
+    tries = support._rpc_replies(mod, monkeypatch, [support.ACCEPTED, support.ACCEPTED])
+    blocked = block_packets(mod)
+    assert invoke_daily(mod, daily_case, card, support.NOW) == 0
+    assert tries == []
+    section = persisted_section(mod, daily_case, card)
+    assert 'lastSentDay' not in section
+    assert section['lastAttemptAt'] == support.NOW
+    if card == 'informationSummary':
+        assert [entry['noticeId'] for entry in section['pending']] == ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']
+    restore_packets(blocked)
+    assert invoke_daily(mod, daily_case, card, support.NOW + 60) == 0
+    assert invoke_daily(mod, daily_case, card, support.NOW + mod.DAILY_CARD_RETRY_SECONDS) == 1
+    assert len(tries) == 1
+    section = persisted_section(mod, daily_case, card)
+    assert section['lastSentDay'] == support.DAY
+    assert mod.read_notice_packet(mod.state_paths(), section['lastRef'])
+
+
+@pytest.mark.parametrize('adopted', [False, True], ids=['compat', 'adopted'])
+def test_daily_retirement_packet_failure_is_retried_by_the_next_stale_sweep(mod, monkeypatch, pinned_clock, adopted):
+    key = 'host-2|retired-line|whatsapp_device_bond_lost'
+    support._write_state(mod, {key: support._physical(support.OLD - 86400, support.OLD)})
+    if adopted:
+        seed = mod.load_incident_state(mod.state_paths())
+        with daily_cycle(mod, True) as cycle:
+            cycle.payload.clear()
+            cycle.payload.update(seed)
+            cycle.commit()
+    tries = support._rpc_replies(mod, monkeypatch, [support.ACCEPTED])
+    blocked = block_packets(mod)
+    assert invoke_daily(mod, adopted, 'lineCheckCard', support.NOW) == 0
+    with daily_cycle(mod, adopted) as cycle:
+        state = cycle.payload if cycle else mod.load_incident_state(mod.state_paths())
+        assert key in state['openIncidents']
+        assert key not in state.get('lineRecheckRetired', {})
+    restore_packets(blocked)
+    with daily_cycle(mod, adopted) as cycle:
+        assert mod.sweep_stale_incidents(mod.state_paths(), incident=cycle) == (0, 0, None)
+    with daily_cycle(mod, adopted) as cycle:
+        state = cycle.payload if cycle else mod.load_incident_state(mod.state_paths())
+        assert key not in state['openIncidents']
+        ref = state['lineRecheckRetired'][key]['ref']
+        assert mod.read_notice_packet(mod.state_paths(), ref)['incidentKey'] == key
+    assert tries == []

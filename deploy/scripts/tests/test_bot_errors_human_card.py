@@ -980,3 +980,51 @@ def test_stale_digest_notice_is_a_card_with_a_packet(state, monkeypatch) -> None
     packet = _mod.read_notice_packet(paths, card.rsplit("Ref: ", 1)[1])
     assert packet["noticeKind"] == "stale-digest"
     assert any(field["label"] == "incident_key" and field["value"] == key for field in packet["bodyFields"])
+
+
+@pytest.mark.parametrize("swap_at", ["enumeration", "unlink"])
+def test_packet_pruning_keeps_directory_custody_during_replacement(state, monkeypatch, swap_at):
+    directory = state["packets"]
+    directory.mkdir(mode=0o700)
+    original = directory.with_name("original-packets")
+    outside = directory.with_name("outside-packets")
+    outside.mkdir(mode=0o700)
+    packet = directory / "12345678.json"
+    victim = outside / packet.name
+    packet.write_text('{"kind":"original"}')
+    victim.write_text('{"kind":"outside"}')
+    old = time.time() - _mod.NOTICE_PACKET_RETENTION_SECONDS - 60
+    os.utime(packet, (old, old))
+    os.utime(victim, (old, old))
+    identity = directory.stat()
+    real_listdir, real_unlink = os.listdir, os.unlink
+    swapped = False
+
+    def replace_directory():
+        nonlocal swapped
+        if not swapped:
+            directory.rename(original)
+            directory.symlink_to(outside, target_is_directory=True)
+            swapped = True
+
+    def list_during_replacement(path):
+        if isinstance(path, int):
+            current = os.fstat(path)
+            matches = (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
+        else:
+            matches = Path(path) == directory
+        if swap_at == "enumeration" and matches:
+            replace_directory()
+        return real_listdir(path)
+
+    def unlink_during_replacement(path, *, dir_fd=None):
+        if swap_at == "unlink" and Path(path).name == packet.name:
+            replace_directory()
+        return real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "listdir", list_during_replacement)
+    monkeypatch.setattr(os, "unlink", unlink_during_replacement)
+    _mod.prune_notice_packets(state)
+    assert swapped, "the controlled directory replacement was not reached"
+    assert victim.read_text() == '{"kind":"outside"}'
+    assert not (original / packet.name).exists()

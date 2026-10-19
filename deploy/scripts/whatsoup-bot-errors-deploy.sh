@@ -53,6 +53,10 @@ ROOT="${2:?missing <root>}"
 # enforces the closure so a future import cannot reopen this silently.
 FILES=(
   "deploy/lib/runtime-path.sh"
+  # fleet_lines.py: the health check and the dispatcher read the local fleet
+  # API's line list through it (relay 16 line recheck). It precedes its
+  # importers so a service invocation between copies can load either script.
+  "deploy/scripts/lib/fleet_lines.py"
   "deploy/scripts/bot-errors-dispatcher.py"
   "deploy/scripts/bot-errors-health-check.py"
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
@@ -90,9 +94,6 @@ FILES=(
   # fleet_config.py: the health-check and watchdog profile loaders and the
   # bot_errors_roster roster loader resolve their files through it.
   "deploy/scripts/lib/fleet_config.py"
-  # fleet_lines.py: the health check and the dispatcher read the local fleet
-  # API's line list through it (relay 16 line recheck).
-  "deploy/scripts/lib/fleet_lines.py"
   "deploy/scripts/lib/health_reader.py"
   "deploy/scripts/lib/owner_route.py"
   "deploy/scripts/lib/producer_cadence_receipt.py"

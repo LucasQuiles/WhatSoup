@@ -40,6 +40,7 @@ import { createChildLogger } from '../logger.ts';
 import { systemClock } from './clock.ts';
 import {
   forceEnsurePrivateDirectorySync,
+  readPrivateFileSync,
   writePrivateJsonMarkerSync,
 } from './private-fs.ts';
 import {
@@ -332,7 +333,17 @@ export type RecoveryMarkerRead =
 export function readRecoveryMarkerState(source: string): RecoveryMarkerRead {
   let raw: string;
   try {
-    raw = fs.readFileSync(markerFilePath(source), 'utf-8');
+    const filePath = markerFilePath(source);
+    const observedSize = fs.lstatSync(filePath).size;
+    const read = readPrivateFileSync(filePath, {
+      // Preserve the existing writer's valid payload range while still letting
+      // the private-file helper enforce no-follow, ownership, and bounded-read
+      // checks.
+      maxBytes: Math.max(1, observedSize),
+      label: 'recovery authority marker',
+    });
+    if (read === null) return { state: 'missing' };
+    raw = read;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
       ? { state: 'missing' }

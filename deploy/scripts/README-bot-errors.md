@@ -1307,6 +1307,10 @@ The next card of that kind names the uncertain card and its retained packet.
 This can also hold a card when the process stops before the network request; it
 is not proof of delivery. A known rejection restores the prior pending notices
 and retry cadence. If the initial hold cannot be persisted, no send is attempted.
+If the daily packet cannot be stored, its pending notices remain eligible and
+the card retries on the existing cadence without sending a packetless fallback.
+Packet pruning holds one directory descriptor through enumeration, deletion and
+syncing, so replacement of the packet directory cannot redirect deletion.
 
 Generic meta-alerts report an uncertain group result as `sent_unconfirmed` and
 still try email. Credential meta-alerts preserve their existing once-per-day
@@ -1501,7 +1505,8 @@ The deploy contract is:
    be recorded.
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
    `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
-   on any copy error or missing payload hash.
+   on any copy error or missing payload hash. Copy the new `lib/fleet_lines.py` dependency
+   before the dispatcher and health check, because timer jobs can start between copies.
 3. Write a host-local runtime manifest at
    `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
    `BOT_ERRORS_RUNTIME_MANIFEST`; abort if the written manifest hash cannot be verified.
