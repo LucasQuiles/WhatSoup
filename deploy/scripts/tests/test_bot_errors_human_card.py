@@ -1302,3 +1302,34 @@ def test_packet_publish_refuses_directory_replacement_after_private_validation(s
     assert sorted(p.name for p in outside.iterdir()) == ["sentinel"]
     assert sentinel.read_bytes() == b"keep"
     assert list(retained.iterdir()) == []
+
+
+def test_packet_preserves_fields_when_redacted_keys_collide():
+    first = "Bearer " + "a" * 40
+    second = "Bearer " + "b" * 40
+    printable = _mod.redact_dispatcher_text(first)
+    metadata = {first: "first-value", second: "second-value", printable: "literal-value"}
+    packet = _mod.build_notice_packet(_GOLDENS[0]["event"], ref="12345678", notice_kind="fixture", card="card", extra={"metadata": metadata})
+    assert len(packet["metadata"]) == 3
+    assert set(packet["metadata"].values()) == {"first-value", "second-value", "literal-value"}
+    encoded = json.dumps(packet)
+    assert "a" * 40 not in encoded and "b" * 40 not in encoded
+
+
+def test_packet_cli_keeps_internal_identity_digest_private(state):
+    _, ref = _mod.notice_message(_GOLDENS[0]["event"], notice_kind="fixture", paths=state)
+    assert ref is not None
+    path = state["packets"] / (ref + ".json")
+    before = path.read_bytes()
+    internal = _mod.read_notice_packet(state, ref)
+    digest = internal["noticeIdSha256"]
+    assert len(digest) == 64
+    printed = subprocess.run([sys.executable, str(_SCRIPT), "packet", ref], capture_output=True, text=True,
+        env={**os.environ, "BOT_ERRORS_STATE_DIR": str(state["root"])}, timeout=60)
+    assert printed.returncode == 0, printed.stderr
+    visible = json.loads(printed.stdout)
+    assert visible["ref"] == ref
+    assert "noticeIdSha256" not in visible
+    assert digest not in printed.stdout
+    assert path.read_bytes() == before
+    assert _mod.existing_notice_ref(state, _GOLDENS[0]["event"]["id"]) == ref

@@ -5248,7 +5248,16 @@ def notice_packet_identity(packet: Mapping[str, Any]) -> str:
 
 def redacted_notice_value(value: Any) -> Any:
     if isinstance(value, dict):
-        return {redact_dispatcher_text(key): redacted_notice_value(item) for key, item in value.items()}
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            base = redact_dispatcher_text(key)
+            printable = base
+            suffix = 2
+            while printable in result:
+                printable = f"{base} [{suffix}]"
+                suffix += 1
+            result[printable] = redacted_notice_value(item)
+        return result
     if isinstance(value, list):
         return [redacted_notice_value(item) for item in value]
     return redact_dispatcher_text(value) if isinstance(value, str) else value
@@ -5553,7 +5562,9 @@ def packet_command(argv: list[str]) -> int:
     if packet is None:
         print(f"no packet for Ref {argv[0]}", file=sys.stderr)
         return 1
-    print(json.dumps(redacted_notice_value(packet), indent=2, sort_keys=True, ensure_ascii=False))
+    visible = redacted_notice_value(packet)
+    visible.pop("noticeIdSha256", None)
+    print(json.dumps(visible, indent=2, sort_keys=True, ensure_ascii=False))
     return 0
 
 
