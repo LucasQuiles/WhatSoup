@@ -27,6 +27,9 @@
 //   - macOS only; no-op on other platforms.
 //   - No-op unless `CLAUDE_CONFIG_DIR` is set (unset ⇒ the CLI uses its native
 //     keychain resolution and there is nothing to heal).
+//   - Reads only the bot's own keychain item, the one the CLI keys to this
+//     CLAUDE_CONFIG_DIR (claudeCredentialServiceFor); never the bare default
+//     item and never another config dir's item.
 //   - Never downgrades a fresher file-store token to an older keychain one.
 //   - Never performs OAuth, never contacts an auth server, never changes which
 //     account is used. It is a purely local store-to-store coherence sync of an
@@ -35,6 +38,7 @@
 //     proceeds exactly as before.
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, renameSync, chmodSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
@@ -44,6 +48,7 @@ import { createChildLogger } from '../../../logger.ts';
 // this is the OS keychain *service name*, not a model/generated-by attribution,
 // but the (line-based) repo-hygiene guard cannot tell the two apart.
 const KEYCHAIN_SERVICE = ['Claude', 'Code-credentials'].join(' ');
+const KEYCHAIN_SERVICE_SUFFIX_HEX = 8;
 const OAUTH_KEY = 'claudeAiOauth';
 const FILE_STORE_NAME = '.credentials.json';
 const KEYCHAIN_READ_TIMEOUT_MS = 5_000;
@@ -57,7 +62,7 @@ export type ClaudeFileStoreHealOutcome =
   | 'healed'
   | 'shadow-detected'
   // #3020: account-identity refusal outcomes — fail closed, never a silent switch.
-  // A bare keychain item whose account identity cannot be proven to match the
+  // A keychain item whose account identity cannot be proven to match the
   // owner-reviewed expected identity is REFUSED: the heal degrades to readiness
   // without healing rather than silently switching the bot to another account.
   | 'refused-no-expected-identity'
@@ -76,8 +81,9 @@ export interface ClaudeFileStoreHealDeps {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   now?: () => number;
-  /** Raw JSON string held in the keychain item, or null when unreadable/absent. */
-  readKeychain?: () => string | null;
+  /** Raw JSON string held in the keychain item named `service` (always the
+   *  bot's own item, see claudeCredentialServiceFor), or null when unreadable/absent. */
+  readKeychain?: (service: string) => string | null;
   /** Raw JSON string of the file store, or null when absent/unreadable. */
   readFileStore?: (path: string) => string | null;
   /** Atomic write of the merged file store + chmod 600. */
@@ -85,10 +91,11 @@ export interface ClaudeFileStoreHealDeps {
   log?: { info: (o: unknown, m: string) => void; warn: (o: unknown, m: string) => void };
   // #3020: account-identity guard — bind healing to an owner-reviewed receipt.
   /** Owner-reviewed expected account identity (a provenance receipt). When
-   *  absent, a bare keychain item is REFUSED — the heal degrades to readiness
-   *  without healing rather than silently switching the bot to another account.
-   *  Suffixed-item unambiguity heal is preserved (the suffixed guard is its own
-   *  proof of identity). The identity itself is never published in logs/tests. */
+   *  absent, the heal is REFUSED — it degrades to readiness without healing
+   *  rather than silently switching the bot to another account. Reading only
+   *  the bot's own keychain item narrows WHICH item is read; it does not prove
+   *  the item's account, so the receipt is required for that item too. The
+   *  identity itself is never published in logs/tests. */
   expectedAccountId?: string | null;
   /** Post-heal canary: verify the keychain blob's account identity WITHOUT
    *  publishing it. Returns true if same-account, false if mismatch, null if
@@ -125,69 +132,41 @@ function defaultSecurityExec(args: string[]): string | null {
 }
 
 /**
- * Extract candidate claude credential service names from `security
- * dump-keychain` METADATA output (never invoked with `-d`; no secret bytes).
- *
- * The claude CLI does not always store its credential under the bare
- * KEYCHAIN_SERVICE name — some installs use a hash-suffixed service name
- * (`<bare>-9821b58b`), and a bare-name-only lookup on such a host reports
- * "no keychain token" forever while a live credential sits in the keychain.
- *
- * Order: the bare name first (exact match is the common fleet shape), then
- * suffixed items newest-`mdat` first; a missing mdat sorts last.
+ * The keychain service the claude CLI stores the login of `configDir` under:
+ * the bare service name suffixed with the first 8 hex digits of the sha256 of
+ * the CLAUDE_CONFIG_DIR string exactly as set (no path resolution, so a
+ * trailing slash names a different item). The CLI uses the bare name only when
+ * CLAUDE_CONFIG_DIR is unset, and the heal never runs then.
  */
-export function parseKeychainServiceCandidates(dump: string): string[] {
-  const newestMdat = new Map<string, string>();
-  for (const block of dump.split(/^keychain: /m)) {
-    const svce = block.match(/"svce"<blob>="([^"]+)"/)?.[1];
-    if (!svce || !svce.startsWith(KEYCHAIN_SERVICE)) continue;
-    const mdat = block.match(/"mdat"<timedate>=\S+\s+"(\d{14}Z)/)?.[1] ?? '';
-    const prev = newestMdat.get(svce);
-    if (prev === undefined || mdat > prev) newestMdat.set(svce, mdat);
-  }
-  return [...newestMdat.keys()].sort((a, b) => {
-    if (a === KEYCHAIN_SERVICE) return -1;
-    if (b === KEYCHAIN_SERVICE) return 1;
-    return (newestMdat.get(b) ?? '').localeCompare(newestMdat.get(a) ?? '');
-  });
+export function claudeCredentialServiceFor(configDir: string): string {
+  const suffix = createHash('sha256').update(configDir).digest('hex').slice(0, KEYCHAIN_SERVICE_SUFFIX_HEX);
+  return `${KEYCHAIN_SERVICE}-${suffix}`;
 }
 
 /**
- * Read the claude credential payload from the login keychain: bare service
- * name first, then prefix discovery via metadata dump for hash-suffixed
- * items. Returns the raw JSON payload string, or null when no readable item
- * exists under any candidate name.
+ * Read the credential payload of exactly one login-keychain item, `service`
+ * (the bot's own item). Returns the raw JSON payload string, or null when the
+ * item is absent, unreadable or empty.
  *
- * Identity guard: the module contract promises the heal "never changes which
- * account is used", and the credential blobs carry no comparable account
- * identity. With two or more suffixed candidates the right item is therefore
- * unknowable — mirroring one could silently switch the bot to another
- * account's token — so discovery heals only from an UNAMBIGUOUS single
- * suffixed item and refuses otherwise, without reading any candidate's
- * secret bytes.
+ * Identity guard: the heal must never mirror another login into the bot's file
+ * store. The bare item is the default login (the operator's or another job's);
+ * other suffixed items belong to other config dirs (other bots, the maintenance
+ * job). So nothing but the bot's own item is ever read, and no item is ever
+ * discovered by enumerating the keychain.
  */
-export function readKeychainViaSecurity(exec: SecurityExec): string | null {
-  const read = (service: string): string | null => {
-    const trimmed = exec(['find-generic-password', '-s', service, '-w'])?.trim();
-    return trimmed ? trimmed : null;
-  };
-  const bare = read(KEYCHAIN_SERVICE);
-  if (bare !== null) return bare;
-  const dump = exec(['dump-keychain']);
-  if (dump === null) return null;
-  const suffixed = parseKeychainServiceCandidates(dump).filter((c) => c !== KEYCHAIN_SERVICE);
-  if (suffixed.length !== 1) return null;
-  return read(suffixed[0]);
+export function readKeychainViaSecurity(exec: SecurityExec, service: string): string | null {
+  const trimmed = exec(['find-generic-password', '-s', service, '-w'])?.trim();
+  return trimmed ? trimmed : null;
 }
 
-function defaultReadKeychain(): string | null {
+function defaultReadKeychain(service: string): string | null {
   // Never touch the real login keychain under a test runner. Unit tests inject
   // readKeychain/readFileStore/writeFileStore and never reach this default; any
   // suite that exercises the probe path with DEFAULT deps (real CLAUDE_CONFIG_DIR
   // fixtures) must not read a live credential nor write it to a tmp fixture dir.
   // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
   if (process.env.VITEST || process.env.NODE_ENV === 'test') return null;
-  return readKeychainViaSecurity(defaultSecurityExec);
+  return readKeychainViaSecurity(defaultSecurityExec, service);
 }
 
 function defaultReadFileStore(path: string): string | null {
@@ -258,7 +237,11 @@ export function ensureClaudeFileStoreCredential(
 
     const now = (deps.now ?? Date.now)();
 
-    const keychainStore = parseJsonObject((deps.readKeychain ?? defaultReadKeychain)());
+    // Only the bot's own item: never the bare default login, never another
+    // config dir's item (see readKeychainViaSecurity).
+    const keychainStore = parseJsonObject(
+      (deps.readKeychain ?? defaultReadKeychain)(claudeCredentialServiceFor(configDir)),
+    );
     const keychainOAuth = oauthOf(keychainStore);
     const keychainExpiresAt = expiresAtOf(keychainOAuth);
     // Only heal from a keychain token that is present AND not already expired —
@@ -304,14 +287,13 @@ export function ensureClaudeFileStoreCredential(
     }
 
     // #3020: account-identity guard — bind healing to an owner-reviewed receipt.
-    // A bare keychain item from a DIFFERENT Claude account would silently switch
+    // A keychain item holding a DIFFERENT Claude account would silently switch
     // the bot's account and report provider usability green. REFUSE to copy when
     // same-account identity cannot be proven (fail closed → degraded readiness,
-    // never a silent switch). The suffixed-item unambiguity heal is preserved
-    // (readKeychainViaSecurity's suffixed guard is its own identity proof —
-    // it only returns when exactly one suffixed item exists, which is
-    // unambiguous by construction). The #2784 shadow-detection above is also
-    // preserved (it returns before reaching this guard).
+    // never a silent switch). This applies to the bot's own item too: its name
+    // is derived from the config dir, which says where the CLI stores a login,
+    // not whose login it is. The #2784 shadow-detection above is preserved (it
+    // returns before reaching this guard).
     const hasExpectedIdentity = deps.expectedAccountId !== undefined && deps.expectedAccountId !== null;
     const hasVerifyFn = typeof deps.verifyAccountId === 'function';
     if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null) {
@@ -332,12 +314,12 @@ export function ensureClaudeFileStoreCredential(
       }
       // verified === true → same account, proceed to heal.
     } else if (!hasExpectedIdentity && !hasVerifyFn) {
-      // No receipt at all — a bare item's account identity is unknowable, so
-      // refuse. This is the core fix: without this guard, a bare item from a
+      // No receipt at all — the item's account identity is unknowable, so
+      // refuse. This is the core fix: without this guard, an item holding a
       // different account silently switches the bot.
       log.warn(
         {},
-        '#3020: no expected-account-identity receipt — refusing bare keychain heal (fail closed, degraded readiness)',
+        '#3020: no expected-account-identity receipt — refusing keychain heal (fail closed, degraded readiness)',
       );
       return { outcome: 'refused-no-expected-identity', keychainExpiresAt };
     } else {

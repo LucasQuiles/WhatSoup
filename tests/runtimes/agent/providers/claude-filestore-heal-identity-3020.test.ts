@@ -3,7 +3,7 @@
  *
  * N1: bare item present, no expected-identity receipt -> REFUSE (fails if guard removed)
  * N2: bare item matches expected identity -> heal proceeds
- * N3: suffixed unambiguity preserved (readKeychainViaSecurity's suffixed guard)
+ * N3: only the bot's own keychain item is read (readKeychainViaSecurity)
  * N4: post-heal canary mismatch -> rollback/recover
  * N5: prior store rollback-safe after refused/failed heal
  * N6: no credential bytes in logs/assertions
@@ -104,45 +104,20 @@ describe('#3020 account-identity guard', () => {
     expect(writeFileStore).not.toHaveBeenCalled();
   });
 
-  // N3: suffixed unambiguity preserved
-  it('N3: readKeychainViaSecurity suffixed unambiguity guard is preserved (exactly one suffixed item heals, two+ refused)', () => {
+  // N3: only the bot's own keychain item is ever read
+  it('N3: readKeychainViaSecurity reads only the named own item: never the bare item, never discovery', () => {
     const SVC = ['Claude', 'Code-credentials'].join(' ');
-    function dumpItem(svce: string, mdat: string): string {
-      return [
-        'keychain: "/tmp/fixture.keychain-db"',
-        'class: "genp"',
-        'attributes:',
-        `    "svce"<blob>="${svce}"`,
-        `    "mdat"<timedate>=0x32303236  "${mdat}\\000"`,
-      ].join('\n');
-    }
-    // One suffixed item -> unambiguous -> heals
-    const execOne = (args: string[]): string | null => {
-      if (args[0] === 'find-generic-password' && args.includes(SVC)) return null; // bare not found
-      if (args[0] === 'dump-keychain') return dumpItem(`${SVC}-9821b58b`, '20260728000000Z');
-      if (args[0] === 'find-generic-password' && args.includes(`${SVC}-9821b58b`)) return 'kc-token';
+    const own = `${SVC}-9821b58b`;
+    const calls: string[][] = [];
+    const exec = (args: string[]): string | null => {
+      calls.push(args);
+      if (args[0] === 'find-generic-password' && args.includes(SVC)) return 'bare-token';
+      if (args[0] === 'find-generic-password' && args.includes(`${SVC}-aabbccdd`)) return 'other-token';
+      if (args[0] === 'find-generic-password' && args.includes(own)) return 'kc-token';
       return null;
     };
-    const result1 = readKeychainViaSecurity(execOne);
-    expect(result1).toBe('kc-token'); // unambiguous suffixed item -> read
-
-    // Two suffixed items -> ambiguous -> refused (null, no secret bytes read)
-    const twoCalls: string[][] = [];
-    const execTwo = (args: string[]): string | null => {
-      twoCalls.push(args);
-      if (args[0] === 'find-generic-password' && args.includes(SVC)) return null; // bare not found
-      if (args[0] === 'dump-keychain') return [
-        dumpItem(`${SVC}-9821b58b`, '20260728000000Z'),
-        dumpItem(`${SVC}-aabbccdd`, '20260729000000Z'),
-      ].join('\n\n');
-      return null;
-    };
-    const result2 = readKeychainViaSecurity(execTwo);
-    expect(result2).toBeNull(); // ambiguous -> refused without reading any secret bytes
-    // Verify no find-generic-password was called on the suffixed items (no secret bytes read)
-    const findCalls = twoCalls.filter((a: string[]) => a[0] === 'find-generic-password');
-    expect(findCalls.length).toBe(1); // only the bare lookup, not the suffixed ones
-    expect(findCalls[0]).toContain(SVC); // bare only
+    expect(readKeychainViaSecurity(exec, own)).toBe('kc-token');
+    expect(calls).toEqual([['find-generic-password', '-s', own, '-w']]);
   });
 
   // N4: post-heal canary mismatch -> rollback/recover
