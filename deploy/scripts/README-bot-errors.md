@@ -1312,6 +1312,14 @@ the card retries on the existing cadence without sending a packetless fallback.
 Known daily-card rejection or packet-storage failure remains visible in dispatcher
 health while its retry is pending, including cycles throttled by the retry delay.
 A daily helper exception also records a failure without preventing the sibling card.
+Packet reads use the durable JSON reader's private-directory checks and inclusive
+8 MiB limit, rejecting symlinked parents and leaves. Printable packet fields and
+keys are redacted; a separate SHA-256 notice identity keeps retries and distinct
+notices separate when their printable identifiers redact to the same text.
+An outbox packet's archive path is corrected to the actual collision-safe destination
+before the terminal event moves to `sent/`, for both WhatsApp and email fallback.
+If that packet update fails after delivery, the persisted terminal send state lets
+reclaim repair the packet and archive without sending the notice again.
 Packet pruning examines at most 500 entries per cycle and resumes its directory
 iterator on the next daemon cycle. It retains packets for at least 30 days and
 holds one directory descriptor through enumeration, deletion and syncing, so
@@ -1510,7 +1518,12 @@ write/hash failure, raw secret output, or authorization ambiguity remains a hard
 The deploy contract is:
 
 1. Take a per-host backup before mutation; abort if the backup path or restore proof cannot
-   be recorded.
+   be recorded. A managed file missing before deployment is recorded in the backup's
+   `.was-absent` ledger; rollback removes that newly introduced file. Before changing the
+   runtime, rollback rejects any unrecorded missing file or any ledger entry that conflicts
+   with a present backup file. Structural rollback remains available for a drifted backup;
+   promotion to last-known-good additionally requires matching hashes for present files
+   and a successful redaction smoke check.
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
    `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
    on any copy error or missing payload hash. Copy the new `lib/fleet_lines.py` dependency

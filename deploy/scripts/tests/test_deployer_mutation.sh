@@ -54,6 +54,12 @@ prepare_current_root() {
   copy_manifest_files "$PWD" "$1"
 }
 
+prepare_current_root_without_fleet_lines() {
+  local root="$1"
+  copy_manifest_files "$PWD" "$root"
+  rm -f "$root/deploy/scripts/lib/fleet_lines.py"
+}
+
 prepare_staging() {
   copy_manifest_files "$PWD" "$1"
 }
@@ -112,6 +118,67 @@ grep -q "LAST_KNOWN_GOOD_SKIPPED=backup_not_clean" "$tmp/deploy.log" || { cat "$
 [ ! -e "$tmp/.bot-errors-last-known-good-runtime" ] || fail "unclean backup created last_known_good pointer"
 assert_backup_metadata "$backup/.bot-errors-backup.json" false null
 bash "$D" verify "$root" > "$tmp/verify.log" 2>&1 || { cat "$tmp/verify.log"; fail "deployed root did not verify"; }
+
+# A first release that newly manages fleet_lines.py must treat its legitimate
+# prior absence as a verified backup, create LKG, and delete the new file when
+# rolling back. Existing bytes remain hash-checked; this is not a drift waiver.
+bootstrap_root="$tmp/bootstrap-runtime"
+prepare_current_root_without_fleet_lines "$bootstrap_root"
+bootstrap_stage="$tmp/bootstrap-stage"
+prepare_staging "$bootstrap_stage"
+bash "$D" deploy "$bootstrap_root" "$bootstrap_stage" > "$tmp/bootstrap-deploy.log" 2>&1
+grep -q "DEPLOY_OK" "$tmp/bootstrap-deploy.log" || { cat "$tmp/bootstrap-deploy.log"; fail "first fleet_lines deploy did not report DEPLOY_OK"; }
+grep -q "BACKUP_VERIFIED=1" "$tmp/bootstrap-deploy.log" || { cat "$tmp/bootstrap-deploy.log"; fail "ledger-aware absent backup was not verified"; }
+bootstrap_backup=$(backup_from_log "$tmp/bootstrap-deploy.log")
+bootstrap_pointer=$(pointer_from_log "$tmp/bootstrap-deploy.log")
+[ -f "$bootstrap_pointer" ] || fail "first fleet_lines deploy did not create last_known_good pointer"
+IFS= read -r pointed_bootstrap_backup < "$bootstrap_pointer"
+[ "$pointed_bootstrap_backup" = "$bootstrap_backup" ] || fail "first fleet_lines LKG pointer did not target verified backup"
+assert_backup_metadata "$bootstrap_backup/.bot-errors-backup.json" true null
+grep -qx 'deploy/scripts/lib/fleet_lines.py' "$bootstrap_backup/.was-absent" || fail "fleet_lines absence was not ledgered"
+[ ! -e "$bootstrap_backup/deploy/scripts/lib/fleet_lines.py" ] || fail "fleet_lines backup unexpectedly contains a file"
+[ -f "$bootstrap_root/deploy/scripts/lib/fleet_lines.py" ] || fail "deploy did not materialize fleet_lines.py"
+printf 'damaged\n' > "$bootstrap_root/deploy/scripts/bot-errors-emit.py"
+bash "$D" rollback-lkg "$bootstrap_root" > "$tmp/bootstrap-rollback-lkg.log" 2>&1
+grep -q "ROLLBACK_LKG_OK" "$tmp/bootstrap-rollback-lkg.log" || { cat "$tmp/bootstrap-rollback-lkg.log"; fail "ledger-aware rollback-lkg did not report success"; }
+[ ! -e "$bootstrap_root/deploy/scripts/lib/fleet_lines.py" ] || fail "rollback-lkg did not delete newly managed fleet_lines.py"
+diff "$bootstrap_root/deploy/scripts/bot-errors-emit.py" "$PWD/deploy/scripts/bot-errors-emit.py" > /dev/null \
+  || fail "rollback-lkg did not restore prior bytes"
+
+# A missing managed backup path without a ledger entry must fail before target
+# mutation, while a ledger/file conflict must also fail before mutation.
+unledgered_backup="$tmp/unledgered-missing-backup"
+copy_manifest_files "$PWD" "$unledgered_backup"
+: > "$unledgered_backup/.was-absent"
+rm -f "$unledgered_backup/deploy/scripts/bot-errors-emit.py"
+unledgered_root="$tmp/unledgered-missing-runtime"
+prepare_current_root "$unledgered_root"
+printf 'unledgered-sentinel\n' > "$unledgered_root/deploy/scripts/bot-errors-emit.py"
+if bash "$D" rollback "$unledgered_root" "$unledgered_backup" > "$tmp/unledgered-missing.log" 2>&1; then
+  cat "$tmp/unledgered-missing.log"
+  fail "rollback accepted an unledgered missing backup path"
+fi
+grep -q "MISSING.*bot-errors-emit.py" "$tmp/unledgered-missing.log" || {
+  cat "$tmp/unledgered-missing.log"
+  fail "unledgered missing backup path was not reported"
+}
+grep -q "unledgered-sentinel" "$unledgered_root/deploy/scripts/bot-errors-emit.py" || fail "unledgered missing backup mutated the target"
+
+conflict_backup="$tmp/conflicting-ledger-backup"
+copy_manifest_files "$PWD" "$conflict_backup"
+printf 'deploy/scripts/bot-errors-emit.py\n' > "$conflict_backup/.was-absent"
+conflict_root="$tmp/conflicting-ledger-runtime"
+prepare_current_root "$conflict_root"
+printf 'conflict-sentinel\n' > "$conflict_root/deploy/scripts/bot-errors-emit.py"
+if bash "$D" rollback "$conflict_root" "$conflict_backup" > "$tmp/conflicting-ledger.log" 2>&1; then
+  cat "$tmp/conflicting-ledger.log"
+  fail "rollback accepted a ledger/file conflict"
+fi
+grep -q "conflicts with present path" "$tmp/conflicting-ledger.log" || {
+  cat "$tmp/conflicting-ledger.log"
+  fail "ledger/file conflict was not reported"
+}
+grep -q "conflict-sentinel" "$conflict_root/deploy/scripts/bot-errors-emit.py" || fail "ledger/file conflict mutated the target"
 
 bash "$D" rollback "$root" "$backup" > "$tmp/rollback.log" 2>&1
 grep -q "ROLLBACK_OK" "$tmp/rollback.log" || { cat "$tmp/rollback.log"; fail "rollback did not report ROLLBACK_OK"; }

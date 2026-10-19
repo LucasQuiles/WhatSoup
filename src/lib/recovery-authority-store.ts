@@ -81,6 +81,7 @@ function state_root(): string {
 const LEGACY_MARKER_FILE = 'recovery-authority.json';
 const MARKER_DIR = 'recovery-authority.d';
 const MARKER_SUFFIX = '.json';
+const MAX_MARKER_PAYLOAD_BYTES = 1024 * 1024;
 /** Only used while a legacy aggregate file still exists (see module header). */
 const RECOVERY_AUTHORITY_LOCK_WAIT_MS = 500;
 const RECOVERY_AUTHORITY_LOCK_POLL_MS = 10;
@@ -336,10 +337,10 @@ export function readRecoveryMarkerState(source: string): RecoveryMarkerRead {
     const filePath = markerFilePath(source);
     const observedSize = fs.lstatSync(filePath).size;
     const read = readPrivateFileSync(filePath, {
-      // Preserve the existing writer's valid payload range while still letting
+      // Preserve valid writer payloads within the reader budget while still letting
       // the private-file helper enforce no-follow, ownership, and bounded-read
       // checks.
-      maxBytes: Math.max(1, observedSize),
+      maxBytes: Math.min(MAX_MARKER_PAYLOAD_BYTES, Math.max(1, observedSize)),
       label: 'recovery authority marker',
     });
     if (read === null) return { state: 'missing' };

@@ -349,6 +349,18 @@ All current callers retain the same synchronous `void` mutator API and
 more restrictive (`0600`) and their containing directory is normalized to
 `0700` by the established private-file boundary.
 
+### Reader resource bound
+
+`readRecoveryMarkerState()` uses an inclusive 1 MiB reader ceiling. It first
+observes the path size without following a symlink, then passes the smaller of
+that size and the ceiling to `readPrivateFileSync()`. The helper rejects an
+existing file above the ceiling before allocating its `maxBytes + 1` buffer; the
+reader maps that failure to `unreadable` and leaves the marker in place for
+diagnosis. A valid payload at or below the ceiling remains readable, including
+the existing writer-to-reader compatibility case above 64 KiB. Parse failures
+within the bound remain `invalid`; the bound does not authorize deletion or
+reinterpretation of oversized evidence.
+
 State roots must be local filesystems with the hard-link and atomic-rename
 semantics already required by `process-lock.ts` and the private-file helpers.
 A network-mounted or otherwise incompatible state root is unsupported and must

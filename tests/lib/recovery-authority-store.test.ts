@@ -502,6 +502,32 @@ describe('readRecoveryMarkerState', () => {
     expect(result.state === 'ok' && result.payload['detail']).toBe(detail);
   });
 
+  it('reads a marker payload exactly at the reader limit', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    const maxBytes = 1024 * 1024;
+    const prefix = '{"detail":"';
+    const suffix = '"}\n';
+    const detail = 'x'.repeat(maxBytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix));
+    setRecoveryMarker('read:limit');
+    writeFileSync(markerFile('read:limit'), prefix + detail + suffix, 'utf-8');
+
+    const result = readRecoveryMarkerState('read:limit');
+
+    expect(result.state).toBe('ok');
+    expect(result.state === 'ok' && result.payload['detail']).toBe(detail);
+  });
+
+  it('reports unreadable for an oversized marker without changing its evidence', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:oversized', { detail: 'x'.repeat(1024 * 1024) });
+    const before = readFileSync(markerFile('read:oversized'));
+
+    const result = readRecoveryMarkerState('read:oversized');
+
+    expect(result).toEqual({ state: 'unreadable' });
+    expect(readFileSync(markerFile('read:oversized'))).toEqual(before);
+  });
+
   it('reports a state rather than throwing for a key too long to encode', async () => {
     // setRecoveryMarker throws RangeError on this key. The reader is called while
     // iterating markers, so it must never abort the loop over one bad entry.

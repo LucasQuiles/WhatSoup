@@ -732,6 +732,31 @@ def test_packet_round_trip(state, golden: dict) -> None:
     assert rebuilt == body
 
 
+def test_packet_reader_rejects_symlinked_parent(state, tmp_path) -> None:
+    outside = tmp_path / "outside-packets"
+    outside.mkdir(mode=0o700)
+    packet = outside / "12345678.json"
+    packet.write_text('{"noticeId":"outside"}')
+    packet.chmod(0o600)
+    state["packets"].symlink_to(outside, target_is_directory=True)
+    assert _mod.read_notice_packet(state, "12345678") is None
+    assert packet.read_text() == '{"noticeId":"outside"}'
+
+
+def test_packet_reader_enforces_durable_json_byte_limit(state) -> None:
+    state["packets"].mkdir(mode=0o700)
+    packet = state["packets"] / "12345678.json"
+    limit = 8 * 1024 * 1024
+    content = '{"noticeId":"boundary"}'
+    packet.write_text(content + " " * (limit - len(content)))
+    packet.chmod(0o600)
+    assert _mod.read_notice_packet(state, "12345678")["noticeId"] == "boundary"
+    with packet.open("a") as handle:
+        handle.write(" ")
+    assert _mod.read_notice_packet(state, "12345678") is None
+    assert packet.stat().st_size == limit + 1
+
+
 def test_packet_stores_the_redacted_event_never_the_raw_one(state, tmp_path) -> None:
     # Relay 19 S6: `packet <ref>` prints the packet, so the stored event is the
     # dispatcher's redacted payload, not json_snapshot(event).
@@ -751,6 +776,48 @@ def test_packet_stores_the_redacted_event_never_the_raw_one(state, tmp_path) -> 
     )
     assert printed.returncode == 0, printed.stderr
     assert token not in printed.stdout
+
+
+def test_packet_redacts_metadata_and_extra_keys(state) -> None:
+    token = "sensitive-" + "x" * 40
+    secret = "Bearer " + token
+    event = dict(_GOLDENS[0]["event"], id=secret, source=secret)
+    ref = _mod.notice_ref_candidates(event["id"])[0]
+    packet = _mod.build_notice_packet(
+        event, ref=ref, notice_kind="fixture", card=secret, body=secret,
+        extra={"incidentKey": secret, "details": {secret: [secret]}},
+    )
+    _mod.write_notice_packet(state, packet)
+    assert token not in json.dumps(_mod.read_notice_packet(state, ref))
+
+
+def test_packet_sensitive_notice_identity_survives_retry_without_collisions(state) -> None:
+    first = dict(_GOLDENS[0]["event"], id="Bearer " + "x" * 40)
+    second = dict(first, id="Bearer " + "y" * 40)
+    _, first_ref = _mod.notice_message(first, notice_kind="fixture", paths=state)
+    _, retry_ref = _mod.notice_message(first, notice_kind="fixture", paths=state)
+    _, second_ref = _mod.notice_message(second, notice_kind="fixture", paths=state)
+    assert first_ref is not None and first_ref == retry_ref
+    assert second_ref is not None and second_ref != first_ref
+    assert _mod.existing_notice_ref(state, first["id"]) == first_ref
+    assert _mod.existing_notice_ref(state, second["id"]) == second_ref
+    for ref in (first_ref, second_ref):
+        stored = json.dumps(_mod.read_notice_packet(state, ref))
+        assert "x" * 40 not in stored and "y" * 40 not in stored
+
+
+def test_packet_retry_preserves_legacy_identity_without_digest(state) -> None:
+    event = _GOLDENS[0]["event"]
+    ref = _mod.notice_ref_candidates(event["id"])[0]
+    legacy = _mod.build_notice_packet(event, ref=ref, notice_kind="fixture", card="old card")
+    legacy.pop("noticeIdSha256")
+    _mod.write_notice_packet(state, legacy)
+    assert _mod.existing_notice_ref(state, event["id"]) == ref
+    _, retry_ref = _mod.notice_message(event, notice_kind="fixture", paths=state)
+    assert retry_ref == ref
+    updated = _mod.read_notice_packet(state, ref)
+    assert updated["noticeId"] == event["id"]
+    assert len(updated["noticeIdSha256"]) == 64
 
 
 def test_packet_cli_prints_the_packet_and_exits_one_when_absent(state, tmp_path) -> None:
@@ -951,6 +1018,67 @@ def test_outbox_send_carries_the_card_and_the_packet_names_the_sent_file(state, 
     sent_files = [p for p in paths["sent"].iterdir() if p.is_file()]
     assert [str(p) for p in sent_files] == [packet["outbox"]["sentPath"]]
     assert packet["outbox"]["file"] == path.name
+
+
+@pytest.mark.parametrize("email", [False, True])
+@pytest.mark.parametrize("packet_failure", [False, True])
+def test_packet_records_actual_archive_path_on_collision(state, monkeypatch, tmp_path, email, packet_failure) -> None:
+    paths = _mod.setup_dirs()
+    now = 1_792_000_000
+    monkeypatch.setattr(_mod.time, "time", lambda: now)
+    event = dict(next(g for g in _GOLDENS if g["family"] == "dispatcher_error")["event"])
+    event["delivery"] = {"attempts": 2, "status": "queued", "nextAttemptAtEpoch": 0}
+    path = dispatcher_fixtures.write_outbox_event(paths, "collision.error.json", event)
+    occupied = paths["sent"] / _mod.archive_name(path.name, "sent", now)
+    sends = []
+
+    def send(*args, **kwargs):
+        sends.append(args[0])
+        # The collision can appear during delivery, after the first packet write.
+        occupied.write_text("previous archive")
+        occupied.chmod(0o600)
+        if email:
+            raise RuntimeError("send rejected")
+
+    monkeypatch.setattr(_mod, "send_whatsapp", send)
+    fallback = tmp_path / "email-fallback.sh"
+    fallback.write_text("#!/bin/sh\nexit 0\n")
+    fallback.chmod(0o700)
+    monkeypatch.setattr(_mod, "EMAIL_FALLBACK", str(fallback))
+    monkeypatch.setattr(_mod, "email_fallback", lambda *args: True)
+    monkeypatch.setattr(_mod, "email_fallback_blocked_reason", lambda *args, **kwargs: None)
+    if packet_failure:
+        original_write = _mod.write_notice_packet
+        writes = []
+
+        def fail_archive_update(*args):
+            writes.append(args)
+            if len(writes) == 2:
+                raise RuntimeError("packet publication failed")
+            return original_write(*args)
+
+        monkeypatch.setattr(_mod, "write_notice_packet", fail_archive_update)
+        with pytest.raises(RuntimeError, match="packet publication failed"):
+            _mod.process_one(path, paths)
+        pending = [p for p in paths["processing"].iterdir() if not p.name.startswith(".")]
+        assert len(pending) == 1
+        assert json.loads(pending[0].read_text())["delivery"]["status"] == ("email_delivered" if email else "sent")
+        monkeypatch.setattr(_mod, "write_notice_packet", original_write)
+        assert _mod.reclaim_processing(paths) == 1
+        queued = list(paths["outbox"].glob("*.json"))
+        assert len(queued) == 1
+        ok, detail = _mod.process_one(queued[0], paths)
+        assert ok and detail.startswith("terminal_replay_archived")
+    else:
+        ok, detail = _mod.process_one(path, paths)
+        assert ok and detail == ("email_delivered" if email else "sent")
+    assert len(sends) == 1
+    assert occupied.read_text() == "previous archive"
+    archived = [p for p in paths["sent"].iterdir() if p.is_file() and p != occupied]
+    assert len(archived) == 1
+    ref = _mod.existing_notice_ref(paths, event["id"])
+    assert ref is not None
+    assert _mod.read_notice_packet(paths, ref)["outbox"]["sentPath"] == str(archived[0])
 
 
 def test_stale_digest_notice_is_a_card_with_a_packet(state, monkeypatch) -> None:

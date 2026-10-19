@@ -211,11 +211,27 @@ assert_no_symlink_path() {
   done
 }
 
+path_is_listed_absent() {
+  local ledger="$1" wanted="$2" listed
+  while IFS= read -r listed || [[ -n "$listed" ]]; do
+    [[ "$listed" == "$wanted" ]] && return 0
+  done < "$ledger"
+  return 1
+}
+
 do_verify() {
-  local fail=0 r="$1"
+  local fail=0 r="$1" allow_ledger_absent="${2:-0}"
   for entry in "${MANAGED_FILES[@]}"; do
     local path="${entry%%:*}" want="${entry##*:}" f="$r/${entry%%:*}"
     if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
+    if [[ "$allow_ledger_absent" == "1" ]] && path_is_listed_absent "$r/.was-absent" "$path"; then
+      if [[ -e "$f" || -L "$f" ]]; then
+        echo "  ABSENT_CONFLICT $path"; fail=1
+      else
+        echo "  ABSENT    $path"
+      fi
+      continue
+    fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
     local got got_rc
     got="$(sha "$f")"; got_rc=$?
@@ -231,8 +247,8 @@ do_verify() {
 }
 
 verify_paths_present() {
-  # Manifest-independent structural check: every managed path exists at the
-  # given root and is not reached through a symlink -- the same path set
+  # Manifest-independent structural check: every managed path is present or
+  # recorded absent, with no symlink traversal -- the same path set
   # do_verify() checks, but with no byte/hash comparison and therefore no
   # dependency on MANAGED_FILES (which requires a readable runtime
   # manifest). Used by rollback/rollback-lkg, which must keep working even
@@ -240,10 +256,18 @@ verify_paths_present() {
   # ground truth for an emergency restore, not the manifest, and a 3am
   # operator should never be blocked from rolling back by an unrelated
   # manifest problem.
-  local fail=0 r="$1"
+  local fail=0 r="$1" absent_ledger="${2:-}"
   for path in "${FILES[@]}"; do
     local f="$r/$path"
     if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
+    if [[ -n "$absent_ledger" ]] && path_is_listed_absent "$absent_ledger" "$path"; then
+      if [[ -e "$f" || -L "$f" ]]; then
+        echo "  ABSENT_CONFLICT $path"; fail=1
+      else
+        echo "  ABSENT    $path"
+      fi
+      continue
+    fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
     echo "  PRESENT  $path"
   done
@@ -349,10 +373,14 @@ require_backup_dir() {
   while IFS= read -r absent_path || [[ -n "$absent_path" ]]; do
     [[ -z "$absent_path" ]] && continue
     is_managed_path "$absent_path" || { echo "FATAL: backup .was-absent contains unmanaged path: $absent_path"; return 3; }
+    [[ ! -e "$bkdir/$absent_path" && ! -L "$bkdir/$absent_path" ]] || {
+      echo "FATAL: backup .was-absent conflicts with present path: $absent_path"; return 3;
+    }
   done < "$bkdir/.was-absent"
   for local_path in "${FILES[@]}"; do
     assert_no_symlink_path "$bkdir" "$local_path" || { echo "FATAL: backup path is unsafe"; return 3; }
   done
+  verify_paths_present "$bkdir" "$bkdir/.was-absent" || { echo "FATAL: backup structurally incomplete"; return 3; }
 }
 
 prune_backup_dir() {
@@ -439,7 +467,7 @@ case "$MODE" in
       if [[ -f "$src" ]]; then mkdir -p "$BKDIR/$(dirname "$local_path")"; cp -p "$src" "$BKDIR/$local_path";
       else echo "$local_path" >> "$BKDIR/.was-absent"; fi
     done
-    if do_verify "$BKDIR" > "$BKDIR/.bot-errors-backup-verify.log" 2>&1 && smoke_redaction "$BKDIR" >> "$BKDIR/.bot-errors-backup-verify.log" 2>&1; then
+    if do_verify "$BKDIR" 1 > "$BKDIR/.bot-errors-backup-verify.log" 2>&1 && smoke_redaction "$BKDIR" >> "$BKDIR/.bot-errors-backup-verify.log" 2>&1; then
       BACKUP_VERIFIED=1
     else
       BACKUP_VERIFIED=0
@@ -495,9 +523,9 @@ case "$MODE" in
     require_backup_dir "$ROOT" "$BKDIR" || exit 3
     echo "== rollback last_known_good $ROOT from $BKDIR =="
     echo "LAST_KNOWN_GOOD_POINTER=$LKG_POINTER"
-    if verify_paths_present "$BKDIR" && smoke_redaction "$BKDIR"; then
+    if verify_paths_present "$BKDIR" "$BKDIR/.was-absent" && smoke_redaction "$BKDIR"; then
       bash "$0" rollback "$ROOT" "$BKDIR"
-      verify_paths_present "$ROOT" && smoke_redaction "$ROOT" && echo "ROLLBACK_LKG_OK backup=$BKDIR" || { echo "ROLLBACK_LKG_VERIFY_FAIL"; exit 4; }
+      verify_paths_present "$ROOT" "$BKDIR/.was-absent" && smoke_redaction "$ROOT" && echo "ROLLBACK_LKG_OK backup=$BKDIR" || { echo "ROLLBACK_LKG_VERIFY_FAIL"; exit 4; }
     else
       echo "FATAL: last_known_good backup does not verify clean: $BKDIR"
       exit 3

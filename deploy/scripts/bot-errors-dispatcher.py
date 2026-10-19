@@ -5238,16 +5238,33 @@ def notice_packet_path(paths: dict[str, Path], ref: str) -> Path:
     return paths["packets"] / f"{ref}.json"
 
 
+def notice_packet_identity(packet: Mapping[str, Any]) -> str:
+    digest = packet.get("noticeIdSha256")
+    if isinstance(digest, str):
+        return digest
+    # Packets written before the digest field retain their original notice id.
+    return hashlib.sha256(str(packet.get("noticeId", "")).encode("utf-8")).hexdigest()
+
+
+def redacted_notice_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {redact_dispatcher_text(key): redacted_notice_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redacted_notice_value(item) for item in value]
+    return redact_dispatcher_text(value) if isinstance(value, str) else value
+
+
 def read_notice_packet(paths: dict[str, Path], ref: str) -> dict[str, Any] | None:
     """The packet a Ref names, or None when there is none (or it is unreadable)."""
     try:
         path = notice_packet_path(paths, ref)
     except ValueError:
         return None
-    if not safe_is_regular_entry(path):
-        return None
     try:
-        return safe_read_json(path)
+        # Match the writer's private-directory and 8 MiB payload contract;
+        # keep this read free of directory creation or symlink resolution.
+        target = durable_json_target(trusted_root=path.parent.absolute(), relative_path=path.name)
+        return observe_json(target, strict=True).payload
     except Exception:  # noqa: BLE001 - an unreadable packet reads as absent
         return None
 
@@ -5259,7 +5276,7 @@ def allocate_notice_ref(paths: dict[str, Path], notice_id: str) -> str:
         if not path.exists() and not path.is_symlink():
             return ref
         existing = read_notice_packet(paths, ref)
-        if existing is not None and existing.get("noticeId") == notice_id:
+        if existing is not None and notice_packet_identity(existing) == hashlib.sha256(notice_id.encode("utf-8")).hexdigest():
             return ref
     raise NoticeRefExhausted(f"no free notice Ref for {safe_segment(notice_id)}")
 
@@ -5270,7 +5287,7 @@ def existing_notice_ref(paths: dict[str, Path], notice_id: Any) -> str | None:
         return None
     for ref in notice_ref_candidates(notice_id.strip()):
         packet = read_notice_packet(paths, ref)
-        if packet is not None and packet.get("noticeId") == notice_id.strip():
+        if packet is not None and notice_packet_identity(packet) == hashlib.sha256(notice_id.strip().encode("utf-8")).hexdigest():
             return ref
     return None
 
@@ -5331,7 +5348,10 @@ def build_notice_packet(
         # incident_key() of the rebuilt event cuts a long source at 80 characters.
         if isinstance(packet.get("incidentKey"), str):
             packet["incidentRef"] = incident_ref(packet["incidentKey"])
-    return packet
+    # Identity must survive redaction without making two secret-bearing ids
+    # equivalent. Keep the full digest separate from the printable notice id.
+    packet["noticeIdSha256"] = hashlib.sha256(notice_id_of(event).encode("utf-8")).hexdigest()
+    return redacted_notice_value(packet)
 
 
 def publish_notice_packet(path: Path, packet: dict[str, Any]) -> PublicationResult:
@@ -5364,15 +5384,27 @@ def write_notice_packet(paths: dict[str, Path], packet: dict[str, Any]) -> Path:
     ref = str(packet["ref"])
     path = notice_packet_path(paths, ref)
     existing = read_notice_packet(paths, ref)
-    if existing is not None and existing.get("noticeId") != packet["noticeId"]:
+    if existing is not None and notice_packet_identity(existing) != notice_packet_identity(packet):
         raise NoticeRefExhausted(f"notice Ref {ref} names a different notice; refusing to overwrite")
     if existing is None and (path.exists() or path.is_symlink()):
         raise RuntimeError(f"notice Ref {ref} holds an unreadable entry; refusing to overwrite")
     require_all_advance([publish_notice_packet(path, packet)])
     written = read_notice_packet(paths, ref)
-    if written is None or written.get("noticeId") != packet["noticeId"]:
+    if written is None or notice_packet_identity(written) != notice_packet_identity(packet):
         raise RuntimeError(f"notice packet {ref} did not survive its own write")
     return path
+
+
+def record_notice_archive_path(paths: dict[str, Path], ref: str | None, destination: Path) -> None:
+    if ref is None:
+        return
+    packet = read_notice_packet(paths, ref)
+    if packet is None or not isinstance(packet.get("outbox"), dict):
+        raise RuntimeError("sent notice packet is unavailable before archive")
+    destination_text = redact_dispatcher_text(str(destination))
+    if packet["outbox"].get("sentPath") != destination_text:
+        packet["outbox"]["sentPath"] = destination_text
+        write_notice_packet(paths, packet)
 
 
 def notice_message(
@@ -12541,6 +12573,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
         else:
             require_all_advance([save_incident_state(paths, replay_state)])
         replay_path = archive_path(paths["sent"], path.name, "sent", event)
+        record_notice_archive_path(paths, existing_notice_ref(paths, notice_id_of(event)), replay_path)
         os.replace(claimed, replay_path)
         if replay_decision == "expire":
             # Metadata only: the reason as a boolean key and the gap as a count.
@@ -12892,6 +12925,7 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
                 else [incident_publication, email_publication]
             )
             email_sent_path = archive_path(paths["sent"], path.name, "sent", event, at=planned_sent_at)
+            record_notice_archive_path(paths, _notice_ref, email_sent_path)
             os.replace(claimed, email_sent_path)
             append_dispatch_log(paths, {
                 "type": "email_delivered",
@@ -12982,9 +13016,10 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
     else:
         incident_publication = save_incident_state(paths, incident_state)
         require_all_advance([incident_publication, sent_publication])
-    # Same name the packet recorded before the send; only a name already taken
-    # (same file, same second) moves aside, and the "sent" record names it.
+    # A collision can appear during delivery. Publish the actual destination
+    # after the terminal send state, before moving the claimed event there.
     sent_path = archive_path(paths["sent"], path.name, "sent", event, at=planned_sent_at)
+    record_notice_archive_path(paths, _notice_ref, sent_path)
     os.replace(claimed, sent_path)
     append_dispatch_log(paths, {
         "type": "sent",
