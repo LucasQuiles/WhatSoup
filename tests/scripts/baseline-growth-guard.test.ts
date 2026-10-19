@@ -233,7 +233,7 @@ describe('baseline growth guard — the red proof', () => {
     expect(status, out).toBe(1);
     expect(out).toMatch(/catch-ratchet-baseline\.json/);
     expect(out).toMatch(/127 -> 128/);
-  });
+  }, 120_000);
 
   it('permits an introduced baseline at or below its audited initial ceiling', () => {
     const dir = makeRepo(2);
@@ -302,7 +302,8 @@ describe('the guard runs clean on this branch', () => {
   });
 });
 
-describe('growth waivers — the reviewed-widening escape valve, fail-closed', () => {
+// Fixture setup and parent startup are outside the separately asserted reader deadline.
+describe('growth waivers — the reviewed-widening escape valve, fail-closed', { timeout: 120_000 }, () => {
   // Waiver fixtures use pinned dates far from the wall clock so expiry logic is
   // deterministic: an "active" waiver expires 2199-01-01, an "expired" one 2020-01-01.
   function writeFitness(dir: string, maxLines: number): void {
@@ -429,7 +430,7 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
       }
       const result = spawnSync(process.execPath,
         ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -474,7 +475,7 @@ syncBuiltinESMExports();
       const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
       const result = spawnSync(process.execPath,
         ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -513,7 +514,7 @@ syncBuiltinESMExports();
       }
       const result = spawnSync(process.execPath,
         ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000 });
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -543,7 +544,7 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
     const result = spawnSync(process.execPath,
       ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 2_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -598,7 +599,7 @@ syncBuiltinESMExports();
       const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
       const result = spawnSync(process.execPath,
         ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 2_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
       expect(result.error).toBeUndefined();
       expect(result.signal).toBeNull();
       expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
@@ -633,7 +634,7 @@ syncBuiltinESMExports();
     const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
     const result = spawnSync(process.execPath,
       ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     rmSync(dir, { recursive: true, force: true });
     renameSync(original, dir);
@@ -652,6 +653,9 @@ syncBuiltinESMExports();
       writeFileSync(hook, `import fs from 'node:fs';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/baseline-growth-guard.ts')) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_000);
+}
 const spawn = cp.spawnSync;
 cp.spawnSync = (command, args, options) => {
   const result = spawn(command, args, options);
@@ -677,7 +681,7 @@ syncBuiltinESMExports();
       const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
       const result = spawnSync(process.execPath,
         ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-        { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
       if (existsSync(moved)) renameSync(moved, dir);
       const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
       expect(readFileSync(marker, 'utf8')).toBe('helper completed');
@@ -707,7 +711,7 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     const started = Date.now();
     const result = spawnSync(process.execPath,
       ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 3_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
     const finished = Date.now();
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(result.error).toBeUndefined();
@@ -733,8 +737,25 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     const dir = makeRepo(2);
     const delayedDocument = join(dir, '.claude/fitness/boundary-baseline.json');
     const hook = join(tmp.make('reader-responsive-delay-hook'), 'hook.mjs');
+    const timing = join(tmp.make('reader-responsive-timing'), 'timing.json');
     writeFileSync(hook, `import fs from 'node:fs';
+import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/baseline-growth-guard.ts')) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_000);
+  const spawn = cp.spawnSync;
+  cp.spawnSync = (command, args, options) => {
+    const started = Date.now();
+    const result = spawn(command, args, options);
+    if (args?.some((arg) => arg.endsWith('/working-document-reader.ts'))) {
+      fs.writeFileSync(${JSON.stringify(timing)}, JSON.stringify({
+        elapsed: Date.now() - started, timeout: options.timeout, status: result.status,
+      }));
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+}
 if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
   const delayedDocument = fs.statSync(${JSON.stringify(delayedDocument)});
   const read = fs.readSync;
@@ -750,17 +771,18 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
 }
 `);
     const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
-    const started = Date.now();
     const result = spawnSync(process.execPath,
       ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
-      { cwd: repoRoot, encoding: 'utf8', timeout: 5_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
-    const elapsed = Date.now() - started;
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
     const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
     expect(result.status, out).toBe(0);
-    expect(elapsed).toBeGreaterThanOrEqual(1_200);
-    expect(elapsed).toBeLessThan(4_000);
+    const observed = JSON.parse(readFileSync(timing, 'utf8')) as { elapsed: number; timeout: number; status: number };
+    expect(observed.timeout).toBe(2_000);
+    expect(observed.status).toBe(0);
+    expect(observed.elapsed).toBeGreaterThanOrEqual(1_200);
+    expect(observed.elapsed).toBeLessThan(2_500);
   });
 
   it.each(['working', 'pinned'] as const)('rejects raw-byte BOM substitution in a %s candidate', (mode) => {
