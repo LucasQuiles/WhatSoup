@@ -15,6 +15,7 @@ import {
   type ClaudeFileStoreHealResult,
 } from './claude-filestore-heal.ts';
 import { createChildLogger } from '../../../logger.ts';
+import { systemClock } from '../../../lib/clock.ts';
 import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
@@ -302,14 +303,14 @@ function probeChildLifecycleLog(
   let startedAtMs: number | null = null;
   return {
     onSpawned: (pid) => {
-      startedAtMs = Date.now();
+      startedAtMs = systemClock.now();
       log.info(
         { event: 'primary_model_probe_spawn', ...base, pid: pid ?? null, startedAt: new Date(startedAtMs).toISOString() },
         'primary model probe spawned',
       );
     },
     onExited: (exit: BinaryCommandProbeExit) => {
-      const endedAtMs = Date.now();
+      const endedAtMs = systemClock.now();
       const start = startedAtMs ?? endedAtMs;
       const termination = exit.killedByTimeout
         ? 'cli-timeout'
