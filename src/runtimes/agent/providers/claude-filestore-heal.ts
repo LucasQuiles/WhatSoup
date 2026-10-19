@@ -141,6 +141,14 @@ export function claudeCredentialServiceLabel(env: NodeJS.ProcessEnv): string {
  * `.credentials.json` and its OAuth refresh lock in (2.1.303): the
  * CLAUDE_SECURESTORAGE_CONFIG_DIR when set (empty means ~/.claude), else
  * CLAUDE_CONFIG_DIR, else ~/.claude.
+ *
+ * Evidence (read from the 2.1.303 binary, 2026-10-19): one storage-dir
+ * resolver returns CLAUDE_SECURESTORAGE_CONFIG_DIR (NFC) when it is defined
+ * and the config dir otherwise. The plaintext store path is that dir joined
+ * with `.credentials.json`, and the OAuth refresh path creates that dir and
+ * takes its lock at `<dir>/.oauth_refresh.lock` (plus `<realpath(dir)>.lock`).
+ * So the variable moves the file store and the lock, not only the keychain
+ * suffix.
  */
 export function claudeSecureStorageDir(env: NodeJS.ProcessEnv): string {
   const home = env.HOME || homedir();
@@ -304,7 +312,8 @@ export function ensureClaudeFileStoreCredential(
         { outcome, keychainExpiresAt, fileStoreExpiresAt },
         'claude login is held in two stores: the own keychain item and a plaintext file store; '
           + 'a slow keychain read makes the CLI refresh from the stale file copy and wipe the login. '
-          + 'Nothing was written; remove the file store once the keychain login is confirmed',
+          + 'Nothing was written or deleted; the fleet baseline reports this copy, and what to do '
+          + 'with it is an operator decision',
       );
     } else if (!twoStores && previous === true) {
       log.info({ outcome, keychainExpiresAt }, 'claude login is held in the own keychain item only (second store gone)');

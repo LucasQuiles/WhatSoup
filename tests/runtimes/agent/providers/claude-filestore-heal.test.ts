@@ -114,6 +114,10 @@ describe('two-store detection', () => {
       keychainExpiresAt: NOW + 3_600_000,
       fileStoreExpiresAt: NOW + 60_000,
     });
+    // Detection only: the line points at the fleet baseline and leaves the copy to the operator.
+    expect(h.lines[0]!.msg).toContain('fleet baseline');
+    expect(h.lines[0]!.msg).toContain('operator decision');
+    expect(h.lines[0]!.msg).not.toMatch(/remove/i);
     const text = JSON.stringify(h.lines);
     expect(text).not.toContain(ACCESS_SENTINEL);
     expect(text).not.toContain(REFRESH_SENTINEL);
