@@ -26,6 +26,9 @@
 
 import type { DiagnosticProbe, DiagnosticProbeResult } from '../diagnostic-bundle.ts';
 import type { BinaryAuthStatusResult, BinaryCommandProbeOptions } from './binary-preflight.ts';
+import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
+import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
+import { createChildLogger } from '../../../logger.ts';
 
 export interface AccountAuthTarget {
   provider: string;
@@ -49,6 +52,8 @@ export interface AccountAuthStatusDeps {
   refreshAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
   /** claude-cli: refresh-lock wait before the auth-status child is signalled. */
   terminationGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
+  /** claude-cli: spawn/exit lines of the auth-status child (probe-lifecycle-log.ts). */
+  log?: ProbeLifecycleLog;
 }
 
 /** `claude auth status --json` — shared with the account-identity verifier
@@ -111,9 +116,16 @@ export function makeAccountAuthStatusProbe(
 
     let result: { status: 'ok' | 'failed'; output: string };
     try {
-      const grace = isClaude ? deps.terminationGrace : undefined;
-      result = grace
-        ? await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env, { terminationGrace: () => grace(env) })
+      const grace = deps.terminationGrace;
+      result = isClaude
+        ? await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env, {
+          ...probeLifecycleObservers(
+            deps.log ?? createChildLogger('diagnostic-auth-status-probe'),
+            CLAUDE_PROBE_EVENTS,
+            { purpose: 'diagnostic-auth-status', provider: target.provider, credentialService: claudeCredentialServiceLabel(env) },
+          ),
+          ...(grace ? { terminationGrace: () => grace(env) } : {}),
+        })
         : await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env);
     } catch {
       // probeBinaryAuthStatus is documented never-throw, but stay defensive.
