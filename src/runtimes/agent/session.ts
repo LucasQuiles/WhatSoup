@@ -67,6 +67,7 @@ import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '..
 import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
+import { claudeRefreshLockGrace } from './providers/claude-refresh-ahead.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
 import {
   isHostWorkAdmissionEnabled,
@@ -848,6 +849,8 @@ export class SessionManager {
     SessionGenerationIdentity | null
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  /** The env each provider child was spawned with: names the claude refresh lock its kill waits on. */
+  private readonly childEnvs = new WeakMap<ReturnType<typeof spawn>, NodeJS.ProcessEnv>();
   private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
   private providerExecutionWaitAbort: AbortController | null = null;
   /** Queued host wrapper, before it has admitted its scoped provider child. */
@@ -1339,6 +1342,24 @@ export class SessionManager {
         : `${generation.managerId}:${generation.generation}:${randomUUID()}`;
       this.childTreeMarkers.set(child, generationMarker);
     }
+    // A claude child holding its OAuth refresh lock may be between the
+    // server's token rotation and the local save; signalling it then loses
+    // the rotated token. Wait (bounded) for the lock first; with no fresh lock
+    // the kill is not delayed at all (claude-refresh-ahead.ts).
+    const childEnv = this.childEnvs.get(child);
+    const grace = this.provider === 'claude-cli' && childEnv ? claudeRefreshLockGrace(childEnv, 'session-kill') : null;
+    if (grace !== null) {
+      const marker = generationMarker;
+      return grace.then(() => this.signalChildTree(child, signal, marker));
+    }
+    return this.signalChildTree(child, signal, generationMarker);
+  }
+
+  private signalChildTree(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+    generationMarker: string,
+  ): Promise<void> {
     return killSessionTree(child, signal, {
       generationMarker,
       termGraceMs: SessionManager.SHUTDOWN_GRACE_MS,
@@ -1428,6 +1449,7 @@ export class SessionManager {
         env: childEnv,
       });
       this.trackChildGeneration(child, generation);
+      this.childEnvs.set(child, childEnv);
       return child;
     }
 
@@ -1463,6 +1485,7 @@ export class SessionManager {
       onSpawned: (child) => {
         pending.child = child;
         this.trackChildGeneration(child, generation);
+        this.childEnvs.set(child, env);
       },
       onAbort: async (child) => {
         await this.killChildTree(child, 'SIGTERM');
