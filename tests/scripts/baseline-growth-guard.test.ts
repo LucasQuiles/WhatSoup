@@ -607,6 +607,64 @@ syncBuiltinESMExports();
     },
   );
 
+  it.each(['after-open', 'after-final-stat'].flatMap((when) =>
+    ['regular', 'symlink', 'missing'].map((kind) => [when, kind]),
+  ))('refuses a working-tree baseline leaf replaced %s with %s', (when, kind) => {
+    const dir = makeRepo(2);
+    const path = join(dir, '.claude/fitness/boundary-baseline.json');
+    const original = readFileSync(path, 'utf8');
+    writeBoundary(dir, 3);
+    const replacement = readFileSync(path, 'utf8');
+    writeFileSync(path, original);
+    const hookDir = tmp.make('baseline-leaf-race');
+    const hook = join(hookDir, 'hook.mjs');
+    const marker = join(hookDir, 'mutation');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  const target = ${JSON.stringify(path)};
+  const leaf = fs.statSync(target);
+  let swapped = false;
+  let observations = 0;
+  const swap = () => {
+    if (swapped) return;
+    swapped = true;
+    fs.renameSync(target, ${JSON.stringify(join(hookDir, 'opened-baseline.json'))});
+    if (${JSON.stringify(kind)} === 'regular') fs.writeFileSync(target, ${JSON.stringify(replacement)});
+    if (${JSON.stringify(kind)} === 'symlink') fs.symlinkSync(${JSON.stringify(join(hookDir, 'opened-baseline.json'))}, target);
+    fs.writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(when)});
+  };
+  const open = fs.openSync;
+  fs.openSync = (path, ...args) => {
+    const fd = open(path, ...args);
+    if (${JSON.stringify(when)} === 'after-open' && path === target) swap();
+    return fd;
+  };
+  const stat = fs.fstatSync;
+  fs.fstatSync = (fd, ...args) => {
+    const observed = stat(fd, ...args);
+    if (observed.ino === leaf.ino && observed.dev === leaf.dev && ++observations === 2
+        && ${JSON.stringify(when)} === 'after-final-stat') swap();
+    return observed;
+  };
+  syncBuiltinESMExports();
+}
+`);
+    const nodeOptions = `${process.env.NODE_OPTIONS ?? ''} --import=${hook}`.trim();
+    const result = spawnSync(process.execPath,
+      ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env, NODE_OPTIONS: nodeOptions } });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(readFileSync(marker, 'utf8')).toBe(when);
+    if (kind === 'regular') {
+      expect(readFileSync(path, 'utf8')).toBe(replacement);
+      expect(runGuard(['--repo', dir, '--base', 'HEAD']).status).toBe(1);
+    }
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/baseline.*invalid/i);
+  });
+
   it('is INCONCLUSIVE when the repository root is replaced between the Git base and working candidate', () => {
     const dir = makeRepo(2);
     const replacement = makeRepo(1);

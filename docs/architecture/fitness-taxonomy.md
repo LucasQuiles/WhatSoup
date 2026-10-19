@@ -248,7 +248,9 @@ When a change would push a grandfathered file past its ceiling:
    one reader that refuses symbolic links (including parent directories), executable files,
    devices and other non-regular files, and uses the
    same 4 MiB byte limit as exact Git blob reads. Parent identities are rechecked after
-   opening and reading the file. This detects replacements still present at either check;
+   opening and reading the file. After reading, the leaf pathname must still identify the
+   opened regular file with matching mode, size, modification time and change time.
+   This detects replacements still present at the corresponding check;
    Node's pathname APIs cannot exclude a directory swapped away and restored between checks.
    One owned helper reads the candidate waiver and all registered working-tree baselines
    within a shared two-second deadline, including helper startup. Each document retains

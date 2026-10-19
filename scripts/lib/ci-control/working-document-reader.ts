@@ -71,6 +71,11 @@ function readWorkingDocument(repoRoot: string, relativePath: string): Buffer | n
           throw new Error('working document changed while reading');
         }
         validateParents();
+        const observed = lstatSync(path);
+        if (!observed.isFile() || !sameIdentity(opened, observed) || observed.mode !== after.mode
+          || observed.size !== after.size || observed.mtimeMs !== after.mtimeMs || observed.ctimeMs !== after.ctimeMs) {
+          throw new Error('working document pathname changed while reading');
+        }
         return bytes.subarray(0, total);
       } finally {
         closeSync(fd);
