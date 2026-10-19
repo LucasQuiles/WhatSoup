@@ -104,6 +104,8 @@ describe('account-auth-status probe — CLI providers', () => {
       'claude',
       ['auth', 'status', '--json'],
       expect.objectContaining({ CLAUDE_CONFIG_DIR: '/tmp/cfg/.claude' }),
+      // claude-cli children carry the spawn/exit lifecycle observers.
+      expect.objectContaining({ onSpawned: expect.any(Function), onExited: expect.any(Function) }),
     );
 
     const withoutVar = vi.fn(async () => ({ status: 'ok' as const, output: 'authenticated' }));
@@ -115,6 +117,7 @@ describe('account-auth-status probe — CLI providers', () => {
       'claude',
       ['auth', 'status', '--json'],
       expect.not.objectContaining({ CLAUDE_CONFIG_DIR: expect.anything() }),
+      expect.objectContaining({ onSpawned: expect.any(Function), onExited: expect.any(Function) }),
     );
   });
 
