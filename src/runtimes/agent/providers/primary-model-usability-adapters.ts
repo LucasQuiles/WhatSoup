@@ -6,10 +6,16 @@ import {
   probeBinaryCommand,
   probeBinaryAuthStatus,
   type BinaryAuthStatusResult,
+  type BinaryCommandProbeExit,
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from '../../../lib/api-key-resolver.ts';
-import { ensureClaudeFileStoreCredential, type ClaudeFileStoreHealResult } from './claude-filestore-heal.ts';
+import {
+  claudeCredentialServiceFor,
+  ensureClaudeFileStoreCredential,
+  type ClaudeFileStoreHealResult,
+} from './claude-filestore-heal.ts';
+import { createChildLogger } from '../../../logger.ts';
 import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
@@ -22,6 +28,14 @@ import type {
   ProviderExecutionLease,
 } from '../provider-execution-gate.ts';
 import { shortHash } from '../../../lib/short-hash.ts';
+
+/** Why a primary-model probe runs; carried into its lifecycle log lines. */
+export type PrimaryModelProbeTrigger = 'startup' | 'manual' | 'periodic' | 'recovery' | 'diagnostic';
+
+/** Sink for the probe child's spawn and exit lines (a pino logger in production). */
+export interface PrimaryModelProbeLog {
+  info: (obj: Record<string, unknown>, msg: string) => void;
+}
 
 export interface PrimaryModelProbeAdapterDeps {
   cwd?: string;
@@ -64,6 +78,10 @@ export interface PrimaryModelProbeAdapterDeps {
    * material, paths that expose user data, or account identity.
    */
   servingContext?: ServingContextReceipt;
+  /** Why this probe runs. Logged with each CLI probe child; 'unspecified' when absent. */
+  probeTrigger?: PrimaryModelProbeTrigger;
+  /** Lifecycle log sink for CLI probe children. Injectable for tests. */
+  log?: PrimaryModelProbeLog;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
@@ -216,6 +234,7 @@ async function probeCliModel(
     executionLease?.release();
     executionLease = null;
   };
+  const lifecycle = probeChildLifecycleLog(provider, env, deps, signal);
   let result: BinaryAuthStatusResult;
   try {
     onStage?.('child-run');
@@ -231,6 +250,7 @@ async function probeCliModel(
         ...(deps.cwd ? { cwd: deps.cwd } : {}),
         timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS,
         ...(signal ? { signal } : {}),
+        ...lifecycle,
         ...(executionLease ? {
           onProcessClosed: () => {
             terminalizeExecutionLease();
@@ -249,6 +269,71 @@ async function probeCliModel(
     throw err;
   }
   return mapCliProbeResult(result);
+}
+
+/**
+ * One info line when a CLI probe child spawns and one when it exits, so a probe
+ * killed by its own timeout can be lined up against a credential change: the
+ * CLI serializes token refresh per config dir, and a child killed mid-refresh
+ * can lose the rotated token. The lines name the keychain item of the child's
+ * CLAUDE_CONFIG_DIR ('default' when unset), never the directory itself, any
+ * other environment value, or the child's output.
+ */
+function probeChildLifecycleLog(
+  provider: string,
+  env: NodeJS.ProcessEnv,
+  deps: PrimaryModelProbeAdapterDeps,
+  signal: AbortSignal | undefined,
+): Required<Pick<BinaryCommandProbeOptions, 'onSpawned' | 'onExited'>> {
+  const log = deps.log ?? createChildLogger('primary-model-probe');
+  const configDir = env.CLAUDE_CONFIG_DIR;
+  const base = {
+    trigger: deps.probeTrigger ?? 'unspecified',
+    provider,
+    ...(provider === 'claude-cli'
+      ? { credentialService: configDir ? claudeCredentialServiceFor(configDir) : 'default' }
+      : {}),
+  };
+  let startedAtMs: number | null = null;
+  return {
+    onSpawned: (pid) => {
+      startedAtMs = Date.now();
+      log.info(
+        { event: 'primary_model_probe_spawn', ...base, pid: pid ?? null, startedAt: new Date(startedAtMs).toISOString() },
+        'primary model probe spawned',
+      );
+    },
+    onExited: (exit: BinaryCommandProbeExit) => {
+      const endedAtMs = Date.now();
+      const start = startedAtMs ?? endedAtMs;
+      const termination = exit.killedByTimeout
+        ? 'cli-timeout'
+        : exit.killedByAbort
+          ? (isTimeoutReason(signal?.reason) ? 'deadline' : 'caller-abort')
+          : null;
+      log.info(
+        {
+          event: 'primary_model_probe_exit',
+          ...base,
+          pid: exit.pid ?? null,
+          startedAt: new Date(start).toISOString(),
+          endedAt: new Date(endedAtMs).toISOString(),
+          durationMs: endedAtMs - start,
+          exitCode: exit.exitCode,
+          signal: exit.signal,
+          killedByProbeTimeout: termination === 'cli-timeout' || termination === 'deadline',
+          termination,
+          spawnFailed: exit.spawnFailed,
+        },
+        'primary model probe exited',
+      );
+    },
+  };
+}
+
+/** An abort reason that marks a deadline (AbortSignal.timeout and the usability deadline use TimeoutError). */
+function isTimeoutReason(reason: unknown): boolean {
+  return typeof reason === 'object' && reason !== null && (reason as { name?: unknown }).name === 'TimeoutError';
 }
 
 function modelProbeCommand(
