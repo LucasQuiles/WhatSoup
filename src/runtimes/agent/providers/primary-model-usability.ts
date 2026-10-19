@@ -156,7 +156,9 @@ export async function probePrimaryModelUsability(
       try {
         prepared = await adapters.prepareBinaryModel({ provider, model });
       } catch { /* deliberately: preparation is fail-open by contract; the probe runs exactly as it would without it */ }
-      if (prepared && prepared.defer) return result(target, model, 'unknown', prepared.defer);
+      // A caller that cancelled meanwhile gets its cancellation outcome below
+      // (caller-pre-aborted), not the deferral.
+      if (prepared && prepared.defer && !options.signal?.aborted) return result(target, model, 'unknown', prepared.defer);
     }
     const probe = await withCancellationDeadline(
       (signal, onStage) => adapters.probeBinaryModel!({ provider, model }, signal, onStage),

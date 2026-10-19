@@ -112,7 +112,8 @@ export function makeAccountAuthStatusProbe(
         refreshed = await deps.refreshAhead(binary, env);
       } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
       // Never start the killable probe while the refresh child still runs.
-      if (refreshed && refreshed.outcome === 'still-running') {
+      // An abandoned probe reports the abort below, not the deferral.
+      if (refreshed && refreshed.outcome === 'still-running' && !signal.aborted) {
         return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: login refresh still running`, data: { mode: 'binary', provider: target.provider } };
       }
     }
