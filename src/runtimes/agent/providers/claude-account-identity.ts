@@ -40,6 +40,7 @@ import {
   type BinaryAuthStatusResult,
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
 
 /** Same bound as the CLI model probe: `auth status` is local, but the CLI's
  *  own startup on a loaded host can exceed the 5 s preflight default. Exported
@@ -92,6 +93,10 @@ export interface ClaudeAccountIdentityDeps {
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   timeoutMs?: number;
+  /** Refresh-ahead run before the killable probe (claude-refresh-ahead.ts). Injectable for tests. */
+  refreshClaudeLoginAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
+  /** Refresh-lock wait before the probe child is signalled. Injectable for tests. */
+  claudeRefreshLockGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
@@ -180,16 +185,24 @@ export async function observeClaudeAccountIdentity(
   }
   if (!binary) return { kind: 'failed', reason: 'binary-missing' };
 
+  // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
+  const env = scrubbedAuthStatusEnv(deps.env ?? process.env);
+  // A due token refresh happens in a child nothing kills, before the probe's
+  // own timer starts (claude-refresh-ahead.ts). Never rejects.
+  try {
+    await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
+  } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
   let probe: BinaryAuthStatusResult;
   try {
     probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(
       binary,
       [...CLAUDE_AUTH_STATUS_ARGS],
-      // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
-      scrubbedAuthStatusEnv(deps.env ?? process.env),
+      env,
       {
         timeoutMs: deps.timeoutMs ?? ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS,
         ...(deps.signal ? { signal: deps.signal } : {}),
+        terminationGrace: () => (deps.claudeRefreshLockGrace
+          ?? ((childEnv: NodeJS.ProcessEnv) => claudeRefreshLockGrace(childEnv, 'account-identity')))(env),
       },
     );
   } catch {

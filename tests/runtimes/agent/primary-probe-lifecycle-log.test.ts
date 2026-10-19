@@ -46,7 +46,7 @@ function adaptersFor(child: FakeChild, log: ReturnType<typeof capture>['log'], t
   const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
   return createPrimaryModelProbeAdapters(undefined, {
     getProviderBinary: () => 'claude',
-    ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-file-store-current' }),
+    ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
     probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
     probeTrigger: trigger as 'periodic',
     log,
@@ -155,6 +155,8 @@ describe('primary model probe lifecycle log', () => {
       { timeoutMs: 5_000 },
     );
 
+    // The child spawns once the (uncancellable) refresh-ahead preparation settled.
+    await vi.advanceTimersByTimeAsync(0);
     vi.advanceTimersByTime(5_000);
     expect(child.kill).toHaveBeenCalledOnce();
     child.emit('close', null, 'SIGTERM');
@@ -181,6 +183,7 @@ describe('primary model probe lifecycle log', () => {
       { signal: controller.signal },
     );
 
+    await vi.advanceTimersByTimeAsync(0);
     vi.advanceTimersByTime(2_000);
     controller.abort();
     child.emit('close', null, 'SIGTERM');
@@ -199,7 +202,7 @@ describe('primary model probe lifecycle log', () => {
     const spawnImpl = vi.fn(() => { throw new Error('spawn EMFILE'); }) as unknown as typeof import('node:child_process').spawn;
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: () => 'claude',
-      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-file-store-current' }),
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
       probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
       probeTrigger: 'periodic',
       log,
@@ -230,7 +233,7 @@ describe('primary model probe lifecycle log with a real child process', () => {
     const { lines, log } = capture();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: () => process.execPath,
-      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-file-store-current' }),
+      ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
       // A real spawn of node itself, which exits 0 at once; the probe's own argv is replaced.
       probeBinaryCommand: (binary, _args, env, options) => runBinaryCommandProbe(binary, ['-e', ''], env, options),
       probeTrigger: 'periodic',

@@ -150,6 +150,48 @@ export function claudeSecureStorageDir(env: NodeJS.ProcessEnv): string {
   return env.CLAUDE_CONFIG_DIR || join(home, '.claude');
 }
 
+/** {@link claudeCredentialServiceForEnv} for log lines: 'default' names the bare item. */
+export function claudeCredentialServiceLabel(env: NodeJS.ProcessEnv): string {
+  const service = claudeCredentialServiceForEnv(env);
+  return service === KEYCHAIN_SERVICE ? 'default' : service;
+}
+
+
+export interface ClaudeCredentialReadDeps {
+  platform?: NodeJS.Platform;
+  /** Raw JSON of the keychain item named `service`, or null. */
+  readKeychain?: (service: string) => string | null;
+  /** Raw JSON of the file store at `path`, or null. */
+  readFileStore?: (path: string) => string | null;
+}
+
+/** Where the stored login's access-token expiry was read, and its value (ms epoch; null = unknown). */
+export interface ClaudeCredentialExpiry {
+  source: 'keychain' | 'file-store' | null;
+  expiresAt: number | null;
+}
+
+/**
+ * Read only `claudeAiOauth.expiresAt` of the login a `claude` child started
+ * with `env` would use, in the CLI's order: on macOS the keychain item first,
+ * then the plaintext store in the storage dir. Nothing else leaves this
+ * function; the parsed store is dropped here.
+ */
+export function readClaudeCredentialExpiry(
+  env: NodeJS.ProcessEnv,
+  deps: ClaudeCredentialReadDeps = {},
+): ClaudeCredentialExpiry {
+  if ((deps.platform ?? process.platform) === 'darwin') {
+    const keychainOAuth = oauthOf(parseJsonObject((deps.readKeychain ?? defaultReadKeychain)(claudeCredentialServiceForEnv(env))));
+    if (keychainOAuth) return { source: 'keychain', expiresAt: expiresAtOf(keychainOAuth) };
+  }
+  const fileOAuth = oauthOf(parseJsonObject(
+    (deps.readFileStore ?? defaultReadFileStore)(join(claudeSecureStorageDir(env), FILE_STORE_NAME)),
+  ));
+  if (fileOAuth) return { source: 'file-store', expiresAt: expiresAtOf(fileOAuth) };
+  return { source: null, expiresAt: null };
+}
+
 /** Under a test runner no default seam may read a live login or start a live CLI. */
 export function underTestRunner(): boolean {
   // env-allowed: test-runner detection; must not read config (lib ring / eval-order)
