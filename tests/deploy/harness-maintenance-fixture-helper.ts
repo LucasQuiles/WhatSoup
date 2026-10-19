@@ -234,6 +234,9 @@ export function makeHarness(): Harness {
     WHATSOUP_ALERT_BIN: path.join(fakeBin, 'alert'),
     WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX: path.join(home, 'npm-global'),
     WHATSOUP_HARNESS_SERVICE_MANAGER: 'launchd',
+    // The job's own agent CLI config dir: absolute, not the default ~/.claude and shared with no
+    // fixture instance, so the script's login isolation check admits the agent CLI steps.
+    CLAUDE_CONFIG_DIR: path.join(home, 'maintenance-claude-config'),
     // The host's own managed settings file must not leak into a test.
     WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE: path.join(home, 'no-managed-settings.json'),
     HM_FIXTURE_SCRIPT: behaviour,
