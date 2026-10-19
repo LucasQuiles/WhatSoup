@@ -40,7 +40,7 @@ import {
   type BinaryAuthStatusResult,
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
-import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
+import { claudeRefreshLockGrace, refreshAheadStillRunning, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
 import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
 import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
@@ -67,6 +67,8 @@ export type ObservedAccountIdentityFailureReason =
   | 'binary-missing'
   | 'probe-failed'
   | 'probe-threw'
+  /** A refresh-ahead child for this login is still running; the probe was not started. */
+  | 'deferred-refresh-in-flight'
   | 'not-logged-in'
   | 'identity-fields-missing'
   | 'unparseable';
@@ -194,9 +196,12 @@ export async function observeClaudeAccountIdentity(
   const env = scrubbedAuthStatusEnv(deps.env ?? process.env);
   // A due token refresh happens in a child nothing kills, before the probe's
   // own timer starts (claude-refresh-ahead.ts). Never rejects.
+  let refreshed: unknown;
   try {
-    await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
+    refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
   } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
+  // Never start the killable probe while the refresh child still runs.
+  if (refreshAheadStillRunning(refreshed)) return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
   let probe: BinaryAuthStatusResult;
   try {
     probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(

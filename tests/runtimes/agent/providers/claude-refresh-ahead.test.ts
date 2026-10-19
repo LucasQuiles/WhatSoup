@@ -10,7 +10,9 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  REFRESH_AHEAD_HARD_CAP_MS,
   REFRESH_AHEAD_MS,
+  REFRESH_AHEAD_WAIT_MS,
   REFRESH_LOCK_GRACE_MS,
   claudeRefreshLockGrace,
   refreshClaudeLoginAhead,
@@ -42,7 +44,7 @@ function fakeChild(pid: number): FakeChild {
 function capture() {
   const lines: Array<{ obj: Record<string, unknown>; msg: string }> = [];
   const push = (obj: unknown, msg: string): void => { lines.push({ obj: obj as Record<string, unknown>, msg }); };
-  return { lines, log: { info: push, warn: push } };
+  return { lines, log: { info: push, warn: push, error: push } };
 }
 
 function store(expiresAt: number | undefined): string {
@@ -140,20 +142,24 @@ describe('refreshClaudeLoginAhead: when it runs', () => {
 });
 
 describe('refreshClaudeLoginAhead: never killed', () => {
-  it('waits for the child however long it runs, logging that it is still running', async () => {
+  it('bounds the caller wait, never the child: still-running after the wait, child runs to its own exit', async () => {
     const h = harness({ fileStore: store(START.getTime() + 1_000) });
-    let settled = false;
-    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: configDir() }, h.deps)
-      .then((r) => { settled = true; return r; });
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: configDir() }, h.deps);
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS - 1);
+    let early: unknown = 'pending';
+    void run.then((r) => { early = r; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(early).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(run).resolves.toEqual({ outcome: 'still-running' });
 
-    // Far past any probe budget (15 s) and the CLI's own lock staleness (60 s).
-    await vi.advanceTimersByTimeAsync(10 * 60_000);
-    expect(settled).toBe(false);
+    // Far past any probe budget and the CLI's own lock staleness: still not killed.
+    await vi.advanceTimersByTimeAsync(9 * 60_000);
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
     expect(h.lines.some((l) => l.obj.event === 'claude_probe_still_running')).toBe(true);
 
     h.children[0]!.emit('close', 0, null);
-    await expect(run).resolves.toMatchObject({ outcome: 'ran', exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(0);
     const exit = h.lines.find((l) => l.obj.event === 'claude_probe_exit')!;
     expect(exit.obj).toMatchObject({
       purpose: 'refresh-ahead',
@@ -165,6 +171,46 @@ describe('refreshClaudeLoginAhead: never killed', () => {
       termination: null,
     });
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
+  it('a later caller while the child still runs joins it and is bounded too (no second child)', async () => {
+    const dir = configDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    void refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS + 5_000);
+    const later = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS);
+    await expect(later).resolves.toEqual({ outcome: 'still-running' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    h.children[0]!.emit('close', 0, null);
+  });
+
+  it('after the hard cap a hung child stops blocking (error line), is still not killed, and a new caller runs its own check', async () => {
+    const dir = configDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    void refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_HARD_CAP_MS);
+    const hung = h.lines.find((l) => l.obj.event === 'claude_refresh_ahead_hung');
+    expect(hung).toBeDefined();
+    expect(hung!.obj).toMatchObject({ purpose: 'refresh-ahead', pid: 9000, elapsedMs: REFRESH_AHEAD_HARD_CAP_MS });
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+
+    const next = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    expect(h.spawnImpl).toHaveBeenCalledTimes(2);
+    h.children[1]!.emit('close', 0, null);
+    await expect(next).resolves.toMatchObject({ outcome: 'ran' });
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+    h.children[0]!.emit('close', 0, null);
+  });
+
+  it('spawns the child detached (its own process group), output discarded', async () => {
+    const h = harness();
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: configDir() }, h.deps);
+    const options = (h.spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![2] as { detached?: unknown; stdio?: unknown };
+    expect(options.detached).toBe(true);
+    expect(options.stdio).toEqual(['ignore', 'ignore', 'ignore']);
+    h.children[0]!.emit('close', 0, null);
+    await run;
   });
 
   it('logs a spawn line and an exit line in the probe lifecycle shape', async () => {
@@ -202,6 +248,16 @@ describe('refreshClaudeLoginAhead: one child per config dir', () => {
     expect(h.spawnImpl).toHaveBeenCalledTimes(2);
     h.children[1]!.emit('close', 0, null);
     await c;
+  });
+
+  it('one storage dir spelled with and without a trailing slash shares one child', async () => {
+    const dir = configDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const a = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    const b = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: `${dir}/` }, h.deps);
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    h.children[0]!.emit('close', 0, null);
+    await Promise.all([a, b]);
   });
 
   it('different config dirs do not share a child', async () => {

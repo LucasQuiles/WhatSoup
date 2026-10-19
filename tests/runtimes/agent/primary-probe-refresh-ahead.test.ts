@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPrimaryModelProbeAdapters, type PrimaryModelProbeAdapterDeps } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import { probePrimaryModelUsability } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import { probeBinaryCommand } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
-import { refreshClaudeLoginAhead } from '../../../src/runtimes/agent/providers/claude-refresh-ahead.ts';
+import { REFRESH_AHEAD_WAIT_MS, refreshClaudeLoginAhead } from '../../../src/runtimes/agent/providers/claude-refresh-ahead.ts';
+import { primaryModelUsabilityRequiresAlert } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import { observeClaudeAccountIdentity } from '../../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { makeAccountAuthStatusProbe, type AccountAuthStatusDeps } from '../../../src/runtimes/agent/providers/account-auth-status.ts';
 
@@ -41,7 +42,7 @@ function spawnRecorder() {
   return { children, calls, spawnImpl };
 }
 
-const quietLog = { info: () => undefined, warn: () => undefined };
+const quietLog = { info: () => undefined, warn: () => undefined, error: () => undefined };
 const START = new Date('2026-10-19T09:00:00.000Z');
 let savedConfigDir: string | undefined;
 
@@ -120,6 +121,29 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
     expect(refresh.children[0]!.kill).not.toHaveBeenCalled();
   });
 
+  it('a refresh-ahead child still running after the wait defers the probe: no killable child, inconclusive, no alert', async () => {
+    const refresh = spawnRecorder();
+    const probe = spawnRecorder();
+    const result = probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: (binary, env) => refreshClaudeLoginAhead(binary, env, {
+          platform: 'linux',
+          readFileStore: () => null,
+          spawnImpl: refresh.spawnImpl,
+          log: quietLog,
+        }),
+      })),
+    );
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS);
+    const settled = await result;
+    expect(settled).toMatchObject({ status: 'unknown', reason: 'deferred-refresh-in-flight' });
+    expect(primaryModelUsabilityRequiresAlert(settled)).toBe(false);
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+    expect(refresh.children[0]!.kill).not.toHaveBeenCalled();
+    refresh.children[0]!.emit('close', 0, null);
+  });
+
   it('is not run for a provider other than claude-cli', async () => {
     const probe = spawnRecorder();
     const refreshAhead = vi.fn(async () => undefined);
@@ -180,7 +204,29 @@ describe('account-identity probe', () => {
   });
 });
 
+describe('account-identity probe deferral', () => {
+  it('does not start its killable probe while the refresh-ahead child still runs', async () => {
+    const probeBinaryCommandSpy = vi.fn(async () => ({ status: 'ok' as const, output: '{}' }));
+    const observed = await observeClaudeAccountIdentity({
+      getProviderBinary: () => 'claude',
+      env: { CLAUDE_CONFIG_DIR: '/tmp/identity-fixture/.claude' },
+      refreshClaudeLoginAhead: async () => ({ outcome: 'still-running' }),
+      claudeRefreshLockGrace: () => null,
+      probeBinaryCommand: probeBinaryCommandSpy,
+    });
+    expect(observed).toEqual({ kind: 'failed', reason: 'deferred-refresh-in-flight' });
+    expect(probeBinaryCommandSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('diagnostic auth-status probe', () => {
+  it('does not start its killable spawn while the refresh-ahead child still runs', async () => {
+    const deps = authDeps({ refreshAhead: async () => ({ outcome: 'still-running' }) });
+    const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
+    expect(deps.probeBinaryAuthStatus).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, confidence: 'suspected' });
+  });
+
   function authDeps(over: Partial<AccountAuthStatusDeps> = {}): AccountAuthStatusDeps {
     return {
       resolveKeyService: () => null,

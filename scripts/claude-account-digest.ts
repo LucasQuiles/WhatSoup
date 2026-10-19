@@ -59,6 +59,10 @@ const FAILURE_EXITS: Record<
   'binary-missing': { code: 4, message: 'claude binary not found: pass --binary <path> or fix PATH' },
   'probe-threw': { code: 4, message: 'auth-status probe failed to run' },
   'probe-failed': { code: 4, message: 'auth-status probe exited non-zero; no digest captured' },
+  'deferred-refresh-in-flight': {
+    code: 4,
+    message: 'a claude login refresh for this config root is still running; no digest captured — re-run once it has finished',
+  },
   'not-logged-in': {
     code: 2,
     message: 'claude CLI reports not logged in for this config root — log in interactively first, then re-run',
