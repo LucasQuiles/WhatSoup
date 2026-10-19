@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 import pytest
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -1082,30 +1082,42 @@ def test_packet_pruning_replaces_its_scan_when_directory_identity_changes(state,
     assert not packet.exists()
 
 
-@pytest.mark.parametrize("stop", ["missing", "error", "exhausted"])
-def test_packet_pruning_closes_owned_scan(state, monkeypatch, stop):
-    directory = state["packets"]
-    directory.mkdir(mode=0o700)
-    for index in range(_mod.NOTICE_PACKET_PRUNE_MAX + 1):
-        (directory / f"{index:08x}.json").write_text("{}")
-    _mod.prune_notice_packets(state)
-    _, directory_fd, entries = _mod._notice_packet_prune_scan
-    if stop == "missing":
-        _mod.prune_notice_packets({})
-    elif stop == "error":
-        real_stat = os.stat
+@settings(max_examples=12, deadline=None)
+@given(stop=st.sampled_from(["missing", "error", "exhausted"]), remaining=st.integers(min_value=1, max_value=20))
+@example(stop="missing", remaining=1)
+@example(stop="error", remaining=1)
+@example(stop="exhausted", remaining=20)
+def test_packet_pruning_closes_owned_scan(stop, remaining):
+    from tempfile import TemporaryDirectory
 
-        def fail_entry_stat(path, *, dir_fd=None, follow_symlinks=True):
-            if dir_fd == directory_fd:
-                raise OSError("controlled packet metadata failure")
-            return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+    with TemporaryDirectory() as root, pytest.MonkeyPatch.context() as patch:
+        patch.setenv("BOT_ERRORS_STATE_DIR", root)
+        paths = _mod.state_paths()
+        directory = paths["packets"]
+        directory.mkdir(mode=0o700)
+        for index in range(_mod.NOTICE_PACKET_PRUNE_MAX + remaining):
+            (directory / f"{index:08x}.json").write_text("{}")
+        try:
+            _mod.prune_notice_packets(paths)
+            _, directory_fd, entries = _mod._notice_packet_prune_scan
+            if stop == "missing":
+                _mod.prune_notice_packets({})
+            elif stop == "error":
+                real_stat = os.stat
 
-        monkeypatch.setattr(os, "stat", fail_entry_stat)
-        with pytest.raises(OSError, match="controlled packet metadata failure"):
-            _mod.prune_notice_packets(state)
-    else:
-        _mod.prune_notice_packets(state)
-    assert _mod._notice_packet_prune_scan is None
-    with pytest.raises(OSError):
-        os.fstat(directory_fd)
-    assert next(entries, None) is None
+                def fail_entry_stat(path, *, dir_fd=None, follow_symlinks=True):
+                    if dir_fd == directory_fd:
+                        raise OSError("controlled packet metadata failure")
+                    return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+                patch.setattr(os, "stat", fail_entry_stat)
+                with pytest.raises(OSError, match="controlled packet metadata failure"):
+                    _mod.prune_notice_packets(paths)
+            else:
+                _mod.prune_notice_packets(paths)
+            assert _mod._notice_packet_prune_scan is None
+            with pytest.raises(OSError):
+                os.fstat(directory_fd)
+            assert next(entries, None) is None
+        finally:
+            _mod.prune_notice_packets({})
