@@ -118,6 +118,14 @@ export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
 }
 
 const inFlight = new Map<string, Promise<ClaudeRefreshAheadResult>>();
+/** Refresh-ahead children still alive per storage dir, including ones past the hard cap. */
+const liveChildren = new Map<string, number>();
+
+function trackLive(key: string, delta: 1 | -1): void {
+  const next = (liveChildren.get(key) ?? 0) + delta;
+  if (next > 0) liveChildren.set(key, next);
+  else liveChildren.delete(key);
+}
 
 /**
  * Dedupe key: the storage dir, resolved and without a trailing slash, so
@@ -148,11 +156,14 @@ export function refreshClaudeLoginAhead(
 ): Promise<ClaudeRefreshAheadResult> {
   const key = refreshAheadKey(env);
   let run = inFlight.get(key);
+  // A child past its hard cap no longer blocks the wait, but while it is
+  // alive no second refresh child and no killable probe may start.
+  if (!run && liveChildren.has(key)) return Promise.resolve({ outcome: 'still-running' });
   if (!run) {
     const release = (): void => {
       if (inFlight.get(key) === created) inFlight.delete(key);
     };
-    const created: Promise<ClaudeRefreshAheadResult> = runRefreshAhead(binary, env, deps, release).finally(release);
+    const created: Promise<ClaudeRefreshAheadResult> = runRefreshAhead(binary, env, deps, release, key).finally(release);
     run = created;
     inFlight.set(key, created);
   }
@@ -173,6 +184,7 @@ async function runRefreshAhead(
   env: NodeJS.ProcessEnv,
   deps: ClaudeRefreshAheadDeps,
   release: () => void,
+  key: string,
 ): Promise<ClaudeRefreshAheadResult> {
   const now = deps.now ?? (() => systemClock.now());
   // Never read a live login or start a live CLI from a test run that did not
@@ -230,8 +242,12 @@ async function runRefreshAhead(
     }, STILL_RUNNING_LOG_MS);
     stillRunning.unref?.();
     // A child that never exits must not block every later probe for this dir.
+    // Awaited through the promise below, but never keeps the bot alive at shutdown.
+    child.unref?.();
+    trackLive(key, 1);
     const hardCap = setTimeout(() => {
       release();
+      clearInterval(stillRunning);
       quietly(() => log.error(
         { event: 'claude_refresh_ahead_hung', purpose: 'refresh-ahead', pid: pid ?? null, elapsedMs: now() - startedAt },
         'claude refresh-ahead child exceeded its hard cap; no longer blocking probes (still not killed)',
@@ -244,6 +260,7 @@ async function runRefreshAhead(
       finished = true;
       clearInterval(stillRunning);
       clearTimeout(hardCap);
+      trackLive(key, -1);
       quietly(() => observers.onExited(exitOf(pid, exitCode, signal, spawnFailed)));
       resolve(spawnFailed ? { outcome: 'spawn-failed', reason } : { outcome: 'ran', reason, exitCode, signal });
     };
