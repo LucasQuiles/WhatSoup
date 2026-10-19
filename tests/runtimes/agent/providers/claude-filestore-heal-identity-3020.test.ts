@@ -92,6 +92,21 @@ describe('#3020 account-identity guard', () => {
     expect(writeFileStore).not.toHaveBeenCalled();
   });
 
+  // N2d: only `true` proves identity; undefined or any other value refuses (fail closed)
+  it.each([undefined, 1, 'true', {}])('N2d: verifyAccountId returning %j (not true) -> REFUSED before any write', (value) => {
+    const writeFileStore = vi.fn();
+    const backupFileStore = vi.fn(() => '/tmp/backup.json');
+    const r = ensureClaudeFileStoreCredential(deps({
+      expectedAccountId: 'expected-account-id',
+      verifyAccountId: (() => value) as unknown as ClaudeFileStoreHealDeps['verifyAccountId'],
+      writeFileStore,
+      backupFileStore,
+    }));
+    expect(r.outcome).toBe('refused-identity-unverifiable');
+    expect(writeFileStore).not.toHaveBeenCalled();
+    expect(backupFileStore).not.toHaveBeenCalled();
+  });
+
   // N2c: identity unverifiable (verifyAccountId returns null) -> REFUSE
   it('N2c: verifyAccountId returning null (unverifiable) -> REFUSED', () => {
     const writeFileStore = vi.fn();

@@ -330,17 +330,23 @@ describe('shell render call sites apply the injector', () => {
   });
 
   /** The 2026-10-19 fleet shape: plistlib.dump of the job, started through maint-ccd-guard.sh. */
-  function installFleetGuarded(home: string, dir: string, guardExists = true): void {
+  function installFleetGuarded(
+    home: string,
+    dir: string,
+    guardExists = true,
+    guard = path.join(home, '.local', 'libexec', 'fleet-reauth', 'maint-ccd-guard.sh'),
+  ): void {
     const launchd = path.join(home, 'Library', 'LaunchAgents');
-    const guard = path.join(home, '.local', 'libexec', 'fleet-reauth', 'maint-ccd-guard.sh');
     if (guardExists) {
       fs.mkdirSync(path.dirname(guard), { recursive: true });
       fs.writeFileSync(guard, '#!/bin/bash\nexec "$@"\n', { mode: 0o755 });
+      fs.chmodSync(guard, 0o755);
     }
     const file = path.join(launchd, 'com.whatsoup.harness-maintenance.plist');
     const r = spawnSync('python3', ['-c', [
       'import plistlib, sys',
       'p, guard, d = sys.argv[1:4]',
+      '# The guard path as written on the host: never resolved here.',
       'x = plistlib.load(open(p, "rb"))',
       'x["ProgramArguments"] = ["/bin/bash", guard, "/bin/bash", x["ProgramArguments"][-1]]',
       'x["EnvironmentVariables"]["CLAUDE_CONFIG_DIR"] = d',
@@ -355,6 +361,48 @@ describe('shell render call sites apply the injector', () => {
     driftCheck(home, '/srv/bot/.claude');
     installFleetGuarded(home, path.join(home, '.claude-maint'));
     expect(runDriftCheck(home)).toContain('ok: harness-maintenance');
+  });
+
+  it('the drift checker accepts the guard at its other deployed location, ~/.local/share/fleet-reauth', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', {});
+    driftCheck(home, null);
+    installFleetGuarded(home, path.join(home, '.claude-maint'), true,
+      path.join(home, '.local', 'share', 'fleet-reauth', 'maint-ccd-guard.sh'));
+    expect(runDriftCheck(home)).toContain('ok: harness-maintenance');
+  });
+
+  it('the drift checker flags a guard outside the two deployed locations, a symlinked one, or a writable one', () => {
+    const elsewhere = (home: string) => path.join(home, 'tmp', 'maint-ccd-guard.sh');
+    // Same name, another directory.
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', {});
+    driftCheck(home, null);
+    installFleetGuarded(home, path.join(home, '.claude-maint'), true, elsewhere(home));
+    expect(runDriftCheck(home)).toContain('drift: harness-maintenance');
+
+    // The deployed path, but a symlink to a guard elsewhere.
+    const home2 = tmpHome();
+    writeInstance(home2, 'alpha-bot', {});
+    driftCheck(home2, null);
+    fs.mkdirSync(path.dirname(elsewhere(home2)), { recursive: true });
+    fs.writeFileSync(elsewhere(home2), '#!/bin/bash\nexec "$@"\n', { mode: 0o755 });
+    const deployed = path.join(home2, '.local', 'libexec', 'fleet-reauth', 'maint-ccd-guard.sh');
+    fs.mkdirSync(path.dirname(deployed), { recursive: true });
+    fs.symlinkSync(elsewhere(home2), deployed);
+    installFleetGuarded(home2, path.join(home2, '.claude-maint'), false, deployed);
+    expect(runDriftCheck(home2)).toContain('drift: harness-maintenance');
+
+    // The deployed path, group- or world-writable.
+    for (const mode of [0o775, 0o757]) {
+      const home3 = tmpHome();
+      writeInstance(home3, 'alpha-bot', {});
+      driftCheck(home3, null);
+      const guard = path.join(home3, '.local', 'libexec', 'fleet-reauth', 'maint-ccd-guard.sh');
+      installFleetGuarded(home3, path.join(home3, '.claude-maint'), true, guard);
+      fs.chmodSync(guard, mode);
+      expect(runDriftCheck(home3), mode.toString(8)).toContain('drift: harness-maintenance');
+    }
   });
 
   it('the drift checker flags the guard wrapper on the bot\'s dir, or with the guard file missing', () => {

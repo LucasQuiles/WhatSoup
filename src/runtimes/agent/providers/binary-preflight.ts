@@ -150,7 +150,7 @@ export interface BinaryCommandProbeOptions {
   signal?: AbortSignal;
   /** Called once spawn is proven absent or the child emits close. */
   onProcessClosed?: () => void;
-  /** Called once, right after spawn returned a child (pid undefined if the spawn failed). */
+  /** Called once, right after spawn returned or threw (pid undefined if no process was created). */
   onSpawned?: (pid: number | undefined) => void;
   /** Called once when the child closes or its spawn is proven to have failed. */
   onExited?: (exit: BinaryCommandProbeExit) => void;
@@ -261,6 +261,11 @@ export async function probeBinaryCommand(
       });
     } catch {
       notifyProcessClosed();
+      // Lifecycle observers always see a spawn before an exit, even when no
+      // process was created (pid undefined, spawnFailed on the exit).
+      try {
+        options.onSpawned?.(undefined);
+      } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
       notifyExited(null, null, true);
       settle({ status: 'failed', output: '' });
       return;

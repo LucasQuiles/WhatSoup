@@ -305,7 +305,9 @@ export function ensureClaudeFileStoreCredential(
         );
         return { outcome: 'refused-identity-mismatch', keychainExpiresAt };
       }
-      if (verified === null) {
+      // Only `true` proves the account: null, undefined or any other value from
+      // a verifier is unverifiable (fail closed).
+      if (verified !== true) {
         log.warn(
           { expectedAccountIdPresent: true },
           '#3020: keychain account identity could not be verified — refusing heal (fail closed, degraded readiness)',
