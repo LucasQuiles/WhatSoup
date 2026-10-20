@@ -292,7 +292,7 @@ describe('explicit host dependency installer', () => {
     expect(ledger(fx)).toEqual([
       'brew install git python@3.13 ripgrep zsh shellcheck',
       `python -m venv ${join(fx.home, 'quality-venv')}`,
-      `python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${join(repoRoot, 'requirements/python/quality-cpython313-darwin-arm64.txt')}`,
+      `python -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${join(repoRoot, 'requirements/python/quality-cpython313-darwin-arm64.txt')}`,
     ]);
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });
