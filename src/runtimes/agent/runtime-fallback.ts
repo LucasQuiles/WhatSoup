@@ -1274,10 +1274,10 @@ export class RuntimeFallbackCoordinator {
         try {
           env = buildChildEnv(
             entry.provider,
+            // No WhatsApp tool socket: a canary needs only the entry's own credential.
             {
               allowM365Mutations: this.host.allowM365Mutations,
               whatsoupInstance: this.host.instanceName,
-              whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
             },
             entry.model,
             providerConfig,
