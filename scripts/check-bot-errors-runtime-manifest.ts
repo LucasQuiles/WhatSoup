@@ -94,9 +94,18 @@ export const EXPLICIT_REQUIRED_RUNTIME_PATHS = [
   'deploy/scripts/bot-errors-release-proof-run.sh',
   'deploy/scripts/install-bot-errors-release-proof.sh',
   'deploy/scripts/install-bot-errors-sentinel.sh',
+  // The observer/deadman is installed separately from ordinary setup, but
+  // runs directly from exported releases and therefore needs the same pin.
+  'deploy/scripts/fleet/fleet_probe.py',
+  'deploy/scripts/fleet/fleet_probe_remote.py',
+  'deploy/scripts/fleet/mcp_probe_remote.py',
+  'deploy/scripts/fleet/fleet_reliability_observer.py',
+  'deploy/scripts/fleet/reliability_supervisor.py',
+  'deploy/scripts/fleet/bot_errors_delivery_receipts.py',
+  'deploy/scripts/install-fleet-reliability-observer.sh',
 ] as const;
 
-const PYTHON_RUNTIME_DIRS = ['deploy/scripts', 'deploy/scripts/lib'] as const;
+const PYTHON_RUNTIME_DIRS = ['deploy/scripts', 'deploy/scripts/lib', 'deploy/scripts/fleet'] as const;
 
 function listPythonRuntimeScripts(cwd: string): string[] {
   const found: string[] = [];
