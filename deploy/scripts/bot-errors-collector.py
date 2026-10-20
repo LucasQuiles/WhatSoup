@@ -2081,9 +2081,10 @@ def best_effort_info_tier_enabled() -> bool:
     A ``--best-effort-remote`` (e.g. a laptop that sleeps) going offline is a
     planned/expected condition, not a crash. When this gate is on (default), its
     per-remote failure events (``relay_host_down``, pre-threshold
-    ``remote-claim-failed``) emit at ``info`` instead of ``warning``/``critical``
-    so they surface in the digest without paging. Gate off restores prior
-    behavior (fail-open).
+    ``remote-claim-failed``) emit at ``info`` instead of their normal severity
+    (``critical`` and ``warning``) so they surface in the digest without
+    paging, and relay_host_down is not re-asserted while the host stays down.
+    Gate off restores the normal severities (fail-open).
     """
     raw = os.environ.get("BOT_ERRORS_BEST_EFFORT_INFO_TIER", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
@@ -2223,9 +2224,13 @@ def enqueue_meta_alert(
     cooldown: int,
     extra_diagnostics: dict[str, Any] | None = None,
     best_effort: bool = False,
+    *,
+    severity: str = "critical",
 ) -> None:
     current = int(time.time())
-    effective_severity = "info" if (best_effort and best_effort_info_tier_enabled()) else "critical"
+    # Pattern I outranks the caller's severity: a declared best-effort remote
+    # never pages. Only the claim ladder's tier 1 passes a non-default severity.
+    effective_severity = "info" if (best_effort and best_effort_info_tier_enabled()) else severity
     alerts = state.setdefault("alerts", {})
     open_alerts = state.setdefault("openAlerts", {})
     key = alert_key(remote, source)
@@ -2842,6 +2847,69 @@ def collector_failure_escalate_threshold() -> int:
         return max(1, int(raw))
     except ValueError:
         return 2
+
+
+# Longest retry interval, from tier-3 entry on, for a down remote whose
+# relay_host_down is re-asserted. The dispatcher holds relay_host_down as a
+# transient (Pattern H) and promotes it only when a later one for the same
+# remote arrives past its promote window. With every retry capped here the
+# attempts after entry are about +300, +1200, +2100, then every 900 s, so the
+# first re-assertion at or past ANY window lands about 900 s after it at most
+# (about 36 min after the first failed poll with the default 1800 s window),
+# and a host that comes back after the critical is seen within about
+# 15 minutes. The plain schedule's 3600 s step would land up to 50 minutes late
+# on both counts. These figures are nominal: each interval is 900 s, plus up to
+# one claim timeout (30 s by default; the next attempt is timed from when the
+# claim failed), plus up to one poll (30 s) before a poll reaches the deadline.
+#
+# The collector deliberately does not read the dispatcher's window: each
+# service fixes its settings when it starts, so the two can differ. A deadline
+# stored before the cap applied is held to it too (cap_stored_tier3_next_attempt).
+#
+# Cost: a down remote is attempted every 900 s instead of hourly. Each attempt
+# runs serially in the cycle: an SSH claim of up to the claim timeout, the
+# reachability probe, and the writefail claim (also up to the claim timeout)
+# unless the reachability diagnosis skips it. Once the critical is open each
+# re-assertion is a suppressed duplicate, which brings the dispatcher's
+# 72-duplicate escalation to about 18 h.
+RELAY_DOWN_RETRY_CAP_S: int = 900
+
+
+def tier3_retry_is_capped(is_best_effort: bool) -> bool:
+    """Whether a down remote re-asserts relay_host_down and retries on the cap.
+
+    A best-effort remote with its info tier on emits an info observation that
+    the dispatcher never holds or promotes, so it keeps the plain schedule and
+    is not re-asserted. Every other remote is re-asserted and capped.
+    """
+    return not (is_best_effort and best_effort_info_tier_enabled())
+
+
+def cap_stored_tier3_next_attempt(remote_record: dict[str, Any], next_attempt_at: int, now_epoch: int) -> int:
+    """Hold a down remote's stored nextAttemptAt to the cap after its last attempt.
+
+    New deadlines are at most RELAY_DOWN_RETRY_CAP_S after the attempt that set
+    them, but a remote already down when a capped collector starts keeps the
+    deadline the previous collector stored, up to 3600 s ahead, which would
+    delay its promoting re-assertion or its recovery by up to an hour. So
+    every tier-3 poll decision caps the stored value at the last attempt +
+    RELAY_DOWN_RETRY_CAP_S. The last attempt is lastFailureAt, which every
+    failed attempt sets; when it is missing, the cap counts from now. A
+    lowered deadline is written back, so a cap counted from now is fixed once
+    instead of moving forward with each poll. For a deadline this collector
+    stored the cap changes nothing (to the second): it stored that attempt's
+    time plus at most RELAY_DOWN_RETRY_CAP_S.
+    """
+    last_failure_at = remote_record.get("lastFailureAt")
+    if isinstance(last_failure_at, int) and not isinstance(last_failure_at, bool):
+        last_attempt_at = min(last_failure_at, now_epoch)
+    else:
+        last_attempt_at = now_epoch
+    capped = last_attempt_at + RELAY_DOWN_RETRY_CAP_S
+    if next_attempt_at <= capped:
+        return next_attempt_at
+    remote_record["nextAttemptAt"] = capped
+    return capped
 
 
 FAILURE_RETENTION_DETAIL_MAX_CHARS: int = 1000
@@ -3970,6 +4038,7 @@ def _emit_collector_outbox_event(
     evidence: str,
     log_type: str,
     extra_diagnostics: dict[str, Any] | None = None,
+    renotify: bool = False,
 ) -> str:
     """Shared low-level constructor for collector-minted outbox events (ENTRY/EXIT
     only). Used by both emit_relay_host_state_event (relay_host_down/recovered)
@@ -4002,6 +4071,11 @@ def _emit_collector_outbox_event(
     time_ns/pid first and the remote last means truncation can only ever
     clip the least-important trailing text.
 
+    renotify=True stamps top-level ``renotify: true``, the marker the
+    dispatcher's flap scan (flap_scan_outbox) skips: the event repeats an open
+    condition rather than reporting a new occurrence, so it is not a flap trip.
+    No other dispatcher path reads the field.
+
     Returns the event id.
     """
     host, _remote_root = parse_remote(remote)
@@ -4029,6 +4103,7 @@ def _emit_collector_outbox_event(
         "process": {"pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv},
         "diagnostics": diagnostics,
         "delivery": {"attempts": 0, "status": "queued", "nextAttemptAtEpoch": 0, "lastError": None},
+        **({"renotify": True} if renotify else {}),
     }
     path = local_outbox_path(event, "collector")
     target = _durable_target(path)
@@ -4055,15 +4130,30 @@ def _emit_collector_outbox_event(
     return event_id
 
 
-def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: dict[str, Any], best_effort: bool = False) -> None:
-    """Write a relay_host_down or relay_host_recovered outbox event (ENTRY/EXIT only).
+def emit_relay_host_state_event(
+    remote: str,
+    kind: str,
+    evidence: str,
+    state: dict[str, Any],
+    best_effort: bool = False,
+    *,
+    renotify: bool = False,
+) -> None:
+    """Write a relay_host_down or relay_host_recovered outbox event.
 
+    relay_host_down is written on entry into the down state and re-asserted on
+    each later failed attempt of the same episode; relay_host_recovered on exit.
+    A re-assertion passes renotify=True (see _emit_collector_outbox_event).
     Delegates envelope construction to _emit_collector_outbox_event (shared
     with emit_collector_capture_escalation_event).
     """
+    # relay_host_down is the ladder's strongest evidence, so it is critical. The
+    # dispatcher holds it as a transient (Pattern H) until the host has been
+    # down for its promote window, and promotion sends at this severity (the
+    # stronger of the held record's first severity and the promoting event's).
     # Pattern I: a best-effort host going down is expected, not a crash — info, not a page.
     if kind == "relay_host_down" and not (best_effort and best_effort_info_tier_enabled()):
-        severity = "warning"
+        severity = "critical"
     else:
         severity = "info"
     # #2419: recovery is a typed SAME-SOURCE clear. Incident identity includes
@@ -4082,6 +4172,7 @@ def emit_relay_host_state_event(remote: str, kind: str, evidence: str, state: di
         summary=f"BOT ERRORS collector relay host {kind.replace('_', ' ')}: {remote}",
         evidence=evidence,
         log_type=kind,
+        renotify=renotify,
     )
 
 
@@ -4095,6 +4186,7 @@ def emit_collector_capture_escalation_event(
     last_error: str | None = None,
     last_success_age_seconds: int | None = None,
     reachability_diagnosis_value: str | None = None,
+    superseded_by: str | None = None,
 ) -> None:
     """Write a collector_remote_unreachable alert/clear outbox event (ENTRY/EXIT only).
 
@@ -4102,10 +4194,13 @@ def emit_collector_capture_escalation_event(
     with emit_relay_host_state_event), but is a genuinely distinct,
     independently-tunable signal: default threshold=2
     (BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD) fires earlier than
-    RELAY_BACKOFF_FAILURE_THRESHOLD=3's relay_host_down, and — unlike
-    relay_host_down/relay_host_recovered, which both use eventType="alert" —
-    emits a real eventType="clear" on recovery so the dispatcher's standard
-    clear-pop path (mark_incident_sent) closes the incident directly.
+    RELAY_BACKOFF_FAILURE_THRESHOLD=3's relay_host_down, and emits a real
+    eventType="clear" so the dispatcher's standard clear-pop path
+    (mark_incident_sent) closes the incident directly.
+
+    ``superseded_by`` names the source that replaced this tier when the clear
+    is a supersession rather than a recovery, so the clear does not tell the
+    operator that capture recovered when the remote has just failed again.
     """
     _, remote_root = parse_remote(remote)
     severity = "warning" if event_type == "alert" else "info"
@@ -4126,6 +4221,8 @@ def emit_collector_capture_escalation_event(
         evidence_parts.append(f"last_error={redacted_last_error}")
     if reachability_diagnosis_value:
         evidence_parts.append(f"reachability_diagnosis={reachability_diagnosis_value}")
+    if superseded_by:
+        evidence_parts.append(f"superseded_by={superseded_by}")
     evidence_parts.append(f"collector_log={state_root() / 'logs/collector.jsonl'}")
     evidence = "\n".join(evidence_parts)
     extra_diagnostics: dict[str, Any] = {
@@ -4139,16 +4236,23 @@ def emit_collector_capture_escalation_event(
     }
     if reachability_diagnosis_value:
         extra_diagnostics["reachabilityDiagnosis"] = reachability_diagnosis_value
+    if superseded_by:
+        extra_diagnostics["supersededBy"] = superseded_by
+    if event_type == "alert":
+        summary = f"BOT ERRORS collector cannot capture remote outbox: {remote}"
+    elif superseded_by:
+        summary = (
+            f"BOT ERRORS collector remote capture alert superseded by "
+            f"{superseded_by.replace('_', ' ')}: {remote}"
+        )
+    else:
+        summary = f"BOT ERRORS collector remote capture recovered: {remote}"
     _emit_collector_outbox_event(
         remote,
         source=COLLECTOR_CAPTURE_ESCALATION_SOURCE,
         event_type=event_type,
         severity=severity,
-        summary=(
-            f"BOT ERRORS collector cannot capture remote outbox: {remote}"
-            if event_type == "alert"
-            else f"BOT ERRORS collector remote capture recovered: {remote}"
-        ),
+        summary=summary,
         evidence=evidence,
         log_type=f"{COLLECTOR_CAPTURE_ESCALATION_SOURCE}_{event_type}",
         extra_diagnostics=extra_diagnostics,
@@ -4248,6 +4352,8 @@ def _run_once_with_state(
         next_attempt_at = int(remote_record_pre.get("nextAttemptAt") or 0)
         is_host_down = consecutive_failures_pre >= RELAY_BACKOFF_FAILURE_THRESHOLD
         now_epoch = int(time.time())
+        if is_host_down and tier3_retry_is_capped(is_best_effort):
+            next_attempt_at = cap_stored_tier3_next_attempt(remote_record_pre, next_attempt_at, now_epoch)
         if is_host_down and now_epoch < next_attempt_at:
             # Inside backoff window: skip SSH entirely, do not count as failure.
             remotes_skipped_backoff += 1
@@ -4290,14 +4396,24 @@ def _run_once_with_state(
             # Three tiers, each SUPERSEDING the prior (boterr-lead ruling,
             # HD-11b battery 4, extending relay_host_down's own
             # "replaces per-attempt alerts" precedent one level down):
-            #   tier 1: remote-claim-failed (cooldown-gated generic meta-alert)
-            #   tier 2: collector_remote_unreachable (this packet)
-            #   tier 3: relay_host_down (backoff schedule entry)
-            # Exactly one open incident per remote at a time: crossing a
-            # tier's threshold ACTIVELY CLOSES the previous tier's open
-            # incident (enqueue_meta_recovery / a typed clear) before opening
-            # the new one -- not just suppressing future re-emission of the
-            # old tier, which would leave it open at the dispatcher.
+            #   tier 1: remote-claim-failed (cooldown-gated generic meta-alert, warning)
+            #   tier 2: collector_remote_unreachable (this packet, warning)
+            #   tier 3: relay_host_down (backoff schedule entry, critical)
+            # Severity rises with the evidence. The dispatcher holds tier 3 as
+            # a transient (Pattern H) and promotes it to a delivered critical
+            # only when a later relay_host_down arrives past its promote
+            # window, so tier 3 is re-asserted on each later failed attempt,
+            # marked renotify so the dispatcher's flap scan does not count a
+            # repeat as a new trip (see RELAY_DOWN_RETRY_CAP_S for the retry
+            # timing). Best-effort remotes drop tiers 1 and 3 to info.
+            # One open incident per remote at a time: crossing a tier's
+            # threshold ACTIVELY CLOSES the previous tier's open incident
+            # (enqueue_meta_recovery / a typed clear) before opening the new
+            # one -- not just suppressing future re-emission of the old tier,
+            # which would leave it open at the dispatcher. With
+            # BOT_ERRORS_COLLECTOR_FAILURE_ESCALATE_THRESHOLD at 3 or more,
+            # tier 2 never opens and tier-3 entry closes only tier 2, so
+            # tiers 1 and 3 can be open together.
             #
             # This MUST be a single mutually-exclusive ladder keyed on which
             # zone new_consecutive_failures falls in (tier 3 checked FIRST,
@@ -4321,7 +4437,14 @@ def _run_once_with_state(
                     # First crossing of threshold: start at index 0.
                     schedule_index_new = 0
                 remote_record["backoffScheduleIndex"] = schedule_index_new
-                remote_record["nextAttemptAt"] = int(time.time()) + RELAY_BACKOFF_SCHEDULE_S[schedule_index_new]
+                attempt_epoch = int(time.time())
+                reasserts_tier3 = tier3_retry_is_capped(is_best_effort)
+                next_attempt_delay = RELAY_BACKOFF_SCHEDULE_S[schedule_index_new]
+                if reasserts_tier3:
+                    # Capped from entry on, with no dependence on downSince or
+                    # the dispatcher's window: see RELAY_DOWN_RETRY_CAP_S.
+                    next_attempt_delay = min(next_attempt_delay, RELAY_DOWN_RETRY_CAP_S)
+                remote_record["nextAttemptAt"] = attempt_epoch + next_attempt_delay
                 if not is_host_down:
                     # First entry into down state: close tier 2 if open --
                     # tier 3 now covers this remote's failure with the
@@ -4337,9 +4460,10 @@ def _run_once_with_state(
                             threshold=escalate_threshold,
                             error_class=prior_error_class or None,
                             last_success_age_seconds=None,
+                            superseded_by=RELAY_HOST_DOWN_SOURCE,
                         )
                     # Then record downSince and emit event.
-                    remote_record["downSince"] = int(time.time())
+                    remote_record["downSince"] = attempt_epoch
                     remote_record["downEventEmitted"] = True
                     emit_relay_host_state_event(
                         remote,
@@ -4349,16 +4473,50 @@ def _run_once_with_state(
                             f"consecutive_failures={new_consecutive_failures}\n"
                             f"threshold={RELAY_BACKOFF_FAILURE_THRESHOLD}\n"
                             f"error={error}\n"
-                            f"next_attempt_delay_s={RELAY_BACKOFF_SCHEDULE_S[schedule_index_new]}\n"
+                            f"next_attempt_delay_s={next_attempt_delay}\n"
                             f"collector_log={state_root() / 'logs/collector.jsonl'}"
                         ),
                         state,
                         best_effort=is_best_effort,
                     )
+                elif reasserts_tier3:
+                    # Still down after a later failed attempt: re-assert
+                    # relay_host_down (same source and remote, so the same
+                    # dispatcher key). Held, it lets the dispatcher promote
+                    # once the promote window has passed; once promoted or
+                    # open, it is a suppressed duplicate. It repeats the open
+                    # condition rather than reporting a new occurrence, so it
+                    # is marked renotify: the dispatcher's flap scan skips it,
+                    # and a backlog of re-assertions processed in one pass
+                    # cannot open a flap storm that would consolidate the
+                    # outage alert itself.
+                    down_since = remote_record.get("downSince")
+                    has_down_since = isinstance(down_since, int) and not isinstance(down_since, bool)
+                    down_since_text = (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(down_since)) if has_down_since else "unknown"
+                    )
+                    down_for_text = str(attempt_epoch - down_since) if has_down_since else "unknown"
+                    emit_relay_host_state_event(
+                        remote,
+                        "relay_host_down",
+                        (
+                            f"remote={remote}\n"
+                            f"reasserted=true\n"
+                            f"down_since={down_since_text}\n"
+                            f"down_for_seconds={down_for_text}\n"
+                            f"consecutive_failures={new_consecutive_failures}\n"
+                            f"error={error}\n"
+                            f"next_attempt_delay_s={next_attempt_delay}\n"
+                            f"collector_log={state_root() / 'logs/collector.jsonl'}"
+                        ),
+                        state,
+                        best_effort=is_best_effort,
+                        renotify=True,
+                    )
                 # While host is in down state (including subsequent cycles
                 # after the backoff window expires and re-fails), do NOT fire
-                # per-attempt meta-alerts OR reopen tier 2. The relay_host_down
-                # event replaces them for the whole down episode.
+                # per-attempt meta-alerts OR reopen tier 2. relay_host_down
+                # alone covers the whole down episode.
             elif new_consecutive_failures >= escalate_threshold:
                 if not remote_record.get("captureFailureEscalated"):
                     remote_record["captureFailureEscalated"] = True
@@ -4423,6 +4581,10 @@ def _run_once_with_state(
                     alert_cooldown,
                     reachability_diagnostics,
                     best_effort=is_best_effort,
+                    # One failed claim is the weakest evidence on the ladder,
+                    # usually a one-cycle tailnet blip; it pages no louder
+                    # than tiers 2 and 3.
+                    severity="warning",
                 )
             records = []
 
