@@ -1535,7 +1535,7 @@ describe('handleGetLine config and adminPhones', () => {
     }
   });
 
-  it('redacts client-output blocked terms and public keys from the detailed config response', async () => {
+  it('withholds a legacy authorization-bearing policy from the detailed config response', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-policy-cfg-'));
     try {
       const privateTerm = 'private-term-that-must-not-escape';
@@ -1575,11 +1575,7 @@ describe('handleGetLine config and adminPhones', () => {
       expect(res._status).toBe(200);
       expect(serialized).not.toContain(privateTerm);
       expect(serialized).not.toContain(publicKey);
-      expect(response.config.clientOutputPolicies[0]).toMatchObject({
-        conversationKey: 'synthetic-conversation',
-        blockedTerms: [{ value: '[redacted]', match: 'whole_word', caseSensitive: false }],
-        authorization: { keyId: 'synthetic-key', publicKey: '[redacted]' },
-      });
+      expect(response.config.clientOutputPolicies).toBe('[redacted]');
       expect(JSON.parse(fs.readFileSync(configPath, 'utf8'))).toEqual(rawConfig);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
