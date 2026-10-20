@@ -20,6 +20,7 @@ const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const scriptPath = path.join(repoRoot, 'scripts', 'install-transcription-deps.sh');
 const scriptSource = fs.readFileSync(scriptPath, 'utf8');
 const lockPolicySource = fs.readFileSync(path.join(repoRoot, 'deploy', 'lib', 'python-lock-policy.sh'), 'utf8');
+const boundedSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'lib', 'bounded-exec.sh'), 'utf8');
 const tempRoots: string[] = [];
 
 function makeTempRoot(prefix: string): string {
@@ -102,6 +103,8 @@ HOST_PYTHON="$1"
 VENV="$2"
 REPO_ROOT="$3"
 ${lockPolicySource}
+${boundedSource}
+${scriptSource.slice(scriptSource.indexOf('install_transcription_requirements() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('install_transcription_requirements() {')) + 3)}
 resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
 whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1"; }
 ${snippet}`,
@@ -261,4 +264,76 @@ describe('install-transcription-deps.sh — managed venv upgrades', () => {
     expect(res.status, res.stderr).toBe(0);
     expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
   });
+});
+
+describe('install-transcription-deps.sh — network bounds', () => {
+  function runNetworkHelper(name: string, body: string, env: NodeJS.ProcessEnv = {}) {
+    const start = scriptSource.indexOf(`${name}() {`);
+    expect(start, `${name} must be provided by the installer`).toBeGreaterThanOrEqual(0);
+    const end = scriptSource.indexOf('\n}\n', start);
+    expect(end).toBeGreaterThan(start);
+    return spawnSync('/bin/bash', ['-c', `${boundedSource}\n${scriptSource.slice(start, end + 3)}\n${body}`], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+      timeout: 15_000,
+    });
+  }
+
+  it('terminates a stalled locked pip install and preserves its timeout status', () => {
+    const result = runNetworkHelper('install_transcription_requirements', `
+whatsoup_install_locked_requirements() { sleep 30; }
+VENV=/unused REPO_ROOT=/unused WHATSOUP_PIP_INSTALL_TIMEOUT=1
+install_transcription_requirements
+`);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(124);
+  }, 20_000);
+
+  it('bounds curl time, redirects, protocols and bytes while disabling inherited curl configuration', () => {
+    const root = makeTempRoot('itd-curl-bounds-');
+    writeExecutable(root, 'curl', '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    const result = runNetworkHelper('download_ggml_model', `
+GGML_SMALL_URL=https://example.invalid/model GGML_SMALL_PATH="$TEST_MODEL"
+download_ggml_model
+`, { PATH: `${root}:${process.env.PATH}`, TEST_MODEL: path.join(root, 'model') });
+    expect(result.status, result.stderr).toBe(0);
+    const args = result.stdout.trim().split('\n');
+    expect(args[0]).toBe('--disable');
+    for (const [option, value] of [
+      ['--connect-timeout', '15'], ['--max-time', '600'], ['--max-redirs', '3'],
+      ['--max-filesize', '536870912'], ['--proto', '=https'], ['--proto-redir', '=https'],
+    ]) {
+      expect(args.indexOf(option)).toBeGreaterThanOrEqual(0);
+      expect(args[args.indexOf(option) + 1]).toBe(value);
+    }
+  });
+
+  it('enforces a kernel file limit even when a downloader ignores its byte limit', () => {
+    const root = makeTempRoot('itd-curl-file-limit-');
+    const model = path.join(root, 'model');
+    writeExecutable(root, 'curl', `#!${process.execPath}
+const fs = require('node:fs');
+fs.closeSync(fs.openSync(process.env.TEST_MODEL, 'w'));
+fs.truncateSync(process.env.TEST_MODEL, 2 * 1024 * 1024 * 1024);
+`);
+    const result = runNetworkHelper('download_ggml_model', `
+GGML_SMALL_URL=https://example.invalid/model GGML_SMALL_PATH="$TEST_MODEL"
+download_ggml_model
+`, { PATH: `${root}:${process.env.PATH}`, TEST_MODEL: model });
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(fs.statSync(model).size).toBeLessThanOrEqual(1024 * 1024 * 1024);
+  });
+
+  it('terminates a stalled downloader and preserves its timeout status', () => {
+    const root = makeTempRoot('itd-curl-stall-');
+    writeExecutable(root, 'curl', '#!/bin/sh\nexec sleep 30\n');
+    const result = runNetworkHelper('download_ggml_model', `
+GGML_SMALL_URL=https://example.invalid/model GGML_SMALL_PATH=/unused
+WHATSOUP_MODEL_DOWNLOAD_TIMEOUT=1
+download_ggml_model
+`, { PATH: `${root}:${process.env.PATH}` });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(124);
+  }, 20_000);
 });

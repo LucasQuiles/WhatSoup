@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -75,6 +75,17 @@ describe('python dependency lock guard', () => {
     ['global value', 'python3 -m pip --timeout 10 install pytest'],
     ['quoted global value', 'pip --log "build output.log" install pytest'],
     ['assigned quoted global value', 'pip --log="build output.log" install pytest'],
+    ['shell assignment', 'PIP_CONFIG_FILE=/tmp/x pip install pytest'],
+    ['multiple shell assignments', 'A=one B="two words" pip3 install pytest'],
+    ['indented shell assignment', '  A=one pip install pytest'],
+    ['workflow shell assignment', 'run: A=one pip install pytest'],
+    ['assignment after a shell separator', 'true && A=one pip install pytest'],
+    ['quoted env assignment', 'env A="two words" pip install pytest'],
+    ['escaped assignment', 'PIP_CONFIG_FILE=/tmp/my\\ config pip install pytest'],
+    ['command substitution assignment', 'A=$(printf x\\ y) pip install pytest'],
+    ['nested command substitution assignment', 'A="$(printf "%s" "$(printf x)")" pip install pytest'],
+    ['parameter expansion assignment', 'A=${VALUE:-two words} pip install pytest'],
+    ['backtick assignment', 'A=`printf "two words"` pip install pytest'],
   ])('rejects an unlocked %s invocation', (_name, install) => {
     const root = makeFixture();
     writePolicy(root);
@@ -96,11 +107,124 @@ describe('python dependency lock guard', () => {
     expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
 
+  it.each([
+    'A=<(printf "two words") pip install pytest',
+    'A=>(cat >/dev/null) pip install pytest',
+    'A=<(cat <(printf "two words")) pip install pytest',
+  ])('rejects an unlocked install after process substitution: %s', (command) => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, 'scripts/install.sh', command);
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-install-unlocked',
+      path: 'scripts/install.sh',
+    }));
+  });
+
   it('accepts a locked install after global options', () => {
     const root = makeFixture();
     writePolicy(root);
     writeValidLock(root);
     write(root, 'scripts/install.sh', 'python3 -m pip --isolated --timeout=10 install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r locks/quality-cpython313.txt');
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
+  });
+
+  it.each(['scripts/large.sh', 'requirements/python/lock-policy.json', 'locks/quality-cpython313.txt'])(
+    'fails closed before reading an oversized %s',
+    (path) => {
+      const root = makeFixture();
+      writePolicy(root);
+      writeValidLock(root);
+      write(root, path, '');
+      truncateSync(join(root, path), 4 * 1024 * 1024 + 1);
+
+      expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+        code: 'python-lock-scan-limit',
+        path,
+      }));
+    },
+  );
+
+  it('fails closed when individually bounded files exceed the total byte budget', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    for (let index = 0; index < 17; index += 1) {
+      const path = `scripts/part-${index}.sh`;
+      write(root, path, '');
+      truncateSync(join(root, path), 4 * 1024 * 1024);
+    }
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-scan-limit',
+      detail: expect.stringContaining('total bytes'),
+    }));
+  });
+
+  it('fails closed on excessive directory entries', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    mkdirSync(join(root, 'scripts'));
+    for (let index = 0; index < 10_001; index += 1) {
+      writeFileSync(join(root, 'scripts', `part-${index}.sh`), '');
+    }
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-scan-limit',
+      detail: expect.stringContaining('entries'),
+    }));
+  });
+
+  it('fails closed on excessive directory nesting', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, `${'nested/'.repeat(65)}install.sh`, '# bounded traversal');
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-scan-limit',
+      detail: expect.stringContaining('depth'),
+    }));
+  });
+
+  it('accepts files at the per-file and shared total-byte boundaries', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    const metadataBytes = 2 * (
+      readFileSync(join(root, 'requirements/python/lock-policy.json')).length
+      + readFileSync(join(root, 'locks/quality-cpython313.txt')).length
+    );
+    for (let index = 0; index < 16; index += 1) {
+      const path = `scripts/part-${index}.sh`;
+      write(root, path, '');
+      truncateSync(join(root, path), 4 * 1024 * 1024 - (index === 15 ? metadataBytes : 0));
+    }
+
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
+  });
+
+  it('accepts exactly 10000 directory entries', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    mkdirSync(join(root, 'scripts'));
+    // The policy/lock paths and scripts directory account for the other six entries.
+    for (let index = 0; index < 9994; index += 1) {
+      writeFileSync(join(root, 'scripts', `part-${index}.sh`), '');
+    }
+
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
+  });
+
+  it('accepts exactly 64 nested directories', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, `${'nested/'.repeat(64)}install.sh`, '# bounded traversal');
+
     expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
 

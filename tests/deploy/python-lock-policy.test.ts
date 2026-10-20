@@ -112,6 +112,40 @@ describe('Python lock runtime policy', () => {
     expect(readFileSync(log, 'utf8')).toContain('--index-url https://pypi.org/simple');
     expect(readFileSync(log, 'utf8')).toContain('quality-cpython313-linux-x64.txt');
   });
+
+  it.each([false, true])('excludes pip configuration with inherited environment options=%s using the real pip parser', (withEnvironment) => {
+    const root = tempRoot();
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const shim = join(root, 'python');
+    const config = join(root, 'pip.conf');
+    const parser = join(root, 'parse-pip.py');
+    writeFileSync(config, '[global]\nextra-index-url = https://config.invalid/simple\nfind-links = /config-wheels\n');
+    writeFileSync(parser, `
+import ensurepip, glob, json, os, pathlib, sys
+sys.path.insert(0, glob.glob(str(pathlib.Path(ensurepip.__file__).parent / "_bundled/pip-*.whl"))[0])
+from pip._internal.cli.main_parser import parse_command
+from pip._internal.commands import create_command
+name, args = parse_command(sys.argv[1:])
+command = create_command(name, isolated="--isolated" in args)
+options, _ = command.parse_args(args)
+print(json.dumps({"index": options.index_url, "extra": options.extra_index_urls, "links": options.find_links, "config": os.environ.get("PIP_CONFIG_FILE"), "isolated": "--isolated" in args}))
+`);
+    executable(shim, `if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" "$@"; fi
+if [ "$1" != "-m" ] || [ "$2" != "pip" ]; then exit 2; fi
+shift 2
+exec "$REAL_PYTHON" "$PIP_PARSER" "$@"`);
+    const result = runPolicy(`whatsoup_install_locked_requirements "${shim}" "${repoRoot}" quality`, {
+      REAL_PYTHON: python,
+      PIP_PARSER: parser,
+      PIP_CONFIG_FILE: config,
+      PIP_EXTRA_INDEX_URL: withEnvironment ? 'https://environment.invalid/simple' : '',
+      PIP_FIND_LINKS: withEnvironment ? '/environment-wheels' : '',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      index: 'https://pypi.org/simple', extra: [], links: [], config: '/dev/null', isolated: true,
+    });
+  });
 });
 
 

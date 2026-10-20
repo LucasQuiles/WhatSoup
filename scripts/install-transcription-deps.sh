@@ -27,6 +27,8 @@ export PATH
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=deploy/lib/python-lock-policy.sh
 . "$REPO_ROOT/deploy/lib/python-lock-policy.sh"
+# shellcheck source=deploy/lib/bounded-exec.sh
+. "$REPO_ROOT/deploy/lib/bounded-exec.sh"
 
 ROOT="$HOME/.local/share/whatsoup"
 VENV="$ROOT/transcription-venv"
@@ -64,6 +66,23 @@ sha256_matches() {
   [ -f "$path" ] || return 1
   actual="$(sha256_of "$path")" || return 1
   [ "$actual" = "$expected" ]
+}
+
+install_transcription_requirements() {
+  whatsoup_run_bounded "${WHATSOUP_PIP_INSTALL_TIMEOUT:-600}" \
+    whatsoup_install_locked_requirements "$VENV/bin/python" "$REPO_ROOT" transcription
+}
+
+download_ggml_model() {
+  (
+    # A kernel limit also bounds downloads with an absent or misleading length.
+    # Bash uses at most 1024-byte blocks here, giving a hard ceiling of 1 GiB.
+    ulimit -f 1048576 || exit 1
+    whatsoup_run_bounded "${WHATSOUP_MODEL_DOWNLOAD_TIMEOUT:-600}" \
+      curl --disable --location --fail --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --max-time 600 --max-redirs 3 --max-filesize 536870912 \
+      "$GGML_SMALL_URL" --output "$GGML_SMALL_PATH"
+  )
 }
 
 # Resolve a Python that can build the venv. Candidate loop rather than a
@@ -120,11 +139,11 @@ fi
 
 whatsoup_create_managed_venv "$PYTHON_BIN" "$VENV"
 
-whatsoup_install_locked_requirements "$VENV/bin/python" "$REPO_ROOT" transcription
+install_transcription_requirements
 
 if ! sha256_matches "$GGML_SMALL_PATH" "$EXPECTED_GGML_SMALL_SHA256"; then
   rm -f "$GGML_SMALL_PATH"
-  curl -L --fail --retry 3 --continue-at - "$GGML_SMALL_URL" -o "$GGML_SMALL_PATH"
+  download_ggml_model
 fi
 
 if ! sha256_matches "$GGML_SMALL_PATH" "$EXPECTED_GGML_SMALL_SHA256"; then

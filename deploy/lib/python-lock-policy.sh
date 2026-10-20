@@ -93,5 +93,5 @@ whatsoup_install_locked_requirements() {
     echo "Python lock policy: missing declared lock $lock_path" >&2
     return 1
   fi
-  "$python_bin" -m pip install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
+  PIP_CONFIG_FILE=/dev/null "$python_bin" -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
 }

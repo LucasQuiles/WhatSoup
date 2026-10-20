@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,6 +8,7 @@ import {
   VENV_ROOT as FASTER_WHISPER_VENV_ROOT,
   fasterWhisperProvider,
   resolvePython,
+  transcribeWithFasterWhisper,
 } from '../../../../src/runtimes/chat/providers/transcription/faster-whisper.ts';
 import { resolveBinaryPath } from '../../../../src/runtimes/chat/providers/transcription/local-audio.ts';
 import {
@@ -17,6 +19,7 @@ import {
 import { transcribeAudio } from '../../../../src/runtimes/chat/providers/whisper.ts';
 
 const FIXTURE_PATH = join(process.cwd(), 'tests/fixtures/audio/hello.ogg');
+const requireLockedRuntime = process.env.WHATSOUP_REQUIRE_LOCKED_TRANSCRIPTION === '1';
 
 // Ask each provider whether it can actually run instead of re-deriving its
 // requirements here. Commit 24b812377 (#2897) fixed the previous version of this
@@ -65,7 +68,7 @@ const fasterWhisperUsable = fasterWhisperProvider.isAvailable();
 const ffmpegPath = resolveBinaryPath('ffmpeg');
 const hasLocalProvider = Boolean(ffmpegPath) && (whisperCppUsable || fasterWhisperUsable);
 
-if (!hasLocalProvider) {
+if (!hasLocalProvider && !requireLockedRuntime) {
   // Loud skip reason. Each half of each provider is reported separately, because
   // "provider unusable" alone cannot tell a missing binary from a missing model and
   // those need different fixes. The halves come from the providers' own resolvers,
@@ -98,10 +101,22 @@ if (!hasLocalProvider) {
 
 describe('transcription integration', () => {
   // @skip-env requires a usable local transcription provider and the real audio fixture.
-  it.skipIf(!hasLocalProvider || !existsSync(FIXTURE_PATH))('transcribes a real audio fixture through the shared chain', async () => {
+  it.skipIf(!requireLockedRuntime && (!hasLocalProvider || !existsSync(FIXTURE_PATH)))('transcribes a real audio fixture through the selected local path', async () => {
     delete process.env.OPENAI_API_KEY;
+    if (requireLockedRuntime) {
+      const python = process.env.WHATSOUP_FASTER_WHISPER_PYTHON;
+      const model = process.env.WHATSOUP_FASTER_WHISPER_MODEL;
+      expect(python, 'the required lane must select its locked venv explicitly').toBeTruthy();
+      expect(model && existsSync(model), 'the required lane must provide its pinned local model').toBe(true);
+      expect(ffmpegPath, 'the required lane must provide ffmpeg').toBeTruthy();
+      const runtime = spawnSync(python!, ['-I', '-c', 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")'], { encoding: 'utf8', timeout: 5_000 });
+      expect(runtime.status, runtime.stderr).toBe(0);
+      expect(runtime.stdout.trim()).toBe('cpython:3.13.16');
+    }
     const buffer = await readFile(FIXTURE_PATH);
-    const result = await transcribeAudio(buffer, 'audio/ogg');
+    const result = requireLockedRuntime
+      ? await transcribeWithFasterWhisper(buffer, 'audio/ogg')
+      : await transcribeAudio(buffer, 'audio/ogg');
     expect(result).toMatch(/hello.*test/i);
   }, 30_000);
 });

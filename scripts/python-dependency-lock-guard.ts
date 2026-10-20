@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, opendirSync, readSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -12,6 +12,59 @@ const EXCLUDED_PREFIXES = [
   'console/node_modules/',
   'tools/agent-runtime-probes/',
 ];
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const MAX_ENTRIES = 10_000;
+const MAX_DEPTH = 64;
+
+interface ScanBudget {
+  bytes: number;
+  entries: number;
+}
+
+class ScanError extends Error {
+  readonly code: string;
+  readonly path: string;
+
+  constructor(code: string, path: string, detail: string) {
+    super(detail);
+    this.code = code;
+    this.path = path;
+  }
+}
+
+function readBoundedText(root: string, path: string, budget: ScanBudget): string {
+  const repoPath = asRepoPath(root, path);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new ScanError('python-lock-scan-input', repoPath, 'not a regular file');
+    if (info.size > MAX_FILE_BYTES) {
+      throw new ScanError('python-lock-scan-limit', repoPath, 'file bytes exceed 4 MiB');
+    }
+    if (budget.bytes + info.size > MAX_TOTAL_BYTES) {
+      throw new ScanError('python-lock-scan-limit', repoPath, 'total bytes exceed 64 MiB');
+    }
+    const data = Buffer.alloc(info.size + 1);
+    let used = 0;
+    while (used < data.length) {
+      const count = readSync(fd, data, used, data.length - used, null);
+      if (count === 0) break;
+      used += count;
+    }
+    if (used !== info.size) {
+      throw new ScanError('python-lock-scan-input', repoPath, 'file size changed during read');
+    }
+    budget.bytes += used;
+    return data.subarray(0, used).toString('utf8');
+  } catch (error) {
+    if (error instanceof ScanError) throw error;
+    throw new ScanError('python-lock-scan-input', repoPath, 'file is unreadable');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 interface LockPolicy {
   schemaVersion: number;
@@ -37,7 +90,7 @@ function isSafeLockPath(path: string): boolean {
     && !path.includes('\0');
 }
 
-function loadPolicy(root: string, violations: Violation[]): LockPolicy | null {
+function loadPolicy(root: string, violations: Violation[], budget: ScanBudget): LockPolicy | null {
   const policyPath = resolve(root, POLICY_PATH);
   if (!existsSync(policyPath)) {
     violations.push({ code: 'python-lock-policy-invalid', path: POLICY_PATH, detail: 'missing policy' });
@@ -46,8 +99,9 @@ function loadPolicy(root: string, violations: Violation[]): LockPolicy | null {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(policyPath, 'utf8'));
-  } catch {
+    parsed = JSON.parse(readBoundedText(root, policyPath, budget));
+  } catch (error) {
+    if (error instanceof ScanError) throw error;
     violations.push({ code: 'python-lock-policy-invalid', path: POLICY_PATH, detail: 'invalid JSON' });
     return null;
   }
@@ -94,20 +148,14 @@ function logicalLines(text: string): string[] {
   return text.replace(/\\\r?\n/g, ' ').split(/\r?\n/);
 }
 
-function validateLock(root: string, lockPath: string, violations: Violation[]): void {
+function validateLock(root: string, lockPath: string, violations: Violation[], budget: ScanBudget): void {
   const absolute = resolve(root, lockPath);
   if (!absolute.startsWith(`${resolve(root)}${sep}`) || !existsSync(absolute)) {
     violations.push({ code: 'python-lock-malformed', path: lockPath, detail: 'declared lock is missing' });
     return;
   }
 
-  let text: string;
-  try {
-    text = readFileSync(absolute, 'utf8');
-  } catch {
-    violations.push({ code: 'python-lock-malformed', path: lockPath, detail: 'lock is unreadable' });
-    return;
-  }
+  const text = readBoundedText(root, absolute, budget);
   let packageCount = 0;
   for (const [index, raw] of logicalLines(text).entries()) {
     const line = raw.trim();
@@ -129,18 +177,31 @@ function validateLock(root: string, lockPath: string, violations: Violation[]): 
   }
 }
 
-function walk(root: string, directory: string, paths: string[]): void {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const absolute = resolve(directory, entry.name);
-    const repoPath = asRepoPath(root, absolute);
-    if (repoPath === 'scripts/python-dependency-lock-guard.ts'
-      || EXCLUDED_PREFIXES.some((prefix) => repoPath.startsWith(prefix))) continue;
-    if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) {
-      if (!EXCLUDED_TOP_LEVEL.has(entry.name)) walk(root, absolute, paths);
-      continue;
+function* walk(root: string, directory: string, budget: ScanBudget, depth = 0): Generator<string> {
+  if (depth > MAX_DEPTH) {
+    throw new ScanError('python-lock-scan-limit', asRepoPath(root, directory), 'directory depth exceeds 64');
+  }
+  const handle = opendirSync(directory);
+  try {
+    let entry;
+    while ((entry = handle.readSync()) !== null) {
+      budget.entries += 1;
+      if (budget.entries > MAX_ENTRIES) {
+        throw new ScanError('python-lock-scan-limit', asRepoPath(root, directory), 'directory entries exceed 10000');
+      }
+      const absolute = resolve(directory, entry.name);
+      const repoPath = asRepoPath(root, absolute);
+      if (repoPath === 'scripts/python-dependency-lock-guard.ts'
+        || EXCLUDED_PREFIXES.some((prefix) => repoPath.startsWith(prefix))) continue;
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (!EXCLUDED_TOP_LEVEL.has(entry.name)) yield* walk(root, absolute, budget, depth + 1);
+      } else if (entry.isFile()) {
+        yield absolute;
+      }
     }
-    if (entry.isFile()) paths.push(absolute);
+  } finally {
+    handle.closeSync();
   }
 }
 
@@ -166,18 +227,56 @@ function pipSubcommandIsInstall(argumentsText: string): boolean {
   return words[index] === 'install';
 }
 
+function shellWordEnd(line: string, start: number): number {
+  const closing: string[] = [];
+  for (let index = start; index < line.length; index += 1) {
+    const char = line[index]!;
+    const current = closing.at(-1);
+    if (char === '\\' && current !== "'") {
+      index += 1;
+    } else if (current === "'") {
+      if (char === "'") closing.pop();
+    } else if (char === '$' && (line[index + 1] === '(' || line[index + 1] === '{')) {
+      closing.push(line[index + 1] === '(' ? ')' : '}');
+      index += 1;
+    } else if ((char === '<' || char === '>') && line[index + 1] === '(' && current !== '"') {
+      closing.push(')');
+      index += 1;
+    } else if (char === current) {
+      closing.pop();
+    } else if ((char === '"' || char === "'" || char === '`') && current !== '"' && current !== '`') {
+      closing.push(char);
+    } else if (char === '`' && current === '"') {
+      closing.push(char);
+    } else if (char === '(' && current === ')') {
+      closing.push(')');
+    } else if (/\s/.test(char) && closing.length === 0) {
+      return index;
+    }
+  }
+  return line.length;
+}
+
 function findInstallCommands(text: string): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
     if (line.trimStart().startsWith('#')) continue;
     const modulePattern = /(?:^|[\s:;|&])-m\s+pip(?=\s)/gi;
-    const directPattern = /(?:^|[;|&]\s*|\brun:\s*|\bsudo\s+|\benv(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S+)*\s+)(?:["']?[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?(?=\s)/gi;
-    for (const pattern of [modulePattern, directPattern]) {
-      let match: RegExpExecArray | null;
-      while ((match = pattern.exec(line)) !== null) {
-        const argumentsText = commandAfterInstall(line, match.index + match[0].length);
-        if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, match.index));
+    for (const match of line.matchAll(modulePattern)) {
+      const argumentsText = commandAfterInstall(line, match.index + match[0].length);
+      if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, match.index));
+    }
+    const starts = /(?:[;|&]\s*|\brun:\s*|\bsudo\s+|\benv\s+)/gi;
+    for (let offset of [0, ...Array.from(line.matchAll(starts), (prefix) => prefix.index + prefix[0].length)]) {
+      while (/\s/.test(line[offset] ?? '') && offset < line.length) offset += 1;
+      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(line.slice(offset))) {
+        offset = shellWordEnd(line, offset);
+        while (/\s/.test(line[offset] ?? '') && offset < line.length) offset += 1;
       }
+      const pip = line.slice(offset).match(/^["']?(?:[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?(?=\s)/i);
+      if (!pip) continue;
+      const argumentsText = commandAfterInstall(line, offset + pip[0].length);
+      if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, offset));
     }
   }
   return commands;
@@ -216,24 +315,24 @@ function validateInstallCommand(
 export function scanPythonDependencyLocks(rootInput = process.cwd()): Violation[] {
   const root = resolve(rootInput);
   const violations: Violation[] = [];
-  const policy = loadPolicy(root, violations);
-  if (!policy) return violations;
-  const locks = declaredLockPaths(policy);
-  for (const lockPath of locks) validateLock(root, lockPath, violations);
+  const budget: ScanBudget = { bytes: 0, entries: 0 };
+  try {
+    const policy = loadPolicy(root, violations, budget);
+    if (!policy) return violations;
+    const locks = declaredLockPaths(policy);
+    for (const lockPath of locks) validateLock(root, lockPath, violations, budget);
 
-  const files: string[] = [];
-  walk(root, root, files);
-  for (const file of files) {
-    let text: string;
-    try {
-      text = readFileSync(file, 'utf8');
-    } catch {
-      continue;
+    for (const file of walk(root, root, budget)) {
+      const text = readBoundedText(root, file, budget);
+      const sourcePath = asRepoPath(root, file);
+      for (const command of findInstallCommands(text)) {
+        validateInstallCommand(sourcePath, command, policy, locks, violations);
+      }
     }
-    const sourcePath = asRepoPath(root, file);
-    for (const command of findInstallCommands(text)) {
-      validateInstallCommand(sourcePath, command, policy, locks, violations);
-    }
+  } catch (error) {
+    violations.push(error instanceof ScanError
+      ? { code: error.code, path: error.path, detail: error.message }
+      : { code: 'python-lock-scan-input', path: '.', detail: 'directory traversal failed' });
   }
   return violations;
 }

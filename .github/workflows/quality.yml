@@ -113,6 +113,14 @@ jobs:
       - name: Python dependency lock guard
         run: npm run guard:python-dependency-lock
 
+      - name: Required locked-runtime audio regression (Linux)
+        timeout-minutes: 10
+        run: |
+          . deploy/lib/bounded-exec.sh
+          whatsoup_run_bounded 180 sudo apt-get update
+          whatsoup_run_bounded 180 sudo apt-get install -y ffmpeg
+          bash scripts/run-locked-transcription-smoke.sh "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$RUNNER_TEMP/whatsoup-transcription-model"
+
       - name: Build Docker deployment image
         timeout-minutes: 10
         run: docker build --file docker/Dockerfile --tag whatsoup-ci .
@@ -598,6 +606,13 @@ jobs:
           python -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
           whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription
           "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
+
+      - name: Required locked-runtime audio regression (macOS)
+        timeout-minutes: 10
+        run: |
+          . deploy/lib/bounded-exec.sh
+          whatsoup_run_bounded 300 brew install ffmpeg
+          bash scripts/run-locked-transcription-smoke.sh "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$RUNNER_TEMP/whatsoup-transcription-model"
 
       - name: BOT ERRORS macOS health hermeticity
         run: npm run test:bot-errors-health:hermeticity
