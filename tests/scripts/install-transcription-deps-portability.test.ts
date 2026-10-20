@@ -136,16 +136,33 @@ describe('install-transcription-deps.sh — source-level portability invariants'
     expect(scriptSource).not.toMatch(/PYTHON_BIN\s*=\s*"?\/opt\/homebrew/);
   });
 
-  it('does not invoke brew unconditionally', () => {
-    // `brew install …` at top level died under `set -e` on any machine without
-    // Homebrew, before reaching a single actionable message.
-    const brewLines = scriptSource
-      .split('\n')
-      .filter((line) => /^\s*brew\s+install/.test(line));
-    for (const line of brewLines) {
-      expect(scriptSource).toMatch(/command -v brew/);
-      expect(line.startsWith('  ')).toBe(true);
-    }
+  it.each([
+    { budget: '0', brewStatus: 0, expectedStatus: 124, called: false },
+    { budget: '10', brewStatus: 17, expectedStatus: 17, called: true },
+  ])('bounds Homebrew with budget $budget and preserves its outcome', ({ budget, brewStatus, expectedStatus, called }) => {
+    const root = makeTempRoot('itd-brew-bound-');
+    const marker = path.join(root, 'brew-arguments');
+    writeExecutable(root, 'brew', `#!/bin/sh\nprintf '%s\\n' "$@" > "$BREW_MARKER"\nexit ${brewStatus}\n`);
+    const start = scriptSource.indexOf('if command -v brew >/dev/null 2>&1; then');
+    const end = scriptSource.indexOf('\nif ! PYTHON_BIN=', start);
+    if (start === -1 || end === -1) throw new Error('system dependency block not found');
+
+    const result = spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${boundedSource}\n${scriptSource.slice(start, end)}`], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        PATH: `${root}:/usr/bin:/bin`,
+        WHATSOUP_PKG_INSTALL_TIMEOUT: budget,
+        BREW_MARKER: marker,
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(expectedStatus);
+    expect(fs.existsSync(marker)).toBe(called);
+    if (called) expect(fs.readFileSync(marker, 'utf8')).toBe('install\nffmpeg\nwhisper-cpp\npython@3.13\n');
   });
 
   it('prepends Homebrew bin dirs only when they exist', () => {

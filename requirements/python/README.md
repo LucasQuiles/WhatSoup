@@ -62,11 +62,11 @@ All four transcription locks were regenerated with the commands below and
 `uv 0.11.1`. Each lock records its exact resolved version and hashes. The required
 Linux and macOS audio checks remain the compatibility acceptance boundary.
 
-The transcription installer bounds pip to 600 seconds and the model download to
+The transcription installer bounds Homebrew, pip and the model download to
 600 seconds, with a 15-second connect limit, three redirects, HTTPS-only
 transport, a 512 MiB curl limit, and an independent kernel file ceiling of at most
 1 GiB. Curl's inherited configuration is disabled. A timeout remains a failure;
-there is no automatic retry. `WHATSOUP_PIP_INSTALL_TIMEOUT` and
+there is no automatic retry. `WHATSOUP_PKG_INSTALL_TIMEOUT`, `WHATSOUP_PIP_INSTALL_TIMEOUT` and
 `WHATSOUP_MODEL_DOWNLOAD_TIMEOUT` can set the outer operation budgets.
 
 ## Updating a lock

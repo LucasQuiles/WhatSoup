@@ -7,6 +7,8 @@ import { isRecord } from '../src/lib/type-guards.ts';
 const POLICY_PATH = 'requirements/python/lock-policy.json';
 const EXPECTED_RUNTIME = { implementation: 'cpython', version: '3.13.16' } as const;
 const EXPECTED_INDEX = 'https://pypi.org/simple';
+const LOCK_PROFILES = ['quality', 'transcription'] as const;
+const LOCK_TARGETS = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'] as const;
 const EXCLUDED_TOP_LEVEL = new Set(['.git', 'coverage', 'dist', 'docs', 'node_modules', 'tests']);
 const EXCLUDED_PREFIXES = [
   'console/node_modules/',
@@ -116,22 +118,27 @@ function loadPolicy(root: string, violations: Violation[], budget: ScanBudget): 
     return null;
   }
 
+  if (Object.keys(parsed.locks).length !== LOCK_PROFILES.length) {
+    violations.push({ code: 'python-lock-policy-invalid', path: POLICY_PATH, detail: 'incomplete or unsupported installer profiles' });
+    return null;
+  }
   const locks: Record<string, Record<string, string>> = {};
-  for (const [profile, targets] of Object.entries(parsed.locks)) {
-    if (!isRecord(targets) || Object.keys(targets).length === 0) {
-      violations.push({ code: 'python-lock-policy-invalid', path: POLICY_PATH, detail: `profile ${profile} has no targets` });
-      continue;
+  for (const profile of LOCK_PROFILES) {
+    const targets = parsed.locks[profile];
+    if (!isRecord(targets) || Object.keys(targets).length !== LOCK_TARGETS.length) {
+      violations.push({ code: 'python-lock-policy-invalid', path: POLICY_PATH, detail: `incomplete or unsupported targets for ${profile}` });
+      return null;
     }
     locks[profile] = {};
-    for (const [target, lockPath] of Object.entries(targets)) {
-      if (!/^(linux|darwin)-(x64|arm64)$/.test(target) || typeof lockPath !== 'string' || !isSafeLockPath(lockPath)) {
+    for (const target of LOCK_TARGETS) {
+      const lockPath = `requirements/python/${profile}-cpython313-${target}.txt`;
+      if (targets[target] !== lockPath) {
         violations.push({ code: 'python-lock-policy-invalid', path: POLICY_PATH, detail: `invalid lock target ${profile}/${target}` });
-        continue;
+        return null;
       }
       locks[profile]![target] = lockPath;
     }
   }
-  if (Object.keys(locks).length === 0) return null;
   return {
     schemaVersion: 1,
     runtime: EXPECTED_RUNTIME,
@@ -257,6 +264,44 @@ function shellWordEnd(line: string, start: number): number {
   return line.length;
 }
 
+function skipInvocationPrefixes(line: string, start: number): number {
+  let offset = start;
+  const nextWord = (): string => {
+    while (offset < line.length && /\s/.test(line[offset]!)) offset += 1;
+    return line.slice(offset, shellWordEnd(line, offset));
+  };
+  const consumeWord = (): void => { offset = shellWordEnd(line, offset); };
+  while (offset < line.length) {
+    const word = nextWord();
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+      consumeWord();
+      continue;
+    }
+    if (!['command', 'exec', 'nohup', 'time'].includes(word)) break;
+    consumeWord();
+    while (nextWord().startsWith('-')) {
+      const option = nextWord();
+      consumeWord();
+      if (option === '--') break;
+      if ((word === 'command' || word === 'time') && /^-p+$/.test(option)) continue;
+      if (word === 'exec' && /^-[cl]+$/.test(option)) continue;
+      if (word === 'exec') {
+        const namedProcess = option.match(/^-[cl]*a(.*)$/);
+        if (namedProcess) {
+          if (namedProcess[1]) continue;
+          if (!nextWord()) return line.length;
+          consumeWord();
+          continue;
+        }
+      }
+      // Do not treat lookup arguments or unrecognized option values as commands.
+      return line.length;
+    }
+  }
+  nextWord();
+  return offset;
+}
+
 function findInstallCommands(text: string): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
@@ -267,12 +312,8 @@ function findInstallCommands(text: string): string[] {
       if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, match.index));
     }
     const starts = /(?:[;|&]\s*|\brun:\s*|\bsudo\s+|\benv\s+)/gi;
-    for (let offset of [0, ...Array.from(line.matchAll(starts), (prefix) => prefix.index + prefix[0].length)]) {
-      while (/\s/.test(line[offset] ?? '') && offset < line.length) offset += 1;
-      while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(line.slice(offset))) {
-        offset = shellWordEnd(line, offset);
-        while (/\s/.test(line[offset] ?? '') && offset < line.length) offset += 1;
-      }
+    for (const start of [0, ...Array.from(line.matchAll(starts), (prefix) => prefix.index + prefix[0].length)]) {
+      const offset = skipInvocationPrefixes(line, start);
       const pip = line.slice(offset).match(/^["']?(?:[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?(?=\s)/i);
       if (!pip) continue;
       const argumentsText = commandAfterInstall(line, offset + pip[0].length);

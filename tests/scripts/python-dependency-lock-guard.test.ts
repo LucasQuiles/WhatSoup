@@ -7,6 +7,12 @@ import { scanPythonDependencyLocks } from '../../scripts/python-dependency-lock-
 
 const repoRoot = new URL('../..', import.meta.url).pathname;
 const tempRoots: string[] = [];
+const profiles = ['quality', 'transcription'] as const;
+const targets = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64'] as const;
+const lockCases = profiles.flatMap((profile) => targets.map((target) => ({
+  profile, target, path: `requirements/python/${profile}-cpython313-${target}.txt`,
+})));
+const qualityLock = 'requirements/python/quality-cpython313-linux-x64.txt';
 
 function makeFixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'whatsoup-python-lock-'));
@@ -21,21 +27,25 @@ function write(root: string, relativePath: string, contents: string, executable 
   if (executable) chmodSync(path, 0o755);
 }
 
-function writePolicy(root: string, lockPath = 'locks/quality-cpython313.txt'): void {
+function writePolicy(root: string): void {
   write(root, 'requirements/python/lock-policy.json', JSON.stringify({
     schemaVersion: 1,
     runtime: { implementation: 'cpython', version: '3.13.16' },
     indexUrl: 'https://pypi.org/simple',
-    locks: { quality: { 'linux-x64': lockPath } },
+    locks: Object.fromEntries(profiles.map((profile) => [profile, Object.fromEntries(
+      lockCases.filter((entry) => entry.profile === profile).map(({ target, path }) => [target, path]),
+    )])),
   }, null, 2));
 }
 
-function writeValidLock(root: string, lockPath = 'locks/quality-cpython313.txt'): void {
-  write(root, lockPath, [
-    '# Lock target: CPython 3.13.16 / linux-x64',
-    'pytest==8.3.5 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-    '',
-  ].join('\n'));
+function writeValidLock(root: string): void {
+  for (const { target, path } of lockCases) {
+    write(root, path, [
+      `# Lock target: CPython 3.13.16 / ${target}`,
+      'pytest==8.3.5 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      '',
+    ].join('\n'));
+  }
 }
 
 afterEach(() => {
@@ -51,17 +61,58 @@ describe('python dependency lock guard', () => {
 
   it('rejects a hash-required install that points at a malformed lock', () => {
     const root = makeFixture();
-    writePolicy(root, 'locks/quality-py313.txt');
+    writePolicy(root);
+    writeValidLock(root);
     write(root, 'scripts/install.sh', [
       '#!/usr/bin/env bash',
-      'python3 -m pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r locks/quality-py313.txt',
+      `python3 -m pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`,
       '',
     ].join('\n'), true);
-    write(root, 'locks/quality-py313.txt', 'pytest>=8\n');
+    write(root, qualityLock, 'pytest>=8\n');
 
     const violations = scanPythonDependencyLocks(root);
 
     expect(violations.some(({ code }) => code === 'python-lock-malformed')).toBe(true);
+  });
+
+  it.each(lockCases)('rejects an omitted $profile/$target installer target', ({ profile, target }) => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    const policy = JSON.parse(readFileSync(join(root, 'requirements/python/lock-policy.json'), 'utf8'));
+    delete policy.locks[profile][target];
+    write(root, 'requirements/python/lock-policy.json', JSON.stringify(policy));
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-policy-invalid',
+    }));
+  });
+
+  it.each(lockCases)('rejects a substituted $profile/$target installer lock', ({ profile, target, path }) => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    const policy = JSON.parse(readFileSync(join(root, 'requirements/python/lock-policy.json'), 'utf8'));
+    policy.locks[profile][target] = 'requirements/python/replacement.txt';
+    write(root, 'requirements/python/replacement.txt', readFileSync(join(root, path), 'utf8'));
+    write(root, 'requirements/python/lock-policy.json', JSON.stringify(policy));
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-policy-invalid',
+    }));
+  });
+
+  it.each(profiles)('rejects an omitted %s installer profile', (profile) => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    const policy = JSON.parse(readFileSync(join(root, 'requirements/python/lock-policy.json'), 'utf8'));
+    delete policy.locks[profile];
+    write(root, 'requirements/python/lock-policy.json', JSON.stringify(policy));
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-policy-invalid',
+    }));
   });
 
   it.each([
@@ -86,6 +137,25 @@ describe('python dependency lock guard', () => {
     ['nested command substitution assignment', 'A="$(printf "%s" "$(printf x)")" pip install pytest'],
     ['parameter expansion assignment', 'A=${VALUE:-two words} pip install pytest'],
     ['backtick assignment', 'A=`printf "two words"` pip install pytest'],
+    ['command wrapper', 'command pip install pytest'],
+    ['command default path', 'command -p pip install pytest'],
+    ['repeated command path flag', 'command -pp pip install pytest'],
+    ['command option delimiter', 'command -- pip install pytest'],
+    ['command path and delimiter', 'command -p -- pip install pytest'],
+    ['exec wrapper', 'exec pip install pytest'],
+    ['exec option delimiter', 'exec -- pip install pytest'],
+    ['exec named process', 'exec -a "worker name" pip install pytest'],
+    ['exec attached process name', 'exec -aworker pip install pytest'],
+    ['exec flags', 'exec -cl pip install pytest'],
+    ['exec combined flags and process name', 'exec -cla worker pip install pytest'],
+    ['exec combined flags and attached process name', 'exec -claworker pip install pytest'],
+    ['exec reordered flags and quoted process name', 'exec -lca "worker name" pip install pytest'],
+    ['exec login flag and process name', 'exec -la worker pip install pytest'],
+    ['exec clear-environment flag and process name', 'exec -ca worker pip install pytest'],
+    ['exec option-shaped process name', 'exec -ac pip install pytest'],
+    ['nohup wrapper', 'nohup pip install pytest'],
+    ['timed command', 'time -p pip install pytest'],
+    ['nested command wrappers', 'env A=one command exec pip install pytest'],
   ])('rejects an unlocked %s invocation', (_name, install) => {
     const root = makeFixture();
     writePolicy(root);
@@ -99,7 +169,12 @@ describe('python dependency lock guard', () => {
     ))).toBe(true);
   });
 
-  it.each(['pip --quiet show install', 'python3 -m pip --log "build output.log" show install'])('preserves the non-install subcommand in %s', (command) => {
+  it.each([
+    'pip --quiet show install',
+    'python3 -m pip --log "build output.log" show install',
+    'command -v pip install',
+    'command -V pip install',
+  ])('preserves the non-install subcommand in %s', (command) => {
     const root = makeFixture();
     writePolicy(root);
     writeValidLock(root);
@@ -126,11 +201,34 @@ describe('python dependency lock guard', () => {
     const root = makeFixture();
     writePolicy(root);
     writeValidLock(root);
-    write(root, 'scripts/install.sh', 'python3 -m pip --isolated --timeout=10 install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r locks/quality-cpython313.txt');
+    write(root, 'scripts/install.sh', `python3 -m pip --isolated --timeout=10 install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`);
     expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
 
-  it.each(['scripts/large.sh', 'requirements/python/lock-policy.json', 'locks/quality-cpython313.txt'])(
+  it.each([
+    'command -p --',
+    'exec -a "worker name"',
+    'exec -cla worker',
+    'exec -claworker',
+    'exec -lca "worker name"',
+    'exec -la worker',
+    'exec -ca worker',
+    'exec -ac',
+    'nohup',
+    'time -p',
+  ])(
+    'accepts an approved lock through %s',
+    (prefix) => {
+      const root = makeFixture();
+      writePolicy(root);
+      writeValidLock(root);
+      write(root, 'scripts/install.sh', `${prefix} pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`);
+
+      expect(scanPythonDependencyLocks(root)).toEqual([]);
+    },
+  );
+
+  it.each(['scripts/large.sh', 'requirements/python/lock-policy.json', qualityLock])(
     'fails closed before reading an oversized %s',
     (path) => {
       const root = makeFixture();
@@ -195,7 +293,7 @@ describe('python dependency lock guard', () => {
     writeValidLock(root);
     const metadataBytes = 2 * (
       readFileSync(join(root, 'requirements/python/lock-policy.json')).length
-      + readFileSync(join(root, 'locks/quality-cpython313.txt')).length
+      + lockCases.reduce((bytes, { path }) => bytes + readFileSync(join(root, path)).length, 0)
     );
     for (let index = 0; index < 16; index += 1) {
       const path = `scripts/part-${index}.sh`;
@@ -211,8 +309,8 @@ describe('python dependency lock guard', () => {
     writePolicy(root);
     writeValidLock(root);
     mkdirSync(join(root, 'scripts'));
-    // The policy/lock paths and scripts directory account for the other six entries.
-    for (let index = 0; index < 9994; index += 1) {
+    // The policy, eight locks and their directories account for the other twelve entries.
+    for (let index = 0; index < 9988; index += 1) {
       writeFileSync(join(root, 'scripts', `part-${index}.sh`), '');
     }
 
@@ -236,7 +334,7 @@ describe('python dependency lock guard', () => {
     write(root, 'tests/fixtures/install.sh', 'python3 -m pip install pytest\n', true);
     write(root, 'scripts/install.sh', [
       '#!/usr/bin/env bash',
-      'python3 -m pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r locks/quality-cpython313.txt',
+      `python3 -m pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`,
       '',
     ].join('\n'), true);
 

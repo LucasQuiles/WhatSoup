@@ -76,6 +76,10 @@ JavaScript release-proof tests supply a hermetic `flock` fixture on macOS, where
 external `flock` is not a host requirement. Linux release operations still
 require the real `util-linux` implementation.
 
+Transcription setup bounds Homebrew, pip and model downloads to 600 seconds each;
+timeouts fail the installation. The [Python lock recovery and update procedure](../requirements/python/README.md)
+documents the operation-budget overrides and retained environments.
+
 Setup bootstraps and proves Node before its first npm command, so a fresh host
 does not need a separate `npm ci` beforehand.
 

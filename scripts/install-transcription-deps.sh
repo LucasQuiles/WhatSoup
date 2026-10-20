@@ -112,7 +112,8 @@ mkdir -p "$FW_MODEL_DIR" "$WCPP_MODEL_DIR"
 # died under `set -e` with "command not found", which tells a Linux operator
 # nothing about what to install.
 if command -v brew >/dev/null 2>&1; then
-  brew install ffmpeg whisper-cpp python@3.13
+  whatsoup_run_bounded "${WHATSOUP_PKG_INSTALL_TIMEOUT:-600}" \
+    brew install ffmpeg whisper-cpp python@3.13
 else
   missing=()
   command -v ffmpeg >/dev/null 2>&1 || missing+=("ffmpeg")
