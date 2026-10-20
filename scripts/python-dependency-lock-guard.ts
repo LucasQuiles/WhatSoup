@@ -342,6 +342,8 @@ function skipInvocationPrefixes(line: string, start: number): number {
 function findInstallCommands(text: string, depth = 0): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
+    // Recognized pip spellings can join quoted segments; unrelated source needs no shell parsing.
+    if (!/p["']*i["']*p/i.test(line)) continue;
     if (line.trimStart().startsWith('#')) continue;
     const modulePattern = /(?:^|[\s:;|&])-m\s+pip(?=\s)/gi;
     for (const match of line.matchAll(modulePattern)) {
