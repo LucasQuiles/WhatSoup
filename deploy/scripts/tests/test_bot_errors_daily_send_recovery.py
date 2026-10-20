@@ -22,7 +22,7 @@ _HEALTH_SCRIPT = _TESTS_DIR.parent / 'bot-errors-health-check.py'
 
 def test_daily_recovery_module_imports_without_pytest_path_injection():
     result = subprocess.run(
-        [sys.executable, '-I', '-c',
+        [sys.executable, '-E', '-P', '-c',
          'import importlib.util, sys; '
          'spec = importlib.util.spec_from_file_location("daily_recovery", sys.argv[1]); '
          'module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)',
