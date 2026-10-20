@@ -66,6 +66,10 @@ do not prove a service is running or that a particular agent runtime can use it.
 Quality and release setup require CPython `3.13.16`, then create a private managed interpreter at
 `${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
 and install the committed, hash-locked `pytest`, `pytest-cov`, Hypothesis, and Ruff graph there.
+Each install creates a fresh environment and retains the old directory at the
+printed adjacent `.previous.*` path. Keep consumers stopped during replacement.
+After successful installation and consumer checks, retire the retained directory
+through the applicable storage procedure; see [Python lock recovery](../requirements/python/README.md#replacing-managed-environments).
 Host package managers can provide the `3.13` command but do not prove its patch
 level; the installer fails closed when it is not `3.13.16`. WhatSoup's
 JavaScript release-proof tests supply a hermetic `flock` fixture on macOS, where

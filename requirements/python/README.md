@@ -7,6 +7,18 @@ for CPython `3.13.16` and the named target (`linux-x64`, `linux-arm64`,
 `deploy/lib/python-lock-policy.sh`, require the exact runtime, and use the PyPI
 simple index with `--require-hashes` and `--only-binary :all:`.
 
+## Replacing managed environments
+
+The host and transcription installers create a fresh managed environment before
+applying a lock. An existing environment must have a regular `pyvenv.cfg`; symlink
+or unrecognized targets are refused. Its complete directory is retained at the
+printed adjacent `.previous.*` path, so old packages and startup hooks cannot run
+in the replacement. A failed environment creation restores the previous path and
+retains partial output for inspection. A later package-install failure leaves the
+previous directory available for an explicit rollback; do not use the incomplete
+replacement. Retire the retained environment only after installation, imports and
+its consumers pass, using the applicable storage-retirement procedure.
+
 ## Updating a lock
 
 Record the update date, reason or advisory, input-pin change, generator version,

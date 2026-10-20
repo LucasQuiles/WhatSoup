@@ -57,6 +57,34 @@ whatsoup_python_lock_path() {
   esac
 }
 
+
+whatsoup_create_managed_venv() {
+  local python_bin="$1" venv_root="$2" backup="" result=0
+  if [ -L "$venv_root" ] || { [ -e "$venv_root" ] && { [ ! -d "$venv_root" ] || [ ! -f "$venv_root/pyvenv.cfg" ] || [ -L "$venv_root/pyvenv.cfg" ]; }; }; then
+    echo "Python lock policy: refusing unrecognized managed environment $venv_root" >&2
+    return 1
+  fi
+  whatsoup_require_locked_python "$python_bin" || return 1
+  mkdir -p "$(dirname "$venv_root")" || return 1
+  if [ -d "$venv_root" ]; then
+    backup="$(mktemp -d "${venv_root}.previous.XXXXXX")" || return 1
+    mv "$venv_root" "$backup/environment" || return 1
+    echo "Python lock policy: previous environment retained at $backup/environment; retire only after installation and consumer verification" >&2
+  fi
+  "$python_bin" -m venv "$venv_root" || result=$?
+  if [ "$result" -eq 0 ]; then
+    chmod 700 "$venv_root" || result=$?
+  fi
+  if [ "$result" -ne 0 ] && [ -n "$backup" ]; then
+    if [ -e "$venv_root" ] || [ -L "$venv_root" ]; then
+      mv "$venv_root" "$backup/failed-environment" || return 1
+    fi
+    mv "$backup/environment" "$venv_root" || return 1
+    echo "Python lock policy: restored previous environment; failed creation retained at $backup" >&2
+  fi
+  return "$result"
+}
+
 whatsoup_install_locked_requirements() {
   local python_bin="$1" root="$2" profile="$3" lock_path
   whatsoup_require_locked_python "$python_bin" || return 1

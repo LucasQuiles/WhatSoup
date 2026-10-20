@@ -70,6 +70,11 @@ describe('python dependency lock guard', () => {
     ['multiline shell pip', 'python3 -m pip install \\\n+      pytest'],
     ['workflow pip', 'run: python3 -m pip install pytest'],
     ['equivalent pip3', 'pip3 install pytest'],
+    ['module global flag', 'python3 -m pip --isolated install pytest'],
+    ['direct global flag', 'pip --disable-pip-version-check install pytest'],
+    ['global value', 'python3 -m pip --timeout 10 install pytest'],
+    ['quoted global value', 'pip --log "build output.log" install pytest'],
+    ['assigned quoted global value', 'pip --log="build output.log" install pytest'],
   ])('rejects an unlocked %s invocation', (_name, install) => {
     const root = makeFixture();
     writePolicy(root);
@@ -81,6 +86,22 @@ describe('python dependency lock guard', () => {
     expect(violations.some((violation) => (
       violation.code === 'python-install-unlocked' && violation.path === 'scripts/install.sh'
     ))).toBe(true);
+  });
+
+  it.each(['pip --quiet show install', 'python3 -m pip --log "build output.log" show install'])('preserves the non-install subcommand in %s', (command) => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, 'scripts/show.sh', command);
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
+  });
+
+  it('accepts a locked install after global options', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, 'scripts/install.sh', 'python3 -m pip --isolated --timeout=10 install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r locks/quality-cpython313.txt');
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
 
   it('does not treat documentation or test fixtures as executable production installers', () => {

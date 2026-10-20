@@ -69,12 +69,14 @@ function runVenvPreparationSnippet(): { status: number; marker: string; stderr: 
   const marker = path.join(root, 'refreshed');
   const hostPython = path.join(root, 'python3.13');
   fs.mkdirSync(path.join(venv, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(venv, 'pyvenv.cfg'), 'home = legacy-runtime\n');
   writeExecutable(
     path.join(venv, 'bin'),
     'python',
     '#!/bin/sh\nif [ "$1" = "-c" ]; then printf \'%s\\n\' \'cpython:3.12.9\'; exit 0; fi\nexit 0\n',
   );
   writeExecutable(root, 'python3.13', `#!/bin/sh
+if [ "$1" = "-c" ]; then printf '%s\n' 'cpython:3.13.16'; exit 0; fi
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   target="$3"
   mkdir -p "$target/bin"

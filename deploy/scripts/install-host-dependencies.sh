@@ -225,8 +225,7 @@ if [ "$profile" = "quality" ] || [ "$profile" = "release" ]; then
 
   venv_root="$(whatsoup_quality_venv_root)"
   mkdir -p "$(dirname "$venv_root")" || exit 1
-  "$base_python" -m venv "$venv_root" >&2 || exit 1
-  chmod 700 "$venv_root" || exit 1
+  whatsoup_create_managed_venv "$base_python" "$venv_root" >&2 || exit 1
   venv_python="$venv_root/bin/python"
   [ -x "$venv_python" ] || {
     echo "host dependency installer: managed venv did not create an executable Python" >&2

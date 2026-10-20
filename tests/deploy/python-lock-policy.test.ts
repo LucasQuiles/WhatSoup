@@ -1,8 +1,9 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveTestPython } from '../helpers/python-interpreter.ts';
 
 const repoRoot = resolve(import.meta.dirname, '..', '..');
 const policyPath = join(repoRoot, 'deploy/lib/python-lock-policy.sh');
@@ -110,5 +111,84 @@ describe('Python lock runtime policy', () => {
     expect(readFileSync(log, 'utf8')).toContain('--only-binary :all:');
     expect(readFileSync(log, 'utf8')).toContain('--index-url https://pypi.org/simple');
     expect(readFileSync(log, 'utf8')).toContain('quality-cpython313-linux-x64.txt');
+  });
+});
+
+
+describe('managed Python environment replacement', () => {
+  function existingEnvironment(root: string): { python: string; target: string; hook: string; marker: string } {
+    const python = resolveTestPython();
+    const target = join(root, 'managed-venv');
+    const created = spawnSync(python, ['-m', 'venv', '--without-pip', target], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+    const site = spawnSync(join(target, 'bin/python'), ['-c', 'import sysconfig; print(sysconfig.get_path("purelib"))'], { encoding: 'utf8' });
+    expect(site.status, site.stderr).toBe(0);
+    const marker = join(root, 'old-hook-executed');
+    const hook = join(site.stdout.trim(), 'old-unlocked.pth');
+    writeFileSync(hook, `import pathlib; pathlib.Path(${JSON.stringify(marker)}).write_text("executed")\n`);
+    return { python, target, hook, marker };
+  }
+
+  it('starts from a fresh environment while retaining the previous executable artifacts', () => {
+    const root = tempRoot();
+    const { python, target, hook, marker } = existingEnvironment(root);
+    const prior = readFileSync(hook);
+    const result = runPolicy(`
+WHATSOUP_LOCKED_PYTHON_VERSION="$($BASE_PYTHON -c 'import platform; print(platform.python_version())')"
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV"
+`, { BASE_PYTHON: python, TARGET_VENV: target });
+    expect(result.status, result.stderr).toBe(0);
+    const probe = spawnSync(join(target, 'bin/python'), ['-I', '-c', 'import sys; print(sys.prefix)'], { encoding: 'utf8' });
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(probe.stdout.trim()).toBe(target);
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(hook)).toBe(false);
+    const backups = readdirSync(root).filter((name) => name.startsWith('managed-venv.previous.'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(root, backups[0]!, 'environment', hook.slice(target.length + 1)))).toEqual(prior);
+  }, 20_000);
+
+  it('restores the previous environment and retains partial creation after a creation failure', () => {
+    const root = tempRoot();
+    const { python, target, hook, marker } = existingEnvironment(root);
+    const failing = join(root, 'failing-python');
+    executable(failing, `if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" "$@"; fi
+mkdir -p "$3"
+printf partial > "$3/partial"
+exit 7`);
+    const prior = readFileSync(hook);
+    const result = runPolicy(`
+WHATSOUP_LOCKED_PYTHON_VERSION="$($REAL_PYTHON -c 'import platform; print(platform.python_version())')"
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV"
+`, { BASE_PYTHON: failing, REAL_PYTHON: python, TARGET_VENV: target });
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(hook)).toEqual(prior);
+    expect(existsSync(marker)).toBe(false);
+    const backups = readdirSync(root).filter((name) => name.startsWith('managed-venv.previous.'));
+    expect(backups).toHaveLength(1);
+    expect(readFileSync(join(root, backups[0]!, 'failed-environment', 'partial'), 'utf8')).toBe('partial');
+  });
+
+  it('refuses a symlink to a recognized environment without moving it', () => {
+    const root = tempRoot();
+    const { python, target, hook } = existingEnvironment(root);
+    const link = join(root, 'linked-venv');
+    symlinkSync(target, link);
+    const result = runPolicy('whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV"', { BASE_PYTHON: python, TARGET_VENV: link });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('refusing unrecognized managed environment');
+    expect(readFileSync(join(link, hook.slice(target.length + 1)))).toEqual(readFileSync(hook));
+    expect(readdirSync(root).filter((name) => name.includes('.previous.'))).toEqual([]);
+  });
+
+  it('retains an unrecognized nonempty directory without running the interpreter', () => {
+    const root = tempRoot();
+    const target = join(root, 'not-a-venv');
+    mkdirSync(target);
+    writeFileSync(join(target, 'unique-work'), 'retain');
+    const result = runPolicy('whatsoup_create_managed_venv /nonexistent/python "$TARGET_VENV"', { TARGET_VENV: target });
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(join(target, 'unique-work'), 'utf8')).toBe('retain');
+    expect(readdirSync(root)).toEqual(['not-a-venv']);
   });
 });

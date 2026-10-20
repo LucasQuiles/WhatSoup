@@ -65,7 +65,7 @@ function resolveHostTool(name: string): string {
 
 function installShellToolbox(bin: string): void {
   for (const name of [
-    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp',
+    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp', 'mv',
     'ps', 'rm', 'rmdir', 'sed', 'sleep', 'tr',
   ]) {
     symlinkSync(resolveHostTool(name), join(bin, name));

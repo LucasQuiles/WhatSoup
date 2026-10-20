@@ -150,16 +150,33 @@ function commandAfterInstall(source: string, offset: number): string {
   return end === -1 ? command : command.slice(0, end);
 }
 
+const PIP_GLOBAL_VALUE_OPTIONS = new Set([
+  '--python', '--log', '--keyring-provider', '--proxy', '--retries', '--timeout',
+  '--exists-action', '--trusted-host', '--cert', '--client-cert', '--cache-dir',
+  '--use-feature', '--use-deprecated', '--resume-retries',
+]);
+
+function pipSubcommandIsInstall(argumentsText: string): boolean {
+  const words = (argumentsText.match(/(?:[^\s"']+|"[^"\n]*"|'[^'\n]*')+/g) ?? []).map(stripQuotes);
+  let index = 0;
+  while (words[index]?.startsWith('-')) {
+    const option = words[index]!;
+    index += PIP_GLOBAL_VALUE_OPTIONS.has(option) ? 2 : 1;
+  }
+  return words[index] === 'install';
+}
+
 function findInstallCommands(text: string): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
     if (line.trimStart().startsWith('#')) continue;
-    const modulePattern = /(?:^|[\s:;|&])-m\s+pip\s+install\b/gi;
-    const directPattern = /(?:^|[;|&]\s*|\brun:\s*|\bsudo\s+|\benv(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S+)*\s+)(?:["']?[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?\s+install\b/gi;
+    const modulePattern = /(?:^|[\s:;|&])-m\s+pip(?=\s)/gi;
+    const directPattern = /(?:^|[;|&]\s*|\brun:\s*|\bsudo\s+|\benv(?:\s+[A-Za-z_][A-Za-z0-9_]*=\S+)*\s+)(?:["']?[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?(?=\s)/gi;
     for (const pattern of [modulePattern, directPattern]) {
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(line)) !== null) {
-        commands.push(commandAfterInstall(line, match.index));
+        const argumentsText = commandAfterInstall(line, match.index + match[0].length);
+        if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, match.index));
       }
     }
   }
