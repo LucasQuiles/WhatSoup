@@ -147,6 +147,8 @@ subst_render() { # TEMPLATE_ABS DEST BOT(optional) INSTALLED_ABS(optional)
   # deploy/setup.sh installs them (same filter and --preserve-from source, run
   # from THIS checkout), so a hand-added key the config does not own is kept
   # on both sides rather than reported as drift and stripped on reinstall.
+  # harness-maintenance is the exception: the filter always gives it its own
+  # $HOME/.claude-maint (see check_maintenance_surface).
   case "$(basename "$template")" in
     com.whatsoup.harness-maintenance.plist|com.whatsoup.reply-guarantee.plist)
       if ! bash "$TOOL_ROOT/scripts/run-with-pinned-node.sh" "$TOOL_ROOT/scripts/launchd-claude-config-env.ts" \
@@ -178,7 +180,9 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
     rm -f "$rendered"
     exit 2
   fi
-  if cmp -s "$rendered" "$installed"; then
+  if [ "$name" = "harness-maintenance" ]; then
+    check_maintenance_surface "$rendered" "$installed"
+  elif cmp -s "$rendered" "$installed"; then
     echo "ok: $name"
   else
     echo "drift: $name" >&2
@@ -188,6 +192,119 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
     failures=$((failures + 1))
   fi
   rm -f "$rendered"
+}
+
+# check_maintenance_surface RENDERED INSTALLED: harness-maintenance is compared as a parsed plist, not
+# byte for byte, so the fleet's login-guard wrapper is accepted: the 2026-10-19 fleet-reauth change
+# rewrote the job with plistlib and starts it as /bin/bash <guard> /bin/bash <script>. <guard> must
+# be one of the two deployed locations, $HOME/.local/libexec/fleet-reauth/maint-ccd-guard.sh or
+# $HOME/.local/share/fleet-reauth/maint-ccd-guard.sh (by realpath, so not a symlink to elsewhere),
+# a regular file owned by this user and not group- or world-writable. The job's CLAUDE_CONFIG_DIR must also be its own:
+# equal to, resolving to, or keyed to the same keychain item as another com.whatsoup.* agent's config
+# dir (a missing key is the default ~/.claude) is drift, because the job's agent CLI can refresh, and
+# so rotate or wipe, the login of the dir it sees. Of other agents only CLAUDE_CONFIG_DIR is read, and
+# only file names are printed.
+check_maintenance_surface() {
+  local rendered="$1" installed="$2" status=0 verdict out
+  # The verdict line is the parser's stdout; its stderr is never shown (it could echo plist content).
+  # A file, not $(...): bash 3.2 misparses a quoted heredoc inside a command substitution.
+  out="$(mktemp "${TMPDIR:-/tmp}/launchd-drift-maint.XXXXXX")"
+  "$PLIST_PYTHON" - "$rendered" "$installed" "$LAUNCHD_DIR" "$HOME" >"$out" 2>/dev/null <<'PY' || status=$?
+import glob, hashlib, os, plistlib, sys
+
+rendered_path, installed_path, launchd_dir, home = sys.argv[1:5]
+BASE = "Claude" + " Code-credentials"  # the agent CLI's keychain service base name
+
+
+def drift(reason):
+    print(f"drift: harness-maintenance{': ' + reason if reason else ''}")
+    sys.exit(1)
+
+
+def load(path):
+    with open(path, "rb") as f:
+        return plistlib.load(f)
+
+
+try:
+    want = load(rendered_path)
+except Exception:
+    sys.exit(2)
+try:
+    got = load(installed_path)
+except Exception:
+    drift("installed plist does not parse")
+if not isinstance(got, dict):
+    drift("installed plist is not a dict")
+args = got.get("ProgramArguments")
+GUARD_HOMES = (".local/libexec/fleet-reauth", ".local/share/fleet-reauth")
+guarded = (isinstance(args, list) and len(args) >= 3 and args[0] == "/bin/bash" and args[2] == "/bin/bash"
+           and isinstance(args[1], str) and args[1].startswith("/") and args[1].endswith("/maint-ccd-guard.sh"))
+if guarded:
+    real_home = os.path.realpath(home)
+    allowed = {os.path.join(real_home, d, "maint-ccd-guard.sh") for d in GUARD_HOMES}
+    real = os.path.realpath(args[1])
+    if real not in allowed:
+        drift("its login guard is not at a deployed location")
+    try:
+        st = os.stat(real)
+    except OSError:
+        drift("its login guard maint-ccd-guard.sh is missing")
+    import stat as stat_mod
+    if not stat_mod.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+        drift("its login guard is not a regular file owned by this user and closed to group and world writes")
+    got = dict(got, ProgramArguments=args[2:])
+if got != want:
+    drift("")
+
+env = got.get("EnvironmentVariables")
+own = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+if not isinstance(own, str) or not own:
+    drift("no CLAUDE_CONFIG_DIR of its own")
+
+
+def resolved(d):
+    d = d or os.path.join(home, ".claude")
+    # realpath resolves the existing prefix and keeps a not-yet-created rest; a relative value is kept.
+    return os.path.realpath(d) if os.path.isabs(d) else d
+
+
+def service(d):
+    return BASE if not d else f"{BASE}-{hashlib.sha256(d.encode()).hexdigest()[:8]}"
+
+
+for path in sorted(glob.glob(os.path.join(launchd_dir, "com.whatsoup.*.plist"))):
+    name = os.path.basename(path)
+    if name == "com.whatsoup.harness-maintenance.plist":
+        continue
+    try:
+        other_env = load(path).get("EnvironmentVariables")
+    except Exception:
+        continue  # an unreadable surface fails its own structural or template check
+    other = other_env.get("CLAUDE_CONFIG_DIR") if isinstance(other_env, dict) else None
+    other = other if isinstance(other, str) else ""
+    if own == other:
+        drift(f"CLAUDE_CONFIG_DIR equals {name[:-6]}'s")
+    if resolved(own) == resolved(other):
+        drift(f"CLAUDE_CONFIG_DIR resolves to {name[:-6]}'s config dir")
+    if service(own) == service(other):
+        drift(f"CLAUDE_CONFIG_DIR shares {name[:-6]}'s keychain item")
+print("ok: harness-maintenance" + (" (started through the login guard)" if guarded else ""))
+PY
+  verdict="$(cat "$out")"
+  rm -f "$out"
+  case "$status" in
+    0) echo "$verdict" ;;
+    1)
+      echo "$verdict" >&2
+      if [ "$SHOW_DIFF" -eq 1 ]; then
+        diff -u "$rendered" "$installed" | sed -n '1,80p' >&2 || true
+      fi
+      failures=$((failures + 1)) ;;
+    *)
+      echo "plist field evidence unavailable: harness-maintenance could not be compared (parser status $status)" >&2
+      exit 2 ;;
+  esac
 }
 
 check_optional_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS

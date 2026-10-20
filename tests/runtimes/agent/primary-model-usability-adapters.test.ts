@@ -32,7 +32,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const controller = new AbortController();
     controller.abort();
     const getProviderBinary = vi.fn(() => 'claude');
-    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'healed' as const }));
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const }));
     const probeBinaryCommand = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary,
@@ -570,7 +570,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
   it('runs the file-store credential heal before a claude-cli probe, but not for opencode-cli', async () => {
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
-    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-file-store-current' as const }));
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
@@ -595,7 +595,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       const i = call++;
       return { status: statuses[i], output: outputs[i] };
     });
-    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'healed' as const }));
+    const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
@@ -685,7 +685,7 @@ describe('createPrimaryModelProbeAdapters', () => {
         'Reply with OK only.',
       ],
       expect.any(Object),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+      { cwd: '/agent-cwd', timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
@@ -787,7 +787,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', '-m', 'openai/configured-primary', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { timeoutMs: 15_000 },
+      { timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
@@ -814,7 +814,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+      { cwd: '/agent-cwd', timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 

@@ -130,12 +130,38 @@ export interface BinaryAuthStatusResult {
   output: string;
 }
 
+/** How a probe child ended, reported once by {@link BinaryCommandProbeOptions.onExited}. */
+export interface BinaryCommandProbeExit {
+  /** Undefined when the spawn failed and no process ever existed. */
+  pid: number | undefined;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  /** The probe's own kill timer (`timeoutMs`) fired and terminated the child. */
+  killedByTimeout: boolean;
+  /** The caller's abort signal terminated the child. */
+  killedByAbort: boolean;
+  /** No process was started (spawn threw or emitted an error before a pid). */
+  spawnFailed: boolean;
+}
+
 export interface BinaryCommandProbeOptions {
   cwd?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
   /** Called once spawn is proven absent or the child emits close. */
   onProcessClosed?: () => void;
+  /** Called once, right after spawn returned or threw (pid undefined if no process was created). */
+  onSpawned?: (pid: number | undefined) => void;
+  /** Called once when the child closes or its spawn is proven to have failed. */
+  onExited?: (exit: BinaryCommandProbeExit) => void;
+  /**
+   * Called right before the child would be signalled (timeout or abort). A
+   * returned promise defers the signal until it settles; null signals at once.
+   * The claude probes use it to wait out a held OAuth refresh lock
+   * (claudeRefreshLockGrace). The probe result itself is not delayed by a
+   * timeout grace; an abort still settles only when the child closes.
+   */
+  terminationGrace?: () => Promise<unknown> | null;
 }
 
 /** Grace period between the timeout kill (SIGTERM) and the SIGKILL escalation. */
@@ -186,7 +212,29 @@ export async function probeBinaryCommand(
     let processClosedNotified = false;
     let terminationStarted = false;
     let abortRequested = false;
+    let killTimerFired = false;
+    let exitNotified = false;
     let abortListener: (() => void) | undefined;
+    let childPid: number | undefined;
+    let childClosed = false;
+    // Whether a signal was actually sent: a child that exits on its own during
+    // a termination grace was not killed, even though a timer or abort fired.
+    let signalSent = false;
+
+    const notifyExited = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean): void => {
+      if (exitNotified) return;
+      exitNotified = true;
+      try {
+        options.onExited?.({
+          pid: childPid,
+          exitCode,
+          signal,
+          killedByTimeout: killTimerFired && signalSent,
+          killedByAbort: abortRequested && signalSent,
+          spawnFailed,
+        });
+      } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
+    };
 
     const notifyProcessClosed = (): void => {
       if (processClosedNotified) return;
@@ -225,22 +273,48 @@ export async function probeBinaryCommand(
       });
     } catch {
       notifyProcessClosed();
+      // Lifecycle observers always see a spawn before an exit, even when no
+      // process was created (pid undefined, spawnFailed on the exit).
+      try {
+        options.onSpawned?.(undefined);
+      } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
+      notifyExited(null, null, true);
       settle({ status: 'failed', output: '' });
       return;
     }
+    childPid = child.pid;
+    try {
+      options.onSpawned?.(childPid);
+    } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
 
-    const terminate = (): void => {
-      if (terminationStarted) return;
-      terminationStarted = true;
-      try { child.kill(); } catch { /* ignore kill errors */ }
+    const signalChild = (): void => {
+      if (childClosed) return;
+      try { if (child.kill() === true) signalSent = true; } catch { /* deliberately: a kill that throws sent no signal (the child already exited or cannot be signalled), so signalSent stays false and the SIGKILL escalation below still runs */ }
       killEscalationTimer = setTimeout(() => {
-        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
+        try { if (child.kill(SIGNAL.KILL) === true) signalSent = true; } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
     };
 
+    const terminate = (): void => {
+      if (terminationStarted) return;
+      terminationStarted = true;
+      let grace: Promise<unknown> | null = null;
+      try {
+        grace = options.terminationGrace?.() ?? null;
+      } catch {
+        grace = null;
+      }
+      if (grace === null) {
+        signalChild();
+        return;
+      }
+      void grace.catch(() => undefined).then(signalChild);
+    };
+
     const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
     killTimer = setTimeout(() => {
+      killTimerFired = true;
       terminate();
       settle({ status: 'failed', output: combinedOutput() });
     }, timeoutMs);
@@ -272,6 +346,7 @@ export async function probeBinaryCommand(
       if (child.pid === undefined) {
         removeAbortListener();
         notifyProcessClosed();
+        notifyExited(null, null, true);
       }
       // Once caller cancellation owns a spawned child, `close` is the shared
       // terminal event for both result settlement and lease release. An
@@ -282,11 +357,13 @@ export async function probeBinaryCommand(
       }
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
+      childClosed = true;
       clearTimeout(killTimer);
       clearTimeout(killEscalationTimer);
       removeAbortListener();
       notifyProcessClosed();
+      notifyExited(code, signal, false);
       settle({ status: !abortRequested && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
     });
   });

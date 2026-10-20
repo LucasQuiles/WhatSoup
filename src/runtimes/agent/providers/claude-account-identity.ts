@@ -40,6 +40,10 @@ import {
   type BinaryAuthStatusResult,
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshAheadStillRunning, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
+import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
+import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
+import { createChildLogger } from '../../../logger.ts';
 
 /** Same bound as the CLI model probe: `auth status` is local, but the CLI's
  *  own startup on a loaded host can exceed the 5 s preflight default. Exported
@@ -63,6 +67,8 @@ export type ObservedAccountIdentityFailureReason =
   | 'binary-missing'
   | 'probe-failed'
   | 'probe-threw'
+  /** A refresh-ahead child for this login is still running; the probe was not started. */
+  | 'deferred-refresh-in-flight'
   | 'not-logged-in'
   | 'identity-fields-missing'
   | 'unparseable';
@@ -92,6 +98,12 @@ export interface ClaudeAccountIdentityDeps {
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   timeoutMs?: number;
+  /** Refresh-ahead run before the killable probe (claude-refresh-ahead.ts). Injectable for tests. */
+  refreshClaudeLoginAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
+  /** Refresh-lock wait before the probe child is signalled. Injectable for tests. */
+  claudeRefreshLockGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
+  /** Spawn/exit lines of the probe child (probe-lifecycle-log.ts). Injectable for tests. */
+  log?: ProbeLifecycleLog;
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
@@ -180,16 +192,33 @@ export async function observeClaudeAccountIdentity(
   }
   if (!binary) return { kind: 'failed', reason: 'binary-missing' };
 
+  // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
+  const env = scrubbedAuthStatusEnv(deps.env ?? process.env);
+  // A due token refresh happens in a child nothing kills, before the probe's
+  // own timer starts (claude-refresh-ahead.ts). Never rejects.
+  let refreshed: unknown;
+  try {
+    refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
+  } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
+  // Never start the killable probe while the refresh child still runs.
+  if (refreshAheadStillRunning(refreshed)) return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
   let probe: BinaryAuthStatusResult;
   try {
     probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(
       binary,
       [...CLAUDE_AUTH_STATUS_ARGS],
-      // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
-      scrubbedAuthStatusEnv(deps.env ?? process.env),
+      env,
       {
         timeoutMs: deps.timeoutMs ?? ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS,
         ...(deps.signal ? { signal: deps.signal } : {}),
+        ...probeLifecycleObservers(
+          deps.log ?? createChildLogger('account-identity-probe'),
+          CLAUDE_PROBE_EVENTS,
+          { purpose: 'account-identity', credentialService: claudeCredentialServiceLabel(env) },
+          deps.signal,
+        ),
+        terminationGrace: () => (deps.claudeRefreshLockGrace
+          ?? ((childEnv: NodeJS.ProcessEnv) => claudeRefreshLockGrace(childEnv, 'account-identity')))(env),
       },
     );
   } catch {

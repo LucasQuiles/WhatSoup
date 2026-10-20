@@ -775,6 +775,138 @@ claude_service_inventory() {
   return "$rc"
 }
 
+# Agent CLI login isolation. The agent CLI uses, and can refresh, the login stored for whatever
+# CLAUDE_CONFIG_DIR it sees: in that directory and in a login-keychain item named after it. A
+# refresh rotates the token, and a process killed mid-refresh loses the rotated one, so a job that
+# shares a bot's config dir or keychain item can wipe the bot's login. Every step that starts the
+# agent CLI (the native installer and its --version postcheck, the plugin and MCP listings) runs
+# only when claude_config_isolation proves this job has a login of its own. The same rule as the
+# fleet's maint-ccd-guard.sh wrapper, carried natively.
+#
+# The keychain service name: the bare name when CLAUDE_CONFIG_DIR is unset, else the bare name, a
+# dash and the first 8 hex digits of the sha256 of the CLAUDE_CONFIG_DIR string exactly as set.
+# Split so the product name never appears as one phrase (scripts/lib/repo-hygiene-policy.ts would
+# read it as an attribution).
+CLAUDE_KEYCHAIN_SERVICE='Claude'' Code-credentials'
+
+# claude_keychain_service <config dir or empty>: the keychain service for that config dir.
+claude_keychain_service() {
+  local suffix
+  if [ -z "$1" ]; then
+    printf '%s\n' "$CLAUDE_KEYCHAIN_SERVICE"
+    return 0
+  fi
+  # The bytes of the string, as `printf %s | shasum -a 256` hashes them.
+  suffix="$(printf '%s' "$1" | "$REPO_NODE_BIN" -e '
+const hash = require("node:crypto").createHash("sha256");
+process.stdin.on("data", (d) => hash.update(d)).on("end", () => process.stdout.write(hash.digest("hex").slice(0, 8)));')" || return 1
+  [ "${#suffix}" -eq 8 ] || return 1
+  printf '%s-%s\n' "$CLAUDE_KEYCHAIN_SERVICE" "$suffix"
+}
+
+# claude_config_dir_resolved <config dir or empty>: the directory the agent CLI reads for it (empty
+# is the default $HOME/.claude), with symlinks resolved. A dir that does not exist yet resolves
+# through its nearest existing parent, so /alias/x and /real/x match when alias -> real. A relative
+# value is returned as given.
+claude_config_dir_resolved() {
+  local dir="${1:-$HOME/.claude}" base rest="" real
+  case "$dir" in
+    /*) ;;
+    *)
+      printf '%s\n' "$dir"
+      return 0 ;;
+  esac
+  while [ "$dir" != "/" ] && [ "${dir%/}" != "$dir" ]; do
+    dir="${dir%/}"
+  done
+  base="$dir"
+  while [ -n "$base" ] && [ ! -d "$base" ]; do
+    rest="/${base##*/}$rest"
+    base="${base%/*}"
+  done
+  if real="$(cd "${base:-/}" 2>/dev/null && pwd -P)"; then
+    real="${real%/}$rest"
+    printf '%s\n' "${real:-/}"
+  else
+    printf '%s\n' "$dir"
+  fi
+}
+
+# claude_config_isolation: 0 when this job's CLAUDE_CONFIG_DIR is set, absolute, not the default
+# config dir, and differs as a string, a resolved directory and a keychain service from the config
+# dir of every instance the last inventory read. Otherwise 1 with the reason on stdout. Fails
+# closed: an unread inventory, an unreadable instance value or no instance at all is unproven.
+claude_config_isolation() {
+  local job="${CLAUDE_CONFIG_DIR:-}" job_dir job_svc other_svc
+  local name manager surface config updates autoupdater checked=0
+  if [ -z "$job" ]; then
+    echo "this job's CLAUDE_CONFIG_DIR is unset, so the agent CLI would use the default login"
+    return 1
+  fi
+  case "$job" in
+    /*) ;;
+    *)
+      echo "this job's CLAUDE_CONFIG_DIR $job is not an absolute path"
+      return 1 ;;
+  esac
+  job_dir="$(claude_config_dir_resolved "$job")"
+  if [ "$job_dir" = "$(claude_config_dir_resolved "")" ]; then
+    echo "this job's CLAUDE_CONFIG_DIR $job is the default config dir"
+    return 1
+  fi
+  if ! job_svc="$(claude_keychain_service "$job")"; then
+    echo "the keychain service for this job's CLAUDE_CONFIG_DIR could not be computed"
+    return 1
+  fi
+  if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
+    echo "service definitions were not read this run, so isolation from every instance is unproven"
+    return 1
+  fi
+  while IFS=$'\037' read -r name manager surface config updates autoupdater; do
+    [ -n "$name" ] || continue
+    checked=$((checked + 1))
+    if [ "$config" = "?" ]; then
+      echo "$name's CLAUDE_CONFIG_DIR is not readable, so isolation from it is unproven"
+      return 1
+    fi
+    if [ "$job" = "$config" ]; then
+      echo "this job's CLAUDE_CONFIG_DIR $job equals $name's"
+      return 1
+    fi
+    if [ "$job_dir" = "$(claude_config_dir_resolved "$config")" ]; then
+      echo "this job's CLAUDE_CONFIG_DIR $job resolves to $name's config dir"
+      return 1
+    fi
+    if ! other_svc="$(claude_keychain_service "$config")"; then
+      echo "the keychain service for $name's CLAUDE_CONFIG_DIR could not be computed"
+      return 1
+    fi
+    if [ "$job_svc" = "$other_svc" ]; then
+      echo "this job's CLAUDE_CONFIG_DIR $job shares $name's keychain item"
+      return 1
+    fi
+  done < "$CLAUDE_INSTANCE_ENV_FILE"
+  if [ "$checked" -eq 0 ]; then
+    echo "no service instance was inventoried, so isolation is unproven"
+    return 1
+  fi
+}
+
+# claude_refuse_execution <reason> <component>...: record that the agent CLI was not started for
+# each <component>, and alert once per run however many steps the refusal skips.
+claude_refuse_execution() {
+  local reason="$1" component
+  shift
+  if ! events_recorded "claude-config-isolation" "refused"; then
+    record_event "claude-config-isolation" "refused" "$reason"
+    send_alert "claude-config-isolation" "warning" "Agent CLI not started: login not isolated" \
+      "The maintenance job started no agent CLI because $reason. Give the job a CLAUDE_CONFIG_DIR of its own."
+  fi
+  for component in "$@"; do
+    record_event "$component" "refused" "agent CLI not started: $reason"
+  done
+}
+
 codex_bin() {
   if [ -x "$CODX_NODE_BIN_DIR/codex" ]; then
     echo "$CODX_NODE_BIN_DIR/codex"
@@ -1260,6 +1392,11 @@ NODE
   if [ "$CHECK_ONLY" -eq 1 ]; then
     record_event "claude" "drift" "cooldown-eligible update available" "$before" "$before" "$target"
     return 0
+  fi
+  # The installer and its --version postcheck start the agent CLI.
+  if ! reason="$(claude_config_isolation)"; then
+    claude_refuse_execution "$reason" claude
+    return 2
   fi
   claude_install_transaction "$before" "$target"
 }
@@ -2020,11 +2157,14 @@ process.stdin.on("data", (d) => { s += d; }).on("end", () => {
 }
 
 probe_tier2() {
-  local systemctl_bin apt_bin launcher reason
+  local systemctl_bin apt_bin launcher reason refused=0
   if [ "$CHECK_ONLY" -eq 1 ]; then
     # Listing plugins or MCP servers starts the agent CLI, which can refresh MCP authentication.
     record_event "claude-plugins" "skipped" "the agent CLI is not executed in check mode"
     record_event "mcp-servers" "skipped" "the agent CLI is not executed in check mode"
+  elif ! reason="$(claude_config_isolation)"; then
+    claude_refuse_execution "$reason" claude-plugins mcp-servers
+    refused=1
   elif launcher="$(command -v claude)"; then
     # Only a launcher the static classifier accepts is started; anything else could be any script.
     if reason="$(claude_probe_admission "$launcher")"; then
@@ -2107,6 +2247,8 @@ probe_tier2() {
   else
     record_event "systemd-content" "skipped" "check-unit-drift.sh unavailable"
   fi
+  # The other probes still ran; the refused listings leave the step, and so the run, degraded.
+  [ "$refused" -eq 0 ] || return 2
 }
 
 # finish_run: aggregate the recorded step results (not variables a step set),

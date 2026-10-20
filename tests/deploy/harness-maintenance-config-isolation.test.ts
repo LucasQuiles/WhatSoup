@@ -1,0 +1,150 @@
+import { existsSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import {
+  OLD,
+  T,
+  TARGET,
+  allFixtureCalls,
+  buildNativeFixture,
+  cleanupHarnesses,
+  events,
+  makeHarness,
+  run,
+  systemdUnit,
+  type Harness,
+  type RunResult,
+} from './harness-maintenance-fixture-helper.ts';
+
+// The agent CLI uses, and can refresh, the login of whatever CLAUDE_CONFIG_DIR it sees. The
+// nightly job starts it for the native installer, the post-install --version check and the plugin
+// and MCP listings. If the job shared a bot's config dir or keychain item, a refresh by the job
+// could rotate or wipe the bot's login. So before any of those steps the script must prove that
+// its own CLAUDE_CONFIG_DIR is set, absolute, not the default ~/.claude, and different from every
+// inventoried instance's (as a string, a resolved directory and a keychain item); otherwise it
+// starts no agent CLI at all and the run ends degraded.
+//
+// Oracles: the native fixture's invocation log (did any agent CLI process start), the launcher
+// link on disk, the alert stub's log, the exit code and the recorded event statuses.
+
+beforeAll(buildNativeFixture);
+afterAll(cleanupHarnesses);
+
+/** Adds the systemd instance `alpha`; its unit sets CLAUDE_CONFIG_DIR to `config` when given. */
+function withInstance(h: Harness, config?: string): Harness {
+  writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
+  const env = [`WHATSOUP_NODE=${process.execPath}`, ...(config === undefined ? [] : [`CLAUDE_CONFIG_DIR=${config}`])];
+  systemdUnit(h, 'alpha', [`Environment=${env.join(' ')}`]);
+  h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+  return h;
+}
+
+function isolationAlerts(h: Harness): string[] {
+  if (!existsSync(h.alertLog)) return [];
+  return readFileSync(h.alertLog, 'utf8').split('\n')
+    .filter((line) => line.includes('harness-maintenance:claude-config-isolation'));
+}
+
+function expectRefused(h: Harness, r: RunResult, reason: string): void {
+  // No agent CLI process started: not the installer, not --version, not a listing.
+  expect(allFixtureCalls(h)).toEqual([]);
+  expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
+  const isolation = events(r, 'claude-config-isolation');
+  expect(isolation).toHaveLength(1);
+  expect(isolation[0]!.status).toBe('refused');
+  expect(isolation[0]!.message).toContain(reason);
+  expect(events(r, 'claude').at(-1)?.status).toBe('refused');
+  for (const listing of ['claude-plugins', 'mcp-servers']) {
+    expect(events(r, listing).map((e) => e.status), listing).toEqual(['refused']);
+  }
+  expect(r.state?.status).toBe('degraded');
+  expect(r.status).toBe(1);
+  // One alert for the refusal, however many steps it skipped.
+  expect(isolationAlerts(h)).toHaveLength(1);
+}
+
+describe('agent CLI login isolation of the maintenance job', () => {
+  it('starts the installer, its --version postcheck and the listings when the job has its own config dir', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const r = run(h);
+    expect(events(r, 'claude-config-isolation')).toEqual([]);
+    expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'updated', before: OLD, target: TARGET });
+    const calls = allFixtureCalls(h);
+    expect(calls).toContain(`${OLD} install ${TARGET}`);
+    expect(calls).toContain(`${TARGET} --version`);
+    expect(calls).toContain('claude plugin list');
+    expect(calls).toContain('claude mcp list');
+    expect(isolationAlerts(h)).toEqual([]);
+  }, T);
+
+  it('also runs them next to an instance on the default config dir', () => {
+    const h = withInstance(makeHarness());
+    const r = run(h);
+    expect(events(r, 'claude-config-isolation')).toEqual([]);
+    expect(allFixtureCalls(h)).toContain('claude plugin list');
+  }, T);
+
+  it('refuses every agent CLI step when the job uses the same config dir as an instance', () => {
+    const h = makeHarness();
+    withInstance(h, h.env.CLAUDE_CONFIG_DIR);
+    expectRefused(h, run(h), "equals alpha's");
+  }, T);
+
+  it('refuses when the job config dir resolves to an instance config dir through a symlink', () => {
+    const h = makeHarness();
+    const real = path.join(h.home, 'bot-config');
+    const alias = path.join(h.home, 'alias-config');
+    mkdirSync(real);
+    symlinkSync(real, alias);
+    withInstance(h, real);
+    expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: alias }), "resolves to alpha's config dir");
+  }, T);
+
+  it('refuses when a not-yet-created job config dir resolves through a symlinked parent to an instance dir', () => {
+    const h = makeHarness();
+    const real = path.join(h.home, 'real');
+    const alias = path.join(h.home, 'alias');
+    mkdirSync(real);
+    symlinkSync(real, alias);
+    // Neither config dir exists yet; only their parents do.
+    withInstance(h, path.join(real, 'bot-config'));
+    expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: path.join(alias, 'bot-config') }), "resolves to alpha's config dir");
+  }, T);
+
+  it('refuses when the job config dir is unset', () => {
+    const h = withInstance(makeHarness());
+    delete h.env.CLAUDE_CONFIG_DIR;
+    expectRefused(h, run(h), 'CLAUDE_CONFIG_DIR is unset');
+  }, T);
+
+  it('refuses when the job config dir is relative', () => {
+    const h = withInstance(makeHarness());
+    expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: 'maintenance-claude' }), 'is not an absolute path');
+  }, T);
+
+  it('refuses when the job config dir is the default config dir', () => {
+    const h = withInstance(makeHarness(), '/elsewhere/bot-config');
+    mkdirSync(path.join(h.home, '.claude'));
+    expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: `${h.home}/.claude/` }), 'is the default config dir');
+  }, T);
+
+  it('refuses when an instance config dir could not be read', () => {
+    // A value with an expansion is not read literally, so the inventory records it as unknown.
+    const h = withInstance(makeHarness(), '$HOME/expanded-by-systemd');
+    expectRefused(h, run(h), "alpha's CLAUDE_CONFIG_DIR is not readable");
+  }, T);
+
+  it('refuses the listings when no service instance was inventoried, so isolation is unproven', () => {
+    const h = makeHarness();
+    h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+    const r = run(h);
+    expect(allFixtureCalls(h)).toEqual([]);
+    const isolation = events(r, 'claude-config-isolation');
+    expect(isolation.map((e) => e.status)).toEqual(['refused']);
+    expect(isolation[0]!.message).toContain('no service instance');
+    expect(events(r, 'claude-plugins').map((e) => e.status)).toEqual(['refused']);
+    expect(r.status).toBe(1);
+  }, T);
+});

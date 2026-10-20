@@ -80,6 +80,12 @@ export type PrimaryModelProbeStage =
 export type PrimaryModelProbeStageReporter = (stage: PrimaryModelProbeStage) => void;
 
 export interface PrimaryModelProbeAdapters {
+  // Uncancellable preparation run BEFORE the probe's deadline is armed (the
+  // claude-cli refresh-ahead, see claude-refresh-ahead.ts): its time is never
+  // charged to the probe budget and nothing aborts it. Must never reject.
+  // Resolving { defer } means the probe must not run now (a refresh-ahead
+  // child is still running); the result is an inconclusive 'unknown'.
+  prepareBinaryModel?: (target: { provider: string; model: string | null }) => Promise<void | { defer: string }>;
   // model: null = probe the CLI's own default model (claude-cli only) — a
   // model-less instance must still be probeable or recovery can never pass.
   // When a signal is supplied, production adapters must settle after abort so
@@ -104,6 +110,9 @@ export interface PrimaryModelProbeOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
 }
+
+/** Reason of a probe deferred because a refresh-ahead child is still running. */
+export const DEFERRED_REFRESH_IN_FLIGHT = 'deferred-refresh-in-flight';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT = Symbol('primary-model-probe-timeout');
@@ -141,6 +150,15 @@ export async function probePrimaryModelUsability(
   if (provider === 'claude-cli' || provider === 'opencode-cli') {
     if (!adapters.probeBinaryModel) {
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
+    }
+    if (adapters.prepareBinaryModel && !options.signal?.aborted) {
+      let prepared: void | { defer: string } = undefined;
+      try {
+        prepared = await adapters.prepareBinaryModel({ provider, model });
+      } catch { /* deliberately: preparation is fail-open by contract; the probe runs exactly as it would without it */ }
+      // A caller that cancelled meanwhile gets its cancellation outcome below
+      // (caller-pre-aborted), not the deferral.
+      if (prepared && prepared.defer && !options.signal?.aborted) return result(target, model, 'unknown', prepared.defer);
     }
     const probe = await withCancellationDeadline(
       (signal, onStage) => adapters.probeBinaryModel!({ provider, model }, signal, onStage),
@@ -270,7 +288,9 @@ async function withCancellationDeadline<T>(
   };
   const abortFor = (kind: 'deadline' | 'caller-abort') => (): void => {
     cause ??= kind;
-    controller.abort();
+    // A deadline aborts with a TimeoutError reason (as AbortSignal.timeout does)
+    // so an adapter can tell its own deadline from a caller's cancellation.
+    controller.abort(kind === 'deadline' ? new DOMException('primary model probe deadline', 'TimeoutError') : undefined);
   };
   const onCallerAbort = abortFor('caller-abort');
   callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
@@ -312,7 +332,11 @@ export function primaryModelUsabilityRequiresAlert(result: PrimaryModelUsability
   // model === null no longer implies not-probed: claude-cli default-model probes
   // carry null and their real failures (e.g. credential-unavailable) must alert.
   if (result.status === 'unknown') {
-    return result.reason !== 'model-not-configured' && result.reason !== 'unsupported-provider';
+    // A probe deferred behind a running refresh-ahead child proved nothing
+    // either way; the refresh-ahead module logs the child (error at its cap).
+    return result.reason !== 'model-not-configured'
+      && result.reason !== 'unsupported-provider'
+      && result.reason !== DEFERRED_REFRESH_IN_FLIGHT;
   }
   return result.status !== 'usable';
 }

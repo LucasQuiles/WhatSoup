@@ -364,7 +364,8 @@ import {
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
-import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
+import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import {
   probePrimaryModelUsability,
 } from './providers/primary-model-usability.ts';
@@ -4586,11 +4587,10 @@ export class AgentRuntime implements Runtime {
       } : null,
     });
 
-    // Heal the claude file-store credential from the keychain BEFORE the first
-    // turn can run, so a keychain-only refresh (native login) can't false-arm
-    // the provider fallback on turn 1 (the recovery probe path heals for the
-    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
-    // the file store is already current. Fail-open by contract.
+    // Check, before the first turn, whether the claude login is held in the
+    // bot's own keychain item only or also in a plaintext file store (a second
+    // live copy that can wipe the login); detection only, nothing is written.
+    // No-op off-darwin / when no config dir is set. Fail-open by contract.
     if (this.agentProvider === 'claude-cli') {
       ensureClaudeFileStoreCredential();
     }
@@ -9749,7 +9749,7 @@ export class AgentRuntime implements Runtime {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, 'recovery'));
     const result = signal
       ? await probePrimaryModelUsability(target, adapters, { signal })
       : await probePrimaryModelUsability(target, adapters);
@@ -9797,7 +9797,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, 'diagnostic')),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
@@ -9805,7 +9805,9 @@ export class AgentRuntime implements Runtime {
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
           getProviderBinary,
-          probeBinaryAuthStatus,
+          probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
+          refreshAhead: (binary, env) => refreshClaudeLoginAhead(binary, env),
+          terminationGrace: (env) => claudeRefreshLockGrace(env, 'diagnostic-auth-status'),
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
           // Explicit allowlist — never hand the CLI probe the full process env.
           // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads
