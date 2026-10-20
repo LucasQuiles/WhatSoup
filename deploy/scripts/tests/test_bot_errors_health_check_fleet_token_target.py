@@ -279,7 +279,9 @@ def test_fleet_transfer_deadline_bounds_a_dripping_peer(fleet_profile, monkeypat
                     if stopped.is_set():
                         break
                     self.connection.sendall(bytes([byte]))
-                    time.sleep(0.05)  # TIMING: keep bytes arriving within the socket timeout while exceeding the total deadline.
+                    # Keep bytes arriving within the socket timeout while exceeding the total deadline.
+                    if stopped.wait(0.05):
+                        break
             except (BrokenPipeError, ConnectionResetError):
                 disconnected.set()
 
