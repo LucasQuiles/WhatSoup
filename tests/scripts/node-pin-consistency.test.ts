@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
+import { rootCertificates } from 'node:tls';
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -13,6 +16,7 @@ import {
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const TEST_DOCKER_DIGEST = '4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d';
 const TEST_SNAPSHOT = '20261001T000000Z';
+const CA_BOOTSTRAP = "RUN node -e \"require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\\n') + '\\n')\"";
 
 /**
  * Build a minimal repo fixture with the four pin surfaces (nvmrc, package.json,
@@ -26,7 +30,7 @@ function makeFixture(opts: {
   dockerVersion?: string;
   dockerDigest?: string | null;
   aptSnapshot?: string;
-  aptSource?: 'approved' | 'https-snapshot' | 'mutable' | 'unavailable';
+  aptSource?: 'approved' | 'http-snapshot' | 'mutable' | 'unavailable';
   wrapperVersion?: string | 'reads-nvmrc' | 'none';
   wrappers?: (
     | 'deploy/whatsoup'
@@ -73,24 +77,25 @@ function makeFixture(opts: {
   );
 
   mkdirSync(path.join(dir, 'docker'), { recursive: true });
-  const approvedDebianSource = `http://snapshot.debian.org/archive/debian/${aptSnapshot}/`;
-  const approvedDebianSecuritySource = `http://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`;
+  const approvedDebianSource = `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`;
+  const approvedDebianSecuritySource = `https://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`;
   const sourceUrl = aptSource === 'mutable'
     ? 'http://deb.debian.org/debian/'
     : aptSource === 'unavailable'
       ? `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`
-      : aptSource === 'https-snapshot'
-        ? `https://snapshot.debian.org/archive/debian/${aptSnapshot}/`
+      : aptSource === 'http-snapshot'
+        ? `http://snapshot.debian.org/archive/debian/${aptSnapshot}/`
       : approvedDebianSource;
   const securitySourceUrl = aptSource === 'approved'
     ? approvedDebianSecuritySource
-    : aptSource === 'https-snapshot'
-      ? `https://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`
+    : aptSource === 'http-snapshot'
+      ? `http://snapshot.debian.org/archive/debian-security/${aptSnapshot}/`
       : sourceUrl;
   writeFileSync(
     path.join(dir, 'docker/Dockerfile'),
     [
       `FROM node:${dockerVersion}-slim${dockerDigest === null ? '' : `@sha256:${dockerDigest}`} AS base`,
+      CA_BOOTSTRAP,
       'RUN printf \'%s\\n\' \\',
       `  'deb [check-valid-until=no] ${sourceUrl} bookworm main' \\`,
       `  'deb [check-valid-until=no] ${securitySourceUrl} bookworm-security main' \\`,
@@ -332,21 +337,72 @@ describe('node-pin consistency check', () => {
     });
   });
 
-  it('rejects HTTPS snapshot sources that cannot bootstrap before ca-certificates is installed', () => {
-    const dir = makeFixture({ aptSource: 'https-snapshot' });
+  it('requires the pinned CA bootstrap before any APT stage', () => {
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8').replace(CA_BOOTSTRAP + '\n', ''));
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath,
+      reason: 'Dockerfile must bootstrap the pinned Node CA roots before APT and preserve that trust store',
+    });
+  });
+
+  it('exports real bundled CA certificates without a system certificate package', () => {
+    const dir = makeFixture({});
+    const actual = readFileSync(path.join(repoRoot, 'docker/Dockerfile'), 'utf8')
+      .split('\n').find((line) => line.startsWith('RUN node -e '));
+    expect(actual).toBeDefined();
+    const script = actual!.slice('RUN node -e "'.length, -1).replaceAll('/etc/ssl/certs', path.join(dir, 'certs'));
+    execFileSync(process.execPath, ['-e', script], { env: { PATH: process.env.PATH }, timeout: 10_000 });
+    const pem = readFileSync(path.join(dir, 'certs/ca-certificates.crt'), 'utf8');
+    const certs = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+    expect(certs.length).toBe(rootCertificates.length);
+    expect(certs.length).toBeGreaterThan(100);
+    expect(certs.map((cert) => new X509Certificate(cert).fingerprint256))
+      .toEqual(rootCertificates.map((cert) => new X509Certificate(cert).fingerprint256));
+  });
+
+  it('rejects replayable HTTP even when policy and Dockerfile agree', () => {
+    const dir = makeFixture({});
     const policyPath = path.join(dir, 'docker/container-inputs.json');
-    const policy = JSON.parse(readFileSync(policyPath, 'utf8')) as {
-      apt: { sources: string[] };
-    };
-    policy.apt.sources = policy.apt.sources.map((source) => source.replace('http://', 'https://'));
-    writeFileSync(policyPath, `${JSON.stringify(policy)}\n`, 'utf8');
+    const dockerfilePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(policyPath, readFileSync(policyPath, 'utf8').replaceAll('https://snapshot.', 'http://snapshot.'));
+    writeFileSync(dockerfilePath, readFileSync(dockerfilePath, 'utf8').replaceAll('https://snapshot.', 'http://snapshot.'));
 
-    const drift = findNodePinDrift({ cwd: dir });
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/container-inputs.json', filePath: policyPath,
+      reason: 'APT sources must use authenticated HTTPS to the approved Debian snapshot',
+    });
+  });
 
-    expect(drift.missing).toContainEqual({
-      source: 'docker/container-inputs.json',
-      filePath: policyPath,
-      reason: 'APT sources must use the CA-independent approved Debian snapshot transport',
+  it.each([
+    "'Acquire::https::Verify-Peer=fal''se'",
+    'Acquire::https::Verify-"Peer"=false',
+    'Acquire::https::Verify-Peer=fal\\se',
+  ])('rejects literal shell spellings that disable TLS: %s', (word) => {
+    expect(execFileSync('/bin/sh', ['-c', `set -- ${word}; printf '%s' "$1"`], { encoding: 'utf8' }))
+      .toBe('Acquire::https::Verify-Peer=false');
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8')
+      + `RUN apt-get -o ${word} -o APT::Update::Error-Mode=any update\n`);
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath,
+      reason: 'Dockerfile may not disable APT repository authentication',
+    });
+  });
+
+  it.each([
+    'RUN apt-get -o Acquire::https::Verify-Peer=false update',
+    'RUN apt-get -o Acquire::https::Verify-Host=false update',
+    `RUN printf '%s\\n' 'Acquire::https::Verify-Peer "false";' > /tmp/apt.conf`,
+  ])('rejects TLS authentication bypasses: %s', (instruction) => {
+    const dir = makeFixture({});
+    const filePath = path.join(dir, 'docker/Dockerfile');
+    writeFileSync(filePath, readFileSync(filePath, 'utf8') + instruction + '\n');
+    expect(findNodePinDrift({ cwd: dir }).missing).toContainEqual({
+      source: 'docker/Dockerfile', filePath,
+      reason: 'Dockerfile may not disable APT repository authentication',
     });
   });
 
@@ -761,13 +817,22 @@ describe('node-pin consistency check', () => {
     );
   });
 
-  it('retrieves snapshot metadata only over HTTPS without following redirects or unbounded responses', () => {
+  it('requests direct snapshot metadata over HTTPS without following redirects or unbounded responses', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const dir = makeFixture({});
     const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
     const capture = path.join(binDir, 'curl-args');
     const curlPath = path.join(binDir, 'curl');
-    writeFileSync(curlPath, '#!/bin/sh\nprintf \'CALL\\n\' >> "$CURL_CAPTURE"\nprintf \'%s\\n\' "$@" >> "$CURL_CAPTURE"\n', 'utf8');
+    writeFileSync(curlPath, `#!${process.execPath}
+const args = process.argv.slice(2);
+const fs = require('node:fs');
+fs.appendFileSync(process.env.CURL_CAPTURE, 'CALL\\n' + args.join('\\n') + '\\n');
+if (args[args.indexOf('--header') + 1] !== 'X-Download-Directly: 1') {
+  process.stderr.write('curl: (47) Maximum (0) redirects followed\\n');
+  process.exit(47);
+}
+process.stdout.write('Origin: Debian\\nCodename: bookworm\\n');
+`, 'utf8');
     chmodSync(curlPath, 0o755);
 
     run(['--verify-container-snapshot'], dir, { PATH: binDir, CURL_CAPTURE: capture });
@@ -781,6 +846,7 @@ describe('node-pin consistency check', () => {
       expect(args[0]).toBe('--disable');
       for (const [option, value] of [
         ['--proto', '=https'], ['--proto-redir', '=https'],
+        ['--header', 'X-Download-Directly: 1'],
         ['--max-redirs', '0'], ['--max-filesize', '1048576'], ['--max-time', '30'],
       ]) {
         expect(args.filter((arg) => arg === option)).toHaveLength(1);

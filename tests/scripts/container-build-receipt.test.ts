@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import {
   createContainerBuildReceipt,
@@ -16,6 +17,29 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 const qualityWorkflow = readFileSync(path.join(repoRoot, '.github/workflows/quality.yml'), 'utf8');
+it('allows bounded slow container, coverage and browser work to finish within the job deadline', () => {
+  const workflow = parse(qualityWorkflow) as {
+    jobs: { quality: { 'timeout-minutes': number; steps: { name: string; 'timeout-minutes'?: number; env?: Record<string, string> }[] } };
+  };
+  const job = workflow.jobs.quality;
+  const step = (name: string) => {
+    const found = job.steps.find((entry) => entry.name === name);
+    expect(found, name).toBeDefined();
+    return found!;
+  };
+  const build = step('Build Docker deployment image')['timeout-minutes']!;
+  const coverage = Number(step('Test suite + coverage thresholds').env?.WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS) / 60_000;
+  const system = step('Install Playwright system deps')['timeout-minutes']!;
+  const download = step('Install Playwright chromium')['timeout-minutes']!;
+  const otherStepsAllowance = 15;
+  const slowSuccessfulRun = build + coverage + system + download + otherStepsAllowance;
+  expect([build, coverage, system, download].every((value) => Number.isFinite(value) && value > 0)).toBe(true);
+  expect(job['timeout-minutes']).toBe(100);
+  expect(slowSuccessfulRun).toBe(92);
+  expect(job['timeout-minutes'] - slowSuccessfulRun).toBe(8);
+  expect(slowSuccessfulRun).toBeGreaterThan(60);
+});
+
 const containerInputs = JSON.parse(
   readFileSync(path.join(repoRoot, 'docker/container-inputs.json'), 'utf8'),
 ) as {

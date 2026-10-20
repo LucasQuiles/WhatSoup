@@ -3387,6 +3387,12 @@ only the declared snapshot. Check the static policy before a build:
 npm run guard:node-pin-consistency
 ```
 
+The digest-pinned Node binary exports its bundled Mozilla CA roots before the first APT
+request. Both snapshot sources use authenticated HTTPS, including on a slim image without
+the `ca-certificates` package. APT signature checks remain enabled. HTTP transport and TLS
+peer/hostname verification bypasses are rejected; this prevents replay by an on-path HTTP
+intermediary while the immutable snapshot uses `check-valid-until=no`.
+
 The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
 The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
 subtree, and APT-root indirection assignments, including both `ENV` forms and `ARG` default
@@ -3425,8 +3431,16 @@ builder invocation, selected-platform base-image and SBOM-generator dependencies
 predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
 
 Snapshot availability probes disable curl configuration, require HTTPS without redirects,
-and limit each response to 1 MiB with an independent parent-process output limit. Curl has
+and request `X-Download-Directly: 1` so Debian serves the pinned Release file without its
+normal redirect to the content-addressed file URL. Probes limit each response to 1 MiB
+with an independent parent-process output limit. Curl has
 a 30-second deadline; the parent stops it after 35 seconds.
+
+The authority job has a 100-minute deadline: 45 minutes for coverage, 10 for the container,
+5 for browser system dependencies, 17 for bounded browser download attempts and backoff,
+and a 15-minute estimate for the remaining setup and checks, with 8 minutes of margin.
+That remainder is a planning allowance, not a separate enforced timeout. Individual failure
+bounds remain enforced; an exhausted download bound fails the job.
 
 Successful container builds upload these files as
 `container-build-evidence-${{ github.sha }}` with a 14-day retention period.

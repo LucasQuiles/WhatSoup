@@ -354,6 +354,8 @@ const APT_ROOT_ASSIGNMENT_PATTERN = /\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*['"]?\/etc(?
 const APT_ROOT_DECLARATION_PATTERN = /^\s*(?:ENV|ARG)\s+[A-Za-z_][A-Za-z0-9_]*\s+['"]?\/etc(?:[/'"\s;)&|]|$)/im;
 const UNSUPPORTED_DOCKERFILE_EXPANSION_PATTERN = /[$`]/;
 const UNSAFE_APT_AUTHENTICATION_PATTERN = /(?:--allow-(?:unauthenticated|insecure-repositories|weak-repositories)\b|(?:Acquire::Allow(?:Insecure|Weak|DowngradeToInsecure)Repositories|APT::Get::AllowUnauthenticated)\s*(?:=\s*|\s+)["']?(?:true|yes|1)["']?(?![A-Za-z0-9_])|\b(?:trusted|allow-insecure|allow-weak|allow-downgrade-to-insecure)\s*=\s*["']?(?:true|yes|1)["']?(?![A-Za-z0-9_]))/i;
+const UNSAFE_APT_TLS_PATTERN = /Acquire::https::Verify-(?:Peer|Host)(?:::[A-Za-z0-9.-]+)?\s*(?:=\s*|\s+)["']?(?:false|no|0)["']?(?![A-Za-z0-9_])/i;
+const APT_CA_BOOTSTRAP = "RUN node -e \"require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\\n') + '\\n')\"";
 const APT_GET_UPDATE_PATTERN = /\bapt-get\b(?:(?![;&|]).)*?\s+update(?=\s|\\|$)/gis;
 const FAIL_CLOSED_APT_UPDATE_OPTION = 'APT::Update::Error-Mode=any';
 
@@ -405,7 +407,15 @@ function hasUnsupportedDockerfileExpansion(instructions: DockerfileInstruction[]
 }
 
 function hasUnsafeAptAuthentication(instructions: DockerfileInstruction[]): boolean {
-  return instructions.some((instruction) => UNSAFE_APT_AUTHENTICATION_PATTERN.test(instruction.text));
+  return instructions.some((instruction) => {
+    // Conservatively join literal shell quote/escape fragments. Expansion remains
+    // forbidden separately; this is a drift check, not arbitrary shell evaluation.
+    const literal = instruction.text.replace(/\\\r?\n/g, '').replace(/['"\\]/g, '');
+    return UNSAFE_APT_AUTHENTICATION_PATTERN.test(instruction.text)
+      || UNSAFE_APT_TLS_PATTERN.test(instruction.text)
+      || UNSAFE_APT_AUTHENTICATION_PATTERN.test(literal)
+      || UNSAFE_APT_TLS_PATTERN.test(literal);
+  });
 }
 
 function hasFailOpenAptUpdate(instructions: DockerfileInstruction[]): boolean {
@@ -440,8 +450,8 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   }
 
   const expectedSources = [
-    `http://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ bookworm main`,
-    `http://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ bookworm-security main`,
+    `https://snapshot.debian.org/archive/debian/${policy.apt.snapshot}/ bookworm main`,
+    `https://snapshot.debian.org/archive/debian-security/${policy.apt.snapshot}/ bookworm-security main`,
   ];
   if (
     policy.apt.sources.length !== expectedSources.length
@@ -450,7 +460,7 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
     policyIssues.push(containerInputIssue(
       cwd,
       'docker/container-inputs.json',
-      'APT sources must use the CA-independent approved Debian snapshot transport',
+      'APT sources must use authenticated HTTPS to the approved Debian snapshot',
     ));
   }
 
@@ -459,6 +469,13 @@ function findContainerInputDrift(cwd: string): NodePinDrift['missing'] {
   const activeLines = activeDockerfileLines(dockerfile);
   const activeRunLines = activeDockerfileRunLines(activeLines);
   const activeInstructions = activeDockerfileInstructions(activeLines);
+  if (activeInstructions[1]?.text !== APT_CA_BOOTSTRAP
+    || activeInstructions.filter((instruction) => instruction.text.includes('/etc/ssl/certs')).length !== 1) {
+    policyIssues.push(containerInputIssue(
+      cwd, 'docker/Dockerfile',
+      'Dockerfile must bootstrap the pinned Node CA roots before APT and preserve that trust store',
+    ));
+  }
   for (const image of dockerExternalImageRefs(dockerfile)) {
     if (!image.includes('@sha256:')) {
       policyIssues.push(containerInputIssue(cwd, 'docker/Dockerfile', 'base image is not pinned by digest'));
@@ -553,6 +570,8 @@ function verifyContainerSnapshotAvailability(
         '--location',
         '--max-redirs',
         '0',
+        '--header',
+        'X-Download-Directly: 1',
         '--proto',
         '=https',
         '--proto-redir',

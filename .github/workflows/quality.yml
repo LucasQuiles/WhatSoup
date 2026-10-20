@@ -29,10 +29,10 @@ jobs:
   quality:
     name: quality (24.x)
     runs-on: ubuntu-latest
-    # Generous cap so it only kills a genuinely hung run, not a slow-but-live
-    # one (the authority job runs the full suite + coverage and can take ~40min).
-    # Without this a hung run rides to the 6h GitHub default.
-    timeout-minutes: 60
+    # Bounds: coverage 45m, container 10m, browser deps/download 5m + 17m,
+    # remaining setup/checks allowance 15m (an estimate). The 100m cap
+    # retains 8m of margin over these explicit bounds and the estimate.
+    timeout-minutes: 100
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -496,8 +496,8 @@ jobs:
       # 1376 s once and exceeded the 1800 s bound twice, with every test file
       # reporting completion, so the default leaves no margin for hosted-runner
       # speed variance. This step raises the bound to 45 min on the hosted
-      # runner only; local gates keep the default. 45 min plus the other steps
-      # (about 9 min) stays inside the job's 60-minute cap.
+      # runner only; local gates keep the default. The coverage limit
+      # and the container/browser bounds fit the job's explicit 100-minute cap.
       - name: Test suite + coverage thresholds
         env:
           WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS: '2700000'
@@ -546,10 +546,12 @@ jobs:
         run: npx playwright install-deps chromium
 
       - name: Install Playwright chromium
+        timeout-minutes: 17
         # The chromium download intermittently hangs on the hosted ubuntu runners
         # (observed repeatedly on the 24.x lane). Bound each attempt with a timeout
         # so a hung attempt is killed and retried, rather than stalling the whole
-        # job until the 60-minute cap. Fails only after 3 genuine failures.
+        # job until its cap. The 17m step bound includes three 300s attempts
+        # and their 15s + 30s + 45s backoffs; any exhausted bound fails.
         run: |
           TIMEOUT_BIN="$(bash scripts/resolve-timeout-bin.sh)"
           for attempt in 1 2 3; do

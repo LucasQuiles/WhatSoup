@@ -24,8 +24,8 @@
   "apt": {
     "snapshot": "20261001T000000Z",
     "sources": [
-      "http://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main",
-      "http://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main"
+      "https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main",
+      "https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main"
     ]
   }
 }

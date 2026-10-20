@@ -3,11 +3,12 @@
 # snapshot policy are verified by scripts/check-node-pin-consistency.ts.
 FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
 
-# HTTP bootstraps the pinned Debian snapshot. apt-secure verifies the signed
-# Release metadata and package hashes; the guard rejects authentication bypasses.
+# The pinned Node binary supplies bundled roots before APT installs certificates.
+# HTTPS authenticates the snapshot server; APT still verifies signed metadata.
+RUN node -e "require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\n') + '\n')"
 RUN printf '%s\n' \
-      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
-      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
       > /etc/apt/sources.list \
     && rm -rf /etc/apt/sources.list.d/*
 
