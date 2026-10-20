@@ -136,6 +136,7 @@ describe('transcribeWithFasterWhisper', () => {
     const [bin, args, timeout] = runCommandMock.mock.calls[1] as [string, string[], number];
     expect(bin).toBe(FAKE_PYTHON);
     expect(args).toEqual([
+      '-I',
       expect.stringMatching(/scripts\/transcribe-faster-whisper\.py$/),
       '--input',
       '/tmp/normalized.wav',
@@ -184,6 +185,7 @@ describe('transcribeWithFasterWhisper', () => {
     await expect(transcribeWithOverride(audioBuffer, 'audio/ogg')).resolves.toBe('x');
     const [, args] = runCommandMock.mock.calls[1] as [string, string[], number];
     expect(args).toEqual([
+      '-I',
       expect.stringMatching(/scripts\/transcribe-faster-whisper\.py$/),
       '--input',
       '/tmp/normalized.wav',

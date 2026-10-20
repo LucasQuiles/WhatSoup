@@ -35,10 +35,70 @@ afterEach(() => {
 });
 
 describe('Python lock runtime policy', () => {
+  it.each(['lock', 'host'])('ignores ambient startup hooks during the %s identity check', (surface) => {
+    const root = tempRoot();
+    const marker = join(root, 'startup-ran');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    writeFileSync(join(root, 'sitecustomize.py'), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\n`);
+
+    const command = surface === 'lock' ? 'whatsoup_require_locked_python "$LOCK_PYTHON"' : `
+. "${join(repoRoot, 'deploy/lib/host-capabilities.sh')}"
+CAP_PATH="$LOCK_PYTHON"
+whatsoup_probe_python exact-cpython:3.13.16
+test "$CAP_VERSION" = 3.13.16`;
+    const result = runPolicy(command, {
+      LOCK_PYTHON: python, PYTHONPATH: root,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('creates the managed environment without importing an ambient venv module', () => {
+    const root = tempRoot();
+    const marker = join(root, 'venv-module-ran');
+    const target = join(root, 'managed');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    writeFileSync(join(root, 'venv.py'), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\nraise RuntimeError("ambient venv")\n`);
+
+    const result = runPolicy('whatsoup_create_managed_venv "$LOCK_PYTHON" "$TARGET_VENV"', {
+      LOCK_PYTHON: python, TARGET_VENV: target, PYTHONPATH: root,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(join(target, 'pyvenv.cfg'))).toBe(true);
+  });
+
+  it('installs an empty lock without importing an ambient pip module', () => {
+    const root = tempRoot();
+    const marker = join(root, 'pip-module-ran');
+    const target = join(root, 'managed');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const created = spawnSync(python, ['-I', '-m', 'venv', target], { encoding: 'utf8' });
+    expect(created.status, created.stderr).toBe(0);
+    const managed = join(target, 'bin/python');
+    mkdirSync(join(root, 'requirements/python'), { recursive: true });
+    for (const platform of ['linux', 'darwin']) {
+      for (const arch of ['x64', 'arm64']) {
+        writeFileSync(join(root, `requirements/python/quality-cpython313-${platform}-${arch}.txt`), '# no packages\n');
+      }
+    }
+    writeFileSync(join(root, 'pip.py'), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\n`);
+
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      LOCK_PYTHON: managed, LOCK_ROOT: root, PYTHONPATH: root,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('accepts only the qualified CPython 3.13.16 runtime', () => {
     const root = tempRoot();
     const python = join(root, 'python');
     executable(python, [
+      '[ "$1" = "-I" ] || exit 2; shift',
       'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython:3.13.16"; exit 0; fi',
       'exit 2',
     ].join('\n'));
@@ -52,6 +112,7 @@ describe('Python lock runtime policy', () => {
     const root = tempRoot();
     const python = join(root, 'python');
     executable(python, [
+      '[ "$1" = "-I" ] || exit 2; shift',
       'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython:3.13.15"; exit 0; fi',
       'exit 2',
     ].join('\n'));
@@ -246,10 +307,12 @@ command = create_command(name, isolated="--isolated" in args)
 options, _ = command.parse_args(args)
 print(json.dumps({"index": options.index_url, "extra": options.extra_index_urls, "links": options.find_links, "config": os.environ.get("PIP_CONFIG_FILE"), "isolated": "--isolated" in args}))
 `);
-    executable(shim, `if [ "$1" = "-c" ] || [ "$1" = "-I" ]; then exec "$REAL_PYTHON" "$@"; fi
+    executable(shim, `[ "$1" = "-I" ] || exit 2
+shift
+if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" -I "$@"; fi
 if [ "$1" != "-m" ] || [ "$2" != "pip" ]; then exit 2; fi
 shift 2
-exec "$REAL_PYTHON" "$PIP_PARSER" "$@"`);
+exec "$REAL_PYTHON" -I "$PIP_PARSER" "$@"`);
     const result = runPolicy(`whatsoup_install_locked_requirements "${shim}" "${repoRoot}" quality`, {
       REAL_PYTHON: python,
       PIP_PARSER: parser,
@@ -311,7 +374,8 @@ describe('managed Python environment replacement', () => {
     const root = tempRoot();
     const { python, target, hook, marker } = existingEnvironment(root);
     const failing = join(root, 'failing-python');
-    executable(failing, `if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" "$@"; fi
+    executable(failing, `[ "$1" != "-I" ] || shift
+if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" -I "$@"; fi
 mkdir -p "$3"
 printf partial > "$3/partial"
 exit 7`);

@@ -167,6 +167,28 @@ describe('python dependency lock guard', () => {
     ['nohup wrapper', 'nohup pip install pytest'],
     ['timed command', 'time -p pip install pytest'],
     ['nested command wrappers', 'env A=one command exec pip install pytest'],
+    ['shell command string', "sh -c 'pip install pytest'"],
+    ['shell combined options', 'bash -lc "pip3 install pytest"'],
+    ['absolute shell path', "/bin/sh -c 'pip install pytest'"],
+    ['nested shell wrapper', 'env A=one command bash -c "pip install pytest"'],
+    ['shell command with option value', "bash -o pipefail -c 'pip install pytest'"],
+    ['shell command with quoted executable', "'/bin/sh' -c 'pip install pytest'"],
+    ['nested shell command', `sh -c "bash -c 'pip install pytest'"`],
+    ['shell startup option', "bash --rcfile /tmp/startup -c 'pip install pytest'"],
+    ['unresolved shell option', "sh --unknown-option value -c 'pip install pytest'"],
+    ['single-quoted shell token concatenation', "sh -c 'pi'p' install pytest'"],
+    ['double-quoted shell token concatenation', 'sh -c "pi"p" install pytest"'],
+    ['unresolved inner-shell subcommand', "sh -c 'pip ${ACTION} package'"],
+    ['quoted shell executable concatenation', `s"h" -c 'pip install pytest'`],
+    ['conditional pip command', 'if pip install pytest; then echo ready; fi'],
+    ['conditional branch pip command', 'if true; then pip install pytest; fi'],
+    ['alternate conditional pip command', 'if false; then true; elif pip install pytest; then true; fi'],
+    ['loop condition pip command', 'while pip install pytest; do true; done'],
+    ['until condition pip command', 'until pip install pytest; do true; done'],
+    ['loop body pip command', 'for item in one; do pip install pytest; done'],
+    ['negated pip command', '! pip install pytest'],
+    ['unresolved inner command with lock flags', `sh -c 'pip \${ACTION} --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}'`],
+    ['concatenated inner pip executable', `sh -c 'pi"p" install pytest'`],
   ])('rejects an unlocked %s invocation', (_name, install) => {
     const root = makeFixture();
     writePolicy(root);
@@ -187,6 +209,8 @@ describe('python dependency lock guard', () => {
     'command -V pip install',
     'env -u PIP_CONFIG_FILE pip show install',
     'env -- echo pip install',
+    "sh -c 'pip show install'",
+    "sh -c 'echo pip install'",
   ])('preserves the non-install subcommand in %s', (command) => {
     const root = makeFixture();
     writePolicy(root);
@@ -215,6 +239,14 @@ describe('python dependency lock guard', () => {
     writePolicy(root);
     writeValidLock(root);
     write(root, 'scripts/install.sh', `python3 -m pip --isolated --timeout=10 install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`);
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
+  });
+
+  it('accepts a literal shell command only when its install uses the approved lock', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, 'scripts/install.sh', `sh -c 'pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}'`);
     expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
 

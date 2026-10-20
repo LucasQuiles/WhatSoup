@@ -227,14 +227,33 @@ const PIP_GLOBAL_VALUE_OPTIONS = new Set([
   '--use-feature', '--use-deprecated', '--resume-retries',
 ]);
 
-function pipSubcommandIsInstall(argumentsText: string): boolean {
-  const words = (argumentsText.match(/(?:[^\s"']+|"[^"\n]*"|'[^'\n]*')+/g) ?? []).map(stripQuotes);
+function staticShellWord(word: string): string | null {
+  let quote = '';
+  let value = '';
+  for (const char of word) {
+    if (char === quote) {
+      quote = '';
+    } else if (quote === "'") {
+      value += char;
+    } else if (char === '$' || char === '`' || char === '\\') {
+      return null;
+    } else if (!quote && (char === "'" || char === '"')) {
+      quote = char;
+    } else {
+      value += char;
+    }
+  }
+  return quote ? null : value;
+}
+
+function pipSubcommand(argumentsText: string): string | null | undefined {
+  const words = (argumentsText.match(/(?:[^\s"']+|"[^"\n]*"|'[^'\n]*')+/g) ?? []).map(staticShellWord);
   let index = 0;
   while (words[index]?.startsWith('-')) {
     const option = words[index]!;
     index += PIP_GLOBAL_VALUE_OPTIONS.has(option) ? 2 : 1;
   }
-  return words[index] === 'install';
+  return words[index];
 }
 
 function shellWordEnd(line: string, start: number): number {
@@ -276,6 +295,10 @@ function skipInvocationPrefixes(line: string, start: number): number {
   const consumeWord = (): void => { offset = shellWordEnd(line, offset); };
   while (offset < line.length) {
     const word = nextWord();
+    if (['if', 'elif', 'then', 'else', 'while', 'until', 'do', '!'].includes(word)) {
+      consumeWord();
+      continue;
+    }
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
       consumeWord();
       continue;
@@ -316,26 +339,64 @@ function skipInvocationPrefixes(line: string, start: number): number {
   return offset;
 }
 
-function findInstallCommands(text: string): string[] {
+function findInstallCommands(text: string, depth = 0): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
-    if (!/pip/i.test(line) || line.trimStart().startsWith('#')) continue;
+    if (line.trimStart().startsWith('#')) continue;
     const modulePattern = /(?:^|[\s:;|&])-m\s+pip(?=\s)/gi;
     for (const match of line.matchAll(modulePattern)) {
       const argumentsText = commandAfterInstall(line, match.index + match[0].length);
-      if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, match.index));
+      const subcommand = pipSubcommand(argumentsText);
+      if (subcommand === 'install') commands.push(commandAfterInstall(line, match.index));
+      else if (depth > 0 && subcommand === null) commands.push('pip install');
     }
     const starts = /(?:[;|&]\s*|\brun:\s*|\bsudo\s+|\benv\s+)/gi;
     for (const start of [0, ...Array.from(line.matchAll(starts), (prefix) => prefix.index + prefix[0].length)]) {
       const offset = skipInvocationPrefixes(line, start);
       if (offset === -1) {
-        commands.push('pip install');
+        if (/pip/i.test(line)) commands.push('pip install');
+        continue;
+      }
+      const executableEnd = shellWordEnd(line, offset);
+      const executable = staticShellWord(line.slice(offset, executableEnd));
+      if (executable && /^(?:[A-Za-z0-9_./-]*\/)?(?:sh|bash|dash|zsh|ksh)$/.test(executable)) {
+        let cursor = executableEnd;
+        const word = (): string => {
+          while (/\s/.test(line[cursor] ?? '') && cursor < line.length) cursor += 1;
+          const end = shellWordEnd(line, cursor);
+          const value = line.slice(cursor, end);
+          cursor = end;
+          return value;
+        };
+        for (let option = word(); option.startsWith('-'); option = word()) {
+          if (['-o', '-O', '--rcfile', '--init-file'].includes(option)) {
+            word();
+            continue;
+          }
+          if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option)) {
+            const body = staticShellWord(word());
+            if (body !== null && depth < 16) {
+              commands.push(...findInstallCommands(body, depth + 1));
+            } else if (/pip/i.test(line)) {
+              commands.push('pip install');
+            }
+            break;
+          }
+          if (!/^-[abefhiklmnprstuvxBCEHPT]+$/.test(option)
+              && !['--norc', '--noprofile', '--posix', '--restricted', '--verbose', '--login'].includes(option)) {
+            if (/pip/i.test(line)) commands.push('pip install');
+            break;
+          }
+        }
         continue;
       }
       const pip = line.slice(offset).match(/^["']?(?:[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?(?=\s)/i);
-      if (!pip) continue;
-      const argumentsText = commandAfterInstall(line, offset + pip[0].length);
-      if (pipSubcommandIsInstall(argumentsText)) commands.push(commandAfterInstall(line, offset));
+      const literalPip = executable && /^(?:[A-Za-z0-9_./-]*\/)?pip(?:3(?:\.\d+)?)?$/i.test(executable);
+      if (!literalPip && !pip) continue;
+      const argumentsText = commandAfterInstall(line, literalPip ? executableEnd : offset + pip![0].length);
+      const subcommand = pipSubcommand(argumentsText);
+      if (subcommand === 'install') commands.push(commandAfterInstall(line, offset));
+      else if (depth > 0 && subcommand === null) commands.push('pip install');
     }
   }
   return commands;

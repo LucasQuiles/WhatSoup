@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 import {
   classifyPrePushInput,
@@ -1332,6 +1333,24 @@ describe('quality workflow composition', () => {
   it('clean-installs the Linux transcription lock through the shared policy', () => {
     expect(qualityWorkflow).toContain('name: Verify Linux transcription lock installation');
     expect(qualityWorkflow).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
+  });
+
+  it('keeps audio package setup in a required job without the private dependency secret', () => {
+    type Step = { run?: string; if?: string; 'continue-on-error'?: boolean };
+    type Job = { steps: Step[]; 'continue-on-error'?: boolean };
+    const workflow = parse(qualityWorkflow) as { jobs: Record<string, Job> };
+    const audioJobs = Object.values(workflow.jobs).filter((job) =>
+      job.steps.some((step) => step.run?.includes('run-locked-transcription-smoke.sh')));
+    expect(audioJobs).toHaveLength(2);
+    for (const job of audioJobs) {
+      expect(JSON.stringify(job)).not.toContain('secrets.');
+      expect(job['continue-on-error']).not.toBe(true);
+      const smoke = job.steps.find((step) => step.run?.includes('run-locked-transcription-smoke.sh'))!;
+      expect(smoke['continue-on-error']).not.toBe(true);
+      expect(smoke.if).toBeUndefined();
+    }
+    expect(workflow.jobs.compatibility!.steps.some((step) =>
+      step.run?.includes('run-locked-transcription-smoke.sh'))).toBe(true);
   });
 
   it('preserves exact required contexts while isolating Node 25 compatibility work', () => {

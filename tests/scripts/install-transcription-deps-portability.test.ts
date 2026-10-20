@@ -74,15 +74,17 @@ function runVenvPreparationSnippet(): { status: number; marker: string; stderr: 
   writeExecutable(
     path.join(venv, 'bin'),
     'python',
-    '#!/bin/sh\nif [ "$1" = "-c" ]; then printf \'%s\\n\' \'cpython:3.12.9\'; exit 0; fi\nexit 0\n',
+    '#!/bin/sh\n[ "$1" != "-I" ] || shift\nif [ "$1" = "-c" ]; then printf \'%s\\n\' \'cpython:3.12.9\'; exit 0; fi\nexit 0\n',
   );
   writeExecutable(root, 'python3.13', `#!/bin/sh
+[ "$1" != "-I" ] || shift
 if [ "$1" = "-c" ]; then printf '%s\n' 'cpython:3.13.16'; exit 0; fi
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   target="$3"
   mkdir -p "$target/bin"
   cat > "$target/bin/python" <<'PYTHON'
 #!/bin/sh
+[ "$1" != "-I" ] || shift
 if [ "$1" = "-c" ]; then printf '%s\\n' 'cpython:3.13.16'; exit 0; fi
 exit 0
 PYTHON
@@ -242,6 +244,7 @@ describe('install-transcription-deps.sh — resolve_python', () => {
     const shim = makeTempRoot('itd-qualified-py-');
     writeExecutable(shim, 'python3.13', [
       '#!/bin/sh',
+      '[ "$1" != "-I" ] || shift',
       'case "$1" in',
       "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exit 0 ;; esac ;;",
       'esac',
@@ -258,6 +261,7 @@ describe('install-transcription-deps.sh — resolve_python', () => {
     const shim = makeTempRoot('itd-unqualified-py-');
     const unqualifiedPython = [
       '#!/bin/sh',
+      '[ "$1" != "-I" ] || shift',
       'case "$1" in',
       "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.15' ;; *) exit 0 ;; esac ;;",
       'esac',

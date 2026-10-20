@@ -47,7 +47,7 @@ export async function transcribeWithFasterWhisper(buffer: Buffer, mimeType: stri
   return await withNormalizedAudioFile(buffer, mimeType, async (wavPath) => {
     const { stdout } = await runCommand(
       pythonBin,
-      [SCRIPT_PATH, '--input', wavPath, '--model', DEFAULT_MODEL, '--model-dir', MODEL_DIR],
+      ['-I', SCRIPT_PATH, '--input', wavPath, '--model', DEFAULT_MODEL, '--model-dir', MODEL_DIR],
       30_000,
     );
 

@@ -267,7 +267,7 @@ whatsoup_probe_python() {
   version_rule="${1:-minimum:3.12}"
   if [ "${version_rule%%:*}" = "exact-cpython" ]; then
     expected_version="${version_rule#*:}"
-    identity="$(whatsoup_first_line whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$CAP_PATH" -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')" || {
+    identity="$(whatsoup_first_line whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$CAP_PATH" -I -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')" || {
       CAP_STATUS=inconclusive
       CAP_DETAIL=python-identity-probe-failed
       return 0

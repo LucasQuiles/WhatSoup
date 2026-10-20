@@ -83,7 +83,7 @@ jobs:
           echo "WHATSOUP_TEST_LOCKED_PYTHON=$LOCKED_PYTHON" >> "$GITHUB_ENV"
 
       - name: Verify locked Python runtime
-        run: python -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
+        run: python -I -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
 
       - name: Host dependency profile (strict)
         run: |
@@ -91,15 +91,7 @@ jobs:
           echo "$HOME/.local/share/whatsoup/quality-venv/bin" >> "$GITHUB_PATH"
 
       - name: Verify Linux quality lock imports
-        run: $HOME/.local/share/whatsoup/quality-venv/bin/python -c 'import coverage, hypothesis, pytest, pytest_cov'
-
-      - name: Verify Linux transcription lock installation
-        run: |
-          set -euo pipefail
-          . deploy/lib/python-lock-policy.sh
-          python -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
-          whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription
-          "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
+        run: $HOME/.local/share/whatsoup/quality-venv/bin/python -I -c 'import coverage, hypothesis, pytest, pytest_cov'
 
       - name: Validate strict doctor receipt
         run: |
@@ -112,14 +104,6 @@ jobs:
 
       - name: Python dependency lock guard
         run: npm run guard:python-dependency-lock
-
-      - name: Required locked-runtime audio regression (Linux)
-        timeout-minutes: 10
-        run: |
-          . deploy/lib/bounded-exec.sh
-          whatsoup_run_bounded 180 sudo apt-get update
-          whatsoup_run_bounded 180 sudo apt-get install -y ffmpeg
-          bash scripts/run-locked-transcription-smoke.sh "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$RUNNER_TEMP/whatsoup-transcription-model"
 
       - name: Build Docker deployment image and load runtime providers
         timeout-minutes: 10
@@ -571,6 +555,22 @@ jobs:
       - name: Install console dependencies
         run: npm --prefix console ci
 
+      - name: Verify Linux transcription lock installation
+        run: |
+          set -euo pipefail
+          . deploy/lib/python-lock-policy.sh
+          python -I -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
+          whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription
+          "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -I -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
+
+      - name: Required locked-runtime audio regression (Linux)
+        timeout-minutes: 10
+        run: |
+          . deploy/lib/bounded-exec.sh
+          whatsoup_run_bounded 180 sudo apt-get update
+          whatsoup_run_bounded 180 sudo apt-get install -y ffmpeg
+          bash scripts/run-locked-transcription-smoke.sh "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$RUNNER_TEMP/whatsoup-transcription-model"
+
       - name: Full compatibility test suite
         run: npm test -- --pool=forks
 
@@ -596,7 +596,7 @@ jobs:
           python-version: '3.13.16'
 
       - name: Verify locked Python runtime
-        run: python -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
+        run: python -I -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
 
       - name: Install dependencies
         run: npm ci
@@ -605,12 +605,12 @@ jobs:
         run: |
           set -euo pipefail
           . deploy/lib/python-lock-policy.sh
-          python -m venv "$RUNNER_TEMP/whatsoup-quality-lock"
+          python -I -m venv "$RUNNER_TEMP/whatsoup-quality-lock"
           whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" "$GITHUB_WORKSPACE" quality
-          "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" -c 'import coverage, hypothesis, pytest, pytest_cov'
-          python -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
+          "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" -I -c 'import coverage, hypothesis, pytest, pytest_cov'
+          python -I -m venv "$RUNNER_TEMP/whatsoup-transcription-lock"
           whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription
-          "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
+          "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" -I -c 'import av, ctranslate2, faster_whisper, huggingface_hub'
 
       - name: Required locked-runtime audio regression (macOS)
         timeout-minutes: 10

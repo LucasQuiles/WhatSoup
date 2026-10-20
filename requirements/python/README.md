@@ -9,6 +9,9 @@ require the exact runtime, and use the PyPI
 simple index with `--require-hashes` and `--only-binary :all:`. Pip runs in
 isolated mode with `PIP_CONFIG_FILE=/dev/null`, excluding inherited pip options
 and all configuration files from the approved package-source selection.
+The interpreter identity probe, environment creation, package installation and
+transcription script all use Python's `-I` mode. Ambient `PYTHONPATH`, user-site
+packages and the working directory cannot substitute startup or dependency modules.
 An x86_64 interpreter under Rosetta uses the `darwin-x64` lock even on an
 ARM-capable Mac. A failed or unsupported interpreter architecture probe stops
 installation before pip runs. The probe runs in isolated mode so ambient Python
@@ -28,6 +31,10 @@ fail the scan; this is not an atomic snapshot of concurrent repository edits.
 Symbolic links in scanned source fail rather than being followed or silently skipped.
 Excluded documentation, tests and build/dependency directories are not scanned;
 an exceeded bound is a failure, not evidence that the remaining files are safe.
+Literal shell `-c` command strings are scanned recursively, including nested
+wrappers. Pip-bearing command strings with unresolved expansion, unknown options
+or more than 16 nested shell wrappers fail closed. The guard is a bounded source
+scan; dynamically generated commands outside the scanned source still require review.
 
 ## Replacing managed environments
 
@@ -52,8 +59,10 @@ both generic launchers, old startup-hook exclusion, and retained prior bytes.
 
 ## Transcription runtime acceptance
 
-The Linux Node 24 and macOS quality jobs require the real audio fixture to pass
+The required Linux Node 25 compatibility job and macOS quality job require the real audio fixture to pass
 directly through faster-whisper in the freshly installed transcription lock.
+Linux audio package setup runs in the existing compatibility job, which does not
+receive the private dependency deploy key used by the Node 24 job.
 `scripts/run-locked-transcription-smoke.sh <venv-python> <fixture-directory>`
 provides the same check locally. Use a dedicated temporary fixture directory.
 It verifies CPython 3.13.16, downloads a revision-pinned tiny.en model with four

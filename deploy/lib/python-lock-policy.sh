@@ -11,7 +11,7 @@ WHATSOUP_PYTHON_INDEX_URL=https://pypi.org/simple
 
 whatsoup_require_locked_python() {
   local python_bin="$1" observed
-  observed="$(whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$python_bin" -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null)" || {
+  observed="$(whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$python_bin" -I -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null)" || {
     echo "Python lock policy: could not query $python_bin" >&2
     return 1
   }
@@ -72,7 +72,7 @@ whatsoup_create_managed_venv() {
     mv "$venv_root" "$backup/environment" || return 1
     echo "Python lock policy: previous environment retained at $backup/environment; retire only after installation and consumer verification" >&2
   fi
-  "$python_bin" -m venv "$venv_root" || result=$?
+  "$python_bin" -I -m venv "$venv_root" || result=$?
   if [ "$result" -eq 0 ]; then
     chmod 700 "$venv_root" || result=$?
   fi
@@ -94,5 +94,5 @@ whatsoup_install_locked_requirements() {
     echo "Python lock policy: missing declared lock $lock_path" >&2
     return 1
   fi
-  PIP_CONFIG_FILE=/dev/null "$python_bin" -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
+  PIP_CONFIG_FILE=/dev/null "$python_bin" -I -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
 }

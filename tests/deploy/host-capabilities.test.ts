@@ -102,6 +102,7 @@ function fixture(overrides: NodeJS.ProcessEnv = {}): Fixture {
   tool(bin, 'launchctl', 'launchctl fixture');
   executable(join(bin, 'security'), "printf '%s\\n' 'SECRET_SHOULD_NOT_APPEAR'");
   executable(join(bin, 'python3.13'), [
+    '[ "$1" != "-I" ] || shift',
     'case "${1:-}" in',
     '  --version) printf "Python %s\\n" "${FAKE_PYTHON_VERSION:-3.13.16}" ;;',
     '  -c) printf "%s\\n" "${FAKE_PYTHON_IDENTITY:-cpython:3.13.16}" ;;',
