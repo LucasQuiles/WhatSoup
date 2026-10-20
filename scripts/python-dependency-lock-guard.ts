@@ -230,12 +230,39 @@ const PIP_GLOBAL_VALUE_OPTIONS = new Set([
 function staticShellWord(word: string): string | null {
   let quote = '';
   let value = '';
-  for (const char of word) {
-    if (char === quote) {
+  let ansiTruncated = false;
+  for (let index = 0; index < word.length; index += 1) {
+    const char = word[index]!;
+    if (quote === "$'") {
+      if (char === "'") {
+        quote = '';
+        ansiTruncated = false;
+      } else if (char === '\\') {
+        const escape = word.slice(index + 1).match(/^(?:x[\da-fA-F]{1,2}|u[\da-fA-F]{1,4}|U[\da-fA-F]{1,8}|[0-7]{1,3}|c[\s\S]|[\s\S])/)?.[0];
+        if (!escape) return null;
+        index += escape.length;
+        const numeric = /^[xuU]/.test(escape) && escape.length > 1
+          ? Number.parseInt(escape.slice(1), 16)
+          : /^[0-7]/.test(escape) ? Number.parseInt(escape, 8) % 256
+            : escape.startsWith('c') && escape.length === 2 ? escape[1]!.toUpperCase().charCodeAt(0) ^ 64 : undefined;
+        if (numeric !== undefined && numeric > 0x10ffff) return null;
+        const decoded = numeric !== undefined ? String.fromCodePoint(numeric)
+          : ({ a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' } as Record<string, string>)[escape] ?? `\\${escape}`;
+        if (decoded === '\0') ansiTruncated = true;
+        else if (!ansiTruncated) value += decoded;
+      } else if (!ansiTruncated) value += char;
+    } else if (char === quote) {
       quote = '';
     } else if (quote === "'") {
       value += char;
-    } else if (char === '$' || char === '`' || char === '\\') {
+    } else if (char === '\\') {
+      const next = word[++index];
+      if (next === undefined) return null;
+      value += quote === '"' && !['$', '`', '"', '\\', '\n'].includes(next) ? `\\${next}` : next;
+    } else if (!quote && char === '$' && word[index + 1] === "'") {
+      quote = "$'";
+      index += 1;
+    } else if (char === '$' || char === '`') {
       return null;
     } else if (!quote && (char === "'" || char === '"')) {
       quote = char;
@@ -256,15 +283,18 @@ function pipSubcommand(argumentsText: string): string | null | undefined {
   return words[index];
 }
 
-function shellWordEnd(line: string, start: number): number {
+function shellWordEnd(line: string, start: number, functionName = false): number {
   const closing: string[] = [];
   for (let index = start; index < line.length; index += 1) {
     const char = line[index]!;
     const current = closing.at(-1);
     if (char === '\\' && current !== "'") {
       index += 1;
-    } else if (current === "'") {
+    } else if (current === "'" || current === "$'") {
       if (char === "'") closing.pop();
+    } else if (char === '$' && line[index + 1] === "'" && current !== '"') {
+      closing.push("$'");
+      index += 1;
     } else if (char === '$' && (line[index + 1] === '(' || line[index + 1] === '{')) {
       closing.push(line[index + 1] === '(' ? ')' : '}');
       index += 1;
@@ -279,7 +309,7 @@ function shellWordEnd(line: string, start: number): number {
       closing.push(char);
     } else if (char === '(' && current === ')') {
       closing.push(')');
-    } else if (/\s/.test(char) && closing.length === 0) {
+    } else if (closing.length === 0 && (/\s/.test(char) || (functionName && /[(){}]/.test(char)))) {
       return index;
     }
   }
@@ -295,6 +325,18 @@ function skipInvocationPrefixes(line: string, start: number): number {
   const consumeWord = (): void => { offset = shellWordEnd(line, offset); };
   while (offset < line.length) {
     const word = nextWord();
+    const functionKeyword = line.slice(offset).match(/^function\s+/);
+    const nameStart = offset + (functionKeyword?.[0].length ?? 0);
+    const nameEnd = shellWordEnd(line, nameStart, true);
+    const functionSuffix = line.slice(nameEnd).match(/^\s*(\(\s*\))?\s*(?=[{(])/);
+    if (nameEnd > nameStart && functionSuffix && (functionKeyword || functionSuffix[1])) {
+      offset = nameEnd + functionSuffix[0].length;
+      continue;
+    }
+    if (line[offset] === '(' || word === '{') {
+      offset += 1;
+      continue;
+    }
     if (['if', 'elif', 'then', 'else', 'while', 'until', 'do', '!'].includes(word)) {
       consumeWord();
       continue;
@@ -342,12 +384,18 @@ function skipInvocationPrefixes(line: string, start: number): number {
 function findInstallCommands(text: string, depth = 0): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
-    // Recognized pip spellings can join quoted segments; unrelated source needs no shell parsing.
-    if (!/p["']*i["']*p/i.test(line)) continue;
+    // Module operands can be dynamic even when no literal pip spelling appears.
+    const mayInvokeModule = /-["'\\A-Za-z]*m/.test(line);
+    if (!mayInvokeModule && !/\$'/.test(line) && !/p["'\\]*i["'\\]*p/i.test(line)) continue;
     if (line.trimStart().startsWith('#')) continue;
-    const modulePattern = /(?:^|[\s:;|&])-m\s+pip(?=\s)/gi;
-    for (const match of line.matchAll(modulePattern)) {
-      const argumentsText = commandAfterInstall(line, match.index + match[0].length);
+    const words = line.matchAll(/(?:[^\s"']+|"[^"\n]*"|'[^'\n]*')+/g);
+    for (const match of words) {
+      if (staticShellWord(match[0]) !== '-m') continue;
+      let moduleStart = match.index + match[0].length;
+      while (moduleStart < line.length && /\s/.test(line[moduleStart]!)) moduleStart += 1;
+      const moduleEnd = shellWordEnd(line, moduleStart);
+      if (!/^pip(?:\.__main__)?$/i.test(staticShellWord(line.slice(moduleStart, moduleEnd)) ?? '')) continue;
+      const argumentsText = commandAfterInstall(line, moduleEnd);
       const subcommand = pipSubcommand(argumentsText);
       if (subcommand === 'install') commands.push(commandAfterInstall(line, match.index));
       else if (depth > 0 && subcommand === null) commands.push('pip install');
@@ -361,6 +409,44 @@ function findInstallCommands(text: string, depth = 0): string[] {
       }
       const executableEnd = shellWordEnd(line, offset);
       const executable = staticShellWord(line.slice(offset, executableEnd));
+      if (executable === null || /^(?:[A-Za-z0-9_./-]*\/)?python(?:\d+(?:\.\d+)*)?$/.test(executable)) {
+        let cursor = executableEnd;
+        while (cursor < line.length) {
+          while (/\s/.test(line[cursor] ?? '') && cursor < line.length) cursor += 1;
+          const end = shellWordEnd(line, cursor);
+          const rawOption = line.slice(cursor, end);
+          const option = staticShellWord(rawOption);
+          cursor = end;
+          if (option === null && /^-[bBdEiIOPqRsSuvx]*m/.test(rawOption.replace(/["'\\]/g, ''))) {
+            commands.push('pip install');
+            break;
+          }
+          const interpreterOption = option?.match(/^-[bBdEiIOPqRsSuvx]*([cmWX])(.*)$/);
+          if (interpreterOption?.[1] === 'm') {
+            let module: string | null = interpreterOption[2]!;
+            if (!module) {
+              while (/\s/.test(line[cursor] ?? '') && cursor < line.length) cursor += 1;
+              const moduleEnd = shellWordEnd(line, cursor);
+              module = staticShellWord(line.slice(cursor, moduleEnd));
+              cursor = moduleEnd;
+            }
+            if (module === null) commands.push('pip install');
+            else if (/^pip(?:\.__main__)?$/i.test(module)) {
+              const command = commandAfterInstall(line, cursor);
+              const subcommand = pipSubcommand(command);
+              if (subcommand === 'install') commands.push(`pip${command}`);
+              else if (subcommand === null) commands.push('pip install');
+            }
+            break;
+          }
+          if (!option?.startsWith('-') || option === '--' || interpreterOption?.[1] === 'c') break;
+          if ((interpreterOption && !interpreterOption[2] && ['W', 'X'].includes(interpreterOption[1]!))
+              || option === '--check-hash-based-pycs') {
+            while (/\s/.test(line[cursor] ?? '') && cursor < line.length) cursor += 1;
+            cursor = shellWordEnd(line, cursor);
+          }
+        }
+      }
       if (executable && /^(?:[A-Za-z0-9_./-]*\/)?(?:sh|bash|dash|zsh|ksh)$/.test(executable)) {
         let cursor = executableEnd;
         const word = (): string => {

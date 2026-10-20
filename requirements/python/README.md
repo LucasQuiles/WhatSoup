@@ -20,6 +20,12 @@ Installer capability, identity and architecture probes, and the host doctor's ex
 identity probe, use a five-second budget through the shared shell supervisor.
 `WHATSOUP_PYTHON_PROBE_TIMEOUT` overrides that budget; expiration fails the probe
 and reaps its process group, with a further termination grace period.
+Before invoking pip, the helper uses that same bound to read at most 4 MiB from
+the selected regular lock without following symlinks below the repository root.
+Each non-comment requirement must contain one exact package version and only
+SHA-256 hash options. Empty locks, recursive requirements, additional indexes,
+URLs and other directives are refused before installation. Pip reads a private
+snapshot of those validated bytes, which is removed when the command exits.
 
 The dependency guard also checks direct `pip` invocations prefixed by shell
 assignments or `env`, including environment-clearing, unset, working-directory
@@ -35,6 +41,10 @@ Literal shell `-c` command strings are scanned recursively, including nested
 wrappers. Pip-bearing command strings with unresolved expansion, unknown options
 or more than 16 nested shell wrappers fail closed. The guard is a bounded source
 scan; dynamically generated commands outside the scanned source still require review.
+Quoted and escaped module words, attached `-m` operands, and `pip.__main__` use
+the same install policy. Unresolved Python module operands are refused.
+Static grouped commands, function bodies and ANSI-C quoted executables are
+checked by the same scan; it does not evaluate arbitrary shell programs.
 
 ## Replacing managed environments
 

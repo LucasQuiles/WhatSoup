@@ -70,7 +70,7 @@ test "$CAP_VERSION" = 3.13.16`;
     expect(existsSync(join(target, 'pyvenv.cfg'))).toBe(true);
   });
 
-  it('installs an empty lock without importing an ambient pip module', () => {
+  it('rejects an empty lock without importing an ambient pip module', () => {
     const root = tempRoot();
     const marker = join(root, 'pip-module-ran');
     const target = join(root, 'managed');
@@ -90,7 +90,8 @@ test "$CAP_VERSION" = 3.13.16`;
       LOCK_PYTHON: managed, LOCK_ROOT: root, PYTHONPATH: root,
     });
 
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('declared lock has no packages');
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -150,8 +151,11 @@ test "$CAP_VERSION" = 3.13.16`;
     const bin = join(root, 'bin');
     const python = join(bin, 'python');
     const log = join(root, 'pip-args');
+    const snapshot = join(root, 'validated-bytes');
+    const lock = join(root, 'requirements/python/quality-cpython313-linux-x64.txt');
+    const valid = 'pytest==8.3.5 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';
     mkdirSync(join(root, 'requirements/python'), { recursive: true });
-    writeFileSync(join(root, 'requirements/python/quality-cpython313-linux-x64.txt'), 'pytest==8.3.5 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n', 'utf8');
+    writeFileSync(lock, valid, 'utf8');
     executable(join(bin, 'uname'), [
       'case "$1" in',
       '  -s) printf "%s\\n" Linux ;;',
@@ -161,13 +165,17 @@ test "$CAP_VERSION" = 3.13.16`;
     ].join('\n'));
     executable(python, [
       '[ "$1" != "-I" ] || shift',
-      'if [ "$1" = "-c" ]; then case "$2" in *platform.machine*) printf x86_64 ;; *sys.implementation*) printf "%s\\n" "cpython:3.13.16" ;; *) exit 2 ;; esac; exit 0; fi',
+      'if [ "$1" = "-c" ]; then case "$2" in *platform.machine*) printf x86_64 ;; *sys.implementation*) printf "%s\\n" "cpython:3.13.16" ;; *) exec "$REAL_PYTHON" -I "$@" ;; esac; exit 0; fi',
       'printf "%s\\n" "$*" > "$WHATSOUP_TEST_PIP_ARGS"',
+      'while [ "$1" != "-r" ]; do shift; done',
+      'printf "%s\\n" "--extra-index-url https://changed.invalid/simple" > "$SOURCE_LOCK"',
+      'cat "$2" > "$VALIDATED_BYTES"',
     ].join('\n'));
 
     const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
-      PATH: `${bin}:/usr/bin:/bin`,
+      PATH: `${bin}:${process.env.PATH}`,
       WHATSOUP_TEST_PIP_ARGS: log,
+      REAL_PYTHON: resolveTestPython(), SOURCE_LOCK: lock, VALIDATED_BYTES: snapshot,
     });
 
     expect(result.status, result.stderr).toBe(0);
@@ -175,6 +183,62 @@ test "$CAP_VERSION" = 3.13.16`;
     expect(readFileSync(log, 'utf8')).toContain('--only-binary :all:');
     expect(readFileSync(log, 'utf8')).toContain('--index-url https://pypi.org/simple');
     expect(readFileSync(log, 'utf8')).toContain('quality-cpython313-linux-x64.txt');
+    expect(readFileSync(snapshot, 'utf8')).toBe(valid);
+    expect(readFileSync(lock, 'utf8')).toContain('https://changed.invalid/simple');
+    expect(existsSync(readFileSync(log, 'utf8').trim().split(' -r ')[1]!)).toBe(false);
+  });
+
+  it.each([
+    ['external index', '--extra-index-url https://packages.invalid/simple\n'],
+    ['nested requirements', '-r other.txt\n'],
+    ['direct URL', 'pytest @ https://packages.invalid/pytest.whl\n'],
+    ['missing hash', 'pytest==8.3.5\n'],
+    ['empty lock', '# no packages\n'],
+    ['lock symlink', 'symlink'],
+    ['parent symlink', 'parent-symlink'],
+  ])('rejects %s before pip starts', (_name, content) => {
+    const root = tempRoot();
+    const lockDirectory = join(root, 'requirements/python');
+    const lock = join(lockDirectory, 'quality-cpython313-linux-x64.txt');
+    const bin = join(root, 'bin');
+    const marker = join(root, 'pip-started');
+    const python = join(bin, 'python');
+    const realPython = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const valid = `pytest==8.3.5 --hash=sha256:${'a'.repeat(64)}\n`;
+    mkdirSync(dirname(lockDirectory), { recursive: true });
+    if (content === 'parent-symlink') {
+      const outside = join(root, 'outside');
+      mkdirSync(outside);
+      symlinkSync(outside, lockDirectory);
+    } else {
+      mkdirSync(lockDirectory);
+    }
+    if (content === 'symlink') {
+      const outside = join(root, 'outside.txt');
+      writeFileSync(outside, valid);
+      symlinkSync(outside, lock);
+    } else {
+      writeFileSync(lock, content === 'parent-symlink' ? valid : content);
+    }
+    executable(join(bin, 'uname'), 'case "$1" in -s) printf Linux ;; *) exit 2 ;; esac');
+    executable(python, `[ "$1" = "-I" ] || exit 2
+shift
+if [ "$1" = "-c" ]; then
+  case "$2" in
+    *sys.implementation*) printf '%s\\n' cpython:3.13.16 ;;
+    *platform.machine*) printf x86_64 ;;
+    *) exec "$REAL_PYTHON" -I "$@" ;;
+  esac
+  exit 0
+fi
+printf started > "$PIP_MARKER"`);
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      PATH: `${bin}:${process.env.PATH}`, LOCK_PYTHON: python, LOCK_ROOT: root,
+      REAL_PYTHON: realPython, PIP_MARKER: marker,
+    });
+    expect(result.status).not.toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(lock, 'utf8')).toBe(content === 'symlink' || content === 'parent-symlink' ? valid : content);
   });
 
   it.each([
@@ -187,7 +251,7 @@ test "$CAP_VERSION" = 3.13.16`;
     const log = join(root, 'pip-args');
     mkdirSync(join(root, 'requirements/python'), { recursive: true });
     for (const arch of ['x64', 'arm64']) {
-      writeFileSync(join(root, `requirements/python/quality-cpython313-darwin-${arch}.txt`), '# fixture lock\n');
+      writeFileSync(join(root, `requirements/python/quality-cpython313-darwin-${arch}.txt`), `pytest==8.3.5 --hash=sha256:${'a'.repeat(64)}\n`);
     }
     executable(join(bin, 'uname'), 'case "$1" in -s) printf Darwin ;; -m) printf x86_64 ;; *) exit 2 ;; esac');
     executable(join(bin, 'sysctl'), 'printf 1');
@@ -197,7 +261,7 @@ if [ "$1" = "-c" ]; then
   case "$2" in
     *platform.machine*) printf '%s\\n' "$TEST_PYTHON_ARCH" ;;
     *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;;
-    *) exit 2 ;;
+    *) exec "$REAL_PYTHON" -I "$@" ;;
   esac
   exit 0
 fi
@@ -206,7 +270,8 @@ printf '%s\\n' "$*" > "$WHATSOUP_TEST_PIP_ARGS"
 `);
 
     const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
-      PATH: `${bin}:/usr/bin:/bin`, TEST_PYTHON_ARCH: architecture, WHATSOUP_TEST_PIP_ARGS: log,
+      PATH: `${bin}:${process.env.PATH}`, TEST_PYTHON_ARCH: architecture, WHATSOUP_TEST_PIP_ARGS: log,
+      REAL_PYTHON: resolveTestPython(),
     });
 
     expect(result.status, result.stderr).toBe(0);

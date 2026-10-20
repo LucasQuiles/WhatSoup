@@ -71,6 +71,11 @@ under Rosetta receives the `darwin-x64` graph rather than the Mac's ARM graph.
 Python identity and architecture probes have a five-second budget; the host
 doctor reports an expired exact-identity probe as inconclusive, and installers
 stop before using a lock. `WHATSOUP_PYTHON_PROBE_TIMEOUT` sets that probe budget.
+Before pip starts, the same budget covers validation of the selected regular lock
+and its directory components. Symlinks, empty locks, additional package sources,
+and requirements without exact versions and SHA-256 hashes are rejected. Pip
+reads a private snapshot of the validated bytes; later source changes cannot
+replace those inputs. The snapshot is removed when the install command exits.
 Each install creates a fresh environment and retains the old directory at the
 printed adjacent `.previous.*` path. Keep consumers stopped during replacement.
 After successful installation and consumer checks, retire the retained directory

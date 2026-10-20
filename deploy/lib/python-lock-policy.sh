@@ -86,13 +86,47 @@ whatsoup_create_managed_venv() {
   return "$result"
 }
 
-whatsoup_install_locked_requirements() {
-  local python_bin="$1" root="$2" profile="$3" lock_path
+whatsoup_install_locked_requirements() (
+  local python_bin="$1" root="$2" profile="$3" lock_path source_lock
   whatsoup_require_locked_python "$python_bin" || return 1
-  lock_path="$(whatsoup_python_lock_path "$root" "$profile" "$python_bin")" || return 1
-  if [ ! -f "$lock_path" ]; then
-    echo "Python lock policy: missing declared lock $lock_path" >&2
+  source_lock="$(whatsoup_python_lock_path "$root" "$profile" "$python_bin")" || return 1
+  if [ ! -f "$source_lock" ]; then
+    echo "Python lock policy: missing declared lock $source_lock" >&2
     return 1
   fi
+  lock_path="$(mktemp "${TMPDIR:-/tmp}/whatsoup-${source_lock##*/}.XXXXXX")" || return 1
+  trap 'rm -f -- "$lock_path"' EXIT
+  # Pip consumes only these validated bytes, even if the source lock changes later.
+  whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$python_bin" -I -c '
+import os, pathlib, re, stat, sys
+root, source = map(os.path.abspath, sys.argv[1:])
+parts = pathlib.Path(source).relative_to(root).parts
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in parts[:-1]:
+        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+        os.close(directory)
+        directory = child
+    descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("declared lock is not a regular file")
+        raw = stream.read(4 * 1024 * 1024 + 1)
+finally:
+    os.close(directory)
+if len(raw) > 4 * 1024 * 1024:
+    raise ValueError("declared lock exceeds its byte bound")
+lines = []
+for raw_line in re.sub(r"\\\r?\n", "", raw.decode("utf-8")).splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*(?:\s+--hash=sha256:[a-f0-9]{64})+", line):
+        raise ValueError("declared lock contains an unauthorized requirement")
+    lines.append(line)
+if not lines:
+    raise ValueError("declared lock has no packages")
+print("\n".join(lines))
+' "$root" "$source_lock" > "$lock_path" || return 1
   PIP_CONFIG_FILE=/dev/null "$python_bin" -I -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
-}
+)
