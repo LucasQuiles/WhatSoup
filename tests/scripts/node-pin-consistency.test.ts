@@ -761,6 +761,51 @@ describe('node-pin consistency check', () => {
     );
   });
 
+  it('retrieves snapshot metadata only over HTTPS without following redirects or unbounded responses', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({});
+    const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
+    const capture = path.join(binDir, 'curl-args');
+    const curlPath = path.join(binDir, 'curl');
+    writeFileSync(curlPath, '#!/bin/sh\nprintf \'CALL\\n\' >> "$CURL_CAPTURE"\nprintf \'%s\\n\' "$@" >> "$CURL_CAPTURE"\n', 'utf8');
+    chmodSync(curlPath, 0o755);
+
+    run(['--verify-container-snapshot'], dir, { PATH: binDir, CURL_CAPTURE: capture });
+
+    expect(process.exitCode).toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+    const calls = readFileSync(capture, 'utf8').split('CALL\n').slice(1);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      const args = call.trimEnd().split('\n');
+      expect(args[0]).toBe('--disable');
+      for (const [option, value] of [
+        ['--proto', '=https'], ['--proto-redir', '=https'],
+        ['--max-redirs', '0'], ['--max-filesize', '1048576'], ['--max-time', '30'],
+      ]) {
+        expect(args.filter((arg) => arg === option)).toHaveLength(1);
+        expect(args[args.indexOf(option!) + 1]).toBe(value);
+      }
+      expect(args.at(-1)).toMatch(/^https:\/\/snapshot\.debian\.org\//);
+    }
+  });
+
+  it('refuses an oversized response even when curl does not enforce its size option', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dir = makeFixture({});
+    const binDir = mkdtempSync(path.join(tmpdir(), 'whatsoup-curl-'));
+    const curlPath = path.join(binDir, 'curl');
+    writeFileSync(curlPath, `#!${process.execPath}\nprocess.stdout.write(Buffer.alloc(2 * 1024 * 1024, 65));\n`, 'utf8');
+    chmodSync(curlPath, 0o755);
+
+    run(['--verify-container-snapshot'], dir, { PATH: binDir });
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('APT snapshot release metadata is unavailable'),
+    );
+  });
+
   it('flags a volta.node pinned to a non-canonical version', () => {
     const dir = makeFixture({ voltaNode: '24.10.0' });
     const drift = findNodePinDrift({ cwd: dir });

@@ -25,8 +25,17 @@ export interface InstallPinnedBuildxOptions {
 
 export const BUILDX_DOWNLOAD_MAX_BYTES = 128 * 1024 * 1024;
 export const BUILDX_DOWNLOAD_TIMEOUT_MS = 120_000;
+export const BUILDX_DOWNLOAD_MAX_REDIRECTS = 3;
+const BUILDX_RELEASE_HOSTS = new Set([
+  'github.com',
+  'github-releases.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+]);
 const VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const SHA256_PATTERN = /^sha256:[a-f0-9]{64}$/;
+
+class BuildxDownloadError extends Error {}
 
 function loadBuildxPolicy(repoRoot: string): BuildxPolicy {
   const policyPath = path.join(repoRoot, 'docker/container-inputs.json');
@@ -52,6 +61,20 @@ function releaseAssetUrl(policy: BuildxPolicy): string {
   return `https://github.com/docker/buildx/releases/download/${policy.version}/${policy.asset}`;
 }
 
+function redirectDestination(location: string, current: URL): URL {
+  let destination: URL;
+  try {
+    destination = new URL(location, current);
+  } catch {
+    throw new BuildxDownloadError('Buildx asset redirect has an invalid destination');
+  }
+  if (destination.protocol !== 'https:' || !BUILDX_RELEASE_HOSTS.has(destination.hostname)
+      || destination.username || destination.password || destination.port) {
+    throw new BuildxDownloadError('Buildx asset redirect destination is not an approved HTTPS GitHub release host');
+  }
+  return destination;
+}
+
 async function readBoundedResponse(
   response: Response,
   maxBytes: number,
@@ -61,20 +84,20 @@ async function readBoundedResponse(
   if (contentLength !== null) {
     const declaredLength = Number(contentLength);
     if (!Number.isSafeInteger(declaredLength) || declaredLength < 0 || declaredLength > maxBytes) {
-      throw new Error(`Buildx asset download exceeds ${maxBytes} byte limit`);
+      throw new BuildxDownloadError(`Buildx asset download exceeds ${maxBytes} byte limit`);
     }
   }
-  if (!response.body) throw new Error('Buildx asset download has no response body');
+  if (!response.body) throw new BuildxDownloadError('Buildx asset download has no response body');
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let received = 0;
   const abort = new Promise<never>((_, reject) => {
     if (signal.aborted) {
-      reject(new Error('Buildx asset download timed out'));
+      reject(new BuildxDownloadError('Buildx asset download timed out'));
       return;
     }
-    signal.addEventListener('abort', () => reject(new Error('Buildx asset download timed out')), { once: true });
+    signal.addEventListener('abort', () => reject(new BuildxDownloadError('Buildx asset download timed out')), { once: true });
   });
   try {
     while (true) {
@@ -83,7 +106,7 @@ async function readBoundedResponse(
       received += next.value.byteLength;
       if (received > maxBytes) {
         await reader.cancel();
-        throw new Error(`Buildx asset download exceeds ${maxBytes} byte limit`);
+        throw new BuildxDownloadError(`Buildx asset download exceeds ${maxBytes} byte limit`);
       }
       chunks.push(next.value);
     }
@@ -106,19 +129,31 @@ export async function installPinnedBuildx(options: InstallPinnedBuildxOptions): 
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let bytes: Buffer;
   try {
-    const response = await fetchImpl(releaseAssetUrl(policy), {
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`Buildx asset download failed: HTTP ${response.status}`);
+    let url = new URL(releaseAssetUrl(policy));
+    let response: Response | undefined;
+    for (let redirects = 0; redirects <= BUILDX_DOWNLOAD_MAX_REDIRECTS; redirects += 1) {
+      const next = await fetchImpl(url.href, { redirect: 'manual', signal: controller.signal });
+      if (next.status < 300 || next.status > 399) {
+        response = next;
+        break;
+      }
+      await next.body?.cancel();
+      if (redirects === BUILDX_DOWNLOAD_MAX_REDIRECTS) {
+        throw new BuildxDownloadError(`Buildx asset download exceeded ${BUILDX_DOWNLOAD_MAX_REDIRECTS} redirect limit`);
+      }
+      const location = next.headers.get('location');
+      if (!location) throw new BuildxDownloadError('Buildx asset redirect is missing a destination');
+      url = redirectDestination(location, url);
+    }
+    if (!response) throw new BuildxDownloadError('Buildx asset download did not return a response');
+    if (!response.ok) throw new BuildxDownloadError(`Buildx asset download failed: HTTP ${response.status}`);
     bytes = await readBoundedResponse(response, maxBytes, controller.signal);
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(`Buildx asset download timed out after ${timeoutMs}ms`);
     }
-    const detail = error instanceof Error ? error.message : String(error);
-    if (detail.startsWith('Buildx asset download')) throw error;
-    throw new Error(`Buildx asset download failed: ${detail}`);
+    if (error instanceof BuildxDownloadError) throw error;
+    throw new Error('Buildx asset download failed: transport error');
   } finally {
     clearTimeout(timeout);
   }

@@ -59,7 +59,87 @@ describe('pinned Buildx installer', () => {
     expect(statSync(destination).mode & 0o777).toBe(0o755);
     expect(fetchImpl).toHaveBeenCalledWith(
       'https://github.com/docker/buildx/releases/download/v0.38.0/buildx-v0.38.0.linux-amd64',
-      expect.objectContaining({ redirect: 'follow' }),
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+  });
+
+  it('follows a bounded reviewed GitHub release CDN redirect without exposing its query', async () => {
+    const asset = Buffer.from('reviewed-buildx-asset');
+    const repoRoot = makeRepo(asset);
+    const dockerConfig = tmp.make('docker-config');
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response(null, {
+        status: 302,
+        headers: { location: 'https://release-assets.githubusercontent.com/download/buildx?sig=secret' },
+      }))
+      .mockResolvedValueOnce(new Response(new Uint8Array(asset), { status: 200 })) as unknown as typeof fetch;
+
+    await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).resolves.toBe(
+      path.join(dockerConfig, 'cli-plugins/docker-buildx'),
+    );
+    expect(fetchImpl).toHaveBeenNthCalledWith(
+      2,
+      'https://release-assets.githubusercontent.com/download/buildx?sig=secret',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
+  });
+
+  it('rejects an unreviewed redirect destination without exposing its query', async () => {
+    const asset = Buffer.from('reviewed-buildx-asset');
+    const repoRoot = makeRepo(asset);
+    const dockerConfig = tmp.make('docker-config');
+    const fetchImpl = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: 'https://evil.example/download?token=secret' },
+    })) as unknown as typeof fetch;
+
+    await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).rejects.toThrow(
+      'Buildx asset redirect destination is not an approved HTTPS GitHub release host',
+    );
+    await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).rejects.not.toThrow('secret');
+  });
+
+  it.each([
+    Object.assign(new URL('https://github.com/docker/buildx/asset'), {
+      username: 'fixture', password: 'fixture-secret',
+    }).href,
+    'https://github.com:8443/docker/buildx/asset',
+    'http://github.com/docker/buildx/asset',
+  ])('rejects a release redirect with an unauthorized origin: %s', async (location) => {
+    const repoRoot = makeRepo(Buffer.from('expected'));
+    const dockerConfig = tmp.make('docker-config');
+    const fetchImpl = vi.fn(async () => new Response(null, {
+      status: 302, headers: { location },
+    })) as unknown as typeof fetch;
+    await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).rejects.toThrow(
+      'not an approved HTTPS GitHub release host',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(existsSync(path.join(dockerConfig, 'cli-plugins/docker-buildx'))).toBe(false);
+  });
+
+  it('stops a redirect loop at the reviewed bound', async () => {
+    const repoRoot = makeRepo(Buffer.from('expected'));
+    const dockerConfig = tmp.make('docker-config');
+    const fetchImpl = vi.fn(async () => new Response(null, {
+      status: 302, headers: { location: '/docker/buildx/loop?token=secret' },
+    })) as unknown as typeof fetch;
+    await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).rejects.toThrow(
+      'exceeded 3 redirect limit',
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not expose a signed redirect URL from a transport error', async () => {
+    const repoRoot = makeRepo(Buffer.from('expected'));
+    const dockerConfig = tmp.make('docker-config');
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response(null, {
+        status: 302, headers: { location: 'https://release-assets.githubusercontent.com/asset?sig=secret' },
+      }))
+      .mockRejectedValueOnce(new Error('request failed https://release-assets.githubusercontent.com/asset?sig=secret')) as unknown as typeof fetch;
+    await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).rejects.toThrow(
+      'Buildx asset download failed: transport error',
     );
   });
 
@@ -95,7 +175,7 @@ describe('pinned Buildx installer', () => {
     }) as unknown as typeof fetch;
 
     await expect(installPinnedBuildx({ repoRoot, dockerConfig, fetchImpl })).rejects.toThrow(
-      'Buildx asset download failed: network connection lost',
+      'Buildx asset download failed: transport error',
     );
     expect(existsSync(path.join(dockerConfig, 'cli-plugins/docker-buildx'))).toBe(false);
   });

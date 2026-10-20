@@ -3421,8 +3421,12 @@ so BuildKit records a verified `configSource` revision rather than a local check
 and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
 parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the
 runnable manifest digest; checks the source repository, Dockerfile path, source revision,
-builder invocation, selected-platform base-image and SBOM-generator dependencies; and records hashes for both the embedded SPDX
-statement and the separately generated SPDX SBOM.
+builder invocation, selected-platform base-image and SBOM-generator dependencies. It extracts the verified embedded SPDX
+predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
+
+Snapshot availability probes disable curl configuration, require HTTPS without redirects,
+and limit each response to 1 MiB with an independent parent-process output limit. Curl has
+a 30-second deadline; the parent stops it after 35 seconds.
 
 Successful container builds upload these files as
 `container-build-evidence-${{ github.sha }}` with a 14-day retention period.

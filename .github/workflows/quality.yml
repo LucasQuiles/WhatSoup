@@ -151,15 +151,6 @@ jobs:
             --output type=oci,dest="$container_dir/whatsoup-image.oci.tar" \
             "${source_repository}#${SOURCE_REVISION}"
 
-      - name: Generate container SBOM
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
-        with:
-          image: oci-archive:${{ runner.temp }}/whatsoup-container/whatsoup-image.oci.tar
-          format: spdx-json
-          output-file: ${{ runner.temp }}/whatsoup-container/whatsoup-image.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
-
       - name: Verify container build receipt
         env:
           SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -178,7 +169,7 @@ jobs:
           provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
-            --sbom "$container_dir/whatsoup-image.spdx.json" \
+            --verified-sbom-output "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
             --source "$SOURCE_REVISION" \
             --source-repository "$source_repository" \

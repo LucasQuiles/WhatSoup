@@ -546,16 +546,26 @@ function verifyContainerSnapshotAvailability(
   for (const release of releases) {
     try {
       execFileSync('curl', [
+        '--disable',
         '--fail',
         '--silent',
         '--show-error',
         '--location',
+        '--max-redirs',
+        '0',
+        '--proto',
+        '=https',
+        '--proto-redir',
+        '=https',
+        '--max-filesize',
+        '1048576',
         '--max-time',
         '30',
         release,
       ], {
         env,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 1024 * 1024,
         timeout: 35_000,
       });
     } catch {

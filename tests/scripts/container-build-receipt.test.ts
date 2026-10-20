@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createContainerBuildReceipt,
   parseArgs,
+  sha256File,
   verifyContainerBuildReceipt,
   verifyOciArchiveAttestations,
 } from '../../scripts/verify-container-build-receipt.ts';
@@ -71,7 +72,14 @@ function makeReceiptInput(options: {
     'containerimage.digest': oci.outputDigest,
     'buildx.build.provenance': options.provenance ?? oci.buildxProvenance,
   }));
-  writeFileSync(sbomPath, JSON.stringify({ spdxVersion: 'SPDX-2.3' }));
+  writeFileSync(sbomPath, JSON.stringify({
+    SPDXID: 'SPDXRef-DOCUMENT',
+    spdxVersion: 'SPDX-2.3',
+    name: 'whatsoup-image',
+    documentNamespace: 'https://example.invalid/spdx/whatsoup-image',
+    creationInfo: { creators: ['Tool: buildkit-syft-scanner'] },
+    packages: [],
+  }));
   return {
     repoRoot,
     metadataPath,
@@ -108,6 +116,11 @@ interface OciArchiveOptions {
   extraRunnableDescriptor?: boolean;
   runnablePlatform?: { os: string; architecture: string };
   attestationPlatform?: { os: string; architecture: string };
+  configPlatform?: { os: string; architecture: string };
+  invalidBlob?: {
+    kind: 'config' | 'image layer';
+    defect: 'missing' | 'bytes' | 'size' | 'media type';
+  };
 }
 
 function writeOciArchive(
@@ -124,11 +137,23 @@ function writeOciArchive(
     return { digest: `sha256:${digest}`, size: bytes.length };
   };
 
+  const config = writeBlob(JSON.stringify({ ...(options.configPlatform ?? { architecture: 'amd64', os: 'linux' }), rootfs: { type: 'layers', diff_ids: [] } }));
+  const layer = writeBlob('compressed-layer-bytes');
+  const configDescriptor = { mediaType: 'application/vnd.oci.image.config.v1+json', ...config };
+  const layerDescriptor = { mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip', ...layer };
+  if (options.invalidBlob) {
+    const descriptor = options.invalidBlob.kind === 'config' ? configDescriptor : layerDescriptor;
+    const file = path.join(blobs, descriptor.digest.slice('sha256:'.length));
+    if (options.invalidBlob.defect === 'missing') unlinkSync(file);
+    if (options.invalidBlob.defect === 'bytes') writeFileSync(file, Buffer.alloc(descriptor.size, 0));
+    if (options.invalidBlob.defect === 'size') descriptor.size += 1;
+    if (options.invalidBlob.defect === 'media type') descriptor.mediaType = 'application/octet-stream';
+  }
   const runnable = writeBlob(JSON.stringify({
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
-    config: { mediaType: 'application/vnd.oci.image.config.v1+json', digest: `sha256:${'0'.repeat(64)}`, size: 0 },
-    layers: [],
+    config: configDescriptor,
+    layers: [layerDescriptor],
   }));
   const imageDigest = runnable.digest;
   const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
@@ -185,7 +210,14 @@ function writeOciArchive(
     _type: 'https://in-toto.io/Statement/v1',
     subject: [{ name: '_', digest: { sha256: statementSubjectDigest } }],
     predicateType: 'https://spdx.dev/Document',
-    predicate: { SPDXID: 'SPDXRef-DOCUMENT', spdxVersion: 'SPDX-2.3', packages: [] },
+    predicate: {
+      SPDXID: 'SPDXRef-DOCUMENT',
+      spdxVersion: 'SPDX-2.3',
+      name: 'whatsoup-image',
+      documentNamespace: 'https://example.invalid/spdx/whatsoup-image',
+      creationInfo: { creators: ['Tool: buildkit-syft-scanner'] },
+      packages: [],
+    },
   }));
   const emptyConfig = writeBlob('{}');
   const manifest = JSON.stringify({
@@ -261,6 +293,63 @@ function writeOciArchive(
 }
 
 describe('container build evidence CI contract', () => {
+  it.each([
+    ['config', 'missing', 'missing blobs/sha256/'],
+    ['config', 'bytes', 'SHA-256 does not match blob'],
+    ['config', 'size', 'size does not match blob'],
+    ['config', 'media type', 'invalid OCI config descriptor'],
+    ['image layer', 'missing', 'missing blobs/sha256/'],
+    ['image layer', 'bytes', 'SHA-256 does not match blob'],
+    ['image layer', 'size', 'size does not match blob'],
+    ['image layer', 'media type', 'unexpected media type'],
+  ] as const)('rejects a %s descriptor with %s', (kind, defect, error) => {
+    const imagePath = path.join(tmp.make('invalid-image'), 'image.tar');
+    const oci = writeOciArchive(imagePath, { invalidBlob: { kind, defect } });
+    expect(() => verifyOciArchiveAttestations(imagePath, oci.outputDigest)).toThrow(error);
+  });
+
+  it('rejects image config architecture inconsistent with its runnable descriptor', () => {
+    const imagePath = path.join(tmp.make('wrong-config'), 'image.tar');
+    const oci = writeOciArchive(imagePath, { configPlatform: { os: 'linux', architecture: 'arm64' } });
+    expect(() => verifyOciArchiveAttestations(imagePath, oci.outputDigest)).toThrow(
+      'runnable image config does not match linux/amd64',
+    );
+  });
+
+  it('hashes multiple chunks exactly and refuses evidence larger than its bound', () => {
+    const file = path.join(tmp.make('hash'), 'evidence');
+    const bytes = Buffer.alloc(3 * 64 * 1024 + 7, 0x83);
+    writeFileSync(file, bytes);
+    expect(sha256File(file, bytes.length)).toBe(`sha256:${sha256(bytes)}`);
+    expect(() => sha256File(file, bytes.length - 1)).toThrow('byte limit');
+  });
+
+  it('exports only the verified embedded SPDX and verifies the exported evidence', () => {
+    const input = makeReceiptInput();
+    const output = path.join(path.dirname(input.sbomPath), 'verified.spdx.json');
+    const receipt = createContainerBuildReceipt({ ...input, sbomPath: undefined, verifiedSbomOutputPath: output });
+    expect(JSON.parse(readFileSync(output, 'utf8'))).toEqual(JSON.parse(readFileSync(input.sbomPath, 'utf8')));
+    expect(() => verifyContainerBuildReceipt(receipt, { ...input, sbomPath: output })).not.toThrow();
+  });
+
+  it('refuses a different valid SPDX document instead of attesting unrelated evidence', () => {
+    const input = makeReceiptInput();
+    const document = JSON.parse(readFileSync(input.sbomPath, 'utf8'));
+    document.name = 'different-image';
+    writeFileSync(input.sbomPath, JSON.stringify(document));
+    expect(() => createContainerBuildReceipt(input)).toThrow('does not match the verified embedded SPDX predicate');
+  });
+
+  it('does not create an exported SPDX file when receipt verification is requested', () => {
+    const input = makeReceiptInput();
+    const output = path.join(path.dirname(input.sbomPath), 'unexpected.spdx.json');
+    const receipt = createContainerBuildReceipt(input);
+    expect(() => verifyContainerBuildReceipt(receipt, {
+      ...input, sbomPath: undefined, verifiedSbomOutputPath: output,
+    })).toThrow('receipt verification requires an existing SBOM');
+    expect(existsSync(output)).toBe(false);
+  });
+
   it('uses the shared closed-option parser and rejects ambiguous receipt inputs', () => {
     const argv = [
       '--metadata', '/tmp/metadata.json', '--sbom', '/tmp/sbom.json',
@@ -326,7 +415,7 @@ describe('container build evidence CI contract', () => {
     expect(qualityWorkflow).toContain('policy.platform');
     expect(qualityWorkflow).toContain('--platform "$platform"');
     expect(qualityWorkflow).toContain('--provenance-builder-id "$provenance_builder_id"');
-    expect(qualityWorkflow).toContain('anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c');
+    expect(qualityWorkflow).toContain('--verified-sbom-output "$container_dir/whatsoup-image.spdx.json"');
     expect(qualityWorkflow).toContain('scripts/verify-container-build-receipt.ts');
     expect(qualityWorkflow).toContain('container-build-evidence-${{ github.sha }}');
     expect(qualityWorkflow).toContain('id: build-container');
@@ -645,9 +734,13 @@ describe('container build evidence CI contract', () => {
 
     const sbomInput = makeReceiptInput();
     const sbomReceipt = createContainerBuildReceipt(sbomInput);
-    writeFileSync(sbomInput.sbomPath, JSON.stringify({ spdxVersion: 'SPDX-2.3', packages: [] }));
+    writeFileSync(sbomInput.sbomPath, JSON.stringify({
+      SPDXID: 'SPDXRef-DOCUMENT', spdxVersion: 'SPDX-2.3', name: 'changed',
+      documentNamespace: 'https://example.invalid/spdx/changed',
+      creationInfo: { creators: ['Tool: changed'] }, packages: [],
+    }));
     expect(() => verifyContainerBuildReceipt(sbomReceipt, sbomInput)).toThrow(
-      'container build receipt does not match the verified build inputs',
+      'SBOM does not match the verified embedded SPDX predicate',
     );
   });
 
