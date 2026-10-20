@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { fakeTimeoutBody } from './fake-timeout-helper.ts';
+import { resolveTestPython } from '../helpers/python-interpreter.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const installer = join(repoRoot, 'deploy/scripts/install-host-dependencies.sh');
@@ -73,6 +74,7 @@ function installShellToolbox(bin: string): void {
 }
 
 function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
+  const realPython = resolveTestPython();
   const home = mkdtempSync(join(tmpdir(), 'whatsoup-host-install-'));
   roots.push(home);
   const bin = join(home, 'bin');
@@ -111,7 +113,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
     '[ "$1" != "-I" ] || shift',
     'case "${1:-}" in',
     "  --version) printf '%s\\n' 'Python 3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
-    "  -c) case \"$2\" in *platform.machine*) printf '%s\\n' \"${FAKE_PYTHON_ARCH:-arm64}\" ;; *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exit 2 ;; esac; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  -c) case \"$2\" in *platform.machine*) printf '%s\\n' \"${FAKE_PYTHON_ARCH:-arm64}\" ;; *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exec \"$WHATSOUP_TEST_REAL_PYTHON\" -I \"$@\" ;; esac; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',
@@ -120,7 +122,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
     '        cp "$0" "$3/bin/python"',
     '        chmod 755 "$3/bin/python"',
     '        ;;',
-    '      pip) printf "python %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER" ;;',
+    '      pip) printf "python %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER"; cat "${@: -1}" > "$WHATSOUP_TEST_LOCK_SNAPSHOT" ;;',
     '    esac',
     '    ;;',
     'esac',
@@ -144,6 +146,8 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
       HOME: home,
       PATH: bin,
       WHATSOUP_TEST_LEDGER: ledger,
+      WHATSOUP_TEST_REAL_PYTHON: realPython.includes('/') ? realPython : resolveHostTool(realPython),
+      WHATSOUP_TEST_LOCK_SNAPSHOT: join(home, 'validated-lock'),
       WHATSOUP_QUALITY_VENV: join(home, 'quality-venv'),
     },
   };
@@ -293,8 +297,10 @@ describe('explicit host dependency installer', () => {
     expect(ledger(fx)).toEqual([
       'brew install git python@3.13 ripgrep zsh shellcheck',
       `python -m venv ${join(fx.home, 'quality-venv')}`,
-      `python -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${join(repoRoot, 'requirements/python/quality-cpython313-darwin-arm64.txt')}`,
+      expect.stringMatching(/^python -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https:\/\/pypi\.org\/simple -r .+\/whatsoup-quality-cpython313-darwin-arm64\.txt\.[A-Za-z0-9]+$/),
     ]);
+    expect(readFileSync(join(fx.home, 'validated-lock'), 'utf8')).toContain('pytest==');
+    expect(readFileSync(join(fx.home, 'validated-lock'), 'utf8')).toContain('--hash=sha256:');
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });
 
