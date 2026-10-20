@@ -1314,7 +1314,17 @@ health while its retry is pending, including cycles throttled by the retry delay
 A daily helper exception also records a failure without preventing the sibling card.
 Packet reads canonicalize the configured state root, then use the durable JSON
 reader's private-directory checks and inclusive 8 MiB limit, rejecting symlinked
-packet directories and leaves. Printable packet fields and
+packet directories and leaves. A grouped line-card packet larger than 6 MiB is
+stored as a small index and SHA-256-addressed 512 KiB parts, each published through
+the same durable writer. The Ref still resolves to the complete packet, including
+every member's record and reconstructed notice. Reads verify the part count,
+byte lengths, hashes and notice identity before returning any evidence; missing
+or changed parts make the packet unavailable. The decoded aggregate is limited
+to 64 MiB. A packet above that budget stays pending and does not send a card.
+Parts are published and verified before the index; they retain an extra day
+beyond the configured packet retention period and share the bounded pruning
+scan. Reusing a part durably refreshes its last-reference timestamp so a newer
+index cannot outlive its evidence. Printable packet fields and
 keys are redacted; a separate SHA-256 notice identity keeps retries and distinct
 notices separate when their printable identifiers redact to the same text.
 An outbox packet's archive path is corrected to the actual collision-safe destination

@@ -9,6 +9,7 @@ retry metadata, poison quarantine, and state reporting.
 from __future__ import annotations
 
 import argparse
+import base64
 import calendar
 import errno
 import fcntl
@@ -5196,6 +5197,11 @@ NOTICE_PACKET_RETENTION_SECONDS = max(
     env_int("BOT_ERRORS_PACKET_RETENTION_SECONDS", NOTICE_PACKET_RETENTION_FLOOR_SECONDS),
 )
 NOTICE_PACKET_PRUNE_MAX = 500
+NOTICE_PACKET_INLINE_BYTES = 6 * 1024 * 1024
+NOTICE_PACKET_PART_BYTES = 512 * 1024
+NOTICE_PACKET_AGGREGATE_BYTES = 64 * 1024 * 1024
+NOTICE_PACKET_INDEX_KIND = "bot-errors-notice-packet-index"
+NOTICE_PACKET_PART_GRACE_SECONDS = 86400
 _BODY_FIELD_RE = re.compile(r"^  > (?P<label>[A-Za-z0-9_]+): ?(?P<value>.*)$")
 
 
@@ -5265,21 +5271,72 @@ def redacted_notice_value(value: Any) -> Any:
     return redact_dispatcher_text(value) if isinstance(value, str) else value
 
 
+def _read_notice_file(paths: dict[str, Path], path: Path) -> dict[str, Any] | None:
+    target = durable_json_target(
+        trusted_root=paths["root"].resolve(strict=True),
+        relative_path=path.relative_to(paths["root"]),
+    )
+    return observe_json(target, strict=True).payload
+
+
+def _packet_json_bytes(packet: Mapping[str, Any]) -> bytes:
+    rendered = json.dumps(packet, allow_nan=False, ensure_ascii=False,
+                          separators=(",", ":"), sort_keys=True)
+    # Encoding the parts must not relax the durable writer's integer/key rules.
+    pending: list[Any] = [packet]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, int) and abs(value) > (1 << 53) - 1:
+            raise ValueError("notice packet integer exceeds the durable JSON range")
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise ValueError("notice packet object keys must be strings")
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return rendered.encode("utf-8")
+
+
+def _read_notice_parts(paths: dict[str, Path], index: dict[str, Any], ref: str) -> dict[str, Any]:
+    size, digests = index.get("bytes"), index.get("parts")
+    if (type(size) is not int or not 0 < size <= NOTICE_PACKET_AGGREGATE_BYTES
+            or not isinstance(digests, list)
+            or len(digests) != (size + NOTICE_PACKET_PART_BYTES - 1) // NOTICE_PACKET_PART_BYTES):
+        raise ValueError("invalid notice packet part bounds")
+    raw = bytearray()
+    for number, digest in enumerate(digests):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ValueError("invalid notice packet part identity")
+        part = _read_notice_file(paths, paths["packets"] / f"{digest}.part.json")
+        if not isinstance(part, dict) or part.get("sha256") != digest:
+            raise ValueError("missing notice packet part")
+        data = part.get("data")
+        expected = min(NOTICE_PACKET_PART_BYTES, size - number * NOTICE_PACKET_PART_BYTES)
+        if not isinstance(data, str) or len(data) != 4 * ((expected + 2) // 3):
+            raise ValueError("invalid notice packet part size")
+        decoded = base64.b64decode(data, validate=True)
+        if len(decoded) != expected or hashlib.sha256(decoded).hexdigest() != digest:
+            raise ValueError("notice packet part digest mismatch")
+        raw.extend(decoded)
+    if hashlib.sha256(raw).hexdigest() != index.get("sha256"):
+        raise ValueError("notice packet aggregate digest mismatch")
+    packet = json.loads(raw)
+    if (not isinstance(packet, dict) or packet.get("kind") != NOTICE_PACKET_KIND
+            or packet.get("noticeKind") != "line-check-card" or packet.get("ref") != ref
+            or notice_packet_identity(packet) != notice_packet_identity(index)):
+        raise ValueError("notice packet index identity mismatch")
+    if _packet_json_bytes(packet) != raw:
+        raise ValueError("notice packet parts contain noncanonical JSON")
+    return packet
+
+
 def read_notice_packet(paths: dict[str, Path], ref: str) -> dict[str, Any] | None:
-    """The packet a Ref names, or None when there is none (or it is unreadable)."""
+    """Read a complete packet through confined, bounded durable JSON files."""
     try:
-        path = notice_packet_path(paths, ref)
-    except ValueError:
-        return None
-    try:
-        # Canonicalize only the configured trust root (for aliases such as
-        # macOS /tmp). Packet directories and leaves remain descriptor-relative
-        # and no-follow, with the writer's private modes and 8 MiB byte limit.
-        target = durable_json_target(
-            trusted_root=paths["root"].resolve(strict=True),
-            relative_path=path.relative_to(paths["root"]),
-        )
-        return observe_json(target, strict=True).payload
+        packet = _read_notice_file(paths, notice_packet_path(paths, ref))
+        if isinstance(packet, dict) and packet.get("kind") == NOTICE_PACKET_INDEX_KIND:
+            return _read_notice_parts(paths, packet, ref)
+        return packet
     except Exception:  # noqa: BLE001 - an unreadable packet reads as absent
         return None
 
@@ -5407,7 +5464,36 @@ def write_notice_packet(paths: dict[str, Path], packet: dict[str, Any]) -> Path:
         raise NoticeRefExhausted(f"notice Ref {ref} names a different notice; refusing to overwrite")
     if existing is None and (path.exists() or path.is_symlink()):
         raise RuntimeError(f"notice Ref {ref} holds an unreadable entry; refusing to overwrite")
-    require_all_advance([publish_notice_packet(path, packet, trusted_root=paths["root"])])
+    stored = packet
+    if packet.get("noticeKind") == "line-check-card":
+        raw = _packet_json_bytes(packet)
+        if len(raw) > NOTICE_PACKET_AGGREGATE_BYTES:
+            raise ValueError("line-card packet exceeds the aggregate evidence budget")
+        if len(raw) > NOTICE_PACKET_INLINE_BYTES:
+            digests = []
+            for start in range(0, len(raw), NOTICE_PACKET_PART_BYTES):
+                data = raw[start:start + NOTICE_PACKET_PART_BYTES]
+                digest = hashlib.sha256(data).hexdigest()
+                part = {"sha256": digest, "data": base64.b64encode(data).decode("ascii")}
+                part_path = paths["packets"] / f"{digest}.part.json"
+                ensure_private_dir(part_path.parent)
+                previous = _read_notice_file(paths, part_path)
+                if previous is not None and any(previous.get(key) != value for key, value in part.items()):
+                    raise ValueError("notice packet part already contains different evidence")
+                # Reused evidence must survive the newer index's retention window.
+                # A byte-identical durable publication would keep the old mtime.
+                part["lastReferencedAtEpoch"] = int(time.time())
+                require_all_advance([publish_notice_packet(part_path, part, trusted_root=paths["root"])])
+                digests.append(digest)
+            stored = {
+                "schemaVersion": 1, "kind": NOTICE_PACKET_INDEX_KIND,
+                "noticeIdSha256": notice_packet_identity(packet),
+                "noticeId": packet["noticeId"], "ref": ref,
+                "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "parts": digests,
+            }
+            # Verify all parts before publishing the Ref or authorizing a send.
+            _read_notice_parts(paths, stored, ref)
+    require_all_advance([publish_notice_packet(path, stored, trusted_root=paths["root"])])
     written = read_notice_packet(paths, ref)
     if written is None or notice_packet_identity(written) != notice_packet_identity(packet):
         raise RuntimeError(f"notice packet {ref} did not survive its own write")
@@ -5533,7 +5619,8 @@ def prune_notice_packets(paths: dict[str, Path], now: int | None = None) -> int:
                 continue
             try:
                 entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                if not stat.S_ISREG(entry.st_mode) or entry.st_mtime >= horizon:
+                cutoff = horizon - NOTICE_PACKET_PART_GRACE_SECONDS if name.endswith(".part.json") else horizon
+                if not stat.S_ISREG(entry.st_mode) or entry.st_mtime >= cutoff:
                     continue
                 os.unlink(name, dir_fd=directory_fd)
                 pruned += 1

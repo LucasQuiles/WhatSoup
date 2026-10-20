@@ -13,11 +13,13 @@ carry no chat ids, phone numbers of real lines, secrets or real host names.
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -755,6 +757,132 @@ def test_packet_reader_enforces_durable_json_byte_limit(state) -> None:
         handle.write(" ")
     assert _mod.read_notice_packet(state, "12345678") is None
     assert packet.stat().st_size == limit + 1
+
+
+def _part_packet(state, monkeypatch, evidence="évidence 🟡 " * 200):
+    monkeypatch.setattr(_mod, "NOTICE_PACKET_INLINE_BYTES", 1024)
+    monkeypatch.setattr(_mod, "NOTICE_PACKET_PART_BYTES", 512)
+    monkeypatch.setattr(_mod, "NOTICE_PACKET_AGGREGATE_BYTES", 128 * 1024)
+    event = _GOLDENS[0]["event"]
+    ref = _mod.allocate_notice_ref(state, event["id"])
+    packet = _mod.build_notice_packet(
+        event, ref=ref, notice_kind="line-check-card", card="daily card",
+        extra={"included": [{"evidence": evidence}]},
+    )
+    _mod.write_notice_packet(state, packet)
+    return ref, packet
+
+
+@settings(max_examples=21, deadline=None, database=None)
+@given(damage=st.sampled_from(["missing", "changed", "symlink", "part_count", "path", "identity", "digest"]),
+       offset=st.integers(min_value=0, max_value=511))
+@example(damage="missing", offset=0)
+@example(damage="changed", offset=0)
+@example(damage="symlink", offset=0)
+@example(damage="part_count", offset=0)
+@example(damage="path", offset=0)
+@example(damage="identity", offset=0)
+@example(damage="digest", offset=0)
+def test_packet_parts_fail_closed_on_incomplete_or_changed_evidence(damage, offset):
+    # Each generated corruption gets its own real store, so damaged evidence
+    # from a preceding example cannot make a later example pass vacuously.
+    with tempfile.TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        root = Path(directory)
+        patch.setenv("BOT_ERRORS_STATE_DIR", directory)
+        state = _mod.state_paths()
+        ref, packet = _part_packet(state, patch)
+        recovered = _mod.read_notice_packet(state, ref)
+        assert recovered["included"] == packet["included"]
+        index_path = _mod.notice_packet_path(state, ref)
+        index = json.loads(index_path.read_text())
+        part_path = state["packets"] / f'{index["parts"][0]}.part.json'
+        if damage == "missing":
+            part_path.unlink()
+        elif damage == "changed":
+            part = json.loads(part_path.read_text())
+            data = bytearray(base64.b64decode(part["data"]))
+            data[offset % len(data)] ^= 1
+            part["data"] = base64.b64encode(data).decode("ascii")
+            part_path.write_text(json.dumps(part))
+        elif damage == "symlink":
+            outside = root / "outside.json"
+            part_path.rename(outside)
+            part_path.symlink_to(outside)
+        else:
+            if damage == "part_count":
+                index["parts"] *= 2
+            elif damage == "path":
+                index["parts"][0] = "../outside"
+            elif damage == "identity":
+                index["noticeIdSha256"] = "0" * 64
+            else:
+                index["sha256"] = "0" * 64
+            index_path.write_text(json.dumps(index))
+        assert _mod.read_notice_packet(state, ref) is None
+
+
+def test_packet_parts_preserve_native_number_validation(state, monkeypatch):
+    ref, packet = _part_packet(state, monkeypatch)
+    before = _mod.notice_packet_path(state, ref).read_bytes()
+    packet["included"][0]["invalidCounter"] = 2 ** 53
+    with pytest.raises(ValueError):
+        _mod.write_notice_packet(state, packet)
+    assert _mod.notice_packet_path(state, ref).read_bytes() == before
+
+
+def test_packet_parts_refuse_aggregate_over_budget_before_publication(state, monkeypatch):
+    ref, packet = _part_packet(state, monkeypatch)
+    before = {p.name: p.read_bytes() for p in state["packets"].glob("*.json")}
+    packet["included"].append({"evidence": "x" * (128 * 1024)})
+    with pytest.raises(ValueError, match="aggregate"):
+        _mod.write_notice_packet(state, packet)
+    assert {p.name: p.read_bytes() for p in state["packets"].glob("*.json")} == before
+    assert _mod.read_notice_packet(state, ref)["included"] == packet["included"][:1]
+
+
+@pytest.mark.parametrize("age", [0, _mod.NOTICE_PACKET_RETENTION_SECONDS + 86401])
+def test_packet_parts_reused_by_new_index_survive_retention(state, monkeypatch, age):
+    now = int(time.time())
+    original_time = now - age
+    with monkeypatch.context() as clock:
+        clock.setattr(_mod.time, "time", lambda: original_time)
+        old_ref, packet = _part_packet(state, monkeypatch, evidence="." * 8192)
+    old_index = _mod.notice_packet_path(state, old_ref)
+    old_parts = set(json.loads(old_index.read_text())["parts"])
+    for path in state["packets"].glob("*.json"):
+        os.utime(path, (original_time, original_time))
+    event = dict(_GOLDENS[0]["event"], id=packet["noticeId"] + "-later")
+    new_ref = _mod.allocate_notice_ref(state, event["id"])
+    packet = _mod.build_notice_packet(
+        event, ref=new_ref, notice_kind="line-check-card", card="daily card",
+        extra={"included": packet["included"]},
+    )
+    with monkeypatch.context() as clock:
+        clock.setattr(_mod.time, "time", lambda: now)
+        _mod.write_notice_packet(state, packet)
+    new_index = json.loads(_mod.notice_packet_path(state, new_ref).read_text())
+    assert old_parts & set(new_index["parts"])
+    _mod.prune_notice_packets(state, now=now)
+    assert old_index.exists() is (age == 0)
+    _mod.prune_notice_packets(state, now=now + _mod.NOTICE_PACKET_RETENTION_SECONDS - 1)
+    assert _mod.read_notice_packet(state, new_ref) == packet
+
+
+def test_packet_parts_survive_parent_retention_and_then_retire(state, monkeypatch):
+    ref, _ = _part_packet(state, monkeypatch)
+    parts = list(state["packets"].glob("*.part.json"))
+    assert parts
+    now = int(time.time())
+    # Parts precede their index. The extra day prevents expiry while the
+    # index remains inside its guaranteed retention period.
+    old = now - _mod.NOTICE_PACKET_RETENTION_SECONDS - 60
+    for part in parts:
+        os.utime(part, (old, old))
+    assert _mod.prune_notice_packets(state, now=now) == 0
+    assert _mod.read_notice_packet(state, ref) is not None
+    expired = now + _mod.NOTICE_PACKET_RETENTION_SECONDS + 86401
+    assert _mod.prune_notice_packets(state, now=expired) == len(parts) + 1
+    assert list(state["packets"].glob("*.json")) == []
 
 
 def test_packet_reader_accepts_configured_root_alias(state, tmp_path) -> None:

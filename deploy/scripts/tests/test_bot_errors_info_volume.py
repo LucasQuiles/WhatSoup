@@ -493,6 +493,61 @@ def test_line_card_packet_keeps_every_field_of_each_members_old_notice(mod, pinn
         assert record["clearRequirement"][:60] in body
 
 
+def test_large_line_card_delivers_and_keeps_all_member_evidence(mod, pinned_clock):
+    # A valid incident state expands past the single-file packet limit when
+    # each member also retains its reconstructed notice and parsed body fields.
+    incidents = {
+        f"host-2|line-{index}|instance_logged_out": _physical(
+            OLD - 86400, OLD, fixtureDetail=f"record {index}: " + "evidence " * 280,
+        )
+        for index in range(2000)
+    }
+    _write_state(mod, incidents)
+    assert mod.state_paths()["incident_state"].stat().st_size < 8 * 1024 * 1024
+    assert len(mod.load_incident_state(mod.state_paths())["openIncidents"]) == 2000
+    sends = _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    [card] = sends
+    packet = mod.read_notice_packet(mod.state_paths(), card.rsplit("Ref: ", 1)[1])
+    members = {
+        member["incidentKey"]: member
+        for group in packet["included"]
+        for member in group["members"]
+    }
+    assert set(members) == set(incidents)
+    for key, record in incidents.items():
+        assert members[key]["record"]["fixtureDetail"] == record["fixtureDetail"]
+        assert key in members[key]["notice"]["body"]
+        assert members[key]["notice"]["bodyFields"]
+    assert len(json.dumps(packet, ensure_ascii=False).encode()) > 8 * 1024 * 1024
+    assert all(path.stat().st_size <= 8 * 1024 * 1024
+               for path in mod.state_paths()["packets"].glob("*.json"))
+    assert set(_state(mod)["openIncidents"]) == set(incidents)
+    assert _state(mod)["lineCheckCard"]["lastSentDay"] == DAY
+
+
+def test_line_card_part_write_failure_preserves_pending_members(mod, monkeypatch, pinned_clock):
+    incidents = _two_producer_pair("host-2", "far-pair-line")
+    _write_state(mod, incidents)
+    sends = _sends(mod)
+    monkeypatch.setattr(mod, "NOTICE_PACKET_INLINE_BYTES", 1024)
+    original = mod.publish_notice_packet
+
+    def fail_part(path, packet, *, trusted_root):
+        if path.name.endswith(".part.json"):
+            raise OSError("fixture storage unavailable")
+        return original(path, packet, trusted_root=trusted_root)
+
+    monkeypatch.setattr(mod, "publish_notice_packet", fail_part)
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 0
+    assert sends == []
+    assert set(_state(mod)["openIncidents"]) == set(incidents)
+    assert _state(mod)["lineCheckCard"]["lastAttemptAt"] == NOW
+    assert "lastSentDay" not in _state(mod)["lineCheckCard"]
+
+
 def test_a_member_whose_recheck_raises_keeps_its_record_and_old_notice(mod, monkeypatch, pinned_clock):
     # Relay 20 M2: the could-not-check member of a recheck that raised keeps
     # the record and the old notice like every other member (contract A).
