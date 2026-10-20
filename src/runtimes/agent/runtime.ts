@@ -826,6 +826,7 @@ export class AgentRuntime implements Runtime {
   private periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null = null; private periodicUsabilityProbeBackoff = 0;
   /** Epoch ms the armed periodic probe timer is due (same clock as checkedAt); null while no timer is armed. */
   private periodicUsabilityProbeDueAt: number | null = null;
+  private periodicUsabilityProbeTimeoutRetryArmed = false;
   // Consecutive failed recovery probes on the revert-timer EXTENSION path
   // (process-local, reset on deactivation — which a successful probe triggers).
   // Early-window standing probes do not count: nothing is extending yet.
@@ -3031,6 +3032,8 @@ export class AgentRuntime implements Runtime {
       set periodicUsabilityProbeBackoff(value) { runtime.periodicUsabilityProbeBackoff = value; },
       get periodicUsabilityProbeDueAt() { return runtime.periodicUsabilityProbeDueAt; },
       set periodicUsabilityProbeDueAt(value) { runtime.periodicUsabilityProbeDueAt = value; },
+      get periodicUsabilityProbeTimeoutRetryArmed() { return runtime.periodicUsabilityProbeTimeoutRetryArmed; },
+      set periodicUsabilityProbeTimeoutRetryArmed(value) { runtime.periodicUsabilityProbeTimeoutRetryArmed = value; },
       get shutdownRequested() { return runtime.shutdownRequested; },
       get fallbackProbeAttempts() { return runtime.fallbackProbeAttempts; },
       set fallbackProbeAttempts(value) { runtime.fallbackProbeAttempts = value; },
@@ -9609,27 +9612,30 @@ export class AgentRuntime implements Runtime {
   }
 
   /** The freshness window the live verdict is judged against: scheduler-derived
-   *  while the periodic probe is armed, the flat 30min otherwise. */
-  private modelUsabilityFreshnessMs(): number {
+   *  while the periodic probe is armed, the flat 30min otherwise. `checkedAt`
+   *  is the evidence's own receipt time (model usability by default). */
+  private modelUsabilityFreshnessMs(checkedAt: number | null = this.primaryModelUsability?.checkedAt ?? null): number {
     return resolveModelUsabilityFreshnessMs(
       this.periodicUsabilityProbeTimer !== null,
       periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
-      {
-        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
-        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
-      },
+      { nextProbeDueAt: this.periodicUsabilityProbeDueAt, checkedAt },
     );
   }
 
-  /** Freshness-honest identity verdict for /health, judged against the same
-   *  window as model usability (the identity check rides the same probe). */
+  /** Freshness-honest identity verdict for /health. The deadline is the same
+   *  next probe as model usability (the identity check rides it), but the
+   *  window starts at the identity receipt: a turn success refreshes the
+   *  usability checkedAt only, and must not age the identity receipt early. */
   private accountIdentityHealth(): AccountIdentityHealth {
+    const receipt = this.accountIdentity;
     return deriveAccountIdentityHealth({
       expectedConfigured: this.expectedAccountDigest !== null,
-      verification: this.accountIdentity,
+      verification: receipt,
       armedAtMs: this.accountIdentityArmedAt,
       nowMs: systemClock.now(),
-      freshnessMs: this.modelUsabilityFreshnessMs(),
+      freshnessMs: receipt !== null && receipt.status !== 'disabled'
+        ? this.modelUsabilityFreshnessMs(receipt.checkedAt)
+        : this.modelUsabilityFreshnessMs(),
     });
   }
 
@@ -9689,7 +9695,7 @@ export class AgentRuntime implements Runtime {
       this.pendingPostRevertConfirmation = false;
     }
     const wasStale = deriveModelUsable(this.primaryModelUsability, Date.now(), this.modelUsabilityFreshnessMs()).modelUsableStale;
-    this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual');
+    this.fallback.recordPrimaryModelUsability({ status: 'usable', provider: this.agentProvider, model: this.model ?? null, reason: 'turn-success' }, 'manual', 'turn-success');
     if (wasStale) log.info({ provider: this.agentProvider, model: this.model ?? null }, 'primary model usability refreshed by turn success after going stale');
   }
 
