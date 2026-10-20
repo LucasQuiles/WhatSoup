@@ -3,15 +3,33 @@ from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
-import test_bot_errors_info_volume as support
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+import test_bot_errors_info_volume as support  # noqa: E402
 
 mod = support.mod
 pinned_clock = support.pinned_clock
 _clean_env = support._clean_env
-_HEALTH_SCRIPT = Path(__file__).resolve().parents[1] / 'bot-errors-health-check.py'
+_HEALTH_SCRIPT = _TESTS_DIR.parent / 'bot-errors-health-check.py'
+
+
+def test_daily_recovery_module_imports_without_pytest_path_injection():
+    result = subprocess.run(
+        [sys.executable, '-I', '-c',
+         'import importlib.util, sys; '
+         'spec = importlib.util.spec_from_file_location("daily_recovery", sys.argv[1]); '
+         'module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)',
+         str(Path(__file__).resolve())],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @contextmanager
@@ -77,6 +95,38 @@ def dispatcher_health_line():
     assert spec.loader is not None
     spec.loader.exec_module(health)
     return next(line for line in health.queue_inventory() if 'dispatcher_state:' in line)
+
+
+@pytest.mark.parametrize('adopted', [False, True], ids=['compat', 'adopted'])
+@pytest.mark.parametrize('now', [support.SLOT - 60, support.NOW], ids=['before-slot', 'due'])
+def test_empty_information_summary_clears_retry_without_consuming_daily_slot(
+    mod, monkeypatch, pinned_clock, adopted, now,
+):
+    support._write_state(mod, {})
+    with daily_cycle(mod, adopted) as cycle:
+        state = cycle.payload if cycle else mod.load_incident_state(mod.state_paths())
+        state['informationSummary'] = {
+            'pending': [], 'lastAttemptAt': support.NOW, 'lastSentDay': '2026-10-15',
+        }
+        mod._commit_incident_state(mod.state_paths(), cycle, state)
+    tries = support._rpc_replies(mod, monkeypatch, [support.ACCEPTED])
+
+    assert invoke_daily(mod, adopted, 'informationSummary', now) == 0
+    section = persisted_section(mod, adopted, 'informationSummary')
+    assert 'lastAttemptAt' not in section
+    assert section['lastSentDay'] == '2026-10-15'
+    assert tries == []
+
+    with daily_cycle(mod, adopted) as cycle:
+        state = cycle.payload if cycle else mod.load_incident_state(mod.state_paths())
+        state['informationSummary']['pending'] = [{
+            'noticeId': 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            'noticeKind': 'observation', 'title': 'A later information notice', 'count': 1,
+        }]
+        mod._commit_incident_state(mod.state_paths(), cycle, state)
+    assert invoke_daily(mod, adopted, 'informationSummary', support.NOW) == 1
+    assert len(tries) == 1
+    assert persisted_section(mod, adopted, 'informationSummary')['lastSentDay'] == support.DAY
 
 
 @pytest.mark.parametrize('card', ['informationSummary', 'lineCheckCard'])

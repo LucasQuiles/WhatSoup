@@ -5817,8 +5817,13 @@ def send_daily_information_summary(
     incident_state = incident.payload if incident else load_incident_state(paths)
     section = _state_section(incident_state, INFO_SUMMARY_STATE_KEY)
     pending = [entry for entry in (section.get("pending") or []) if isinstance(entry, dict)]
+    if not pending:
+        if "lastAttemptAt" in section:
+            section.pop("lastAttemptAt")
+            _commit_incident_state(paths, incident, incident_state)
+        return 0
     day = daily_card_due_day(section, current)
-    if not pending or day is None:
+    if day is None:
         return 0
     lines = information_summary_lines(pending)
     dropped = section.get("droppedFromSummary")
