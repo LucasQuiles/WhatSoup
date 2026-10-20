@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -117,6 +117,8 @@ describe('python dependency lock guard', () => {
 
   it.each([
     ['direct pip', 'pip install pytest'],
+    ['case-insensitive pip', 'PiP3 install pytest'],
+    ['continued pip token', 'p\\\nip install pytest'],
     ['python module pip', 'python3 -m pip install pytest'],
     ['multiline shell pip', 'python3 -m pip install \\\n+      pytest'],
     ['workflow pip', 'run: python3 -m pip install pytest'],
@@ -341,5 +343,41 @@ describe('python dependency lock guard', () => {
     const violations = scanPythonDependencyLocks(root);
 
     expect(violations).toEqual([]);
+  });
+
+  it.each(['excluded-file', 'external-file', 'external-directory', 'dangling'] as const)(
+    'rejects an installer symlink to %s instead of silently skipping it',
+    (targetKind) => {
+      const root = makeFixture();
+      const external = makeFixture();
+      writePolicy(root);
+      writeValidLock(root);
+      write(root, 'docs/unlocked.sh', 'pip install pytest\n');
+      write(external, 'unlocked.sh', 'pip install pytest\n');
+      mkdirSync(join(root, 'scripts'));
+      const targets = {
+        'excluded-file': '../docs/unlocked.sh',
+        'external-file': join(external, 'unlocked.sh'),
+        'external-directory': external,
+        dangling: join(external, 'missing.sh'),
+      };
+      symlinkSync(targets[targetKind], join(root, 'scripts/install.sh'));
+
+      expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+        code: 'python-lock-scan-input',
+        path: 'scripts/install.sh',
+      }));
+    },
+  );
+
+  it('retains the explicit dependency-directory exclusion for a dependency symlink', () => {
+    const root = makeFixture();
+    const external = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(external, 'install.sh', 'pip install pytest\n');
+    symlinkSync(external, join(root, 'node_modules'), 'dir');
+
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
 });

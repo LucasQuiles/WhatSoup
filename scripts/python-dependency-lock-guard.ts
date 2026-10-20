@@ -152,7 +152,7 @@ function declaredLockPaths(policy: LockPolicy): Set<string> {
 }
 
 function logicalLines(text: string): string[] {
-  return text.replace(/\\\r?\n/g, ' ').split(/\r?\n/);
+  return text.replace(/\\\r?\n/g, '').split(/\r?\n/);
 }
 
 function validateLock(root: string, lockPath: string, violations: Violation[], budget: ScanBudget): void {
@@ -200,7 +200,10 @@ function* walk(root: string, directory: string, budget: ScanBudget, depth = 0): 
       const repoPath = asRepoPath(root, absolute);
       if (repoPath === 'scripts/python-dependency-lock-guard.ts'
         || EXCLUDED_PREFIXES.some((prefix) => repoPath.startsWith(prefix))) continue;
-      if (entry.isSymbolicLink()) continue;
+      if (entry.isSymbolicLink()) {
+        if (EXCLUDED_TOP_LEVEL.has(entry.name)) continue;
+        throw new ScanError('python-lock-scan-input', repoPath, 'symbolic link in scanned source');
+      }
       if (entry.isDirectory()) {
         if (!EXCLUDED_TOP_LEVEL.has(entry.name)) yield* walk(root, absolute, budget, depth + 1);
       } else if (entry.isFile()) {
@@ -305,7 +308,7 @@ function skipInvocationPrefixes(line: string, start: number): number {
 function findInstallCommands(text: string): string[] {
   const commands: string[] = [];
   for (const line of logicalLines(text)) {
-    if (line.trimStart().startsWith('#')) continue;
+    if (!/pip/i.test(line) || line.trimStart().startsWith('#')) continue;
     const modulePattern = /(?:^|[\s:;|&])-m\s+pip(?=\s)/gi;
     for (const match of line.matchAll(modulePattern)) {
       const argumentsText = commandAfterInstall(line, match.index + match[0].length);

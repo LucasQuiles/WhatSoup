@@ -121,9 +121,13 @@ jobs:
           whatsoup_run_bounded 180 sudo apt-get install -y ffmpeg
           bash scripts/run-locked-transcription-smoke.sh "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$RUNNER_TEMP/whatsoup-transcription-model"
 
-      - name: Build Docker deployment image
+      - name: Build Docker deployment image and load runtime providers
         timeout-minutes: 10
-        run: docker build --file docker/Dockerfile --tag whatsoup-ci .
+        run: |
+          docker build --file docker/Dockerfile --tag whatsoup-ci .
+          docker run --rm --network none --entrypoint node whatsoup-ci \
+            --experimental-strip-types --input-type=module \
+            --eval "const { transcribeAudio } = await import('./src/runtimes/chat/providers/transcription/chain.ts'); if (typeof transcribeAudio !== 'function') throw new Error('transcription entrypoint missing');"
 
       - name: Refresh PR base snapshot
         run: |

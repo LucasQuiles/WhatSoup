@@ -14,6 +14,7 @@ assignments or `env`. Its scan fails closed above 4 MiB per file, 64 MiB total
 read bytes, 10,000 directory entries, or 64 nested directories. Policy and lock
 reads share these bounds. Unreadable files and size changes detected while reading
 fail the scan; this is not an atomic snapshot of concurrent repository edits.
+Symbolic links in scanned source fail rather than being followed or silently skipped.
 Excluded documentation, tests and build/dependency directories are not scanned;
 an exceeded bound is a failure, not evidence that the remaining files are safe.
 
