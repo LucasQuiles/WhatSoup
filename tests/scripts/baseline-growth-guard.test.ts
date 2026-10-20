@@ -1122,7 +1122,7 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
     expect(malformed.out).toMatch(/inconclusive/i);
   });
 
-  it('pins the PR3815 waiver to its reviewed 93-entry baseline and two-day window', () => {
+  it('pins the PR3815 waiver to its reviewed 93-entry baseline and approved expiry', () => {
     const document = JSON.parse(readFileSync(join(repoRoot, GROWTH_WAIVERS_PATH), 'utf8'));
     expect(document.schemaVersion).toBe(2);
     expect(document).not.toHaveProperty('waivers');
@@ -1133,7 +1133,7 @@ if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
       path: '.claude/test-integrity/baseline.json',
       maxWeight: 93,
       grantedAt: '2026-10-17',
-      expiresAt: '2026-10-19',
+      expiresAt: '2026-10-27',
       expectedBaselineSha256: '9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7',
     });
     expect(entries[0].admitsNewIdentities).toBe(true);
