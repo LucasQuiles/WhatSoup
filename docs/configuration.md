@@ -1071,6 +1071,32 @@ The unified database retention sweep removes terminal rows older than 30 days an
 
 Authenticated `GET /health` exposes aggregate-only `outbound_sends`, `tool_durability`, and `retention.database` blocks. A failed database observation reports `readable: false` and null counts rather than manufacturing zero. No receipt, destination, provider ID, or error prose appears in these blocks.
 
+### Handoff artifact retention
+
+Agent fallback stores a per-conversation handoff artifact only for short-lived
+cross-provider continuity. Its summary, seeded artifact content, source provider,
+source model, and token baseline have one 24-hour eligibility cutoff. The canonical
+database-retention runner deletes rows whose `updated_at` is strictly older than
+that cutoff through deterministic statements of at most 100 rows, draining the
+eligible backlog during each successful sweep. It runs once immediately when the
+instance starts and then on the configured database-retention interval (daily by
+default). A row is therefore removed on the next successful sweep after it becomes
+eligible; a stopped process or failed sweep delays online deletion.
+`health.retention.database.lastResult.handoffArtifacts` is the count deleted by the
+most recent successful sweep. Databases without the optional agent table report zero
+for that field.
+
+The prompt-injection freshness TTL is separate from disk retention: a stale artifact
+is excluded from a prompt before its row necessarily becomes eligible for deletion.
+Chat clear, message revoke/delete, and the agent `/new` workspace reset also
+invalidate the affected conversation's artifact. The current application has no
+separate privacy-erasure event or API; any future privacy-erasure path must use the
+same artifact invalidation seam.
+
+This is online database deletion only. It does not erase bytes already present in
+SQLite backups, WAL copies, storage snapshots, or provider copies. Those copies
+follow their own backup-retention, destruction, and provider-data controls.
+
 ### `memory`
 
 `memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.
@@ -1796,7 +1822,7 @@ When the primary provider returns a usage-limit, rate-limit, auth-required, or m
 1. **Tears down, explains briefly, and continues when safe.** The in-flight session is killed and the user receives a one- or two-line notice naming the switch reason and backup model, for example: "_Primary model hit a token/quota limit; switching until about 3:00 PM. Backup: OpenCode / minimax/MiniMax-M2.7. I will continue here._" If fallback credentials are missing, the notice says an operator has been notified and does not promise continuation. Provider policy-block results deliberately do **not** activate fallback.
 2. **Arms a fallback window** (only when `fallbackProvider` or `fallbacks` is set). The first arm of a window (never an extension, and never the post-restart restore of a persisted window — the alert belongs to the original arm, once per window across restarts) raises the `provider_fallback_activated` operator alert carrying the reason, the selected entry's provider/model, and the window end; a post-restart restore instead raises `provider_fallback_restored` (the same window resuming — repeated restores are the crash-loop signature) carrying the original reason, the selected entry, the window end, and the resumed probe-attempt count; every deactivation of an active window raises `provider_fallback_reverted` carrying the revert reason (`window-elapsed`, `admin-disabled`, `primary-probe-ok`, ...), the window's own turn counts (served/empty during that window — not the process-lifetime totals), and the window duration; a completed replay raises `provider_fallback_replayed` carrying the reason and target entry (a failed replay raises only `runtime_provider_fallback_replay_failed` — never both for the same turn). The interrupted turn is replayed once on a freshly created fallback session only when the selected fallback target is usable and no tool side effects have started; it is not a general crash-replay path. Later sessions also route to that fallback until the window ends. With `fallbacks`, selection is static at arm/restore time: entries are checked in order for required key presence, the first eligible entry wins, and if every keyed entry is missing a key the runtime fails open to entry zero while alerting per-entry missing-key evidence. Usage-limit windows end at the reset time parsed from the provider message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. Rate-limit windows use the default rolling window. Auth-required windows stay armed until a background primary recovery probe succeeds: while the remaining window exceeds the recheck cadence a standing probe re-checks every `WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS` (early recovery), and once the window reaches its end each failed probe extends it by one recheck interval. After `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` consecutive failed extension probes (default 12) the first `fallback_recovery_stalled` operator alert fires, and then re-fires at every subsequent multiple of the threshold (2T, 3T, …) within the same stall episode, up to the `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE` escalation ceiling — cadenced re-surfacing without per-probe noise. The window keeps extending so the instance is never stranded on a dead primary. A second usage-limit hit while a window is active is tier-attributed by the failing session's route identity: a PRIMARY-tier hit extends the window (never shortens) and updates the stored reset time, while a FALLBACK-tier hit — the active entry's own session, or a prior chain entry's still-running session — advances the chain but preserves every window clock (the window end, the stored reset time, and the standing primary recovery-probe countdown stay untouched), because a fallback entry's reset estimate describes the fallback provider's quota, never the primary's. The same tier attribution governs every other classified failure class during a window: fallback-tier evidence can never extend the window, restart the recovery probe, or — while window state exists but the deadline has passed during an in-flight recovery probe — arm a new window over the probe's pending decision. **Probe-confirmed recovery is a typed transaction (DUR-02, honest re-scope):** the same fresh primary-usability result that ends the window also drives the revert, in one pass — the reused evidence (provider, model, status, `checkedAt`) is appended to that `provider_fallback_reverted` alert's evidence as `from_provider=… from_model=… to_provider=… to_model=… evidence_status=… evidence_provider=… evidence_model=… checked_at=… probe_validated=true post_revert_canary=not_run probe_attempts=N`. `probe_validated=true` is a genuine claim — the probe passed all three validation axes — but it is a PRE-revert check, not a post-revert canary (a real turn actually served through the reverted route); `post_revert_canary` is honestly `not_run` at receipt time because no such turn has happened yet. The SAME transaction clears `fallback_recovery_stalled` immediately if that stall episode had raised it (that incident is honestly about probe cadence, and a validated probe genuinely resolves it) — the stall clear is gated on `fallbackProbeAttempts` reaching `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` at deactivation time, true for ANY deactivation reason (not only a probe-confirmed one), so an admin-disable mid-stall clears it too, with honest `reason=… recovery=unconfirmed episode=abandoned` evidence instead of a receipt. `provider_fallback_activated`, however, stays open after a probe-confirmed revert until the real post-revert canary: the FIRST successful user turn served after the revert (outside any fallback window) clears it with `reason=post-revert-turn-success` evidence; a failing first post-revert turn leaves it open — no false "recovery confirmed" claim. A manual or window-elapsed deactivation (no receipt) clears `provider_fallback_activated` immediately, as it always has — it makes no probe-confirmed claim to defer. The transaction is instance-scoped only: it never reads or writes per-chat model pins, so a chat holding its own strict provider pin (`/model keep`) is unaffected by an instance-default revert.
 3. **Persists the window across restarts.** The window is written to the singleton `agent_fallback_state` SQLite table (`src/runtimes/agent/fallback-state-db.ts`) and re-armed on startup, so a restart mid-window resumes on the fallback provider. Restored windows are clamped to at most 24 hours from startup; expired, corrupt, or no-longer-applicable rows are cleared and startup proceeds on the primary. The original activation time is preserved across extensions and restores, and the recovery-probe attempt count is persisted in the same row (additive `probe_attempts` column; rows written by older builds read back as 0) so a restart mid-stall resumes the stall clock instead of resetting it — without this, frequent restarts could keep a dead primary below the stall threshold forever. Each restore raises the `provider_fallback_restored` operator alert.
-4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`) — but only for services with a verified probe endpoint: `anthropic`, `deepseek`, `minimax`, and `openai`. All other keyring services (`kimi`, `xai`, `groq`, `mistral`, `openrouter`, `google`, `fireworks-ai`, `togetherai`, ...) have no validity probe: the pre-flight returns `unknown` for them and degrades to the presence-only check, so `fallback_credential_invalid` cannot fire for those providers. The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
+4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`) — but only for services with a verified probe endpoint: `anthropic`, `deepseek`, `minimax`, and `openai`. All other keyring services (`kimi`, `xai`, `groq`, `mistral`, `openrouter`, `google`, `fireworks-ai`, `togetherai`, `zai-coding-plan`, `minimax-coding-plan`, ...) have no validity probe: the pre-flight returns `unknown` for them and degrades to the presence-only check, so `fallback_credential_invalid` cannot fire for those providers. The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
 5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block along with `effectiveProvider`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `primaryModelUsability`, and the recovery-probe telemetry `probeAttempts` (consecutive failed extension probes in the current stall episode) and `lastProbeAt` (epoch ms of the most recent recovery probe, `null` until one runs); counters are reset on restart. Transition totals are counted the same way — `fallbackActivations` (first arms only; extensions and post-restart restores excluded), `fallbackReverts`, and `fallbackReplays` are process-local lifetime totals in the same `instance` block, reset on restart like the turn counters. Provider-reported turn cost is counted too: when a result event carries a finite `costUsd` (opencode today) it is logged beside the token counts and, while a fallback window is active, accumulated into `fallbackWindowCostUsd` — a process-local lifetime total (same semantics as `fallbackTurnsServed`) in the same `instance` block answering "what has fallback serving cost this process". The fleet `GET /api/lines/:name/provider-status` route forwards the same fields under `fallback.probeAttempts` / `fallback.lastProbeAt` / `fallback.windowCostUsd` / `fallback.activations` / `fallback.reverts` / `fallback.replays` (`null` when the instance health predates them). A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal); the alert is deduplicated per chat using the `WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS` window so a sustained silent-bot episode does not flood the operator channel. Counters always increment regardless of the dedup. On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
 
 If no fallback activates for a rate-limit or model-unavailable terminal, the raw provider
@@ -1876,7 +1902,7 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    must be current-user regular files with private mode and bounded size;
    symlinks and loose modes are refused.
 
-   **Route A — environment variable (universal).**
+   **Route A — environment variable (unmanaged processes only).**
    Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):
 
    | Provider service | Environment variable |
@@ -1892,42 +1918,64 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    | `google`        | `GOOGLE_API_KEY`    |
    | `fireworks-ai`  | `FIREWORKS_API_KEY` |
    | `togetherai`    | `TOGETHER_API_KEY`  |
+   | `zai-coding-plan` | `ZHIPU_API_KEY`   |
+   | `minimax-coding-plan` | `MINIMAX_API_KEY` |
 
    Service names are opencode's models.dev provider ids — the prefix of the
    configured fallback model (`xai/grok-4` → `xai`). Note the catalog spells
    them `fireworks-ai` and `togetherai` (not `fireworks` / `together`). The
+   coding-plan ids are separate services: `zai-coding-plan/<model>` reads
+   `ZHIPU_API_KEY` (not the `glm` row's `ZAI_API_KEY`), and
+   `minimax-coding-plan/<model>` has its own keychain and `auth.json` entry
+   even though it shares `MINIMAX_API_KEY`. The
    same service name is the keychain service for Routes B and C below.
 
-   For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
-   ```ini
-   # ~/.config/systemd/user/whatsoup@<name>.service.d/fallback-key.conf
-   [Service]
-   Environment="MINIMAX_API_KEY=sk-…"
-   # or: EnvironmentFile=%h/.config/whatsoup/<name>.env
-   ```
-   For **launchd** managed instances, add an `EnvironmentVariables` key to the plist (plists are generated in-process by `buildPlist()` in `src/fleet/platform.ts`; to regenerate and redeploy, follow [macOS launchd deployment](runbooks/macos-launchd-deployment.md)):
-   ```xml
-   <key>EnvironmentVariables</key>
-   <dict>
-     <key>MINIMAX_API_KEY</key>
-     <string>sk-…</string>
-   </dict>
-   ```
+   **Managed instances cannot rely on Route A.** Both service managers start the
+   instance through the `deploy/whatsoup` wrapper (`deploy/whatsoup@.service`
+   `ExecStart`, and the generated launchd plist's `ProgramArguments`). The
+   wrapper unsets every variable in this table before anything else runs, then
+   re-resolves only the keys it supplies itself from the secure stores: the
+   chat-instance keys, `OPENAI_API_KEY`/`PINECONE_API_KEY` for agent instances,
+   and the one handoff-distiller key. On the ordinary path, with no
+   `WHATSOUP_HANDOFF_DISTILL_MODEL`, a provider key set only through a systemd
+   `Environment=`/`EnvironmentFile=` or a launchd `EnvironmentVariables` entry
+   therefore never reaches the runtime, and a fallback that needs it raises
+   `fallback_credential_missing`. Do not remove the scrub to work around this.
 
-   **launchd caveat:** generated plists emit `PATH`/`HOME`/`TMPDIR`
-   (+`WHATSOUP_NODE`, and — when configured through the instance
-   [`service` block](#service-launchd-render-options) — `CLAUDE_CONFIG_DIR`
-   plus a `pathPrepend`-extended `PATH`) in `EnvironmentVariables`
-   (`buildPlist()`, `src/fleet/platform.ts`). There is no `EnvironmentFile`
-   equivalent to the systemd units' per-instance `tokens.env`, so a hand-added
-   key outside that governed set (e.g. a credential variable) is LOST on the
-   next `deploy:launchd.generated` regeneration. On macOS prefer Route B: API-provider keys are read
-   in-process at request time, so the keychain entry alone is sufficient —
-   no plist edit needed. Grant the service user's launchd context access to
-   the item (`security add-generic-password -U …` under that user); keychain
-   reads from a non-GUI launchd session fail when the login keychain is
-   locked, which surfaces as `fallback_credential_missing` / QR-104 env
-   fallback rather than an explicit error.
+   One exception is deliberate. When an agent instance sets
+   `WHATSOUP_HANDOFF_DISTILL_MODEL`, the wrapper restores that model's one
+   variable (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY` or `ZAI_API_KEY`): from the
+   `deepseek`, `minimax` or `zai` keyring entry first, otherwise from the value
+   the service manager supplied. Runtime lookup reads the environment first, so
+   every service mapped to that variable then uses it. `minimax-coding-plan`
+   shares `MINIMAX_API_KEY`, so with a `MiniMax-*` distiller the restored value
+   shadows the separate `minimax-coding-plan` file, keyring or `auth.json`
+   entry: when the two keys differ, a `minimax-coding-plan` fallback sends the
+   distiller's key.
+
+   Provision managed instances through one of the stores the runtime reads after
+   the environment:
+
+   - **Private credential file:** `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`
+     (default `~/.config/whatsoup/credentials/`), owned by the service user,
+     mode `0600`, holding only the key (for example `zai-coding-plan.key`).
+   - **Platform keyring:** Route B or Route C below.
+   - **OpenCode login:** the `auth.json` entry stored under the provider id
+     (`opencode auth login`, default `~/.local/share/opencode/auth.json`).
+
+   **Health-probe caveat:** the BOT ERRORS provider probe
+   (`deploy/scripts/bot-errors-health-check.py`) reads the loaded LaunchAgent
+   environment, which is the wrapper's input before the scrub. An environment-only
+   key can therefore make that probe pass while the managed runtime has no key.
+   A passing probe is not evidence that Route A provisioning works for a managed
+   instance.
+
+   On macOS prefer Route B. API-provider keys are read in-process at request
+   time, so the keychain entry alone is sufficient and no plist edit is needed.
+   Grant the service user's launchd context access to the item
+   (`security add-generic-password -U …` under that user). Keychain reads from a
+   non-GUI launchd session fail when the login keychain is locked, which
+   surfaces as `fallback_credential_missing` rather than an explicit error.
 
    **Route B — macOS Keychain.**
    The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:

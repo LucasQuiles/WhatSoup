@@ -38,6 +38,11 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
   google: 'GOOGLE_API_KEY',
   'fireworks-ai': 'FIREWORKS_API_KEY',
   togetherai: 'TOGETHER_API_KEY',
+  // Coding-plan catalogue ids. Each keeps its own service name (matching
+  // opencode's auth.json entry) and the env var opencode reads for it, which
+  // differs from the glm row for zai-coding-plan.
+  'zai-coding-plan': 'ZHIPU_API_KEY',
+  'minimax-coding-plan': 'MINIMAX_API_KEY',
   pinecone: 'PINECONE_API_KEY',
   elevenlabs: 'ELEVENLABS_API_KEY',
   'whatsoup-health-token': 'WHATSOUP_HEALTH_TOKEN',
@@ -57,6 +62,7 @@ export const SERVICE_ENV_MAP: Record<string, string> = {
 export const PROVIDER_API_KEY_SERVICES: ReadonlySet<string> = new Set([
   'anthropic', 'openai', 'deepseek', 'minimax', 'kimi', 'glm', 'xai', 'groq',
   'mistral', 'openrouter', 'google', 'fireworks-ai', 'togetherai',
+  'zai-coding-plan', 'minimax-coding-plan',
 ]);
 
 export function resolveProviderKeyService(

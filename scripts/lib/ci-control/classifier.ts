@@ -98,6 +98,7 @@ export const CLASSIFIER_RUNTIME_SOURCE_PATHS = [
   'scripts/lib/ci-control/git-blob-input.ts',
   'scripts/lib/ci-control/git-input-core.ts',
   'scripts/lib/ci-control/git-input.ts',
+  'scripts/lib/ci-control/input-limits.ts',
   'scripts/lib/ci-control/manifest.ts',
   'scripts/lib/ci-control/reasons.ts',
   'scripts/lib/ci-control/ref-policy.ts',
