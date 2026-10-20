@@ -9,5 +9,13 @@
   ],
   "sourcePrefixes": ["src/"],
   "excludedSuffixes": [".d.ts"],
-  "allowlist": []
+  "allowlist": [
+    {
+      "path": "src/core/substrate/sqlite-trigger-worker.ts",
+      "owner": "substrate-trigger-poller",
+      "reason": "Spawned TypeScript worker owned by poller.ts and pinned in deploy/source-runtime-manifest.json; the static import graph does not model child-process entrypoints.",
+      "expiresOn": "2027-01-31",
+      "reentryCondition": "Remove when semantic reachability follows declared spawned entrypoints from production roots."
+    }
+  ]
 }
