@@ -76,6 +76,35 @@ afterEach(() => {
 });
 
 describe('transcribeWithFasterWhisper', () => {
+  beforeEach(() => {
+    runCommandMock.mockResolvedValueOnce({ stdout: 'cpython:3.13.16\n' });
+  });
+
+  it.each(['cpython:3.12.12', 'cpython:3.13.15', 'cpython:3.13.17', 'pypy:3.13.16', '', 'unexpected output'])(
+    'rejects runtime identity %j before normalization and model execution',
+    async (identity) => {
+      existsSyncMock.mockReturnValue(true);
+      runCommandMock.mockReset().mockResolvedValueOnce({ stdout: identity });
+
+      await expect(transcribeWithFasterWhisper(audioBuffer, 'audio/ogg'))
+        .rejects.toThrow('CPython 3.13.16 is required');
+      expect(withNormalizedAudioFileMock).not.toHaveBeenCalled();
+      expect(runCommandMock).toHaveBeenCalledTimes(1);
+      expect(runCommandMock).toHaveBeenCalledWith(
+        FAKE_PYTHON, ['-I', '-c', expect.stringContaining('sys.implementation.name')], 5_000,
+      );
+    },
+  );
+
+  it('propagates a failed runtime probe without normalizing audio', async () => {
+    existsSyncMock.mockReturnValue(true);
+    runCommandMock.mockReset().mockRejectedValueOnce(new Error('Command timed out after 5000ms'));
+    await expect(transcribeWithFasterWhisper(audioBuffer, 'audio/ogg'))
+      .rejects.toThrow('Command timed out after 5000ms');
+    expect(withNormalizedAudioFileMock).not.toHaveBeenCalled();
+    expect(runCommandMock).toHaveBeenCalledTimes(1);
+  });
+
   it('throws when no python binary is resolvable (env unset, venv missing)', async () => {
     delete process.env.WHATSOUP_FASTER_WHISPER_PYTHON;
     existsSyncMock.mockReturnValue(false);
@@ -103,8 +132,8 @@ describe('transcribeWithFasterWhisper', () => {
       'audio/ogg',
       expect.any(Function),
     );
-    expect(runCommandMock).toHaveBeenCalledTimes(1);
-    const [bin, args, timeout] = runCommandMock.mock.calls[0] as [string, string[], number];
+    expect(runCommandMock).toHaveBeenCalledTimes(2);
+    const [bin, args, timeout] = runCommandMock.mock.calls[1] as [string, string[], number];
     expect(bin).toBe(FAKE_PYTHON);
     expect(args).toEqual([
       expect.stringMatching(/scripts\/transcribe-faster-whisper\.py$/),
@@ -153,7 +182,7 @@ describe('transcribeWithFasterWhisper', () => {
     );
 
     await expect(transcribeWithOverride(audioBuffer, 'audio/ogg')).resolves.toBe('x');
-    const [, args] = runCommandMock.mock.calls[0] as [string, string[], number];
+    const [, args] = runCommandMock.mock.calls[1] as [string, string[], number];
     expect(args).toEqual([
       expect.stringMatching(/scripts\/transcribe-faster-whisper\.py$/),
       '--input',

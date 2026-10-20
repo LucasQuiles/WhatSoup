@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import pythonLockPolicy from '../../../../../requirements/python/lock-policy.json' with { type: 'json' };
 import { createChildLogger } from '../../../../logger.ts';
 import { runCommand, withNormalizedAudioFile } from './local-audio.ts';
 import type { TranscriptionProvider } from './types.ts';
@@ -33,6 +34,15 @@ export async function transcribeWithFasterWhisper(buffer: Buffer, mimeType: stri
   const pythonBin = resolvePython();
   if (!pythonBin) throw new Error('faster-whisper python runtime is not installed');
   if (!existsSync(SCRIPT_PATH)) throw new Error(`faster-whisper wrapper missing at ${SCRIPT_PATH}`);
+
+  const { stdout: identity } = await runCommand(pythonBin, [
+    '-I', '-c',
+    'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")',
+  ], 5_000);
+  const expected = `${pythonLockPolicy.runtime.implementation}:${pythonLockPolicy.runtime.version}`;
+  if (identity.trim() !== expected) {
+    throw new Error(`faster-whisper CPython ${pythonLockPolicy.runtime.version} is required; found ${identity.trim().slice(0, 200) || 'unknown'}`);
+  }
 
   return await withNormalizedAudioFile(buffer, mimeType, async (wavPath) => {
     const { stdout } = await runCommand(

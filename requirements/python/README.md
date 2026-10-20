@@ -49,6 +49,18 @@ SHA-256 checks, and selects the interpreter and local model explicitly. The test
 fails if a prerequisite is missing and cannot fall back to another provider.
 The ordinary optional shared-chain test remains separate from this required lane.
 This smoke check covers runtime compatibility; it does not qualify every model.
+Ordinary transcription also checks the selected interpreter in isolated mode
+against `lock-policy.json` before normalizing audio or starting the model. A wrong
+implementation, patch version, failed probe or five-second timeout rejects that
+provider attempt. Termination can take an additional two-second grace period
+before SIGKILL. An explicit interpreter override does not bypass the check.
+
+On 2026-10-20, the transcription input added `av<19` because faster-whisper 1.2.1
+passes `metadata_errors` to `av.open`, an argument removed in PyAV 19
+([upstream issue](https://github.com/SYSTRAN/faster-whisper/issues/1589)).
+All four transcription locks were regenerated with the commands below and
+`uv 0.11.1`. Each lock records its exact resolved version and hashes. The required
+Linux and macOS audio checks remain the compatibility acceptance boundary.
 
 The transcription installer bounds pip to 600 seconds and the model download to
 600 seconds, with a 15-second connect limit, three redirects, HTTPS-only
