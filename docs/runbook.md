@@ -792,9 +792,10 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
     current cached walk (a `stale` digest is not a re-read), for
     `auth_failure.*`;
   - for `enrichment_stale`, an enrichment run with a valid, not-future time
-    inside the staleness bound that is newer than the run seen when the latch
-    point was last set. The same run reading fresh again because the clock
-    moved is not a re-probe;
+    inside the staleness bound that is newer than the newest run seen at the
+    arm or at any advance of the latch point. An advance never lowers that
+    baseline, and one that sees no run keeps it. The same run reading fresh
+    again because the clock moved is not a re-probe;
   - a reported, non-degraded memory state, for each `memory_*` family;
   - the late sources, which are read on every evaluation:
     `durability_evidence_unreadable` needs both durability ledgers readable,
@@ -809,8 +810,16 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   when the set is empty, or when what is left is turn-provable and a turn
   receipt proves it. Any other evaluation, including a failed one, restarts
   every window, and so does a source that stops reporting, because that is
-  silence and not a clean read. Elapsed time with no evaluation releases
-  nothing, because a window needs a clean re-probe at both ends. The window
+  silence and not a clean read. The evaluations that restart it are the
+  ones that throw (`health check failed`, HTTP 500) or report any status
+  reason. A probe that fails quietly does not restart the window: its
+  `probe_availability` entry reads `false`, its fallback value is used, and
+  no status reason is raised (`messages`, `pending_access_list`,
+  `schema_version`). No re-probe source reads those values. A failed `outbound_sends` or
+  `tool_durability` read is not quiet: it raises
+  `durability_evidence_unreadable`, which restarts every window. Elapsed
+  time with no evaluation releases nothing, because a window needs a clean
+  re-probe at both ends. The window
   runs on the monotonic clock, so a wall-clock step neither shortens nor
   lengthens it. The window counts evaluations, not polls. Every authenticated
   `GET /health` is an evaluation, whoever sends it (the fleet poller every
@@ -819,8 +828,11 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   nothing. So the number of polls inside one window depends on who polls;
   release needs at least two clean evaluations, one at each end. Reasons
   without a direct probe keep the proof they needed before. These are the
-  turn-pipeline reasons, child-reported runtime and
-  `enrichment_runtime_degraded`, the identity reasons, and `schema_future`.
+  turn-pipeline reasons, child-reported runtime (a passive or Chat
+  `runtime_degraded` or `runtime_unhealthy` among them) and
+  `enrichment_runtime_degraded`, the identity reasons, `schema_future`, and
+  `fact_export_consumer_missing`, whose failed read falls back to an idle
+  state that looks clean.
 - **Restart amnesia (known hazard, not a channel).** The latch is
   process-lifetime, in-memory state: a process restart clears it without any
   recovery proof. Nothing treats a restart as proof; the loss is a documented
@@ -830,8 +842,10 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   underlying condition is fixed and the process restarts, even after a later
   evaluation stops reporting it. Examples are `runtime.recent_crashes`,
   `runtime.turn_queue_halted`, `enrichment_runtime_degraded`, a passive or
-  Chat instance's `runtime_degraded`, the identity reasons, and
-  `schema_future`. On an agent instance, `turn_capability_degraded` and
+  Chat instance's `runtime_degraded` or `runtime_unhealthy`, the identity
+  reasons, `schema_future`, and `fact_export_consumer_missing`. The late
+  reasons among them never arm a latch, but they join one that is already
+  armed. On an agent instance, `turn_capability_degraded` and
   `agent_runtime_*` leave only through a turn receipt, and only when every
   reason left in the set is turn-provable. Each such source needs its own
   positive clear read before it can join the re-probe.

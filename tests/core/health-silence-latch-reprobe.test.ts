@@ -611,6 +611,31 @@ describe('GET /health — passive silence latch released by direct re-probe (#35
     expectReleased(await p.poll());
   });
 
+  it('(1) scenario A: a pending_polls read that fails on a later poll joins an auth latch, and both release once clean', async () => {
+    const p = await openPassive('passive-scenario-a');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    const [, setPendingPollsBad] = lateReasonTable.find(([reason]) => reason === 'pending_polls_unreadable')!;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+    // A later poll: the bond is clean, and one pending_polls read fails.
+    advance(WINDOW_MS / 2);
+    p.setBond(authBond());
+    setPendingPollsBad(p, true);
+    expect((await p.poll()).status_reasons).toEqual(['degradation_silence_unproven', 'pending_polls_unreadable']);
+    expect(latchJoinedLines(callsBefore)).toEqual([{
+      instance: 'passive-scenario-a',
+      reasons: ['pending_polls_unreadable'],
+      latched: ['auth_failure.auth_bond_at_risk', 'pending_polls_unreadable'],
+    }]);
+    // Both clean from here: one window, opened by the first clean poll.
+    setPendingPollsBad(p, false);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
   it('(2) a stale enrichment run that reads fresh again only because the clock moved is not a new run', async () => {
     const p = await openPassive('passive-enrichment-same-run');
     p.setEnrichment({ lastRun: new Date(Date.now() - 11 * 60_000).toISOString() });
@@ -623,6 +648,31 @@ describe('GET /health — passive silence latch released by direct re-probe (#35
     advance(WINDOW_MS);
     expectLatched(await p.poll());
     // A run newer than the one seen at the latch point is the witness.
+    p.setEnrichment({ lastRun: new Date(Date.now()).toISOString() });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it('(2) an advance that sees no enrichment run keeps the run seen before as the baseline', async () => {
+    const p = await openPassive('passive-enrichment-baseline-kept');
+    const staleRun = new Date(Date.now() - 11 * 60_000).toISOString();
+    p.setEnrichment({ lastRun: staleRun });
+    expect((await p.poll()).status_reasons).toEqual(['enrichment_stale']);
+    // A later evaluation advances the latch with no run reported at all.
+    p.setEnrichment({ lastRun: null });
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    expect((await p.poll()).status_reasons).toContain('auth_failure.auth_bond_at_risk');
+    // The same run comes back, and a backward clock step makes it read fresh.
+    p.setBond(authBond());
+    p.setEnrichment({ lastRun: staleRun });
+    vi.setSystemTime(Date.now() - 10 * 60_000);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    // Only a run newer than that one is the witness.
     p.setEnrichment({ lastRun: new Date(Date.now()).toISOString() });
     expectLatched(await p.poll());
     advance(WINDOW_MS);
@@ -782,7 +832,9 @@ describe('releaseDegradationLatchOnReprobe — the re-probe release contract', (
       'runtime.credential_identity_mismatch',
       'enrichment_runtime_degraded',
       'runtime_degraded',
+      'runtime_unhealthy',
       'schema_future',
+      'fact_export_consumer_missing',
     ]) {
       const map = latch([reason]);
       expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);

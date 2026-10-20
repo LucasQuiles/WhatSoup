@@ -8504,9 +8504,10 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
     const h = await buildLatchHarness();
     try {
       await seedTurnClassLatch(h);
-      // A full-visibility evaluation replaces the latched set with the reasons
-      // it observes. When the backoff is the ONLY reason, latching it would
-      // swap a provable set for an unprovable one.
+      // Every evaluation that observes real reasons unions them into the
+      // latched set (#3562). The backoff is directly re-probed, so it never
+      // joins: latching it would add a reason no turn can prove to a
+      // turn-provable set.
       h.setRuntimeSnapshot('degraded', ['auto_compact_backoff']);
       const second = JSON.parse((await healthReq(h.port)).body);
       expect(second.status).toBe('degraded');
@@ -8823,6 +8824,39 @@ describe('silence-latch release on fresh primary-turn receipt (#2280)', () => {
       advanceClock(1000);
       h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
       expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+    } finally {
+      await new Promise<void>((resolve) => h.server.close(() => resolve()));
+    }
+  });
+
+  it('(#3562) an evaluation that narrows by re-probe and then releases by turn receipt names nothing it released as remaining', async () => {
+    const h = await buildLatchHarness();
+    try {
+      const callsBefore = healthLogger.info.mock.calls.length;
+      h.setAuthBond(makeAuthBond({ issues: ['auth_mode_chmod_failed:creds.json:EPERM'], treeProvenance: treeProvenance() }));
+      h.setTurnCapability(degradedTurnCapability());
+      const armed = await poll(h);
+      expect(armed.status_reasons).toContain('auth_failure.auth_bond_at_risk');
+      expect(armed.status_reasons).toContain('turn_capability_degraded');
+      h.setAuthBond(walkedCleanBond());
+      h.setTurnCapability(null);
+      expect(latchState(await poll(h))).toEqual(LATCHED_STATE);
+      // One evaluation: the auth window ends, so the re-probe narrows the set to
+      // the turn-class reason, and the fresh receipt then releases that.
+      advanceClock(MINUTE_MS);
+      h.setTurnCapability(receiptTurnCapability(harnessNow(), 'claude-cli'));
+      expect(latchState(await poll(h))).toEqual(RELEASED_STATE);
+      const lines = healthLogger.info.mock.calls.slice(callsBefore);
+      const narrowed = lines
+        .filter((call) => call[1] === 'degradation silence latch narrowed: direct re-probe')
+        .map((call) => call[0] as { reasons: string[]; remaining: string[] });
+      const released = lines
+        .filter((call) => call[1] === 'degradation silence latch released: fresh primary-turn receipt')
+        .map((call) => call[0] as { reasons: string[] });
+      expect(released.map(({ reasons }) => reasons)).toEqual([['turn_capability_degraded']]);
+      expect(narrowed.map(({ reasons, remaining }) => ({ reasons, remaining }))).toEqual([
+        { reasons: ['auth_failure.auth_bond_at_risk'], remaining: [] },
+      ]);
     } finally {
       await new Promise<void>((resolve) => h.server.close(() => resolve()));
     }

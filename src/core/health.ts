@@ -248,10 +248,12 @@ export interface DegradationLatchEntry {
    * absent when no reason has one. latchedAtMs stays wall time, because the
    * turn-receipt channel compares it with a wall-clock receipt. */
   reprobeClearSinceMs?: ReadonlyMap<string, number>;
-  /** The enrichment run time (epoch ms, as the run reported it) seen when the
-   * latch point was last set, or null when no valid run was reported then. The
-   * re-probe needs a run newer than this one before `enrichment_stale` counts
-   * as clear; absent means nothing was recorded, and no run counts as new. */
+  /** The newest enrichment run time (epoch ms, as the run reported it) seen
+   * at the arm or at any advance of the latch point, or null when no valid
+   * run was reported at any of them. An advance never lowers it, and one that
+   * sees no run keeps it. The re-probe needs a run newer than this one before
+   * `enrichment_stale` counts as clear; absent means nothing was recorded,
+   * and no run counts as new. */
   enrichmentRunAtLatchMs?: number | null;
 }
 
@@ -489,9 +491,24 @@ function latchedReasonReprobedClear(reason: string, evidence: LatchReprobeEviden
   if (reason === 'schema_not_ready') return evidence.schemaReady;
   if (reason === 'pending_polls_unreadable') return evidence.pendingPollsReadable;
   // No direct probe: the turn pipeline (turn-receipt proof only), child-reported
-  // runtime and enrichment-runtime state, identity, schema_future and the other
-  // late sources. Such a reason holds the latch until the process restarts.
+  // runtime and enrichment-runtime state (a passive or Chat runtime_degraded /
+  // runtime_unhealthy among them), identity, schema_future and
+  // fact_export_consumer_missing, whose failed read falls back to a clean-looking
+  // idle state. Such a reason holds the latch until the process restarts.
   return false;
+}
+
+/** #3562: the enrichment run baseline an ADVANCE records. It never moves back:
+ * the later of the recorded run and this evaluation's run, and the recorded
+ * one when this evaluation reports no valid run. Otherwise an advance that
+ * saw no run would leave a null baseline, which accepts the old run again. */
+function advancedEnrichmentRunBaseline(
+  recorded: number | null | undefined,
+  current: number | null,
+): number | null | undefined {
+  if (current === null) return recorded;
+  if (recorded === undefined || recorded === null) return current;
+  return Math.max(recorded, current);
 }
 
 /** #3562: the release channel for latched reasons that no turn receipt can
@@ -2595,11 +2612,17 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       // #2280: true when the degraded evaluation path observed an EARLY-path
       // reason the latch may hold (isLatchable), captured at that point: the
       // gate for ARMING a new latch. The unhealthy short-circuit branches never
-      // arm. Late-source reasons do not open the gate (they are directly
-      // probed every evaluation, not silence-prone, so a transient late blip
-      // must clear to healthy on the next poll), and neither does an early
-      // reason kept out of the latch: beside one, a late reason never latched
-      // alone, and keeping a reason out must not make it an arming trigger.
+      // arm. Late-source reasons do not open the gate, so with no latch a
+      // transient late blip clears to healthy on the next poll. With a latch
+      // armed, a late reason joins it like any other (the union below):
+      // durability_evidence_unreadable, database_retention_failed,
+      // schema_not_ready and pending_polls_unreadable then need their own
+      // clean read across the re-probe window, and the late reasons with no
+      // re-probe (fact_export_consumer_missing, schema_future, a passive or
+      // Chat runtime_degraded / runtime_unhealthy) hold until restart. Nor
+      // does an early reason kept out of the latch open the gate: beside one,
+      // a late reason never latched alone, and keeping a reason out must not
+      // make it an arming trigger.
       let latchArmEligible = false;
       // #2280: a release earlier in THIS evaluation is provisional — if a
       // late-computed reason turns up before emit, latch maintenance RESTORES
@@ -3099,9 +3122,11 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
       //   ARM (no latch): only when the full-visibility degraded path saw a
       //     latchable EARLY-path reason (latchArmEligible), and only when the
       //     FINAL verdict is degraded. Late-source reasons never arm on their
-      //     own — they are directly probed every evaluation, not
-      //     silence-prone, so a transient late blip clears to healthy on the
-      //     next poll — nor beside an early reason the latch cannot hold. An
+      //     own, so with no latch a transient late blip clears to healthy on
+      //     the next poll; nor do they arm beside an early reason the latch
+      //     cannot hold. With a latch armed they join it (ADVANCE): see
+      //     latchArmEligible for which then need a re-probe window and which
+      //     hold until restart. An
       //     unhealthy final verdict never arms either
       //     (unhealthy verdicts advance/restore only): arming there would
       //     contradict that scoping, and when a late reassignment like
@@ -3120,10 +3145,14 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
               'degradation silence latch reasons added',
             );
           }
+          const baselineRun = advancedEnrichmentRunBaseline(
+            latchBeforeEvaluation.enrichmentRunAtLatchMs,
+            enrichmentRunMs,
+          );
           recentlyDegraded.set(deps.instanceName, {
             latchedAtMs: systemClock.now(),
             reasons,
-            enrichmentRunAtLatchMs: enrichmentRunMs,
+            ...(baselineRun === undefined ? {} : { enrichmentRunAtLatchMs: baselineRun }),
           });
         } else if (latchArmEligible && status === 'degraded') {
           const reasons = new Set(realReasons);
@@ -3365,7 +3394,8 @@ export function startHealthServer(deps: HealthDeps): ReturnType<typeof createSer
             {
               instance: deps.instanceName,
               reasons: [...reprobeNarrowed].sort(),
-              remaining: [...(recentlyDegraded.get(deps.instanceName)?.reasons ?? releasedLatch?.reasons ?? [])].sort(),
+              // The final state: empty when the turn receipt released the rest.
+              remaining: [...(recentlyDegraded.get(deps.instanceName)?.reasons ?? [])].sort(),
               proof: 'direct_reprobe',
             },
             'degradation silence latch narrowed: direct re-probe',
