@@ -96,7 +96,7 @@ resolve_python() {
   candidates+=(python3.13 python3)
   for candidate in "${candidates[@]}"; do
     if command -v "$candidate" >/dev/null 2>&1 \
-      && "$candidate" -c 'import venv' >/dev/null 2>&1 \
+      && whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$candidate" -I -c 'import venv' >/dev/null 2>&1 \
       && whatsoup_require_locked_python "$candidate"; then
       command -v "$candidate"
       return 0

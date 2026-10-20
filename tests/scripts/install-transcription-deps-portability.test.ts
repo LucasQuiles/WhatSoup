@@ -242,11 +242,16 @@ describe('install-transcription-deps.sh — resolve_python', () => {
 
   it('honours a qualified WHATSOUP_TRANSCRIPTION_PYTHON override', () => {
     const shim = makeTempRoot('itd-qualified-py-');
+    const probes = path.join(shim, 'probes');
     writeExecutable(shim, 'python3.13', [
       '#!/bin/sh',
-      '[ "$1" != "-I" ] || shift',
-      'case "$1" in',
-      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exit 0 ;; esac ;;",
+      '[ "$1" = "-I" ] || exit 91',
+      'shift',
+      '[ "$1" = "-c" ] || exit 92',
+      'case "$2" in',
+      `  'import venv') printf '%s\\n' capability >> "${probes}" ;;`,
+      `  *implementation*) printf '%s\\n' identity >> "${probes}"; printf '%s\\n' 'cpython:3.13.16' ;;`,
+      '  *) exit 93 ;;',
       'esac',
     ].join('\n'));
     const res = runWithHelpers(
@@ -255,6 +260,38 @@ describe('install-transcription-deps.sh — resolve_python', () => {
     );
     expect(res.status).toBe(0);
     expect(res.stdout.trim()).toBe(path.join(shim, 'python3.13'));
+    expect(fs.readFileSync(probes, 'utf8')).toBe('capability\nidentity\n');
+  });
+
+  it('does not import ambient startup or venv modules while selecting Python', () => {
+    const root = makeTempRoot('itd-python-import-isolation-');
+    const identity = spawnSync('python3', ['-I', '-c', 'import sys; print(".".join(map(str, sys.version_info[:3])))'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    expect(identity.status, identity.stderr).toBe(0);
+    for (const module of ['sitecustomize', 'venv']) {
+      fs.writeFileSync(path.join(root, `${module}.py`),
+        `from pathlib import Path\nPath(${JSON.stringify(path.join(root, `${module}-executed`))}).touch()\n`);
+    }
+    const res = runWithHelpers(
+      `cd "${root}"\nWHATSOUP_LOCKED_PYTHON_VERSION="${identity.stdout.trim()}" WHATSOUP_TRANSCRIPTION_PYTHON=python3 PYTHONPATH="${root}" resolve_python`,
+    );
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.existsSync(path.join(root, 'sitecustomize-executed'))).toBe(false);
+    expect(fs.existsSync(path.join(root, 'venv-executed'))).toBe(false);
+  });
+
+  it('does not execute a capability probe when its budget is exhausted', () => {
+    const shim = makeTempRoot('itd-python-probe-budget-');
+    const marker = path.join(shim, 'executed');
+    for (const name of ['python3.13', 'python3']) {
+      writeExecutable(shim, name, `#!/bin/sh\nprintf started > "${marker}"\nexit 0\n`);
+    }
+    const res = runWithHelpers('WHATSOUP_PYTHON_PROBE_TIMEOUT=0 resolve_python', shim, false);
+    expect(res.status).not.toBe(0);
+    expect(res.stdout.trim()).toBe('');
+    expect(fs.existsSync(marker)).toBe(false);
   });
 
   it('fails closed when no candidate has the locked CPython identity', () => {

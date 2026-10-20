@@ -16,7 +16,7 @@ An x86_64 interpreter under Rosetta uses the `darwin-x64` lock even on an
 ARM-capable Mac. A failed or unsupported interpreter architecture probe stops
 installation before pip runs. The probe runs in isolated mode so ambient Python
 paths cannot replace the platform module used for lock selection.
-Installer identity and architecture probes, and the host doctor's exact Python
+Installer capability, identity and architecture probes, and the host doctor's exact Python
 identity probe, use a five-second budget through the shared shell supervisor.
 `WHATSOUP_PYTHON_PROBE_TIMEOUT` overrides that budget; expiration fails the probe
 and reaps its process group, with a further termination grace period.
@@ -104,7 +104,7 @@ regenerating every target after changing either input or the approved runtime po
 
 ```bash
 PYTHON_31316=/path/to/cpython-3.13.16/bin/python3.13
-"$PYTHON_31316" -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
+"$PYTHON_31316" -I -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
 uv pip compile requirements/python/quality-cpython313.in \
   --output-file requirements/python/quality-cpython313-linux-x64.txt \
   --generate-hashes --only-binary :all: --python "$PYTHON_31316" \
