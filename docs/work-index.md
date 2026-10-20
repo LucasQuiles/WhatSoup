@@ -78,7 +78,7 @@ scoped markdown files currently on disk.
 |------|------|-------|----------|
 | `docs/sdlc/convention-map.md` | doc | sdlc | 2026-10-04 |
 | `docs/superpowers/handoffs/2026-07-28-incident-control-plane-finder-report.md` | handoff | incident-control-plane-finder-report | 2026-07-28 |
-| `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | headless-fallback-runtime-alignment | 2026-07-15 |
+| `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | headless-fallback-runtime-alignment | 2026-10-06 |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | boundary-validator-ci-refactor | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-17-macos-credential-durability.md` | plan | macos-credential-durability | 2026-07-17 |
 | `docs/superpowers/plans/2026-07-23-agent-reliability-remediation-implementation.md` | plan | agent-reliability-remediation-implementation | 2026-07-27 |
@@ -91,7 +91,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/plans/2026-07-29-pr-metadata-guard.md` | plan | pr-metadata-guard | 2026-07-31 |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | host-setup-portability | 2026-08-06 |
 | `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | fallback-continuity | 2026-08-12 |
-| `docs/superpowers/plans/2026-08-14-operational-health-recovery-debt.md` | plan | operational-health-recovery-debt | 2026-09-25 |
+| `docs/superpowers/plans/2026-08-14-operational-health-recovery-debt.md` | plan | operational-health-recovery-debt | 2026-10-06 |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | plan | loop-lag-safe-forensic-pipeline | 2026-08-16 |
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | poisoned-direct-send-rejection | 2026-08-20 |
 | `docs/superpowers/plans/2026-08-21-anonymous-health-projection-ceiling.md` | plan | anonymous-health-projection-ceiling | 2026-08-21 |
@@ -100,15 +100,15 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-07-23-agent-reliability-remediation-design.md` | spec | agent-reliability-remediation-design | 2026-07-27 |
 | `docs/superpowers/specs/2026-07-28-bot-errors-durability-stack-design.md` | spec | bot-errors-durability-stack-design | 2026-08-03 |
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | spec | chat-queue-admission-design | 2026-07-29 |
-| `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | incident-control-plane-design | 2026-07-28 |
-| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | incident-ingestion-surface-design | 2026-07-30 |
+| `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | incident-control-plane-design | 2026-10-06 |
+| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | incident-ingestion-surface-design | 2026-10-06 |
 | `docs/superpowers/specs/2026-07-29-incident-evaluator-core-design.md` | spec | incident-evaluator-core-design | 2026-07-31 |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | maybe-sent-ambiguity-episode-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | portable-startup-notification-protocol-design | 2026-07-30 |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | fallback-continuity-design | 2026-08-12 |
-| `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |
-| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | anonymous-health-projection-ceiling-design | 2026-08-21 |
+| `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | loop-lag-safe-forensic-pipeline-design | 2026-10-06 |
+| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | anonymous-health-projection-ceiling-design | 2026-10-06 |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | fleet-lifecycle-observability-standard-design | 2026-08-27 |
 | `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |
 
@@ -176,39 +176,39 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
 | `docs/superpowers/plans/2026-04-04-colony-orchestration-phase1.md` | plan | closed | body-marker | colony-orchestration-phase1 | 2026-06-20 | current workspace runtime topology, tmup operating docs, and repo `CLAUDE.md` for active coordination rules. |
-| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | completed | body-marker | phase4-m2-websocket-console | 2026-06-20 | PR #310 (WS ticket + rotatable tokens), PR #287 (HTTP API token auth), `README.md`, `docs/public-surface.md`, `docs/runbook.md`, and `docs/runbooks/`. |
+| `docs/superpowers/plans/2026-04-05-phase4-m2-websocket-console.md` | plan | completed | body-marker | phase4-m2-websocket-console | 2026-10-06 | PR #310 (WS ticket + rotatable tokens), PR #287 (HTTP API token auth), `README.md`, `docs/public-surface.md`, `docs/runbook.md`, and `docs/runbooks/`. |
 | `docs/superpowers/plans/2026-04-05-phase4-realtime-performance.md` | plan | closed | body-marker | phase4-realtime-performance | 2026-06-20 | PR #310 (WS ticket + rotatable tokens), PR #287 (HTTP API token auth), `README.md`, `docs/public-surface.md`, `docs/runbook.md`, and `docs/runbooks/`. |
-| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | completed | body-marker | phase5-analytics-observability | 2026-06-20 | `README.md`, `docs/public-surface.md`, `src/core/metrics-collector.ts`, `src/fleet/routes/metrics.ts`, `src/fleet/routes/fleet-metrics.ts`, and `console/src/pages/LineDetail.tsx`. |
-| `docs/superpowers/plans/2026-04-05-sp1-media-access.md` | plan | completed | body-marker | sp1-media-access | 2026-04-24 |  |
-| `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md` | plan | completed | body-marker | sp2-content-completeness | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-phase5-analytics-observability.md` | plan | completed | body-marker | phase5-analytics-observability | 2026-10-06 | `README.md`, `docs/public-surface.md`, `src/core/metrics-collector.ts`, `src/fleet/routes/metrics.ts`, `src/fleet/routes/fleet-metrics.ts`, and `console/src/pages/LineDetail.tsx`. |
+| `docs/superpowers/plans/2026-04-05-sp1-media-access.md` | plan | completed | body-marker | sp1-media-access | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-04-05-sp2-content-completeness.md` | plan | completed | body-marker | sp2-content-completeness | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-04-05-sp3-search-enhancement.md` | plan | completed | body-marker | sp3-search-enhancement | 2026-04-24 |  |
-| `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-04-24 |  |
-| `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | completed | body-marker | scheduled-groups-tabs | 2026-06-20 | `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below. |
-| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | completed | body-marker | anti-echo-session-controls | 2026-06-12 |  |
-| `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-04-24 |  |
+| `docs/superpowers/plans/2026-04-05-sp4-two-way-voice.md` | plan | completed | body-marker | sp4-two-way-voice | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-04-06-scheduled-groups-tabs.md` | plan | completed | body-marker | scheduled-groups-tabs | 2026-10-06 | `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below. |
+| `docs/superpowers/plans/2026-04-07-anti-echo-session-controls.md` | plan | completed | body-marker | anti-echo-session-controls | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-04-07-fleet-charts.md` | plan | deferred | body-marker | fleet-charts | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-04-25-operation-tracker.md` | plan | completed | body-marker | operation-tracker | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-04-25-pr-0a-transport-contract-foundation.md` | plan | completed | body-marker | pr-0a-transport-contract-foundation | 2026-05-12 |  |
 | `docs/superpowers/plans/2026-05-29-harness-maintenance.md` | plan | completed | body-marker | harness-maintenance | 2026-05-29 |  |
-| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-06-11 |  |
+| `docs/superpowers/plans/2026-06-10-twilio-sms-transport.md` | plan | completed | body-marker | twilio-sms-transport | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-06-11-twilio-voice-webhook.md` | plan | completed | body-marker | twilio-voice-webhook | 2026-06-11 |  |
-| `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md` | plan | completed | body-marker | d20-provider-keychain-unlock-policy | 2026-06-20 |  |
-| `docs/superpowers/plans/2026-06-13-outstanding-burndown.md` | plan | completed | body-marker | outstanding-burndown | 2026-06-13 |  |
+| `docs/superpowers/plans/2026-06-13-d20-provider-keychain-unlock-policy.md` | plan | completed | body-marker | d20-provider-keychain-unlock-policy | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-06-13-outstanding-burndown.md` | plan | completed | body-marker | outstanding-burndown | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-06-13-provider-errpreview-sanitization.md` | plan | completed | body-marker | provider-errpreview-sanitization | 2026-06-20 |  |
-| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | completed | body-marker | python-deploy-redaction-ssot | 2026-06-20 |  |
-| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | completed | body-marker | verification-reliability-residuals | 2026-06-20 |  |
-| `docs/superpowers/plans/2026-06-16-handoff-distiller-wiring.md` | plan | completed | body-marker | handoff-distiller-wiring | 2026-06-20 |  |
-| `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md` | plan | pending | body-marker | architecture-and-verification-quality | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-09-console-truthful-session-update-and-send-ux.md` | plan | pending | body-marker | console-truthful-session-update-and-send-ux | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-09-delivery-audit-and-idempotency.md` | plan | pending | body-marker | delivery-audit-and-idempotency | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-09-durable-inbound-and-reply-guarantee.md` | plan | pending | body-marker | durable-inbound-and-reply-guarantee | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md` | plan | pending | body-marker | health-recovery-and-self-update | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | plan | pending | body-marker | metrics-realtime-and-watch-completeness | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-07-10 |  |
+| `docs/superpowers/plans/2026-06-13-python-deploy-redaction-ssot.md` | plan | completed | body-marker | python-deploy-redaction-ssot | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-06-13-verification-reliability-residuals.md` | plan | completed | body-marker | verification-reliability-residuals | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-06-16-handoff-distiller-wiring.md` | plan | completed | body-marker | handoff-distiller-wiring | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-architecture-and-verification-quality.md` | plan | pending | body-marker | architecture-and-verification-quality | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-console-truthful-session-update-and-send-ux.md` | plan | pending | body-marker | console-truthful-session-update-and-send-ux | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-delivery-audit-and-idempotency.md` | plan | pending | body-marker | delivery-audit-and-idempotency | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-durable-inbound-and-reply-guarantee.md` | plan | pending | body-marker | durable-inbound-and-reply-guarantee | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-health-recovery-and-self-update.md` | plan | pending | body-marker | health-recovery-and-self-update | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-metrics-realtime-and-watch-completeness.md` | plan | pending | body-marker | metrics-realtime-and-watch-completeness | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-09-outbound-governor-and-flood-observability.md` | plan | pending | body-marker | outbound-governor-and-flood-observability | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-07-09-privacy-erasure-and-media-confinement.md` | plan | pending | body-marker | privacy-erasure-and-media-confinement | 2026-07-10 |  |
-| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-07-12 |  |
-| `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | unknown | body-marker | headless-fallback-runtime-alignment | 2026-07-15 |  |
-| `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | plan | pending | body-marker | semantic-boundary-foundation | 2026-07-16 |  |
-| `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | plan | pending | body-marker | boundary-contract-feedback-hardening | 2026-07-17 |  |
+| `docs/superpowers/plans/2026-07-11-central-hub-release-proof-pilot.md` | plan | active | body-marker | central-hub-release-proof-pilot | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-15-headless-fallback-runtime-alignment.md` | plan | unknown | body-marker | headless-fallback-runtime-alignment | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-15-semantic-boundary-foundation.md` | plan | pending | body-marker | semantic-boundary-foundation | 2026-10-06 |  |
+| `docs/superpowers/plans/2026-07-16-boundary-contract-feedback-hardening.md` | plan | pending | body-marker | boundary-contract-feedback-hardening | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-07-16-boundary-core-history-provenance.md` | plan | pending | body-marker | boundary-core-history-provenance | 2026-07-16 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-exit-parser-codeql-hardening.md` | plan | active | body-marker | boundary-exit-parser-codeql-hardening | 2026-07-17 |  |
 | `docs/superpowers/plans/2026-07-17-boundary-validator-ci-refactor.md` | plan | unknown | fallback | boundary-validator-ci-refactor | 2026-07-17 |  |
@@ -233,7 +233,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/plans/2026-08-03-watchdog-auth-required-contract.md` | plan | active | body-marker | watchdog-auth-required-contract | 2026-08-04 |  |
 | `docs/superpowers/plans/2026-08-06-host-setup-portability.md` | plan | unknown | fallback | host-setup-portability | 2026-08-06 |  |
 | `docs/superpowers/plans/2026-08-07-fallback-continuity.md` | plan | unknown | fallback | fallback-continuity | 2026-08-12 |  |
-| `docs/superpowers/plans/2026-08-14-operational-health-recovery-debt.md` | plan | unknown | fallback | operational-health-recovery-debt | 2026-09-25 |  |
+| `docs/superpowers/plans/2026-08-14-operational-health-recovery-debt.md` | plan | unknown | fallback | operational-health-recovery-debt | 2026-10-06 |  |
 | `docs/superpowers/plans/2026-08-14-outbound-queue-quiescence-containment.md` | plan | active | body-marker | outbound-queue-quiescence-containment | 2026-08-20 |  |
 | `docs/superpowers/plans/2026-08-15-loop-lag-safe-forensic-pipeline.md` | plan | unknown | fallback | loop-lag-safe-forensic-pipeline | 2026-08-16 |  |
 | `docs/superpowers/plans/2026-08-15-poisoned-direct-send-rejection.md` | plan | unknown | fallback | poisoned-direct-send-rejection | 2026-08-20 |  |
@@ -282,8 +282,8 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-28-bot-errors-durability-stack-design.md` | spec | unknown | body-marker | bot-errors-durability-stack-design | 2026-08-03 |  |
 | `docs/superpowers/specs/2026-07-28-chat-queue-admission-design.md` | spec | unknown | fallback | chat-queue-admission-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-controller-state-recovery-integrity-design.md` | spec | completed | body-marker | controller-state-recovery-integrity-design | 2026-07-29 |  |
-| `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | unknown | body-marker | incident-control-plane-design | 2026-07-28 | BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path. |
-| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | unknown | body-marker | incident-ingestion-surface-design | 2026-07-30 |  |
+| `docs/superpowers/specs/2026-07-28-incident-control-plane-design.md` | spec | unknown | body-marker | incident-control-plane-design | 2026-10-06 | BOT ERRORS WhatsApp-transport-centric delivery (dispatcher/collector file+SSH architecture) as the canonical incident path. |
+| `docs/superpowers/specs/2026-07-28-incident-ingestion-surface-design.md` | spec | unknown | body-marker | incident-ingestion-surface-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-07-28-primary-probe-cancellation-design.md` | spec | completed | body-marker | primary-probe-cancellation-design | 2026-07-29 |  |
 | `docs/superpowers/specs/2026-07-28-runtime-health-signal-dispositions-design.md` | spec | active | body-marker | runtime-health-signal-dispositions-design | 2026-07-28 |  |
 | `docs/superpowers/specs/2026-07-28-turn-recovery-safety-design.md` | spec | active | body-marker | turn-recovery-safety-design | 2026-07-31 |  |
@@ -291,15 +291,15 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-07-29-launchd-restart-policy-2682-design.md` | spec | active | body-marker | launchd-restart-policy-2682-design | 2026-09-28 |  |
 | `docs/superpowers/specs/2026-07-29-maybe-sent-ambiguity-episode-design.md` | spec | unknown | fallback | maybe-sent-ambiguity-episode-design | 2026-07-30 |  |
 | `docs/superpowers/specs/2026-07-29-portable-startup-notification-protocol-design.md` | spec | unknown | body-marker | portable-startup-notification-protocol-design | 2026-07-30 |  |
-| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-08-12 |  |
+| `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | active | body-marker | watchdog-auth-required-contract-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-06-host-setup-portability-and-macos-reconciliation-design.md` | spec | unknown | body-marker | host-setup-portability-and-macos-reconciliation-design | 2026-08-06 |  |
 | `docs/superpowers/specs/2026-08-07-fallback-continuity-design.md` | spec | unknown | body-marker | fallback-continuity-design | 2026-08-12 |  |
-| `docs/superpowers/specs/2026-08-14-operational-health-recovery-debt-design.md` | spec | pending | body-marker | operational-health-recovery-debt-design | 2026-09-25 |  |
+| `docs/superpowers/specs/2026-08-14-operational-health-recovery-debt-design.md` | spec | pending | body-marker | operational-health-recovery-debt-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | spec | active | body-marker | outbound-queue-quiescence-containment-design | 2026-08-20 |  |
-| `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | unknown | body-marker | loop-lag-safe-forensic-pipeline-design | 2026-08-16 |  |
+| `docs/superpowers/specs/2026-08-15-loop-lag-safe-forensic-pipeline-design.md` | spec | unknown | body-marker | loop-lag-safe-forensic-pipeline-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | active | body-marker | recovery-blocked-follower-lifecycle-design | 2026-08-16 |  |
 | `docs/superpowers/specs/2026-08-17-recovery-authority-store-concurrency-containment-design.md` | spec | completed | body-marker | recovery-authority-store-concurrency-containment-design | 2026-08-22 |  |
-| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-08-21 |  |
+| `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | unknown | body-marker | fleet-lifecycle-observability-standard-design | 2026-08-27 |  |
 | `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | unknown | fallback | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |  |
 
@@ -315,11 +315,11 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
-| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-09-25 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-09-25 |  |
-| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-09-25 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | active | body-marker | design | 2026-10-06 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/requirements.md` | spec | active | body-marker | requirements | 2026-10-06 |  |
+| `docs/superpowers/specs/provider-event-lifecycle/tasks.md` | spec | active | body-marker | tasks | 2026-10-06 |  |
 
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-10-06T05:39:09Z from commit `59cc562bc437e8692b14889df075341e036aa988`
+- Generated at 2026-10-14T19:37:33Z from commit `bd6a91ad7c8722b34f5dff828c1690d4a51f2a1b`

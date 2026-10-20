@@ -22,6 +22,7 @@ const LEGACY_FIELD_MAPPINGS: ReadonlyArray<{ from: string; to: string }> = [
   { from: 'enrichmentDedupThreshold', to: 'memory.enrichment.dedupThreshold' },
   { from: 'enrichmentMaxRetries', to: 'memory.enrichment.maxRetries' },
   { from: 'pineconeApiKeyEnv', to: 'memory.pinecone.apiKeyEnv' },
+  { from: 'pineconeApiKeyService', to: 'memory.pinecone.apiKeyService' },
   { from: 'pineconeProjectId', to: 'memory.pinecone.projectId' },
   { from: 'pineconeExpectedHostSuffix', to: 'memory.pinecone.expectedHostSuffix' },
   { from: 'pineconeIndex', to: 'memory.pinecone.index' },

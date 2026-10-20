@@ -1140,6 +1140,20 @@ export class PineconeMemory {
     }
   }
 
+  async upsertDirectMemory(
+    records: MemoryRecord[],
+    context: {
+      operationId?: string;
+      traceId?: string;
+      beforeProviderAttempt: () => void | Promise<void>;
+    },
+  ): Promise<void> {
+    return this.upsert(records, {
+      ...context,
+      operation: 'memory_write',
+    });
+  }
+
   async upsert(
     records: MemoryRecord[],
     contextInput: {
@@ -1147,6 +1161,7 @@ export class PineconeMemory {
       traceId?: string;
       operation?: 'upsert' | 'memory_write';
       signal?: AbortSignal;
+      beforeProviderAttempt?: () => void | Promise<void>;
     } = {},
   ): Promise<void> {
     return pineconeOperationSignal.run(
@@ -1162,6 +1177,7 @@ export class PineconeMemory {
       traceId?: string;
       operation?: 'upsert' | 'memory_write';
       signal?: AbortSignal;
+      beforeProviderAttempt?: () => void | Promise<void>;
     } = {},
   ): Promise<void> {
     contextInput.signal?.throwIfAborted();
@@ -1217,7 +1233,9 @@ export class PineconeMemory {
 
     const pineconeRecords = records.map(toPineconeRecord);
     const startMs = Date.now();
-    const doUpsert = () => {
+    const doUpsert = async () => {
+      contextInput.signal?.throwIfAborted();
+      await contextInput.beforeProviderAttempt?.();
       contextInput.signal?.throwIfAborted();
       return this.index.upsertRecords({ records: pineconeRecords });
     };
@@ -1269,6 +1287,33 @@ export class PineconeMemory {
         throw new AppError('Pinecone upsert failed', 'PINECONE_UNAVAILABLE', retryErr);
       }
     }
+  }
+
+  /**
+   * Erase a direct-memory record from the configured index's default namespace.
+   * It deliberately shares the upsert path's project guard; a mismatched key
+   * must never delete or inspect another Pinecone project.
+   */
+  async deleteRemoteMemoryRecord(recordId: string, signal?: AbortSignal): Promise<void> {
+    await pineconeOperationSignal.run(signal, async () => {
+      const projectGuardError = await this.getProjectGuardError();
+      if (projectGuardError) {
+        throw new AppError('Pinecone project guard failed', 'PINECONE_UNAVAILABLE', projectGuardError);
+      }
+      await this.index.deleteOne({ id: recordId });
+    });
+  }
+
+  /** True only when the configured default namespace currently returns the record. */
+  async remoteMemoryRecordExists(recordId: string, signal?: AbortSignal): Promise<boolean> {
+    return pineconeOperationSignal.run(signal, async () => {
+      const projectGuardError = await this.getProjectGuardError();
+      if (projectGuardError) {
+        throw new AppError('Pinecone project guard failed', 'PINECONE_UNAVAILABLE', projectGuardError);
+      }
+      const response = await this.index.fetch({ ids: [recordId] });
+      return Boolean((response as { records?: Record<string, unknown> }).records?.[recordId]);
+    });
   }
 
   async checkDuplicate(

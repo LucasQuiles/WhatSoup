@@ -10,11 +10,11 @@ import { registerAllTools } from '../../src/mcp/register-all.ts';
 import type { ConnectionManager } from '../../src/transport/connection.ts';
 import type { ToolDeclaration } from '../../src/mcp/types.ts';
 
-// Baseline tool count for a non-Pinecone build.
+// Baseline tool count when direct-memory write credentials are unavailable.
 // Bumped from a loose `>= 100` to an exact baseline so a missing module is detected.
-// 165 always-registered + 1 conditional `knowledge_search` when Pinecone is configured.
-// resume_trigger (#3608) raised the baseline from 165 to 166.
-const BASELINE_TOOL_COUNT = 166;
+// `erase_remote_memory` remains available with a configured index so stalled
+// provider reconciliation cannot be hidden by an unavailable write credential.
+const BASELINE_TOOL_COUNT = 167;
 
 // ---------------------------------------------------------------------------
 // Minimal ConnectionManager mock — mirrors what tool-registration.test.ts uses

@@ -120,6 +120,7 @@ export interface MemoryConfig {
   };
   pinecone: {
     apiKeyEnv: string;
+    apiKeyService?: string;
     projectId?: string;
     expectedHostSuffix?: string;
     index: string;
@@ -1116,6 +1117,7 @@ export function resolveMemoryConfig(rawSource: Record<string, unknown> | null | 
     },
     pinecone: {
       apiKeyEnv: stringProp(pinecone, 'apiKeyEnv') ?? DEFAULT_PINECONE_API_KEY_ENV,
+      apiKeyService: stringProp(pinecone, 'apiKeyService'),
       projectId: stringProp(pinecone, 'projectId') ?? process.env.PINECONE_PROJECT_ID,
       expectedHostSuffix: stringProp(pinecone, 'expectedHostSuffix') ?? process.env.PINECONE_EXPECTED_HOST_SUFFIX,
       index,

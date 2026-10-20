@@ -86,6 +86,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/durability-writer-guard.test.ts',
   'tests/scripts/tmpdir-helper-migration.test.ts',
   'tests/scripts/grant-resolver-inventory-guard.test.ts',
+  'tests/scripts/security-boundary-guard.test.ts',
   'tests/scripts/resolved-override-inventory-guard.test.ts',
   'tests/scripts/source-inventory-enforcement.test.ts',
   'tests/scripts/source-inventory-native-read.test.ts',
@@ -188,6 +189,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:import-cycle'),
   guard('guard:phantom-deps'),
   guard('guard:grant-resolver'),
+  guard('guard:security-boundaries'),
   guard('guard:resolved-override'),
   guard('guard:instance-config'),
   step(
@@ -239,6 +241,7 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   guard('guard:no-destructive-git'),
   guard('guard:catch-ratchet'),
   guard('guard:grant-resolver'),
+  guard('guard:security-boundaries'),
   guard('guard:resolved-override'),
   guard('guard:instance-config'),
   step(

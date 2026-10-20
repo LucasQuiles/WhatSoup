@@ -239,6 +239,38 @@ describe('handoff-artifact store', () => {
     }
   });
 
+  it('invalidates derived data for an already soft-deleted message using canonical provenance', () => {
+    const lifecycleDb = new Database(':memory:');
+    lifecycleDb.open();
+    ensureHandoffArtifactSchema(lifecycleDb);
+    try {
+      upsertHandoffArtifact(lifecycleDb, artifact({ conversationKey: 'already-deleted-chat' }));
+      lifecycleDb.raw.prepare(`
+        INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content, timestamp)
+        VALUES (
+          'already-deleted-chat@s.whatsapp.net',
+          'already-deleted-chat',
+          'sender@s.whatsapp.net',
+          'already-deleted-message',
+          'secret',
+          1
+        )
+      `).run();
+      expect(lifecycleDb.markMessagesDeleted(['already-deleted-message'])).toBe(1);
+      const invalidated = vi.fn();
+
+      expect(deleteMessagesAndHandoffArtifacts(
+        lifecycleDb,
+        ['already-deleted-message'],
+        invalidated,
+      )).toEqual({ messages: 0, handoffArtifacts: 1, conversations: 1 });
+      expect(invalidated).toHaveBeenCalledWith(['already-deleted-chat']);
+      expect(getHandoffArtifact(lifecycleDb, 'already-deleted-chat')).toBeNull();
+    } finally {
+      lifecycleDb.close();
+    }
+  });
+
   it('fences a deferred distill before revoke can remove its conversation artifact', async () => {
     const lifecycleDb = new Database(':memory:');
     lifecycleDb.open();

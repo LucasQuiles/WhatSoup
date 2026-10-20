@@ -74,6 +74,7 @@ import type { Runtime } from './runtimes/types.ts';
 import { MediaRetentionTimer } from './core/media-retention.ts';
 import { ProcessTmpRetentionTimer, DEFAULT_PROCESS_TMP_RETENTION } from './core/process-tmp-retention.ts';
 import { DatabaseRetentionTimer, DEFAULT_DATABASE_RETENTION } from './core/database-retention.ts';
+import { RemoteMemoryLifecycle, RemoteMemoryLifecycleTimer } from './core/remote-memory-lifecycle.ts';
 import { persistIntroSentFlag } from './core/intro-sent-config.ts';
 import { MessageScheduler } from './core/scheduler.ts';
 import { TriggerPoller } from './core/substrate/poller.ts';
@@ -81,6 +82,7 @@ import { createPineconeWatchSearch } from './mcp/tools/knowledge.ts';
 import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.ts';
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
+import { resolveApiKey } from './lib/api-key-resolver.ts';
 import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
@@ -373,6 +375,50 @@ const databaseRetentionTimer = new DatabaseRetentionTimer(db, {
   ...DEFAULT_DATABASE_RETENTION,
   messageRetentionDays: config.retentionDays,
 });
+const remoteMemoryLifecycle = config.pineconeIndex
+  ? new RemoteMemoryLifecycle(db, { accountId: config.botName, indexName: config.pineconeIndex })
+  : null;
+const remoteMemoryApiKeyEnv = config.memory.pinecone.apiKeyEnv;
+const remoteMemoryApiKeyService = config.memory.pinecone.apiKeyService;
+let remoteMemoryProvider: PineconeMemory | null = null;
+let remoteMemoryProviderAdapter: {
+  deleteRecord: (recordId: string, signal?: AbortSignal) => Promise<void>;
+  recordExists: (recordId: string, signal?: AbortSignal) => Promise<boolean>;
+} | null = null;
+let remoteMemoryProviderUnavailableLogged = false;
+const getRemoteMemoryProvider = () => {
+  if (!remoteMemoryLifecycle) return null;
+  if (remoteMemoryProviderAdapter) return remoteMemoryProviderAdapter;
+  if (!resolveApiKey({ service: remoteMemoryApiKeyService, envVar: remoteMemoryApiKeyEnv })) {
+    if (!remoteMemoryProviderUnavailableLogged) {
+      remoteMemoryProviderUnavailableLogged = true;
+      log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable');
+    }
+    return null;
+  }
+  try {
+    remoteMemoryProvider = new PineconeMemory();
+    remoteMemoryProviderAdapter = {
+      deleteRecord: (recordId, signal) => remoteMemoryProvider!.deleteRemoteMemoryRecord(recordId, signal),
+      recordExists: (recordId, signal) => remoteMemoryProvider!.remoteMemoryRecordExists(recordId, signal),
+    };
+    remoteMemoryProviderUnavailableLogged = false;
+    return remoteMemoryProviderAdapter;
+  } catch {
+    if (!remoteMemoryProviderUnavailableLogged) {
+      remoteMemoryProviderUnavailableLogged = true;
+      log.warn({ index: config.pineconeIndex }, 'remote memory lifecycle provider unavailable');
+    }
+    return null;
+  }
+};
+const remoteMemoryLifecycleTimer = remoteMemoryLifecycle
+  ? new RemoteMemoryLifecycleTimer(
+      remoteMemoryLifecycle,
+      getRemoteMemoryProvider,
+      `remote-memory:${process.pid}`,
+    )
+  : null;
 
 // 2a. Seed admin phones into access_list for allowlist/open_dm modes.
 // INSERT OR IGNORE — existing entries are untouched, only missing ones are added.
@@ -629,6 +675,14 @@ const invalidateAgentHandoffArtifacts = instanceType === 'agent'
     (runtime as AgentRuntime).invalidateHandoffArtifacts(conversationKeys)
   )
   : undefined;
+const invalidateDeletedConversationData = invalidateAgentHandoffArtifacts || remoteMemoryLifecycle
+  ? (conversationKeys: readonly string[]) => {
+      invalidateAgentHandoffArtifacts?.(conversationKeys);
+      for (const conversationKey of conversationKeys) {
+        remoteMemoryLifecycle?.requestErase({ scope: 'conversation', conversationKey });
+      }
+    }
+  : undefined;
 
 // Self-restart resume: if a fresh intentional-restart marker is present, the
 // previous shutdown was a deliberate restart (not a crash). Consume the marker,
@@ -679,7 +733,7 @@ connectionManager.onMessage = createIngestHandler(
 connectionManager.on('chatCleared', (jid: string) => {
   const conversationKey = toConversationKey(jid);
   try {
-    const result = clearChatAndDeleteHandoffArtifact(db, conversationKey, invalidateAgentHandoffArtifacts);
+    const result = clearChatAndDeleteHandoffArtifact(db, conversationKey, invalidateDeletedConversationData);
     log.info({ jid, conversationKey, ...result }, 'chatCleared: soft-deleted messages and handoff artifact');
   } catch (err) {
     log.error({ err, jid, conversationKey }, 'chatCleared: failed to clear messages and handoff artifact');
@@ -688,7 +742,7 @@ connectionManager.on('chatCleared', (jid: string) => {
 
 connectionManager.on('messageDeleted', (messageIds: string[]) => {
   try {
-    const result = deleteMessagesAndHandoffArtifacts(db, messageIds, invalidateAgentHandoffArtifacts);
+    const result = deleteMessagesAndHandoffArtifacts(db, messageIds, invalidateDeletedConversationData);
     log.info(
       { ...result, requested: messageIds.length },
       'messageDeleted: soft-deleted revoked messages and handoff artifacts',
@@ -1121,6 +1175,7 @@ processTmpRetentionTimer.start(DEFAULT_PROCESS_TMP_RETENTION.intervalMs);
 // standalone path read), replacing the separate startup timeout + daily
 // interval that used to call deleteOldMessages() directly.
 databaseRetentionTimer.start(DEFAULT_DATABASE_RETENTION.intervalMs);
+remoteMemoryLifecycleTimer?.start();
 
 // 13. Echo timeout checker — sweep submitted ops stuck > 30 s without an echo
 const echoTimeoutInterval = setInterval(() => {
@@ -1383,6 +1438,7 @@ async function shutdown(signal: string): Promise<void> {
         { name: 'media-retention-timer', stop: () => mediaRetentionTimer.stop() },
         { name: 'process-tmp-retention-timer', stop: () => processTmpRetentionTimer.stop() },
         { name: 'database-retention-timer', stop: () => databaseRetentionTimer.stop() },
+        { name: 'remote-memory-lifecycle-timer', stop: () => remoteMemoryLifecycleTimer?.stop() },
         { name: 'memory-consolidation-scheduler', stop: async () => { await memoryConsolidationScheduler?.stop(); } },
         { name: 'echo-timeout-interval', stop: () => clearInterval(echoTimeoutInterval) },
         { name: 'stuck-inbound-interval', stop: () => clearInterval(stuckInboundInterval) },

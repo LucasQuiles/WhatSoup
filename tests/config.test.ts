@@ -1122,6 +1122,15 @@ describe('config — apiTimeoutMs env-var override (P3.6 D-2)', () => {
 });
 
 describe('config — BYOK memory block', () => {
+  it('resolves a Pinecone keyring service without requiring an environment-key alias', async () => {
+    const { resolveMemoryConfig } = await import('../src/config.ts');
+    const resolved = resolveMemoryConfig({
+      memory: { pinecone: { apiKeyService: 'pinecone-instance-keyring' } },
+    });
+
+    expect(resolved.pinecone.apiKeyService).toBe('pinecone-instance-keyring');
+  });
+
   it('uses canonical memory.pinecone values before legacy aliases', async () => {
     const instanceConfig = {
       name: 'byok-bot',

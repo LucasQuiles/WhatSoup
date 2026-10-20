@@ -23,6 +23,7 @@ import {
   createMemoryOperationContext,
 } from '../../lib/memory-operation-telemetry.ts';
 import { PineconeMemory, type MemoryRecord } from '../../runtimes/chat/providers/pinecone.ts';
+import type { RemoteMemoryLifecycle } from '../../core/remote-memory-lifecycle.ts';
 import {
   conversationBoundKey,
   errorResult,
@@ -35,15 +36,24 @@ import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 export interface MemoryWriteOperationContext {
   operationId?: string;
   traceId?: string;
-  operation?: 'upsert' | 'memory_write';
+  beforeProviderAttempt: () => void | Promise<void>;
 }
 
 export interface MemoryWriter {
-  upsert(
+  upsertDirectMemory(
     records: MemoryRecord[],
-    context?: MemoryWriteOperationContext,
+    context: MemoryWriteOperationContext,
   ): Promise<void>;
 }
+
+export type MemoryWriteLifecycle = Pick<
+  RemoteMemoryLifecycle,
+  | 'registerWrite'
+  | 'assertWriteAdmission'
+  | 'markWriteFinalized'
+  | 'markWriteAmbiguous'
+  | 'requestErase'
+>;
 
 const MEMORY_TYPES = ['user_fact', 'group_context', 'preference', 'correction', 'self_fact'] as const;
 
@@ -60,6 +70,28 @@ const MemoryWriteSchema = z.object({
   contradicts: z.string().max(2000).optional(),
 });
 
+const RemoteMemoryEraseSchema = z.object({
+  scope: z.enum(['account', 'sender', 'conversation']),
+  sender_jid: z.string().optional(),
+  conversation_key: z.string().optional(),
+}).strict().superRefine((value, context) => {
+  if (value.scope === 'account' && (value.sender_jid !== undefined || value.conversation_key !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'account scope does not accept sender_jid or conversation_key' });
+  }
+  if (value.scope === 'sender' && value.sender_jid === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['sender_jid'], message: 'sender_jid is required for sender scope' });
+  }
+  if (value.scope === 'sender' && value.conversation_key !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['conversation_key'], message: 'sender scope does not accept conversation_key' });
+  }
+  if (value.scope === 'conversation' && value.conversation_key === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['conversation_key'], message: 'conversation_key is required for conversation scope' });
+  }
+  if (value.scope === 'conversation' && value.sender_jid !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['sender_jid'], message: 'conversation scope does not accept sender_jid' });
+  }
+});
+
 function stableId(chatKey: string, memoryType: string, text: string): string {
   const h = shortHash(JSON.stringify([chatKey, memoryType, text]), 24);
   return `${memoryType}_${h}`;
@@ -69,14 +101,16 @@ function stableId(chatKey: string, memoryType: string, text: string): string {
  * Register the `memory_write` tool.
  *
  * @param register   registry register callback
+ * @param lifecycle  required authority for write admission, receipts, and erasure
  * @param makeWriter optional writer factory (defaults to a live PineconeMemory) — injectable for tests
  */
 export function registerMemoryWriteTools(
   register: (tool: ToolDeclaration) => void,
+  lifecycle: MemoryWriteLifecycle,
   makeWriter: () => MemoryWriter = () => new PineconeMemory(),
   // Injectable so record timestamps can be driven to a known instant (#2200).
-  // Optional and defaulted, so this slice changes no existing call site.
   clock: Clock = systemClock,
+  registerEraseTool = true,
 ): void {
   let writer: MemoryWriter | null = null;
   const getWriter = (): MemoryWriter => (writer ??= makeWriter());
@@ -140,8 +174,21 @@ export function registerMemoryWriteTools(
         filterShape: 'none',
       });
       const now = clock.nowIso();
+      const stableRecordId = stableId(rawChat, memoryType, p.text);
+      const registration = lifecycle.registerWrite({
+        remoteRecordId: stableRecordId,
+        conversationKey: rawChat,
+        senderJid,
+        memoryType,
+      });
+      if (!registration.admitted) {
+        return errorResult('memory_write was refused because this record is pending erasure');
+      }
       const record: MemoryRecord = {
-        id: stableId(rawChat, memoryType, p.text),
+        // Preserve the existing provider record identity. The lifecycle ledger
+        // consumes this exact ID so delete/retry work can reconcile records
+        // written before this lifecycle existed.
+        id: registration.remoteRecordId,
         text: p.text,
         chatJid: rawChat,
         senderJid,
@@ -159,11 +206,21 @@ export function registerMemoryWriteTools(
       };
 
       try {
-        await getWriter().upsert([record], {
+        await getWriter().upsertDirectMemory([record], {
           operationId: operation.operationId,
-          operation: 'memory_write',
+          beforeProviderAttempt: () => lifecycle.assertWriteAdmission(record.id),
         });
+        if (!lifecycle.markWriteFinalized(record.id)) {
+          lifecycle.markWriteAmbiguous(record.id);
+          return toolError({
+            error: 'memory_write completed remotely but erasure was accepted before local finalization',
+            code: 'unknown',
+            retryable: false,
+            operation_id: operation.operationId,
+          });
+        }
       } catch (err) {
+        lifecycle.markWriteAmbiguous(record.id);
         const failure = classifyMemoryOperationFailure(err);
         return toolError({
           error: 'memory_write failed',
@@ -178,6 +235,36 @@ export function registerMemoryWriteTools(
         status: 'written',
         memory_type: memoryType,
       };
+    },
+  });
+
+  if (registerEraseTool) registerRemoteMemoryEraseTool(register, lifecycle);
+}
+
+export function registerRemoteMemoryEraseTool(
+  register: (tool: ToolDeclaration) => void,
+  lifecycle: MemoryWriteLifecycle,
+): void {
+  register({
+    name: 'erase_remote_memory',
+    description:
+      'Queue provider erasure for direct memory_write records in this configured account. ' +
+      'Deletion acknowledgement and verified current absence are tracked separately; provider backups and replicas are outside this evidence.',
+    schema: RemoteMemoryEraseSchema,
+    scope: 'global',
+    targetMode: 'caller-supplied',
+    core: false,
+    sensitive: true,
+    replayPolicy: 'unsafe',
+    externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
+    handler: async (params) => {
+      const request = RemoteMemoryEraseSchema.parse(params);
+      const result = lifecycle.requestErase({
+        scope: request.scope,
+        ...(request.sender_jid === undefined ? {} : { senderJid: request.sender_jid }),
+        ...(request.conversation_key === undefined ? {} : { conversationKey: request.conversation_key }),
+      });
+      return { scope: request.scope, matched: result.matched, queued: result.queued, states: result.states };
     },
   });
 }

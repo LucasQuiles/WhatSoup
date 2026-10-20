@@ -1,8 +1,8 @@
 # Provider-Event Lifecycle Design
 
-**Status:** Active specification — source reconciliation at `59cc562bc` (2026-10-06), schema 66. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
+**Status:** Active specification — source reconciliation updated 2026-10-14 at schema 67. Provider-lifecycle implementation and activation remain unauthorized until the terminal-recovery prerequisite and the existing owner authorization requirements are satisfied.
 
-**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-66 base, terminal recovery is planned as 67 and the provider lifecycle ledger as 68; recheck before implementation.
+**Schema allocation:** see [the shared allocation and history](requirements.md#schema-allocation). At the audited schema-67 base, terminal recovery is planned as 68 and the provider lifecycle ledger as 69; recheck before implementation.
 
 ## Context
 
@@ -110,7 +110,7 @@ provider-content replay path.
 
 #### DES-003: Add a child receipt ledger inside `DurabilityEngine`
 - **Traces-from:** REQ-002, REQ-004, REQ-006, CON-002, CON-004, CON-007
-- **Rationale:** Migration 68 adds one empty activation marker table plus nine
+- **Rationale:** Migration 69 adds one empty activation marker table plus nine
   content-free lifecycle tables: `provider_request_attempts`, immutable
   `provider_attempt_handoffs`, `provider_request_segments`,
   `provider_continuation_obligations`, `provider_event_receipts`, append-only
@@ -432,9 +432,9 @@ provider-content replay path.
   settles consumed only from terminal already-effectful proof, otherwise quarantine/
   failed uncertainty. Canonical `not_sent` is a distinct pre-send-rejection operation
   status and terminal evidence retains the exact op ID/status proof; generic
-  `failed_permanent` is not. Migration 67 enables aggregate no-send only for proved
+  `failed_permanent` is not. Migration 68 enables aggregate no-send only for proved
   single-op answers; pre-lifecycle multi-op answers remain uncertain because they lack
-  a sealed expected set. Migration 68 may prove multi-op no-send only from an immutable
+  a sealed expected set. Migration 69 may prove multi-op no-send only from an immutable
   complete effect plan where every expected sibling is not-sent—missing, late-created,
   echoed, or ambiguous siblings dominate. No-send never clears an
   independent provider/tool/lifecycle replay veto. A receipt in a mixed/shared plan settles consumed only
@@ -558,10 +558,10 @@ provider-content replay path.
   sources and adds forward repair migration 43, with tests for the deployed v42
   shape. Canonical base `482b707d716aee5641db25d40c2a954caee5d78f`
   understands migrations through 46. Migrations 47 through 52 are already consumed by
-  later durable work, and the schema-66 source baseline includes migration 53 for outbound
-  quarantine disposition and retirement receipts. The terminal-recovery prerequisite uses migration 67 for
+  later durable work, and the schema-67 source baseline includes migration 53 for outbound
+  quarantine disposition and retirement receipts. The terminal-recovery prerequisite uses migration 68 for
   durable terminal `not_sent` plus bounded terminal-non-echoed recovery closure.
-  Migration 67 does not alter historical 37-53. It adds the typed outbound/terminal
+  Migration 68 does not alter historical 37-53. It adds the typed outbound/terminal
   no-send shape, an immutable singleton answer-set seal plus late-sibling rejection
   triggers, and lockstepped proof triggers, immutable database-UTC transfer start/
   deadline fields with legacy backfill, the recovery-job clock high-water field, and
@@ -573,17 +573,17 @@ provider-content replay path.
   conflict evidence. A declared eligibility index orders closure witnesses oldest first.
   A witness remains a root until the bound inbound, terminal, optional job, selected op,
   and late-echo/conflict evidence are terminal, no live owner/reference remains, and the
-  canonical terminal cutoff passes; the guarded aggregate deletes it last. Migration-67
+  canonical terminal cutoff passes; the guarded aggregate deletes it last. Migration-68
   storage accounting includes these rows, and unresolved/recent witnesses never prune.
-  After the migration-67 prerequisite merges, the lifecycle branch rebases
+  After the migration-68 prerequisite merges, the lifecycle branch rebases
   and allocates provider-event lifecycle
-  migration 68. It extends terminal/job/closure ownership with the final attempt's
+  migration 69. It extends terminal/job/closure ownership with the final attempt's
   immutable aggregate publication-set seal (owner, attempt, invocation epoch, exact
   count/fingerprint/membership) while retaining the selected op only as representative.
   Recovery rederives every member after restart, fences them all on abandonment, and
   records late nonselected-member truth/conflicts. Fresh databases apply the full
-  registered history through 68; deployed v42 databases apply 43-68, v40 databases
-  apply 41-68, and the audited v66 baseline applies 67-68. Runtime
+  registered history through 69; deployed v42 databases apply 43-69, v40 databases
+  apply 41-69, and the audited v67 baseline applies 68-69. Runtime
   manifests and the targeted deployment mechanism remain the only rollout source of
   truth, and configuration/state/data directories are preserved. The tracked
   `installation-evidence-ledger.json` tracks the private packet schema/trust policy; its
@@ -601,15 +601,15 @@ provider-content replay path.
   records boolean/delta-free pass/fail. Missing or stale evidence blocks activation. Accepted
   local shims and private overrides are classified and preserved until a focused
   canonicalization decision. The production schema-ceiling gate must be fleet-verified
-  before any schema-67/68 writer. A database max above
+  before any schema-68/69 writer. A database max above
   the binary's supported maximum preserves
   backup/inspection but rejects every provider turn in drain/read-only mode; older
-  pre-guard fingerprints are prohibited rollback targets. Migration 68 creates an
+  pre-guard fingerprints are prohibited rollback targets. Migration 69 creates an
   empty `provider_lifecycle_activation` table; the first lifecycle-enabled attempt
   inserts its marker atomically before provider invocation. The immutable
-  `schema_migrations(version=68)` row alone is not activation. After the activation
+  `schema_migrations(version=69)` row alone is not activation. After the activation
   marker, any lifecycle data row, or an activated provider request, runtime deployment is
-  roll-forward-only; a prior runtime is safe only if it is fully v68 write-
+  roll-forward-only; a prior runtime is safe only if it is fully v69 write-
   compatible or enters drain/read-only mode and rejects all new provider turns.
   Before activation, each target quiesces, creates an application-consistent
   SQLite backup, passes source/backup integrity checks and a scratch restore/schema
@@ -617,7 +617,7 @@ provider-content replay path.
   runbook must prove no activation marker, zero rows across the other nine named
   lifecycle data tables, zero nonterminal inbound rows, zero active agent sessions,
   and no runtime provider request/process. Only then may a coordinated restore of
-  that exact verified schema-67 (pre-v68) backup followed by integrity/fingerprint verification
+  that exact verified schema-68 (pre-v69) backup followed by integrity/fingerprint verification
   be the sole state-replacement exception. After activation, no data restore is permitted.
   Failure aborts rollout.
 - **Alternatives considered:**
@@ -638,9 +638,9 @@ provider-content replay path.
   (`84ba01a04941d29becbaa4ffac274e604ee89820` merged as
   `56e232223132d33c347cd2d2521620f911d4f4b6`) separates active recovery work
   from audit health without supplying canonical no-send truth. Migrations through
-  66 are already allocated in the audited source baseline. Land the
-  terminal recovery prerequisite on migration 67, then provider-event lifecycle on
-  migration 68.
+  67 are already allocated in the audited source baseline. Land the
+  terminal recovery prerequisite on migration 68, then provider-event lifecycle on
+  migration 69.
   Unpublished live-checkout shutdown commits remain a
   separate review lane. The lifecycle PR contains
   no automatic restart continuation replay, operator UI, raw installation, fleet
@@ -656,7 +656,7 @@ provider-content replay path.
 
 ### `provider_lifecycle_activation`
 
-Migration 68 creates this singleton table empty. The first lifecycle-enabled
+Migration 69 creates this singleton table empty. The first lifecycle-enabled
 attempt inserts its immutable activation timestamp, binary/source fingerprint, and
 schema-contract version in the same transaction as the attempt. The migration row
 in `schema_migrations` is not activation; any activation row makes deployment
@@ -1002,7 +1002,7 @@ Startup reconciliation never reconstructs event content:
 | admitted `attempt_finality` | exclusive input to `finalizeAttemptBoundary`; validate against the attempt's immutable invocation epoch/context/proof manifest across restart; generic recovery cannot consume or quarantine it |
 | `observed` without linked effect | quarantine as restart-ambiguous; veto replay |
 | `admitted` without complete expected effect links | quarantine as restart-ambiguous; veto replay |
-| non-boundary `admitted` with complete outbound links | existing outbound recovery owns each delivery truth; canonical durable `not_sent` retains exact op proof; migration-67 proof is single-op only, while migration-68 multi-op proof requires an immutable sealed expected set and every sibling not-sent; generic/missing/late/mixed/ambiguous states remain uncertain without clearing other replay vetoes |
+| non-boundary `admitted` with complete outbound links | existing outbound recovery owns each delivery truth; canonical durable `not_sent` retains exact op proof; migration-68 proof is single-op only, while migration-69 multi-op proof requires an immutable sealed expected set and every sibling not-sent; generic/missing/late/mixed/ambiguous states remain uncertain without clearing other replay vetoes |
 | `admitted` with complete runtime-tool links | existing tool-call evidence owns reconciliation, then lifecycle CAS-settles consumed/quarantined |
 | `admitted` with sealed no-send or presence links | settle from recorded terminal truth without egress/re-emission; absent or uncertain truth quarantines |
 | `admitted` with provider-managed links | never delegate or re-execute; terminal already-effectful proof may settle consumed, otherwise quarantine and preserve failed uncertainty |
@@ -1043,17 +1043,17 @@ Shutdown uses the same rules. A generation change is a hard ownership boundary.
    #1768 (`cf1fc6e3e2d3faa3cae80737466f52d40e34b9bf`) and canonical base
    `482b707d716aee5641db25d40c2a954caee5d78f` as historically containing migrations
    through 46. Migration 53's quarantine disposition and retirement receipts are
-   now included in the schema-66 source baseline. Verify their historical review
-   and publication evidence and current fleet compatibility before any schema-67
+   now included in the schema-67 source baseline. Verify their historical review
+   and publication evidence and current fleet compatibility before any schema-68
    writer; missing evidence remains open, and this step does not call for
    reimplementing or republishing an already merged migration.
 5. Treat PR #1770 (`84ba01a04941d29becbaa4ffac274e604ee89820`, merged as
    `56e232223132d33c347cd2d2521620f911d4f4b6`) as recovery-health evidence only;
    land and verify the remaining terminal no-send/recovery-owner prerequisite as
-   migration 67.
-6. Rebase the lifecycle branch onto that canonical main and implement migration 68.
-7. Run fresh, v40, deployed-v42, repaired-v43, current-v53, recovery-v67, and
-   lifecycle-v68 migration fixtures,
+   migration 68.
+6. Rebase the lifecycle branch onto that canonical main and implement migration 69.
+7. Run fresh, v40, deployed-v42, repaired-v43, current-v53, recovery-v68, and
+   lifecycle-v69 migration fixtures,
    crash-boundary tests, adapter-version gates, and high-fragment-count budgets.
 8. Merge only after focused, full release, test-integrity, repository, manifest,
    privacy, and independent review gates pass.
@@ -1067,8 +1067,8 @@ Shutdown uses the same rules. A generation change is a hard ownership boundary.
    zero rows across the other nine lifecycle data tables, zero nonterminal inbound
    rows, zero active agent sessions, and runtime proof of no provider process/request,
    coordinated restore of that exact backup is the sole state-replacement exception;
-   it returns schema history to the backup's exact schema-67 fingerprint, so removal of a
-   source v68 marker occurs only as part of that whole-database restore and never by
+   it returns schema history to the backup's exact schema-68 fingerprint, so removal of a
+   source v69 marker occurs only as part of that whole-database restore and never by
    manual/in-place migration-history deletion or rewrite;
    reverify source/restore integrity/fingerprints.
    Any failure aborts without migration or restart.
@@ -1078,12 +1078,12 @@ Shutdown uses the same rules. A generation change is a hard ownership boundary.
 Before activation, code rollback is permitted only with proof that the activation
 table and all nine lifecycle data tables are empty, no nonterminal inbound or active
 agent session exists, and runtime drain reports no provider process/request. The
-immutable migration-68 schema marker may exist in the pre-restore source; the exact
-verified schema-67 (pre-v68) whole-database backup restore returns schema history to 67 and is the
+immutable migration-69 schema marker may exist in the pre-restore source; the exact
+verified schema-68 (pre-v69) whole-database backup restore returns schema history to 68 and is the
 sole data-rollback/migration-row-removal path. Manual or in-place schema-history deletion
 or rewrite is prohibited. After the first lifecycle activation
 row, any lifecycle data row, or activated request, deployment is roll-forward-only. A downgrade requires a
-fully v68 write-compatible backport or a drain/read-only binary that rejects every
+fully v69 write-compatible backport or a drain/read-only binary that rejects every
 new provider turn; merely reading or ignoring the tables is unsafe. After activation,
 data rollback/restore is prohibited and never deletes unresolved receipts or migration history.
 

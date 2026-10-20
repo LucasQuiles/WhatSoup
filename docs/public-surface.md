@@ -170,10 +170,11 @@ message content, identities, or exporter payloads. `state` is one of `disabled`,
 ## MCP tools
 
 Canonical tool index: [docs/tools.md](tools.md) — full schemas, scopes, replay policies for
-all 170 tools (166 always-registered + 4 conditionally-registered: `knowledge_search` when
+all 171 tools (166 always-registered + 5 conditionally-registered: `knowledge_search` when
 Pinecone is configured, `emit_heal_result` when the runtime has at least one configured
 control-plane peer and is not in any sandbox mode, `memory_write` when its Pinecone
-key environment variable and index are configured, and `restart_self` when the
+credential resolver and index are configured, `erase_remote_memory` when its index is
+configured, and `restart_self` when the
 non-sandboxed runtime receives a restart capability; see
 [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for the full gating conditions).
 Tool definitions live under [`src/mcp/tools/*.ts`](../src/mcp/tools/) — each file exports a
@@ -205,7 +206,7 @@ individual tool inventory is `docs/tools.md`). Tool-level entries follow on prom
 | `mcp:tools.calls` | 1 | [`src/mcp/tools/calls.ts`](../src/mcp/tools/calls.ts) | stable | active | `reject_call` |
 | `mcp:tools.presence` | 3 | [`src/mcp/tools/presence.ts`](../src/mcp/tools/presence.ts) | stable | active | `get_presence`, `subscribe_presence`, `send_typing` |
 | `mcp:tools.voice` | 1 | [`src/mcp/tools/voice.ts`](../src/mcp/tools/voice.ts) | stable | active | `send_voice_reply` |
-| `mcp:tools.memory-write` | 1 | [`src/mcp/tools/memory-write.ts`](../src/mcp/tools/memory-write.ts) | stable | active | `memory_write` (agent episodic write to the configured per-person Pinecone index; Pinecone-gated, `core: false`). |
+| `mcp:tools.memory-write` | 2 | [`src/mcp/tools/memory-write.ts`](../src/mcp/tools/memory-write.ts) | stable | active | `memory_write` (agent episodic write to the configured per-person Pinecone index) and sensitive `erase_remote_memory` reconciliation; both are `core: false`. |
 | `mcp:tools.knowledge` | 1 | [`src/mcp/tools/knowledge.ts`](../src/mcp/tools/knowledge.ts) | stable | active | `knowledge_search` (BYOK Pinecone). Pinecone-gated registration: conditionally-registered only when the instance's Pinecone allowed-indexes, credentials, and knowledge profiles are usable; see [docs/tools.md](tools.md#whatsoup-mcp-tool-api-reference) for full gating conditions. |
 | `mcp:tools.retention` | 1 | [`src/mcp/tools/retention.ts`](../src/mcp/tools/retention.ts) | stable | active | `cleanup_media` retention controls |
 | `mcp:tools.status` | 2 | [`src/mcp/tools/status.ts`](../src/mcp/tools/status.ts) | stable | active | `post_status`, `list_statuses` |
@@ -374,6 +375,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-phantom-deps` | `npm run guard:phantom-deps` | `package.json` | stable | active | Refuse an import of a package that no package.json from the importing file up to the repo root declares (phantom/hoisted dependency: resolves locally, breaks on a clean install); node builtins excluded in both spellings; an unreadable manifest chain or an implausibly small scan is INCONCLUSIVE (exit 2), never a pass |
 | `cli:npm.guard-platform-patterns` | `npm run guard:platform-patterns` | `package.json` | stable | active | Enforce cross-platform portability: block hardcoded platform binaries, unguarded /proc///sys///run/ access, systemctl without launchctl fallback, and GNU-only shell flags; 6 mechanical rule classes with 73 baselined violations |
 | `cli:npm.guard-grant-resolver` | `npm run guard:grant-resolver` | `package.json` | internal | active | Fail the build on a new ungated inline isAdminPhone(resolvePhoneFromJid(...)) grant composition in src/ (QR-143/B4; use resolvePhoneFromJidForGrant or an allowlist row) |
+| `cli:npm.guard-security-boundaries` | `npm run guard:security-boundaries` | `package.json` | stable | active | Fail closed when remote-memory writes bypass the lifecycle ledger, use a generic provider mutation from MCP, omit the pre-attempt admission gate, register outside the composition root, weaken required contracts, or drift from the exact canonical boundary inventory; unreadable or empty source inventory is INCONCLUSIVE |
 | `cli:npm.guard-resolved-override` | `npm run guard:resolved-override` | `package.json` | internal | active | Fail the build on an `ExecutingSessionContext.resolved` override outside the count-pinned test-only inventory (#3435); the override flips an all-undefined executing context to `'resolved'` and bypasses the fail-closed branch #3438 added, so a production caller reopens the empty-context fail-open; a zero-file scan, an unreadable candidate, or an allowlisted site that stops matching is INCONCLUSIVE (exit 2), never a pass |
 | `cli:npm.guard-launchd-drift` | `npm run guard:launchd-drift` | `package.json` | internal | active | Compare installed macOS com.whatsoup.* LaunchAgents with checked-in templates (substitute-then-compare; secret-bearing plists structural-only) |
 | `cli:npm.triage-required-suites` | `npm run triage:required-suites` | `package.json` | internal | active | Compute the minimum local suite set (functional ∪ all-fitness) to prevent #1507/#1514 CI-gap recurrence; WARN-tier triage aid (always exits 0, not a gate) |

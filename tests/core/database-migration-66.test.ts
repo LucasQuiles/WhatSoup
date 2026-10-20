@@ -39,13 +39,13 @@ function ledgerVersions(raw: DatabaseSync): number[] {
 }
 
 describe('migration 66 through the registry', () => {
-  it('a fresh database opens at schema 66 with the closure table and its guards', () => {
-    expect(CURRENT_SCHEMA_MIGRATION).toBe(66);
+  it('a fresh database opens at schema 67 with the closure table and its guards', () => {
+    expect(CURRENT_SCHEMA_MIGRATION).toBe(67);
     const db = new Database(':memory:');
     db.open();
     try {
       const raw = db.raw;
-      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 66 }, (_, i) => i + 1));
+      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 67 }, (_, i) => i + 1));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       expect(objectNames(raw, 'trigger')).toEqual([
         'continuity_gap_closures_append_only_delete',
@@ -75,7 +75,7 @@ describe('migration 66 through the registry', () => {
     upgraded.open();
     try {
       const raw = upgraded.raw;
-      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 66 }, (_, i) => i + 1));
+      expect(ledgerVersions(raw)).toEqual(Array.from({ length: 67 }, (_, i) => i + 1));
       expect(objectNames(raw, 'table')).toEqual(['continuity_gap_closures']);
       const plans = (raw.prepare(`
         SELECT plan_id FROM recovery_plans WHERE actor = 'continuity_manifest_recorder'
