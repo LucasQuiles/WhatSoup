@@ -3,13 +3,15 @@
 # The Python package locks are qualified for this exact CPython release. Package
 # managers may install a newer or older patch, so callers must verify before a
 # lock is used rather than treating a minor-version command name as proof.
+. "${BASH_SOURCE[0]%/*}/bounded-exec.sh"
+
 WHATSOUP_LOCKED_PYTHON_IMPLEMENTATION=cpython
 WHATSOUP_LOCKED_PYTHON_VERSION=3.13.16
 WHATSOUP_PYTHON_INDEX_URL=https://pypi.org/simple
 
 whatsoup_require_locked_python() {
   local python_bin="$1" observed
-  observed="$($python_bin -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null)" || {
+  observed="$(whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$python_bin" -c 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null)" || {
     echo "Python lock policy: could not query $python_bin" >&2
     return 1
   }
@@ -20,7 +22,7 @@ whatsoup_require_locked_python() {
 }
 
 whatsoup_python_lock_target() {
-  local platform arch arm64_capable
+  local python_bin="$1" platform arch
   platform="$(uname -s 2>/dev/null)" || return 1
   case "$platform" in
     Darwin) platform=darwin ;;
@@ -28,11 +30,10 @@ whatsoup_python_lock_target() {
     *) echo "Python lock policy: unsupported platform $platform" >&2; return 1 ;;
   esac
 
-  arch="$(uname -m 2>/dev/null)" || return 1
-  if [ "$platform" = darwin ] && command -v sysctl >/dev/null 2>&1; then
-    arm64_capable="$(sysctl -n hw.optional.arm64 2>/dev/null || true)"
-    [ "$arm64_capable" != 1 ] || arch=arm64
-  fi
+  arch="$(whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" "$python_bin" -I -c 'import platform; print(platform.machine())' 2>/dev/null)" || {
+    echo "Python lock policy: could not query interpreter architecture for $python_bin" >&2
+    return 1
+  }
   case "$arch" in
     arm64|aarch64) arch=arm64 ;;
     x86_64|amd64|x64) arch=x64 ;;
@@ -42,8 +43,8 @@ whatsoup_python_lock_target() {
 }
 
 whatsoup_python_lock_path() {
-  local root="$1" profile="$2" target
-  target="$(whatsoup_python_lock_target)" || return 1
+  local root="$1" profile="$2" python_bin="$3" target
+  target="$(whatsoup_python_lock_target "$python_bin")" || return 1
   case "$profile:$target" in
     quality:linux-x64) printf '%s\n' "$root/requirements/python/quality-cpython313-linux-x64.txt" ;;
     quality:linux-arm64) printf '%s\n' "$root/requirements/python/quality-cpython313-linux-arm64.txt" ;;
@@ -88,7 +89,7 @@ whatsoup_create_managed_venv() {
 whatsoup_install_locked_requirements() {
   local python_bin="$1" root="$2" profile="$3" lock_path
   whatsoup_require_locked_python "$python_bin" || return 1
-  lock_path="$(whatsoup_python_lock_path "$root" "$profile")" || return 1
+  lock_path="$(whatsoup_python_lock_path "$root" "$profile" "$python_bin")" || return 1
   if [ ! -f "$lock_path" ]; then
     echo "Python lock policy: missing declared lock $lock_path" >&2
     return 1

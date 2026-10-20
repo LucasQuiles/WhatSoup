@@ -76,7 +76,9 @@ describe('Python lock runtime policy', () => {
       'esac',
     ].join('\n'));
 
-    const result = runPolicy(`whatsoup_python_lock_path "${root}" transcription`, { PATH: bin });
+    const python = join(bin, 'python');
+    executable(python, '[ "$1" != "-I" ] || shift; [ "$1" = "-c" ] || exit 2; printf arm64');
+    const result = runPolicy(`whatsoup_python_lock_path "${root}" transcription "${python}"`, { PATH: `${bin}:/usr/bin:/bin` });
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe(`${root}/requirements/python/transcription-cpython313-darwin-arm64.txt`);
@@ -97,12 +99,13 @@ describe('Python lock runtime policy', () => {
       'esac',
     ].join('\n'));
     executable(python, [
-      'if [ "$1" = "-c" ]; then printf "%s\\n" "cpython:3.13.16"; exit 0; fi',
+      '[ "$1" != "-I" ] || shift',
+      'if [ "$1" = "-c" ]; then case "$2" in *platform.machine*) printf x86_64 ;; *sys.implementation*) printf "%s\\n" "cpython:3.13.16" ;; *) exit 2 ;; esac; exit 0; fi',
       'printf "%s\\n" "$*" > "$WHATSOUP_TEST_PIP_ARGS"',
     ].join('\n'));
 
     const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
-      PATH: bin,
+      PATH: `${bin}:/usr/bin:/bin`,
       WHATSOUP_TEST_PIP_ARGS: log,
     });
 
@@ -111,6 +114,119 @@ describe('Python lock runtime policy', () => {
     expect(readFileSync(log, 'utf8')).toContain('--only-binary :all:');
     expect(readFileSync(log, 'utf8')).toContain('--index-url https://pypi.org/simple');
     expect(readFileSync(log, 'utf8')).toContain('quality-cpython313-linux-x64.txt');
+  });
+
+  it.each([
+    { architecture: 'x86_64', target: 'x64' },
+    { architecture: 'arm64', target: 'arm64' },
+  ])('uses the $architecture interpreter lock on an ARM-capable Mac', ({ architecture, target }) => {
+    const root = tempRoot();
+    const bin = join(root, 'bin');
+    const python = join(bin, 'python');
+    const log = join(root, 'pip-args');
+    mkdirSync(join(root, 'requirements/python'), { recursive: true });
+    for (const arch of ['x64', 'arm64']) {
+      writeFileSync(join(root, `requirements/python/quality-cpython313-darwin-${arch}.txt`), '# fixture lock\n');
+    }
+    executable(join(bin, 'uname'), 'case "$1" in -s) printf Darwin ;; -m) printf x86_64 ;; *) exit 2 ;; esac');
+    executable(join(bin, 'sysctl'), 'printf 1');
+    executable(python, `
+[ "$1" != "-I" ] || shift
+if [ "$1" = "-c" ]; then
+  case "$2" in
+    *platform.machine*) printf '%s\\n' "$TEST_PYTHON_ARCH" ;;
+    *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+[ "$1" = "-m" ] && [ "$2" = pip ] || exit 2
+printf '%s\\n' "$*" > "$WHATSOUP_TEST_PIP_ARGS"
+`);
+
+    const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
+      PATH: `${bin}:/usr/bin:/bin`, TEST_PYTHON_ARCH: architecture, WHATSOUP_TEST_PIP_ARGS: log,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(log, 'utf8')).toContain(`quality-cpython313-darwin-${target}.txt`);
+  });
+
+  it.each(['unsupported', 'probe-failed'])('refuses pip when interpreter architecture is %s', (condition) => {
+    const root = tempRoot();
+    const bin = join(root, 'bin');
+    const python = join(bin, 'python');
+    const log = join(root, 'pip-args');
+    mkdirSync(join(root, 'requirements/python'), { recursive: true });
+    writeFileSync(join(root, 'requirements/python/quality-cpython313-linux-x64.txt'), '# fixture lock\n');
+    executable(join(bin, 'uname'), 'case "$1" in -s) printf Linux ;; -m) printf x86_64 ;; *) exit 2 ;; esac');
+    executable(python, `
+[ "$1" != "-I" ] || shift
+if [ "$1" = "-c" ]; then
+  case "$2" in
+    *platform.machine*) [ "$TEST_PYTHON_ARCH" != probe-failed ] || exit 7; printf '%s\\n' riscv64 ;;
+    *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
+printf '%s\\n' "$*" > "$WHATSOUP_TEST_PIP_ARGS"
+`);
+
+    const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
+      PATH: `${bin}:/usr/bin:/bin`, TEST_PYTHON_ARCH: condition, WHATSOUP_TEST_PIP_ARGS: log,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it('does not execute an ambient platform module while selecting the interpreter lock', () => {
+    const root = tempRoot();
+    const marker = join(root, 'ambient-module-ran');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    writeFileSync(join(root, 'platform.py'), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\nraise RuntimeError("ambient module must not run")\n`);
+
+    const result = runPolicy('whatsoup_python_lock_path "$LOCK_ROOT" quality "$LOCK_PYTHON"', {
+      LOCK_ROOT: repoRoot, LOCK_PYTHON: python, PYTHONPATH: root,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(result.stdout.trim())).toBe(true);
+  });
+
+  it.each([
+    { name: 'lock identity', command: 'whatsoup_require_locked_python "$HANG_PYTHON"', status: 1, output: '' },
+    { name: 'lock architecture', command: 'whatsoup_python_lock_target "$HANG_PYTHON"', status: 1, output: '' },
+    {
+      name: 'host identity',
+      command: `. "${join(repoRoot, 'deploy/lib/host-capabilities.sh')}"
+CAP_PATH="$HANG_PYTHON"
+whatsoup_probe_python exact-cpython:3.13.16
+printf '%s:%s' "$CAP_STATUS" "$CAP_DETAIL"`,
+      status: 0,
+      output: 'inconclusive:python-identity-probe-failed',
+    },
+  ])('bounds the $name probe and reaps its hung interpreter', ({ command, status, output }) => {
+    const root = tempRoot();
+    const python = join(root, 'hung-python');
+    const pidFile = join(root, 'interpreter-pid');
+    executable(python, 'printf "%s" "$$" > "$HANG_PID_FILE"\nexec /bin/sleep 8');
+
+    const result = spawnSync('/bin/bash', ['-c', `. "${policyPath}"\n${command}`], {
+      cwd: repoRoot,
+      env: { ...process.env, HANG_PYTHON: python, HANG_PID_FILE: pidFile, WHATSOUP_PYTHON_PROBE_TIMEOUT: '1' },
+      encoding: 'utf8',
+      timeout: 4500,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(status);
+    expect(result.stdout.trim()).toBe(output);
+    const pid = readFileSync(pidFile, 'utf8').trim();
+    expect(pid).toMatch(/^[0-9]+$/);
+    expect(spawnSync('/bin/kill', ['-0', pid]).status).not.toBe(0);
   });
 
   it.each([false, true])('excludes pip configuration with inherited environment options=%s using the real pip parser', (withEnvironment) => {
@@ -130,7 +246,7 @@ command = create_command(name, isolated="--isolated" in args)
 options, _ = command.parse_args(args)
 print(json.dumps({"index": options.index_url, "extra": options.extra_index_urls, "links": options.find_links, "config": os.environ.get("PIP_CONFIG_FILE"), "isolated": "--isolated" in args}))
 `);
-    executable(shim, `if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" "$@"; fi
+    executable(shim, `if [ "$1" = "-c" ] || [ "$1" = "-I" ]; then exec "$REAL_PYTHON" "$@"; fi
 if [ "$1" != "-m" ] || [ "$2" != "pip" ]; then exit 2; fi
 shift 2
 exec "$REAL_PYTHON" "$PIP_PARSER" "$@"`);

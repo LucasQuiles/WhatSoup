@@ -19,7 +19,7 @@ import path from 'node:path';
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const scriptPath = path.join(repoRoot, 'scripts', 'install-transcription-deps.sh');
 const scriptSource = fs.readFileSync(scriptPath, 'utf8');
-const lockPolicySource = fs.readFileSync(path.join(repoRoot, 'deploy', 'lib', 'python-lock-policy.sh'), 'utf8');
+const lockPolicyPath = path.join(repoRoot, 'deploy', 'lib', 'python-lock-policy.sh');
 const boundedSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'lib', 'bounded-exec.sh'), 'utf8');
 const tempRoots: string[] = [];
 
@@ -53,7 +53,7 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
     })
     .join('\n');
   const pathPrefix = extraPath ? `export PATH="${extraPath}${inheritPath ? ':$PATH' : ''}"\n` : '';
-  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}${lockPolicySource}\n${helpers}\n${body}`], {
+  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}. "${lockPolicyPath}"\n${helpers}\n${body}`], {
     encoding: 'utf8',
     cwd: repoRoot,
   });
@@ -102,8 +102,7 @@ exit 1
 HOST_PYTHON="$1"
 VENV="$2"
 REPO_ROOT="$3"
-${lockPolicySource}
-${boundedSource}
+. "${lockPolicyPath}"
 ${scriptSource.slice(scriptSource.indexOf('install_transcription_requirements() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('install_transcription_requirements() {')) + 3)}
 resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
 whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1"; }

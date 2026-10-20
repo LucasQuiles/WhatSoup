@@ -4,13 +4,24 @@ The committed locks in this directory are the only approved source for productio
 CI, release, host-quality, and transcription Python installs. They are qualified
 for CPython `3.13.16` and the named target (`linux-x64`, `linux-arm64`,
 `darwin-x64`, or `darwin-arm64`). Installers select the target with
-`deploy/lib/python-lock-policy.sh`, require the exact runtime, and use the PyPI
+`deploy/lib/python-lock-policy.sh` from the selected interpreter's architecture,
+require the exact runtime, and use the PyPI
 simple index with `--require-hashes` and `--only-binary :all:`. Pip runs in
 isolated mode with `PIP_CONFIG_FILE=/dev/null`, excluding inherited pip options
 and all configuration files from the approved package-source selection.
+An x86_64 interpreter under Rosetta uses the `darwin-x64` lock even on an
+ARM-capable Mac. A failed or unsupported interpreter architecture probe stops
+installation before pip runs. The probe runs in isolated mode so ambient Python
+paths cannot replace the platform module used for lock selection.
+Installer identity and architecture probes, and the host doctor's exact Python
+identity probe, use a five-second budget through the shared shell supervisor.
+`WHATSOUP_PYTHON_PROBE_TIMEOUT` overrides that budget; expiration fails the probe
+and reaps its process group, with a further termination grace period.
 
 The dependency guard also checks direct `pip` invocations prefixed by shell
-assignments or `env`. Its scan fails closed above 4 MiB per file, 64 MiB total
+assignments or `env`, including environment-clearing, unset, working-directory
+and option-delimiter prefixes. Split-string or unknown `env` options on a pip
+line fail closed. Its scan fails closed above 4 MiB per file, 64 MiB total
 read bytes, 10,000 directory entries, or 64 nested directories. Policy and lock
 reads share these bounds. Unreadable files and size changes detected while reading
 fail the scan; this is not an atomic snapshot of concurrent repository edits.

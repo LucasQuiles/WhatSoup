@@ -108,9 +108,10 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
   executable(join(bin, 'python3.13'), [
+    '[ "$1" != "-I" ] || shift',
     'case "${1:-}" in',
     "  --version) printf '%s\\n' 'Python 3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
-    "  -c) printf '%s\\n' 'cpython:3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  -c) case \"$2\" in *platform.machine*) printf '%s\\n' \"${FAKE_PYTHON_ARCH:-arm64}\" ;; *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exit 2 ;; esac; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',

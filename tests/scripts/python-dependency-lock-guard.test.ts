@@ -134,6 +134,15 @@ describe('python dependency lock guard', () => {
     ['workflow shell assignment', 'run: A=one pip install pytest'],
     ['assignment after a shell separator', 'true && A=one pip install pytest'],
     ['quoted env assignment', 'env A="two words" pip install pytest'],
+    ['env cleared environment', 'env -i PATH="$PATH" pip install pytest'],
+    ['env long clear option', 'env --ignore-environment pip install pytest'],
+    ['env unset value', 'env -u PIP_CONFIG_FILE pip install pytest'],
+    ['env attached unset value', 'env -uPIP_CONFIG_FILE pip install pytest'],
+    ['env long unset value', 'env --unset=PIP_CONFIG_FILE pip install pytest'],
+    ['env working directory', 'env -C "/tmp/build output" pip install pytest'],
+    ['env option delimiter', 'env -- pip install pytest'],
+    ['env split string', 'env -S "pip install pytest"'],
+    ['env unknown option prefix', 'env --unknown-option value pip install pytest'],
     ['escaped assignment', 'PIP_CONFIG_FILE=/tmp/my\\ config pip install pytest'],
     ['command substitution assignment', 'A=$(printf x\\ y) pip install pytest'],
     ['nested command substitution assignment', 'A="$(printf "%s" "$(printf x)")" pip install pytest'],
@@ -176,6 +185,8 @@ describe('python dependency lock guard', () => {
     'python3 -m pip --log "build output.log" show install',
     'command -v pip install',
     'command -V pip install',
+    'env -u PIP_CONFIG_FILE pip show install',
+    'env -- echo pip install',
   ])('preserves the non-install subcommand in %s', (command) => {
     const root = makeFixture();
     writePolicy(root);
@@ -206,6 +217,17 @@ describe('python dependency lock guard', () => {
     write(root, 'scripts/install.sh', `python3 -m pip --isolated --timeout=10 install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`);
     expect(scanPythonDependencyLocks(root)).toEqual([]);
   });
+
+  it.each(['env -i PATH="$PATH"', 'env -u PIP_CONFIG_FILE', 'env --'])(
+    'accepts a locked install after %s',
+    (prefix) => {
+      const root = makeFixture();
+      writePolicy(root);
+      writeValidLock(root);
+      write(root, 'scripts/install.sh', `${prefix} pip install --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r ${qualityLock}`);
+      expect(scanPythonDependencyLocks(root)).toEqual([]);
+    },
+  );
 
   it.each([
     'command -p --',

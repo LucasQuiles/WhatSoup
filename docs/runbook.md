@@ -66,6 +66,11 @@ do not prove a service is running or that a particular agent runtime can use it.
 Quality and release setup require CPython `3.13.16`, then create a private managed interpreter at
 `${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
 and install the committed, hash-locked `pytest`, `pytest-cov`, Hypothesis, and Ruff graph there.
+Lock selection uses that interpreter's architecture, so an x86_64 interpreter
+under Rosetta receives the `darwin-x64` graph rather than the Mac's ARM graph.
+Python identity and architecture probes have a five-second budget; the host
+doctor reports an expired exact-identity probe as inconclusive, and installers
+stop before using a lock. `WHATSOUP_PYTHON_PROBE_TIMEOUT` sets that probe budget.
 Each install creates a fresh environment and retains the old directory at the
 printed adjacent `.previous.*` path. Keep consumers stopped during replacement.
 After successful installation and consumer checks, retire the retained directory

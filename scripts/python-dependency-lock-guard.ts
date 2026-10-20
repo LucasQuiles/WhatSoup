@@ -280,12 +280,23 @@ function skipInvocationPrefixes(line: string, start: number): number {
       consumeWord();
       continue;
     }
-    if (!['command', 'exec', 'nohup', 'time'].includes(word)) break;
+    if (!['command', 'exec', 'nohup', 'time', 'env'].includes(word)) break;
     consumeWord();
     while (nextWord().startsWith('-')) {
       const option = nextWord();
       consumeWord();
       if (option === '--') break;
+      if (word === 'env') {
+        if (['-', '-i', '--ignore-environment'].includes(option)) continue;
+        if (['-u', '--unset', '-C', '--chdir', '-a', '--argv0'].includes(option)) {
+          if (!nextWord()) return -1;
+          consumeWord();
+          continue;
+        }
+        if (/^(?:-[uCa].+|--(?:unset|chdir|argv0)=.+)$/.test(option)) continue;
+        // Split-string and unknown options cannot be safely resolved by this scanner.
+        return -1;
+      }
       if ((word === 'command' || word === 'time') && /^-p+$/.test(option)) continue;
       if (word === 'exec' && /^-[cl]+$/.test(option)) continue;
       if (word === 'exec') {
@@ -317,6 +328,10 @@ function findInstallCommands(text: string): string[] {
     const starts = /(?:[;|&]\s*|\brun:\s*|\bsudo\s+|\benv\s+)/gi;
     for (const start of [0, ...Array.from(line.matchAll(starts), (prefix) => prefix.index + prefix[0].length)]) {
       const offset = skipInvocationPrefixes(line, start);
+      if (offset === -1) {
+        commands.push('pip install');
+        continue;
+      }
       const pip = line.slice(offset).match(/^["']?(?:[A-Za-z0-9_${}./-]*\/)?pip(?:3(?:\.\d+)?)?["']?(?=\s)/i);
       if (!pip) continue;
       const argumentsText = commandAfterInstall(line, offset + pip[0].length);

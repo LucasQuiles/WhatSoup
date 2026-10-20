@@ -213,11 +213,12 @@ jobs:
           chmod 700 "$HOME/.ssh"
           printf '%s\n' "$TEST_INTEGRITY_DEPLOY_KEY" > "$HOME/.ssh/test_integrity_deploy"
           chmod 600 "$HOME/.ssh/test_integrity_deploy"
-          trap 'rm -f "$HOME/.ssh/test_integrity_deploy"' EXIT
-          ssh-keyscan -t ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          trap 'rm -f "$HOME/.ssh/test_integrity_deploy" "$HOME/.ssh/test_integrity_known_hosts"' EXIT
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$HOME/.ssh/test_integrity_known_hosts"
+          chmod 600 "$HOME/.ssh/test_integrity_known_hosts"
           git -C "$plugin_dir" init
           git -C "$plugin_dir" remote add origin git@github.com:LucasQuiles/test-integrity.git
-          GIT_SSH_COMMAND="ssh -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+          GIT_SSH_COMMAND="ssh -F /dev/null -i $HOME/.ssh/test_integrity_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=$HOME/.ssh/test_integrity_known_hosts" \
             git -C "$plugin_dir" fetch --depth 1 origin "$TEST_INTEGRITY_COMMIT"
           git -C "$plugin_dir" switch --detach FETCH_HEAD
           observed_commit="$(git -C "$plugin_dir" rev-parse HEAD)"
