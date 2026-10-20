@@ -19,16 +19,21 @@ incident's own health reading (relay 19 B1), and fails closed without it.
 """
 from __future__ import annotations
 
+import base64
 import errno
+import io
 import ipaddress
 import json
+import math
 import os
 import socket
 import stat
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -41,8 +46,6 @@ try:  # imported as ``lib.fleet_lines`` by the deploy scripts
         tracked_health_profile_path,
     )
 except ImportError:  # loaded by file path, without deploy/scripts on sys.path
-    import sys
-
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from lib.fleet_config import (
         HEALTH_PROFILE_JSON_ENV,
@@ -128,8 +131,6 @@ def fleet_api_url(profile: dict[str, Any]) -> str:
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host == "localhost":
-        return True
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
@@ -137,13 +138,14 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
-    """True unless ``url`` is plain http on a loopback host.
+    """True unless ``url`` is plain http on a literal loopback address.
 
     Relay 22 A2: the URL can come from an environment or profile override, and
     the fleet token goes with the request, so any non-loopback host (or scheme,
     or a URL carrying user info) is refused before a request is built. A
     configured non-loopback bind is not local proof: remote access must use the
-    loopback listener through its TLS front door.
+    loopback listener through its TLS front door. Named aliases, including
+    localhost, are refused because their resolution is not a peer-address proof.
     """
     try:
         parts = urlsplit(url)
@@ -152,7 +154,7 @@ def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
         parts.port  # noqa: B018 - a bad port raises ValueError here
     except ValueError:
         return True
-    if parts.scheme != "http" or not host or has_user_info:
+    if parts.scheme != "http" or not host or has_user_info or parts.query or parts.fragment:
         return True
     return not _is_loopback_host(host)
 
@@ -165,8 +167,72 @@ class _RedirectRefused(HTTPRedirectHandler):
 
 
 def fleet_api_opener() -> Callable[..., Any]:
-    """An opener with no proxy (environment settings are ignored) and no redirect following."""
-    return build_opener(ProxyHandler({}), _RedirectRefused()).open
+    """No proxies or redirects; one deadline covers headers and the entire body."""
+    return _bounded_fleet_open
+
+
+class _FleetResponse(io.BytesIO):
+    def __init__(self, body: bytes, status: int) -> None:
+        super().__init__(body)
+        self.status = status
+
+
+def _bounded_fleet_open(request: Request, *, timeout: float) -> _FleetResponse:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("fleet request timeout must be finite and positive")
+    payload = json.dumps({
+        "url": request.full_url,
+        "headers": dict(request.header_items()),
+        "timeout": timeout,
+    }).encode()
+    # urllib's timeout is an inactivity timeout. A separate process lets the
+    # caller bound a peer that keeps dripping bytes, then kill and reap it.
+    # Credentials travel through stdin, never arguments or error messages.
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-B", str(Path(__file__).resolve())],
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise TimeoutError("fleet transfer deadline exceeded") from None
+    if completed.returncode != 0:
+        raise OSError("fleet transfer worker failed")
+    result = json.loads(completed.stdout)
+    if error := result.get("error"):
+        if error == "ValueError":
+            raise ValueError("fleet request refused")
+        if error == "TimeoutError":
+            raise TimeoutError("fleet transfer deadline exceeded")
+        raise URLError(error)
+    body = base64.b64decode(result["body"], validate=True)
+    status = result["status"]
+    if status >= 300:
+        raise HTTPError(request.full_url, status, "fleet HTTP error", {}, io.BytesIO(body))
+    return _FleetResponse(body, status)
+
+
+def _fleet_transfer_worker() -> None:
+    try:
+        payload = json.loads(sys.stdin.buffer.read(64 * 1024))
+        request = Request(payload["url"], method="GET", headers=payload["headers"])
+        opener = build_opener(ProxyHandler({}), _RedirectRefused())
+        try:
+            response = opener.open(request, timeout=payload["timeout"])
+        except HTTPError as exc:
+            response = exc
+        with response:
+            status = response.status
+            body = response.read(FLEET_LINES_MAX_BYTES + 1)
+        if len(body) > FLEET_LINES_MAX_BYTES:
+            raise ValueError("fleet response too large")
+        result = {"status": status, "body": base64.b64encode(body).decode("ascii")}
+    except Exception as exc:  # noqa: BLE001 - never expose request or token bytes
+        result = {"error": type(exc).__name__}
+    sys.stdout.write(json.dumps(result))
 
 
 def fleet_token_path(profile: dict[str, Any]) -> str:
@@ -382,3 +448,7 @@ def line_verdict(row: dict[str, Any] | None) -> str:
     if status == "unlinked":
         return LINE_LOGGED_OUT
     return LINE_COULD_NOT_CHECK
+
+
+if __name__ == "__main__":
+    _fleet_transfer_worker()

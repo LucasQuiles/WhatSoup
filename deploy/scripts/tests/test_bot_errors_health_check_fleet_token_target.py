@@ -15,6 +15,7 @@ import http.server
 import importlib.util
 import json
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -224,3 +225,88 @@ def test_a_malformed_health_token_never_reaches_the_report_line(fleet_profile, m
     assert local_seen == []
     assert line == f"FAIL http://127.0.0.1:{local.server_address[1]}/health ValueError", line
     _assert_no_token_bytes(line)
+
+
+@pytest.mark.parametrize("host", ["localhost", "LOCALHOST"])
+def test_named_loopback_alias_is_refused_before_token_read(fleet_profile, monkeypatch, host):
+    profile_for, _servers = fleet_profile
+    profile = profile_for(f"http://{host}:9099")
+    reads = []
+    monkeypatch.setattr(_mod, "load_fleet_api_token", lambda *_a: (
+        reads.append("token") or ("synthetic-token", "fixture", 0, None)
+    ))
+    monkeypatch.setattr(_mod, "urlopen", lambda *_a, **_k: None)
+
+    assert _mod.fleet_api_inventory(profile) == ["FAIL fleet_api: fleet_api_host_refused"]
+    assert reads == []
+
+
+@pytest.mark.parametrize("component", ["?token=synthetic-private-value", "#synthetic-private-value"])
+def test_fleet_url_components_are_refused_without_disclosure(fleet_profile, monkeypatch, component):
+    profile_for, _servers = fleet_profile
+    profile = profile_for("http://127.0.0.1:9099/api/lines" + component)
+    reads = []
+    monkeypatch.setattr(_mod, "load_fleet_api_token", lambda *_a: (
+        reads.append("token") or ("synthetic-token", "fixture", 0, None)
+    ))
+    monkeypatch.setattr(_mod, "urlopen", lambda *_a, **_k: None)
+
+    assert _mod.fleet_api_inventory(profile) == ["FAIL fleet_api: fleet_api_host_refused"]
+    assert reads == []
+
+
+@pytest.mark.parametrize("consumer", ["dispatcher", "health"])
+@pytest.mark.parametrize("phase", ["headers", "body"])
+@pytest.mark.parametrize("error_status", [False, True])
+def test_fleet_transfer_deadline_bounds_a_dripping_peer(fleet_profile, monkeypatch, consumer, phase, error_status):
+    from lib.fleet_lines import read_fleet_lines
+
+    profile_for, servers = fleet_profile
+    disconnected = threading.Event()
+    received = threading.Event()
+    stopped = threading.Event()
+
+    class DrippingHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib entry point
+            received.set()
+            body = b'{"lines":[],"padding":"012345678901234567890123456789"}'
+            status = b"503 Unavailable" if error_status else b"200 OK"
+            headers = b"HTTP/1.1 " + status + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+            prefix, dripping = (b"", headers + body) if phase == "headers" else (headers, body)
+            try:
+                self.connection.sendall(prefix)
+                for byte in dripping:
+                    if stopped.is_set():
+                        break
+                    self.connection.sendall(bytes([byte]))
+                    time.sleep(0.05)  # TIMING: keep bytes arriving within the socket timeout while exceeding the total deadline.
+            except (BrokenPipeError, ConnectionResetError):
+                disconnected.set()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DrippingHandler)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    servers.append(server)
+    profile = profile_for(f"http://127.0.0.1:{server.server_address[1]}")
+    monkeypatch.setattr(_mod, "HEALTH_PROBE_TIMEOUT_SECONDS", 0.5)
+    started = time.monotonic()
+    try:
+        if consumer == "dispatcher":
+            result = read_fleet_lines(profile, timeout=0.5)
+            failed = result.lines is None and result.error is not None
+        else:
+            [line] = _mod.fleet_api_inventory(profile)
+            failed = line.startswith("FAIL fleet_api:")
+            assert "synthetic-fleet-token" not in line
+        elapsed = time.monotonic() - started
+        assert received.is_set(), "the real local peer was never contacted"
+        assert failed, "an unfinished transfer must not become usable inventory"
+        assert elapsed < 1.5, f"whole-transfer deadline was exceeded: {elapsed:.2f}s"
+        assert disconnected.wait(1), "the deadline left the transport running"
+    finally:
+        stopped.set()
+        server.shutdown()
+        serving.join(timeout=2)

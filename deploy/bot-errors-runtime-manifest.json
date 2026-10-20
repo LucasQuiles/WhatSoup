@@ -642,7 +642,7 @@
     },
     {
       "path": "deploy/scripts/lib/fleet_lines.py",
-      "sha256": "0fa67568cf8b1268bd58c01d1ad4127c68a3732b9027a11a72ab694bc3bb7097",
+      "sha256": "ba8bfac3d928334b80b4557e017f5231295858847da91ff4c7f93823e03a2188",
       "mustContain": [
         "def read_fleet_lines(",
         "def line_verdict(",

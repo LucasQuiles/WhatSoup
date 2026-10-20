@@ -1496,6 +1496,14 @@ Import history (sha256 matrix, deviation notes, RESUME NOTE) lives in
 
 ## NORMATIVE — Deploy method (stream + hash-verify)
 
+Fleet API reads by the dispatcher and health check require a literal loopback
+address, such as `http://127.0.0.1:9099` or `http://[::1]:9099`. Named aliases,
+including `localhost`, and URLs with queries or fragments are refused before the
+token is read. Proxies and redirects are disabled. The request budget covers
+connection, headers and the complete response body, including HTTP error bodies;
+expiry terminates and reaps the
+request worker. Responses larger than 256 KiB fail closed.
+
 Fleet minis have **no GitHub access**. Deploys are content-pushed from an operator machine:
 stream each script over ssh to the host's running location, then hash-verify on the host.
 This section describes the mechanics only; fleet mutation still requires a separately named
