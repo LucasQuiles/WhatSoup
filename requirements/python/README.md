@@ -19,6 +19,15 @@ previous directory available for an explicit rollback; do not use the incomplete
 replacement. Retire the retained environment only after installation, imports and
 its consumers pass, using the applicable storage-retirement procedure.
 
+## Migration regression prerequisites
+
+The managed-environment regression uses real CPython 3.12 and the locked 3.13.16
+runtime. CI provisions both explicitly. For local runs, set
+`WHATSOUP_TEST_LEGACY_PYTHON` and `WHATSOUP_TEST_LOCKED_PYTHON` to their executable
+paths when `python3.12` and `python3.13` do not resolve to those versions. Missing or
+wrong runtimes fail the test; they do not skip the migration check. The test checks
+both generic launchers, old startup-hook exclusion, and retained prior bytes.
+
 ## Updating a lock
 
 Record the update date, reason or advisory, input-pin change, generator version,

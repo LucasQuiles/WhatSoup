@@ -116,8 +116,7 @@ describe('Python lock runtime policy', () => {
 
 
 describe('managed Python environment replacement', () => {
-  function existingEnvironment(root: string): { python: string; target: string; hook: string; marker: string } {
-    const python = resolveTestPython();
+  function existingEnvironment(root: string, python = resolveTestPython()): { python: string; target: string; hook: string; marker: string } {
     const target = join(root, 'managed-venv');
     const created = spawnSync(python, ['-m', 'venv', '--without-pip', target], { encoding: 'utf8' });
     expect(created.status, created.stderr).toBe(0);
@@ -129,23 +128,33 @@ describe('managed Python environment replacement', () => {
     return { python, target, hook, marker };
   }
 
-  it('starts from a fresh environment while retaining the previous executable artifacts', () => {
+  it('replaces real CPython 3.12 launchers with the locked 3.13.16 runtime and retains prior artifacts', () => {
     const root = tempRoot();
-    const { python, target, hook, marker } = existingEnvironment(root);
-    const prior = readFileSync(hook);
-    const result = runPolicy(`
-WHATSOUP_LOCKED_PYTHON_VERSION="$($BASE_PYTHON -c 'import platform; print(platform.python_version())')"
-whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV"
-`, { BASE_PYTHON: python, TARGET_VENV: target });
+    const legacy = process.env.WHATSOUP_TEST_LEGACY_PYTHON || 'python3.12';
+    const replacement = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const legacyProbe = spawnSync(legacy, ['-I', '-c', 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}")'], { encoding: 'utf8' });
+    expect(legacyProbe.status, legacyProbe.stderr).toBe(0);
+    expect(legacyProbe.stdout.trim()).toBe('cpython:3.12');
+    const { target, hook, marker } = existingEnvironment(root, legacy);
+    const priorHook = readFileSync(hook);
+    const priorConfig = readFileSync(join(target, 'pyvenv.cfg'));
+    const result = runPolicy('whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV"', {
+      BASE_PYTHON: replacement,
+      TARGET_VENV: target,
+    });
     expect(result.status, result.stderr).toBe(0);
-    const probe = spawnSync(join(target, 'bin/python'), ['-I', '-c', 'import sys; print(sys.prefix)'], { encoding: 'utf8' });
-    expect(probe.status, probe.stderr).toBe(0);
-    expect(probe.stdout.trim()).toBe(target);
+    for (const launcher of ['python', 'python3']) {
+      const probe = spawnSync(join(target, 'bin', launcher), ['-I', '-c', 'import json, sys; print(json.dumps({"implementation": sys.implementation.name, "version": list(sys.version_info[:3]), "prefix": sys.prefix}))'], { encoding: 'utf8' });
+      expect(probe.status, probe.stderr).toBe(0);
+      expect(JSON.parse(probe.stdout)).toEqual({ implementation: 'cpython', version: [3, 13, 16], prefix: target });
+    }
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(hook)).toBe(false);
     const backups = readdirSync(root).filter((name) => name.startsWith('managed-venv.previous.'));
     expect(backups).toHaveLength(1);
-    expect(readFileSync(join(root, backups[0]!, 'environment', hook.slice(target.length + 1)))).toEqual(prior);
+    const retained = join(root, backups[0]!, 'environment');
+    expect(readFileSync(join(retained, hook.slice(target.length + 1)))).toEqual(priorHook);
+    expect(readFileSync(join(retained, 'pyvenv.cfg'))).toEqual(priorConfig);
   }, 20_000);
 
   it('restores the previous environment and retains partial creation after a creation failure', () => {

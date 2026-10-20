@@ -48,7 +48,8 @@ jobs:
 
       # Node 24 is the full enforcement authority. The explicit compatibility
       # job below validates the supported Node 25 runtime without duplicating
-      # version-invariant guards, coverage, Python, design, or browser work.
+      # version-invariant guards, coverage, Python suites, design, or browser work.
+      # Both Node suites need Python interpreters for real installer migration tests.
       - name: Setup Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
@@ -61,10 +62,25 @@ jobs:
             package-lock.json
             console/package-lock.json
 
+      - name: Setup legacy CPython for migration regression
+        id: legacy-python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
       - name: Setup CPython 3.13.16
+        id: locked-python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.13.16'
+
+      - name: Bind migration regression interpreters
+        env:
+          LEGACY_PYTHON: ${{ steps.legacy-python.outputs.python-path }}
+          LOCKED_PYTHON: ${{ steps.locked-python.outputs.python-path }}
+        run: |
+          echo "WHATSOUP_TEST_LEGACY_PYTHON=$LEGACY_PYTHON" >> "$GITHUB_ENV"
+          echo "WHATSOUP_TEST_LOCKED_PYTHON=$LOCKED_PYTHON" >> "$GITHUB_ENV"
 
       - name: Verify locked Python runtime
         run: python -c 'import sys; assert sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 13, 16)'
@@ -505,6 +521,26 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             console/package-lock.json
+
+      - name: Setup legacy CPython for migration regression
+        id: legacy-python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Setup CPython 3.13.16
+        id: locked-python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.13.16'
+
+      - name: Bind migration regression interpreters
+        env:
+          LEGACY_PYTHON: ${{ steps.legacy-python.outputs.python-path }}
+          LOCKED_PYTHON: ${{ steps.locked-python.outputs.python-path }}
+        run: |
+          echo "WHATSOUP_TEST_LEGACY_PYTHON=$LEGACY_PYTHON" >> "$GITHUB_ENV"
+          echo "WHATSOUP_TEST_LOCKED_PYTHON=$LOCKED_PYTHON" >> "$GITHUB_ENV"
 
       - name: Install compatibility host dependencies
         run: |

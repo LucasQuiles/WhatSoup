@@ -1349,7 +1349,11 @@ describe('quality workflow composition', () => {
     expect(compatibility).not.toContain('coverage:check');
     expect(compatibility).not.toContain('guard:');
     expect(compatibility).not.toContain('Playwright');
-    expect(compatibility).not.toContain('setup-python');
+    expect(compatibility).toContain("python-version: '3.12'");
+    expect(compatibility).toContain("python-version: '3.13.16'");
+    expect(compatibility).toContain('WHATSOUP_TEST_LEGACY_PYTHON=$LEGACY_PYTHON');
+    expect(compatibility).toContain('WHATSOUP_TEST_LOCKED_PYTHON=$LOCKED_PYTHON');
+    expect(compatibility).not.toContain('python -m pytest');
     expect(compatibility).toContain('install-host-dependencies.sh --profile compatibility --node-policy compatibility');
     expect(compatibility).toContain('whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility');
     expect(compatibility).not.toContain('test-integrity');
