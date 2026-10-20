@@ -23,6 +23,7 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { TEST_WORKER_LIMIT } from './lib/test-worker-limit.ts';
 
 export interface GateStep {
   readonly name: string;
@@ -297,10 +298,18 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
  * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…); WHATSOUP_*
  * vars pass through EXCEPT the neutralized skip-vars — which implements the
  * legacy `unset WHATSOUP_SKIP_*` preamble structurally rather than by
- * mutation: the skips simply never reach the children.
+ * mutation: the skips simply never reach the children. Vitest's worker-count
+ * setting may reduce the repository default so resource limits reach both lanes.
  */
 export function pushGateChildEnv(): NodeJS.ProcessEnv {
   const env = cleanGitEnv();
+  const workers = process.env.VITEST_MAX_WORKERS;
+  if (workers !== undefined) {
+    if (!/^[1-9]\d*$/.test(workers) || Number(workers) > TEST_WORKER_LIMIT) {
+      throw new Error(`VITEST_MAX_WORKERS must be an integer from 1 through ${TEST_WORKER_LIMIT}`);
+    }
+    env.VITEST_MAX_WORKERS = workers;
+  }
   for (const [key, value] of Object.entries(process.env)) {
     if (
       key.startsWith('WHATSOUP_')

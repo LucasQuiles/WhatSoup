@@ -3,9 +3,8 @@
 # snapshot policy are verified by scripts/check-node-pin-consistency.ts.
 FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
 
-# The pinned slim base intentionally has no CA bundle. Debian snapshot documents
-# HTTP as the bootstrap transport; apt-secure still verifies the signed Release
-# metadata and package hashes. The guard rejects authentication bypasses.
+# HTTP bootstraps the pinned Debian snapshot. apt-secure verifies the signed
+# Release metadata and package hashes; the guard rejects authentication bypasses.
 RUN printf '%s\n' \
       'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
       'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
