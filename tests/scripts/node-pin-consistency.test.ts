@@ -977,3 +977,16 @@ describe('sub-package engines align with root (#1082)', () => {
     expect(enginesNode('tools/whatsoup_guard/package.json')).toBe(root);
   });
 });
+
+it('refuses a policy fallback redirected to another GitHub repository', () => {
+  const root = makeFixture({});
+  const policyPath = path.join(root, 'docker/container-inputs.json');
+  const policy = JSON.parse(readFileSync(policyPath, 'utf8'));
+  policy.sourceRepository = 'https://github.com/contributor/WhatSoup.git';
+  policy.builder.provenanceIdPrefix = 'https://github.com/contributor/WhatSoup/actions/runs/';
+  writeFileSync(policyPath, JSON.stringify(policy));
+  expect(findNodePinDrift({ cwd: root }).missing).toContainEqual({
+    source: 'docker/container-inputs.json', filePath: policyPath,
+    reason: 'invalid container input policy shape',
+  });
+});

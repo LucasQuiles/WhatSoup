@@ -82,7 +82,7 @@ const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{6
 const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
 const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64';
 const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9&platform=linux%2Famd64';
-const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
+const CANONICAL_SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
 const APT_SOURCE_DEFINITION_PATTERN = /(?:^|['"\s])((?:deb|deb-src)(?:\s+\[[^\]\r\n]+\])?\s+[^\s'"]+\s+[^\s'"]+(?:\s+[^\s'"]+)*)(?=['"\\,;]|\s*$)/g;
 
 const HARDCODED_NODE_PATH_PATTERN =
@@ -205,7 +205,7 @@ function readContainerInputPolicy(cwd: string):
     || (parsed as { schemaVersion?: unknown }).schemaVersion !== 3
     || (parsed as { platform?: unknown }).platform !== 'linux/amd64'
     || typeof (parsed as { sourceRepository?: unknown }).sourceRepository !== 'string'
-    || !SOURCE_REPOSITORY_PATTERN.test((parsed as { sourceRepository: string }).sourceRepository)
+    || (parsed as { sourceRepository: string }).sourceRepository !== CANONICAL_SOURCE_REPOSITORY
     || typeof (parsed as { baseImage?: unknown }).baseImage !== 'string'
     || (parsed as { baseImageDependency?: unknown }).baseImageDependency !== BASE_IMAGE_DEPENDENCY
     || !isBuildkitImageDependency(

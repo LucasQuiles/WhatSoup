@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -81,6 +81,14 @@ function makeReceiptInput(options: {
 } = {}) {
   const dir = tmp.make('evidence');
   const metadataPath = path.join(dir, 'build-metadata.json');
+  const runtimeEvidencePath = path.join(dir, 'buildkit-runtime.json');
+  writeFileSync(runtimeEvidencePath, JSON.stringify({
+    schemaVersion: 1, builderName: 'whatsoup-ci-builder', builderDriver: 'docker-container',
+    buildxVersion: options.buildxVersion ?? 'v0.38.0', buildkitVersion: options.buildkitVersion ?? 'v0.33.1',
+    buildkitImage: containerInputs.buildx!.buildkitImage, imageId: `sha256:${'e'.repeat(64)}`,
+    nodeName: 'whatsoup-ci-builder0', endpoint: 'unix:///var/run/docker.sock', containerId: 'f'.repeat(64),
+    sourceRevision: SOURCE_REVISION, provenanceBuilderId: PROVENANCE_BUILDER_ID,
+  }));
   const sbomPath = path.join(dir, 'image.spdx.json');
   const imagePath = path.join(dir, 'image.tar');
   const oci = writeOciArchive(imagePath, {
@@ -107,6 +115,7 @@ function makeReceiptInput(options: {
   return {
     repoRoot,
     metadataPath,
+    runtimeEvidencePath,
     sbomPath,
     imagePath,
     sourceRevision: SOURCE_REVISION,
@@ -138,6 +147,7 @@ interface OciArchiveOptions {
   directLayout?: boolean;
   extraOutputDescriptor?: boolean;
   extraRunnableDescriptor?: boolean;
+  imageLayerCount?: number;
   runnablePlatform?: { os: string; architecture: string };
   attestationPlatform?: { os: string; architecture: string };
   configPlatform?: { os: string; architecture: string };
@@ -177,7 +187,7 @@ function writeOciArchive(
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     config: configDescriptor,
-    layers: [layerDescriptor],
+    layers: Array.from({ length: options.imageLayerCount ?? 1 }, () => layerDescriptor),
   }));
   const imageDigest = runnable.digest;
   const sourceRevision = options.sourceRevision ?? SOURCE_REVISION;
@@ -376,7 +386,7 @@ describe('container build evidence CI contract', () => {
 
   it('uses the shared closed-option parser and rejects ambiguous receipt inputs', () => {
     const argv = [
-      '--metadata', '/tmp/metadata.json', '--sbom', '/tmp/sbom.json',
+      '--metadata', '/tmp/metadata.json', '--runtime-evidence', '/tmp/runtime.json', '--sbom', '/tmp/sbom.json',
       '--image', '/tmp/image.tar', '--source', SOURCE_REVISION,
       '--builder', 'whatsoup-ci-builder|docker-container',
       '--buildx-version', 'v0.38.0', '--buildkit-version', 'v0.33.1',
@@ -775,10 +785,80 @@ describe('container build evidence CI contract', () => {
     expect(() => verifyContainerBuildReceipt(receipt, {
       ...input,
       sourceRevision: 'c'.repeat(40),
-    })).toThrow('SLSA config source revision does not match requested source revision');
+    })).toThrow('BuildKit runtime evidence does not bind reviewed image and workflow invocation');
     expect(() => verifyContainerBuildReceipt(receipt, {
       ...input,
       builder: 'unreviewed|docker',
     })).toThrow('builder identity does not match docker/container-inputs.json');
   });
+});
+
+describe('primary review evidence boundaries', () => {
+  it.each(['metadataPath', 'sbomPath'] as const)('rejects oversized %s before parsing', (field) => {
+    const input = makeReceiptInput();
+    const bytes = readFileSync(input[field]);
+    writeFileSync(input[field], Buffer.concat([Buffer.alloc(33 * 1024 * 1024, 32), bytes]));
+    expect(() => createContainerBuildReceipt(input)).toThrow('byte limit');
+  });
+  it('rejects a redirected policy fallback even when its builder prefix agrees', () => {
+    const input = makeReceiptInput({ sourceRepository: 'https://github.com/contributor/WhatSoup.git',
+      ociProvenanceBuilderId: 'https://github.com/contributor/WhatSoup/actions/runs/123' });
+    const root = tmp.make('redirected-policy');
+    mkdirSync(path.join(root, 'docker'));
+    const policy = JSON.parse(readFileSync(path.join(repoRoot, 'docker/container-inputs.json'), 'utf8'));
+    policy.sourceRepository = 'https://github.com/contributor/WhatSoup.git';
+    policy.builder.provenanceIdPrefix = 'https://github.com/contributor/WhatSoup/actions/runs/';
+    writeFileSync(path.join(root, 'docker/container-inputs.json'), JSON.stringify(policy));
+    expect(() => createContainerBuildReceipt({ ...input, repoRoot: root,
+      provenanceBuilderId: `${policy.builder.provenanceIdPrefix}123` })).toThrow('invalid source');
+  });
+  it('rejects an excessive image layer list before repeated extraction', () => {
+    const archive = path.join(tmp.make('too-many-layers'), 'image.tar');
+    const output = writeOciArchive(archive, { imageLayerCount: 129 });
+    expect(() => verifyOciArchiveAttestations(archive, output.outputDigest)).toThrow('descriptor count limit');
+  });
+});
+
+it.each(['buildkitImage', 'sourceRevision', 'provenanceBuilderId'])('rejects substituted runtime %s', (field) => {
+  const input = makeReceiptInput();
+  const evidence = JSON.parse(readFileSync(input.runtimeEvidencePath, 'utf8'));
+  evidence[field] = field === 'buildkitImage' ? `moby/buildkit:v0.33.1@sha256:${'d'.repeat(64)}` : 'substituted';
+  writeFileSync(input.runtimeEvidencePath, JSON.stringify(evidence));
+  expect(() => createContainerBuildReceipt(input)).toThrow('BuildKit runtime evidence does not bind');
+});
+it('binds runtime evidence bytes and image identity into the receipt', () => {
+  const input = makeReceiptInput();
+  const receipt = createContainerBuildReceipt(input);
+  expect(receipt.runtimeEvidenceSha256).toBe(`sha256:${sha256(readFileSync(input.runtimeEvidencePath))}`);
+  expect(receipt.buildkitImageId).toBe(`sha256:${'e'.repeat(64)}`);
+  const evidence = JSON.parse(readFileSync(input.runtimeEvidencePath, 'utf8'));
+  evidence.imageId = `sha256:${'d'.repeat(64)}`;
+  writeFileSync(input.runtimeEvidencePath, JSON.stringify(evidence));
+  expect(() => verifyContainerBuildReceipt(receipt, input)).toThrow('does not match the verified build inputs');
+});
+it('enforces an aggregate extraction budget across valid OCI entries', () => {
+  const archive = path.join(tmp.make('budget'), 'image.tar');
+  const output = writeOciArchive(archive);
+  expect(() => verifyOciArchiveAttestations(archive, output.outputDigest, undefined, { maxEntries: 1 }))
+    .toThrow('extraction count limit');
+  expect(() => verifyOciArchiveAttestations(archive, output.outputDigest, undefined, { maxBytes: 2048 }))
+    .toThrow('aggregate byte limit');
+  expect(() => verifyOciArchiveAttestations(archive, output.outputDigest, undefined, { timeoutMs: 1 }))
+    .toThrow(/wall-time limit|ETIMEDOUT/);
+  expect(verifyOciArchiveAttestations(archive, output.outputDigest).imageDigest).toBe(output.imageDigest);
+});
+
+it('rejects a runtime evidence FIFO without waiting for a writer', () => {
+  const input = makeReceiptInput();
+  unlinkSync(input.runtimeEvidencePath);
+  execFileSync('mkfifo', [input.runtimeEvidencePath]);
+  const moduleUrl = new URL('../../scripts/verify-container-build-receipt.ts', import.meta.url).href;
+  const program = `import { createContainerBuildReceipt } from ${JSON.stringify(moduleUrl)};
+    try { createContainerBuildReceipt(${JSON.stringify(input)}); process.exit(3); }
+    catch (error) { console.error(error.message); process.exit(42); }`;
+  const result = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', program],
+    { encoding: 'utf8', timeout: 2000 });
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(42);
+  expect(result.stderr).toContain('BuildKit runtime evidence exceeds');
 });

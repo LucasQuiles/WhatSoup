@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, constants, fstatSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -30,6 +31,7 @@ interface SbomDocument { SPDXID?: unknown; spdxVersion?: unknown; name?: unknown
 export interface ContainerBuildReceiptInput {
   repoRoot: string;
   metadataPath: string;
+  runtimeEvidencePath: string;
   sbomPath?: string;
   verifiedSbomOutputPath?: string;
   imagePath: string;
@@ -52,6 +54,8 @@ export interface ContainerBuildReceipt {
   buildkitImage: string;
   buildkitVersion: string;
   baseImage: string;
+  buildkitImageId: string;
+  runtimeEvidenceSha256: string;
   baseImageDependency: string;
   baseImageResolvedDigest: string;
   sbomGenerator: string;
@@ -77,6 +81,7 @@ const BUILDX_VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
 const BUILDKIT_IMAGE_PATTERN = /^moby\/buildkit:v\d+\.\d+\.\d+@sha256:[a-f0-9]{64}$/;
 const SBOM_GENERATOR_IMAGE_PATTERN = /^docker\/buildkit-syft-scanner:stable-1@sha256:[a-f0-9]{64}$/;
 const SOURCE_REPOSITORY_PATTERN = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/;
+const CANONICAL_SOURCE_REPOSITORY = 'https://github.com/LucasQuiles/WhatSoup.git';
 const PLATFORM = 'linux/amd64';
 const BASE_IMAGE_DEPENDENCY = 'pkg:docker/node@24.15.0-slim?digest=sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d&platform=linux%2Famd64';
 const SBOM_GENERATOR_DEPENDENCY = 'pkg:docker/docker/buildkit-syft-scanner@stable-1?digest=sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9&platform=linux%2Famd64';
@@ -140,26 +145,64 @@ function sha256(contents: Buffer): string {
 }
 
 export const EVIDENCE_FILE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const JSON_MAX_BYTES = 32 * 1024 * 1024;
+const OCI_ENTRY_MAX_BYTES = 96 * 1024 * 1024;
+const DESCRIPTOR_LIST_MAX = 128;
 
-export function sha256File(filePath: string, maxBytes = EVIDENCE_FILE_MAX_BYTES): string {
-  const initial = statSync(filePath);
-  if (!initial.isFile() || !Number.isSafeInteger(initial.size) || initial.size < 0 || initial.size > maxBytes) {
-    throw new Error(`evidence file exceeds ${maxBytes} byte limit: ${filePath}`);
+export interface OciVerificationLimits { maxBytes: number; maxEntries: number; timeoutMs: number }
+const VERIFICATION_LIMITS: OciVerificationLimits = {
+  maxBytes: EVIDENCE_FILE_MAX_BYTES, maxEntries: 256, timeoutMs: 120_000,
+};
+
+class VerificationBudget {
+  readonly limits: OciVerificationLimits;
+  readonly deadline: number;
+  bytes = 0;
+  entries = 0;
+  constructor(limits: Partial<OciVerificationLimits> = {}) {
+    this.limits = { ...VERIFICATION_LIMITS, ...limits };
+    for (const key of Object.keys(VERIFICATION_LIMITS) as (keyof OciVerificationLimits)[]) {
+      if (!Number.isSafeInteger(this.limits[key]) || this.limits[key] <= 0
+        || this.limits[key] > VERIFICATION_LIMITS[key]) throw new Error('invalid verification limit');
+    }
+    this.deadline = performance.now() + this.limits.timeoutMs;
   }
-  const fd = openSync(filePath, 'r');
+  remainingTime(): number {
+    const remaining = Math.floor(this.deadline - performance.now());
+    if (remaining <= 0) throw new Error('container verification wall-time limit exceeded');
+    return remaining;
+  }
+  remainingBytes(): number {
+    this.remainingTime();
+    const remaining = this.limits.maxBytes - this.bytes;
+    if (remaining <= 0) throw new Error('OCI aggregate byte limit exceeded');
+    return remaining;
+  }
+}
+
+export function sha256File(filePath: string, maxBytes = EVIDENCE_FILE_MAX_BYTES, checkTime: () => void = () => {}): string {
+  const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   const hash = createHash('sha256');
   const chunk = Buffer.allocUnsafe(64 * 1024);
   let total = 0;
   try {
+    const initial = fstatSync(fd);
+    if (!initial.isFile() || !Number.isSafeInteger(initial.size) || initial.size < 0 || initial.size > maxBytes) {
+      throw new Error(`evidence file exceeds ${maxBytes} byte limit: ${filePath}`);
+    }
     while (true) {
+      checkTime();
       const read = readSync(fd, chunk, 0, chunk.length, null);
       if (read === 0) break;
       total += read;
       if (total > maxBytes) throw new Error(`evidence file exceeds ${maxBytes} byte limit: ${filePath}`);
       hash.update(chunk.subarray(0, read));
     }
+    const final = fstatSync(fd);
+    if (total !== initial.size || final.size !== initial.size || final.mtimeMs !== initial.mtimeMs) {
+      throw new Error(`evidence file changed while hashing: ${filePath}`);
+    }
   } finally { closeSync(fd); }
-  if (total !== initial.size || statSync(filePath).size !== initial.size) throw new Error(`evidence file changed while hashing: ${filePath}`);
   return `sha256:${hash.digest('hex')}`;
 }
 
@@ -171,12 +214,28 @@ function parseJsonBytes<T>(bytes: Buffer, label: string): T {
   }
 }
 
-function parseJson<T>(filePath: string, label: string): T {
+function readJsonBytes(filePath: string, label: string): Buffer {
+  const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    return JSON.parse(readFileSync(filePath, 'utf8')) as T;
-  } catch {
-    throw new Error(`${label} is missing or invalid JSON: ${filePath}`);
-  }
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > JSON_MAX_BYTES) throw new Error(`${label} exceeds ${JSON_MAX_BYTES} byte limit`);
+    const bytes = Buffer.allocUnsafe(before.size + 1);
+    let total = 0;
+    while (total < bytes.length) {
+      const count = readSync(fd, bytes, total, bytes.length - total, null);
+      if (!count) break;
+      total += count;
+    }
+    const after = fstatSync(fd);
+    if (total !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+      throw new Error(`${label} changed while reading`);
+    }
+    return bytes.subarray(0, total);
+  } finally { closeSync(fd); }
+}
+
+function parseJson<T>(filePath: string, label: string): T {
+  return parseJsonBytes<T>(readJsonBytes(filePath, label), label);
 }
 
 function requireRegularFile(filePath: string, label: string): void {
@@ -198,7 +257,7 @@ function loadPolicy(repoRoot: string): ContainerInputPolicy {
     policy.schemaVersion !== 3
     || policy.platform !== PLATFORM
     || typeof policy.sourceRepository !== 'string'
-    || !SOURCE_REPOSITORY_PATTERN.test(policy.sourceRepository)
+    || policy.sourceRepository !== CANONICAL_SOURCE_REPOSITORY
     || typeof policy.baseImage !== 'string'
     || !SHA256_PATTERN.test(policy.baseImage.slice(policy.baseImage.indexOf('@') + 1))
     || policy.baseImageDependency !== BASE_IMAGE_DEPENDENCY
@@ -242,13 +301,24 @@ function selectedSourceRepository(policy: ContainerInputPolicy, sourceRepository
   return selected;
 }
 
-function readOciArchiveEntry(archivePath: string, entry: string): Buffer {
+function readOciArchiveEntry(archivePath: string, entry: string, budget: VerificationBudget): Buffer {
   for (const candidate of [entry, `./${entry}`]) {
+    if (++budget.entries > budget.limits.maxEntries) throw new Error('OCI extraction count limit exceeded');
+    const maxBytes = Math.min(OCI_ENTRY_MAX_BYTES, budget.remainingBytes());
+    const timeout = Math.min(30_000, budget.remainingTime());
     try {
-      return execFileSync('tar', ['-xOf', archivePath, candidate], {
-        stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000, maxBuffer: 96 * 1024 * 1024,
+      const bytes = execFileSync('tar', ['-xOf', archivePath, candidate], {
+        stdio: ['ignore', 'pipe', 'ignore'], timeout, maxBuffer: maxBytes,
       });
-    } catch { /* OCI exporters differ on a leading ./ prefix. */ }
+      budget.bytes += bytes.length;
+      budget.remainingTime();
+      return bytes;
+    } catch (error) {
+      budget.remainingTime();
+      // Only an ordinary missing-entry exit can use the alternate archive spelling.
+      if (!isRecord(error) || (error.status !== 1 && error.status !== 2) || error.signal || error.code) throw error;
+      if (Buffer.isBuffer(error.stdout)) budget.bytes += error.stdout.length;
+    }
   }
   throw new Error(`OCI image archive is missing ${entry}: ${archivePath}`);
 }
@@ -262,6 +332,7 @@ function descriptorPlatform(descriptor: OciDescriptor): Record<string, unknown> 
 }
 
 function requireDescriptorArray(value: unknown, label: string): OciDescriptor[] {
+  if (Array.isArray(value) && value.length > DESCRIPTOR_LIST_MAX) throw new Error(`${label} exceeds OCI descriptor count limit`);
   if (!Array.isArray(value) || value.length === 0 || !value.every(isRecord)) {
     throw new Error(`${label} must contain at least one complete OCI descriptor`);
   }
@@ -278,9 +349,10 @@ function descriptorSize(descriptor: OciDescriptor, label: string): number {
   return descriptor.size as number;
 }
 
-function readVerifiedDescriptorBlob(archivePath: string, descriptor: OciDescriptor, label: string): Buffer {
+function readVerifiedDescriptorBlob(archivePath: string, descriptor: OciDescriptor, label: string, budget: VerificationBudget): Buffer {
   const digest = descriptorDigest(descriptor, label);
-  const bytes = readOciArchiveEntry(archivePath, `blobs/sha256/${digest.slice('sha256:'.length)}`);
+  if (descriptorSize(descriptor, label) > budget.remainingBytes()) throw new Error('OCI aggregate byte limit exceeded');
+  const bytes = readOciArchiveEntry(archivePath, `blobs/sha256/${digest.slice('sha256:'.length)}`, budget);
   if (bytes.length !== descriptorSize(descriptor, label)) throw new Error(`OCI descriptor size does not match blob: ${label}`);
   if (sha256(bytes) !== digest) throw new Error(`OCI descriptor SHA-256 does not match blob: ${label}`);
   return bytes;
@@ -441,9 +513,17 @@ export function verifyOciArchiveAttestations(
   imagePath: string,
   expectedOutputDigest: string,
   expected?: OciVerificationExpectation,
+  limits: Partial<OciVerificationLimits> = {},
 ): OciVerificationResult {
+  return verifyArchive(imagePath, expectedOutputDigest, expected, new VerificationBudget(limits));
+}
+
+function verifyArchive(imagePath: string, expectedOutputDigest: string,
+  expected: OciVerificationExpectation | undefined, budget: VerificationBudget): OciVerificationResult {
   if (!SHA256_PATTERN.test(expectedOutputDigest)) throw new Error('expected OCI output digest must be a SHA-256 digest');
-  const indexBytes = readOciArchiveEntry(imagePath, 'index.json');
+  const archive = statSync(imagePath);
+  if (!archive.isFile() || archive.size > EVIDENCE_FILE_MAX_BYTES) throw new Error('OCI archive exceeds byte limit');
+  const indexBytes = readOciArchiveEntry(imagePath, 'index.json', budget);
   const index = parseJsonBytes<OciIndex>(indexBytes, `OCI image archive index.json: ${imagePath}`);
   if (index.schemaVersion !== 2 || (index.mediaType !== undefined && index.mediaType !== OCI_IMAGE_INDEX_MEDIA_TYPE)) {
     throw new Error(`OCI image archive has invalid index.json: ${imagePath}`);
@@ -458,7 +538,7 @@ export function verifyOciArchiveAttestations(
     }
     const outputDescriptor = nestedOutputDescriptors[0];
     imageIndexDigest = descriptorDigest(outputDescriptor, 'OCI output index descriptor');
-    const outputIndexBytes = readVerifiedDescriptorBlob(imagePath, outputDescriptor, 'OCI output index descriptor');
+    const outputIndexBytes = readVerifiedDescriptorBlob(imagePath, outputDescriptor, 'OCI output index descriptor', budget);
     const outputIndex = parseJsonBytes<OciIndex>(outputIndexBytes, 'OCI output image index');
     if (outputIndex.schemaVersion !== 2 || outputIndex.mediaType !== OCI_IMAGE_INDEX_MEDIA_TYPE) {
       throw new Error('OCI output descriptor does not reference an OCI image index');
@@ -475,19 +555,20 @@ export function verifyOciArchiveAttestations(
     throw new Error('runnable image descriptor platform does not match linux/amd64');
   }
   const imageDigest = descriptorDigest(runnable, 'runnable image descriptor');
-  const imageManifestBytes = readVerifiedDescriptorBlob(imagePath, runnable, 'runnable image descriptor');
+  const imageManifestBytes = readVerifiedDescriptorBlob(imagePath, runnable, 'runnable image descriptor', budget);
   const manifest = parseJsonBytes<Record<string, unknown>>(imageManifestBytes, 'runnable image manifest');
   if (manifest.schemaVersion !== 2 || manifest.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE) throw new Error('runnable image descriptor does not reference an OCI image manifest');
   if (!isRecord(manifest.config) || manifest.config.mediaType !== OCI_IMAGE_CONFIG_MEDIA_TYPE) throw new Error('runnable image manifest has an invalid OCI config descriptor');
   const config = parseJsonBytes<Record<string, unknown>>(
-    readVerifiedDescriptorBlob(imagePath, manifest.config as OciDescriptor, 'runnable image config descriptor'),
+    readVerifiedDescriptorBlob(imagePath, manifest.config as OciDescriptor, 'runnable image config descriptor', budget),
     'runnable image config',
   );
   if (config.os !== 'linux' || config.architecture !== 'amd64') throw new Error('runnable image config does not match linux/amd64');
   if (!Array.isArray(manifest.layers) || !manifest.layers.every(isRecord)) throw new Error('runnable image manifest has invalid layer descriptors');
+  if (manifest.layers.length > DESCRIPTOR_LIST_MAX) throw new Error('runnable image exceeds OCI descriptor count limit');
   for (const layer of manifest.layers) {
     if (!OCI_IMAGE_LAYER_MEDIA_TYPES.has(layer.mediaType as string)) throw new Error('runnable image layer descriptor has an unexpected media type');
-    readVerifiedDescriptorBlob(imagePath, layer as OciDescriptor, 'runnable image layer descriptor');
+    readVerifiedDescriptorBlob(imagePath, layer as OciDescriptor, 'runnable image layer descriptor', budget);
   }
   if (expectedOutputDigest !== imageDigest && expectedOutputDigest !== imageIndexDigest) throw new Error('build metadata output digest does not match the verified OCI output');
   if (attestationDescriptors.length === 0) throw new Error(`OCI image archive has no BuildKit attestation manifest: ${imagePath}`);
@@ -504,7 +585,7 @@ export function verifyOciArchiveAttestations(
     if (attestationPlatform.os !== 'unknown' || attestationPlatform.architecture !== 'unknown') {
       throw new Error('OCI image archive attestation descriptor platform is not unknown/unknown');
     }
-    const attestationBytes = readVerifiedDescriptorBlob(imagePath, descriptor, 'attestation manifest descriptor');
+    const attestationBytes = readVerifiedDescriptorBlob(imagePath, descriptor, 'attestation manifest descriptor', budget);
     const attestation = parseJsonBytes<OciManifest>(attestationBytes, 'OCI image archive attestation manifest');
     if (attestation.schemaVersion !== 2 || attestation.mediaType !== OCI_IMAGE_MANIFEST_MEDIA_TYPE || attestation.artifactType !== OCI_ATTESTATION_ARTIFACT_TYPE || !isRecord(attestation.subject)) {
       throw new Error('OCI image archive has an invalid attestation manifest');
@@ -513,10 +594,11 @@ export function verifyOciArchiveAttestations(
       throw new Error('OCI image archive attestation manifest is not bound to runnable image descriptor');
     }
     if (!Array.isArray(attestation.layers)) throw new Error('OCI image archive attestation manifest has no layers');
+    if (attestation.layers.length > DESCRIPTOR_LIST_MAX) throw new Error('attestation exceeds OCI descriptor count limit');
     for (const layer of attestation.layers) {
       if (!isRecord(layer) || layer.mediaType !== IN_TOTO_MEDIA_TYPE) continue;
       const layerDescriptor = layer as OciDescriptor;
-      const layerBytes = readVerifiedDescriptorBlob(imagePath, layerDescriptor, 'attestation layer descriptor');
+      const layerBytes = readVerifiedDescriptorBlob(imagePath, layerDescriptor, 'attestation layer descriptor', budget);
       const statement = parseJsonBytes<InTotoStatement>(layerBytes, 'OCI image archive in-toto statement');
       assertStatementSubject(statement, imageDigest);
       if (typeof statement.predicateType !== 'string' || annotations(layerDescriptor)['in-toto.io/predicate-type'] !== statement.predicateType) {
@@ -559,8 +641,11 @@ export function verifyOciArchiveAttestations(
   };
 }
 
-function assertInput(input: ContainerBuildReceiptInput): {
+function assertInput(input: ContainerBuildReceiptInput, budget: VerificationBudget): {
   metadata: BuildMetadata;
+  metadataBytes: Buffer;
+  runtimeBytes: Buffer;
+  buildkitImageId: string;
   sbom: SbomDocument;
   sbomBytes: Buffer;
   policy: ContainerInputPolicy;
@@ -570,7 +655,8 @@ function assertInput(input: ContainerBuildReceiptInput): {
   if (!COMMIT_PATTERN.test(input.sourceRevision)) throw new Error(`source revision must be a full 40-hex commit: ${input.sourceRevision}`);
   requireRegularFile(input.metadataPath, 'build metadata');
   requireRegularFile(input.imagePath, 'image archive');
-  const metadata = parseJson<BuildMetadata>(input.metadataPath, 'build metadata');
+  const metadataBytes = readJsonBytes(input.metadataPath, 'build metadata');
+  const metadata = parseJsonBytes<BuildMetadata>(metadataBytes, 'build metadata');
   if (typeof metadata['containerimage.digest'] !== 'string' || !SHA256_PATTERN.test(metadata['containerimage.digest'])) throw new Error('build metadata is missing a valid containerimage.digest');
   if (!isRecord(metadata['buildx.build.provenance']) || Object.keys(metadata['buildx.build.provenance']).length === 0) {
     throw new Error('build metadata is missing non-empty buildx.build.provenance');
@@ -584,7 +670,21 @@ function assertInput(input: ContainerBuildReceiptInput): {
   if (!/^\d+$/.test(input.provenanceBuilderId.slice(policy.builder.provenanceIdPrefix.length))) {
     throw new Error('provenance builder id does not identify a GitHub Actions run');
   }
-  const oci = verifyOciArchiveAttestations(input.imagePath, metadata['containerimage.digest'], {
+  const runtimeBytes = readJsonBytes(input.runtimeEvidencePath, 'BuildKit runtime evidence');
+  const runtime = parseJsonBytes<Record<string, unknown>>(runtimeBytes, 'BuildKit runtime evidence');
+  if (!isRecord(runtime) || runtime.schemaVersion !== 1
+    || runtime.buildkitImage !== policy.buildx.buildkitImage
+    || runtime.buildkitVersion !== input.buildkitVersion || runtime.buildxVersion !== input.buildxVersion
+    || runtime.builderName !== policy.builder.name || runtime.builderDriver !== policy.builder.driver
+    || runtime.sourceRevision !== input.sourceRevision || runtime.provenanceBuilderId !== input.provenanceBuilderId
+    || typeof runtime.imageId !== 'string' || !SHA256_PATTERN.test(runtime.imageId)
+    || typeof runtime.containerId !== 'string' || !/^[a-f0-9]{64}$/.test(runtime.containerId)
+    || typeof runtime.nodeName !== 'string' || !BUILDER_NAME_PATTERN.test(runtime.nodeName)
+    || typeof runtime.endpoint !== 'string' || runtime.endpoint.length === 0) {
+    throw new Error('BuildKit runtime evidence does not bind reviewed image and workflow invocation');
+  }
+  const buildkitImageId = runtime.imageId;
+  const oci = verifyArchive(input.imagePath, metadata['containerimage.digest'], {
     sourceRevision: input.sourceRevision,
     sourceRepository,
     provenanceBuilderId: input.provenanceBuilderId,
@@ -593,21 +693,23 @@ function assertInput(input: ContainerBuildReceiptInput): {
     sbomGeneratorDependency: policy.sbom.dependency,
     sbomGeneratorResolvedDigest: policy.sbom.resolvedDigest,
     buildxProvenance: metadata['buildx.build.provenance'],
-  });
+  }, budget);
   const embeddedSbomBytes = Buffer.from(`${stableJson(oci.spdxDocument)}\n`, 'utf8');
   if (input.sbomPath) {
     requireRegularFile(input.sbomPath, 'SBOM');
-    const sbom = parseJson<SbomDocument>(input.sbomPath, 'SBOM');
+    const sbomBytes = readJsonBytes(input.sbomPath, 'SBOM');
+    const sbom = parseJsonBytes<SbomDocument>(sbomBytes, 'SBOM');
     assertSpdxPredicate(sbom);
     if (stableJson(sbom) !== stableJson(oci.spdxDocument)) throw new Error('SBOM does not match the verified embedded SPDX predicate');
-    return { metadata, sbom, sbomBytes: readFileSync(input.sbomPath), policy, sourceRepository, oci };
+    return { metadata, metadataBytes, runtimeBytes, buildkitImageId, sbom, sbomBytes, policy, sourceRepository, oci };
   }
   if (!input.verifiedSbomOutputPath) throw new Error('SBOM or verified SBOM output path is required');
-  return { metadata, sbom: oci.spdxDocument, sbomBytes: embeddedSbomBytes, policy, sourceRepository, oci };
+  return { metadata, metadataBytes, runtimeBytes, buildkitImageId, sbom: oci.spdxDocument, sbomBytes: embeddedSbomBytes, policy, sourceRepository, oci };
 }
 
 export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): ContainerBuildReceipt {
-  const { metadata, policy, sourceRepository, oci, sbomBytes } = assertInput(input);
+  const budget = new VerificationBudget();
+  const { metadata, metadataBytes, runtimeBytes, buildkitImageId, policy, sourceRepository, oci, sbomBytes } = assertInput(input, budget);
   const receipt: ContainerBuildReceipt = {
     schemaVersion: 3,
     sourceRevision: input.sourceRevision,
@@ -617,6 +719,8 @@ export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): 
     provenanceBuilderId: input.provenanceBuilderId,
     buildxVersion: input.buildxVersion,
     buildkitImage: policy.buildx.buildkitImage,
+    buildkitImageId,
+    runtimeEvidenceSha256: sha256(runtimeBytes),
     buildkitVersion: input.buildkitVersion,
     baseImage: policy.baseImage,
     baseImageDependency: policy.baseImageDependency,
@@ -628,14 +732,15 @@ export function createContainerBuildReceipt(input: ContainerBuildReceiptInput): 
     imageIndexDigest: oci.imageIndexDigest,
     imageDigest: oci.imageDigest,
     imageManifestSize: oci.imageManifestSize,
-    imageArchiveSha256: sha256File(input.imagePath),
-    metadataSha256: sha256File(input.metadataPath),
-    sbomSha256: input.sbomPath ? sha256File(input.sbomPath) : sha256(sbomBytes),
+    imageArchiveSha256: sha256File(input.imagePath, EVIDENCE_FILE_MAX_BYTES, () => { budget.remainingTime(); }),
+    metadataSha256: sha256(metadataBytes),
+    sbomSha256: sha256(sbomBytes),
     slsaStatementSha256: oci.slsaStatementSha256,
     spdxStatementSha256: oci.spdxStatementSha256,
     sbomFormat: 'SPDX',
     provenance: 'in-toto/slsa-v1',
   };
+  budget.remainingTime();
   if (input.verifiedSbomOutputPath) writeFileSync(input.verifiedSbomOutputPath, sbomBytes, { encoding: 'utf8', flag: 'wx' });
   return receipt;
 }
@@ -647,6 +752,7 @@ export function verifyContainerBuildReceipt(receipt: ContainerBuildReceipt, inpu
 
 export interface ParsedArgs {
   metadataPath: string;
+  runtimeEvidencePath: string;
   sbomPath?: string;
   verifiedSbomOutputPath?: string;
   imagePath: string;
@@ -666,12 +772,12 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
   const parsed = parseClosedOptions(argv, {
     booleanOptions: [],
     valueOptions: [
-      '--metadata', '--sbom', '--verified-sbom-output', '--image', '--source', '--source-repository',
+      '--metadata', '--runtime-evidence', '--sbom', '--verified-sbom-output', '--image', '--source', '--source-repository',
       '--builder', '--buildx-version', '--buildkit-version', '--provenance-builder-id',
       '--repo-root', '--output', '--receipt', '--github-output',
     ],
   });
-  const usage = 'usage: verify-container-build-receipt.ts --metadata PATH (--sbom PATH | --verified-sbom-output PATH) --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)';
+  const usage = 'usage: verify-container-build-receipt.ts --metadata PATH --runtime-evidence PATH (--sbom PATH | --verified-sbom-output PATH) --image PATH --source COMMIT --builder ID --buildx-version VERSION --buildkit-version VERSION --provenance-builder-id ID [--source-repository HTTPS_GITHUB_CLONE_URL] [--repo-root PATH] [--github-output PATH] (--output PATH | --receipt PATH)';
   if (parsed.error) throw new Error(usage);
   const values = parsed.values;
   const required = (flag: string): string => {
@@ -687,7 +793,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
   if (Boolean(sbomPath) === Boolean(verifiedSbomOutputPath)) throw new Error('provide exactly one of --sbom or --verified-sbom-output');
   if (receiptPath && verifiedSbomOutputPath) throw new Error('receipt verification requires an existing SBOM');
   return {
-    metadataPath: required('--metadata'), sbomPath, verifiedSbomOutputPath, imagePath: required('--image'),
+    metadataPath: required('--metadata'), runtimeEvidencePath: required('--runtime-evidence'), sbomPath, verifiedSbomOutputPath, imagePath: required('--image'),
     sourceRevision: required('--source'), sourceRepository: values.get('--source-repository'), builder: required('--builder'), buildxVersion: required('--buildx-version'),
     buildkitVersion: required('--buildkit-version'), provenanceBuilderId: required('--provenance-builder-id'),
     repoRoot: values.get('--repo-root') ?? cwd, outputPath, receiptPath, githubOutputPath: values.get('--github-output'),
@@ -697,7 +803,7 @@ export function parseArgs(argv: string[], cwd: string): ParsedArgs {
 export function run(argv: string[] = process.argv.slice(2), cwd: string = process.cwd()): ContainerBuildReceipt {
   const args = parseArgs(argv, cwd);
   const input: ContainerBuildReceiptInput = {
-    repoRoot: args.repoRoot, metadataPath: args.metadataPath, sbomPath: args.sbomPath, verifiedSbomOutputPath: args.verifiedSbomOutputPath, imagePath: args.imagePath,
+    repoRoot: args.repoRoot, metadataPath: args.metadataPath, runtimeEvidencePath: args.runtimeEvidencePath, sbomPath: args.sbomPath, verifiedSbomOutputPath: args.verifiedSbomOutputPath, imagePath: args.imagePath,
     sourceRevision: args.sourceRevision, sourceRepository: args.sourceRepository, builder: args.builder, buildxVersion: args.buildxVersion,
     buildkitVersion: args.buildkitVersion, provenanceBuilderId: args.provenanceBuilderId,
   };

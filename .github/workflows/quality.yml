@@ -126,9 +126,13 @@ jobs:
           sbom_generator="$(node -e 'const policy = require("./docker/container-inputs.json"); process.stdout.write(policy.sbom.generator)')"
           # Buildx v0.38.0 inspect has no format flag. Parse its supported text
           # interface and fail closed on missing, duplicate, or drifted fields.
+          provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           builder_name="$(
             bash scripts/run-with-pinned-node.sh scripts/verify-buildx-runtime.ts \
-              --repo-root "$GITHUB_WORKSPACE"
+              --repo-root "$GITHUB_WORKSPACE" \
+              --output "$container_dir/buildkit-runtime.json" \
+              --source "$SOURCE_REVISION" \
+              --provenance-builder-id "$provenance_builder_id"
           )"
           if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
             source_repository="$SOURCE_REPOSITORY"
@@ -152,6 +156,7 @@ jobs:
             "${source_repository}#${SOURCE_REVISION}"
 
       - name: Verify container build receipt
+        timeout-minutes: 5
         env:
           SOURCE_REVISION: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           SOURCE_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.clone_url || '' }}
@@ -169,6 +174,7 @@ jobs:
           provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
+            --runtime-evidence "$container_dir/buildkit-runtime.json" \
             --verified-sbom-output "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
             --source "$SOURCE_REVISION" \
@@ -180,6 +186,7 @@ jobs:
             --output "$container_dir/container-build-receipt.json"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
+            --runtime-evidence "$container_dir/buildkit-runtime.json" \
             --sbom "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
             --source "$SOURCE_REVISION" \
@@ -612,6 +619,7 @@ jobs:
           path: ${{ runner.temp }}/whatsoup-container
 
       - name: Reverify downloaded container evidence
+        timeout-minutes: 5
         id: reverify-container-evidence
         run: |
           set -euo pipefail
@@ -622,6 +630,7 @@ jobs:
           provenance_builder_id="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           bash scripts/run-with-pinned-node.sh scripts/verify-container-build-receipt.ts \
             --metadata "$container_dir/build-metadata.json" \
+            --runtime-evidence "$container_dir/buildkit-runtime.json" \
             --sbom "$container_dir/whatsoup-image.spdx.json" \
             --image "$container_dir/whatsoup-image.oci.tar" \
             --source "$GITHUB_SHA" \

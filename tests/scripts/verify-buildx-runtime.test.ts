@@ -39,6 +39,8 @@ function commandRunner(options: {
   version?: string;
   inspect?: string;
   failure?: Error;
+  containerImage?: string;
+  containerImageId?: string;
 } = {}) {
   const calls: Array<{ file: string; args: readonly string[] }> = [];
   const runCommand = (file: string, args: readonly string[]): string => {
@@ -49,6 +51,17 @@ function commandRunner(options: {
     }
     if (args.join(' ') === 'buildx inspect whatsoup-ci-builder --bootstrap') {
       return options.inspect ?? INSPECT_OUTPUT;
+    }
+    if (args[0] === '--host' && args[2] === 'image' && args[3] === 'inspect') {
+      return JSON.stringify([{ Id: `sha256:${'b'.repeat(64)}` }]);
+    }
+    if (args[0] === '--host' && args[2] === 'container' && args[3] === 'inspect') {
+      return JSON.stringify([{
+        Id: 'c'.repeat(64), Name: '/buildx_buildkit_whatsoup-ci-builder0',
+        Image: options.containerImageId ?? `sha256:${'b'.repeat(64)}`,
+        Config: { Image: options.containerImage ?? `moby/buildkit:v0.33.1@sha256:${'a'.repeat(64)}` },
+        State: { Running: true },
+      }]);
     }
     throw new Error(`unexpected command: ${file} ${args.join(' ')}`);
   };
@@ -76,6 +89,9 @@ describe('pinned Buildx runtime verification', () => {
       builderDriver: 'docker-container',
       buildxVersion: 'v0.38.0',
       buildkitVersion: 'v0.33.1',
+      buildkitImage: `moby/buildkit:v0.33.1@sha256:${'a'.repeat(64)}`,
+      nodeName: 'whatsoup-ci-builder0', endpoint: 'unix:///var/run/docker.sock',
+      containerId: 'c'.repeat(64), imageId: `sha256:${'b'.repeat(64)}`,
     });
     expect(runner.calls).toEqual([
       { file: 'docker', args: ['buildx', 'version'] },
@@ -83,6 +99,8 @@ describe('pinned Buildx runtime verification', () => {
         file: 'docker',
         args: ['buildx', 'inspect', 'whatsoup-ci-builder', '--bootstrap'],
       },
+      { file: 'docker', args: ['--host', 'unix:///var/run/docker.sock', 'image', 'inspect', `moby/buildkit:v0.33.1@sha256:${'a'.repeat(64)}`] },
+      { file: 'docker', args: ['--host', 'unix:///var/run/docker.sock', 'container', 'inspect', 'buildx_buildkit_whatsoup-ci-builder0'] },
     ]);
     expect(runner.calls.flatMap((call) => call.args)).not.toContain('--format');
   });
@@ -134,4 +152,15 @@ describe('pinned Buildx runtime verification', () => {
     expect(() => verifyBuildxRuntime({ repoRoot: makeRepo(), runCommand: runner.runCommand }))
       .toThrow('docker daemon unavailable');
   });
+});
+
+it('rejects a same-version BuildKit container with a different immutable image', () => {
+  const runner = commandRunner({ containerImageId: `sha256:${'d'.repeat(64)}` });
+  expect(() => verifyBuildxRuntime({ repoRoot: makeRepo(), runCommand: runner.runCommand }))
+    .toThrow('BuildKit container image does not match reviewed digest');
+});
+it('rejects a same-version BuildKit container created from another digest', () => {
+  const runner = commandRunner({ containerImage: `moby/buildkit:v0.33.1@sha256:${'d'.repeat(64)}` });
+  expect(() => verifyBuildxRuntime({ repoRoot: makeRepo(), runCommand: runner.runCommand }))
+    .toThrow('BuildKit container image does not match reviewed digest');
 });

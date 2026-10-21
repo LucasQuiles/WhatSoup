@@ -3418,10 +3418,16 @@ reproducible, but they do not update themselves.
 
 The Quality workflow downloads the policy's pinned Buildx Linux asset with a bounded request,
 checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, and
-creates its named `docker-container` builder from the policy's pinned BuildKit image. It builds
+creates its named `docker-container` builder from the policy's pinned BuildKit image. Before
+building, the runtime probe checks the single running node at its actual Docker endpoint,
+compares its immutable image ID with Docker's inspection of the reviewed digest, and retains
+`buildkit-runtime.json` bound to the source SHA and workflow invocation. The build receipt binds
+those runtime bytes and image ID alongside the independently checked SLSA source/invocation.
+BuildKit's SLSA materials do not themselves establish the builder image identity. It builds
 for the policy's explicit platform and sends the policy's digest-pinned SBOM generator to BuildKit.
 For a pull request it builds from GitHub's authoritative head clone URL at the exact full head SHA;
-push and merge-group builds retain the policy's canonical Git repository and event SHA. The selected
+push and merge-group builds require the fixed `https://github.com/LucasQuiles/WhatSoup.git`
+policy fallback and event SHA. An explicit PR-head fork override remains supported. The selected
 source must be an `https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
 so BuildKit records a verified `configSource` revision rather than a local checkout hint. The receipt verifies OCI descriptor sizes
 and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
@@ -3429,6 +3435,13 @@ parsing their SLSA v1 and SPDX statements. It requires every statement subject t
 runnable manifest digest; checks the source repository, Dockerfile path, source revision,
 builder invocation, selected-platform base-image and SBOM-generator dependencies. It extracts the verified embedded SPDX
 predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
+
+The verifier caps each JSON input at 32 MiB before allocation, the OCI archive and aggregate
+extracted bytes at 2 GiB, each extracted entry at 96 MiB, each descriptor list at 128, and all
+extraction attempts at 256. A shared 120-second monotonic deadline bounds archive traversal
+and hashing; each tar process also has a 30-second cap within the remaining budget. The
+workflow gives each receipt step five minutes for creation and independent readback. Exceeding
+a limit fails qualification; raise a bound only with reviewed workload evidence.
 
 Snapshot availability probes disable curl configuration, require HTTPS without redirects,
 and request `X-Download-Directly: 1` so Debian serves the pinned Release file without its
