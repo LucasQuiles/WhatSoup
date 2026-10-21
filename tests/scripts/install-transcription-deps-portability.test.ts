@@ -62,7 +62,7 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
-function runVenvPreparationSnippet(installStatus = 0, importStatus = 0, downloadStatus = 0, invalidModel = false, symlinkModel = false): { status: number; marker: string; venv: string; model: string; stderr: string } {
+function runVenvPreparationSnippet(installStatus = 0, importStatus = 0, downloadStatus = 0, invalidModel = false, symlinkModel = false, fasterWhisperStatus = 0): { status: number; marker: string; venv: string; model: string; phases: string; stderr: string } {
   const start = scriptSource.indexOf('if ! PYTHON_BIN="$(resolve_python)"; then');
   const end = scriptSource.indexOf('\necho "Dependencies installed."', start);
   if (start === -1 || end === -1) throw new Error('venv preparation block not found');
@@ -70,6 +70,7 @@ function runVenvPreparationSnippet(installStatus = 0, importStatus = 0, download
   const root = makeTempRoot('itd-venv-upgrade-');
   const venv = path.join(root, 'transcription-venv');
   const marker = path.join(root, 'refreshed');
+  const phases = path.join(root, 'model-phases');
   const hostPython = path.join(root, 'python3.13');
   const model = path.join(root, 'models', 'whisper.cpp', 'ggml-small.bin');
   fs.mkdirSync(path.dirname(model), { recursive: true });
@@ -80,6 +81,7 @@ function runVenvPreparationSnippet(installStatus = 0, importStatus = 0, download
     fs.writeFileSync(model, 'prior-model-bytes');
   }
   writeExecutable(root, 'curl', `#!/bin/sh
+printf '%s\\n' ggml >> "$MODEL_PHASES"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = --output ]; then output="$2"; break; fi
   shift
@@ -141,6 +143,12 @@ ${['sha256_of', 'sha256_matches', 'download_ggml_model'].map((name) => {
   return scriptSource.slice(helperStart, scriptSource.indexOf('\n}\n', helperStart) + 3);
 }).join('\n')}
 resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
+FW_MODEL_PATH="$MODEL_PATH.faster-whisper" FW_MODEL_BASE_URL=https://example.invalid/pinned-model
+install_faster_whisper_model() {
+  [ "$1" = "$MODEL_PATH.faster-whisper" ] && [ "$2" = https://example.invalid/pinned-model ] || return 97
+  printf '%s\\n' faster-whisper >> "$MODEL_PHASES"
+  return "$FASTER_WHISPER_STATUS"
+}
 GGML_SMALL_PATH="$MODEL_PATH" EXPECTED_GGML_SMALL_SHA256="$MODEL_SHA256" GGML_SMALL_URL=https://example.invalid/model
 whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1" || return $?; return "$INSTALL_STATUS"; }
 ${snippet}`,
@@ -152,10 +160,11 @@ ${snippet}`,
     {
       encoding: 'utf8',
       cwd: repoRoot,
-      env: { ...process.env, TEST_LOCK_POLICY: lockPolicyPath, PATH: `${root}:${process.env.PATH}`, MODEL_PATH: model, MODEL_SHA256: createHash('sha256').update('verified-model').digest('hex'), REFRESH_MARKER: marker, INSTALL_STATUS: String(installStatus), IMPORT_STATUS: String(importStatus), DOWNLOAD_STATUS: String(downloadStatus), INVALID_MODEL: invalidModel ? '1' : '0' },
+      env: { ...process.env, TEST_LOCK_POLICY: lockPolicyPath, PATH: `${root}:${process.env.PATH}`, MODEL_PATH: model, MODEL_SHA256: createHash('sha256').update('verified-model').digest('hex'), REFRESH_MARKER: marker, MODEL_PHASES: phases, FASTER_WHISPER_STATUS: String(fasterWhisperStatus), INSTALL_STATUS: String(installStatus), IMPORT_STATUS: String(importStatus), DOWNLOAD_STATUS: String(downloadStatus), INVALID_MODEL: invalidModel ? '1' : '0' },
+      timeout: 15_000,
     },
   );
-  return { status: result.status ?? -1, marker, venv, model, stderr: result.stderr ?? '' };
+  return { status: result.status ?? -1, marker, venv, model, phases, stderr: result.stderr ?? '' };
 }
 
 afterEach(() => {
@@ -364,6 +373,7 @@ describe('install-transcription-deps.sh — managed venv upgrades', () => {
     expect(res.status, res.stderr).toBe(0);
     expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
     expect(fs.readFileSync(res.model, 'utf8')).toBe('verified-model');
+    expect(fs.readFileSync(res.phases, 'utf8')).toBe('faster-whisper\nggml\n');
     const retained = fs.readdirSync(path.dirname(res.model)).filter((name) => name.startsWith('ggml-small.bin.pending.'));
     expect(retained).toHaveLength(1);
     expect(fs.readFileSync(path.join(path.dirname(res.model), retained[0]!, 'previous-model'), 'utf8')).toBe('prior-model-bytes');
@@ -381,12 +391,16 @@ describe('install-transcription-deps.sh — managed venv upgrades', () => {
   });
 
   it.each([
-    ['import', 19, 0, false, 19],
-    ['download', 0, 21, false, 21],
-    ['checksum', 0, 0, true, 1],
-  ] as const)('restores the prior environment after %s validation fails', (_stage, importStatus, downloadStatus, invalidModel, status) => {
-    const res = runVenvPreparationSnippet(0, importStatus, downloadStatus, invalidModel);
+    ['import', 19, 0, false, 0, 19],
+    ['faster-whisper', 0, 0, false, 23, 23],
+    ['download', 0, 21, false, 0, 21],
+    ['checksum', 0, 0, true, 0, 1],
+  ] as const)('restores the prior environment after %s validation fails', (stage, importStatus, downloadStatus, invalidModel, fasterWhisperStatus, status) => {
+    const res = runVenvPreparationSnippet(0, importStatus, downloadStatus, invalidModel, false, fasterWhisperStatus);
     expect(res.status, res.stderr).toBe(status);
+    if (stage === 'faster-whisper') {
+      expect(fs.readFileSync(res.phases, 'utf8')).toBe('faster-whisper\n');
+    }
     expect(fs.readFileSync(res.model, 'utf8')).toBe('prior-model-bytes');
     expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
     expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
