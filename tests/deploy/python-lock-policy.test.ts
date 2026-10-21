@@ -22,9 +22,9 @@ function executable(path: string, body: string): void {
 }
 
 function runPolicy(body: string, env: NodeJS.ProcessEnv = {}): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync('/bin/bash', ['-c', `. "${policyPath}"\n${body}`], {
+  const result = spawnSync('/bin/bash', ['-c', `. "$TEST_LOCK_POLICY"\n${body}`], {
     cwd: repoRoot,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...env, TEST_LOCK_POLICY: policyPath, TEST_HOST_CAPABILITIES: join(repoRoot, 'deploy/lib/host-capabilities.sh') },
     encoding: 'utf8',
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
@@ -42,7 +42,7 @@ describe('Python lock runtime policy', () => {
     writeFileSync(join(root, 'sitecustomize.py'), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("executed")\n`);
 
     const command = surface === 'lock' ? 'whatsoup_require_locked_python "$LOCK_PYTHON"' : `
-. "${join(repoRoot, 'deploy/lib/host-capabilities.sh')}"
+. "$TEST_HOST_CAPABILITIES"
 CAP_PATH="$LOCK_PYTHON"
 whatsoup_probe_python exact-cpython:3.13.16
 test "$CAP_VERSION" = 3.13.16`;
@@ -105,7 +105,7 @@ test "$CAP_VERSION" = 3.13.16`;
       'exit 2',
     ].join('\n'));
 
-    const result = runPolicy(`whatsoup_require_locked_python "${python}"`);
+    const result = runPolicy('whatsoup_require_locked_python "$LOCK_PYTHON"', { LOCK_PYTHON: python });
 
     expect(result.status, result.stderr).toBe(0);
   });
@@ -119,7 +119,7 @@ test "$CAP_VERSION" = 3.13.16`;
       'exit 2',
     ].join('\n'));
 
-    const result = runPolicy(`whatsoup_require_locked_python "${python}"`);
+    const result = runPolicy('whatsoup_require_locked_python "$LOCK_PYTHON"', { LOCK_PYTHON: python });
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('CPython 3.13.16');
@@ -141,7 +141,7 @@ test "$CAP_VERSION" = 3.13.16`;
 
     const python = join(bin, 'python');
     executable(python, '[ "$1" != "-I" ] || shift; [ "$1" = "-c" ] || exit 2; printf arm64');
-    const result = runPolicy(`whatsoup_python_lock_path "${root}" transcription "${python}"`, { PATH: `${bin}:/usr/bin:/bin` });
+    const result = runPolicy('whatsoup_python_lock_path "$LOCK_ROOT" transcription "$LOCK_PYTHON"', { PATH: `${bin}:/usr/bin:/bin`, LOCK_ROOT: root, LOCK_PYTHON: python });
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe(`${root}/requirements/python/transcription-cpython313-darwin-arm64.txt`);
@@ -173,7 +173,8 @@ test "$CAP_VERSION" = 3.13.16`;
       'cat "$2" > "$VALIDATED_BYTES"',
     ].join('\n'));
 
-    const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      LOCK_PYTHON: python, LOCK_ROOT: root,
       PATH: `${bin}:${process.env.PATH}`,
       WHATSOUP_TEST_PIP_ARGS: log,
       REAL_PYTHON: resolveTestPython(), SOURCE_LOCK: lock, VALIDATED_BYTES: snapshot,
@@ -301,7 +302,8 @@ fi
 printf '%s\\n' "$*" > "$WHATSOUP_TEST_PIP_ARGS"
 `);
 
-    const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      LOCK_PYTHON: python, LOCK_ROOT: root,
       PATH: `${bin}:${process.env.PATH}`, TEST_PYTHON_ARCH: architecture, WHATSOUP_TEST_PIP_ARGS: log,
       REAL_PYTHON: resolveTestPython(),
     });
@@ -331,7 +333,8 @@ fi
 printf '%s\\n' "$*" > "$WHATSOUP_TEST_PIP_ARGS"
 `);
 
-    const result = runPolicy(`whatsoup_install_locked_requirements "${python}" "${root}" quality`, {
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      LOCK_PYTHON: python, LOCK_ROOT: root,
       PATH: `${bin}:/usr/bin:/bin`, TEST_PYTHON_ARCH: condition, WHATSOUP_TEST_PIP_ARGS: log,
     });
 
@@ -359,7 +362,7 @@ printf '%s\\n' "$*" > "$WHATSOUP_TEST_PIP_ARGS"
     { name: 'lock architecture', command: 'whatsoup_python_lock_target "$HANG_PYTHON"', status: 1, output: '' },
     {
       name: 'host identity',
-      command: `. "${join(repoRoot, 'deploy/lib/host-capabilities.sh')}"
+      command: `. "$TEST_HOST_CAPABILITIES"
 CAP_PATH="$HANG_PYTHON"
 whatsoup_probe_python exact-cpython:3.13.16
 printf '%s:%s' "$CAP_STATUS" "$CAP_DETAIL"`,
@@ -372,9 +375,9 @@ printf '%s:%s' "$CAP_STATUS" "$CAP_DETAIL"`,
     const pidFile = join(root, 'interpreter-pid');
     executable(python, 'printf "%s" "$$" > "$HANG_PID_FILE"\nexec /bin/sleep 8');
 
-    const result = spawnSync('/bin/bash', ['-c', `. "${policyPath}"\n${command}`], {
+    const result = spawnSync('/bin/bash', ['-c', `. "$TEST_LOCK_POLICY"\n${command}`], {
       cwd: repoRoot,
-      env: { ...process.env, HANG_PYTHON: python, HANG_PID_FILE: pidFile, WHATSOUP_PYTHON_PROBE_TIMEOUT: '1' },
+      env: { ...process.env, TEST_LOCK_POLICY: policyPath, TEST_HOST_CAPABILITIES: join(repoRoot, 'deploy/lib/host-capabilities.sh'), HANG_PYTHON: python, HANG_PID_FILE: pidFile, WHATSOUP_PYTHON_PROBE_TIMEOUT: '1' },
       encoding: 'utf8',
       timeout: 4500,
     });
@@ -410,7 +413,8 @@ if [ "$1" = "-c" ]; then exec "$REAL_PYTHON" -I "$@"; fi
 if [ "$1" != "-m" ] || [ "$2" != "pip" ]; then exit 2; fi
 shift 2
 exec "$REAL_PYTHON" -I "$PIP_PARSER" "$@"`);
-    const result = runPolicy(`whatsoup_install_locked_requirements "${shim}" "${repoRoot}" quality`, {
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      LOCK_PYTHON: shim, LOCK_ROOT: repoRoot,
       REAL_PYTHON: python,
       PIP_PARSER: parser,
       PIP_CONFIG_FILE: config,

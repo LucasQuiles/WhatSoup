@@ -53,10 +53,11 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
       return scriptSource.slice(start, end + 3);
     })
     .join('\n');
-  const pathPrefix = extraPath ? `export PATH="${extraPath}${inheritPath ? ':$PATH' : ''}"\n` : '';
-  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}. "${lockPolicyPath}"\n${helpers}\n${body}`], {
+  const pathPrefix = extraPath ? `export PATH="$TEST_EXTRA_PATH${inheritPath ? ':$PATH' : ''}"\n` : '';
+  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}. "$TEST_LOCK_POLICY"\n${helpers}\n${body}`], {
     encoding: 'utf8',
     cwd: repoRoot,
+    env: { ...process.env, TEST_LOCK_POLICY: lockPolicyPath, TEST_EXTRA_PATH: extraPath },
   });
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
@@ -132,7 +133,7 @@ exit 1
 HOST_PYTHON="$1"
 VENV="$2"
 REPO_ROOT="$3"
-. "${lockPolicyPath}"
+. "$TEST_LOCK_POLICY"
 ${scriptSource.slice(scriptSource.indexOf('install_transcription_requirements() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('install_transcription_requirements() {')) + 3)}
 ${scriptSource.slice(scriptSource.indexOf('finish_transcription_environment() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('finish_transcription_environment() {')) + 3)}
 ${['sha256_of', 'sha256_matches', 'download_ggml_model'].map((name) => {
@@ -151,7 +152,7 @@ ${snippet}`,
     {
       encoding: 'utf8',
       cwd: repoRoot,
-      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, MODEL_PATH: model, MODEL_SHA256: createHash('sha256').update('verified-model').digest('hex'), REFRESH_MARKER: marker, INSTALL_STATUS: String(installStatus), IMPORT_STATUS: String(importStatus), DOWNLOAD_STATUS: String(downloadStatus), INVALID_MODEL: invalidModel ? '1' : '0' },
+      env: { ...process.env, TEST_LOCK_POLICY: lockPolicyPath, PATH: `${root}:${process.env.PATH}`, MODEL_PATH: model, MODEL_SHA256: createHash('sha256').update('verified-model').digest('hex'), REFRESH_MARKER: marker, INSTALL_STATUS: String(installStatus), IMPORT_STATUS: String(importStatus), DOWNLOAD_STATUS: String(downloadStatus), INVALID_MODEL: invalidModel ? '1' : '0' },
     },
   );
   return { status: result.status ?? -1, marker, venv, model, stderr: result.stderr ?? '' };
