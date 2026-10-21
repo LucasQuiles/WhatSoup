@@ -12,6 +12,7 @@
  */
 import { afterEach, describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,8 @@ import path from 'node:path';
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const scriptPath = path.join(repoRoot, 'scripts', 'install-transcription-deps.sh');
 const scriptSource = fs.readFileSync(scriptPath, 'utf8');
+const lockPolicyPath = path.join(repoRoot, 'deploy', 'lib', 'python-lock-policy.sh');
+const boundedSource = fs.readFileSync(path.join(repoRoot, 'deploy', 'lib', 'bounded-exec.sh'), 'utf8');
 const tempRoots: string[] = [];
 
 function makeTempRoot(prefix: string): string {
@@ -50,12 +53,118 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
       return scriptSource.slice(start, end + 3);
     })
     .join('\n');
-  const pathPrefix = extraPath ? `export PATH="${extraPath}${inheritPath ? ':$PATH' : ''}"\n` : '';
-  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}${helpers}\n${body}`], {
+  const pathPrefix = extraPath ? `export PATH="$TEST_EXTRA_PATH${inheritPath ? ':$PATH' : ''}"\n` : '';
+  const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}. "$TEST_LOCK_POLICY"\n${helpers}\n${body}`], {
     encoding: 'utf8',
     cwd: repoRoot,
+    env: { ...process.env, TEST_LOCK_POLICY: lockPolicyPath, TEST_EXTRA_PATH: extraPath },
   });
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+function runVenvPreparationSnippet(installStatus = 0, importStatus = 0, downloadStatus = 0, invalidModel = false, symlinkModel = false, fasterWhisperStatus = 0): { status: number; marker: string; venv: string; model: string; phases: string; stderr: string } {
+  const start = scriptSource.indexOf('if ! PYTHON_BIN="$(resolve_python)"; then');
+  const end = scriptSource.indexOf('\necho "Dependencies installed."', start);
+  if (start === -1 || end === -1) throw new Error('venv preparation block not found');
+
+  const root = makeTempRoot('itd-venv-upgrade-');
+  const venv = path.join(root, 'transcription-venv');
+  const marker = path.join(root, 'refreshed');
+  const phases = path.join(root, 'model-phases');
+  const hostPython = path.join(root, 'python3.13');
+  const model = path.join(root, 'models', 'whisper.cpp', 'ggml-small.bin');
+  fs.mkdirSync(path.dirname(model), { recursive: true });
+  if (symlinkModel) {
+    fs.writeFileSync(`${model}.original`, 'prior-model-bytes');
+    fs.symlinkSync(`${model}.original`, model);
+  } else {
+    fs.writeFileSync(model, 'prior-model-bytes');
+  }
+  writeExecutable(root, 'curl', `#!/bin/sh
+printf '%s\\n' ggml >> "$MODEL_PHASES"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then output="$2"; break; fi
+  shift
+done
+if [ "$DOWNLOAD_STATUS" != 0 ] || [ "$INVALID_MODEL" = 1 ]; then
+  printf partial-download > "$output"
+else
+  printf verified-model > "$output"
+fi
+exit "$DOWNLOAD_STATUS"
+`);
+  fs.mkdirSync(path.join(venv, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(venv, 'pyvenv.cfg'), 'home = legacy-runtime\n');
+  writeExecutable(
+    path.join(venv, 'bin'),
+    'python',
+    '#!/bin/sh\n[ "$1" != "-I" ] || shift\nif [ "$1" = "-c" ]; then printf \'%s\\n\' \'cpython:3.12.9\'; exit 0; fi\nexit 0\n',
+  );
+  writeExecutable(root, 'python3.13', `#!/bin/sh
+[ "$1" != "-I" ] || shift
+if [ "$1" = "-c" ]; then printf '%s\n' 'cpython:3.13.16'; exit 0; fi
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  target="$3"
+  mkdir -p "$target/bin"
+  cat > "$target/bin/python" <<'PYTHON'
+#!/bin/sh
+[ "$1" != "-I" ] || shift
+if [ "$1" = "-c" ]; then
+  case "$2" in
+    *implementation*) printf '%s\\n' 'cpython:3.13.16'; exit 0 ;;
+    'import av,'*) exit "$IMPORT_STATUS" ;;
+    *) exec python3 -I "$@" ;;
+  esac
+fi
+exit 0
+PYTHON
+  chmod 755 "$target/bin/python"
+  printf '%s\\n' 'home = replacement-runtime' > "$target/pyvenv.cfg"
+  printf '%s\\n' refreshed > "$REFRESH_MARKER"
+  exit 0
+fi
+exit 1
+`);
+
+  const snippet = scriptSource.slice(start, end);
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+HOST_PYTHON="$1"
+VENV="$2"
+REPO_ROOT="$3"
+. "$TEST_LOCK_POLICY"
+${scriptSource.slice(scriptSource.indexOf('install_transcription_requirements() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('install_transcription_requirements() {')) + 3)}
+${scriptSource.slice(scriptSource.indexOf('finish_transcription_environment() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('finish_transcription_environment() {')) + 3)}
+${['sha256_of', 'sha256_matches', 'download_ggml_model'].map((name) => {
+  const helperStart = scriptSource.indexOf(`${name}() {`);
+  return scriptSource.slice(helperStart, scriptSource.indexOf('\n}\n', helperStart) + 3);
+}).join('\n')}
+resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
+FW_MODEL_PATH="$MODEL_PATH.faster-whisper" FW_MODEL_BASE_URL=https://example.invalid/pinned-model
+install_faster_whisper_model() {
+  [ "$1" = "$MODEL_PATH.faster-whisper" ] && [ "$2" = https://example.invalid/pinned-model ] || return 97
+  printf '%s\\n' faster-whisper >> "$MODEL_PHASES"
+  return "$FASTER_WHISPER_STATUS"
+}
+GGML_SMALL_PATH="$MODEL_PATH" EXPECTED_GGML_SMALL_SHA256="$MODEL_SHA256" GGML_SMALL_URL=https://example.invalid/model
+whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1" || return $?; return "$INSTALL_STATUS"; }
+${snippet}`,
+      'venv-preparation-test',
+      hostPython,
+      venv,
+      repoRoot,
+    ],
+    {
+      encoding: 'utf8',
+      cwd: repoRoot,
+      env: { ...process.env, TEST_LOCK_POLICY: lockPolicyPath, PATH: `${root}:${process.env.PATH}`, MODEL_PATH: model, MODEL_SHA256: createHash('sha256').update('verified-model').digest('hex'), REFRESH_MARKER: marker, MODEL_PHASES: phases, FASTER_WHISPER_STATUS: String(fasterWhisperStatus), INSTALL_STATUS: String(installStatus), IMPORT_STATUS: String(importStatus), DOWNLOAD_STATUS: String(downloadStatus), INVALID_MODEL: invalidModel ? '1' : '0' },
+      timeout: 15_000,
+    },
+  );
+  return { status: result.status ?? -1, marker, venv, model, phases, stderr: result.stderr ?? '' };
 }
 
 afterEach(() => {
@@ -67,21 +176,38 @@ afterEach(() => {
 
 describe('install-transcription-deps.sh — source-level portability invariants', () => {
   it('does not hardcode an absolute Homebrew python path', () => {
-    // The original defect: PYTHON_BIN="/opt/homebrew/bin/python3.12", which does
-    // not exist on Linux, Intel macOS, or a Mac without the python@3.12 formula.
+    // The original defect: PYTHON_BIN="/opt/homebrew/bin/python@…", which does
+    // not exist on Linux, Intel macOS, or a Mac without the matching formula.
     expect(scriptSource).not.toMatch(/PYTHON_BIN\s*=\s*"?\/opt\/homebrew/);
   });
 
-  it('does not invoke brew unconditionally', () => {
-    // `brew install …` at top level died under `set -e` on any machine without
-    // Homebrew, before reaching a single actionable message.
-    const brewLines = scriptSource
-      .split('\n')
-      .filter((line) => /^\s*brew\s+install/.test(line));
-    for (const line of brewLines) {
-      expect(scriptSource).toMatch(/command -v brew/);
-      expect(line.startsWith('  ')).toBe(true);
-    }
+  it.each([
+    { budget: '0', brewStatus: 0, expectedStatus: 124, called: false },
+    { budget: '10', brewStatus: 17, expectedStatus: 17, called: true },
+  ])('bounds Homebrew with budget $budget and preserves its outcome', ({ budget, brewStatus, expectedStatus, called }) => {
+    const root = makeTempRoot('itd-brew-bound-');
+    const marker = path.join(root, 'brew-arguments');
+    writeExecutable(root, 'brew', `#!/bin/sh\nprintf '%s\\n' "$@" > "$BREW_MARKER"\nexit ${brewStatus}\n`);
+    const start = scriptSource.indexOf('if command -v brew >/dev/null 2>&1; then');
+    const end = scriptSource.indexOf('\nif ! PYTHON_BIN=', start);
+    if (start === -1 || end === -1) throw new Error('system dependency block not found');
+
+    const result = spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${boundedSource}\n${scriptSource.slice(start, end)}`], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        PATH: `${root}:/usr/bin:/bin`,
+        WHATSOUP_PKG_INSTALL_TIMEOUT: budget,
+        BREW_MARKER: marker,
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(expectedStatus);
+    expect(fs.existsSync(marker)).toBe(called);
+    if (called) expect(fs.readFileSync(marker, 'utf8')).toBe('install\nffmpeg\nwhisper-cpp\npython@3.13\n');
   });
 
   it('prepends Homebrew bin dirs only when they exist', () => {
@@ -149,28 +275,210 @@ process.stdout.write(createHash('sha256').update(readFileSync(process.argv[2])).
 describe('install-transcription-deps.sh — resolve_python', () => {
   it('skips an interpreter that cannot build a venv', () => {
     const shim = makeTempRoot('itd-badpy-');
-    writeExecutable(shim, 'python3.12', '#!/bin/sh\nexit 1\n');
+    writeExecutable(shim, 'python3.13', '#!/bin/sh\nexit 1\n');
     const res = runWithHelpers('resolve_python', shim);
-    // Either it finds a working interpreter elsewhere on PATH, or it fails —
-    // but it must never hand back the one that cannot import venv.
+    // Either it finds a qualified runtime elsewhere on PATH, or it fails — but
+    // it must never hand back the candidate that could not build a venv.
     if (res.status === 0) {
-      expect(res.stdout.trim()).not.toBe(path.join(shim, 'python3.12'));
+      expect(res.stdout.trim()).not.toBe(path.join(shim, 'python3.13'));
     }
   });
 
-  it('honours WHATSOUP_TRANSCRIPTION_PYTHON when it is usable', () => {
+  it('honours a qualified WHATSOUP_TRANSCRIPTION_PYTHON override', () => {
+    const shim = makeTempRoot('itd-qualified-py-');
+    const probes = path.join(shim, 'probes');
+    writeExecutable(shim, 'python3.13', [
+      '#!/bin/sh',
+      '[ "$1" = "-I" ] || exit 91',
+      'shift',
+      '[ "$1" = "-c" ] || exit 92',
+      'case "$2" in',
+      `  'import venv') printf '%s\\n' capability >> "${probes}" ;;`,
+      `  *implementation*) printf '%s\\n' identity >> "${probes}"; printf '%s\\n' 'cpython:3.13.16' ;;`,
+      '  *) exit 93 ;;',
+      'esac',
+    ].join('\n'));
     const res = runWithHelpers(
-      'WHATSOUP_TRANSCRIPTION_PYTHON="$(command -v python3)" resolve_python',
+      `WHATSOUP_TRANSCRIPTION_PYTHON="${path.join(shim, 'python3.13')}" resolve_python`,
+      shim,
     );
     expect(res.status).toBe(0);
-    expect(res.stdout.trim()).not.toBe('');
+    expect(res.stdout.trim()).toBe(path.join(shim, 'python3.13'));
+    expect(fs.readFileSync(probes, 'utf8')).toBe('capability\nidentity\n');
   });
 
-  it('falls through a broken override instead of failing outright', () => {
+  it('does not import ambient startup or venv modules while selecting Python', () => {
+    const root = makeTempRoot('itd-python-import-isolation-');
+    const identity = spawnSync('python3', ['-I', '-c', 'import sys; print(".".join(map(str, sys.version_info[:3])))'], {
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    expect(identity.status, identity.stderr).toBe(0);
+    for (const module of ['sitecustomize', 'venv']) {
+      fs.writeFileSync(path.join(root, `${module}.py`),
+        `from pathlib import Path\nPath(${JSON.stringify(path.join(root, `${module}-executed`))}).touch()\n`);
+    }
+    const res = runWithHelpers(
+      `cd "${root}"\nWHATSOUP_LOCKED_PYTHON_VERSION="${identity.stdout.trim()}" WHATSOUP_TRANSCRIPTION_PYTHON=python3 PYTHONPATH="${root}" resolve_python`,
+    );
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.existsSync(path.join(root, 'sitecustomize-executed'))).toBe(false);
+    expect(fs.existsSync(path.join(root, 'venv-executed'))).toBe(false);
+  });
+
+  it('does not execute a capability probe when its budget is exhausted', () => {
+    const shim = makeTempRoot('itd-python-probe-budget-');
+    const marker = path.join(shim, 'executed');
+    for (const name of ['python3.13', 'python3']) {
+      writeExecutable(shim, name, `#!/bin/sh\nprintf started > "${marker}"\nexit 0\n`);
+    }
+    const res = runWithHelpers('WHATSOUP_PYTHON_PROBE_TIMEOUT=0 resolve_python', shim, false);
+    expect(res.status).not.toBe(0);
+    expect(res.stdout.trim()).toBe('');
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('fails closed when no candidate has the locked CPython identity', () => {
+    const shim = makeTempRoot('itd-unqualified-py-');
+    const unqualifiedPython = [
+      '#!/bin/sh',
+      '[ "$1" != "-I" ] || shift',
+      'case "$1" in',
+      "  -c) case \"$2\" in *implementation*) printf '%s\\n' 'cpython:3.13.15' ;; *) exit 0 ;; esac ;;",
+      'esac',
+    ].join('\n');
+    writeExecutable(shim, 'python3.13', unqualifiedPython);
+    writeExecutable(shim, 'python3', unqualifiedPython);
     const res = runWithHelpers(
       'WHATSOUP_TRANSCRIPTION_PYTHON=/nonexistent/python resolve_python',
+      shim,
+      false,
     );
-    expect(res.status).toBe(0);
-    expect(res.stdout.trim()).not.toBe('/nonexistent/python');
+    expect(res.status).not.toBe(0);
+    expect(res.stdout.trim()).toBe('');
   });
+});
+
+describe('install-transcription-deps.sh — managed venv upgrades', () => {
+  it('refuses a symlink model destination without replacing it or its target', () => {
+    const res = runVenvPreparationSnippet(0, 0, 0, false, true);
+    expect(res.status, res.stderr).toBe(1);
+    expect(fs.lstatSync(res.model).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(`${res.model}.original`, 'utf8')).toBe('prior-model-bytes');
+    expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
+  });
+
+  it('refreshes an existing venv with the qualified interpreter before the locked install', () => {
+    const res = runVenvPreparationSnippet();
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
+    expect(fs.readFileSync(res.model, 'utf8')).toBe('verified-model');
+    expect(fs.readFileSync(res.phases, 'utf8')).toBe('faster-whisper\nggml\n');
+    const retained = fs.readdirSync(path.dirname(res.model)).filter((name) => name.startsWith('ggml-small.bin.pending.'));
+    expect(retained).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(res.model), retained[0]!, 'previous-model'), 'utf8')).toBe('prior-model-bytes');
+  });
+
+  it('restores the prior live environment when the locked installation fails', () => {
+    const res = runVenvPreparationSnippet(17);
+    expect(res.status, res.stderr).toBe(17);
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
+    expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
+    const retained = fs.readdirSync(path.dirname(res.venv)).filter((name) => name.startsWith('transcription-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(res.venv), retained[0]!, 'failed-environment', 'pyvenv.cfg'), 'utf8'))
+      .toBe('home = replacement-runtime\n');
+  });
+
+  it.each([
+    ['import', 19, 0, false, 0, 19],
+    ['faster-whisper', 0, 0, false, 23, 23],
+    ['download', 0, 21, false, 0, 21],
+    ['checksum', 0, 0, true, 0, 1],
+  ] as const)('restores the prior environment after %s validation fails', (stage, importStatus, downloadStatus, invalidModel, fasterWhisperStatus, status) => {
+    const res = runVenvPreparationSnippet(0, importStatus, downloadStatus, invalidModel, false, fasterWhisperStatus);
+    expect(res.status, res.stderr).toBe(status);
+    if (stage === 'faster-whisper') {
+      expect(fs.readFileSync(res.phases, 'utf8')).toBe('faster-whisper\n');
+    }
+    expect(fs.readFileSync(res.model, 'utf8')).toBe('prior-model-bytes');
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
+    expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
+    const retained = fs.readdirSync(path.dirname(res.venv)).filter((name) => name.startsWith('transcription-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(res.venv), retained[0]!, 'failed-environment', 'pyvenv.cfg'), 'utf8'))
+      .toBe('home = replacement-runtime\n');
+  });
+});
+
+describe('install-transcription-deps.sh — network bounds', () => {
+  function runNetworkHelper(name: string, body: string, env: NodeJS.ProcessEnv = {}) {
+    const start = scriptSource.indexOf(`${name}() {`);
+    expect(start, `${name} must be provided by the installer`).toBeGreaterThanOrEqual(0);
+    const end = scriptSource.indexOf('\n}\n', start);
+    expect(end).toBeGreaterThan(start);
+    return spawnSync('/bin/bash', ['-c', `${boundedSource}\n${scriptSource.slice(start, end + 3)}\n${body}`], {
+      encoding: 'utf8',
+      env: { ...process.env, ...env },
+      timeout: 15_000,
+    });
+  }
+
+  it('terminates a stalled locked pip install and preserves its timeout status', () => {
+    const result = runNetworkHelper('install_transcription_requirements', `
+whatsoup_install_locked_requirements() { sleep 30; }
+VENV=/unused REPO_ROOT=/unused WHATSOUP_PIP_INSTALL_TIMEOUT=1
+install_transcription_requirements
+`);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(124);
+  }, 20_000);
+
+  it('bounds curl time, redirects, protocols and bytes while disabling inherited curl configuration', () => {
+    const root = makeTempRoot('itd-curl-bounds-');
+    writeExecutable(root, 'curl', '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+    const result = runNetworkHelper('download_ggml_model', `
+GGML_SMALL_URL=https://example.invalid/model GGML_SMALL_PATH="$TEST_MODEL"
+download_ggml_model
+`, { PATH: `${root}:${process.env.PATH}`, TEST_MODEL: path.join(root, 'model') });
+    expect(result.status, result.stderr).toBe(0);
+    const args = result.stdout.trim().split('\n');
+    expect(args[0]).toBe('--disable');
+    for (const [option, value] of [
+      ['--connect-timeout', '15'], ['--max-time', '600'], ['--max-redirs', '3'],
+      ['--max-filesize', '536870912'], ['--proto', '=https'], ['--proto-redir', '=https'],
+    ]) {
+      expect(args.indexOf(option)).toBeGreaterThanOrEqual(0);
+      expect(args[args.indexOf(option) + 1]).toBe(value);
+    }
+  });
+
+  it('enforces a kernel file limit even when a downloader ignores its byte limit', () => {
+    const root = makeTempRoot('itd-curl-file-limit-');
+    const model = path.join(root, 'model');
+    writeExecutable(root, 'curl', `#!${process.execPath}
+const fs = require('node:fs');
+fs.closeSync(fs.openSync(process.env.TEST_MODEL, 'w'));
+fs.truncateSync(process.env.TEST_MODEL, 2 * 1024 * 1024 * 1024);
+`);
+    const result = runNetworkHelper('download_ggml_model', `
+GGML_SMALL_URL=https://example.invalid/model GGML_SMALL_PATH="$TEST_MODEL"
+download_ggml_model
+`, { PATH: `${root}:${process.env.PATH}`, TEST_MODEL: model });
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(fs.statSync(model).size).toBeLessThanOrEqual(1024 * 1024 * 1024);
+  });
+
+  it('terminates a stalled downloader and preserves its timeout status', () => {
+    const root = makeTempRoot('itd-curl-stall-');
+    writeExecutable(root, 'curl', '#!/bin/sh\nexec sleep 30\n');
+    const result = runNetworkHelper('download_ggml_model', `
+GGML_SMALL_URL=https://example.invalid/model GGML_SMALL_PATH=/unused
+WHATSOUP_MODEL_DOWNLOAD_TIMEOUT=1
+download_ggml_model
+`, { PATH: `${root}:${process.env.PATH}` });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(124);
+  }, 20_000);
 });

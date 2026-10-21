@@ -137,11 +137,16 @@ bash scripts/install-transcription-deps.sh
 ```
 
 On macOS, the installer uses Homebrew for `ffmpeg`, `whisper-cpp`, and
-`python@3.12`. On Linux it checks prerequisites and prints the required install
-commands when they are missing; it does not use Homebrew. It then prepares:
+`python@3.13`. On Linux it checks prerequisites and prints the required install
+commands when they are missing; it does not use Homebrew. It requires CPython
+`3.13.16`, then refreshes the managed venv with that interpreter before every
+install; a host package manager supplying another patch is a visible failure,
+not an unqualified install. It then installs the committed, hash-locked binary
+dependency graph and prepares:
 
 - dedicated venv at `~/.local/share/whatsoup/transcription-venv`
-- faster-whisper cache under `~/.local/share/whatsoup/models/faster-whisper`
+- the verified `large-v3-turbo` faster-whisper model at a revision-named directory under `~/.local/share/whatsoup/models/faster-whisper`; the installer fetches every manifest file with HTTPS/time/redirect/size bounds and checks SHA-256 before publication
+- ordinary faster-whisper transcription is local-only; `WHATSOUP_FASTER_WHISPER_MODEL` accepts the supported default name or an explicit absolute local directory, never an on-demand remote model name
 - whisper.cpp model under `~/.local/share/whatsoup/models/whisper.cpp/`
 
 ## Database Migration Trigger

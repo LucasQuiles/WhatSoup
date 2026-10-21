@@ -12,8 +12,11 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import childProcess, { type ExecFileSyncOptions } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 
 import { describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 
 import {
   classifyPrePushInput,
@@ -185,6 +188,47 @@ describe('pre-push guard classifier', () => {
     },
   );
 
+});
+
+describe('pre-push verification composite deadline', () => {
+  it.each([
+    ['refs/heads/topic', 'branch', '0.8', false],
+    ['refs/heads/main', 'release', '0.8', false],
+    ['refs/heads/topic', 'branch', '5', true],
+  ] as const)('bounds %s verification (%s, %ss, expires=%s)', (ref, decision, duration, expires) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-deadline-'));
+    const npm = resolve(root, 'npm');
+    const completed = resolve(root, 'completed');
+    const nativeExec = childProcess.execFileSync;
+    const originalPath = process.env.PATH;
+    writeFileSync(npm, `#!${process.execPath}\nif (process.argv[3]?.startsWith('verify:')) setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(completed)}, ''), ${Number(duration) * 1000});\n`, { mode: 0o700 });
+    // Scale only the aggregate deadline; execute the real native timeout path.
+    const spy = vi.spyOn(childProcess, 'execFileSync').mockImplementation((file, args, options) => {
+      const composite = file === 'npm' && Array.isArray(args) && String(args[1]).startsWith('verify:');
+      const config = options as ExecFileSyncOptions;
+      return nativeExec(file, args as string[], composite
+        ? { ...config, timeout: Number(config.timeout) / 1000 }
+        : config);
+    });
+    try {
+      process.env.PATH = `${root}:${originalPath ?? ''}`;
+      syncBuiltinESMExports();
+      const run = () => runPrePushGuard(
+        `${ref} ${'a'.repeat(40)} ${ref} ${ZERO_SHA}`,
+        repoRoot,
+        { assertConsoleDependencies: () => {} },
+      );
+      if (expires) expect(run).toThrow(/ETIMEDOUT/);
+      else expect(run()).toBe(decision);
+      expect(existsSync(completed)).toBe(!expires);
+    } finally {
+      spy.mockRestore();
+      syncBuiltinESMExports();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('pre-push guard runtime — fail-closed on empty stdin', () => {
@@ -1304,7 +1348,7 @@ describe('quality workflow composition', () => {
   });
 
   it('uses the shared quality installer before Python-backed gates run', () => {
-    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup Python 3.12');
+    const setupPythonIndex = qualityWorkflow.indexOf('name: Setup CPython 3.13.16');
     const pythonDepsIndex = qualityWorkflow.indexOf('name: Host dependency profile (strict)');
     const testIntegrityIndex = qualityWorkflow.indexOf('name: Test integrity baseline check');
 
@@ -1312,10 +1356,44 @@ describe('quality workflow composition', () => {
     expect(pythonDepsIndex).toBeGreaterThan(setupPythonIndex);
     expect(testIntegrityIndex).toBeGreaterThan(pythonDepsIndex);
     expect(qualityWorkflow).toMatch(/uses: actions\/setup-python@[0-9a-f]{40}/);
-    expect(qualityWorkflow).toContain("python-version: '3.12'");
+    expect(qualityWorkflow).toContain("python-version: '3.13.16'");
+    expect(qualityWorkflow).toContain('name: Verify locked Python runtime');
     expect(qualityWorkflow).toContain('install-host-dependencies.sh --profile quality --apply --yes --json');
     expect(qualityWorkflow).not.toContain('Install Python and Linux quality prerequisites');
     expect(qualityWorkflow).not.toContain('sudo apt-get install -y shellcheck ripgrep');
+  });
+
+  it('selects macOS Python locks through the shared policy', () => {
+    const macosStart = qualityWorkflow.indexOf('  bot-errors-health-macos:');
+    const macos = qualityWorkflow.slice(macosStart);
+
+    expect(macos).toContain('. deploy/lib/python-lock-policy.sh');
+    expect(macos).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-quality-lock/bin/python" "$GITHUB_WORKSPACE" quality');
+    expect(macos).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
+    expect(macos).not.toContain('quality-cpython313-darwin-arm64.txt');
+  });
+
+  it('clean-installs the Linux transcription lock through the shared policy', () => {
+    expect(qualityWorkflow).toContain('name: Verify Linux transcription lock installation');
+    expect(qualityWorkflow).toContain('whatsoup_install_locked_requirements "$RUNNER_TEMP/whatsoup-transcription-lock/bin/python" "$GITHUB_WORKSPACE" transcription');
+  });
+
+  it('keeps audio package setup in a required job without the private dependency secret', () => {
+    type Step = { run?: string; if?: string; 'continue-on-error'?: boolean };
+    type Job = { steps: Step[]; 'continue-on-error'?: boolean };
+    const workflow = parse(qualityWorkflow) as { jobs: Record<string, Job> };
+    const audioJobs = Object.values(workflow.jobs).filter((job) =>
+      job.steps.some((step) => step.run?.includes('run-locked-transcription-smoke.sh')));
+    expect(audioJobs).toHaveLength(2);
+    for (const job of audioJobs) {
+      expect(JSON.stringify(job)).not.toContain('secrets.');
+      expect(job['continue-on-error']).not.toBe(true);
+      const smoke = job.steps.find((step) => step.run?.includes('run-locked-transcription-smoke.sh'))!;
+      expect(smoke['continue-on-error']).not.toBe(true);
+      expect(smoke.if).toBeUndefined();
+    }
+    expect(workflow.jobs.compatibility!.steps.some((step) =>
+      step.run?.includes('run-locked-transcription-smoke.sh'))).toBe(true);
   });
 
   it('preserves exact required contexts while isolating Node 25 compatibility work', () => {
@@ -1333,7 +1411,13 @@ describe('quality workflow composition', () => {
     expect(compatibility).not.toContain('coverage:check');
     expect(compatibility).not.toContain('guard:');
     expect(compatibility).not.toContain('Playwright');
-    expect(compatibility).not.toContain('Setup Python');
+    expect(compatibility).toContain("python-version: '3.12'");
+    expect(compatibility).toContain("python-version: '3.13.16'");
+    expect(compatibility).toContain('WHATSOUP_TEST_LEGACY_PYTHON=$LEGACY_PYTHON');
+    expect(compatibility).toContain('WHATSOUP_TEST_LOCKED_PYTHON=$LOCKED_PYTHON');
+    expect(compatibility).not.toContain('python -m pytest');
+    expect(compatibility).toContain('install-host-dependencies.sh --profile compatibility --node-policy compatibility');
+    expect(compatibility).toContain('whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility');
     expect(compatibility).not.toContain('test-integrity');
     expect(compatibility).not.toContain('ci-disk-reclaim');
   });

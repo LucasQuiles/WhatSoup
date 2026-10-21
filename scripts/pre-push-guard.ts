@@ -27,6 +27,7 @@ export type PushDecision = 'skip' | 'branch' | 'release' | 'preserve';
 const REQUIRED_CONSOLE_EXECUTABLES = ['eslint', 'tsc', 'vite'] as const;
 const DELETE_ONLY_METADATA_SCRIPTS = ['design:metrics', 'design:burndown'] as const;
 const PRESERVE_REF_PREFIX = 'refs/preserve/';
+const VERIFICATION_COMPOSITE_TIMEOUT_MS = 60 * 60 * 1000;
 
 interface PrePushGuardDependencies {
   assertConsoleDependencies: (cwd: string) => void;
@@ -288,10 +289,11 @@ export function runPrePushGuard(
 
   for (const script of commands) {
     console.error(`pre-push guard: running npm run ${script}`);
-    // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
-    // run for minutes — 600s bounds a hang without tripping real steps. The 30s
-    // default used elsewhere in this series is for fast single git/gh invocations.
-    execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
+    // This child runs the entire ordered composite, including a battery with its
+    // own 30-minute bound. Match the CI job's aggregate hour, not a single step.
+    execFileSync('npm', ['run', script], {
+      cwd, timeout: VERIFICATION_COMPOSITE_TIMEOUT_MS, stdio: 'inherit',
+    });
   }
 
   if (alignmentReceipt) {
