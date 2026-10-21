@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 
 import pytest
@@ -150,11 +151,17 @@ def test_malformed_state_cannot_authorize_legacy_rollback(rollback_tree):
     primary.write_text("{broken")
     primary.chmod(0o600)
     assert_unknown_state_refuses_legacy_rollback(rollback_tree)
+    assert primary.read_bytes() == b"{broken"
 
 
 def test_fifo_state_cannot_authorize_legacy_rollback(rollback_tree):
-    os.mkfifo(rollback_tree[2] / "incident-state.json", 0o600)
+    primary = rollback_tree[2] / "incident-state.json"
+    os.mkfifo(primary, 0o600)
+    before = primary.lstat()
     assert_unknown_state_refuses_legacy_rollback(rollback_tree)
+    after = primary.lstat()
+    assert stat.S_ISFIFO(after.st_mode)
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
 
 
 def test_symlink_state_cannot_authorize_legacy_rollback(rollback_tree):
@@ -164,6 +171,8 @@ def test_symlink_state_cannot_authorize_legacy_rollback(rollback_tree):
     outside.chmod(0o600)
     (state / "incident-state.json").symlink_to(outside)
     assert_unknown_state_refuses_legacy_rollback(rollback_tree)
+    assert (state / "incident-state.json").readlink() == outside
+    assert outside.read_bytes() == b'{"openIncidents": {}, "lastSentAt": {}}'
 
 
 def test_missing_adopted_state_cannot_authorize_legacy_rollback(rollback_tree):
@@ -171,6 +180,8 @@ def test_missing_adopted_state_cannot_authorize_legacy_rollback(rollback_tree):
     marker.write_text("{}")
     marker.chmod(0o600)
     assert_unknown_state_refuses_legacy_rollback(rollback_tree)
+    assert marker.read_bytes() == b"{}"
+    assert not (rollback_tree[2] / "incident-state.json").exists()
 
 
 def test_evidence_only_state_cannot_authorize_legacy_rollback(rollback_tree):
@@ -178,11 +189,14 @@ def test_evidence_only_state_cannot_authorize_legacy_rollback(rollback_tree):
     evidence.write_text("retained recovery evidence")
     evidence.chmod(0o600)
     assert_unknown_state_refuses_legacy_rollback(rollback_tree)
+    assert evidence.read_bytes() == b"retained recovery evidence"
+    assert not (rollback_tree[2] / "incident-state.json").exists()
 
 
 def test_semantically_invalid_incident_state_cannot_authorize_legacy_rollback(rollback_tree):
-    write_state(rollback_tree[2], {"openIncidents": {}, "lastSentAt": []})
+    original = write_state(rollback_tree[2], {"openIncidents": {}, "lastSentAt": []})
     assert_unknown_state_refuses_legacy_rollback(rollback_tree)
+    assert (rollback_tree[2] / "incident-state.json").read_bytes() == original
 
 
 @pytest.mark.parametrize("value", ["not-an-int", {"timestamp": 1700000000}])
