@@ -183,13 +183,24 @@ function observeLifecycleEventOrder(source: string): string {
   return source;
 }
 const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bounded-exec-lifecycle-driver.py'), 'utf8');
-export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'authorization-unreadable-guard-stuck' | 'authorized-guard-stuck' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'guard-first-grace-term-boundary' | 'zero', terminal = false, startup: 'normal' | 'delayed' | 'stalled' | 'stalled-after-release' = 'normal', helperReadiness: 'normal' | 'delayed' | 'stalled' = 'normal') {
+export function runLifecycleProbe(mode: EventOrderMode | 'guard-job-control-unavailable' | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'authorization-unreadable-guard-stuck' | 'authorized-guard-stuck' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'guard-first-grace-term-boundary' | 'zero', terminal = false, startup: 'normal' | 'delayed' | 'stalled' | 'stalled-after-release' = 'normal', helperReadiness: 'normal' | 'delayed' | 'stalled' = 'normal') {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
   const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
+  let guardGroupSource: string | undefined;
+  if (mode === 'guard-job-control-unavailable') {
+    const source = fs.readFileSync(BOUNDED_LIB, 'utf8');
+    const launch = '    worker_group="$worker_candidate"\n\n    (';
+    const captured = '    guard_pid=$!\n';
+    expect(source.split(launch)).toHaveLength(2);
+    expect(source.split(captured)).toHaveLength(2);
+    // Model a failed setpgid for only the guard; keep all other groups real.
+    guardGroupSource = source.replace(launch, () => launch.replace('\n\n', '\n    set +m\n'))
+      .replace(captured, () => captured + '    set -m\n');
+  }
   let outcomeSource: string | undefined;
   if (mode.startsWith('outcome-') || mode === 'event-order-outcome-candidate-directory') {
     const source = eventOrderSource ?? fs.readFileSync(BOUNDED_LIB, 'utf8');
@@ -664,7 +675,7 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
     '  }',
     '  ;; esac',
     startup === 'delayed' ? '/bin/sleep 3.25' : startup === 'stalled' ? 'exec /bin/sleep 30' : '',
-    outcomeSource ?? eventOrderSource ?? '. "$1"',
+    outcomeSource ?? eventOrderSource ?? guardGroupSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
     'budget=6; case "$4" in event-order-frame-*) ;; event-order-*|nested|near-deadline|ordinary-exit-*|watchdog-reader-killed-after-verification|parent-stopped|worker-stopped-after-authorization|forged-completion-worker-stopped|dead-leader-before-authorization|dead-leader-clean-cleanup|dead-leader-finishing-cleanup|deadline-fifo-after-cleanup|authorization-unreadable-after-cleanup|authorization-unreadable-guard-stuck|authorized-guard-stuck|setup-*-term-ignoring|setup-timer-sleep-failure|cleanup-residual|handshake-early-cont|timeout-*|outcome-*|deadline-writer-*|guard-trap-in-record-read|job-control-unavailable|guard-first-grace-term-boundary) budget=1;; deadline-timer-descendant|deadline-helper-*|cleanup-child-group) budget=1;; control-*|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap) budget=1;; guard-terminated) budget=3;; zero) budget=0;; esac',
@@ -764,7 +775,7 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
       REAL_PS: resolveBinary('ps')!, PS_COUNTER: path.join(root, 'ps-counter'),
       PS_FAIL_AT: mode === 'ownership-command' ? '2' : mode === 'ownership-watchdog' ? '3' : '0',
       PS_KILL_AT: mode === 'reader-killed-after-verification' ? '2' : mode === 'watchdog-reader-killed-after-verification' ? '3' : '0',
-      PS_BORROW_GROUP: mode === 'ownership-caller-group' ? '1' : '0',
+      PS_BORROW_GROUP: mode === 'ownership-caller-group' || mode === 'guard-job-control-unavailable' ? '1' : '0',
       PS_CALLER_GROUP: path.join(root, 'caller-group'),
       PS_KILL_RECEIPT: path.join(root, 'reader-killed'),
       TIMEOUT_FIXTURE_READY: path.join(root, 'timeout-fixture-ready'),

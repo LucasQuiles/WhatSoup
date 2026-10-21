@@ -615,6 +615,17 @@ whatsoup_run_bounded() {
 
     (
       set +m
+      local guard_self_pid="" guard_self_group=""
+      if ! guard_self_pid="$(exec /bin/sh -c 'printf %s "$PPID"')" ||
+         [[ ! "$guard_self_pid" =~ ^[0-9]+$ ]] || [ "$guard_self_pid" -le 1 ] ||
+         ! guard_self_group="$(/bin/ps -o pgid= -p "$guard_self_pid" 2>/dev/null)" ||
+         [ "${guard_self_group//[[:space:]]/}" != "$guard_self_pid" ]; then
+        # The worker is our recorded child and has not been released. A failed
+        # guard group must never fork timers or resume it into unguarded work.
+        kill -TERM "$worker_pid" 2>/dev/null
+        kill -CONT "$worker_pid" 2>/dev/null
+        return 2
+      fi
       local timer_pid="" monitor_pid="" guard_grace_sleep_pid="" guard_status=0 command_authorized=0 watchdog_authorized=0
       _bounded_wait_for_budget() {
         local remaining="$budget" chunk

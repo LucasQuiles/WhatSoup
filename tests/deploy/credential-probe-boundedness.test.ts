@@ -281,6 +281,13 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.command_started).toBe(false);
     expectLifecycleIsolation(result);
   });
+  it('refuses a guard that inherits the caller group without leaving its budget sleep alive', () => {
+    const result = runLifecycleProbe('guard-job-control-unavailable');
+    const evidence = JSON.stringify(result);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    expect(result.command_started, evidence).toBe(false);
+    expectLifecycleIsolation(result);
+  });
   it('keeps the command deadline when an optional watchdog launch reader is lost', () => {
     const result = runLifecycleProbe('watchdog-reader-killed-after-verification');
     expect(result.verified_reader_killed, JSON.stringify(result)).toBe(true);
