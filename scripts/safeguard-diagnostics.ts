@@ -483,7 +483,7 @@ const ANCHOR_REQUIREMENTS: AnchorRequirement[] = [
     anchors: [],
     validate: qualityCiPlaywrightTimeoutFailures,
     remediation:
-      'Restore the 60-minute quality job cap and 5-minute Playwright system-dependency step cap so hosted-runner stalls fail closed.',
+      'Restore the 100-minute quality job cap and 5-minute Playwright system-dependency step cap so hosted-runner stalls fail closed.',
   },
   {
     id: 'tag-release-console-design-chain',
@@ -1127,8 +1127,8 @@ function qualityCiPlaywrightTimeoutFailures(text: string): string[] {
   const failures: string[] = [];
   if (hasOwn(root, 'defaults')) failures.push('quality workflow must not declare defaults');
   if (hasOwn(root, 'env')) failures.push('quality workflow must not declare env');
-  if (quality['timeout-minutes'] !== 60) {
-    failures.push('quality job timeout must be exactly 60 minutes');
+  if (quality['timeout-minutes'] !== 100) {
+    failures.push('quality job timeout must be exactly 100 minutes');
   }
   if (hasOwn(quality, 'continue-on-error') && quality['continue-on-error'] !== false) {
     failures.push('quality job continue-on-error must be absent or false');

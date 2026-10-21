@@ -1,8 +1,22 @@
-# ── Stage 1: Install production dependencies ──────────────────────────────────
-# Node version pinned to match .nvmrc and package.json#volta.node.
-FROM node:24.15.0-slim AS deps
+# ── Stage 0: Immutable Node and Debian package inputs ──────────────────────────
+# Node version pinned to match .nvmrc and package.json#volta.node. The digest and
+# snapshot policy are verified by scripts/check-node-pin-consistency.ts.
+FROM node:24.15.0-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The pinned Node binary supplies bundled roots before APT installs certificates.
+# HTTPS authenticates the snapshot server; APT still verifies signed metadata.
+RUN node -e "require('fs').mkdirSync('/etc/ssl/certs', {recursive:true}); require('fs').writeFileSync('/etc/ssl/certs/ca-certificates.crt', require('tls').rootCertificates.join('\n') + '\n')"
+RUN printf '%s\n' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
+      > /etc/apt/sources.list \
+    && rm -rf /etc/apt/sources.list.d/*
+
+# ── Stage 1: Install production dependencies ──────────────────────────────────
+FROM base AS deps
+
+RUN apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get install -y --no-install-recommends \
       ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -31,10 +45,10 @@ RUN npm run build
 # Output lands at /app/dist (vite.config.ts: outDir: '../dist')
 
 # ── Stage 3: Runtime ──────────────────────────────────────────────────────────
-# Node version pinned to match .nvmrc and package.json#volta.node.
-FROM node:24.15.0-slim AS runtime
+FROM base AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get install -y --no-install-recommends \
       tini \
     && rm -rf /var/lib/apt/lists/*
 

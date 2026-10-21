@@ -3368,7 +3368,105 @@ WhatSoup can run in a Docker container as an alternative to the systemd/launchd 
 docker compose build
 ```
 
-The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on the reviewed Node tag and digest in `docker/container-inputs.json`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+
+### Build input updates and evidence
+
+`docker/container-inputs.json` is the reviewed source of truth for the Linux target platform,
+Node image tag and index digest, its selected-platform dependency digest, Buildx client version,
+Linux release asset and SHA-256, BuildKit image, the digest-pinned BuildKit SBOM generator and
+its selected-platform dependency digest, builder name and driver, and Debian snapshot.
+For Docker Hub official images, BuildKit emits the familiar provenance PURL
+(`pkg:docker/node@...`), without the registry's implicit `library/` namespace; the policy stores
+that emitted identifier for receipt verification.
+`docker/Dockerfile` must match it exactly:
+the readable image tag remains alongside its immutable digest, and the package sources use
+only the declared snapshot. Check the static policy before a build:
+
+```bash
+npm run guard:node-pin-consistency
+```
+
+The digest-pinned Node binary exports its bundled Mozilla CA roots before the first APT
+request. Both snapshot sources use authenticated HTTPS, including on a slim image without
+the `ca-certificates` package. APT signature checks remain enabled. HTTP transport and TLS
+peer/hostname verification bypasses are rejected; this prevents replay by an on-path HTTP
+intermediary while the immutable snapshot uses `check-valid-until=no`.
+
+The source-list bootstrap is the only authorized writer of the effective APT descriptor set.
+The guard rejects later absolute or relative descriptor operands, entry into `/etc` or its APT
+subtree, and APT-root indirection assignments, including both `ENV` forms and `ARG` default
+declarations. Active Dockerfile instructions may not use `$` expansion or backtick command
+substitution until a reviewed parser and behavior test explicitly support them. This is a
+static drift invariant, not proof of arbitrary shell semantics: ambiguous new paths or expansion
+forms are rejected until the invariant and its behavior test are extended together.
+
+CI also checks that both Debian snapshot `Release` files remain available before it builds.
+Run the network check when the environment can reach the snapshot service:
+
+```bash
+npm run guard:node-pin-consistency -- --verify-container-snapshot
+```
+
+To update inputs, verify a new Node tag-to-index-digest mapping and selected platform manifest,
+Buildx Linux release asset and SHA-256, BuildKit image digest, SBOM-generator index digest and
+selected platform manifest, and the Debian snapshot metadata, then update the policy, Dockerfile,
+and CI setup together. Run the guard, a clean Linux container build, and the focused receipt tests in the
+same change. Review inputs at least monthly and whenever a relevant Node, Docker, BuildKit,
+or Debian security update is published; immutable references make a reviewed build
+reproducible, but they do not update themselves.
+
+The Quality workflow downloads the policy's pinned Buildx Linux asset with a bounded request,
+checks its policy SHA-256 before atomically publishing the job-local Docker CLI plugin, and
+creates its named `docker-container` builder from the policy's pinned BuildKit image. Before
+building, the runtime probe checks the single running node at its actual Docker endpoint,
+compares its immutable image ID with Docker's inspection of the reviewed digest, and retains
+`buildkit-runtime.json` bound to the source SHA and workflow invocation. The build receipt binds
+those runtime bytes and image ID alongside the independently checked SLSA source/invocation.
+BuildKit's SLSA materials do not themselves establish the builder image identity. It builds
+for the policy's explicit platform and sends the policy's digest-pinned SBOM generator to BuildKit.
+For a pull request it builds from GitHub's authoritative head clone URL at the exact full head SHA;
+push and merge-group builds require the fixed `https://github.com/LucasQuiles/WhatSoup.git`
+policy fallback and event SHA. An explicit PR-head fork override remains supported. The selected
+source must be an `https://github.com/<owner>/<repo>.git` clone URL and is recorded in the receipt,
+so BuildKit records a verified `configSource` revision rather than a local checkout hint. The receipt verifies OCI descriptor sizes
+and SHA-256 values for the runnable image, attestation manifests, and in-toto layers before
+parsing their SLSA v1 and SPDX statements. It requires every statement subject to name the
+runnable manifest digest; checks the source repository, Dockerfile path, source revision,
+builder invocation, selected-platform base-image and SBOM-generator dependencies. It extracts the verified embedded SPDX
+predicate for attestation, so the attested SBOM is bound to the runnable manifest and to the policy-controlled scanner.
+
+The verifier caps each JSON input at 32 MiB before allocation, the OCI archive and aggregate
+extracted bytes at 2 GiB, each extracted entry at 96 MiB, each descriptor list at 128, and all
+extraction attempts at 256. A shared 120-second monotonic deadline bounds archive traversal
+and hashing; each tar process also has a 30-second cap within the remaining budget. The
+workflow gives each receipt step five minutes for creation and independent readback. Exceeding
+a limit fails qualification; raise a bound only with reviewed workload evidence.
+
+Snapshot availability probes disable curl configuration, require HTTPS without redirects,
+and request `X-Download-Directly: 1` so Debian serves the pinned Release file without its
+normal redirect to the content-addressed file URL. Probes limit each response to 1 MiB
+with an independent parent-process output limit. Curl has
+a 30-second deadline; the parent stops it after 35 seconds.
+
+The authority job has a 100-minute deadline: 45 minutes for coverage, 10 for the container,
+5 for browser system dependencies, 17 for bounded browser download attempts and backoff,
+and a 15-minute estimate for the remaining setup and checks, with 8 minutes of margin.
+That remainder is a planning allowance, not a separate enforced timeout. Individual failure
+bounds remain enforced; an exhausted download bound fails the job.
+
+Successful container builds upload these files as
+`container-build-evidence-${{ github.sha }}` with a 14-day retention period.
+Retrieve the artifact from the corresponding Quality workflow run before it expires
+when release verification or an investigation requires the original evidence.
+The workflow artifact is not a durable evidence archive.
+
+Pull requests produce unsigned evidence only. After a trusted `main` build succeeds, the
+attestation job rechecks that evidence, exports the verified runnable-manifest digest, and signs
+provenance and SBOM attestations with that digest as the subject. It never attests the OCI tar
+archive as though it were the container image. A local Docker or compatible container engine is
+still needed to establish local build proof; a missing engine is an inconclusive result, not a
+successful build.
 
 ### Configure
 
