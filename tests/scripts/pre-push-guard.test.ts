@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import childProcess, { type ExecFileSyncOptions } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
@@ -186,6 +188,47 @@ describe('pre-push guard classifier', () => {
     },
   );
 
+});
+
+describe('pre-push verification composite deadline', () => {
+  it.each([
+    ['refs/heads/topic', 'branch', '0.8', false],
+    ['refs/heads/main', 'release', '0.8', false],
+    ['refs/heads/topic', 'branch', '5', true],
+  ] as const)('bounds %s verification (%s, %ss, expires=%s)', (ref, decision, duration, expires) => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-deadline-'));
+    const npm = resolve(root, 'npm');
+    const completed = resolve(root, 'completed');
+    const nativeExec = childProcess.execFileSync;
+    const originalPath = process.env.PATH;
+    writeFileSync(npm, `#!${process.execPath}\nif (process.argv[3]?.startsWith('verify:')) setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(completed)}, ''), ${Number(duration) * 1000});\n`, { mode: 0o700 });
+    // Scale only the aggregate deadline; execute the real native timeout path.
+    const spy = vi.spyOn(childProcess, 'execFileSync').mockImplementation((file, args, options) => {
+      const composite = file === 'npm' && Array.isArray(args) && String(args[1]).startsWith('verify:');
+      const config = options as ExecFileSyncOptions;
+      return nativeExec(file, args as string[], composite
+        ? { ...config, timeout: Number(config.timeout) / 1000 }
+        : config);
+    });
+    try {
+      process.env.PATH = `${root}:${originalPath ?? ''}`;
+      syncBuiltinESMExports();
+      const run = () => runPrePushGuard(
+        `${ref} ${'a'.repeat(40)} ${ref} ${ZERO_SHA}`,
+        repoRoot,
+        { assertConsoleDependencies: () => {} },
+      );
+      if (expires) expect(run).toThrow(/ETIMEDOUT/);
+      else expect(run()).toBe(decision);
+      expect(existsSync(completed)).toBe(!expires);
+    } finally {
+      spy.mockRestore();
+      syncBuiltinESMExports();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('pre-push guard runtime — fail-closed on empty stdin', () => {
