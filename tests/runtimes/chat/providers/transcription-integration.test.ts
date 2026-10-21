@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_MODEL_PATH as FASTER_WHISPER_DEFAULT_MODEL_PATH,
   SCRIPT_PATH as FASTER_WHISPER_SCRIPT_PATH,
   VENV_ROOT as FASTER_WHISPER_VENV_ROOT,
   fasterWhisperProvider,
@@ -46,18 +47,10 @@ const requireLockedRuntime = process.env.WHATSOUP_REQUIRE_LOCKED_TRANSCRIPTION =
 // entry this test can therefore skip here while the network provider would in fact
 // have transcribed the fixture. Neutralizing the keychain is a separate change.
 //
-// KNOWN ASYMMETRY, deliberate and NOT compensated for here: faster-whisper's
-// isAvailable() checks python + wrapper script but no model, because it downloads
-// models on demand. So a TRUE predicate still permits a run-and-fail: a host with
-// the venv but no cached model and no network reaches the assertion and fails on
-// FALLBACK_TEXT, exactly as whisper.cpp did before this change.
-//
-// Under this harness that is not a corner case, it is EVERY run. faster-whisper.ts
-// derives MODEL_DIR from homedir() and passes it as --model-dir, and the setup file
-// rewrites HOME to a fresh mkdtemp, so the download root is a new empty directory
-// every time and the cache is always cold. Any host whose venv really does have
-// faster_whisper installed must therefore fetch a model inside runCommand's 30s
-// budget on every single run. Fixing that belongs in the provider, not in this test.
+// Faster-whisper availability requires the selected local model directory as well
+// as the interpreter and wrapper. The fresh HOME used by vitest therefore makes it
+// unavailable instead of causing a production-model download during a test. The
+// locked smoke lane explicitly supplies its verified tiny model directory.
 const whisperCppUsable = whisperCppProvider.isAvailable();
 const fasterWhisperUsable = fasterWhisperProvider.isAvailable();
 
@@ -95,7 +88,8 @@ if (!hasLocalProvider && !requireLockedRuntime) {
     + `\n      resolved to ${WHISPER_CPP_MODEL} — ${existsSync(WHISPER_CPP_MODEL) ? 'present' : 'MISSING'}`
     + `\n  faster-whisper = ${fasterWhisperUsable ? 'usable' : 'NOT USABLE'}`
     + `\n    python ($WHATSOUP_FASTER_WHISPER_PYTHON, else ${FASTER_WHISPER_VENV_ROOT}/bin/{python3.13,python3,python}) = ${pythonPath ?? 'NOT FOUND'}`
-    + `\n    wrapper script ${FASTER_WHISPER_SCRIPT_PATH} — ${existsSync(FASTER_WHISPER_SCRIPT_PATH) ? 'present' : 'MISSING'}`,
+    + `\n    wrapper script ${FASTER_WHISPER_SCRIPT_PATH} — ${existsSync(FASTER_WHISPER_SCRIPT_PATH) ? 'present' : 'MISSING'}`
+    + `\n    model ($WHATSOUP_FASTER_WHISPER_MODEL, else ${FASTER_WHISPER_DEFAULT_MODEL_PATH}) = ${existsSync(process.env.WHATSOUP_FASTER_WHISPER_MODEL ?? FASTER_WHISPER_DEFAULT_MODEL_PATH) ? 'present' : 'MISSING'}`,
   );
 }
 

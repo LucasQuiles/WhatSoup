@@ -6,7 +6,7 @@ type FsModule = typeof nodeFs;
 const FAKE_PYTHON = '/fake/venv/bin/python3';
 const FAKE_WHISPER_CLI = '/fake/bin/whisper-cli';
 const FAKE_MODEL = '/fake/model.bin';
-const FAKE_FASTER_MODEL = 'large-v3-turbo';
+const FAKE_FASTER_MODEL = '/fake/faster-whisper-model';
 
 const {
   runCommandMock,
@@ -15,7 +15,7 @@ const {
   existsSyncMock,
 } = vi.hoisted(() => {
   process.env.WHATSOUP_FASTER_WHISPER_PYTHON = '/fake/venv/bin/python3';
-  process.env.WHATSOUP_FASTER_WHISPER_MODEL = 'large-v3-turbo';
+  process.env.WHATSOUP_FASTER_WHISPER_MODEL = '/fake/faster-whisper-model';
   process.env.WHATSOUP_WHISPER_CPP_BIN = '/fake/bin/whisper-cli';
   process.env.WHATSOUP_WHISPER_CPP_MODEL = '/fake/model.bin';
   return {
@@ -37,6 +37,7 @@ vi.mock('node:fs', async (importOriginal: () => Promise<FsModule>) => {
   return {
     ...actual,
     existsSync: (path: string) => existsSyncMock(path),
+    statSync: (path: string) => ({ isFile: () => existsSyncMock(path) }),
   };
 });
 
@@ -141,7 +142,7 @@ describe('transcribeWithFasterWhisper', () => {
       '--input',
       '/tmp/normalized.wav',
       '--model',
-      'large-v3-turbo',
+      FAKE_FASTER_MODEL,
       '--model-dir',
       expect.stringContaining('/.local/share/whatsoup/models/faster-whisper'),
     ]);
@@ -172,8 +173,8 @@ describe('transcribeWithFasterWhisper', () => {
     );
   });
 
-  it('honors WHATSOUP_FASTER_WHISPER_MODEL env override on cold module load', async () => {
-    process.env.WHATSOUP_FASTER_WHISPER_MODEL = 'tiny.en';
+  it('honors a local WHATSOUP_FASTER_WHISPER_MODEL override on cold module load', async () => {
+    process.env.WHATSOUP_FASTER_WHISPER_MODEL = '/custom/faster-whisper-model';
     existsSyncMock.mockReturnValue(true);
     runCommandMock.mockResolvedValueOnce({ stdout: JSON.stringify({ text: 'x' }) });
 
@@ -190,7 +191,7 @@ describe('transcribeWithFasterWhisper', () => {
       '--input',
       '/tmp/normalized.wav',
       '--model',
-      'tiny.en',
+      '/custom/faster-whisper-model',
       '--model-dir',
       expect.stringContaining('/.local/share/whatsoup/models/faster-whisper'),
     ]);
@@ -198,7 +199,7 @@ describe('transcribeWithFasterWhisper', () => {
 });
 
 describe('fasterWhisperProvider', () => {
-  it('reports availability when both python and script exist', () => {
+  it('reports availability when python, script and required model files exist', () => {
     existsSyncMock.mockReturnValue(true);
     expect(fasterWhisperProvider.isAvailable()).toBe(true);
   });
@@ -212,6 +213,21 @@ describe('fasterWhisperProvider', () => {
   it('reports unavailable when script is missing', () => {
     existsSyncMock.mockImplementation((p: string) => p === FAKE_PYTHON);
     expect(fasterWhisperProvider.isAvailable()).toBe(false);
+  });
+
+  it('reports unavailable when the configured local model is missing', () => {
+    existsSyncMock.mockImplementation((path: string) => path === FAKE_PYTHON || path.endsWith('transcribe-faster-whisper.py'));
+    expect(fasterWhisperProvider.isAvailable()).toBe(false);
+  });
+
+  it('does not treat an unpinned model name as a local override', async () => {
+    process.env.WHATSOUP_FASTER_WHISPER_MODEL = 'tiny.en';
+    existsSyncMock.mockReturnValue(true);
+    vi.resetModules();
+    const { fasterWhisperProvider: provider } = await import(
+      '../../../../../src/runtimes/chat/providers/transcription/faster-whisper.ts'
+    );
+    expect(provider.isAvailable()).toBe(false);
   });
 
   it('has the documented provider name', () => {
