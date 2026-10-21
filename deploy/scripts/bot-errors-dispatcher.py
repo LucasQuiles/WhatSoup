@@ -5598,6 +5598,10 @@ def prune_notice_packets(paths: dict[str, Path], now: int | None = None) -> int:
         except OSError:
             return 0
         try:
+            opened = os.fstat(directory_fd)
+            if (opened.st_dev, opened.st_ino) != (identity.st_dev, identity.st_ino):
+                os.close(directory_fd)
+                return 0
             entries = os.scandir(directory_fd)
         except BaseException:
             os.close(directory_fd)

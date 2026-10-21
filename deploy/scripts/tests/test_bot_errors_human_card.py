@@ -1316,6 +1316,40 @@ def test_packet_pruning_keeps_directory_custody_during_replacement(state, monkey
     assert not (original / packet.name).exists()
 
 
+def test_packet_pruning_refuses_directory_replaced_before_open(state, monkeypatch):
+    directory = state["packets"]
+    directory.mkdir(mode=0o700)
+    original = directory.with_name("original-packets")
+    replacement = directory.with_name("replacement-packets")
+    replacement.mkdir(mode=0o700)
+    name = "12345678.json"
+    old = time.time() - _mod.NOTICE_PACKET_RETENTION_SECONDS - 60
+    for root in (directory, replacement):
+        packet = root / name
+        packet.write_text(root.name)
+        os.utime(packet, (old, old))
+    real_open = os.open
+    opened = []
+
+    def open_after_replacement(path, flags, *args, **kwargs):
+        if Path(path) == directory and not opened:
+            directory.rename(original)
+            replacement.rename(directory)
+            fd = real_open(path, flags, *args, **kwargs)
+            opened.append(fd)
+            return fd
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_after_replacement)
+    assert _mod.prune_notice_packets(state) == 0
+    assert len(opened) == 1
+    assert (original / name).read_text() == "packets"
+    assert (directory / name).read_text() == "replacement-packets"
+    assert _mod._notice_packet_prune_scan is None
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
 def test_packet_pruning_bounds_inspection_and_resumes_past_young_packets(state, monkeypatch):
     directory = state["packets"]
     directory.mkdir(mode=0o700)

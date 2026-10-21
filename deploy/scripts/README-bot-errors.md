@@ -1349,7 +1349,8 @@ If that packet update fails after delivery, the persisted terminal send state le
 reclaim repair the packet and archive without sending the notice again.
 Packet pruning examines at most 500 entries per cycle and resumes its directory
 iterator on the next daemon cycle. It retains packets for at least 30 days and
-holds one directory descriptor through enumeration, deletion and syncing, so
+verifies that the newly opened directory matches its observed device and inode
+before scanning. It holds that descriptor through enumeration, deletion and syncing, so
 replacement of the packet directory cannot redirect deletion. The iterator closes
 on exhaustion, error or directory change; process restart begins a new scan.
 This bounds per-cycle entry work, not individual filesystem-call duration or total
