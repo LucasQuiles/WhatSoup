@@ -2504,7 +2504,7 @@ def record_daily_health_freshness(event: dict[str, Any], incident_state: dict[st
     host = daily_health_host_from_payload(event)
     if not host:
         return None
-    observed_epoch = event_created_epoch(event)
+    observed_epoch = bounded_observation_epoch(event)
     if observed_epoch is None:
         return None
     ledger = incident_state.setdefault("dailyHealthFreshness", {})
@@ -3041,7 +3041,7 @@ def has_post_incident_outbound_proof(probe: str, record: dict[str, Any], opened_
     """
     if evidence_field(probe, "outbound_success_evidence") != "provider_acknowledged_or_better":
         return False
-    outbound_epoch = evidence_epoch(probe, "outbound_success_at")
+    outbound_epoch = bounded_observation_epoch({"createdAt": evidence_field(probe, "outbound_success_at")})
     if outbound_epoch is None:
         return False
     opened_at = int_field(record, "openedAt", opened_epoch)
@@ -3136,9 +3136,11 @@ def daily_health_recovered_incident_keys(
 ) -> list[str]:
     if str(event.get("source") or "") != "daily-health":
         return []
+    created = bounded_observation_epoch(event)
+    if created is None:
+        return []
     machine = safe_segment(str(event.get("machine") or "unknown"))
     open_incidents = incident_state.setdefault("openIncidents", {})
-    created = event_created_epoch(event)
     recovered: list[str] = []
     seen: set[str] = set()
     for raw_line in event_text(event, "evidence").splitlines():
@@ -3718,6 +3720,15 @@ def event_created_epoch(event: dict[str, Any]) -> int | None:
     except ValueError:
         return None
     return int(parsed.timestamp())
+
+
+def bounded_observation_epoch(event: dict[str, Any]) -> int | None:
+    """Bound liveness and recovery time; this does not authenticate the producer."""
+    order = event_created_order(event)
+    if order is None:
+        return None
+    observed = order // 1_000_000
+    return observed if observed <= int(time.time()) + CLOCK_SKEW_TOLERANCE_SECONDS else None
 
 
 def event_created_order(event: dict[str, Any]) -> int | None:
@@ -6044,18 +6055,24 @@ class LineRoster:
                 name = str(inst.get("name") or "").strip().lower()
                 if name:
                     self.rows.setdefault(name, []).append((host, str(inst.get("expected") or "").strip()))
-        local = _machine_strings(event_machine())
-        self.local_host = next((host for host, aliases in self.aliases.items() if aliases & local), None)
+        self.local_host = self.host_of_machine(event_machine())
+
+    def matching_hosts(self, machine: Any) -> set[str]:
+        strings = _machine_strings(machine)
+        return {host for host, aliases in self.aliases.items() if aliases & strings}
 
     def host_of_machine(self, machine: Any) -> str | None:
-        strings = _machine_strings(machine)
-        return next((host for host, aliases in self.aliases.items() if aliases & strings), None)
+        hosts = self.matching_hosts(machine)
+        return next(iter(hosts)) if len(hosts) == 1 else None
 
     def resolve(self, machine: Any, bot: str) -> tuple[str, str] | None:
         """(host, expected) of the roster row for this bot on this machine, or None."""
         candidates = self.rows.get(bot.lower(), [])
-        machine_host = self.host_of_machine(machine)
-        if machine_host is not None:
+        hosts = self.matching_hosts(machine)
+        if len(hosts) > 1:
+            return None
+        if hosts:
+            machine_host = next(iter(hosts))
             matched = [row for row in candidates if row[0] == machine_host]
             return matched[0] if len(matched) == 1 else None
         return candidates[0] if len(candidates) == 1 else None
@@ -7037,6 +7054,8 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # delivered: mark_incident_sent writes that bookkeeping on delivery, and
     # applies the intents set below only then.
     clear_delivery_intents(event)
+    if is_incident_clear(event) and bounded_observation_epoch(event) is None:
+        return "clear observation time is invalid or exceeds the clock-skew allowance"
     if os.environ.get("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "").strip().lower() in {"1", "true", "yes", "on"}:
         return None
     source = str(event.get("source") or "")
@@ -7561,6 +7580,8 @@ def append_clear_context(event: dict[str, Any], incident_state: dict[str, Any]) 
 
 
 def mark_incident_sent(event: dict[str, Any], incident_state: dict[str, Any]) -> None:
+    if is_incident_clear(event) and bounded_observation_epoch(event) is None:
+        return
     key = incident_key(event)
     current = int(time.time())
     # An operator has now actually been shown this event, on WhatsApp or via
@@ -11164,7 +11185,7 @@ def suppress_alerts_recovered_before_delivery(paths: dict[str, Path], incident: 
         order = event_created_order(event)
         if is_incident_alert(event):
             alerts_by_key.setdefault(incident_key(event), []).append((path, event, epoch, order))
-        elif is_incident_clear(event) and delivery_ready(event):
+        elif is_incident_clear(event) and delivery_ready(event) and bounded_observation_epoch(event) is not None:
             clears.append((path, event, epoch, order))
 
     suppressed = 0

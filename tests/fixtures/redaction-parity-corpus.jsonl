@@ -54,3 +54,7 @@
 {"id":"forensic-basic-quoted-whitespace","class":"regress:quoted-basic","input":"{ \"Authorization\" \r\n : \t \"Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=\" }","expected":"{ \"Authorization\" \r\n : \t \"Basic [REDACTED]\" }"}
 {"id":"forensic-basic-quoted-benign","class":"make:benign-keep","input":"{\"description\":\"Basic rendering mode\"}","expected":"{\"description\":\"Basic rendering mode\"}"}
 {"id":"forensic-basic-quoted-unquoted","class":"regress:quoted-basic","input":"Authorization: Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=","expected":"Authorization: Basic [REDACTED]"}
+{"id": "url-userinfo-token-only", "class": "url-userinfo", "input": "https://example-credential@fixture.invalid/repo", "expected": "https://[REDACTED]@fixture.invalid/repo"}
+{"id": "url-userinfo-empty-user", "class": "url-userinfo", "input": "https://:example-credential@fixture.invalid/repo", "expected": "https://[REDACTED]@fixture.invalid/repo"}
+{"id": "url-userinfo-empty-password", "class": "url-userinfo", "input": "https://example-user:@fixture.invalid/repo", "expected": "https://[REDACTED]@fixture.invalid/repo"}
+{"id": "url-path-at-sign", "class": "url-userinfo-negative", "input": "https://fixture.invalid/users/example@team", "expected": "https://fixture.invalid/users/example@team"}

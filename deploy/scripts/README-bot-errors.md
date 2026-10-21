@@ -794,7 +794,20 @@ and falsifier traffic from a genuine incident. `is_test_provenance_event` in
 `bot-errors-dispatcher.py` screens on `runtime.provenance.test` being exactly
 `true`; a matching event is refused before ordinary incident processing, the
 original is retained in suppressed audit state, and one bounded meta-alert is
-emitted. This is a backstop, not the producer-authority boundary #2391 asks for.
+emitted. This test-traffic backstop does not authenticate a producer.
+
+Health freshness and incident recovery trust writers admitted to the private,
+host-owned queue. Producer names and relay diagnostics do not authenticate a
+distinct writer. The line recheck requires a confirmed local fleet API reading
+plus the incident's stored health proof; that proof inherits the queue's trust.
+An alias shared by multiple roster hosts cannot select a host or retire a line,
+even when only one roster row uses that bot name.
+
+Health observations, outbound-send proof and clear events require explicit
+timezones and cannot exceed the dispatcher's clock by more than 60 seconds.
+An invalid or future clear cannot close an incident or retire its queued alert.
+The daily-health display override does not bypass this time check. These checks
+bound observation time; they do not establish producer identity.
 
 `test` is derived from **strong runner signals only** — `VITEST`,
 `VITEST_WORKER_ID`, `JEST_WORKER_ID`, `PYTEST_CURRENT_TEST`, plus

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import example, given, strategies as st
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-dispatcher.py"
 
@@ -64,6 +65,30 @@ def _empty_incident_state() -> dict[str, Any]:
 
 class TestOrphanClearSuppression:
     """Clear events with no open incident must be suppressed."""
+
+    @given(offset=st.integers(min_value=0, max_value=86400))
+    @example(offset=0)
+    @example(offset=60)
+    @example(offset=61)
+    @example(offset=86400)
+    @pytest.mark.parametrize("force_health_info", [False, True])
+    def test_future_clear_cannot_close_an_open_incident(self, offset, force_health_info):
+        accepted = offset <= 60
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            now = 1784719200
+            monkeypatch.setattr(_mod.time, "time", lambda: now)
+            if force_health_info:
+                monkeypatch.setenv("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", "1")
+            key = "host-a|inst-x|daily-health"
+            state = _empty_incident_state()
+            state["openIncidents"][key] = {"status": "open", "openedAt": now - 3600,
+                                           "eventCreatedAtEpoch": now - 3600}
+            event = _make_clear_event("host-a", "inst-x", "daily-health", now + offset)
+
+            reason = _mod.should_suppress_send(event, state)
+            assert (reason is None) is accepted
+            _mod.mark_incident_sent(event, state)
+            assert (key not in state["openIncidents"]) is accepted
 
     def test_clear_no_open_incident_is_suppressed(self):
         """The core fix: a clear with no matching open incident is suppressed."""

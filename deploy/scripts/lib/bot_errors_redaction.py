@@ -74,7 +74,7 @@ PEM_PRIVATE_KEY_RE = re.compile(
 # `apikey.`*N → ~8s on 140KB) because `[a-z0-9+.-]*` greedily consumed the whole
 # input then re-tried `://` at every offset. The bound keeps the scan LINEAR while
 # still masking creds for ANY scheme (redis/postgres/wss/https/ldap/ftp/…).
-URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]{0,30}://)[^\s/@:]+:[^\s/@]+@", re.IGNORECASE)
+URL_USERINFO_RE = re.compile(r"\b([a-z][a-z0-9+.-]{0,30}://)[^\s/@]+@", re.IGNORECASE)
 
 
 def redact_phone_like_match(match: re.Match[str], marker: str) -> str:

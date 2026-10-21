@@ -24,6 +24,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+from hypothesis import example, given, strategies as st
+
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
@@ -163,6 +166,31 @@ def test_record_freshness_covers_daily_health_fail():
     event = _daily_health_event(source="daily-health-fail", severity="critical")
     assert _disp.record_daily_health_freshness(event, state) == _HOST_A
     assert _HOST_A in state["dailyHealthFreshness"]
+
+
+@given(offset=st.integers(min_value=0, max_value=86400))
+@example(offset=0)
+@example(offset=60)
+@example(offset=61)
+@example(offset=86400)
+def test_freshness_future_clock_bound_preserves_previous_stamp(offset):
+    accepted = offset <= 60
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(_disp.time, "time", lambda: _DEFAULT_CREATED_EPOCH)
+        prior = {"lastSeenAt": _DEFAULT_CREATED_EPOCH - 100, "lastSeenIso": "previous"}
+        state = {"dailyHealthFreshness": {_HOST_A: dict(prior)}}
+        event = _daily_health_event(createdAt=_disp.iso_from_epoch(_DEFAULT_CREATED_EPOCH + offset))
+        assert _disp.record_daily_health_freshness(event, state) == (_HOST_A if accepted else None)
+        if accepted:
+            assert state["dailyHealthFreshness"][_HOST_A]["lastSeenAt"] == _DEFAULT_CREATED_EPOCH + offset
+        else:
+            assert state["dailyHealthFreshness"][_HOST_A] == prior
+
+
+def test_freshness_rejects_timezone_ambiguous_observation():
+    state = {}
+    assert _disp.record_daily_health_freshness(_daily_health_event(createdAt="2026-07-22T11:20:00"), state) is None
+    assert state == {}
 
 
 def test_record_freshness_skips_non_daily_health():

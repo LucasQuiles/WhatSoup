@@ -314,6 +314,43 @@ def test_same_name_retired_on_one_host_is_never_retired_where_ambiguous_or_alway
     assert "You: Action needed: relink or retire each line that needs a QR relink (Lucas)" in card
 
 
+@pytest.mark.parametrize("reverse_hosts", [False, True])
+@pytest.mark.parametrize("shared_bot", [False, True])
+def test_shared_machine_alias_never_retires_an_incident(mod, pinned_clock, reverse_hosts, shared_bot):
+    hosts = [
+        {"host": "host-2", "machineNames": ["shared.example"],
+         "instances": [{"name": "reused", "expected": "blocked"}]},
+        {"host": "hub-1", "machineNames": ["shared.example"],
+         "instances": [{"name": "reused", "expected": "always_on"}] if shared_bot else []},
+    ]
+    if reverse_hosts:
+        hosts.reverse()
+    Path(os.environ["BOT_ERRORS_FLEET_SENTINEL_HOSTS"]).write_text(json.dumps({"hosts": hosts}))
+    key = "shared.example|reused|instance_logged_out"
+    _write_state(mod, {key: _physical(OLD - 86400, OLD)})
+    _sends(mod)
+
+    assert mod.send_daily_line_card(mod.state_paths(), now=NOW) == 1
+
+    state = _state(mod)
+    assert key in state["openIncidents"]
+    assert key not in state.get("lineRecheckRetired", {})
+    assert mod.LineChecker().check("shared.example", "reused").verdict == mod.LINE_COULD_NOT_CHECK
+    assert mod.fleet_reads == []
+    roster = mod.LineRoster({"hosts": hosts})
+    assert roster.host_of_machine("shared.example") is None
+    assert roster.resolve("shared.example", "reused") is None
+
+
+def test_shared_local_machine_alias_does_not_select_a_host(mod, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_MACHINE", "shared.example")
+    roster = mod.LineRoster({"hosts": [
+        {"host": "hub-1", "machineNames": ["shared.example"]},
+        {"host": "host-2", "machineNames": ["shared.example"]},
+    ]})
+    assert roster.local_host is None
+
+
 def test_unlinked_line_is_deferred_and_listed_once_in_the_daily_card(mod):
     now = int(time.time())
     key = "hub-1|logged-line|instance_logged_out"

@@ -23,6 +23,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
+from hypothesis import example, given, strategies as st
+
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -139,6 +142,20 @@ class TestSustainedConnectionStability:
 # ---------------------------------------------------------------------------
 
 class TestPostIncidentOutboundProof:
+    @given(offset=st.integers(min_value=0, max_value=86400))
+    @example(offset=0)
+    @example(offset=60)
+    @example(offset=61)
+    @example(offset=86400)
+    def test_outbound_future_clock_bound(self, offset):
+        accepted = offset <= 60
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            mod = _load()
+            now = 1784719200
+            monkeypatch.setattr(mod.time, "time", lambda: now)
+            record = {"openedAt": now - 3600}
+            assert mod.has_post_incident_outbound_proof(_probe_with_outbound(now + offset), record, now - 3600) is accepted
+
     def test_accepts_outbound_after_incident(self):
         mod = _load()
         now = int(time.time())
@@ -212,6 +229,31 @@ def _make_incident_state(
 class TestSustainedStabilityRecoveryPath:
     """A bond-lost incident with NO outbound proof but WITH sustained stability
     must be recovered by daily_health_recovered_incident_keys."""
+
+    @given(offset=st.integers(min_value=0, max_value=86400))
+    @example(offset=0)
+    @example(offset=60)
+    @example(offset=61)
+    @example(offset=86400)
+    def test_recovery_future_clock_bound(self, offset):
+        accepted = offset <= 60
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            mod = _load()
+            now = 1784719200
+            monkeypatch.setattr(mod.time, "time", lambda: now)
+            key = "host-1|line-1|whatsapp_device_bond_lost"
+            state = _make_incident_state(key, now - 3600)
+            event = _make_recovery_event("host-1", "line-1", _probe_with_stability(), now + offset)
+            assert mod.daily_health_recovered_incident_keys(event, state) == ([key] if accepted else [])
+
+    def test_recovery_rejects_timezone_ambiguous_observation(self):
+        mod = _load()
+        now = 1784719200
+        key = "host-1|line-1|whatsapp_device_bond_lost"
+        state = _make_incident_state(key, now - 3600)
+        event = _make_recovery_event("host-1", "line-1", _probe_with_stability(), now)
+        event["createdAt"] = "2026-07-22T11:20:00"
+        assert mod.daily_health_recovered_incident_keys(event, state) == []
 
     def test_bond_lost_recovered_via_sustained_stability_no_outbound(self):
         """The core fix: ghost bond-lost incident clears via stability alone."""

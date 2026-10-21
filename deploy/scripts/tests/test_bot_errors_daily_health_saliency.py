@@ -354,6 +354,7 @@ def recovery_case(request, dirs, monkeypatch):
                 "auth_failure_class=none"
             ),
         }
+        monkeypatch.setattr(dispatcher.time, "time", lambda: 1780185900)
         return dispatcher, state, key, recovery, event
 
     return make
