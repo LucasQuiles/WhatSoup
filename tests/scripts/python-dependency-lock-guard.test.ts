@@ -75,6 +75,37 @@ describe('python dependency lock guard', () => {
     expect(violations.some(({ code }) => code === 'python-lock-malformed')).toBe(true);
   });
 
+  it.each([
+    '--no-deps',
+    '--hash=sha256:invalid',
+    '; python_version >= "3.13"',
+    'unexpected',
+  ])('rejects trailing lock syntax that the installer refuses: %s', (suffix) => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, qualityLock, `pytest==8.3.5 --hash=sha256:${'a'.repeat(64)} ${suffix}\n`);
+
+    expect(scanPythonDependencyLocks(root)).toContainEqual(expect.objectContaining({
+      code: 'python-lock-malformed',
+      path: qualityLock,
+    }));
+  });
+
+  it('accepts multiple SHA-256 hashes across continued lock lines', () => {
+    const root = makeFixture();
+    writePolicy(root);
+    writeValidLock(root);
+    write(root, qualityLock, [
+      'pytest==8.3.5 \\',
+      `    --hash=sha256:${'a'.repeat(64)} \\`,
+      `    --hash=sha256:${'b'.repeat(64)}`,
+      '',
+    ].join('\n'));
+
+    expect(scanPythonDependencyLocks(root)).toEqual([]);
+  });
+
   it.each(lockCases)('rejects an omitted $profile/$target installer target', ({ profile, target }) => {
     const root = makeFixture();
     writePolicy(root);

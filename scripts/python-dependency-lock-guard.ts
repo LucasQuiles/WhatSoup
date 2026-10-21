@@ -172,8 +172,7 @@ function validateLock(root: string, lockPath: string, violations: Violation[], b
       violations.push({ code: 'python-lock-malformed', path: lockPath, detail: `unsafe source at line ${index + 1}` });
       continue;
     }
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!~-]*(?:\s|;|$)/.test(line)
-      || !/(?:^|\s)--hash=sha256:[a-f0-9]{64}(?:\s|$)/.test(line)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*(?:\s+--hash=sha256:[a-f0-9]{64})+$/.test(line)) {
       violations.push({ code: 'python-lock-malformed', path: lockPath, detail: `exact pin and SHA-256 hash required at line ${index + 1}` });
       continue;
     }
