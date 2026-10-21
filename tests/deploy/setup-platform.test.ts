@@ -103,8 +103,9 @@ function runLinuxSetupReplay(
   shimDir: string,
   extraEnv: NodeJS.ProcessEnv = {},
   realPath: string = process.env.PATH ?? '',
+  args: string[] = [],
 ) {
-  return spawnSync('bash', ['deploy/setup.sh'], {
+  return spawnSync('bash', ['deploy/setup.sh', ...args], {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -204,6 +205,28 @@ describe('deploy/setup.sh platform portability', () => {
       'host-plan',
       'ensure-node:24.15.0',
       'doctor:runtime',
+      'npm:ci',
+    ]);
+  });
+
+  it('accepts the compatibility profile and forwards it to the host doctor', () => {
+    const home = makeTempRoot('whatsoup-setup-home-');
+    const shimDir = makeTempRoot('whatsoup-setup-shims-');
+    const profile = path.join(home, 'profiles', 'testhost.json');
+    writeHealthProfile(profile);
+    writeLinuxSetupShims(shimDir);
+
+    const result = runLinuxSetupReplay(
+      home, shimDir, { BOT_ERRORS_HEALTH_PROFILE: profile }, undefined,
+      ['--profile', 'compatibility'],
+    );
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    const events = fs.readFileSync(path.join(home, 'setup-events.log'), 'utf8').trim().split('\n');
+    expect(events).toEqual([
+      'host-plan',
+      'ensure-node:24.15.0',
+      'doctor:compatibility',
       'npm:ci',
     ]);
   });

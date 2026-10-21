@@ -95,6 +95,10 @@ against `lock-policy.json` before normalizing audio or starting the model. A wro
 implementation, patch version, failed probe or five-second timeout rejects that
 provider attempt. Termination can take an additional two-second grace period
 before SIGKILL. An explicit interpreter override does not bypass the check.
+This runtime probe verifies interpreter identity; it does not compare installed
+packages or their files with the lock. Package versions, target selection and
+artifact hashes are enforced during installation. An interpreter override must
+point to an environment provisioned with the matching transcription lock.
 
 On 2026-10-20, the transcription input added `av<19` because faster-whisper 1.2.1
 passes `metadata_errors` to `av.open`, an argument removed in PyAV 19
@@ -103,10 +107,13 @@ All four transcription locks were regenerated with the commands below and
 `uv 0.11.1`. Each lock records its exact resolved version and hashes. The required
 Linux and macOS audio checks remain the compatibility acceptance boundary.
 
-The transcription installer bounds Homebrew, pip and the model download to
-600 seconds, with a 15-second connect limit, three redirects, HTTPS-only
-transport, a 512 MiB curl limit, and an independent kernel file ceiling of at most
-1 GiB. Curl's inherited configuration is disabled. A timeout remains a failure;
+The transcription installer defaults Homebrew and pip operations to 600 seconds.
+The whisper.cpp model download has a 600-second budget, a 512 MiB curl limit,
+and an independent kernel file ceiling of at most 1 GiB. Each faster-whisper
+file download has a 900-second budget, a 2 GiB curl limit, and a kernel file
+ceiling of at most 4 GiB, accommodating its 1.62 GB model artifact. Both paths
+use a 15-second connect limit, at most three redirects and HTTPS-only transport.
+Curl's inherited configuration is disabled. A timeout remains a failure;
 there is no automatic retry. `WHATSOUP_PKG_INSTALL_TIMEOUT`, `WHATSOUP_PIP_INSTALL_TIMEOUT` and
 `WHATSOUP_MODEL_DOWNLOAD_TIMEOUT` can set the outer operation budgets.
 
