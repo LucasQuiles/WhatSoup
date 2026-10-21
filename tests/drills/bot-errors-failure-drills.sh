@@ -107,18 +107,62 @@ seen     -> each card record followed by its packet record(s) as above
 combined -> one record per card, text = card + newline + packet body
 """
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
-mode, capture, state = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
+MAX_PACKET_OUTPUT_BYTES = 64 * 1024 * 1024
+PACKET_READ_TIMEOUT_SECONDS = 60
+READ_COMPLETE_PACKET = """
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+dispatcher, ref = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_packet_reader", Path(dispatcher))
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+packet = mod.read_notice_packet(mod.state_paths(), ref)
+if not isinstance(packet, dict) or not isinstance(packet.get("body"), str) or not isinstance(packet.get("card"), str):
+    raise SystemExit("no complete notice packet")
+if "included" in packet and not isinstance(packet["included"], list):
+    raise SystemExit("invalid included notices")
+output_packet = {"body": packet["body"], "card": packet["card"]}
+if "included" in packet:
+    output_packet["included"] = packet["included"]
+output = json.dumps(output_packet, ensure_ascii=False, separators=(",", ":"))
+if len(output.encode("utf-8")) > 64 * 1024 * 1024:
+    raise SystemExit("notice packet output exceeds bound")
+sys.stdout.write(output)
+"""
+
+mode, capture, state, dispatcher = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
 
 
 def packet_of(ref):
     path = state / "packets" / f"{ref}.json"
     if not path.is_file():
         raise SystemExit(f"Ref {ref} names no packet")
-    return json.loads(path.read_text(encoding="utf-8"))
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    if packet.get("kind") == "bot-errors-notice-packet-index":
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", READ_COMPLETE_PACKET, dispatcher, ref],
+            cwd=Path(dispatcher).parents[2],
+            env={**os.environ, "BOT_ERRORS_STATE_DIR": str(state)},
+            text=True,
+            capture_output=True,
+            timeout=PACKET_READ_TIMEOUT_SECONDS,
+        )
+        if result.returncode:
+            raise SystemExit(f"Ref {ref} names no complete packet: {result.stderr.strip()}")
+        if len(result.stdout.encode("utf-8")) > MAX_PACKET_OUTPUT_BYTES:
+            raise SystemExit(f"Ref {ref} packet output exceeds bound")
+        packet = json.loads(result.stdout)
+    return packet
 
 
 for line in capture.read_text(encoding="utf-8").splitlines():
@@ -153,7 +197,7 @@ PY
 notice_view() {
   : > "$3"
   [ -s "$2" ] || return 0
-  if ! python3 "$NOTICE_VIEW" "$1" "$2" "$BOT_ERRORS_STATE_DIR" > "$3" 2> "$SANDBOX/notice-view.err"; then
+  if ! python3 -B "$NOTICE_VIEW" "$1" "$2" "$BOT_ERRORS_STATE_DIR" "$DISPATCH" > "$3" 2> "$SANDBOX/notice-view.err"; then
     fail "card Ref resolves to the packet holding that card ($(tr '\n' ';' < "$SANDBOX/notice-view.err"))"
   fi
 }
@@ -1137,6 +1181,69 @@ then
   pass "D20e storm digests satisfy Q-actionability rubric"
 else
   fail "D20e actionability audit failed: $(tr '\n' ';' < "$D20_AUDIT")"
+fi
+echo
+
+# ── Drill 21: bounded fragmented line-card packet reader
+echo "Drill 21: bounded fragmented line-card packet reader"
+reset_sandbox
+if python3 -B - "$DISPATCH" "$CAPTURE" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+dispatcher, capture = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("bot_errors_dispatcher_fragmented_drill", dispatcher)
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+paths = mod.state_paths()
+ref = "1234abcd"
+card = f"BOT WARNING - fragmented drill\nRef: {ref}"
+body = "BOT WARNING - fragmented drill\n  > evidence: " + "x" * (mod.NOTICE_PACKET_INLINE_BYTES + 1) + "\n  > sentinel: canonical fragment"
+packet = mod.build_notice_packet(
+    {"id": "fragmented-drill", "summary": "fragmented drill"},
+    ref=ref,
+    notice_kind="line-check-card",
+    card=card,
+    body=body,
+)
+mod.write_notice_packet(paths, packet)
+assert len(body.encode("utf-8")) > mod.NOTICE_PACKET_INLINE_BYTES
+assert json.loads(mod.notice_packet_path(paths, ref).read_text())["kind"] == mod.NOTICE_PACKET_INDEX_KIND
+capture.write_text(json.dumps({"text": card}) + "\n", encoding="utf-8")
+PY
+then
+  assert_packet_in "sentinel: canonical fragment" "D21 >6MiB packet resolves through bounded canonical reader"
+  D21_PART=$(find "$BOT_ERRORS_STATE_DIR/packets" -name "*.part.json" -print -quit)
+  if python3 -B - "$D21_PART" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+part = json.loads(path.read_text())
+data = part["data"]
+part["data"] = data[:-1] + ("A" if data[-1] != "A" else "B")
+path.write_text(json.dumps(part))
+PY
+  then
+    if ! python3 -B "$NOTICE_VIEW" packets "$CAPTURE" "$BOT_ERRORS_STATE_DIR" "$DISPATCH" >/dev/null 2>"$SANDBOX/d21-corrupt-part.err"; then
+      pass "D21 corrupt packet part is refused"
+    else
+      fail "D21 corrupt packet part must be refused"
+    fi
+  else
+    fail "D21 corrupt packet fixture is created"
+  fi
+  if [ -n "$D21_PART" ] && rm -f "$D21_PART" && ! python3 -B "$NOTICE_VIEW" packets "$CAPTURE" "$BOT_ERRORS_STATE_DIR" "$DISPATCH" >/dev/null 2>"$SANDBOX/d21-missing-part.err"; then
+    pass "D21 missing packet part is refused"
+  else
+    fail "D21 missing packet part must be refused"
+  fi
+else
+  fail "D21 >6MiB fragmented packet fixture is created"
 fi
 echo
 

@@ -234,6 +234,57 @@ afterEach(() => {
 });
 
 describe('bot-errors-dispatcher', () => {
+  it('reads an over-6MiB card packet and refuses corrupt or missing parts', () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-fragmented-helper-'));
+    const capturePath = join(tmpRoot, 'sent-message.txt');
+    const fixture = spawnSync(
+      'python3',
+      [
+        '-B',
+        '-c',
+        [
+          'import importlib.util, json',
+          "spec = importlib.util.spec_from_file_location('bot_errors_dispatcher_fragmented_helper', 'deploy/scripts/bot-errors-dispatcher.py')",
+          'mod = importlib.util.module_from_spec(spec)',
+          'assert spec.loader is not None',
+          'spec.loader.exec_module(mod)',
+          'paths = mod.state_paths()',
+          "ref = '1234abcd'",
+          "card = 'BOT WARNING - fragmented helper\\nRef: ' + ref",
+          "body = 'BOT WARNING - fragmented helper\\n  > evidence: ' + 'x' * (mod.NOTICE_PACKET_INLINE_BYTES + 1) + '\\n  > sentinel: canonical packet reader'",
+          "packet = mod.build_notice_packet({'id': 'fragmented-helper', 'summary': 'fragmented helper'}, ref=ref, notice_kind='line-check-card', card=card, body=body)",
+          'mod.write_notice_packet(paths, packet)',
+          'assert len(body.encode("utf-8")) > mod.NOTICE_PACKET_INLINE_BYTES',
+          "assert json.loads(mod.notice_packet_path(paths, ref).read_text())['kind'] == mod.NOTICE_PACKET_INDEX_KIND",
+        ].join('\n'),
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, BOT_ERRORS_STATE_DIR: tmpRoot },
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    expect(fixture.status, fixture.stderr).toBe(0);
+
+    const card = 'BOT WARNING - fragmented helper\nRef: 1234abcd';
+    writeFileSync(capturePath, `${JSON.stringify({ text: card })}\n`);
+    const rendered = readCapture(capturePath, tmpRoot);
+    expect(rendered).toContain('sentinel: canonical packet reader');
+
+    const index = JSON.parse(readFileSync(join(tmpRoot, 'packets', '1234abcd.json'), 'utf8')) as { parts: string[] };
+    const partPath = join(tmpRoot, 'packets', `${index.parts[0]}.part.json`);
+    const originalPart = readFileSync(partPath, 'utf8');
+    const corruptPart = JSON.parse(originalPart) as { data: string };
+    corruptPart.data = `${corruptPart.data.slice(0, -1)}${corruptPart.data.endsWith('A') ? 'B' : 'A'}`;
+    writeFileSync(partPath, JSON.stringify(corruptPart));
+    expect(() => readCapture(capturePath, tmpRoot)).toThrow('packet 1234abcd is unreadable');
+
+    writeFileSync(partPath, originalPart);
+    rmSync(partPath);
+    expect(() => readCapture(capturePath, tmpRoot)).toThrow('packet 1234abcd is unreadable');
+  });
+
   it('keeps bounded dispatch diagnostics best-effort while durable JSONL stays synced', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-dispatch-log-'));
     const probe = spawnSync(
