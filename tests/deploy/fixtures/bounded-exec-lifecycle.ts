@@ -183,7 +183,7 @@ function observeLifecycleEventOrder(source: string): string {
   return source;
 }
 const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bounded-exec-lifecycle-driver.py'), 'utf8');
-export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'authorization-unreadable-guard-stuck' | 'authorized-guard-stuck' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'guard-first-grace-term-boundary' | 'zero', terminal = false) {
+export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'authorization-unreadable-guard-stuck' | 'authorized-guard-stuck' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'guard-first-grace-term-boundary' | 'zero', terminal = false, startup: 'normal' | 'delayed' | 'stalled' | 'stalled-after-release' = 'normal', helperReadiness: 'normal' | 'delayed' | 'stalled' = 'normal') {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
@@ -243,12 +243,16 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
     ].join('\n'), { mode: 0o700 });
   }
   if (mode === 'deadline-timer-descendant' || mode === 'deadline-helper-vanished' || mode === 'deadline-helper-signal-refused') {
+    if (mode.startsWith('deadline-helper-')) {
+      execFileSync(resolveBinary('mkfifo')!, ['status-helper-ready', 'status-helper-injected'].map((name) => path.join(root, name)));
+    }
     fs.unlinkSync(path.join(shim, 'sleep'));
     fs.writeFileSync(path.join(shim, 'sleep'), [
       '#!/bin/bash',
       'group="$("$REAL_PS" -o pgid= -p "$$")" || exit 2',
       'group="${group//[[:space:]]/}"; [[ "$group" =~ ^[0-9]+$ ]] || exit 2',
       'builtin printf "%s\\n" "$$" > "$TMPDIR/sleep-child.$group"',
+      'if [ "${STATUS_HELPER_READY-}" = 1 ]; then builtin printf "ready\\n" > "$TMPDIR/status-helper-ready"; fi',
       'exec /bin/sleep "$@"',
       '',
     ].join('\n'), { mode: 0o700 });
@@ -339,7 +343,6 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
   }
   fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
   fs.writeFileSync(path.join(root, 'probe.sh'), [
-    'IFS= read -r go',
     'cleanup_mode="$4"',
     'case "$4" in control-*|cleanup-residual)',
     '  kill() {',
@@ -579,20 +582,35 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
     '  }',
     '  ;; esac',
     'case "$4" in deadline-timer-descendant|deadline-helper-vanished|deadline-helper-signal-refused)',
+    // The driver bounds these fixture barriers. Injection starts only after a
+    // real status-timer child exists; setup scheduling is not a kill failure.
     '  case "$4" in deadline-helper-*)',
-    '    sleep() {',
-    '      if [ "${FUNCNAME[1]}" = _bounded_wait_for_budget ]; then',
-    '        local polls=0',
-    '        while [ ! -f "$TMPDIR/timer-partial-signal" ]; do polls=$((polls + 1)); [ "$polls" -lt 300 ] || return 2; /bin/sleep 0.01; done',
-    '      fi',
+    '  sleep() {',
+    '    if [[ "$cleanup_mode" = deadline-helper-* ]] && [ "${FUNCNAME[1]}" = _bounded_wait_for_budget ]; then',
+    '      local injected',
+    '      IFS= builtin read -r injected <> "$TMPDIR/status-helper-injected" || return 2',
+    '      [ "$injected" = injected ] || return 2',
+    '    fi',
+    '    if [ "${FUNCNAME[1]}" = _bounded_read_deadline_bounded ]; then',
+    helperReadiness === 'delayed' ? '      /bin/sleep 2' : helperReadiness === 'stalled' ? '      exec /bin/sleep 30' : '',
+    '      STATUS_HELPER_READY=1 command sleep "$@"',
+    '    else',
     '      command sleep "$@"',
-    '    }',
-    '    ;; esac',
+    '    fi',
+    '  }',
+    '  ;; esac',
     '  kill() {',
     '    if [ "$1" = -9 ] && [ -n "$status_timer_pid" ] && [ "$3" = "-$status_timer_pid" ] && [ ! -f "$TMPDIR/timer-partial-signal" ]; then',
-    '      count=0; while [ ! -s "$TMPDIR/sleep-child.$status_timer_pid" ] && [ "$count" -lt 100 ]; do /bin/sleep 0.01; count=$((count + 1)); done',
+    '      if [[ "$cleanup_mode" = deadline-helper-* ]]; then',
+    '        local ready',
+    '        IFS= builtin read -r ready <> "$TMPDIR/status-helper-ready" || return 2',
+    '        [ "$ready" = ready ] || return 2',
+    '      else',
+    '        count=0; while [ ! -s "$TMPDIR/sleep-child.$status_timer_pid" ] && [ "$count" -lt 100 ]; do /bin/sleep 0.01; count=$((count + 1)); done',
+    '      fi',
     '      [ -s "$TMPDIR/sleep-child.$status_timer_pid" ] || return 2',
     '      builtin printf "%s\\n" "$status_timer_pid" > "$TMPDIR/timer-partial-signal"',
+    '      if [[ "$cleanup_mode" = deadline-helper-* ]]; then builtin printf "injected\\n" > "$TMPDIR/status-helper-injected"; fi',
     // Model the observed fork race: the first signal catches the leader while its child survives.
     '      builtin kill -9 "$status_timer_pid"; return "$?"',
     '    fi',
@@ -639,6 +657,7 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
     '    builtin read "$@"',
     '  }',
     '  ;; esac',
+    startup === 'delayed' ? '/bin/sleep 3.25' : startup === 'stalled' ? 'exec /bin/sleep 30' : '',
     outcomeSource ?? eventOrderSource ?? '. "$1"',
     'before_options="$-"',
     '[ "$4" != printf-override ] || printf() { return 91; }',
@@ -647,6 +666,9 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
     // These modes count groups that outlive the call. Such a group would hold a
     // capture pipe open and keep the probe from returning, so they use a file.
     'case "$4" in control-tokenless-worker-stopped|control-tokenless-cleanup-interrupted|authorization-*-cleanup-interrupted|authorization-valid-outer-terminated-after-reap|guard-terminated|outer-terminated|outcome-candidate-fork-race-symlink|guard-trap-in-record-read|guard-first-grace-term-boundary) capture_file="$TMPDIR/bounded-output";; *) capture_file="";; esac',
+    'builtin printf prepared > "$TMPDIR/probe-prepared"',
+    'IFS= builtin read -r go || exit 98',
+    startup === 'stalled-after-release' ? 'exec /bin/sleep 30' : '',
     'if [ "$4" = deadline-timer-descendant ]; then',
     '  if out="$(builtin printf "payload\\n" | { whatsoup_run_bounded "$budget" "$2" "$3" "$4"; bounded_rc=$?; builtin printf returned > "$TMPDIR/timer-library-return"; exit "$bounded_rc"; })"; then rc=0; else rc=$?; fi',
     'elif [ -n "$capture_file" ]; then',

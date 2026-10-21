@@ -347,6 +347,39 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.stdout, JSON.stringify(result)).toContain('rc=124 output=');
     expectLifecycleIsolation(result);
   });
+  it.each([false, true])('keeps authorization observation separate from delayed probe preparation (pty=%s)', (terminal) => {
+    const result = runLifecycleProbe('dead-leader-clean-cleanup', terminal, 'delayed');
+    const evidence = JSON.stringify(result);
+    expect(result.exit, evidence).toBe(0);
+    expect(result.prepared_at_ms, evidence).toBeGreaterThanOrEqual(3_000);
+    expect(result.release_written_at_ms, evidence).toBeGreaterThanOrEqual(result.prepared_at_ms);
+    expect(result.command_pid_reaped_before_authorization, evidence).toBe(true);
+    expect(result.worker_cleanup_completed_before_authorization, evidence).toBe(true);
+    expect(result.guard_left_stopped_for_deadline_reader, evidence).toBe(result.stopped_guard);
+    expect(result.stdout, evidence).toContain('rc=124 output=');
+    expectLifecycleIsolation(result);
+  });
+  it('bounds probe preparation that never becomes ready and reaps its process group', () => {
+    const result = runLifecycleProbe('dead-leader-clean-cleanup', false, 'stalled');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toContain('probe preparation unavailable');
+    expect(result.release_written_at_ms, evidence).toBeUndefined();
+    expect(result.command_started, evidence).toBe(false);
+    expect(result.duration_ms, evidence).toBeLessThan(8_000);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
+  it('retains the authorization observation bound after releasing a prepared probe', () => {
+    const result = runLifecycleProbe('dead-leader-clean-cleanup', false, 'stalled-after-release');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toContain('outer authorization unavailable');
+    expect(result.prepared_at_ms, evidence).toBeGreaterThanOrEqual(0);
+    expect(result.release_written_at_ms, evidence).toBeGreaterThanOrEqual(result.prepared_at_ms);
+    expect(result.command_started, evidence).toBe(false);
+    expect(result.duration_ms - result.release_written_at_ms, evidence).toBeLessThan(4_000);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
   it('allows bounded worker cleanup to finish after the command leader is reaped', () => {
     const result = runLifecycleProbe('dead-leader-finishing-cleanup');
     expect(result.exit, JSON.stringify(result)).toBe(0);
@@ -1017,6 +1050,29 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.sentinel_alive_before_cleanup, JSON.stringify(result)).toBe(true);
     if (vanished) expect(result.survivors_before_cleanup, JSON.stringify(result)).toEqual([]);
     expect(result.survivors_after_cleanup, JSON.stringify(result)).toEqual([]);
+  });
+  it.each(['deadline-helper-vanished', 'deadline-helper-signal-refused'] as const)(
+    'waits for delayed %s readiness before injecting the signal race', (mode) => {
+      const result = runLifecycleProbe(mode, true, 'normal', 'delayed');
+      const evidence = JSON.stringify(result);
+      expect(result.error, evidence).toBeUndefined();
+      expect(result.exit, evidence).toBe(0);
+      expect(result.timer_partial_signal, evidence).toBeTruthy();
+      expect(result.helper_vanished_after_probe, evidence).toBe(mode === 'deadline-helper-vanished');
+      expect(result.helper_signal_refused, evidence).toBe(mode === 'deadline-helper-signal-refused');
+      expect(result.stdout, evidence).toContain(`rc=${mode === 'deadline-helper-vanished' ? 124 : 2} output=`);
+      expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+      expect(result.survivors_after_cleanup, evidence).toEqual([]);
+    },
+  );
+  it('fails and reaps a status helper that never becomes ready', () => {
+    const result = runLifecycleProbe('deadline-helper-signal-refused', true, 'normal', 'stalled');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toContain('TimeoutExpired');
+    expect(result.timer_partial_signal, evidence).toBeNull();
+    expect(result.helper_signal_refused, evidence).toBe(false);
+    expect(result.sentinel_alive_before_cleanup, evidence).toBe(true);
+    expect(result.survivors_after_cleanup, evidence).toEqual([]);
   });
   it('preserves job-control isolation under a controlling PTY', () => {
     const result = runLifecycleProbe('nested', true);

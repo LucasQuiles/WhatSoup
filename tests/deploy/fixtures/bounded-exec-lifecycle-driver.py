@@ -6,7 +6,7 @@ root = pathlib.Path(root)
 # so a release sent before the probe shell reaches its read would be lost as a
 # harness error. Hold each release FIFO open read-write for the whole run; a
 # release then waits in the pipe until the shell reads it.
-release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release', 'event-order-poll-release')) if fifo.is_fifo()]
+release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release', 'event-order-poll-release', 'status-helper-ready', 'status-helper-injected')) if fifo.is_fifo()]
 def interrupted(signum, frame):
     raise TimeoutError('outer lifecycle watchdog interrupted the fixture')
 signal.signal(signal.SIGTERM, interrupted)
@@ -49,13 +49,23 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         record['sentinel'] = members(os.getsid(sentinel.pid))
         record['sentinel_group'] = os.getpgid(sentinel.pid)
         record['caller_group'] = os.getpgid(child.pid)
+        # Preparation is outside the helper's budget. Hold the prepared probe
+        # until its driver releases it, then start each existing lifecycle bound.
+        preparation_deadline = time.monotonic() + 6
+        while not (root / 'probe-prepared').exists() and child.poll() is None and time.monotonic() < preparation_deadline:
+            time.sleep(0.01)
+        if not (root / 'probe-prepared').exists(): raise RuntimeError('probe preparation unavailable')
+        record['prepared_at_ms'] = int((time.monotonic() - started) * 1000)
         if master is not None:
             record['terminal_foreground_group'] = os.tcgetpgrp(master)
             os.write(master, b'go\n')
+            record['release_written_at_ms'] = int((time.monotonic() - started) * 1000)
             # Darwin's terminal close can wait for undrained echo after the
             # command has already exited. The fixture owns the master reader.
             if select.select([master], [], [], 2)[0]: record['terminal_echo'] = os.read(master, 4096).decode()
-        else: child.stdin.write('go\n'); child.stdin.close()
+        else:
+            child.stdin.write('go\n'); child.stdin.close()
+            record['release_written_at_ms'] = int((time.monotonic() - started) * 1000)
         if mode == 'job-control-unavailable':
             record['caller_group_stopped'] = False
             record['caller_group_stop_members'] = []
@@ -544,7 +554,6 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'event-order-stopped-worker-hard-cut', 'forged-completion-worker-stopped') else 8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
-        record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         record['survivors_before_cleanup'] = members(session)
         record['pre_cleanup_inventory_ms'] = int((time.monotonic() - started) * 1000)
     except Exception as error:
@@ -553,6 +562,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         record['stdout_at_error'] = (root / 'stdout').read_text()
         record['stderr_at_error'] = (root / 'stderr').read_text()
     finally:
+        record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         # Finish bounded cleanup if the Node-side watchdog requested shutdown.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
