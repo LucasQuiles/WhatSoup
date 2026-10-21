@@ -141,6 +141,44 @@ fi
 grep -q "NOTFILE.*fleet_lines.py" "$tmp/directory-rollback.log" || { cat "$tmp/directory-rollback.log"; fail "rollback managed directory was not reported"; }
 diff -r "$tmp/directory-before" "$directory_root" || fail "rejected directory rollback mutated target"
 
+# The root itself must be refused, including trailing directory syntax.
+symlink_target="$tmp/symlink-target"
+prepare_current_root "$symlink_target"
+cp -R "$symlink_target" "$tmp/symlink-before"
+ln -s "$symlink_target" "$tmp/symlink-root"
+for root_suffix in '' '/' '/.'; do
+  for mode in deploy verify rollback; do
+    input_root="$tmp/symlink-root$root_suffix"
+    source_dir="$PWD"
+    [ "$mode" != rollback ] || source_dir="$directory_backup"
+    if bash "$D" "$mode" "$input_root" "$source_dir" > "$tmp/symlink-root.log" 2>&1; then
+      fail "$mode accepted a symlinked root: $input_root"
+    fi
+    grep -q "SYMLINK.*root" "$tmp/symlink-root.log" || { cat "$tmp/symlink-root.log"; fail "root symlink was not reported"; }
+    diff -r "$tmp/symlink-before" "$symlink_target" || fail "rejected $mode mutated symlink target"
+  done
+done
+[ ! -e "$tmp/.bot-errors-last-known-good-symlink-root" ] || fail "rejected root created LKG"
+symlink_backup_count=$(find "$tmp" -maxdepth 1 -name '.bot-errors-deploy-backup-symlink-root-*' -print | wc -l | tr -d ' ')
+[ "$symlink_backup_count" = 0 ] || fail "rejected root created a backup"
+
+mkdir -p "$tmp/ancestor-target"
+prepare_current_root "$tmp/ancestor-target/runtime"
+cp -R "$tmp/ancestor-target" "$tmp/ancestor-before"
+ln -s "$tmp/ancestor-target" "$tmp/ancestor-link"
+for root_suffix in '' '/' '/.'; do
+  for mode in deploy verify rollback; do
+    input_root="$tmp/ancestor-link/runtime$root_suffix"
+    source_dir="$PWD"
+    [ "$mode" != rollback ] || source_dir="$directory_backup"
+    if bash "$D" "$mode" "$input_root" "$source_dir" > "$tmp/ancestor-root.log" 2>&1; then
+      fail "$mode accepted a symlinked ancestor: $input_root"
+    fi
+    grep -q "SYMLINK.*root" "$tmp/ancestor-root.log" || { cat "$tmp/ancestor-root.log"; fail "ancestor symlink was not reported"; }
+    diff -r "$tmp/ancestor-before" "$tmp/ancestor-target" || fail "rejected $mode mutated ancestor target"
+  done
+done
+
 # A first release that newly manages fleet_lines.py must treat its legitimate
 # prior absence as a verified backup, create LKG, and delete the new file when
 # rolling back. Existing bytes remain hash-checked; this is not a drift waiver.

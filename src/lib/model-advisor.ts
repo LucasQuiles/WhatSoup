@@ -59,12 +59,12 @@ function sleep(ms: number): Promise<void> {
 let cachedAdvisories: ModelAdvisory[] = [];
 let cachedLiveScan: LiveModelScanStatus | null = null;
 let lastCheckedAt: string | null = null;
-// Dedupe key of the last advisory set we alerted on — re-alert only when the
+// Dedupe key per instance of the last advisory set we alerted on — re-alert only when the
 // set changes, not on every daily re-check. A fresh process starts at null and
 // falls back to the key persisted with the source's recovery marker, so a
 // restart does not re-send an unchanged set (see persistedNotifiedKey).
-let lastNotifiedKey: string | null = null;
-let lastLiveScanFailureKey: string | null = null;
+const notifiedKeys = new Map<string, string>();
+const liveScanFailureKeys = new Map<string, string>();
 // #2394: tracks whether the cold-start recovery-marker reconcile has fired in
 // this process. The reconcile runs ONCE after the first startup check result,
 // never on daily interval ticks (trap 7).
@@ -116,8 +116,8 @@ export function __resetModelAdvisorForTest(): void {
   cachedAdvisories = [];
   cachedLiveScan = null;
   lastCheckedAt = null;
-  lastNotifiedKey = null;
-  lastLiveScanFailureKey = null;
+  notifiedKeys.clear();
+  liveScanFailureKeys.clear();
   startupReconciled = false;
   liveIdsCache = null;
 }
@@ -598,6 +598,7 @@ export function notifyModelAdvisories(
 ): void {
   cachedAdvisories = advisories;
   lastCheckedAt = new Date().toISOString();
+  const lastNotifiedKey = notifiedKeys.get(instance) ?? null;
 
   const key = advisories
     .map((a) => `${a.role}:${a.model}:${a.level}:${a.recommended ?? ''}`)
@@ -613,9 +614,11 @@ export function notifyModelAdvisories(
           // intentional: marker removal is best-effort — a stale marker only
           // causes a redundant idempotent clear on the next cold-start scan.
         }
+      } else {
+        return;
       }
     }
-    lastNotifiedKey = '';
+    notifiedKeys.set(instance, '');
     if (options.logAllCurrent !== false) {
       log.info({}, 'model currency check: all configured models current');
     }
@@ -631,16 +634,15 @@ export function notifyModelAdvisories(
   if (key === lastNotifiedKey) return; // already alerted on this exact set
   if (lastNotifiedKey === null && persistedNotifiedKey(ALERT_SOURCE, instance) === key) {
     // Restarted with the set a prior process already alerted on: adopt it.
-    lastNotifiedKey = key;
+    notifiedKeys.set(instance, key);
     return;
   }
-  lastNotifiedKey = key;
-
   const severity = advisories.some((a) => a.level !== 'upgrade-available') ? 'warning' : 'info';
   const summary = `[${severity}] model updates available (${advisories.length}): ` + advisories
     .map((a) => `${a.role}=${a.model} → ${a.recommended ?? '?'} [${a.level}]`)
     .join('; ');
   if (emitAlertChecked(instance, ALERT_SOURCE, summary, JSON.stringify(advisories), severity)) {
+    notifiedKeys.set(instance, key);
     try {
       setRecoveryMarker(`${ALERT_SOURCE}:${instance}`, { [NOTIFIED_KEY_FIELD]: key });
     } catch {
@@ -653,6 +655,7 @@ export function notifyModelAdvisories(
 
 export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelScanStatus): void {
   cachedLiveScan = liveScan;
+  const lastLiveScanFailureKey = liveScanFailureKeys.get(instance) ?? null;
 
   if (liveScan.degradedVendors.length === 0) {
     if (lastLiveScanFailureKey !== null && lastLiveScanFailureKey !== '') {
@@ -663,9 +666,11 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
           // intentional: marker removal is best-effort — a stale marker only
           // causes a redundant idempotent clear on the next cold-start scan.
         }
+      } else {
+        return;
       }
     }
-    lastLiveScanFailureKey = '';
+    liveScanFailureKeys.set(instance, '');
     return;
   }
 
@@ -676,16 +681,15 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
   if (key === lastLiveScanFailureKey) return;
   if (lastLiveScanFailureKey === null && persistedNotifiedKey(LIVE_SCAN_ALERT_SOURCE, instance) === key) {
     // Restarted with the degradation a prior process already alerted on: adopt it.
-    lastLiveScanFailureKey = key;
+    liveScanFailureKeys.set(instance, key);
     return;
   }
-  lastLiveScanFailureKey = key;
-
   const summary = '[warning] model currency live scan degraded: ' + liveScan.degradedVendors
     .map((failure) => `${failure.vendor}=${failure.reason}`)
     .join('; ') + '; static catalog fallback in use';
   log.warn({ liveScan }, 'model currency live scan degraded');
   if (emitAlertChecked(instance, LIVE_SCAN_ALERT_SOURCE, summary, JSON.stringify(liveScan), 'warning')) {
+    liveScanFailureKeys.set(instance, key);
     try {
       setRecoveryMarker(`${LIVE_SCAN_ALERT_SOURCE}:${instance}`, { [NOTIFIED_KEY_FIELD]: key });
     } catch {

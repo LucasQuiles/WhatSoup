@@ -568,6 +568,25 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expectLifecycleIsolation(result);
   });
+  it('commits refusal before the parent interrupts the guard after a worker hard cut', () => {
+    const result = runLifecycleProbe('event-order-stopped-worker-hard-cut');
+    const evidence = JSON.stringify(result);
+    expect(result.error, evidence).toBeUndefined();
+    expect(result.exit, evidence).toBe(0);
+    expect(result.duration_ms, evidence).toBeLessThan(6_000);
+    expect(result.stopped_worker, evidence).toBeGreaterThan(1);
+    expect(result.stdout, evidence).toContain('rc=2 output=');
+    const events: string[] = result.events;
+    expect(events.filter((event) => event.startsWith('G_HARD_CUT ')), evidence)
+      .toEqual([`G_HARD_CUT worker=${result.stopped_worker} guard_status=2`]);
+    expect(events.some((event) => event.startsWith('CONTROL_ERROR ')), evidence).toBe(false);
+    expect(events.find((event) => event.startsWith('P_WORKER_REAPED ')), evidence)
+      .toBe(`P_WORKER_REAPED worker=${result.stopped_worker} worker_rc=137`);
+    expect(events.find((event) => event.startsWith('P_GUARD_REAPED ')), evidence)
+      .toMatch(/^P_GUARD_REAPED guard=\d+ guard_rc=2$/);
+    expectLifecycleIsolation(result);
+    expect(result.residual_bounded_files, evidence).toEqual([]);
+  });
   it('does not lose a release sent before the worker stops', () => {
     const result = runLifecycleProbe('handshake-early-cont');
     expect(result.exit, JSON.stringify(result)).toBe(0);

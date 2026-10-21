@@ -19,7 +19,7 @@ export function resolveBinary(name: string): string | undefined {
 // groups. Capture survivors before finally cleans them; cleanup cannot make a
 // lifecycle assertion pass. Processes that create a new session are outside
 // this boundary and are not claimed as covered by these probes.
-export type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | `event-order-natural-${0 | 2 | 143}` | `event-order-near-deadline-${'result' | 'deadline'}-first` | 'event-order-frame-gap' | 'event-order-frame-gap-control' | 'event-order-frame-fragment' | 'event-order-frame-before-liveness' | 'event-order-frame-tear' | 'event-order-frame-tmout';
+export type EventOrderMode = 'event-order-deadline-first' | 'event-order-expired-reaped' | 'event-order-inner-deadline-command-2' | 'event-order-outcome-candidate-directory' | 'event-order-stopped-worker-hard-cut' | `event-order-natural-${0 | 2 | 143}` | `event-order-near-deadline-${'result' | 'deadline'}-first` | 'event-order-frame-gap' | 'event-order-frame-gap-control' | 'event-order-frame-fragment' | 'event-order-frame-before-liveness' | 'event-order-frame-tear' | 'event-order-frame-tmout';
 
 // Instrument a fixture-owned string, never the production helper. Each anchor
 // must remain unique so a source change cannot silently remove an observation.
@@ -167,6 +167,16 @@ function observeLifecycleEventOrder(source: string): string {
     '      if [ "$authorization_state" -eq 0 ]; then',
   ].join('\n'));
   insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', `    wait "$worker_pid" 2>/dev/null || worker_rc=$?\n    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`);
+  insert('        _bounded_end_worker_groups || guard_status=2', [
+    '        _bounded_end_worker_groups || guard_status=2',
+    '        if [ "$EVENT_ORDER_MODE" = event-order-stopped-worker-hard-cut ]; then',
+    `          ${event('G_HARD_CUT worker=$worker_pid guard_status=$guard_status')}`,
+    // Give the real parent its reaping/TERM boundary before this call returns.
+    '          event_polls=0; while [ "$event_polls" -lt 100 ]; do sleep 0.01; event_polls=$((event_polls + 1)); done',
+    `          ${event('CONTROL_ERROR hard-cut-parent-term')}`,
+    '        fi',
+  ].join('\n'));
+  insert('              kill -CONT "$worker_pid" 2>/dev/null || kill -USR2 0 2>/dev/null', `              ${event('G_MONITOR_CONT worker=$worker_pid')}\n              kill -CONT "$worker_pid" 2>/dev/null || kill -USR2 0 2>/dev/null`);
   insert('      _bounded_read_deadline_bounded\n      deadline_rc=$?', `      _bounded_read_deadline_bounded\n      deadline_rc=$?\n      ${event('P_DEADLINE_READ deadline_rc=$deadline_rc cleanup_failed=$status_cleanup_failed')}`);
   insert('    _bounded_wait_guard "$guard_term_sent"', `    ${event('G_WAIT worker=$worker_pid guard=$guard_pid worker_rc=$worker_rc deadline_rc=$deadline_rc')}\n    _bounded_wait_guard "$guard_term_sent"\n    ${event('P_GUARD_REAPED guard=$guard_pid guard_rc=$guard_rc')}`);
   insert('    _bounded_outer_cleanup\n    trap - EXIT', `    ${event('A worker=$worker_pid worker_rc=$worker_rc guard=$guard_pid guard_rc=$guard_rc deadline_rc=$deadline_rc rc=$rc')}\n    _bounded_outer_cleanup\n    trap - EXIT`);
@@ -176,7 +186,7 @@ const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bou
 export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'printf-override' | 'leader-exits' | 'nested' | 'nonzero' | 'ordinary-exit-0' | 'ordinary-exit-2' | 'ordinary-exit-143' | 'status-255' | 'ownership-command' | 'ownership-watchdog' | 'ownership-caller-group' | 'reader-killed-after-verification' | 'watchdog-reader-killed-after-verification' | 'parent-stopped' | 'parent-terminated' | 'worker-stopped-after-authorization' | 'forged-completion-worker-stopped' | 'dead-leader-before-authorization' | 'dead-leader-clean-cleanup' | 'dead-leader-finishing-cleanup' | 'command-group-descendant' | 'cleanup-child-group' | 'deadline-timer-descendant' | 'deadline-helper-vanished' | 'deadline-helper-signal-refused' | 'deadline-fifo-after-cleanup' | 'authorization-unreadable-after-cleanup' | 'authorization-unreadable-guard-stuck' | 'authorized-guard-stuck' | 'setup-mktemp-term-ignoring' | 'setup-mkfifo-term-ignoring' | 'setup-ps-term-ignoring' | 'setup-timer-sleep-failure' | 'cleanup-residual' | 'handshake-early-cont' | 'control-tokenless' | 'control-duplicate-token' | 'control-low-group' | 'control-caller-group' | 'control-external-group' | 'control-tokenless-worker-stopped' | 'control-tokenless-cleanup-interrupted' | 'authorization-unreadable-cleanup-interrupted' | 'authorization-valid-cleanup-interrupted' | 'authorization-valid-outer-terminated-after-reap' | 'guard-terminated' | 'outer-terminated' | 'timeout-symlink' | 'timeout-existing' | 'outcome-symlink' | 'outcome-existing' | 'outcome-fifo' | 'outcome-directory' | 'outcome-candidate-symlink' | 'outcome-candidate-existing' | 'outcome-candidate-fifo' | 'outcome-candidate-directory' | 'outcome-candidate-fork-race-symlink' | 'guard-trap-in-record-read' | 'deadline-writer-interrupted' | 'deadline-writer-preexisting' | 'deadline-writer-publish-limited' | 'deadline-writer-pending-planted' | 'job-control-unavailable' | 'guard-first-grace-term-boundary' | 'zero', terminal = false) {
   const nearDeadlineTrace = mode === 'near-deadline' && process.env.WHATSOUP_NEAR_DEADLINE_EVENT_TRACE === '1';
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
-  const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
+  const stoppedWorkerTrace = (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
   const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
@@ -651,6 +661,7 @@ export function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline
   ].join('\n'));
   fs.writeFileSync(path.join(root, 'child.sh'), [
     'printf "%s %s" "$$" "$PPID" > "$COMMAND_STARTED"',
+    'if [ "$1" = event-order-stopped-worker-hard-cut ]; then value="$(sleep 30)"; printf "%s" "$value"; exit; fi',
     'case "$1" in event-order-*)',
     '  if declare -p control_token outcome_file >/dev/null 2>&1; then',
     '    builtin printf "%s\\n" "CHILD_SECRET_EXPORTED" >> "$EVENT_ORDER_LOG"',

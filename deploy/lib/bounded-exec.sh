@@ -741,9 +741,9 @@ whatsoup_run_bounded() {
       sleep "$grace" &
       guard_grace_sleep_pid=$!
       if ! wait "$guard_grace_sleep_pid"; then
+        guard_status=2
         _bounded_guard_kill_authorized
         _bounded_guard_end_worker
-        guard_status=2
         _bounded_guard_exit
       fi
       guard_grace_sleep_pid=""
@@ -752,9 +752,10 @@ whatsoup_run_bounded() {
         sleep "$grace" &
         timer_pid=$!
         wait "$timer_pid" 2>/dev/null
-        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }
-        _bounded_guard_end_worker
+        [ "$?" -eq 0 ] || { guard_status=2; _bounded_guard_end_worker; _bounded_guard_exit; }
+        # Reaping the worker lets its parent TERM this guard immediately.
         guard_status=2
+        _bounded_guard_end_worker
         _bounded_guard_exit
       else
         if kill -0 "$worker_pid" 2>/dev/null; then guard_status=2; fi

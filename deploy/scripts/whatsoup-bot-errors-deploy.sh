@@ -198,8 +198,37 @@ PY
 }
 
 assert_no_symlink_path() {
-  local root="$1" rel="$2" cur i
-  cur="$root"
+  local root="$1" rel="$2" cur i part alias_target
+  local root_parts=()
+  case "$root" in
+    /*) cur=/ ;;
+    *) cur="$(pwd -P)" || return 1 ;;
+  esac
+  IFS='/' read -r -a root_parts <<< "$root"
+  for part in "${root_parts[@]}"; do
+    case "$part" in
+      ''|.) continue ;;
+      ..) cur="${cur%/*}"; [[ -n "$cur" ]] || cur=/ ;;
+      *) cur="${cur%/}/$part" ;;
+    esac
+    if [[ -L "$cur" ]]; then
+      # Preserve stock Darwin aliases, but never arbitrary ancestor links.
+      alias_target=""
+      case "$cur" in
+        /var|/tmp)
+          if [[ "$(uname -s)" == Darwin ]]; then
+            alias_target="$(readlink "$cur")" || return 1
+          fi ;;
+      esac
+      if [[ ( "$alias_target" == "private$cur" || "$alias_target" == "/private$cur" ) \
+            && ! -L /private && ! -L "/private$cur" && -d "/private$cur" ]]; then
+        cur="/private$cur"
+      else
+        echo "  SYMLINK  root via $cur"; return 1
+      fi
+    fi
+    if [[ -e "$cur" && ! -d "$cur" ]]; then echo "  NOTDIR   root via $cur"; return 1; fi
+  done
   local parts=()
   IFS='/' read -r -a parts <<< "$rel"
   for ((i=0; i<${#parts[@]}; i++)); do

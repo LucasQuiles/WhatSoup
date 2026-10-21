@@ -74,7 +74,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 time.sleep(0.01)
             if 'caller_group_observation' not in record:
                 record['caller_group_observation'] = members(session)
-        if mode.startswith('event-order-'):
+        if mode.startswith('event-order-') and mode != 'event-order-stopped-worker-hard-cut':
             events = root / 'event-order.log'
             record['event_observations'] = []
             observed_count = 0
@@ -310,7 +310,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             staged.write_text('\n'.join(replacement) + '\n')
             staged.replace(control)
             record['control_corrupted'] = mode
-        if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group', 'control-tokenless-worker-stopped'):
+        if mode in ('worker-stopped-after-authorization', 'event-order-stopped-worker-hard-cut', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group', 'control-tokenless-worker-stopped'):
             if mode in GROUP_MODES: wait_ready()
             deadline = time.monotonic() + 3
             authorization = None
@@ -541,7 +541,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'event-order-stopped-worker-hard-cut', 'forged-completion-worker-stopped') else 8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
