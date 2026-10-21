@@ -322,6 +322,118 @@ print("  SMOKE    redaction ok (secret removed)")
 PY
 }
 
+require_side_notice_compatibility() {
+  local candidate="$1" scripts_dir
+  scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 3
+  python3 - "$scripts_dir" "$candidate" <<'PY'
+import ast
+import importlib.util
+import os
+from pathlib import Path
+import stat
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lib.controller_state import read_controller_state
+from lib.state_files import INCIDENT_STATE
+from lib.state_root import state_root
+
+
+def unavailable():
+    print("ROLLBACK_STATE_UNAVAILABLE: preserve runtime; verify the service user's state root and reconcile incident state", file=sys.stderr)
+    raise SystemExit(3)
+
+
+def supports_uncertain_notices(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            unavailable()
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            source = handle.read(2 * 1024 * 1024 + 1)
+        if len(source) > 2 * 1024 * 1024:
+            unavailable()
+    finally:
+        os.close(fd)
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, UnicodeDecodeError):
+        return False
+    declarations = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "SIDE_NOTICE_STATE_VERSION"
+                            for target in node.targets)]
+    return (len(declarations) == 1 and isinstance(declarations[0], ast.Constant)
+            and type(declarations[0].value) is int and declarations[0].value == 1)
+
+
+def validate(payload):
+    spec = importlib.util.spec_from_file_location(
+        "rollback_dispatcher", Path(sys.argv[1]) / "bot-errors-dispatcher.py")
+    dispatcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatcher)
+    payload = dispatcher.validate_dispatcher_state(payload)
+    for value in payload["lastSentAt"].values():
+        try:
+            int(value or 0)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("invalid incident timestamp") from error
+    for key in ("openIncidents", "flapState"):
+        section = payload.get(key, {})
+        if not isinstance(section, dict) or any(not isinstance(row, dict) for row in section.values()):
+            raise ValueError("invalid incident section")
+    return dict(payload)
+
+
+try:
+    candidate = Path(sys.argv[2]) / "deploy/scripts/bot-errors-dispatcher.py"
+    if supports_uncertain_notices(candidate):
+        raise SystemExit(0)
+    explicit_root = os.environ.get("BOT_ERRORS_STATE_DIR")
+    if explicit_root and explicit_root.strip() and not Path(explicit_root).is_absolute():
+        unavailable()
+    root = state_root(resolve_anchor=True)
+    if root.is_symlink():
+        unavailable()
+    if not root.exists():
+        raise SystemExit(0)
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+        unavailable()
+    authority_present = False
+    with os.scandir(root) as entries:
+        for count, entry in enumerate(entries):
+            if count >= 4096:
+                unavailable()
+            if entry.name == INCIDENT_STATE + ".lock":
+                continue
+            if (entry.name == INCIDENT_STATE
+                    or entry.name.startswith((INCIDENT_STATE + ".", "." + INCIDENT_STATE + "."))
+                    or entry.name.endswith(".controller-state-evidence")):
+                authority_present = True
+                break
+    if not authority_present:
+        raise SystemExit(0)
+    result = read_controller_state(root / INCIDENT_STATE, component="dispatcher-incident",
+                                   validate_payload=validate, lock_timeout_seconds=2.0)
+    if result.mode not in {"valid", "legacy_valid"} or result.payload is None:
+        unavailable()
+    payload = result.payload
+    stale_fields = ("lastStaleRenotifyUnconfirmedAt", "lastStaleRenotifyUnconfirmedEventId",
+                    "lastStaleRenotifyUnconfirmedRef")
+    stale = any(any(field in row for field in stale_fields)
+                for row in payload.get("openIncidents", {}).values())
+    flap = any("unconfirmedStorm" in row for row in payload.get("flapState", {}).values())
+    if stale or flap:
+        print("ROLLBACK_INCOMPATIBLE: uncertain side notices require a compatible dispatcher; preserve incident state and use a compatible backup", file=sys.stderr)
+        raise SystemExit(3)
+except (OSError, ValueError, RecursionError):
+    unavailable()
+PY
+}
+
 last_known_good_pointer_for_root() {
   local root="$1" root_parent root_base safe_root_base
   root_parent="$(cd "$(dirname "$root")" && pwd -P)" || { echo "FATAL: root parent unavailable"; return 3; }
@@ -492,6 +604,7 @@ case "$MODE" in
       local_path="${entry%%:*}"
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
+    require_side_notice_compatibility "$STAGING" || exit 3
     # 1) backup EVERY target path that exists (record absentees for rollback-delete)
     mkdir -p "$BKDIR"; : > "$BKDIR/.was-absent"
     for entry in "${MANAGED_FILES[@]}"; do
@@ -539,6 +652,7 @@ case "$MODE" in
     for local_path in "${FILES[@]}"; do
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
+    require_side_notice_compatibility "$BKDIR" || exit 3
     for local_path in "${FILES[@]}"; do
       if [[ -f "$BKDIR/$local_path" ]]; then mkdir -p "$(dirname "$ROOT/$local_path")"; cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
     done

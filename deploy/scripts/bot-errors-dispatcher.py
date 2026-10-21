@@ -100,6 +100,8 @@ from lib.fleet_lines import (
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
+# Deployer compatibility contract for persisted uncertain stale/flap notices.
+SIDE_NOTICE_STATE_VERSION = 1
 BOT_ERRORS_EXPECTED_JID = os.environ.get("BOT_ERRORS_EXPECTED_JID", "").strip()
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("dispatcher")
 DEFAULT_SOCKET = os.environ.get(

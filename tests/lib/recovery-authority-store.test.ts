@@ -525,7 +525,7 @@ describe('readRecoveryMarkerState', () => {
     const result = readRecoveryMarkerState('read:oversized');
 
     expect(result).toEqual({ state: 'unreadable' });
-    expect(readFileSync(markerFile('read:oversized'))).toEqual(before);
+    expect(readFileSync(markerFile('read:oversized')).equals(before)).toBe(true);
   });
 
   it('reports a state rather than throwing for a key too long to encode', async () => {

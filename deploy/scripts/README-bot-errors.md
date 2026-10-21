@@ -1300,6 +1300,22 @@ opening does not suppress member alerts. Stale reminders retain
 storm escalation remains eligible on its existing cadence. A quiet interval
 ends an unconfirmed storm before a later occurrence starts a new one.
 
+Older dispatchers ignore these uncertainty fields and can resend a possibly
+accepted notice. The deployer checks the target dispatcher's
+`SIDE_NOTICE_STATE_VERSION` before deployment or rollback. A target without
+version 1 is refused while stale or flap uncertainty remains, or when incident
+state cannot be verified. Use a compatible backup; do not clear uncertainty or
+advance confirmed-delivery fields to permit a downgrade. Compatible rollback
+remains independent of the runtime manifest and can restore damaged runtime code.
+Stop the dispatcher and prevent its scheduled restarts before changing runtime
+files. Run the deployer as the service user with an absolute
+`BOT_ERRORS_STATE_DIR` pointing to the service's state, then verify the restored
+files before restarting. Keep the reviewed staging or backup files unchanged
+throughout the operation. The version marker declares compatibility; it does
+not authenticate a backup, and must not be added to an older dispatcher to
+bypass this check. The deployer does not stop services or grant deployment
+authority.
+
 Daily information summaries and grouped line cards commit their packet reference
 and an unconfirmed daily hold before sending. A process interruption or failed
 state publication after acceptance therefore cannot resend the same daily card.

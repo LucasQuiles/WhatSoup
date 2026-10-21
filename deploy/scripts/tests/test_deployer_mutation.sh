@@ -4,6 +4,8 @@ set -euo pipefail
 D=deploy/scripts/whatsoup-bot-errors-deploy.sh
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+export BOT_ERRORS_STATE_DIR="$tmp/incident-state"
+mkdir -m 700 "$BOT_ERRORS_STATE_DIR"
 
 fail() {
   echo "DEPLOYER_MUTATION_FAIL: $*"
@@ -349,15 +351,11 @@ fakebin="$tmp/fakebin"
 mkdir -p "$fakebin"
 real_python3="$(command -v python3)"
 # Only fail smoke_redaction's invocation (python3 - <root-dir> <<PY ... PY).
-# resolve_managed_files() also calls python3 now (python3 - <manifest.json>
-# <paths...> <<PY ... PY>) to resolve MANAGED_FILES from the runtime
-# manifest -- that call must still succeed so deploy mode reaches its own
-# smoke_redaction step and the auto-rollback path this test exercises,
-# rather than failing earlier for an unrelated reason. Distinguished by the
-# script's second argument: a manifest path (.json) vs. a root directory.
+# Manifest resolution and rollback compatibility pass additional arguments;
+# allow those real checks to run so the injected fault reaches the smoke step.
 cat > "$fakebin/python3" <<SH
 #!/usr/bin/env bash
-if [[ "\$2" == *.json ]]; then
+if [[ "\$#" -ne 2 ]]; then
   exec "$real_python3" "\$@"
 fi
 echo "fake python smoke failure" >&2
