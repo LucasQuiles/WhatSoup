@@ -306,6 +306,7 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   it.each(['setup-mktemp-term-ignoring', 'setup-mkfifo-term-ignoring', 'setup-ps-term-ignoring'] as const)('bounds a TERM-ignoring setup child from helper entry: %s', (mode) => {
     const result = runLifecycleProbe(mode);
     expect(result.exit, JSON.stringify(result)).toBe(0);
+    expect(result.guard_grace_seconds, JSON.stringify(result)).toBe(1);
     expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(4_000);
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expect(result.command_started, JSON.stringify(result)).toBe(false);
@@ -438,6 +439,8 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.error, evidence).toBeUndefined();
     expect(result.exit, evidence).toBe(0);
     expect(result.stdout, evidence).toContain('guard_grace_entered=true');
+    expect(result.guard_grace_entered, evidence).toBe(true);
+    expect(result.guard_grace_seconds, evidence).toBe(2);
     expect(result.stdout, evidence).toContain('rc=124 output=');
     expect(result.duration_ms, evidence).toBeLessThan(6_000);
     expectLifecycleIsolation(result);

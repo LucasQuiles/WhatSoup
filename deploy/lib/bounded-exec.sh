@@ -735,6 +735,8 @@ whatsoup_run_bounded() {
         _bounded_kill_worker_children || guard_status=2
         kill -TERM -- "-$worker_group" 2>/dev/null
         kill -CONT -- "-$worker_group" 2>/dev/null
+        # Its created groups are ended; allow one second for worker cleanup.
+        grace=1
       fi
       # Only an authenticated record needs the worker's timeout-entry path.
       [ "$authorization_state" -eq 0 ] && kill -USR1 "$worker_pid" 2>/dev/null
