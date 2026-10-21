@@ -59,30 +59,81 @@ whatsoup_python_lock_path() {
 }
 
 
+_whatsoup_finish_managed_venv() {
+  local root="$1" backup="$2" first_install="$3" result="$4"
+  if [ "$result" -ne 0 ] && { [ "$first_install" -eq 1 ] || [ -d "$backup/environment" ]; }; then
+    if [ -e "$root" ] || [ -L "$root" ]; then
+      mv "$root" "$backup/failed-environment" || {
+        echo "Python lock policy: cannot retain failed environment; manual recovery required at $backup" >&2
+        return 1
+      }
+    fi
+    if [ -d "$backup/environment" ]; then
+      mv "$backup/environment" "$root" || {
+        echo "Python lock policy: cannot restore previous environment; manual recovery required at $backup" >&2
+        return 1
+      }
+      echo "Python lock policy: restored previous environment; failed replacement retained at $backup" >&2
+    else
+      echo "Python lock policy: failed first installation retained at $backup" >&2
+    fi
+  fi
+  if [ "$result" -eq 0 ] && [ "$first_install" -eq 1 ]; then
+    rmdir "$backup" || echo "Python lock policy: recovery reservation retained at $backup" >&2
+  fi
+  return "$result"
+}
+
+_whatsoup_managed_venv_exit() {
+  local root="$1" backup="$2" first_install="$3" prior_exit="$4" result="$5"
+  trap - EXIT INT TERM HUP
+  _whatsoup_finish_managed_venv "$root" "$backup" "$first_install" "$result" || result=$?
+  if [ -n "$prior_exit" ]; then
+    # trap -p emits shell-quoted arguments; recover its existing handler exactly.
+    eval "set -- ${prior_exit#trap -- }"
+    if (exit "$result"); then eval "$1"; else eval "$1"; fi
+  fi
+  exit "$result"
+}
+
 whatsoup_create_managed_venv() {
-  local python_bin="$1" venv_root="$2" backup="" result=0
-  if [ -L "$venv_root" ] || { [ -e "$venv_root" ] && { [ ! -d "$venv_root" ] || [ ! -f "$venv_root/pyvenv.cfg" ] || [ -L "$venv_root/pyvenv.cfg" ]; }; }; then
-    echo "Python lock policy: refusing unrecognized managed environment $venv_root" >&2
+  local managed_python_bin="$1" managed_venv_root="$2" managed_venv_backup="" managed_first_install=0
+  local saved_traps prior_exit exit_command result=0
+  shift 2
+  if [ -L "$managed_venv_root" ] || { [ -e "$managed_venv_root" ] && { [ ! -d "$managed_venv_root" ] || [ ! -f "$managed_venv_root/pyvenv.cfg" ] || [ -L "$managed_venv_root/pyvenv.cfg" ]; }; }; then
+    echo "Python lock policy: refusing unrecognized managed environment $managed_venv_root" >&2
     return 1
   fi
-  whatsoup_require_locked_python "$python_bin" || return 1
-  mkdir -p "$(dirname "$venv_root")" || return 1
-  if [ -d "$venv_root" ]; then
-    backup="$(mktemp -d "${venv_root}.previous.XXXXXX")" || return 1
-    mv "$venv_root" "$backup/environment" || return 1
-    echo "Python lock policy: previous environment retained at $backup/environment; retire only after installation and consumer verification" >&2
+  whatsoup_require_locked_python "$managed_python_bin" || return 1
+  mkdir -p "$(dirname "$managed_venv_root")" || return 1
+  if [ -d "$managed_venv_root" ]; then
+    managed_venv_backup="$(mktemp -d "${managed_venv_root}.previous.XXXXXX")" || return 1
+  else
+    managed_first_install=1
+    managed_venv_backup="$(mktemp -d "${managed_venv_root}.failed.XXXXXX")" || {
+      echo "Python lock policy: cannot reserve first-install recovery beside $managed_venv_root" >&2
+      return 1
+    }
   fi
-  "$python_bin" -I -m venv "$venv_root" || result=$?
-  if [ "$result" -eq 0 ]; then
-    chmod 700 "$venv_root" || result=$?
+  saved_traps="$(trap -p EXIT INT TERM HUP)"
+  prior_exit="$(trap -p EXIT)"
+  # Capture recovery inputs literally: a callback's exit unwinds function locals.
+  printf -v exit_command '_whatsoup_managed_venv_exit %q %q %q %q "$?"' \
+    "$managed_venv_root" "$managed_venv_backup" "$managed_first_install" "$prior_exit"
+  trap "$exit_command" EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  if [ "$managed_first_install" -eq 0 ]; then
+    mv "$managed_venv_root" "$managed_venv_backup/environment" || result=$?
+    [ "$result" -ne 0 ] || echo "Python lock policy: previous environment retained at $managed_venv_backup/environment; retire only after installation and consumer verification" >&2
   fi
-  if [ "$result" -ne 0 ] && [ -n "$backup" ]; then
-    if [ -e "$venv_root" ] || [ -L "$venv_root" ]; then
-      mv "$venv_root" "$backup/failed-environment" || return 1
-    fi
-    mv "$backup/environment" "$venv_root" || return 1
-    echo "Python lock policy: restored previous environment; failed creation retained at $backup" >&2
-  fi
+  if [ "$result" -eq 0 ]; then "$managed_python_bin" -I -m venv "$managed_venv_root" || result=$?; fi
+  if [ "$result" -eq 0 ]; then chmod 700 "$managed_venv_root" || result=$?; fi
+  if [ "$result" -eq 0 ] && [ "$#" -gt 0 ]; then "$@" || result=$?; fi
+  _whatsoup_finish_managed_venv "$managed_venv_root" "$managed_venv_backup" "$managed_first_install" "$result" || result=$?
+  trap - EXIT INT TERM HUP
+  eval "$saved_traps"
   return "$result"
 }
 
@@ -128,5 +179,6 @@ if not lines:
     raise ValueError("declared lock has no packages")
 print("\n".join(lines))
 ' "$root" "$source_lock" > "$lock_path" || return 1
-  PIP_CONFIG_FILE=/dev/null "$python_bin" -I -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
+  PIP_CONFIG_FILE=/dev/null whatsoup_run_bounded "${WHATSOUP_PIP_INSTALL_TIMEOUT:-600}" \
+    "$python_bin" -I -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https://pypi.org/simple -r "$lock_path"
 )

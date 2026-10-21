@@ -78,6 +78,16 @@ reads a private snapshot of the validated bytes; later source changes cannot
 replace those inputs. The snapshot is removed when the install command exits.
 Each install creates a fresh environment and retains the old directory at the
 printed adjacent `.previous.*` path. Keep consumers stopped during replacement.
+Creation, package installation, imports and the installer's final acceptance run
+within the restoration boundary: failure restores the prior live environment
+and retains the failed replacement. A first installation failure leaves no
+incomplete environment at the live path. INT, TERM and HUP sent to the installer
+also restore it. Uncatchable termination or a failed restore still requires
+recovery from the printed backup. Transcription models download into a private
+adjacent `.pending.*` directory and publish atomically after hash verification;
+failed downloads preserve the prior live model. Symlink and non-file model
+destinations are refused. A successful replacement retains `previous-model`
+in the staging directory for recovery and consumer verification.
 After successful installation and consumer checks, retire the retained directory
 through the applicable storage procedure; see [Python lock recovery](../requirements/python/README.md#replacing-managed-environments).
 Host package managers can provide the `3.13` command but do not prove its patch
@@ -87,7 +97,8 @@ external `flock` is not a host requirement. Linux release operations still
 require the real `util-linux` implementation.
 
 Transcription setup bounds Homebrew, pip and model downloads to 600 seconds each;
-timeouts fail the installation. The [Python lock recovery and update procedure](../requirements/python/README.md)
+timeouts fail the installation. The lock helper enforces the pip budget for
+direct CI and release callers too. The [Python lock recovery and update procedure](../requirements/python/README.md)
 documents the operation-budget overrides and retained environments.
 
 Setup bootstraps and proves Node before its first npm command, so a fresh host

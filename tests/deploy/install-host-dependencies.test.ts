@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -122,7 +123,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
     '        cp "$0" "$3/bin/python"',
     '        chmod 755 "$3/bin/python"',
     '        ;;',
-    '      pip) printf "python %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER"; cat "${@: -1}" > "$WHATSOUP_TEST_LOCK_SNAPSHOT" ;;',
+    '      pip) printf "python %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER"; cat "${@: -1}" > "$WHATSOUP_TEST_LOCK_SNAPSHOT"; exit "${FAKE_PIP_EXIT:-0}" ;;',
     '    esac',
     '    ;;',
     'esac',
@@ -313,6 +314,23 @@ describe('explicit host dependency installer', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
     expect(ledger(fx)).toEqual(['brew install git python@3.13 ripgrep zsh shellcheck']);
     expect(result.stderr).toContain('CPython 3.13.16 is required');
+  });
+
+  it.each(['pip', 'doctor'])('restores the prior quality environment after %s fails', (boundary) => {
+    const fx = fixture();
+    const target = join(fx.home, 'quality-venv');
+    mkdirSync(target);
+    writeFileSync(join(target, 'pyvenv.cfg'), 'prior-runtime\n');
+    writeFileSync(join(target, 'retained-package'), 'accepted-package\n');
+    if (boundary === 'pip') fx.env.FAKE_PIP_EXIT = '17';
+    else unlinkSync(join(fx.bin, 'rg'));
+    const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
+    expect(result.status, result.stderr).toBe(boundary === 'pip' ? 17 : 1);
+    expect(readFileSync(join(target, 'pyvenv.cfg'), 'utf8')).toBe('prior-runtime\n');
+    expect(readFileSync(join(target, 'retained-package'), 'utf8')).toBe('accepted-package\n');
+    const retained = readdirSync(fx.home).filter((name) => name.startsWith('quality-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(statSync(join(fx.home, retained[0]!, 'failed-environment/bin/python')).isFile()).toBe(true);
   });
 
   it('does not install packages after a failed platform discovery', () => {

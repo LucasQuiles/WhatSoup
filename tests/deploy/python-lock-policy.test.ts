@@ -68,6 +68,7 @@ test "$CAP_VERSION" = 3.13.16`;
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(join(target, 'pyvenv.cfg'))).toBe(true);
+    expect(readdirSync(root).filter((name) => name.startsWith('managed.failed.'))).toEqual([]);
   });
 
   it('rejects an empty lock without importing an ambient pip module', () => {
@@ -187,6 +188,37 @@ test "$CAP_VERSION" = 3.13.16`;
     expect(readFileSync(lock, 'utf8')).toContain('https://changed.invalid/simple');
     expect(existsSync(readFileSync(log, 'utf8').trim().split(' -r ')[1]!)).toBe(false);
   });
+
+  it('bounds pip itself when the lock policy is called directly', () => {
+    const root = tempRoot();
+    const python = join(root, 'python');
+    const marker = join(root, 'pip-started');
+    mkdirSync(join(root, 'requirements/python'), { recursive: true });
+    for (const platform of ['linux', 'darwin']) {
+      for (const arch of ['x64', 'arm64']) {
+        writeFileSync(join(root, `requirements/python/quality-cpython313-${platform}-${arch}.txt`),
+          'pytest==8.3.5 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n');
+      }
+    }
+    executable(python, `[ "$1" != "-I" ] || shift
+if [ "$1" = -c ]; then
+  case "$2" in
+    *sys.implementation*) printf '%s\\n' 'cpython:3.13.16'; exit 0 ;;
+    *) exec "$REAL_PYTHON" -I "$@" ;;
+  esac
+fi
+[ "$1" = -m ] && [ "$2" = pip ] || exit 2
+printf started > "$PIP_MARKER"
+sleep 3
+printf completed >> "$PIP_MARKER"
+exit 17`);
+    const result = runPolicy('whatsoup_install_locked_requirements "$LOCK_PYTHON" "$LOCK_ROOT" quality', {
+      LOCK_PYTHON: python, LOCK_ROOT: root, REAL_PYTHON: resolveTestPython(),
+      PIP_MARKER: marker, WHATSOUP_PIP_INSTALL_TIMEOUT: '1',
+    });
+    expect(result.status, result.stderr).toBe(124);
+    expect(readFileSync(marker, 'utf8')).toBe('started');
+  }, 10_000);
 
   it.each([
     ['external index', '--extra-index-url https://packages.invalid/simple\n'],
@@ -456,6 +488,91 @@ whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV"
     expect(backups).toHaveLength(1);
     expect(readFileSync(join(root, backups[0]!, 'failed-environment', 'partial'), 'utf8')).toBe('partial');
   });
+
+  it.each(['return 17', 'return 124', 'exit 23'])('restores prior bytes after initializer failure: %s', (failure) => {
+    const root = tempRoot();
+    const { target, hook, marker } = existingEnvironment(root);
+    const prior = readFileSync(hook);
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const result = runPolicy(`
+initialize_environment() { printf attempted > "$TARGET_VENV/initialization"; ${failure}; }
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV" initialize_environment
+`, { BASE_PYTHON: python, TARGET_VENV: target });
+    expect(result.status, result.stderr).toBe(Number(failure.split(' ')[1]));
+    expect(readFileSync(hook)).toEqual(prior);
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(join(target, 'initialization'))).toBe(false);
+    const retained = readdirSync(root).filter((name) => name.startsWith('managed-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(readFileSync(join(root, retained[0]!, 'failed-environment/initialization'), 'utf8')).toBe('attempted');
+  }, 20_000);
+
+  it('retains failed first-install output away from the live environment', () => {
+    const root = tempRoot();
+    const target = join(root, 'managed-venv');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const result = runPolicy(`
+initialize_environment() { printf attempted > "$TARGET_VENV/initialization"; return 17; }
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV" initialize_environment
+`, { BASE_PYTHON: python, TARGET_VENV: target });
+    expect(result.status, result.stderr).toBe(17);
+    expect(existsSync(target)).toBe(false);
+    const retained = readdirSync(root).filter((name) => name.startsWith('managed-venv.failed.'));
+    expect(retained).toHaveLength(1);
+    expect(readFileSync(join(root, retained[0]!, 'failed-environment/initialization'), 'utf8')).toBe('attempted');
+  }, 20_000);
+
+  it.each(['return 0', 'return 17', 'exit 23'])('preserves the caller exit handler and status after %s', (completion) => {
+    const root = tempRoot();
+    const target = join(root, 'managed-venv');
+    const marker = join(root, 'caller-exit');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const result = runPolicy(`
+trap 'printf "%s\\n" "$?" >> "$CALLER_EXIT"' EXIT
+initialize_environment() { ${completion}; }
+status=0
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV" initialize_environment || status=$?
+exit "$status"
+`, { BASE_PYTHON: python, TARGET_VENV: target, CALLER_EXIT: marker });
+    const status = Number(completion.split(' ')[1]);
+    expect(result.status, result.stderr).toBe(status);
+    expect(readFileSync(marker, 'utf8')).toBe(`${status}\n`);
+  }, 20_000);
+
+  it('does not create a live environment when first-install recovery allocation fails', () => {
+    const root = tempRoot();
+    const target = join(root, 'managed-venv');
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const result = runPolicy(`
+mktemp() { case "$*" in *"$TARGET_VENV.failed."*) return 28 ;; *) command mktemp "$@" ;; esac; }
+initialize_environment() { printf attempted > "$TARGET_VENV/initialization"; return 17; }
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV" initialize_environment
+`, { BASE_PYTHON: python, TARGET_VENV: target });
+    expect(result.status).not.toBe(0);
+    expect(existsSync(target)).toBe(false);
+  }, 20_000);
+
+  it.each([
+    ['INT', 130, 'helper'], ['TERM', 143, 'helper'], ['HUP', 129, 'helper'],
+    ['INT', 130, 'installer'], ['TERM', 143, 'installer'], ['HUP', 129, 'installer'],
+  ] as const)('restores the prior environment on %s (%s) sent to the %s process', (signal, status, recipient) => {
+    const root = tempRoot();
+    const { target, hook, marker } = existingEnvironment(root);
+    const prior = readFileSync(hook);
+    const python = process.env.WHATSOUP_TEST_LOCKED_PYTHON || 'python3.13';
+    const result = runPolicy(`
+ export INSTALLER_PID=$$
+ initialize_environment() { printf attempted > "$TARGET_VENV/initialization"; /bin/sh -c 'kill -${signal} "$${recipient === 'installer' ? 'INSTALLER_PID' : 'PPID'}"'; }
+whatsoup_create_managed_venv "$BASE_PYTHON" "$TARGET_VENV" initialize_environment
+`, { BASE_PYTHON: python, TARGET_VENV: target });
+    expect(result.status, result.stderr).toBe(status);
+    expect(readFileSync(hook)).toEqual(prior);
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(join(target, 'initialization'))).toBe(false);
+    const retained = readdirSync(root).filter((name) => name.startsWith('managed-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(readFileSync(join(root, retained[0]!, 'failed-environment/initialization'), 'utf8')).toBe('attempted');
+  }, 20_000);
 
   it('refuses a symlink to a recognized environment without moving it', () => {
     const root = tempRoot();

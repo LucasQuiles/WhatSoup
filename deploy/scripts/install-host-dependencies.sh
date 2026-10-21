@@ -209,6 +209,26 @@ case "$manager" in
     ;;
 esac
 
+verify_installed_host() {
+  if ! PATH="$(whatsoup_quality_venv_root)/bin:$PATH" \
+    "$WHATSOUP_CAPABILITY_ROOT/deploy/scripts/whatsoup-host-doctor.sh" \
+    --profile "$profile" --node-policy "$node_policy" --json >&2; then
+    echo "host dependency installer: post-install doctor did not pass" >&2
+    return 1
+  fi
+}
+
+finish_quality_environment() {
+  local venv_python="$venv_root/bin/python"
+  [ -x "$venv_python" ] || {
+    echo "host dependency installer: managed venv did not create an executable Python" >&2
+    return 1
+  }
+  whatsoup_bounded_install "$WHATSOUP_PIP_INSTALL_TIMEOUT" "hash-locked Python dependencies" \
+    whatsoup_install_locked_requirements "$venv_python" "$WHATSOUP_CAPABILITY_ROOT" quality
+  verify_installed_host
+}
+
 if [ "$profile" = "quality" ] || [ "$profile" = "release" ]; then
   base_python=""
   for python_candidate in python3.13 python3; do
@@ -225,21 +245,9 @@ if [ "$profile" = "quality" ] || [ "$profile" = "release" ]; then
 
   venv_root="$(whatsoup_quality_venv_root)"
   mkdir -p "$(dirname "$venv_root")" || exit 1
-  whatsoup_create_managed_venv "$base_python" "$venv_root" >&2 || exit 1
-  venv_python="$venv_root/bin/python"
-  [ -x "$venv_python" ] || {
-    echo "host dependency installer: managed venv did not create an executable Python" >&2
-    exit 1
-  }
-  whatsoup_bounded_install "$WHATSOUP_PIP_INSTALL_TIMEOUT" "hash-locked Python dependencies" \
-    whatsoup_install_locked_requirements "$venv_python" "$WHATSOUP_CAPABILITY_ROOT" quality
-fi
-
-if ! PATH="$(whatsoup_quality_venv_root)/bin:$PATH" \
-  "$WHATSOUP_CAPABILITY_ROOT/deploy/scripts/whatsoup-host-doctor.sh" \
-  --profile "$profile" --node-policy "$node_policy" --json >&2; then
-  echo "host dependency installer: post-install doctor did not pass" >&2
-  exit 1
+  whatsoup_create_managed_venv "$base_python" "$venv_root" finish_quality_environment >&2 || exit $?
+else
+  verify_installed_host || exit $?
 fi
 
 exit 0

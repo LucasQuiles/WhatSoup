@@ -85,6 +85,34 @@ download_ggml_model() {
   )
 }
 
+finish_transcription_environment() {
+  local model_stage
+  if [ -L "$GGML_SMALL_PATH" ] || { [ -e "$GGML_SMALL_PATH" ] && [ ! -f "$GGML_SMALL_PATH" ]; }; then
+    echo "Refusing unsafe model destination $GGML_SMALL_PATH" >&2
+    return 1
+  fi
+  install_transcription_requirements || return $?
+  whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" \
+    "$VENV/bin/python" -I -c 'import av, ctranslate2, faster_whisper, huggingface_hub' || return $?
+  if ! sha256_matches "$GGML_SMALL_PATH" "$EXPECTED_GGML_SMALL_SHA256"; then
+    model_stage="$(mktemp -d "${GGML_SMALL_PATH}.pending.XXXXXX")" || return 1
+    echo "Model replacement retained at $model_stage; retire only after consumer verification" >&2
+    GGML_SMALL_PATH="$model_stage/model" download_ggml_model || return $?
+    if ! sha256_matches "$model_stage/model" "$EXPECTED_GGML_SMALL_SHA256"; then
+      echo "Checksum mismatch for $model_stage/model" >&2
+      return 1
+    fi
+    if [ -e "$GGML_SMALL_PATH" ] || [ -L "$GGML_SMALL_PATH" ]; then
+      [ ! -L "$GGML_SMALL_PATH" ] || return 1
+      [ -f "$GGML_SMALL_PATH" ] || return 1
+      cp -p "$GGML_SMALL_PATH" "$model_stage/previous-model" || return $?
+    fi
+    whatsoup_run_bounded "${WHATSOUP_PYTHON_PROBE_TIMEOUT:-5}" \
+      "$VENV/bin/python" -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' \
+      "$model_stage/model" "$GGML_SMALL_PATH" || return $?
+  fi
+}
+
 # Resolve a Python that can build the venv. Candidate loop rather than a
 # hardcoded path so this works on Linux, Intel macOS, and Apple Silicon without
 # requiring the python@3.13 formula to live at one specific prefix. The lock
@@ -138,19 +166,6 @@ if ! PYTHON_BIN="$(resolve_python)"; then
   exit 1
 fi
 
-whatsoup_create_managed_venv "$PYTHON_BIN" "$VENV"
-
-install_transcription_requirements
-
-if ! sha256_matches "$GGML_SMALL_PATH" "$EXPECTED_GGML_SMALL_SHA256"; then
-  rm -f "$GGML_SMALL_PATH"
-  download_ggml_model
-fi
-
-if ! sha256_matches "$GGML_SMALL_PATH" "$EXPECTED_GGML_SMALL_SHA256"; then
-  rm -f "$GGML_SMALL_PATH"
-  echo "Checksum mismatch for $GGML_SMALL_PATH" >&2
-  exit 1
-fi
+whatsoup_create_managed_venv "$PYTHON_BIN" "$VENV" finish_transcription_environment
 
 echo "Dependencies installed."

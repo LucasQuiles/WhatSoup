@@ -12,6 +12,7 @@
  */
 import { afterEach, describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -60,15 +61,35 @@ function runWithHelpers(body: string, extraPath?: string, inheritPath = true): {
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
-function runVenvPreparationSnippet(): { status: number; marker: string; stderr: string } {
+function runVenvPreparationSnippet(installStatus = 0, importStatus = 0, downloadStatus = 0, invalidModel = false, symlinkModel = false): { status: number; marker: string; venv: string; model: string; stderr: string } {
   const start = scriptSource.indexOf('if ! PYTHON_BIN="$(resolve_python)"; then');
-  const end = scriptSource.indexOf('\n\nif ! sha256_matches', start);
+  const end = scriptSource.indexOf('\necho "Dependencies installed."', start);
   if (start === -1 || end === -1) throw new Error('venv preparation block not found');
 
   const root = makeTempRoot('itd-venv-upgrade-');
   const venv = path.join(root, 'transcription-venv');
   const marker = path.join(root, 'refreshed');
   const hostPython = path.join(root, 'python3.13');
+  const model = path.join(root, 'models', 'whisper.cpp', 'ggml-small.bin');
+  fs.mkdirSync(path.dirname(model), { recursive: true });
+  if (symlinkModel) {
+    fs.writeFileSync(`${model}.original`, 'prior-model-bytes');
+    fs.symlinkSync(`${model}.original`, model);
+  } else {
+    fs.writeFileSync(model, 'prior-model-bytes');
+  }
+  writeExecutable(root, 'curl', `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then output="$2"; break; fi
+  shift
+done
+if [ "$DOWNLOAD_STATUS" != 0 ] || [ "$INVALID_MODEL" = 1 ]; then
+  printf partial-download > "$output"
+else
+  printf verified-model > "$output"
+fi
+exit "$DOWNLOAD_STATUS"
+`);
   fs.mkdirSync(path.join(venv, 'bin'), { recursive: true });
   fs.writeFileSync(path.join(venv, 'pyvenv.cfg'), 'home = legacy-runtime\n');
   writeExecutable(
@@ -85,10 +106,17 @@ if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   cat > "$target/bin/python" <<'PYTHON'
 #!/bin/sh
 [ "$1" != "-I" ] || shift
-if [ "$1" = "-c" ]; then printf '%s\\n' 'cpython:3.13.16'; exit 0; fi
+if [ "$1" = "-c" ]; then
+  case "$2" in
+    *implementation*) printf '%s\\n' 'cpython:3.13.16'; exit 0 ;;
+    'import av,'*) exit "$IMPORT_STATUS" ;;
+    *) exec python3 -I "$@" ;;
+  esac
+fi
 exit 0
 PYTHON
   chmod 755 "$target/bin/python"
+  printf '%s\\n' 'home = replacement-runtime' > "$target/pyvenv.cfg"
   printf '%s\\n' refreshed > "$REFRESH_MARKER"
   exit 0
 fi
@@ -106,8 +134,14 @@ VENV="$2"
 REPO_ROOT="$3"
 . "${lockPolicyPath}"
 ${scriptSource.slice(scriptSource.indexOf('install_transcription_requirements() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('install_transcription_requirements() {')) + 3)}
+${scriptSource.slice(scriptSource.indexOf('finish_transcription_environment() {'), scriptSource.indexOf('\n}\n', scriptSource.indexOf('finish_transcription_environment() {')) + 3)}
+${['sha256_of', 'sha256_matches', 'download_ggml_model'].map((name) => {
+  const helperStart = scriptSource.indexOf(`${name}() {`);
+  return scriptSource.slice(helperStart, scriptSource.indexOf('\n}\n', helperStart) + 3);
+}).join('\n')}
 resolve_python() { printf '%s\\n' "$HOST_PYTHON"; }
-whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1"; }
+GGML_SMALL_PATH="$MODEL_PATH" EXPECTED_GGML_SMALL_SHA256="$MODEL_SHA256" GGML_SMALL_URL=https://example.invalid/model
+whatsoup_install_locked_requirements() { whatsoup_require_locked_python "$1" || return $?; return "$INSTALL_STATUS"; }
 ${snippet}`,
       'venv-preparation-test',
       hostPython,
@@ -117,10 +151,10 @@ ${snippet}`,
     {
       encoding: 'utf8',
       cwd: repoRoot,
-      env: { ...process.env, REFRESH_MARKER: marker },
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, MODEL_PATH: model, MODEL_SHA256: createHash('sha256').update('verified-model').digest('hex'), REFRESH_MARKER: marker, INSTALL_STATUS: String(installStatus), IMPORT_STATUS: String(importStatus), DOWNLOAD_STATUS: String(downloadStatus), INVALID_MODEL: invalidModel ? '1' : '0' },
     },
   );
-  return { status: result.status ?? -1, marker, stderr: result.stderr ?? '' };
+  return { status: result.status ?? -1, marker, venv, model, stderr: result.stderr ?? '' };
 }
 
 afterEach(() => {
@@ -316,10 +350,49 @@ describe('install-transcription-deps.sh — resolve_python', () => {
 });
 
 describe('install-transcription-deps.sh — managed venv upgrades', () => {
+  it('refuses a symlink model destination without replacing it or its target', () => {
+    const res = runVenvPreparationSnippet(0, 0, 0, false, true);
+    expect(res.status, res.stderr).toBe(1);
+    expect(fs.lstatSync(res.model).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(`${res.model}.original`, 'utf8')).toBe('prior-model-bytes');
+    expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
+  });
+
   it('refreshes an existing venv with the qualified interpreter before the locked install', () => {
     const res = runVenvPreparationSnippet();
     expect(res.status, res.stderr).toBe(0);
     expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
+    expect(fs.readFileSync(res.model, 'utf8')).toBe('verified-model');
+    const retained = fs.readdirSync(path.dirname(res.model)).filter((name) => name.startsWith('ggml-small.bin.pending.'));
+    expect(retained).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(res.model), retained[0]!, 'previous-model'), 'utf8')).toBe('prior-model-bytes');
+  });
+
+  it('restores the prior live environment when the locked installation fails', () => {
+    const res = runVenvPreparationSnippet(17);
+    expect(res.status, res.stderr).toBe(17);
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
+    expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
+    const retained = fs.readdirSync(path.dirname(res.venv)).filter((name) => name.startsWith('transcription-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(res.venv), retained[0]!, 'failed-environment', 'pyvenv.cfg'), 'utf8'))
+      .toBe('home = replacement-runtime\n');
+  });
+
+  it.each([
+    ['import', 19, 0, false, 19],
+    ['download', 0, 21, false, 21],
+    ['checksum', 0, 0, true, 1],
+  ] as const)('restores the prior environment after %s validation fails', (_stage, importStatus, downloadStatus, invalidModel, status) => {
+    const res = runVenvPreparationSnippet(0, importStatus, downloadStatus, invalidModel);
+    expect(res.status, res.stderr).toBe(status);
+    expect(fs.readFileSync(res.model, 'utf8')).toBe('prior-model-bytes');
+    expect(fs.readFileSync(res.marker, 'utf8').trim()).toBe('refreshed');
+    expect(fs.readFileSync(path.join(res.venv, 'pyvenv.cfg'), 'utf8')).toBe('home = legacy-runtime\n');
+    const retained = fs.readdirSync(path.dirname(res.venv)).filter((name) => name.startsWith('transcription-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(res.venv), retained[0]!, 'failed-environment', 'pyvenv.cfg'), 'utf8'))
+      .toBe('home = replacement-runtime\n');
   });
 });
 

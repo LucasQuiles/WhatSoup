@@ -52,11 +52,21 @@ The host and transcription installers create a fresh managed environment before
 applying a lock. An existing environment must have a regular `pyvenv.cfg`; symlink
 or unrecognized targets are refused. Its complete directory is retained at the
 printed adjacent `.previous.*` path, so old packages and startup hooks cannot run
-in the replacement. A failed environment creation restores the previous path and
-retains partial output for inspection. A later package-install failure leaves the
-previous directory available for an explicit rollback; do not use the incomplete
-replacement. Retire the retained environment only after installation, imports and
+in the replacement. Creation, package installation, and the installer's final
+validation run within one restoration boundary. A failure restores the previous
+live path and retains the failed replacement for inspection. A failed first
+installation retains its partial output away from the live path. INT, TERM and
+HUP sent to the installer also restore; an uncatchable kill or failed filesystem
+move requires explicit recovery from the printed backup. Retire the retained environment only after installation, imports and
 its consumers pass, using the applicable storage-retirement procedure.
+
+The transcription model is downloaded into a private adjacent `.pending.*`
+directory and verified before atomic publication. Symlink and non-file model
+destinations are refused. Failed downloads leave the prior live model untouched;
+successful replacements retain its bytes in `previous-model` inside that
+directory. Keep these artifacts until consumer verification and retire them
+through the same storage procedure. The lock helper itself enforces the pip
+budget, including direct CI and release calls.
 
 ## Migration regression prerequisites
 
