@@ -128,36 +128,42 @@ describe('turn-recovery-operator CLI (#2155)', () => {
     }
   });
 
-  it('promote dry-run previews without mutating, and --apply promotes exactly once with an audit trail', () => {
-    const jobId = seedOne();
-    const evidence = ['--evidence-type', 'operator-verified-no-delivery', '--evidence-ref', 'runbook/INC-2155-check'];
+  describe('promote lifecycle with a seeded recovery job', () => {
+    let jobId = 0;
+    beforeEach(() => {
+      jobId = seedOne();
+    }, FIXTURE_SETUP_TIMEOUT_MS);
 
-    const dry = run(['promote', '--db', dbPath, '--job', String(jobId), ...evidence, '--audit-file', auditPath]);
-    expect(dry.status).toBe(0);
-    expect(JSON.parse(dry.stdout)).toMatchObject({ dryRun: true });
+    it('promote dry-run previews without mutating, and --apply promotes exactly once with an audit trail', () => {
+      const evidence = ['--evidence-type', 'operator-verified-no-delivery', '--evidence-ref', 'runbook/INC-2155-check'];
 
-    const applied = run(['promote', '--db', dbPath, '--job', String(jobId), ...evidence, '--apply', '--audit-file', auditPath]);
-    expect(applied.status).toBe(0);
-    expect(JSON.parse(applied.stdout)).toMatchObject({
-      applied: true,
-      job: { state: 'pending', replay_safe: 0, has_proof: true },
+      const dry = run(['promote', '--db', dbPath, '--job', String(jobId), ...evidence, '--audit-file', auditPath]);
+      expect(dry.status).toBe(0);
+      expect(JSON.parse(dry.stdout)).toMatchObject({ dryRun: true });
+
+      const applied = run(['promote', '--db', dbPath, '--job', String(jobId), ...evidence, '--apply', '--audit-file', auditPath]);
+      expect(applied.status).toBe(0);
+      expect(JSON.parse(applied.stdout)).toMatchObject({
+        applied: true,
+        job: { state: 'pending', replay_safe: 0, has_proof: true },
+      });
+
+      // Idempotent retry: same evidence again is a no-op, not an error.
+      const retry = run(['promote', '--db', dbPath, '--job', String(jobId), ...evidence, '--apply', '--audit-file', auditPath]);
+      expect(retry.status).toBe(0);
+      expect(JSON.parse(retry.stdout)).toMatchObject({ applied: false, alreadyPromoted: true });
+
+      // A DIFFERENT proof against the promoted job is rejected with no mutation.
+      const conflict = run(['promote', '--db', dbPath, '--job', String(jobId), '--evidence-type', 'provider-receipt', '--evidence-ref', 'SM-conflicting-1', '--apply', '--audit-file', auditPath]);
+      expect(conflict.status).toBe(1);
+
+      const receipts = readFileSync(auditPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(receipts.map((r) => r.outcome)).toEqual(['previewed', 'applied', 'not-applied:already-promoted']);
+      for (const r of receipts) {
+        expect(JSON.stringify(r)).not.toContain(CONVERSATION_KEY);
+        expect(JSON.stringify(r)).not.toContain('runbook/INC-2155-check');
+      }
     });
-
-    // Idempotent retry: same evidence again is a no-op, not an error.
-    const retry = run(['promote', '--db', dbPath, '--job', String(jobId), ...evidence, '--apply', '--audit-file', auditPath]);
-    expect(retry.status).toBe(0);
-    expect(JSON.parse(retry.stdout)).toMatchObject({ applied: false, alreadyPromoted: true });
-
-    // A DIFFERENT proof against the promoted job is rejected with no mutation.
-    const conflict = run(['promote', '--db', dbPath, '--job', String(jobId), '--evidence-type', 'provider-receipt', '--evidence-ref', 'SM-conflicting-1', '--apply', '--audit-file', auditPath]);
-    expect(conflict.status).toBe(1);
-
-    const receipts = readFileSync(auditPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
-    expect(receipts.map((r) => r.outcome)).toEqual(['previewed', 'applied', 'not-applied:already-promoted']);
-    for (const r of receipts) {
-      expect(JSON.stringify(r)).not.toContain(CONVERSATION_KEY);
-      expect(JSON.stringify(r)).not.toContain('runbook/INC-2155-check');
-    }
   });
 
   // #3561: seeding opens and migrates a real DB, and the old body spawned two
