@@ -11,15 +11,19 @@ the opener uses no proxy and follows no redirect.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import http.server
 import importlib.util
 import json
+import string
 import threading
 import time
 import urllib.request
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
 
@@ -35,6 +39,16 @@ _FLEET_ENV = (
     "BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON",
 )
 _PROXY_ENV = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY")
+
+_PATH_SEGMENT = st.text(alphabet=string.ascii_lowercase + string.digits + "-_", min_size=1, max_size=48)
+_ARBITRARY_REFUSED_FLEET_PATH = st.one_of(
+    _PATH_SEGMENT.map(lambda segment: f"/{segment}"),
+    _PATH_SEGMENT.map(lambda segment: f"/{segment}/api/lines"),
+    _PATH_SEGMENT.map(lambda segment: f"/api/lines/{segment}"),
+    _PATH_SEGMENT.map(lambda segment: f"/api%2f{segment}"),
+    _PATH_SEGMENT.map(lambda segment: f"//{segment}"),
+)
+_SUPPORTED_FLEET_PATHS = ("", "/api/lines", "/api/instances")
 
 
 def _load_module():
@@ -74,21 +88,29 @@ def _lines_reply(_handler):
     return 200, {"Content-Type": "application/json"}, json.dumps([{"name": "q"}]).encode()
 
 
-@pytest.fixture
-def fleet_profile(tmp_path, monkeypatch):
+@contextmanager
+def fleet_profile_scope(base, monkeypatch):
     for key in _FLEET_ENV + _PROXY_ENV:
         monkeypatch.delenv(key, raising=False)
     # urlopen caches one opener per process and reads the proxy settings when it
     # builds it; drop the cache so no case depends on test order.
     monkeypatch.setattr(urllib.request, "_opener", None)
-    token = tmp_path / "fleet-tokens.json"
+    token = base / "fleet-tokens.json"
     token.write_text(json.dumps({"active": "synthetic-fleet-token", "accept": []}), encoding="utf-8")
     token.chmod(0o600)
     servers: list = []
-    yield lambda url: {"expectFleetApi": True, "fleetApiTokenFile": str(token), "fleetApiUrl": url}, servers
-    for server in servers:
-        server.shutdown()
-        server.server_close()
+    try:
+        yield lambda url: {"expectFleetApi": True, "fleetApiTokenFile": str(token), "fleetApiUrl": url}, servers
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+
+
+@pytest.fixture
+def fleet_profile(tmp_path, monkeypatch):
+    with fleet_profile_scope(tmp_path, monkeypatch) as profile:
+        yield profile
 
 
 def _set_proxy(monkeypatch, proxy) -> None:
@@ -253,6 +275,99 @@ def test_fleet_url_components_are_refused_without_disclosure(fleet_profile, monk
 
     assert _mod.fleet_api_inventory(profile) == ["FAIL fleet_api: fleet_api_host_refused"]
     assert reads == []
+
+
+@given(consumer=st.sampled_from(("dispatcher", "health")),
+       via=st.sampled_from(("environment", "profile")), path=_ARBITRARY_REFUSED_FLEET_PATH)
+@example(consumer='dispatcher', via='environment', path='/synthetic-private-value')
+@example(consumer='dispatcher', via='environment', path='/synthetic-private-value/api/lines')
+@example(consumer='dispatcher', via='environment', path='/synthetic-private-value/api/instances')
+@example(consumer='dispatcher', via='environment', path='/api/lines/../synthetic-private-value')
+@example(consumer='dispatcher', via='environment', path='/api%2flines')
+@example(consumer='dispatcher', via='environment', path='//api/lines')
+@example(consumer='dispatcher', via='profile', path='/synthetic-private-value')
+@example(consumer='dispatcher', via='profile', path='/synthetic-private-value/api/lines')
+@example(consumer='dispatcher', via='profile', path='/synthetic-private-value/api/instances')
+@example(consumer='dispatcher', via='profile', path='/api/lines/../synthetic-private-value')
+@example(consumer='dispatcher', via='profile', path='/api%2flines')
+@example(consumer='dispatcher', via='profile', path='//api/lines')
+@example(consumer='health', via='environment', path='/synthetic-private-value')
+@example(consumer='health', via='environment', path='/synthetic-private-value/api/lines')
+@example(consumer='health', via='environment', path='/synthetic-private-value/api/instances')
+@example(consumer='health', via='environment', path='/api/lines/../synthetic-private-value')
+@example(consumer='health', via='environment', path='/api%2flines')
+@example(consumer='health', via='environment', path='//api/lines')
+@example(consumer='health', via='profile', path='/synthetic-private-value')
+@example(consumer='health', via='profile', path='/synthetic-private-value/api/lines')
+@example(consumer='health', via='profile', path='/synthetic-private-value/api/instances')
+@example(consumer='health', via='profile', path='/api/lines/../synthetic-private-value')
+@example(consumer='health', via='profile', path='/api%2flines')
+@example(consumer='health', via='profile', path='//api/lines')
+@settings(max_examples=60, deadline=None, database=None)
+def test_arbitrary_fleet_paths_are_refused_before_credentials_or_requests(consumer, via, path):
+    with TemporaryDirectory(prefix="fleet-token-target-") as directory:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            with fleet_profile_scope(Path(directory), monkeypatch) as (profile_for, _servers):
+                from lib import fleet_lines
+
+                url = "http://127.0.0.1:9099" + path
+                profile = profile_for(url)
+                if via == "environment":
+                    profile.pop("fleetApiUrl")
+                    monkeypatch.setenv("BOT_ERRORS_FLEET_API_URL", url)
+                reads = []
+                requests = []
+                monkeypatch.setattr(_mod, "load_fleet_api_token", lambda *_a: (
+                    reads.append("health-token") or ("synthetic-token", "fixture", 0, None)
+                ))
+                monkeypatch.setattr(fleet_lines, "read_fleet_token_text", lambda *_a: (
+                    reads.append("dispatcher-token") or ('{"active":"synthetic-token"}', None)
+                ))
+                monkeypatch.setattr(_mod, "urlopen", lambda *_a, **_k: requests.append("health-request"))
+                monkeypatch.setattr(fleet_lines, "fleet_api_opener", lambda: (
+                    lambda *_a, **_k: requests.append("dispatcher-request")
+                ))
+
+                if consumer == "health":
+                    result = _mod.fleet_api_inventory(profile)
+                else:
+                    observed = fleet_lines.read_fleet_lines(profile, timeout=5)
+                    result = [observed.error]
+                    assert observed.lines is None
+
+                assert reads == [], "credentials were read for an arbitrary API path"
+                assert requests == [], "a request was made for an arbitrary API path"
+                assert result == (["FAIL fleet_api: fleet_api_host_refused"] if consumer == "health"
+                                  else ["fleet_api_host_refused"])
+
+
+@given(consumer=st.sampled_from(("dispatcher", "health")), path=st.sampled_from(_SUPPORTED_FLEET_PATHS))
+@example(consumer='dispatcher', path='')
+@example(consumer='dispatcher', path='/api/lines')
+@example(consumer='dispatcher', path='/api/instances')
+@example(consumer='health', path='')
+@example(consumer='health', path='/api/lines')
+@example(consumer='health', path='/api/instances')
+@settings(max_examples=6, deadline=None, database=None)
+def test_supported_fleet_paths_reach_only_the_named_local_endpoint(consumer, path):
+    with TemporaryDirectory(prefix="fleet-token-target-") as directory:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            with fleet_profile_scope(Path(directory), monkeypatch) as (profile_for, servers):
+                from lib.fleet_lines import read_fleet_lines
+
+                local, seen = _serve("127.0.0.1", _lines_reply)
+                servers.append(local)
+                profile = profile_for(f"http://127.0.0.1:{local.server_address[1]}" + path)
+
+                if consumer == "health":
+                    [line] = _mod.fleet_api_inventory(profile)
+                    assert line.startswith("fleet_api: status=200"), line
+                else:
+                    result = read_fleet_lines(profile, timeout=5)
+                    assert result.error is None
+                    assert result.lines is not None
+
+                assert seen == [{"path": path or "/api/lines", "authorization": "Bearer synthetic-fleet-token"}]
 
 
 @pytest.mark.parametrize("consumer", ["dispatcher", "health"])

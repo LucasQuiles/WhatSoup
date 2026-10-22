@@ -138,7 +138,7 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
-    """True unless ``url`` is plain http on a literal loopback address.
+    """True unless ``url`` names a supported API path on literal loopback http.
 
     Relay 22 A2: the URL can come from an environment or profile override, and
     the fleet token goes with the request, so any non-loopback host (or scheme,
@@ -155,6 +155,8 @@ def fleet_api_token_target_refused(url: str, profile: dict[str, Any]) -> bool:
     except ValueError:
         return True
     if parts.scheme != "http" or not host or has_user_info or parts.query or parts.fragment:
+        return True
+    if parts.path not in {"/api/lines", "/api/instances"}:
         return True
     return not _is_loopback_host(host)
 
