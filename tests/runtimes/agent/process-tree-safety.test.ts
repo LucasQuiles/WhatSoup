@@ -1033,6 +1033,38 @@ describe('#1755 kill-time ambiguity resolution', () => {
     expect(outcomes[0]).not.toHaveProperty('escalated');
   });
 
+  it('refuses a captured-parent change before escalation can signal', async () => {
+    const target = {
+      pid: ROOT_PID,
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => true),
+    };
+    const authority = captureProcessTreeRootAuthority(target)!;
+    const changedParent = rootRows().replace(
+      `${ROOT_PID} ${process.pid} ${ROOT_PID}`,
+      `${ROOT_PID} ${process.pid + 1} ${ROOT_PID}`,
+    );
+    execFileSyncMock
+      .mockReturnValueOnce(rootRows()) // entry snapshot
+      .mockReturnValueOnce(rootRows()) // pre-signal: SIGTERM
+      .mockReturnValueOnce(rootRows()) // TERM grace: survivors remain
+      .mockReturnValueOnce(changedParent); // escalation re-census
+
+    const result = await killSessionTreeRaw(target, 'SIGTERM', {
+      generationMarker: 'escalation-parent-mismatch',
+      rootAuthority: authority,
+      termGraceMs: 0,
+      killGraceMs: 0,
+      ambiguityResolveMs: 0,
+    }).catch((error: unknown) => error);
+
+    expect(result).toMatchObject({ code: 'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED' });
+    expect(target.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(target.kill).not.toHaveBeenCalledWith('SIGKILL');
+    expect(killSpy.mock.calls.some((call: unknown[]) => call[1] === 'SIGKILL')).toBe(false);
+  });
+
   it('suppresses the process-group broadcast when an ambiguous sibling shares the root group, never signaling it', async () => {
     // root leads its group; a duplicate-row (ambiguous) child shares root.pgid.
     const rootWithAmbiguousChild = census([
