@@ -14,6 +14,7 @@
 // proceeds as a clean reset. Idle /new is unchanged.
 
 import { createChildLogger } from '../../logger.ts';
+import type { OutboundMessageRole } from './outbound-queue.ts';
 
 const log = createChildLogger('runtime-new-command');
 
@@ -53,7 +54,7 @@ export interface NewCommandHost<TSession, TTeardown extends TeardownWithDisposit
   // reset epilogue
   clearHandoffLatches(): void;
   clearTurnHadVisibleOutput(): void;
-  sendDirect(text: string): void;
+  sendDirect(text: string, role: OutboundMessageRole): void;
 }
 
 /** Execute /new: interrupt an in-flight turn if one exists, then reset. */
@@ -162,5 +163,6 @@ export async function runNewCommand<TSession, TTeardown extends TeardownWithDisp
         ? '*Interrupted the running task — recovery pending, use /new again* ✓'
         : '*Interrupted the running task — starting new session* ✓'
       : '*Starting new session* ✓',
+    'status',
   );
 }

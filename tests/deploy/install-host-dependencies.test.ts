@@ -64,7 +64,10 @@ function resolveHostTool(name: string): string {
 }
 
 function installShellToolbox(bin: string): void {
-  for (const name of ['bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'sed', 'tr']) {
+  for (const name of [
+    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp',
+    'ps', 'rm', 'rmdir', 'sed', 'sleep', 'tr',
+  ]) {
     symlinkSync(resolveHostTool(name), join(bin, name));
   }
 }
@@ -80,7 +83,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
 
   executable(join(bin, 'uname'), [
     'case "${1:-}" in',
-    `  -s) printf '%s\\n' '${platform}' ;;`,
+    `  -s) printf '%s\\n' '${platform}'; exit "\${FAKE_PLATFORM_EXIT:-0}" ;;`,
     '  -m) printf "%s\\n" "${FAKE_MACHINE:-arm64}" ;;',
     `  *) printf '%s\\n' '${platform}' ;;`,
     'esac',
@@ -99,18 +102,14 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   versionTool(bin, 'rg', 'ripgrep 14.1.1');
   versionTool(bin, 'zsh', 'zsh 5.9');
   versionTool(bin, 'shellcheck', 'ShellCheck 0.11.0');
-  // GNU timeout in miniature, shared with the health-token-wrapper tests via
-  // fakeTimeoutBody(): `--version` answers the capability probe; any other argv is
-  // `timeout [-k <grace>] <duration> <command...>`, which the fake collapses to just
-  // the command (it does not bound — whatsoup_run_bounded's own bounding is covered
-  // by credential-probe-boundedness.test.ts; here the fake only needs to let the
-  // installer's wrapped commands reach their ledger-writing targets).
+  // The dependency doctor still probes timeout capability. Wrapped commands use
+  // the real shell supervisor and the restricted toolbox above.
   executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), fakeTimeoutBody());
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
   executable(join(bin, 'python3.12'), [
     'case "${1:-}" in',
-    "  --version) printf '%s\\n' 'Python 3.12.13' ;;",
+    "  --version) printf '%s\\n' 'Python 3.12.13'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',
@@ -276,6 +275,40 @@ describe('explicit host dependency installer', () => {
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });
 
+  it('does not create a venv after a failed Python version probe', () => {
+    const fx = fixture();
+    fx.env.FAKE_PYTHON_PROBE_EXIT = '17';
+
+    const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(ledger(fx)).toEqual(['brew install git python@3.12 ripgrep zsh shellcheck']);
+    expect(result.stderr).toContain('Python 3.12 or newer is required');
+  });
+
+  it('does not install packages after a failed platform discovery', () => {
+    const fx = fixture();
+    fx.env.FAKE_PLATFORM_EXIT = '17';
+
+    const result = runInstaller(fx, ['--profile', 'runtime', '--manager', 'brew', '--apply', '--yes']);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('unsupported platform');
+    expect(ledger(fx)).toEqual([]);
+  });
+
+  it('fails post-install verification when a required probe emits output but exits nonzero', () => {
+    const fx = fixture();
+    executable(join(fx.bin, 'npm'), "printf '%s\\n' '11.12.1'\nexit 17");
+
+    const result = runInstaller(fx, ['--profile', 'runtime', '--manager', 'brew', '--apply', '--yes']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+    expect(result.stderr).toContain('"outcome":"inconclusive"');
+    expect(result.stderr).toContain('post-install doctor did not pass');
+    expect(ledger(fx)).toEqual(['brew install git']);
+  });
+
   it('allows the compatibility lane to install and prove a supported Node 25 runtime', () => {
     const fx = fixture();
     fx.env.FAKE_NODE_VERSION = '25.4.0';
@@ -312,12 +345,7 @@ describe('explicit host dependency installer', () => {
 
   it('kills a stalled install command fast and reports a distinguishable timeout', () => {
     const fx = fixture('Linux');
-    // Swap the delegating fake timeout for the real GNU timeout so a stalled
-    // child is actually killed after the budget, and shrink the update budget so
-    // the test proves the fail-fast path without sleeping for the 300s default.
-    unlinkSync(join(fx.bin, 'timeout'));
-    symlinkSync(resolveHostTool('timeout'), join(fx.bin, 'timeout'));
-    symlinkSync(resolveHostTool('sleep'), join(fx.bin, 'sleep'));
+    // Exercise the real supervisor with a short install budget.
     executable(join(fx.bin, 'apt-get'), 'sleep 300');
     fx.env.WHATSOUP_APT_UPDATE_TIMEOUT = '1';
 
@@ -332,8 +360,7 @@ describe('explicit host dependency installer', () => {
     ]);
     const wall = Date.now() - started;
 
-    // 124 (GNU timeout), not 1 — the next person debugging can tell a hang from a
-    // genuine install failure. And it must fail fast, not ride to the job cap.
+    // Expiry has a distinct status from an install failure and remains bounded.
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(124);
     expect(result.stderr).toContain('TIMEOUT');
     expect(result.stderr).toContain('apt-get update');

@@ -46,15 +46,16 @@
       "source": "deploy/templates/watchdog-script.sh wd_rank result vocabulary",
       "domain": [
         "OUTBOUND-POISON", "CREDENTIAL-DEAD", "HEALTH-UNKNOWN", "RESTART-FAILED",
-        "RESTARTED", "RESTART-SUPPRESSED", "ERROR", "CREDENTIAL-UNKNOWN", "ok"
+        "RESTARTED", "RESTART-SUPPRESSED", "RESTART-AVOIDED", "ERROR", "CREDENTIAL-UNKNOWN", "ok"
       ],
       "rows": [
         { "legacy_value": "OUTBOUND-POISON", "canonical": "fail", "lossy": false },
         { "legacy_value": "CREDENTIAL-DEAD", "canonical": "fail", "lossy": false },
         { "legacy_value": "HEALTH-UNKNOWN", "canonical": "inconclusive", "lossy": false },
         { "legacy_value": "RESTART-FAILED", "canonical": "infra_error", "lossy": false },
-        { "legacy_value": "RESTARTED", "canonical": "not_applicable", "lossy": true, "note": "an ACTION record, not an observation; F21 context (single un-retried curl can trigger it) preserved via raw_value" },
+        { "legacy_value": "RESTARTED", "canonical": "not_applicable", "lossy": true, "note": "an ACTION record, not an observation; F21 context preserved via raw_value: a single read can still trigger it at once: a connect- or request-stage failure, a bot decision-block restart verdict on the diagnostic body (an HTTP 200 body included; the bot's HTTP status alone never triggers it), or a fleet console HTTP error status (the only target an error status alone restarts); a silent read (connection accepted, no answer) triggers it only after the same run's confirm reads got no trusted answer for the confirm window, the reader binding still verifies, and the job is as the silent read saw it" },
         { "legacy_value": "RESTART-SUPPRESSED", "canonical": "not_applicable", "lossy": true, "note": "action record" },
+        { "legacy_value": "RESTART-AVOIDED", "canonical": "not_applicable", "lossy": true, "note": "action record: a silent read would have restarted the target with every restart gate open, and a confirm read in the same run got a trusted answer, so nothing was restarted" },
         { "legacy_value": "ERROR", "canonical": "infra_error", "lossy": false },
         { "legacy_value": "CREDENTIAL-UNKNOWN", "canonical": "inconclusive", "lossy": false },
         { "legacy_value": "ok", "canonical": "pass", "lossy": false }

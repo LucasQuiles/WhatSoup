@@ -24,8 +24,9 @@ decision, each carried item folded into a WS4/WS6 task, cheap items closed. **Ow
 
 ## Notes
 
-- **DD-22** is the only item still open-ended after this pass; it lands as a recorded
-  decision in WS6.4 (recommendation: **defer** — see `19-performance-budget.md` §DD-22).
+- **DD-22** received the recorded **defer** decision in
+  [the performance budget, §4](19-performance-budget.md#4-dd-22-decision-64--logstream-live-tail).
+  The deferred live-tail work remains distinct from closure of this disposition decision.
 - Carried items with "absorbed" fold targets are already satisfied by shipped mockup/
   spec work; they close when the owner signs this register.
 - No orphan debt: every carried DD has exactly one fold target.

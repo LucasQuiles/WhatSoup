@@ -19,6 +19,9 @@ set -euo pipefail
 #       (0 with --allow-missing-launchd-dir).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Where this checker's own helpers live (independent of --repo-root, which
+# names the templates under comparison).
+TOOL_ROOT="$REPO_ROOT"
 LAUNCHD_DIR="$HOME/Library/LaunchAgents"
 BIN_DIR="$HOME/.local/bin"
 ALLOW_MISSING_LAUNCHD_DIR=0
@@ -29,7 +32,7 @@ ALL_INSTANCES=()
 # Non-instance stems: parity with deploy/managed-components.json
 # protective_services (+ the fleet console). Enforced by
 # tests/scripts/launchd-drift.test.ts (manifest-parity test).
-NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check ms365-token-backup whatsoup-fleet)
+NON_INSTANCE_STEMS=(reply-guarantee harness-maintenance release-drift-check ms365-token-backup bot-errors-j1-collector whatsoup-fleet)
 
 usage() {
   cat <<'USAGE'
@@ -120,8 +123,8 @@ resolve_plist_python() {
 
 resolve_plist_python
 
-subst_render() { # TEMPLATE_ABS DEST BOT(optional)
-  local template="$1" dest="$2" bot="${3:-}"
+subst_render() { # TEMPLATE_ABS DEST BOT(optional) INSTALLED_ABS(optional)
+  local template="$1" dest="$2" bot="${3:-}" installed="${4:-}"
   local v nl
   nl=$'\n'
   for v in "$REPO_ROOT" "$HOME" "$bot"; do
@@ -140,6 +143,21 @@ subst_render() { # TEMPLATE_ABS DEST BOT(optional)
     echo "unsubstituted placeholder survived render of: $template" >&2
     return 2
   fi
+  # Host-level timers get the host's service.claudeConfigDir exactly as
+  # deploy/setup.sh installs them (same filter and --preserve-from source, run
+  # from THIS checkout), so a hand-added key the config does not own is kept
+  # on both sides rather than reported as drift and stripped on reinstall.
+  case "$(basename "$template")" in
+    com.whatsoup.harness-maintenance.plist|com.whatsoup.reply-guarantee.plist)
+      if ! bash "$TOOL_ROOT/scripts/run-with-pinned-node.sh" "$TOOL_ROOT/scripts/launchd-claude-config-env.ts" \
+        --home "$HOME" --preserve-from "$installed" < "$dest" > "$dest.env"; then
+        rm -f "$dest.env"
+        echo "cannot resolve service.claudeConfigDir for render of: $template" >&2
+        return 2
+      fi
+      mv "$dest.env" "$dest"
+      ;;
+  esac
   return 0
 }
 
@@ -156,7 +174,7 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
   fi
   local rendered
   rendered="$(mktemp "${TMPDIR:-/tmp}/launchd-drift.XXXXXX")"
-  if ! subst_render "$repo_template" "$rendered" "$bot"; then
+  if ! subst_render "$repo_template" "$rendered" "$bot" "$installed"; then
     rm -f "$rendered"
     exit 2
   fi
@@ -212,7 +230,8 @@ check_release_drift_surface() { # host-level; uses INSTANCES
   tmpd="$(mktemp -d "${TMPDIR:-/tmp}/launchd-drift-rd.XXXXXX")"
   for bot in ${ALL_INSTANCES[@]+"${ALL_INSTANCES[@]}"}; do
     out="$tmpd/render-$bot.plist"
-    if bash "$render" --instance "$bot" --repo-root "$REPO_ROOT" --home "$HOME" --output "$out" >/dev/null 2>&1 \
+    if bash "$render" --instance "$bot" --repo-root "$REPO_ROOT" --home "$HOME" --output "$out" \
+         --preserve-from "$installed" >/dev/null 2>&1 \
        && cmp -s "$out" "$installed"; then
       matched=1
       echo "ok: release-drift-check (renders for instance $bot)"
@@ -270,6 +289,77 @@ check_ms365_script() {
   else
     echo "ok: ms365-token-backup script (no surviving placeholders)"
   fi
+}
+
+check_j1_collector_script() { # optional surface; when its plist is installed the wrapper must be a readable regular
+                              # executable equal to the tracked template, and its host prerequisites must exist:
+                              # the env file (existence ONLY — never read or printed) and the launchd log directory.
+  local plist="$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
+  local script="$BIN_DIR/bot-errors-j1-collector"
+  local template="$REPO_ROOT/deploy/templates/bot-errors-j1-collector.sh"
+  local env_file="$HOME/.config/whatsoup/bot-errors-j1-collector.env"
+  local log_dir="$HOME/.local/state/whatsoup-logs"
+  if [ ! -f "$plist" ]; then
+    return 0 # host does not run this surface; plist skip already reported
+  fi
+  if [ ! -f "$template" ]; then
+    echo "missing repo template: deploy/templates/bot-errors-j1-collector.sh" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -f "$script" ] || [ ! -r "$script" ] || [ ! -x "$script" ]; then
+    echo "missing installed bot-errors-j1-collector script: $script (must be a readable, executable regular file)" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if grep -qE '__[A-Z][A-Z_]*__' "$script"; then
+    echo "drift: bot-errors-j1-collector script has surviving placeholders" >&2
+    failures=$((failures + 1)); return 0
+  else
+    local grep_status=$?
+    if [ "$grep_status" -ne 1 ]; then # 1 = no match; anything else = the inspection itself failed
+      echo "inspection failure: bot-errors-j1-collector script could not be scanned (grep status $grep_status)" >&2
+      failures=$((failures + 1)); return 0
+    fi
+  fi
+  if ! cmp -s "$template" "$script"; then
+    echo "drift: bot-errors-j1-collector script differs from deploy/templates/bot-errors-j1-collector.sh" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -f "$env_file" ]; then
+    echo "missing host config for bot-errors-j1-collector: $env_file (existence checked only; contents never read)" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  if [ ! -d "$log_dir" ]; then
+    echo "missing log directory for bot-errors-j1-collector: $log_dir (launchd cannot open StandardOutPath)" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  # The slot minute exists in the plist (schedule) and in the wrapper (bundle label); they must agree.
+  local plist_minute wrapper_minute
+  plist_minute="$("$PLIST_PYTHON" - "$plist" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], "rb") as f:
+    p = plistlib.load(f)
+sci = p.get("StartCalendarInterval")
+print(sci.get("Minute", "") if isinstance(sci, dict) else "")
+PY
+)"
+  wrapper_minute="$(grep -oE 'BOT_ERRORS_J1_SLOT_MINUTE:-[0-9]+' "$script" | head -n 1 | grep -oE '[0-9]+$' || true)"
+  if [ -z "$plist_minute" ] || [ -z "$wrapper_minute" ] || [ "$plist_minute" != "$wrapper_minute" ]; then
+    echo "drift: bot-errors-j1-collector slot minute mismatch (plist Minute=${plist_minute:-unreadable}, wrapper default=${wrapper_minute:-unreadable})" >&2
+    failures=$((failures + 1)); return 0
+  fi
+  echo "ok: bot-errors-j1-collector script (matches template; host config and log directory present; slot minute $plist_minute)"
+}
+
+warn_unmanaged_collector_jobs() { # any OTHER LaunchAgent that runs the J1 collector (e.g. an ad-hoc scheduler label) — reported, not counted
+  local f label
+  for f in "$LAUNCHD_DIR"/*.plist; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in com.whatsoup.bot-errors-j1-collector.plist) continue ;; esac
+    if grep -q 'bot_errors_j1_collector' "$f" 2>/dev/null; then
+      label="$(basename "$f" .plist)"
+      echo "warn: unmanaged collector job: $label (runs bot_errors_j1_collector outside the managed label; boot it out before installing com.whatsoup.bot-errors-j1-collector)"
+    fi
+  done
 }
 
 plist_key() { # PLIST_ABS Label|Prog0  (plistlib: cross-platform; values printed are structural keys only, never EnvironmentVariables)
@@ -372,6 +462,9 @@ check_template_surface "harness-maintenance" "deploy/com.whatsoup.harness-mainte
 check_template_surface "reply-guarantee" "deploy/com.whatsoup.reply-guarantee.plist" "$LAUNCHD_DIR/com.whatsoup.reply-guarantee.plist"
 check_optional_template_surface "ms365-token-backup" "deploy/templates/com.whatsoup.ms365-token-backup.plist" "$LAUNCHD_DIR/com.whatsoup.ms365-token-backup.plist"
 check_ms365_script
+check_optional_template_surface "bot-errors-j1-collector" "deploy/templates/com.whatsoup.bot-errors-j1-collector.plist" "$LAUNCHD_DIR/com.whatsoup.bot-errors-j1-collector.plist"
+check_j1_collector_script
+warn_unmanaged_collector_jobs
 check_fleet_console_structural
 
 discover_instances

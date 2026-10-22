@@ -3,7 +3,7 @@ import {
   spawnSync,
   type ExecFileException,
 } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import {
   lstatSync,
   mkdirSync,
@@ -14,12 +14,44 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  acquireProcessLock,
+  ProcessLockError,
+  releaseProcessLock,
+  type ProcessLockHandle,
+} from '../src/lib/process-lock.ts';
 import { cleanGitEnv } from './lib/guard-core.ts';
+import {
+  BASELINE_SCHEMA_VERSION,
+  compareText,
+  GitEstateError,
+  isFullObjectId,
+  readBaseline,
+  sha256,
+  stableJson,
+  type BaselineFile,
+  type BaselinePayload,
+  type BaselineReceipt,
+  type EstateBranch,
+  type EstateFinding,
+  type EstateSnapshot,
+  type EstateSnapshotWithoutHash,
+  type EstateStash,
+  type EstateWorktree,
+  type GitResult,
+  type GuardDecision,
+  type GuardPhase,
+  type ScanError,
+  type SnapshotConsistency,
+  type WorktreePorcelain,
+  type WorktreeStatus,
+} from './lib/git-estate-model.ts';
+
+// Retain the guard's existing parser API after moving its object-ID predicate.
+export { isFullObjectId };
 
 const SCHEMA_VERSION = 1 as const;
-const BASELINE_SCHEMA_VERSION = 2 as const;
 const BASELINE_NAME = 'git-estate-baseline.v2.json';
-const HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const ORDINARY_XY = new Set([
   '.M', '.T', '.A', '.D',
   'M.', 'MM', 'MT', 'MD',
@@ -36,159 +68,10 @@ const UNMERGED_XY_PATTERN = /^(?:DD|AU|UD|UA|DU|AA|UU)$/;
 const SUBMODULE_STATE_PATTERN = /^(?:N\.\.\.|S[.C][.M][.U])$/;
 const FILE_MODE_PATTERN = /^[0-7]{6}$/;
 const RENAME_SCORE_PATTERN = /^([RC])(?:100|[1-9]?\d)$/;
-const FINDING_ID_PATTERN = /^(dirty|untracked|conflict|detached|locked|prunable|branch_no_upstream|branch_gone|branch_ahead|branch_behind|stash):[0-9a-f]{24}$/;
-const WORKTREE_ID_PATTERN = /^worktree:[0-9a-f]{24}$/;
-const BRANCH_ID_PATTERN = /^branch:[0-9a-f]{24}$/;
 const DEFAULT_GIT_TIMEOUT_MS = 5_000;
 const MAX_GIT_TIMEOUT_MS = 30_000;
 const STATUS_SCAN_CONCURRENCY = 4;
-
-type GuardPhase = 'pre-commit' | 'pre-push';
-type BaselineState = 'valid' | 'missing' | 'malformed';
-type SnapshotConsistency = 'single-pass' | 'verified';
-
-interface GitResult {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-  error?: string;
-}
-
-interface WorktreePorcelain {
-  path: string;
-  head: string | null;
-  branch: string | null;
-  detached: boolean;
-  locked: boolean;
-  lockReason: string | null;
-  prunable: boolean;
-  pruneReason: string | null;
-}
-
-interface TrackedStatus {
-  path: string;
-  originalPath?: string;
-  xy: string;
-  staged: boolean;
-  unstaged: boolean;
-}
-
-interface ConflictStatus {
-  path: string;
-  xy: string;
-  stageOids: [string, string, string];
-}
-
-interface WorktreeStatus {
-  branchOid: string | null;
-  branchHead: string | null;
-  branchUpstream: string | null;
-  ahead: number;
-  behind: number;
-  tracked: TrackedStatus[];
-  untracked: string[];
-  conflicts: ConflictStatus[];
-  conflictOperationMarker: string | null;
-  conflictOperationReliable: boolean;
-}
-
-interface EstateWorktree extends WorktreePorcelain {
-  primary: boolean;
-  status: WorktreeStatus | null;
-}
-
-interface EstateBranch {
-  name: string;
-  oid: string;
-  upstream: string | null;
-  ahead: number;
-  behind: number;
-  gone: boolean;
-}
-
-interface EstateStash {
-  oid: string;
-  parents: string[];
-}
-
-interface EstateFinding {
-  id: string;
-  kind:
-    | 'dirty'
-    | 'untracked'
-    | 'conflict'
-    | 'detached'
-    | 'locked'
-    | 'prunable'
-    | 'branch_no_upstream'
-    | 'branch_gone'
-    | 'branch_ahead'
-    | 'branch_behind'
-    | 'stash';
-  worktree?: string;
-  path?: string;
-  branch?: string;
-  upstream?: string;
-  oid?: string;
-  conflictInstanceReliable?: boolean;
-}
-
-interface ScanError {
-  kind:
-    | 'worktree_status_failed'
-    | 'worktree_status_rescan_failed'
-    | 'topology_rescan_failed';
-  message: string;
-  worktree?: string;
-}
-
-interface EstateSnapshotWithoutHash {
-  schemaVersion: 1;
-  commonDir: string;
-  baselinePath: string;
-  invokingWorktreePath: string;
-  topologyFingerprintStart: string;
-  topologyFingerprintEnd: string;
-  statusFingerprintStart: string;
-  statusFingerprintEnd: string;
-  incomplete: boolean;
-  racing: boolean;
-  worktrees: EstateWorktree[];
-  branches: EstateBranch[];
-  stashes: EstateStash[];
-  findings: EstateFinding[];
-  errors: ScanError[];
-}
-
-interface EstateSnapshot extends EstateSnapshotWithoutHash {
-  snapshotHash: string;
-}
-
-interface BaselinePayload {
-  schemaVersion: 2;
-  commonDir: string;
-  snapshotHash: string;
-  findingIds: string[];
-  worktreeCount: number;
-  branchCount: number;
-  worktreeIds: string[];
-  branchIds: string[];
-}
-
-interface BaselineFile extends BaselinePayload {
-  payloadHash: string;
-}
-
-interface BaselineReceipt {
-  state: BaselineState;
-  path: string;
-  findingIds: string[];
-  worktreeCount: number;
-  branchCount: number;
-  worktreeIds: string[];
-  branchIds: string[];
-  error?: string;
-}
+const MAX_STASH_CLOSURE_OBJECTS = 100_000;
 
 /**
  * Reasons that are reported but never block a push.
@@ -210,56 +93,6 @@ interface BaselineReceipt {
  */
 const ADVISORY_REASONS = new Set(['estate_count_growth']);
 
-interface GuardDecision {
-  blocked: boolean;
-  newConflictIds: string[];
-  newCriticalFindingIds: string[];
-  countGrowth: {
-    worktrees: number;
-    branches: number;
-  };
-  newWorktreeIds: string[];
-  newBranchIds: string[];
-  exemptedWorktreeIds: string[];
-  exemptedBranchIds: string[];
-  warningCounts: Record<string, number>;
-  reasons: string[];
-  /** Subset of `reasons` that actually caused `blocked`. Empty when advisory-only. */
-  blockingReasons: string[];
-  /** Subset of `reasons` that were reported without blocking. */
-  advisoryReasons: string[];
-}
-
-class GitEstateError extends Error {
-  readonly kind: string;
-
-  constructor(kind: string, message: string) {
-    super(message);
-    this.kind = kind;
-  }
-}
-
-function compareText(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
-function sha256(value: string | Uint8Array): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort(compareText).map((key) =>
-    `${JSON.stringify(key)}:${stableJson(record[key])}`
-  ).join(',')}}`;
-}
-
-export function isFullObjectId(value: string): boolean {
-  return HASH_PATTERN.test(value);
-}
-
 function cleanGitEnvironment(): NodeJS.ProcessEnv {
   return { ...cleanGitEnv(), GIT_OPTIONAL_LOCKS: '0' };
 }
@@ -279,10 +112,11 @@ function gitTimeoutMs(): number {
   );
 }
 
-function runGit(cwd: string, args: string[]): GitResult {
+function runGit(cwd: string, args: string[], input?: string): GitResult {
   const result = spawnSync('git', ['--no-optional-locks', '-C', cwd, ...args], {
     encoding: 'utf8',
     env: cleanGitEnvironment(),
+    ...(input === undefined ? {} : { input }),
     maxBuffer: 32 * 1024 * 1024,
     timeout: gitTimeoutMs(),
     killSignal: 'SIGKILL',
@@ -323,8 +157,8 @@ function runGitAsync(cwd: string, args: string[]): Promise<GitResult> {
   });
 }
 
-function requireGit(cwd: string, args: string[], label: string): string {
-  const result = runGit(cwd, args);
+function requireGit(cwd: string, args: string[], label: string, input?: string): string {
+  const result = runGit(cwd, args, input);
   if (result.status !== 0) {
     throw new GitEstateError(
       'git_scan_failed',
@@ -780,7 +614,7 @@ interface CommonCapture {
   stashes: EstateStash[];
 }
 
-function captureCommonState(cwd: string): CommonCapture {
+function resolveCommonDir(cwd: string): string {
   const commonDirRaw = requireGit(
     cwd,
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
@@ -789,7 +623,11 @@ function captureCommonState(cwd: string): CommonCapture {
   if (!path.isAbsolute(commonDirRaw)) {
     throw new GitEstateError('common_dir_invalid', 'git common directory is not absolute');
   }
-  const commonDir = path.normalize(commonDirRaw);
+  return path.normalize(commonDirRaw);
+}
+
+function captureCommonState(cwd: string): CommonCapture {
+  const commonDir = resolveCommonDir(cwd);
   const worktreeRaw = requireGit(
     cwd,
     ['worktree', 'list', '--porcelain', '-z'],
@@ -1170,113 +1008,6 @@ async function collectSnapshot(
   };
 }
 
-function readBaseline(snapshot: EstateSnapshot): BaselineReceipt {
-  try {
-    const parsed = JSON.parse(readFileSync(snapshot.baselinePath, 'utf8')) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new GitEstateError('baseline_schema_invalid', 'baseline root must be an object');
-    }
-    const record = parsed as Record<string, unknown>;
-    const expectedKeys = [
-      'branchCount',
-      'branchIds',
-      'commonDir',
-      'findingIds',
-      'payloadHash',
-      'schemaVersion',
-      'snapshotHash',
-      'worktreeCount',
-      'worktreeIds',
-    ];
-    if (
-      stableJson(Object.keys(record).sort(compareText)) !== stableJson(expectedKeys)
-    ) {
-      throw new GitEstateError('baseline_schema_invalid', 'baseline fields do not match schema');
-    }
-    const findingIds = record['findingIds'];
-    const worktreeIds = record['worktreeIds'];
-    const branchIds = record['branchIds'];
-    if (
-      record['schemaVersion'] !== BASELINE_SCHEMA_VERSION
-      || record['commonDir'] !== snapshot.commonDir
-      || typeof record['snapshotHash'] !== 'string'
-      || !/^[0-9a-f]{64}$/.test(record['snapshotHash'])
-      || !Array.isArray(findingIds)
-      || !findingIds.every((id) => typeof id === 'string' && FINDING_ID_PATTERN.test(id))
-      || new Set(findingIds).size !== findingIds.length
-      || stableJson(findingIds) !== stableJson([...findingIds].sort(compareText))
-      || !Array.isArray(worktreeIds)
-      || !worktreeIds.every((id) => typeof id === 'string' && WORKTREE_ID_PATTERN.test(id))
-      || new Set(worktreeIds).size !== worktreeIds.length
-      || stableJson(worktreeIds) !== stableJson([...worktreeIds].sort(compareText))
-      || !Array.isArray(branchIds)
-      || !branchIds.every((id) => typeof id === 'string' && BRANCH_ID_PATTERN.test(id))
-      || new Set(branchIds).size !== branchIds.length
-      || stableJson(branchIds) !== stableJson([...branchIds].sort(compareText))
-      || !Number.isSafeInteger(record['worktreeCount'])
-      || (record['worktreeCount'] as number) < 0
-      || record['worktreeCount'] !== worktreeIds.length
-      || !Number.isSafeInteger(record['branchCount'])
-      || (record['branchCount'] as number) < 0
-      || record['branchCount'] !== branchIds.length
-      || typeof record['payloadHash'] !== 'string'
-      || !/^[0-9a-f]{64}$/.test(record['payloadHash'])
-    ) {
-      throw new GitEstateError(
-        'baseline_schema_invalid',
-        `baseline does not match schema version ${BASELINE_SCHEMA_VERSION}`,
-      );
-    }
-    const payload: BaselinePayload = {
-      schemaVersion: BASELINE_SCHEMA_VERSION,
-      commonDir: record['commonDir'] as string,
-      snapshotHash: record['snapshotHash'],
-      findingIds: findingIds as string[],
-      worktreeCount: record['worktreeCount'] as number,
-      branchCount: record['branchCount'] as number,
-      worktreeIds: worktreeIds as string[],
-      branchIds: branchIds as string[],
-    };
-    if (record['payloadHash'] !== sha256(stableJson(payload))) {
-      throw new GitEstateError(
-        'baseline_payload_hash_invalid',
-        'baseline canonical payload hash does not match its fields',
-      );
-    }
-    return {
-      state: 'valid',
-      path: snapshot.baselinePath,
-      findingIds: [...payload.findingIds],
-      worktreeCount: payload.worktreeCount,
-      branchCount: payload.branchCount,
-      worktreeIds: [...payload.worktreeIds],
-      branchIds: [...payload.branchIds],
-    };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return code === 'ENOENT'
-      ? {
-          state: 'missing',
-          path: snapshot.baselinePath,
-          findingIds: [],
-          worktreeCount: 0,
-          branchCount: 0,
-          worktreeIds: [],
-          branchIds: [],
-        }
-      : {
-          state: 'malformed',
-          path: snapshot.baselinePath,
-          findingIds: [],
-          worktreeCount: 0,
-          branchCount: 0,
-          worktreeIds: [],
-          branchIds: [],
-          error: 'baseline could not be parsed',
-        };
-  }
-}
-
 function warningCounts(findings: EstateFinding[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const finding of findings) {
@@ -1468,6 +1199,7 @@ const USAGE = [
   '  git-estate-guard snapshot [--json]',
   '  git-estate-guard guard --phase pre-commit|pre-push [--push-local-ref refs/heads/<name>]... [--json]',
   '  git-estate-guard baseline write [--json]',
+  '  git-estate-guard baseline accept-stash --oid <40|64-hex> --reason <nonempty> [--json]',
 ].join('\n');
 
 interface CliArgs {
@@ -1475,6 +1207,9 @@ interface CliArgs {
   json: boolean;
   phase?: GuardPhase;
   pushLocalRefs: string[];
+  baselineAction?: 'write' | 'accept-stash';
+  stashOid?: string;
+  reason?: string;
 }
 
 function parseCli(argv: string[]): CliArgs {
@@ -1523,10 +1258,35 @@ function parseCli(argv: string[]): CliArgs {
     };
   }
   if (command === 'baseline') {
-    if (args.length !== 2 || args[1] !== 'write') {
-      throw new GitEstateError('usage', 'baseline supports only the write action');
+    if (args.length === 2 && args[1] === 'write') {
+      return { command, json, pushLocalRefs: [], baselineAction: 'write' };
     }
-    return { command, json, pushLocalRefs: [] };
+    const oid = args[3];
+    const reason = args[5]?.trim();
+    if (
+      args.length === 6
+      && args[1] === 'accept-stash'
+      && args[2] === '--oid'
+      && typeof oid === 'string'
+      && isFullObjectId(oid)
+      && args[4] === '--reason'
+      && typeof reason === 'string'
+      && reason.length > 0
+      && reason.length <= 512
+    ) {
+      return {
+        command,
+        json,
+        pushLocalRefs: [],
+        baselineAction: 'accept-stash',
+        stashOid: oid,
+        reason,
+      };
+    }
+    throw new GitEstateError(
+      'usage',
+      'baseline accepts either write or accept-stash --oid <40|64-hex> --reason <nonempty>',
+    );
   }
   throw new GitEstateError('usage', `unknown or malformed command: ${command ?? '(missing)'}`);
 }
@@ -1594,6 +1354,7 @@ async function runGuardCommand(
     baseline = {
       state: 'missing',
       path: '',
+      rawHash: '',
       findingIds: [],
       worktreeCount: 0,
       branchCount: 0,
@@ -1647,8 +1408,8 @@ async function runGuardCommand(
   return exitCode;
 }
 
-function writeBaselineAtomically(snapshot: EstateSnapshot): BaselineFile {
-  const payload: BaselinePayload = {
+function fullSnapshotBaselinePayload(snapshot: EstateSnapshot): BaselinePayload {
+  return {
     schemaVersion: BASELINE_SCHEMA_VERSION,
     commonDir: snapshot.commonDir,
     snapshotHash: snapshot.snapshotHash,
@@ -1660,6 +1421,12 @@ function writeBaselineAtomically(snapshot: EstateSnapshot): BaselineFile {
     ).sort(compareText),
     branchIds: snapshot.branches.map(({ name }) => branchId(name)).sort(compareText),
   };
+}
+
+function writeBaselineAtomically(
+  snapshot: EstateSnapshot,
+  payload = fullSnapshotBaselinePayload(snapshot),
+): BaselineFile {
   const baseline: BaselineFile = {
     ...payload,
     payloadHash: sha256(stableJson(payload)),
@@ -1688,7 +1455,328 @@ function writeBaselineAtomically(snapshot: EstateSnapshot): BaselineFile {
   return baseline;
 }
 
-async function runBaselineWriteCommand(cwd: string, json: boolean): Promise<number> {
+function sameStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+interface VerifiedStashAcceptance {
+  finding: EstateFinding;
+  parents: string[];
+}
+
+function verifyReachableStashObjects(cwd: string, roots: string[]): void {
+  const listed = requireGit(
+    cwd,
+    ['rev-list', '--objects', '--no-object-names', ...roots, '--'],
+    'stash closure enumeration',
+  );
+  const objectIds = [...new Set(listed.split('\n').filter(Boolean))].sort(compareText);
+  if (
+    objectIds.length === 0
+    || objectIds.length > MAX_STASH_CLOSURE_OBJECTS
+    || !objectIds.every(isFullObjectId)
+  ) {
+    throw new GitEstateError(
+      'stash_closure_invalid',
+      'stash closure is empty, invalid, or exceeds the bounded object limit',
+    );
+  }
+  const details = requireGit(
+    cwd,
+    ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+    'stash closure object inspection',
+    `${objectIds.join('\n')}\n`,
+  ).trim().split('\n');
+  if (details.length !== objectIds.length) {
+    throw new GitEstateError('stash_closure_invalid', 'stash closure object count changed');
+  }
+  for (let index = 0; index < objectIds.length; index++) {
+    const [actualOid, objectType, extra] = details[index]!.split(' ');
+    if (
+      actualOid !== objectIds[index]
+      || extra !== undefined
+      || !['commit', 'tree', 'blob'].includes(objectType ?? '')
+    ) {
+      throw new GitEstateError(
+        'stash_closure_invalid',
+        'stash closure contains a missing or unsupported reachable object',
+      );
+    }
+  }
+}
+
+/**
+ * This checks the enumerated reachable objects' availability and type from the
+ * observed stash and its direct parents. It does not hash blob contents, prove
+ * restoration, or create a durable archive. The final snapshot checks the
+ * observation interval; the baseline lock only serializes baseline writers.
+ */
+function verifyObservedStashClosure(
+  cwd: string,
+  snapshot: EstateSnapshot,
+  oid: string,
+): VerifiedStashAcceptance {
+  const observed = snapshot.stashes.find((stash) => stash.oid === oid);
+  if (!observed) {
+    throw new GitEstateError('stash_not_retained', 'requested stash is not currently retained');
+  }
+  const closure = requireGit(
+    cwd,
+    ['rev-list', '--parents', '-n', '1', oid, '--'],
+    'stash closure inspection',
+  ).trim().split(/\s+/).filter(Boolean);
+  const [closureOid, ...parents] = closure;
+  const sortedParents = [...parents].sort(compareText);
+  if (
+    closureOid !== oid
+    || !parents.every(isFullObjectId)
+    || parents.length < 2
+    || parents.length > 3
+    || !sameStrings(sortedParents, observed.parents)
+  ) {
+    throw new GitEstateError(
+      'stash_closure_changed',
+      'requested stash closure does not match the current retained-stash observation',
+    );
+  }
+  for (const objectId of [oid, ...parents]) {
+    requireGit(cwd, ['cat-file', '-e', `${objectId}^{commit}`], 'stash closure inspection');
+  }
+  verifyReachableStashObjects(cwd, [oid, ...parents]);
+  const finding = snapshot.findings.find(
+    (candidate) => candidate.kind === 'stash' && candidate.oid === oid,
+  );
+  if (!finding) {
+    throw new GitEstateError('stash_finding_missing', 'requested stash has no current finding');
+  }
+  return { finding, parents };
+}
+
+function printBaselineAcceptRefusal(
+  json: boolean,
+  snapshotHash: string | null,
+  kind: string,
+  message: string,
+): void {
+  if (json) {
+    printJson({
+      schemaVersion: SCHEMA_VERSION,
+      command: 'baseline',
+      action: 'accept-stash',
+      exitCode: 2,
+      baseline: null,
+      ...(snapshotHash ? { snapshotHash } : {}),
+      error: { kind, message },
+    });
+  }
+  diagnostic(`baseline accept-stash refused: ${message}`);
+}
+
+type BaselineCommandResult = number | { publishSuccess: () => void };
+
+async function runBaselineAcceptStashCommand(
+  cwd: string,
+  json: boolean,
+  oid: string,
+  // The JSON receipt includes the reason; the baseline stores only finding identities.
+  _reason: string,
+): Promise<BaselineCommandResult> {
+  let first: EstateSnapshot;
+  try {
+    first = await collectSnapshot(cwd);
+  } catch (error) {
+    printBaselineAcceptRefusal(
+      json,
+      null,
+      'scan_failed',
+      error instanceof Error ? error.message : 'initial estate scan failed',
+    );
+    return 2;
+  }
+  if (first.incomplete || first.racing) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'snapshot_unsafe',
+      'initial acceptance snapshot is incomplete or racing',
+    );
+    return 2;
+  }
+
+  const prior = readBaseline(first);
+  if (prior.state !== 'valid') {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'baseline_invalid',
+      `a valid existing baseline is required (found ${prior.state})`,
+    );
+    return 2;
+  }
+  let initialStash: VerifiedStashAcceptance;
+  try {
+    initialStash = verifyObservedStashClosure(cwd, first, oid);
+  } catch (error) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      error instanceof GitEstateError ? error.kind : 'stash_inspection_failed',
+      error instanceof Error ? error.message : 'stash closure inspection failed',
+    );
+    return 2;
+  }
+  if (prior.findingIds.includes(initialStash.finding.id)) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'stash_already_accepted',
+      'requested stash is already inherited by the baseline',
+    );
+    return 2;
+  }
+
+  let finalSnapshot: EstateSnapshot;
+  try {
+    finalSnapshot = await collectSnapshot(cwd);
+  } catch (error) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'scan_failed',
+      error instanceof Error ? error.message : 'final estate scan failed',
+    );
+    return 2;
+  }
+  if (finalSnapshot.incomplete || finalSnapshot.racing) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'snapshot_unsafe',
+      'final acceptance snapshot is incomplete or racing',
+    );
+    return 2;
+  }
+  if (finalSnapshot.snapshotHash !== first.snapshotHash) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'scan_racing',
+      'estate state changed between acceptance snapshots',
+    );
+    return 2;
+  }
+  const finalBaseline = readBaseline(finalSnapshot);
+  if (finalBaseline.state !== 'valid' || finalBaseline.rawHash !== prior.rawHash) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'baseline_changed',
+      'baseline changed or became invalid during stash acceptance',
+    );
+    return 2;
+  }
+  let finalStash: VerifiedStashAcceptance;
+  try {
+    finalStash = verifyObservedStashClosure(cwd, finalSnapshot, oid);
+  } catch (error) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      error instanceof GitEstateError ? error.kind : 'stash_inspection_failed',
+      error instanceof Error ? error.message : 'final stash closure inspection failed',
+    );
+    return 2;
+  }
+  if (
+    finalStash.finding.id !== initialStash.finding.id
+    || !sameStrings(finalStash.parents, initialStash.parents)
+  ) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'stash_closure_changed',
+      'requested stash closure changed between acceptance observations',
+    );
+    return 2;
+  }
+  const baselineAfterFinalClosure = readBaseline(finalSnapshot);
+  if (
+    baselineAfterFinalClosure.state !== 'valid'
+    || baselineAfterFinalClosure.rawHash !== prior.rawHash
+  ) {
+    printBaselineAcceptRefusal(
+      json,
+      first.snapshotHash,
+      'baseline_changed',
+      'baseline changed or became invalid during final stash closure inspection',
+    );
+    return 2;
+  }
+
+  const payload: BaselinePayload = {
+    schemaVersion: BASELINE_SCHEMA_VERSION,
+    commonDir: finalSnapshot.commonDir,
+    snapshotHash: finalSnapshot.snapshotHash,
+    findingIds: [...prior.findingIds, finalStash.finding.id].sort(compareText),
+    worktreeCount: prior.worktreeCount,
+    branchCount: prior.branchCount,
+    worktreeIds: [...prior.worktreeIds],
+    branchIds: [...prior.branchIds],
+  };
+  try {
+    const baseline = writeBaselineAtomically(finalSnapshot, payload);
+    return {
+      publishSuccess: () => {
+        if (json) {
+          printJson({
+            schemaVersion: SCHEMA_VERSION,
+            command: 'baseline',
+            action: 'accept-stash',
+            exitCode: 0,
+            baseline: {
+              path: finalSnapshot.baselinePath,
+              snapshotHash: baseline.snapshotHash,
+              findingCount: baseline.findingIds.length,
+              worktreeCount: baseline.worktreeCount,
+              branchCount: baseline.branchCount,
+            },
+            acceptedStash: {
+              oid,
+              findingId: finalStash.finding.id,
+              parentCount: finalStash.parents.length,
+            },
+            admission: {
+              reason: _reason,
+              reasonSha256: sha256(_reason),
+            },
+          });
+        } else {
+          process.stdout.write(
+            `OK git-estate baseline accept-stash: finding=${finalStash.finding.id} ` +
+              `snapshot=${baseline.snapshotHash} reason-sha256=${sha256(_reason)}\n`,
+          );
+        }
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'baseline update failed';
+    if (json) {
+      printJson({
+        schemaVersion: SCHEMA_VERSION,
+        command: 'baseline',
+        action: 'accept-stash',
+        exitCode: 1,
+        baseline: null,
+        snapshotHash: first.snapshotHash,
+        error: { kind: 'write_failed', message },
+      });
+    }
+    diagnostic(`baseline accept-stash failed: ${message}`);
+    return 1;
+  }
+}
+
+async function runBaselineWriteCommand(cwd: string, json: boolean): Promise<BaselineCommandResult> {
   let snapshot: EstateSnapshot;
   try {
     snapshot = await collectSnapshot(cwd);
@@ -1762,28 +1850,31 @@ async function runBaselineWriteCommand(cwd: string, json: boolean): Promise<numb
     }
 
     const baseline = writeBaselineAtomically(finalSnapshot);
-    if (json) {
-      printJson({
-        schemaVersion: SCHEMA_VERSION,
-        command: 'baseline',
-        action: 'write',
-        exitCode: 0,
-        baseline: {
-          path: finalSnapshot.baselinePath,
-          snapshotHash: baseline.snapshotHash,
-          findingCount: baseline.findingIds.length,
-          worktreeCount: baseline.worktreeCount,
-          branchCount: baseline.branchCount,
-        },
-      });
-    } else {
-      process.stdout.write(
-        `OK git-estate baseline: findings=${baseline.findingIds.length} ` +
-          `worktrees=${baseline.worktreeCount} branches=${baseline.branchCount} ` +
-          `snapshot=${baseline.snapshotHash}\n`,
-      );
-    }
-    return 0;
+    return {
+      publishSuccess: () => {
+        if (json) {
+          printJson({
+            schemaVersion: SCHEMA_VERSION,
+            command: 'baseline',
+            action: 'write',
+            exitCode: 0,
+            baseline: {
+              path: finalSnapshot.baselinePath,
+              snapshotHash: baseline.snapshotHash,
+              findingCount: baseline.findingIds.length,
+              worktreeCount: baseline.worktreeCount,
+              branchCount: baseline.branchCount,
+            },
+          });
+        } else {
+          process.stdout.write(
+            `OK git-estate baseline: findings=${baseline.findingIds.length} ` +
+              `worktrees=${baseline.worktreeCount} branches=${baseline.branchCount} ` +
+              `snapshot=${baseline.snapshotHash}\n`,
+          );
+        }
+      },
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown baseline write failure';
     if (json) {
@@ -1800,6 +1891,47 @@ async function runBaselineWriteCommand(cwd: string, json: boolean): Promise<numb
     diagnostic(`baseline write failed: ${message}`);
     return 1;
   }
+}
+
+async function withBaselineWriteLock(
+  cwd: string,
+  json: boolean,
+  action: () => Promise<BaselineCommandResult>,
+): Promise<number> {
+  let lock: ProcessLockHandle;
+  try {
+    const directory = path.join(resolveCommonDir(cwd), 'whatsoup');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    lock = acquireProcessLock(path.join(directory, `${BASELINE_NAME}.lock`));
+  } catch (error) {
+    const kind = error instanceof ProcessLockError ? 'baseline_locked' : 'baseline_lock_failed';
+    const message = error instanceof Error ? error.message : 'baseline lock acquisition failed';
+    if (json) printJson(errorDocument(2, kind, message));
+    diagnostic(`baseline mutation refused: ${message}`);
+    return 2;
+  }
+  let result: BaselineCommandResult;
+  let releaseFailure: string | undefined;
+  try {
+    result = await action();
+  } finally {
+    try {
+      if (!releaseProcessLock(lock)) releaseFailure = 'baseline lock ownership changed before release';
+    } catch (error) {
+      releaseFailure = error instanceof Error ? error.message : 'baseline lock release failed';
+    }
+  }
+  if (releaseFailure !== undefined) {
+    if (json && typeof result !== 'number') printJson({
+      ...errorDocument(2, 'baseline_lock_release_failed', releaseFailure),
+      outcome: 'unknown',
+    });
+    diagnostic(`baseline mutation outcome unknown: ${releaseFailure}`);
+    return 2;
+  }
+  if (typeof result === 'number') return result;
+  result.publishSuccess();
+  return 0;
 }
 
 export async function main(
@@ -1823,7 +1955,14 @@ export async function main(
     return 0;
   }
   if (parsed.command === 'baseline') {
-    return await runBaselineWriteCommand(cwd, parsed.json);
+    return await withBaselineWriteLock(cwd, parsed.json, () => parsed.baselineAction === 'accept-stash'
+      ? runBaselineAcceptStashCommand(
+        cwd,
+        parsed.json,
+        parsed.stashOid!,
+        parsed.reason!,
+      )
+      : runBaselineWriteCommand(cwd, parsed.json));
   }
   if (parsed.command === 'snapshot') {
     return await runSnapshotCommand(cwd, parsed.json);

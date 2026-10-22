@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
@@ -30,8 +31,12 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+// maintenance.auto=false: `git commit` otherwise starts a detached
+// `git maintenance run --auto` that deletes .git/objects/maintenance.lock after
+// commit returns. A fixture that then removes .git races that delete, and
+// Node's rmSync reports success while leaving the rest of .git behind.
 function execGit(cwd: string, args: string[]): void {
-  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-C', cwd, ...args], {
+  execFileSync('git', ['-c', 'core.hooksPath=.git/hooks', '-c', 'maintenance.auto=false', '-C', cwd, ...args], {
     env: cleanGitEnv(),
     stdio: 'pipe',
   });
@@ -55,9 +60,9 @@ function runGit(cwd: string, args: string[]): {
   };
 }
 
-function makeRepo(): string {
-  const root = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-'));
-  tmpRoot = root;
+function makeRepo(parent?: string): string {
+  const root = mkdtempSync(path.join(parent ?? tmpdir(), 'whatsoup-source-runtime-'));
+  tmpRoot = parent ?? root;
   execGit(root, ['init', '-q']);
   execGit(root, ['config', 'user.email', 'test.invalid']);
   execGit(root, ['config', 'user.name', 'Test']);
@@ -117,6 +122,7 @@ function makeContainedSymlinkRepo(): {
 
 function convertRepoToRelease(root: string): void {
   rmSync(path.join(root, '.git'), { recursive: true, force: true });
+  if (existsSync(path.join(root, '.git'))) throw new Error(`fixture .git was not fully removed: ${root}`);
   const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -145,14 +151,82 @@ function convertRepoToRelease(root: string): void {
   }), 'utf8');
 }
 
-describe('source runtime drift check', () => {
-  it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
-    const root = makeRepo();
-    const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+// A committed git repo that encloses the release fixture: a release root
+// nested under an unrelated ancestor .git must stay in release mode.
+function makeAncestorRepo(): string {
+  const parent = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-ancestor-'));
+  tmpRoot = parent;
+  execGit(parent, ['init', '-q']);
+  execGit(parent, ['-c', 'user.email=test.invalid', '-c', 'user.name=Test', 'commit', '-q', '--allow-empty', '-m', 'ancestor']);
+  return parent;
+}
 
-    expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+// #3561: under gate load the five fixture git calls alone outran the 10 s test
+// budget. Read-only clean-graph cases build their repo in a hook with its own
+// budget, so the test budget times only the code under test.
+const FIXTURE_SETUP_TIMEOUT_MS = 60_000;
+// Longer than the 10 s default test budget, so setup inside a test body times out.
+const SLOW_FIXTURE_INIT_SECONDS = 11;
+
+function slowInitGitDir(): string {
+  const bin = mkdtempSync(path.join(tmpdir(), 'whatsoup-source-runtime-slow-git-'));
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  // Once only: makeRepo's `commit -qm init` also carries an `init` argument.
+  writeFileSync(path.join(bin, 'git'), `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "init" ] && [ ! -e '${bin}/slept' ]; then
+    : > '${bin}/slept'
+    sleep ${String(SLOW_FIXTURE_INIT_SECONDS)}
+    break
+  fi
+done
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+  return bin;
+}
+
+function expectCleanImportGraph(root: string): void {
+  const manifest = parseSourceRuntimeManifest(JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8')));
+
+  expect(collectSourceRuntimeIssues(root, manifest)).toEqual([]);
+}
+
+describe('source runtime drift check on a prebuilt clean repo', () => {
+  let root = '';
+  beforeAll(() => {
+    root = makeRepo();
+  }, FIXTURE_SETUP_TIMEOUT_MS);
+
+  it('passes when the entrypoint import graph is tracked, committed, and clean', () => {
+    expectCleanImportGraph(root);
+  });
+});
+
+// #3561 injection: a git whose `init` sleeps past the default test budget. Setup
+// inside the test body would time out; setup in the hook leaves the body its budget.
+// @skip-env #3561 red-proof harness; sleeps 11 s, off in the normal suite
+describe.runIf(process.env.WHATSOUP_TEST_3561_SLOW_SETUP_INJECTION === '1')('source runtime drift check on a slowly built clean repo', () => {
+  let root = '';
+  let slowGit = '';
+  beforeAll(() => {
+    slowGit = slowInitGitDir();
+    vi.stubEnv('PATH', `${slowGit}:${process.env.PATH ?? ''}`);
+    try {
+      root = makeRepo();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, FIXTURE_SETUP_TIMEOUT_MS);
+  afterAll(() => {
+    if (slowGit) rmSync(slowGit, { recursive: true, force: true });
   });
 
+  it('keeps slow fixture setup out of the clean-graph test budget', () => {
+    expectCleanImportGraph(root);
+  });
+});
+
+describe('source runtime drift check', () => {
   it('loads Git state with a constant number of bulk commands across a diamond import graph', () => {
     const root = makeRepo();
     writeFileSync(
@@ -400,6 +474,51 @@ describe('source runtime drift check', () => {
   it('rejects a drifted source-runtime control manifest in a non-git snapshot', () => {
     const root = makeRepo();
     convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('keeps release mode for a non-git snapshot nested inside an ancestor git repo', () => {
+    const root = makeRepo(makeAncestorRepo());
+    convertRepoToRelease(root);
+
+    const issues = run(['--manifest', 'manifest.json'], root);
+    expect(process.exitCode).toBeUndefined();
+    expect(issues).toEqual([]);
+  });
+
+  it('rejects a drifted control manifest in a non-git snapshot nested inside an ancestor git repo', () => {
+    const root = makeRepo(makeAncestorRepo());
+    convertRepoToRelease(root);
+    writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      scope: 'retargeted',
+      entrypoints: [],
+    }), 'utf8');
+
+    expect(run(['--manifest', 'manifest.json'], root)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'file-sha256-drift', path: 'manifest.json' }),
+    ]));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('treats a release root that is itself a bare git dir as outside a work tree', () => {
+    // `rev-parse --is-inside-work-tree` exits 0 and prints "false" here, so an
+    // exit-status-only probe would skip the control-manifest check.
+    const root = makeRepo();
+    convertRepoToRelease(root);
+    execGit(root, ['init', '-q', '--bare']);
+    expect(runGit(root, ['rev-parse', '--is-inside-work-tree'])).toEqual(
+      expect.objectContaining({ status: 0, stdout: 'false\n' }),
+    );
     writeFileSync(path.join(root, 'manifest.json'), JSON.stringify({
       schemaVersion: 1,
       scope: 'retargeted',

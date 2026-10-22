@@ -16,7 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional, Union
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -29,9 +29,24 @@ from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
 )
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import configured_machine, event_machine, new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
+from lib.fleet_config import (  # noqa: E402
+    PROFILE_MISSING_MARKER_KIND,
+    PROFILE_MISSING_MARKER_SCHEMA,
+    FleetConfigError,
+    profile_missing_due,
+    read_json_object,
+    resolve_health_profile,
+    tracked_health_profile_path,
+    utc_day,
+)
+from lib.dm_roundtrip import (  # noqa: E402
+    RoundtripConfigError,
+    evaluate_target as dm_roundtrip_evaluate_target,
+    parse_roster as dm_roundtrip_parse_roster,
+)
 from lib.health_reader import (  # noqa: E402,F401 — PUBLIC_HEALTH_SCHEMA_PREFIX re-exported for consumers/tests
     PUBLIC_HEALTH_SCHEMA_PREFIX,
     health_body_is_disclosed,
@@ -46,6 +61,7 @@ from lib.controller_log import (
 )
 from lib.durable_json import (
     JsonVersion,
+    PublicationResult,
     durable_json_target,
     observe_json,
     operation_id,
@@ -71,8 +87,10 @@ from lib.state_files import (
     INCIDENT_STATE,
     Q_LOOP_STATE,
     SENTINEL_HEARTBEAT,
+    WATCHDOG_PROFILE_MISSING_MARKER,
 )
 from lib.state_root import q_loop_state_root, sentinel_state_root, state_root as _ssot_state_root
+from lib.classify_health import recovery_debt_issue
 
 
 def state_root() -> Path:
@@ -104,8 +122,17 @@ KNOWN_WATCHDOG_CHECKS: frozenset[str] = frozenset({
     "collector_roster",
     "browser_debug",
     "wedge_signature",
+    "turn_failure_rate",
     "supervision_deadman",
     "clock_skew",
+    "dm_roundtrip",
+})
+# Checks whose expectation is the per-host health profile's instance list.
+PROFILE_CHECKS: frozenset[str] = frozenset({
+    "local_services",
+    "local_instance_health",
+    "wedge_signature",
+    "turn_failure_rate",
 })
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -117,7 +144,15 @@ INSTANCE_CONFIG_ROOT = Path(
     os.environ.get("WHATSOUP_INSTANCE_CONFIG_ROOT")
     or Path.home() / ".config" / "whatsoup" / "instances"
 )
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json. The
+# auth_401_* classes are unconfirmed removals; a restart would buy a fresh
+# bounded retry and park again, so they are terminal for restart purposes.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 CONTROLLER_LOG_CONTEXT = ControllerLogContext("heartbeat_watchdog")
 
 
@@ -154,6 +189,39 @@ def watchdog_renotify_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS", 6 * 60 * 60)
 
 
+def watchdog_renotify_max_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS", 24 * 60 * 60)
+
+
+def renotify_interval_seconds(unchanged_renotifies: int) -> int:
+    """Renotify interval after ``unchanged_renotifies`` escalated re-sends of
+    the same evidence: base, 2x base, 4x base, ... capped at
+    BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS. The base is the floor, so a max
+    set below the base can never make re-sends more frequent."""
+    base = watchdog_renotify_seconds()
+    backed_off = base * (2 ** min(max(0, unchanged_renotifies), 32))
+    return max(base, min(backed_off, watchdog_renotify_max_seconds()))
+
+
+# Evidence values that move on their own while the condition is unchanged
+# (the deadman's age_seconds grows every cycle). Counts are NOT normalized: a
+# count that changes is new information.
+_EVIDENCE_ISO_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_EVIDENCE_VOLATILE_FIELD = re.compile(
+    r"\b([A-Za-z_]*(?:age|Age)[A-Za-z_]*|[A-Za-z_]*(?:_seconds|Seconds|_at|At|_utc))="
+    r"(?:<ts>|[0-9][0-9.]*)"
+)
+
+
+def evidence_fingerprint(evidence: str) -> str:
+    """Stable identity of an incident's evidence for renotify backoff."""
+    normalized = _EVIDENCE_ISO_TIMESTAMP.sub("<ts>", str(evidence))
+    normalized = _EVIDENCE_VOLATILE_FIELD.sub(r"\1=<v>", normalized)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
 def watchdog_escalate_seconds() -> int:
     return positive_env_int("BOT_ERRORS_WATCHDOG_ESCALATE_SECONDS", 24 * 60 * 60)
 
@@ -184,6 +252,10 @@ Q_LOOP_CAPACITY_KEY = "q_loop:supervisor:capacity"
 Q_LOOP_AWAITING_Q_KEY = "q_loop:awaiting_q"
 BROWSER_DEBUG_PREFIX = "browser_debug:"
 BROWSER_DEBUG_PROBE_KEY = f"{BROWSER_DEBUG_PREFIX}probe"
+# Interactive and scheduled work sharing a session id is a structural state
+# that persists until someone rotates the session; it pages once on open and
+# re-sends as a warning.
+SESSION_COLLISION_PREFIX = "session_collision:"
 
 # q-loop "q_unavailable_<reason>" phases that are self-recovering usage/rate
 # capacity conditions (claude-cli usage-window caps), NOT supervisor failures.
@@ -224,14 +296,17 @@ def is_nonpaging_incident_key(key: str) -> bool:
     return is_capacity_incident_key(key) or is_browser_debug_incident_key(key)
 
 
-def incident_severity(key: str, escalated: bool) -> str:
+def incident_severity(key: str, escalated: bool, *, renotify: bool = False) -> str:
     """Severity for an incident, capping non-paging signals at ``warning``.
 
     Genuine failures escalate to ``critical`` when ``escalated`` is set, but a
     capacity event or resource-observation warning must never page critical
-    regardless of age or suppression count.
+    regardless of age or suppression count. A session collision opens
+    critical once; its renotifies are warnings.
     """
     if is_nonpaging_incident_key(key) or key == Q_LOOP_AWAITING_Q_KEY:
+        return "warning"
+    if renotify and key.startswith(SESSION_COLLISION_PREFIX):
         return "warning"
     return "critical" if escalated else "warning"
 
@@ -264,6 +339,7 @@ def incident_requested_action(key: str, *, persistent: bool = False) -> str:
 
 def validate_thresholds() -> None:
     watchdog_renotify_seconds()
+    watchdog_renotify_max_seconds()
     watchdog_escalate_seconds()
     watchdog_escalate_suppressed()
     watchdog_recovery_confirmations()
@@ -607,7 +683,7 @@ def outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(current),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-heartbeat-watchdog",
         "source": "heartbeat-watchdog",
@@ -644,6 +720,205 @@ def outbox_event(
     )
     require_advance(publication)
     return path
+
+
+PROFILE_MISSING_PRODUCER = "heartbeat-watchdog"
+
+
+def _profile_missing_error_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _profile_missing_error_sha256(exc: FleetConfigError) -> str:
+    return hashlib.sha256(str(exc).encode("utf-8")).hexdigest()
+
+
+def profile_missing_event_text(host: str, day: str, exc: FleetConfigError) -> tuple[str, str]:
+    """Summary and evidence for the profile-missing alert.
+
+    The error message names paths, and an env-var path outside the redacted
+    config tree would survive redaction, so the event carries only fixed
+    tokens and a hash. The full message stays on the configuration_error line.
+    """
+    summary = f"health profile missing: {PROFILE_MISSING_PRODUCER} cannot load its health profile; exiting 2"
+    evidence = "\n".join([
+        "kind=profile-missing",
+        f"producer={PROFILE_MISSING_PRODUCER}",
+        f"host={host}",
+        f"utc_day={day}",
+        f"error_class={getattr(exc, 'kind', 'unknown')}",
+        f"source={getattr(exc, 'source', 'unknown')}",
+        f"error_sha256={_profile_missing_error_sha256(exc)}",
+    ])
+    return summary, evidence
+
+
+def profile_missing_marker_payload(host: str, day: str, event_path: Path, exc: FleetConfigError) -> dict[str, Any]:
+    # A hash, not the error text: the marker must not carry the private path.
+    return {
+        "schemaVersion": PROFILE_MISSING_MARKER_SCHEMA,
+        "kind": PROFILE_MISSING_MARKER_KIND,
+        "producer": PROFILE_MISSING_PRODUCER,
+        "host": host,
+        "utcDay": day,
+        "eventId": event_path.stem,
+        "errorSha256": _profile_missing_error_sha256(exc),
+    }
+
+
+def observe_profile_missing_marker() -> tuple[Any, Any]:
+    """Return ``(target, observation)`` for this producer's marker.
+
+    Raises when the marker cannot be read (unparseable, unreadable, wrong
+    type); the caller then moves it aside. Only this marker is touched:
+    controller state stays unopened.
+    """
+    root = state_root()
+    ensure_private_dir(root)
+    target = _durable_target(root / WATCHDOG_PROFILE_MISSING_MARKER)
+    return target, observe_json(target)
+
+
+def move_profile_missing_marker_aside(epoch: int) -> Path:
+    """Rename an unreadable marker to a timestamped sibling, keeping its bytes.
+
+    The compare-and-swap cannot replace a marker it cannot read, so without
+    this every run (every few minutes) would alert. The corrupt bytes are kept
+    before the fresh marker (a normal compare-and-swap from absent) supersedes
+    them, the ordering docs/superpowers/specs/2026-07-28-bot-errors-
+    durability-stack-design.md lines 514-517 ask for. Only the ordering: this
+    plain rename neither syncs the state directory nor takes the durable-JSON
+    lock, so the spec's "published and synced" guarantee and its Draft 3
+    transition contract (lines 428-437) are not met here. Raises when the
+    rename fails.
+    """
+    marker = state_root() / WATCHDOG_PROFILE_MISSING_MARKER
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
+    aside = marker.with_name(f"{marker.name}.corrupt-{stamp}")
+    if os.path.lexists(aside):
+        aside = marker.with_name(f"{marker.name}.corrupt-{stamp}-{os.getpid()}-{time.time_ns()}")
+    os.rename(marker, aside)
+    return aside
+
+
+def record_profile_missing_marker(target: Any, expected: JsonVersion, marker: dict[str, Any]) -> PublicationResult:
+    publication_operation = operation_id(
+        target,
+        marker,
+        component="heartbeat_watchdog.profile_missing_marker",
+        predecessor=expected,
+    )
+    publication = publish_state_json(
+        target,
+        marker,
+        component="heartbeat_watchdog.profile_missing_marker",
+        operation_id=publication_operation,
+        expected=expected,
+        generation=(expected.generation or 0) + 1,
+    )
+    require_advance(publication)
+    return publication
+
+
+def emit_profile_missing_event(exc: FleetConfigError) -> None:
+    """Queue the critical profile-missing alert at most once per (host, producer, UTC day).
+
+    This is daily suppression after a successfully recorded marker, not
+    exactly-once delivery. The event is published first and the marker second,
+    so a lost alert is never traded for a quiet day. Three known duplicates follow:
+    (a) the event is published but the marker write fails or the process dies
+    before it, so the next run alerts again; (b) two concurrent runs both read
+    "due" before either marker lands, so both publish (the loser's marker write
+    then fails its compare-and-swap); (c) a run that found the marker unreadable
+    renames aside whatever sits at the path, which can be a good marker a
+    concurrent run just wrote, so one more alert follows. The durable writer's
+    lock covers one state write, not the event-plus-marker pair, and the rename
+    takes no lock; no extra lock is taken here.
+
+    An unreadable marker is renamed aside and replaced. Only a state root where
+    no marker can be written (or moved) is left, and there every run alerts:
+    nothing can suppress without writable state, and that state-root failure is
+    itself what needs a page.
+
+    Every outcome is reported on stderr after the configuration_error line.
+    Nothing here raises: run_once() returns 2 whatever this does.
+    """
+    prefix = "profile-missing"
+    try:
+        host = canonical_local_host()
+        epoch = now_epoch()
+        day = utc_day(epoch)
+    except Exception as setup_exc:  # noqa: BLE001 - the exit code must stay 2.
+        print(f"{prefix} event not written (clock or host lookup failed): {_profile_missing_error_text(setup_exc)}", file=sys.stderr)
+        return
+    target: Any = None
+    observation: Any = None
+    try:
+        target, observation = observe_profile_missing_marker()
+    except Exception as read_exc:  # noqa: BLE001 - an unreadable marker must not suppress.
+        read_error = _profile_missing_error_text(read_exc)
+        try:
+            aside = move_profile_missing_marker_aside(epoch)
+        except Exception as move_exc:  # noqa: BLE001 - fall back to alerting without a marker.
+            print(
+                f"{prefix} marker read failed ({read_error}) and could not be moved aside "
+                f"({_profile_missing_error_text(move_exc)}); alerting without suppression and leaving the marker in place",
+                file=sys.stderr,
+            )
+        else:
+            print(f"{prefix} marker read failed ({read_error}); moved it aside to {aside}", file=sys.stderr)
+            try:
+                target, observation = observe_profile_missing_marker()
+            except Exception as reread_exc:  # noqa: BLE001 - alert without a marker.
+                print(
+                    f"{prefix} marker still unreadable after the move ({_profile_missing_error_text(reread_exc)})",
+                    file=sys.stderr,
+                )
+    if observation is not None:
+        decision = profile_missing_due(observation.payload, producer=PROFILE_MISSING_PRODUCER, host=host, day=day)
+        if not decision.due:
+            print(f"{prefix} event suppressed: already queued for {host} on {day}", file=sys.stderr)
+            return
+        if decision.anomaly:
+            print(f"{prefix} marker does not prove suppression ({decision.reason}); alerting", file=sys.stderr)
+    summary, evidence = profile_missing_event_text(host, day, exc)
+    try:
+        event_path = outbox_event(
+            summary,
+            evidence,
+            severity="critical",
+            source_key=f"profile-missing:{PROFILE_MISSING_PRODUCER}",
+            event_type="alert",
+            force_notify=False,
+        )
+    except Exception as publish_exc:  # noqa: BLE001 - report the stage, keep exit 2.
+        print(
+            f"{prefix} event not written (event publish failed; no marker written): "
+            f"{_profile_missing_error_text(publish_exc)}",
+            file=sys.stderr,
+        )
+        return
+    if observation is None:
+        print(
+            f"{prefix} event queued at {event_path} but marker not written (existing marker unreadable); "
+            "the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    try:
+        record_profile_missing_marker(
+            target,
+            observation.version,
+            profile_missing_marker_payload(host, day, event_path, exc),
+        )
+    except Exception as marker_exc:  # noqa: BLE001 - the event is already queued.
+        print(
+            f"{prefix} event queued at {event_path} but marker write failed "
+            f"({_profile_missing_error_text(marker_exc)}); the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    print(f"{prefix} event queued: {event_path}", file=sys.stderr)
 
 
 def json_updated_age(path: Path, key: str = "updated_at") -> tuple[int | None, str]:
@@ -949,23 +1224,44 @@ def local_daily_health_hosts() -> list[str]:
     return [canonical_local_host()]
 
 
+def daily_health_source_host(host: str) -> str:
+    """Return the name the ``daily_health:<host>`` problem key carries.
+
+    That key becomes the event ``alertSource`` and so part of the incident key.
+    This host's lookup name follows the live hostname, which can change, so a
+    configured machine name replaces it in the key: the alert and its clear
+    keep one key across a rename. Unset, and for every other host, the key
+    keeps the lookup name. The ledger, the event scan and the tracked profile
+    are still looked up by the lookup name.
+    """
+    if host == canonical_local_host():
+        return configured_machine() or host
+    return host
+
+
+def tracked_health_profile() -> Path:
+    return tracked_health_profile_path(REPO_ROOT, canonical_local_host())
+
+
 def health_profile_path() -> Path:
-    raw = os.environ.get("BOT_ERRORS_HEALTH_PROFILE", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return REPO_ROOT / "deploy" / "health-profiles" / f"{canonical_local_host()}.json"
+    """Profile path for evidence text; never raises (the load reports failures)."""
+    try:
+        return resolve_health_profile(tracked_health_profile()).path
+    except FleetConfigError:
+        return tracked_health_profile()
 
 
-def load_health_profile() -> dict[str, Any] | None:
-    path = health_profile_path()
-    data = load_json(path)
-    return data if isinstance(data, dict) else None
+def load_health_profile() -> dict[str, Any]:
+    """Load this host's profile via ``lib.fleet_config``.
+
+    Raises :class:`FleetConfigError` instead of returning nothing: a missing
+    profile must never read as "this host expects zero instances".
+    """
+    return read_json_object(resolve_health_profile(tracked_health_profile()))
 
 
 def expected_local_instances() -> list[dict[str, Any]]:
     profile = load_health_profile()
-    if not profile:
-        return []
     result: list[dict[str, Any]] = []
     instances = profile.get("instances")
     if not isinstance(instances, list):
@@ -1447,6 +1743,150 @@ def wedge_signature_problems() -> dict[str, str]:
     return problems
 
 
+def turn_failure_window_seconds() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS", 1800)
+
+
+def turn_failure_min_count() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_MIN_COUNT", 3)
+
+
+def turn_failure_max_chats_reported() -> int:
+    return positive_env_int("BOT_ERRORS_TURN_FAILURE_MAX_CHATS", 5)
+
+
+TURN_FAILURE_PREFIXES = ("turn_failure:", "session_collision:", "turn_failure_probe:")
+
+
+def session_collision_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map interactive conversation keys to session IDs also used by active
+    scheduled checkpoints. Interactive and scheduled work use separate
+    persistence namespaces; a shared session ID contradicts that isolation.
+    Read-only; unavailable schema propagates as an observation failure."""
+    rows = conn.execute(
+        "SELECT i.conversation_key, i.session_id "
+        "FROM session_checkpoints i "
+        "JOIN session_checkpoints s ON s.session_id = i.session_id "
+        "WHERE i.session_status = 'active' AND s.session_status = 'active' "
+        "AND i.conversation_key NOT LIKE '%::scheduled-agent-job' "
+        "AND s.conversation_key LIKE '%::scheduled-agent-job' "
+        "AND i.session_id IS NOT NULL AND i.session_id <> ''"
+    ).fetchall()
+    return {str(r[0]): str(r[1]) for r in rows}
+
+
+def turn_failure_rate_problems(evaluated_keys: set[str] | None = None) -> dict[str, str]:
+    """Per-instance terminal turn-failure-rate probe.
+
+    Sibling of :func:`wedge_signature_problems`, which by contract only fires on
+    NONTERMINAL inbound rows. Turns that error and are marked terminal ``failed``
+    (``inbound_events.processing_status='failed'``) drain cleanly and are
+    invisible to every other check: the process is up, WhatsApp is connected,
+    /health is 200, and the queue is empty — yet the chat is silently failing
+    every real turn. This probe alerts when a single conversation accumulates at
+    least BOT_ERRORS_TURN_FAILURE_MIN_COUNT terminal failures within
+    BOT_ERRORS_TURN_FAILURE_WINDOW_SECONDS, and enriches the packet with the
+    per-conversation ``failure_class`` split plus the scheduled/interactive
+    session-sharing collision when present.
+
+    Dark by default: runs only when ``turn_failure_rate`` is explicitly listed
+    in BOT_ERRORS_WATCHDOG_CHECKS. Read-only toward the product runtime: SQLite
+    is opened mode=ro with query_only ON (the live database is WAL)."""
+    problems: dict[str, str] = {}
+    now = now_epoch()
+    window = turn_failure_window_seconds()
+    min_count = turn_failure_min_count()
+    max_chats = turn_failure_max_chats_reported()
+    for item in expected_local_services():
+        name = item["name"]
+        key = f"turn_failure:{name}"
+        collision_key = f"session_collision:{name}"
+        probe_key = f"turn_failure_probe:{name}"
+        db_path = wedge_db_root() / name / "bot.db"
+        if not db_path.exists():
+            problems[probe_key] = (
+                f"turn-failure probe misconfigured: instance={name} database missing: {db_path}"
+            )
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                has_inbound = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='inbound_events'"
+                ).fetchone()
+                if not has_inbound:
+                    problems[probe_key] = (
+                        f"turn-failure probe found no inbound_events table: "
+                        f"instance={name} db={db_path}"
+                    )
+                    continue
+                rows = conn.execute(
+                    "SELECT conversation_key, "
+                    "COALESCE(failure_class, 'unknown') AS fc, COUNT(*) AS n "
+                    "FROM inbound_events "
+                    "WHERE processing_status = 'failed' "
+                    "AND received_at IS NOT NULL "
+                    "AND strftime('%s', received_at) IS NOT NULL "
+                    "AND (? - CAST(strftime('%s', received_at) AS INTEGER)) BETWEEN 0 AND ? "
+                    "GROUP BY conversation_key, fc",
+                    (now, window),
+                ).fetchall()
+                collisions = session_collision_map(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            problems[probe_key] = (
+                f"turn-failure probe failed: instance={name} error={str(exc)[:160]}"
+            )
+            continue
+        # Both queries must succeed before this probe can authorize recovery.
+        # Instance evaluation by another check is not evidence for these keys.
+        if evaluated_keys is not None:
+            evaluated_keys.update((key, collision_key, probe_key))
+        # Active interactive and scheduled checkpoints use separate namespaces.
+        # Alert on a shared session ID independently of the failure-rate threshold.
+        if collisions:
+            collision_details = "; ".join(
+                "ck=[REDACTED CONVERSATION] shared_session_id=[REDACTED SESSION]"
+                for _ in sorted(collisions)[:max_chats]
+            )
+            problems[collision_key] = (
+                f"session-sharing collision: instance={name} "
+                f"affected_chats={len(collisions)} {collision_details}"
+            )
+        # Aggregate per conversation: total failures + failure_class split.
+        per_chat: dict[str, dict[str, int]] = {}
+        for conv_key, fc, n in rows:
+            bucket = per_chat.setdefault(str(conv_key), {})
+            bucket[str(fc)] = bucket.get(str(fc), 0) + int(n)
+        offending = [
+            (conv_key, sum(split.values()), split)
+            for conv_key, split in per_chat.items()
+            if sum(split.values()) >= min_count
+        ]
+        if not offending:
+            continue
+        offending.sort(key=lambda entry: entry[1], reverse=True)
+        details = []
+        for conv_key, total, split in offending[:max_chats]:
+            classes = ",".join(
+                f"{cls}:{count}"
+                for cls, count in sorted(split.items(), key=lambda kv: kv[1], reverse=True)
+            )
+            detail = f"ck=[REDACTED CONVERSATION] failed={total} classes={classes}"
+            if conv_key in collisions:
+                detail += " session_collision session_id=[REDACTED SESSION]"
+            details.append(detail)
+        problems[key] = (
+            f"turn-failure rate: instance={name} window_seconds={window} "
+            f"min_count={min_count} affected_chats={len(offending)} "
+            + "; ".join(details)
+        )
+    return problems
+
+
 def supervision_max_age_seconds() -> float:
     raw = os.environ.get("BOT_ERRORS_SUPERVISION_MAX_AGE_SECONDS", "7200")
     try:
@@ -1695,6 +2135,9 @@ def health_reasons_from_payload(payload: dict, name: str) -> tuple[list[str], di
     bond_status = auth_bond.get("status") if isinstance(auth_bond, dict) else None
     bond_issues = auth_bond.get("issues") if isinstance(auth_bond, dict) else None
     reasons: list[str] = []
+    debt_issue = recovery_debt_issue(payload)
+    if debt_issue is not None:
+        reasons.append(debt_issue)
     if isinstance(actual_name, str) and actual_name != name:
         reasons.append(f"health_identity_mismatch actual={actual_name}")
     if health_status == "unhealthy":
@@ -1985,6 +2428,28 @@ def daily_health_events() -> list[tuple[Path, int, dict[str, Any] | None]]:
     return events
 
 
+# typing.Union, not "|": this alias is evaluated at import time and the
+# watchdog also runs under older system Pythons.
+DailyHealthScan = Union[
+    list[tuple[Path, int, Optional[dict[str, Any]]]], DailyHealthEventError
+]
+
+
+def daily_health_scan() -> DailyHealthScan:
+    """Scan the event archives ONCE, keeping a scan failure as a value.
+
+    ``daily_health_events`` reads and parses every archived event (tens of
+    thousands of files), and the per-host check used to repeat that full scan
+    once per configured host. Callers that evaluate several hosts scan once and
+    pass the result to ``daily_health_age``. A failure is returned rather than
+    raised so every host still reports it, exactly as each per-host scan did.
+    """
+    try:
+        return daily_health_events()
+    except DailyHealthEventError as exc:
+        return exc
+
+
 def daily_health_freshness_ledger_age(host: str) -> tuple[int | None, str]:
     """Read per-host daily-health freshness from the durable incident-state ledger.
 
@@ -2023,13 +2488,14 @@ def daily_health_freshness_ledger_age(host: str) -> tuple[int | None, str]:
     return max(0, current - last_seen_epoch), f"ledger dailyHealthFreshness[{host}] lastSeenAt={last_seen_epoch}"
 
 
-def _daily_health_file_age(host: str | None) -> tuple[int | None, str]:
+def _daily_health_file_age(
+    host: str | None, scan: DailyHealthScan | None = None
+) -> tuple[int | None, str]:
     newest: int | None = None
     newest_path = ""
-    try:
-        events = daily_health_events()
-    except DailyHealthEventError as exc:
-        return None, f"failed to scan daily-health events under {state_root()}: {exc}"
+    events = daily_health_scan() if scan is None else scan
+    if isinstance(events, DailyHealthEventError):
+        return None, f"failed to scan daily-health events under {state_root()}: {events}"
     for path, mtime, data in events:
         if host is not None:
             event_host = daily_health_event_host(path, data)
@@ -2050,7 +2516,9 @@ def _daily_health_file_age(host: str | None) -> tuple[int | None, str]:
     return max(0, current - newest), f"{newest_path} mtime={newest}"
 
 
-def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
+def daily_health_age(
+    host: str | None = None, *, scan: DailyHealthScan | None = None
+) -> tuple[int | None, str]:
     dry_age = os.environ.get("BOT_ERRORS_DRY_DAILY_HEALTH_AGE_SECONDS")
     if dry_age is not None and host is None:
         try:
@@ -2060,7 +2528,7 @@ def daily_health_age(host: str | None = None) -> tuple[int | None, str]:
         if age < 0:
             return None, f"invalid dry daily-health age: value={dry_age!r}"
         return age, "dry daily-health age"
-    file_age, file_detail = _daily_health_file_age(host)
+    file_age, file_detail = _daily_health_file_age(host, scan)
     if host is None:
         # Aggregate "any daily-health" check: the per-host freshness ledger does not apply.
         return file_age, file_detail
@@ -2192,10 +2660,35 @@ def _browser_debug_port(args: list[str]) -> int | None:
     return None
 
 
+def _browser_identity_hash(identity: str) -> str:
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
 def _browser_profile_hash(args: list[str], debug_port: int) -> str:
     profile = next((arg.partition("=")[2] for arg in args if arg.startswith("--user-data-dir=")), "")
     identity = profile or f"debug-port:{debug_port}"
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    return _browser_identity_hash(identity)
+
+
+def browser_debug_owned_profile_hashes() -> set[str]:
+    """Profile hashes of debug browsers an owner keeps alive on purpose.
+
+    BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED is a comma-separated list of
+    ``--user-data-dir`` paths (for example a scheduled watcher's keep-alive
+    CDP Chrome). Matching uses the same hash as the incident key, so the path
+    itself never leaves the host. Empty or unset keeps every debug browser in
+    scope.
+    """
+    owned: set[str] = set()
+    for part in os.environ.get("BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED", "").split(","):
+        path = part.strip()
+        if not path:
+            continue
+        owned.add(_browser_identity_hash(path))
+        stripped = path.rstrip("/")
+        if stripped:
+            owned.add(_browser_identity_hash(stripped))
+    return owned
 
 
 def _established_debug_connections(ports: set[int]) -> tuple[dict[int, int], str | None]:
@@ -2271,6 +2764,9 @@ def browser_debug_snapshot() -> tuple[list[dict[str, Any]], str | None]:
 
 def browser_debug_problems() -> dict[str, str]:
     rows, scan_error = browser_debug_snapshot()
+    owned = browser_debug_owned_profile_hashes()
+    if owned:
+        rows = [row for row in rows if str(row["profileHash"]) not in owned]
     min_age = browser_debug_min_age_seconds()
     min_rss = browser_debug_min_rss_mb()
     qualifying = [
@@ -2373,10 +2869,14 @@ def active_reconcile_prefixes(checks: set[str]) -> list[str]:
         prefixes.append(BROWSER_DEBUG_PREFIX)
     if "wedge_signature" in checks:
         prefixes.append("wedge:")
+    if "turn_failure_rate" in checks:
+        prefixes.extend(TURN_FAILURE_PREFIXES)
     if "supervision_deadman" in checks:
         prefixes.append("supervision_deadman")
     if "clock_skew" in checks:
         prefixes.append("clock_skew")
+    if "dm_roundtrip" in checks:
+        prefixes.append("dm_roundtrip:")
     return prefixes
 
 
@@ -2384,7 +2884,70 @@ def key_in_active_scope(key: str, prefixes: list[str]) -> bool:
     return any(key == prefix or key.startswith(prefix) for prefix in prefixes)
 
 
-def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, evaluated_instances: set[str] | None = None) -> dict[str, str]:
+def dm_roundtrip_env_float(name: str, default: float) -> float:
+    """Positive finite float from env, else default (fail-safe on bad input)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def dm_roundtrip_problems() -> dict[str, str]:
+    """Active direct-DM round-trip liveness probe (layer 3, bead active-liveness-checks-fleet).
+
+    Per roster entry: send a sentinel to the instance's OWN jid over its MCP
+    socket, prove the send was accepted, then confirm the sentinel lands in that
+    instance's ``messages`` table as a ``fromMe`` echo -- end-to-end liveness that
+    a ``/health`` 200 cannot give. Does NOT prove the turn pipeline (Finding B).
+
+    Dark by default: runs only when ``dm_roundtrip`` is explicitly listed in
+    ``BOT_ERRORS_WATCHDOG_CHECKS`` (NOT in DEFAULT_CHECKS). Because the endpoints
+    (socket + own jid) are not auto-discoverable, the roster is explicit via
+    ``BOT_ERRORS_DM_ROUNDTRIP_ROSTER`` (JSON array of ``{name,socket,own_jid[,db]}``;
+    ``db`` defaults to ``wedge_db_root()/<name>/bot.db``). Enabled-but-unconfigured
+    fails loud as a config problem rather than silently probing nothing.
+    """
+    problems: dict[str, str] = {}
+    raw = os.environ.get("BOT_ERRORS_DM_ROUNDTRIP_ROSTER", "")
+    try:
+        targets = dm_roundtrip_parse_roster(
+            raw, default_db_for=lambda name: str(wedge_db_root() / name / "bot.db")
+        )
+    except RoundtripConfigError as exc:
+        problems["dm_roundtrip:config"] = (
+            f"dm_roundtrip enabled but roster invalid: {exc}. Set "
+            "BOT_ERRORS_DM_ROUNDTRIP_ROSTER to a JSON array of "
+            "{name,socket,own_jid[,db]}."
+        )
+        return problems
+    timeout = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_TIMEOUT_SECONDS", 15.0)
+    deadline = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_DEADLINE_SECONDS", 10.0)
+    poll = dm_roundtrip_env_float("BOT_ERRORS_DM_ROUNDTRIP_POLL_SECONDS", 0.5)
+    for target in targets:
+        problem = dm_roundtrip_evaluate_target(
+            target, timeout=timeout, deadline_s=deadline, poll_interval_s=poll
+        )
+        if problem:
+            problems[f"dm_roundtrip:{target.name}"] = problem
+    return problems
+
+
+def key_recovery_is_observed(key: str, evaluated_keys: set[str] | None) -> bool:
+    return not key.startswith(TURN_FAILURE_PREFIXES) or (
+        evaluated_keys is not None and key in evaluated_keys
+    )
+
+
+def collect_problems(
+    args: argparse.Namespace,
+    checks: set[str] | None = None,
+    evaluated_instances: set[str] | None = None,
+    evaluated_keys: set[str] | None = None,
+) -> dict[str, str]:
     checks = checks if checks is not None else configured_checks()
     problems: dict[str, str] = {}
     if "q_loop" in checks:
@@ -2470,9 +3033,10 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
     if "daily_health" in checks:
         hosts = daily_health_hosts()
         if hosts:
+            scan = daily_health_scan()
             for host in hosts:
-                age, detail = daily_health_age(host)
-                key = f"daily_health:{host}"
+                age, detail = daily_health_age(host, scan=scan)
+                key = f"daily_health:{daily_health_source_host(host)}"
                 if age is None or age > args.max_daily_health_age:
                     collector_context = collector_reachability_evidence(host)
                     problems[key] = (
@@ -2495,10 +3059,14 @@ def collect_problems(args: argparse.Namespace, checks: set[str] | None = None, e
         problems.update(browser_debug_problems())
     if "wedge_signature" in checks:
         problems.update(wedge_signature_problems())
+    if "turn_failure_rate" in checks:
+        problems.update(turn_failure_rate_problems(evaluated_keys))
     if "supervision_deadman" in checks:
         problems.update(supervision_deadman_problems())
     if "clock_skew" in checks:
         problems.update(clock_skew_problems())
+    if "dm_roundtrip" in checks:
+        problems.update(dm_roundtrip_problems())
     return problems
 
 
@@ -2565,6 +3133,7 @@ def reconcile(
     session: Any = None,
     capability: Any = None,
     evaluated_instances: set[str] | None = None,
+    evaluated_keys: set[str] | None = None,
 ) -> list[Path]:
     """Reconcile problems against open incidents and write outbox events.
 
@@ -2588,6 +3157,7 @@ def reconcile(
                 _compat_session,
                 _load.capability,
                 evaluated_instances,
+                evaluated_keys,
             )
     assert state is not None and capability is not None
     open_incidents: dict[str, Any] = state.setdefault("open", {})
@@ -2601,6 +3171,17 @@ def reconcile(
             open_incidents.pop(key, None)
         if key in open_incidents:
             incident = open_incidents[key]
+            # State written before the backoff fields existed has no
+            # lastNotifiedEvidence; the previous lastEvidence is the best
+            # record of what was last said.
+            notified_evidence = incident.get("lastNotifiedEvidence")
+            if not isinstance(notified_evidence, str):
+                previous_evidence = incident.get("lastEvidence")
+                notified_evidence = previous_evidence if isinstance(previous_evidence, str) else None
+            evidence_unchanged = notified_evidence is not None and (
+                evidence_fingerprint(notified_evidence) == evidence_fingerprint(redacted_evidence)
+            )
+            unchanged_renotifies = int_or_zero(incident.get("renotifyCount")) if evidence_unchanged else 0
             incident["suppressed"] = int_or_zero(incident.get("suppressed")) + 1
             incident["lastSeenAt"] = now_iso(current)
             incident["lastEvidence"] = redacted_evidence
@@ -2617,11 +3198,16 @@ def reconcile(
             # when they are old or repeatedly observed.
             if is_nonpaging_incident_key(key):
                 escalated = False
-            should_renotify = since_notify >= watchdog_renotify_seconds()
+            # Escalated incidents saying the same thing back off (6 h, 12 h,
+            # 24 h, capped); changed evidence falls back to the base interval.
+            renotify_interval = renotify_interval_seconds(unchanged_renotifies if escalated else 0)
+            should_renotify = since_notify >= renotify_interval
             if should_renotify:
                 incident["lastNotifiedAt"] = now_iso(current)
                 incident["lastNotificationSuppressed"] = suppressed
-                severity = incident_severity(key, escalated)
+                incident["lastNotifiedEvidence"] = redacted_evidence
+                incident["renotifyCount"] = unchanged_renotifies + 1 if (escalated and evidence_unchanged) else 0
+                severity = incident_severity(key, escalated, renotify=True)
                 label = "escalated" if escalated else "still open"
                 append_log(
                     "renotify_open",
@@ -2630,6 +3216,9 @@ def reconcile(
                         "suppressed": suppressed,
                         "ageSeconds": age_seconds,
                         "sinceLastNotifySeconds": since_notify,
+                        "renotifyIntervalSeconds": renotify_interval,
+                        "renotifyCount": incident["renotifyCount"],
+                        "evidenceChanged": not evidence_unchanged,
                         "escalated": escalated,
                         "evidence": evidence,
                     },
@@ -2645,6 +3234,9 @@ def reconcile(
                         f"age_seconds={age_seconds}",
                         f"suppressed_duplicates={suppressed}",
                         f"last_notified={now_iso(last_notified)}",
+                        f"evidence_changed={str(not evidence_unchanged).lower()}",
+                        f"renotify_count={incident['renotifyCount']}",
+                        f"next_renotify_seconds={renotify_interval_seconds(incident['renotifyCount'] if escalated else 0)}",
                         evidence,
                         f"watchdog_state={watchdog_state_path()}",
                         f"watchdog_log={state_root() / 'logs/heartbeat-watchdog.jsonl'}",
@@ -2688,6 +3280,13 @@ def reconcile(
                     "ageSeconds": int_or_zero(flap_record.get("ageSeconds")),
                     "flapCount": flap_count,
                 }
+                if first_reopen:
+                    open_incidents[key]["lastNotifiedEvidence"] = redacted_evidence
+                    open_incidents[key]["renotifyCount"] = 0
+                else:
+                    for carried in ("lastNotifiedEvidence", "renotifyCount"):
+                        if carried in flap_record:
+                            open_incidents[key][carried] = flap_record[carried]
                 if first_reopen:
                     append_log(
                         "flap_reopen_alert",
@@ -2746,6 +3345,8 @@ def reconcile(
             "lastSeenAt": now_iso(current),
             "lastNotifiedAt": now_iso(current),
             "lastEvidence": redacted_evidence,
+            "lastNotifiedEvidence": redacted_evidence,
+            "renotifyCount": 0,
             "suppressed": 0,
         }
         new_summary = open_incident_summary(key)
@@ -2764,6 +3365,8 @@ def reconcile(
         ))
     for key in sorted(set(open_incidents) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
+            continue
+        if not key_recovery_is_observed(key, evaluated_keys):
             continue
         # #2431: constrain incident-clear to the evaluated instance set only.
         # An incident for a non-evaluated instance must survive the sweep so
@@ -2804,6 +3407,9 @@ def reconcile(
             "recoveryObservations": recovery_observations,
             "holdNotice": flap_count > 0,
         }
+        for carried in ("lastNotifiedEvidence", "renotifyCount"):
+            if carried in incident:
+                state["recentlyRecovered"][key][carried] = incident[carried]
         if flap_count > 0:
             # A flapping incident's recovery is provisional: inside the re-arm
             # window the same condition reopens silently, so announcing each
@@ -2833,11 +3439,13 @@ def reconcile(
             event_type="clear",
         ))
     for key in sorted(set(state["pendingStale"]) - set(problems)):
-        if key_in_active_scope(key, active_prefixes):
+        if key_in_active_scope(key, active_prefixes) and key_recovery_is_observed(key, evaluated_keys):
             state["pendingStale"].pop(key, None)
     rearm_seconds = watchdog_flap_rearm_seconds()
     for key in sorted(set(state["recentlyRecovered"]) - set(problems)):
         if not key_in_active_scope(key, active_prefixes):
+            continue
+        if not key_recovery_is_observed(key, evaluated_keys):
             continue
         record = state["recentlyRecovered"][key]
         if not isinstance(record, dict):
@@ -2920,12 +3528,24 @@ def run_once(args: argparse.Namespace) -> int:
     validate_thresholds()
     try:
         checks = configured_checks()
-    except ValueError as exc:
+        if "turn_failure_rate" in checks:
+            turn_failure_window_seconds()
+            turn_failure_min_count()
+            turn_failure_max_chats_reported()
+        if checks & PROFILE_CHECKS:
+            # Resolve the profile before any state effect: an unreadable
+            # profile must fail the run, not expect zero instances.
+            expected_local_services()
+    except (ValueError, FleetConfigError) as exc:
         # Configuration error: fail closed (#2465). Do NOT reconcile, refresh
         # state, or print a green-looking result. Exit nonzero with a bounded
         # diagnostic so supervisors see a configuration failure, not success.
         print(f"configuration_error: {exc}", file=sys.stderr)
         print(json.dumps({"time": now_iso(), "verdict": "configuration_error", "error": str(exc)}, sort_keys=True))
+        if isinstance(exc, FleetConfigError):
+            # A missing profile also raises the daily alert. It touches only the
+            # outbox and its own marker, so controller state stays unopened.
+            emit_profile_missing_event(exc)
         return 2
     # #2723 R4.2/R4.3: open state session before domain effects (collect_problems).
     # Load/inspect mode, reconcile recovered state per _load_collector_state_for_cycle
@@ -2956,7 +3576,8 @@ def run_once(args: argparse.Namespace) -> int:
             _state = _load_result.payload
             _capability = _load_result.capability
             evaluated_instances: set[str] = set()
-            problems = collect_problems(args, checks, evaluated_instances)
+            evaluated_keys: set[str] = set()
+            problems = collect_problems(args, checks, evaluated_instances, evaluated_keys)
             written = reconcile(
                 problems,
                 active_reconcile_prefixes(checks),
@@ -2964,6 +3585,7 @@ def run_once(args: argparse.Namespace) -> int:
                 session,
                 _capability,
                 evaluated_instances,
+                evaluated_keys,
             )
             print(json.dumps({
                 "time": now_iso(),

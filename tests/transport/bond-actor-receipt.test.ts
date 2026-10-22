@@ -141,6 +141,7 @@ describe('S1 — the bond actor ledger', () => {
       action: 'mcp_tool:logout',
       actorIdentity: ACTOR_JID,
       requestId: 'durability:4242',
+      turnOwned: true,
     });
     const evidence = resolveBondOwnerEvidence(ledger);
     expect(evidence.status).toBe('consulted');
@@ -149,9 +150,45 @@ describe('S1 — the bond actor ledger', () => {
     expect(evidence.bondRemovalRequest!.route).toBe('mcp');
     expect(evidence.bondRemovalRequest!.action).toBe('mcp_tool:logout');
     expect(evidence.bondRemovalRequest!.ageMs).toBeGreaterThanOrEqual(0);
-    // route + actor identity => operator, and the raw route survives alongside
-    // the derived class so the mapping stays auditable.
-    expect(evidence.actorClass).toBe('operator');
+    // #3421: an mcp call from the turn's own helper => turn_agent, and the raw
+    // route survives alongside the derived class so the mapping stays auditable.
+    expect(evidence.actorClass).toBe('turn_agent');
+  });
+
+  it('#3421: labels an mcp caller that is not the turn\'s own helper outside_caller, even with the turn\'s actor', () => {
+    // The mislabel this fixes: an outside same-UID caller landing mid-turn
+    // inherits the turn's sender, so an actor identity alone used to read as
+    // `operator`. Turn ownership, not the actor, now decides the class.
+    const withActor = createBondActorLedger();
+    withActor.recordBondRemovalRequest({
+      route: 'mcp',
+      action: 'mcp_tool:logout',
+      actorIdentity: ACTOR_JID,
+      requestId: 'durability:4243',
+      turnOwned: false,
+    });
+    const unknownOwnership = createBondActorLedger();
+    unknownOwnership.recordBondRemovalRequest({
+      route: 'mcp',
+      action: 'mcp_tool:logout',
+      actorIdentity: null,
+      requestId: null,
+    });
+    const classes = [withActor, unknownOwnership].map((ledger) => {
+      const evidence = resolveBondOwnerEvidence(ledger);
+      return evidence.status === 'consulted' ? evidence.actorClass : evidence.status;
+    });
+    expect(classes).toEqual(['outside_caller', 'outside_caller']);
+  });
+
+  it('#3421: stamps version 2 on both the consulted and the unavailable receipt', () => {
+    expect(resolveBondOwnerEvidence(createBondActorLedger())).toMatchObject({ status: 'consulted', version: 2 });
+    expect(resolveBondOwnerEvidence(null)).toEqual({
+      status: 'unavailable',
+      version: 2,
+      reason: 'ledger_absent',
+      resolvedAt: null,
+    });
   });
 
   it('uses systemClock for default record and resolve timestamps', () => {
@@ -194,7 +231,7 @@ describe('S1 — the bond actor ledger', () => {
     const evidence = resolveBondOwnerEvidence(ledger, resolvedAt);
     expect(evidence).toEqual({
       status: 'consulted',
-      version: 1,
+      version: 2,
       resolvedAt: '2026-08-17T04:36:40.250Z',
       actorClass: 'api',
       bondRemovalRequest: {
@@ -307,13 +344,14 @@ describe('S1 — the receipt is joined onto the persisted bond event', () => {
       action: 'mcp_tool:logout',
       actorIdentity: ACTOR_JID,
       requestId: 'durability:99',
+      turnOwned: true,
     });
     const receipt = emitBondEventAndReadReceipt();
     expect(receipt.status).toBe('consulted');
     if (receipt.status !== 'consulted') return;
     expect(receipt.bondRemovalRequest).not.toBeNull();
     expect(receipt.bondRemovalRequest!.action).toBe('mcp_tool:logout');
-    expect(receipt.actorClass).toBe('operator');
+    expect(receipt.actorClass).toBe('turn_agent');
   });
 
   it('carries the S2 effective-client receipt, describing the socket that was built', () => {

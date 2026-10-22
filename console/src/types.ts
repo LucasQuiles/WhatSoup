@@ -2,6 +2,11 @@
 //  WhatSoup Console — Shared Type Definitions
 // ---------------------------------------------------------------------------
 
+export type {
+  ProviderCatalogEntry,
+  ProviderModelsListing,
+} from '../../src/lib/provider-catalogue-contract.d.ts';
+
 export type Mode = 'passive' | 'chat' | 'agent';
 export type Status = 'online' | 'degraded' | 'unreachable' | 'logged_out' | 'config_error' | 'unknown';
 export type StatusConfidence = 'confirmed' | 'inferred' | 'ambiguous';
@@ -23,6 +28,14 @@ export interface MetricAvailabilityMap {
   chatCounts?: MetricAvailability;
   tokenStats?: MetricAvailability;
   lastActivity?: MetricAvailability;
+}
+
+export interface RecoveryDebtSummary {
+  open: boolean;
+  serviceBlocking: boolean;
+  attention: 'none' | 'routine' | 'urgent';
+  reasons: string[];
+  gaugeTotal: number;
 }
 
 export interface LineInstance {
@@ -91,6 +104,7 @@ export interface LineInstance {
       provider?: string;
     };
   } | null;
+  recoveryDebt?: RecoveryDebtSummary | null;
   // Freshness seam (#1762 remediation 1, enrichInstance in src/fleet/routes/lines.ts):
   // when `health` was last genuinely replaced by a live poll, and whether the
   // poller is currently failing (in which case `health` may be carried
@@ -256,6 +270,14 @@ export type FeedDetail =
       reason?: string;
       evidence?: string[];
     }
+  | {
+      type: 'recovery_debt';
+      state: 'opened' | 'changed' | 'cleared';
+      serviceBlocking: boolean;
+      attention: RecoveryDebtSummary['attention'];
+      reasons: string[];
+      gaugeTotal: number;
+    }
   | { type: 'import'; table?: string; count?: number; skipped?: boolean }
   | { type: 'message'; direction: 'inbound' | 'outbound'; chatJid?: string; messageId?: string; preview?: string; senderName?: string; contentType?: string; conversationKey?: string }
   | { type: 'generic' };
@@ -329,14 +351,6 @@ export interface ContactResult {
 //  Mirrors GET /api/providers and GET /api/lines/:name/provider-status
 //  (src/fleet/routes/providers.ts, src/fleet/routes/lines.ts).
 // ---------------------------------------------------------------------------
-
-export interface ProviderCatalogEntry {
-  id: string;
-  displayName: string;
-  type: 'cli' | 'api';
-  needsApiKey: boolean;
-  providerConfig: string[];
-}
 
 /** One provider slot (primary or fallback) in the provider-status response. */
 /** Windowed per-sender throttle aggregate for one line (D-5) —

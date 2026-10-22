@@ -15,14 +15,29 @@
 //    together on quota/suspension, so provider diversity IS the ladder's
 //    resilience (incident 2026-08-15: kimi suspended + glm quota-exhausted
 //    left a 3-entry chain with a single live entry).
-//  - Within a provider, the operator pin wins, else the LAST catalogue entry
-//    (observed newest/flagship across deepseek/glm/minimax/kimi catalogues).
-//  - Candidates with real-completion 'ok' evidence rank before 'unknown';
-//    'dead' candidates are excluded from selection but reported in the basis.
-//  - Keyless free-tier gateway models are eligible ONLY for the tail slot — a
-//    weak model that needs no credential beats a chain-exhausted turn.
+//  - Within a provider, a live operator pin wins. Otherwise recent successful
+//    completion evidence wins, then stable reported lifecycle, then a plain id
+//    over one carrying a pre-release token such as `-exp` or `-preview` (the
+//    gateway usually reports those active), then validated release date, then
+//    the provider's rolling alias (an id equal to its models.dev family), and
+//    finally descending model id. The representative never depends on where
+//    an id appears in the catalogue listing (incident 2026-09-21: three
+//    same-day DeepSeek ids tied and listing position picked an experimental
+//    variant).
+//  - A dead exact model does not condemn its provider: the next eligible model
+//    can represent that provider. An all-dead provider keeps one bounded
+//    recovery probe; a replaced dead sibling becomes eligible after its
+//    failure evidence expires rather than expanding the canary sweep.
+//  - A metadata-confirmed zero-cost gateway model is eligible ONLY for the
+//    tail slot — a weak keyless model beats a chain-exhausted turn.
+
+import {
+  modelCatalogReleaseDateSortKey,
+  type ModelCatalogMetadata,
+} from './providers/binary-preflight.ts';
 
 export type CandidateEvidence = 'ok' | 'dead' | 'unknown';
+export type CandidateEligibilityBasis = 'metadata' | 'legacy-heuristic' | 'operator-pin';
 
 export interface FallbackDiscoveryPolicy {
   /** Chain length cap; clamped to [1, 4] (mirrors the static-chain cap). */
@@ -64,6 +79,11 @@ const NON_CHAT_MODEL_TOKENS = [
   'moderation', 'realtime', 'transcribe', 'rerank', 'audio',
 ] as const;
 
+/** Lifecycle values that explicitly mean the model should no longer receive
+ *  automatic traffic. Preview/alpha/beta values stay eligible because they
+ *  are not an inactive claim. */
+const INACTIVE_MODEL_STATUSES = new Set(['inactive', 'deprecated', 'retired', 'disabled']);
+
 /** True when a catalogue id's model segment matches a non-chat token. */
 export function isNonChatCatalogModel(modelId: string): boolean {
   const slash = modelId.indexOf('/');
@@ -71,10 +91,36 @@ export function isNonChatCatalogModel(modelId: string): boolean {
   return NON_CHAT_MODEL_TOKENS.some((token) => modelSegment.includes(token));
 }
 
+/**
+ * Whole-word lifecycle tokens that mark a model id as pre-release. models.dev
+ * publishes lifecycle only as absent, `beta`, or `deprecated`, and OpenCode
+ * reports an absent value as `active`, so an experimental variant usually
+ * arrives with the same status and release date as the stable model it
+ * accompanies (observed 2026-09-21: `deepseek-v4-flash-vision-exp`). The id is
+ * then the only lifecycle signal left. Tokens are matched as whole words so
+ * `expert` or `betamax` never match. `:` and `/` also delimit, because
+ * aggregators nest ids (`vendor/model`) and append routing suffixes
+ * (`model-preview:free`).
+ */
+const PRE_RELEASE_ID_TOKENS = new Set(['exp', 'experimental', 'preview', 'alpha', 'beta']);
+
+/** True when a catalogue id's model segment carries a pre-release token. */
+export function isExperimentalCatalogModel(modelId: string): boolean {
+  const slash = modelId.indexOf('/');
+  const modelSegment = (slash >= 0 ? modelId.slice(slash + 1) : modelId).toLowerCase();
+  return modelSegment.split(/[-_.:/]/).some((token) => PRE_RELEASE_ID_TOKENS.has(token));
+}
+
 export interface DiscoveredCandidate {
   catalogProvider: string;
   model: string;
   evidence: CandidateEvidence;
+  catalogStatus: string | null;
+  /** models.dev family of the representative, when the catalogue supplies one. */
+  family: string | null;
+  releaseDate: string | null;
+  zeroCost: boolean | null;
+  eligibilityBasis: CandidateEligibilityBasis;
   freeTier: boolean;
   selected: boolean;
 }
@@ -89,6 +135,8 @@ export interface DiscoveredChainResult {
 export function deriveFallbackChainFromCatalog(opts: {
   /** `listModelCatalog` ids in catalogue order (e.g. 'glm/glm-5.2'). */
   catalogIds: readonly string[];
+  /** Shape-checked optional metadata keyed by exact catalogue id. */
+  catalogMetadata?: Readonly<Record<string, ModelCatalogMetadata>>;
   /** Runtime provider id the entries route through (e.g. 'opencode-cli'). */
   gatewayProvider: string;
   primary: { provider: string; model?: string | null };
@@ -104,49 +152,195 @@ export function deriveFallbackChainFromCatalog(opts: {
   const evidenceFor = opts.evidenceFor ?? ((): CandidateEvidence => 'unknown');
   const excluded = new Set(policy.excludeProviders);
 
-  // Group catalogue ids by provider prefix, preserving catalogue order.
-  // Non-chat models (embeddings, image/video/speech generation, …) are
-  // dropped here so BOTH the newest-per-provider pick and the free-tier tail
-  // only ever consider ids that can serve a text turn — unless the operator
-  // pinned one explicitly, which always wins over the heuristic.
+  // Group catalogue ids by provider prefix. Map insertion order (first
+  // appearance of each provider) still orders providers in the final chain;
+  // an id's position inside its provider group is never a ranking input.
   const groups = new Map<string, string[]>();
   for (const id of opts.catalogIds) {
     const slash = id.indexOf('/');
     if (slash <= 0 || slash === id.length - 1) continue; // malformed id
     const catalogProvider = id.slice(0, slash);
     if (excluded.has(catalogProvider)) continue;
-    if (isNonChatCatalogModel(id) && policy.preferModels[catalogProvider] !== id) continue;
     const group = groups.get(catalogProvider);
     if (group) group.push(id);
     else groups.set(catalogProvider, [id]);
   }
 
-  // One candidate per provider: operator pin when live, else last (newest).
+  const evidenceTier = (evidence: CandidateEvidence): number => {
+    if (evidence === 'ok') return 0;
+    if (evidence === 'unknown') return 1;
+    return 2;
+  };
+  const statusTier = (status: string | null): number => {
+    if (status === 'active' || status === 'stable' || status === 'ga') return 0;
+    if (status === 'beta' || status === 'preview') return 1;
+    if (status === 'alpha' || status === 'experimental') return 2;
+    return 3;
+  };
+
+  type RankedProviderModel = {
+    model: string;
+    evidence: CandidateEvidence;
+    catalogStatus: string | null;
+    /** The id carries a whole-word pre-release token (`-exp`, `-preview`, …). */
+    preRelease: boolean;
+    family: string | null;
+    /** The id's model segment equals its family: the provider's rolling
+     *  alias for that line (e.g. `deepseek/deepseek-flash`). */
+    canonicalAlias: boolean;
+    releaseDate: string | null;
+    releaseDateSortKey: string | null;
+    zeroCost: boolean | null;
+    eligibilityBasis: CandidateEligibilityBasis;
+    hasMetadataRecord: boolean;
+    pinned: boolean;
+  };
+
+  // One representative per provider. A pin wins while it is not dead. For an
+  // automatic pick, completion evidence is stronger than catalogue recency;
+  // then reported lifecycle, the pre-release naming hint, release date, the
+  // rolling alias, and finally the model id break the remaining ties. The
+  // result depends on the id set, its metadata and the evidence oracle, never
+  // on the order of the listing.
   const candidates: DiscoveredCandidate[] = [];
   for (const [catalogProvider, ids] of groups) {
+    if (catalogProvider === FREE_TIER_PREFIX && !policy.includeFreeTier) continue;
     const pinned = policy.preferModels[catalogProvider];
-    const model = pinned !== undefined && ids.includes(pinned) ? pinned : ids[ids.length - 1]!;
-    const freeTier = catalogProvider === FREE_TIER_PREFIX;
-    if (freeTier && !policy.includeFreeTier) continue;
-    if (opts.gatewayProvider === opts.primary.provider && model === opts.primary.model) continue;
+    const providerModels: RankedProviderModel[] = [];
+    for (const id of ids) {
+      if (opts.gatewayProvider === opts.primary.provider && id === opts.primary.model) continue;
+      const isPinned = pinned === id;
+      const hasMetadataRecord = opts.catalogMetadata !== undefined
+        && Object.prototype.hasOwnProperty.call(opts.catalogMetadata, id);
+      const rawMetadata = opts.catalogMetadata?.[id];
+      const status = typeof rawMetadata?.status === 'string'
+        ? rawMetadata.status.trim().toLowerCase()
+        : null;
+      const rawReleaseDate = rawMetadata?.releaseDate;
+      const releaseDateSortKey = modelCatalogReleaseDateSortKey(rawReleaseDate);
+      const releaseDate = releaseDateSortKey !== null && typeof rawReleaseDate === 'string'
+        ? rawReleaseDate
+        : null;
+      const zeroCost = typeof rawMetadata?.zeroCost === 'boolean'
+        ? rawMetadata.zeroCost
+        : null;
+      const family = typeof rawMetadata?.family === 'string' && rawMetadata.family.trim() !== ''
+        ? rawMetadata.family.trim()
+        : null;
+      const canonicalAlias = family !== null
+        && id.slice(catalogProvider.length + 1).toLowerCase() === family.toLowerCase();
+
+      // The opencode gateway also lists paid catalogue entries. Only a model
+      // explicitly recorded as zero-cost (or a metadata-free legacy entry)
+      // can fill the automatic keyless/free-tier reserve. A verbose record
+      // with missing/malformed cost is unknown, not free. An exact operator
+      // pin may still choose such an entry, but it is not labeled free tier.
+      if (
+        catalogProvider === FREE_TIER_PREFIX
+        && !isPinned
+        && hasMetadataRecord
+        && zeroCost !== true
+      ) continue;
+
+      let eligibilityBasis: CandidateEligibilityBasis;
+      if (isPinned) {
+        eligibilityBasis = 'operator-pin';
+      } else {
+        const explicitlyIneligible = (status !== null && INACTIVE_MODEL_STATUSES.has(status))
+          || rawMetadata?.textOutput === false
+          || rawMetadata?.toolCall === false;
+        if (explicitlyIneligible) continue;
+        if (rawMetadata?.textOutput === true && rawMetadata?.toolCall === true) {
+          eligibilityBasis = 'metadata';
+        } else {
+          if (isNonChatCatalogModel(id)) continue;
+          eligibilityBasis = 'legacy-heuristic';
+        }
+      }
+
+      providerModels.push({
+        model: id,
+        evidence: evidenceFor(id),
+        catalogStatus: status,
+        preRelease: isExperimentalCatalogModel(id),
+        family,
+        canonicalAlias,
+        releaseDate,
+        releaseDateSortKey,
+        zeroCost,
+        eligibilityBasis,
+        hasMetadataRecord,
+        pinned: isPinned,
+      });
+    }
+    if (providerModels.length === 0) continue;
+
+    providerModels.sort((a, b) => {
+      if (a.pinned !== b.pinned) {
+        if (a.pinned && a.evidence !== 'dead') return -1;
+        if (b.pinned && b.evidence !== 'dead') return 1;
+      }
+      const evidenceDifference = evidenceTier(a.evidence) - evidenceTier(b.evidence);
+      if (evidenceDifference !== 0) return evidenceDifference;
+      const statusDifference = statusTier(a.catalogStatus) - statusTier(b.catalogStatus);
+      if (statusDifference !== 0) return statusDifference;
+      // Within one reported lifecycle, a pre-release id ranks below a plain
+      // one. An explicit gateway status still outranks the naming hint, and
+      // the hint works without metadata (legacy capture) because it never
+      // moves a model to another status tier.
+      if (a.preRelease !== b.preRelease) return a.preRelease ? 1 : -1;
+      if (a.releaseDateSortKey !== b.releaseDateSortKey) {
+        if (a.releaseDateSortKey === null) return 1;
+        if (b.releaseDateSortKey === null) return -1;
+        return b.releaseDateSortKey.localeCompare(a.releaseDateSortKey);
+      }
+      // Among equally evidenced, equally stable, same-day models, prefer the
+      // provider's rolling alias. Sitting after release date, this can never
+      // choose an alias over a newer versioned model, and after lifecycle it
+      // can never choose a pre-release alias over a stable sibling. On the
+      // fleet host it also avoids a legacy alias carrying a smaller locally
+      // configured output limit (observed 2026-09-22). The flag is per model,
+      // so it also applies between same-day ids of different families; the
+      // catalogue gives no basis for ranking families against each other.
+      if (a.canonicalAlias !== b.canonicalAlias) return a.canonicalAlias ? -1 : 1;
+      // Total order: descending plain string comparison of the id (UTF-16
+      // code units, not locale-aware, so the result is identical on every
+      // host). OpenCode lists ids with a locale-aware sort, so for a provider
+      // whose ids share one letter case this reproduces the former later-entry
+      // pick; mixed-case ids, `~` or `_` prefixes, and pre-release ids can
+      // resolve differently.
+      if (a.model === b.model) return 0;
+      return a.model < b.model ? 1 : -1;
+    });
+
+    const representative = providerModels[0]!;
+    const freeTier = catalogProvider === FREE_TIER_PREFIX
+      && (representative.zeroCost === true || !representative.hasMetadataRecord);
     candidates.push({
       catalogProvider,
-      model,
-      evidence: evidenceFor(model),
+      model: representative.model,
+      evidence: representative.evidence,
+      catalogStatus: representative.catalogStatus,
+      family: representative.family,
+      releaseDate: representative.releaseDate,
+      zeroCost: representative.zeroCost,
+      eligibilityBasis: representative.eligibilityBasis,
       freeTier,
       selected: false,
     });
   }
 
-  // Rank: keyed providers first (ok → unknown, catalogue order within each
-  // tier), then the free-tier candidate; 'dead' never selectable.
+  // Rank: keyed providers first (ok → unknown, then the order in which each
+  // provider first appears in the catalogue), then the free-tier candidate;
+  // 'dead' never selectable. Provider order deliberately still follows the
+  // listing: only the choice of model WITHIN a provider is order-invariant.
   const tierOf = (c: DiscoveredCandidate): number => {
     if (c.evidence === 'dead') return Number.MAX_SAFE_INTEGER;
     return (c.freeTier ? 2 : 0) + (c.evidence === 'ok' ? 0 : 1);
   };
   const ranked = candidates
-    .map((candidate, catalogRank) => ({ candidate, catalogRank }))
-    .sort((a, b) => tierOf(a.candidate) - tierOf(b.candidate) || a.catalogRank - b.catalogRank)
+    .map((candidate, providerOrder) => ({ candidate, providerOrder }))
+    .sort((a, b) => tierOf(a.candidate) - tierOf(b.candidate) || a.providerOrder - b.providerOrder)
     .map((r) => r.candidate);
 
   // The free-tier tail slot is RESERVED (not spare-capacity-only): a keyless

@@ -11,11 +11,13 @@ export interface HandoffDistillRunnerDeps {
   distillFor: (conversationKey: string) => Promise<DistillOutcome>;
   persist: (artifact: HandoffArtifact) => void;
   onDegraded: (conversationKey: string, reason: string) => void;
+  onSucceeded?: (conversationKey: string) => void;
   sourceFor: (conversationKey: string) => { provider: string; model: string | null };
 }
 
 export class HandoffDistillRunner {
   private states = new Map<string, DistillState>();
+  private invalidationGenerations = new Map<string, number>();
   private inFlight = new Set<string>();
   private globalInFlight = 0;
   // Explicit field (not a constructor parameter property): TS parameter
@@ -25,6 +27,22 @@ export class HandoffDistillRunner {
 
   constructor(deps: HandoffDistillRunnerDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * Fence any pending distill for a conversation. The runner is deliberately
+   * in-memory only: lifecycle invalidation must never create another stored
+   * copy of a conversation identifier.
+   */
+  invalidateConversation(conversationKey: string): void {
+    if (conversationKey.length === 0) return;
+    const generation = this.invalidationGenerations.get(conversationKey) ?? 0;
+    this.invalidationGenerations.set(conversationKey, generation + 1);
+    this.states.delete(conversationKey);
+  }
+
+  private generationFor(conversationKey: string): number {
+    return this.invalidationGenerations.get(conversationKey) ?? 0;
   }
 
   /**
@@ -39,6 +57,11 @@ export class HandoffDistillRunner {
         this.states.delete(key);
       }
     }
+    for (const key of this.invalidationGenerations.keys()) {
+      if (!activeKeys.has(key) && !this.inFlight.has(key)) {
+        this.invalidationGenerations.delete(key);
+      }
+    }
   }
 
   async tickConversation(conversationKey: string): Promise<void> {
@@ -48,6 +71,7 @@ export class HandoffDistillRunner {
     this.inFlight.add(conversationKey);
     this.globalInFlight += 1;
     try {
+      const generation = this.generationFor(conversationKey);
       const state = this.states.get(conversationKey) ?? initialDistillState(this.deps.now());
       const source = this.deps.sourceFor(conversationKey);
       const result = await runHandoffDistill({
@@ -56,10 +80,20 @@ export class HandoffDistillRunner {
         conversationKey, sourceProvider: source.provider, sourceModel: source.model,
         tokenBaseline: this.deps.tokenGrowth(conversationKey),
         distill: () => this.deps.distillFor(conversationKey),
-        persist: this.deps.persist,
-        onDegraded: (reason) => this.deps.onDegraded(conversationKey, reason),
+        persist: (artifact) => {
+          if (this.generationFor(conversationKey) === generation) {
+            this.deps.persist(artifact);
+          }
+        },
+        onDegraded: (reason) => {
+          if (this.generationFor(conversationKey) === generation) {
+            this.deps.onDegraded(conversationKey, reason);
+          }
+        },
       });
+      if (this.generationFor(conversationKey) !== generation) return;
       this.states.set(conversationKey, result.nextState);
+      if (result.ran) this.deps.onSucceeded?.(conversationKey);
     } finally {
       this.globalInFlight -= 1;
       this.inFlight.delete(conversationKey);

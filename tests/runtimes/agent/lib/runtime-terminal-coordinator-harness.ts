@@ -306,6 +306,7 @@ export function durabilityMock() {
       orphanTransfers: 0,
       echoConflicts: 0,
       openRecoveries: 0,
+      blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
     })),
     getOutboundDeliverySnapshot: vi.fn<(opId: number, expected: {
       conversationKey: string;

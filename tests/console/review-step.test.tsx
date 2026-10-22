@@ -96,8 +96,8 @@ describe('ReviewStep — Model & Auth card', () => {
 
   it('shows model defaults and "API key" auth label when models/auth are missing for chat type', () => {
     renderReview({ data: { name: 'cht-line', type: 'chat' } })
-    expect(kvValue('Conversation')).toBe('claude-sonnet-4-6')
-    expect(kvValue('Extraction')).toBe('claude-haiku-4-5-20251001')
+    expect(kvValue('Conversation')).toBe('Runtime default')
+    expect(kvValue('Extraction')).toBe('Runtime default')
     expect(kvValue('Auth')).toBe('API key')
   })
 
@@ -215,6 +215,27 @@ describe('ReviewStep — Config card agent-only rows', () => {
     expect(kvValue('Max Tokens')).toBe('32768')
     // Empty baseUrl must not render a row.
     expect(kvExists('Base URL')).toBe(false)
+  })
+
+  it('reviews configured fields for a server-discovered provider absent from the local registry', () => {
+    renderReview({
+      data: {
+        name: 'agt-new-adapter',
+        type: 'agent',
+        agentOptions: {
+          provider: 'new-adapter',
+          providerConfig: {
+            model: 'vendor-model-1',
+            customFlag: 'strict',
+            emptyField: '',
+          },
+        },
+      },
+    })
+    expect(kvValue('Provider')).toBe('new-adapter')
+    expect(kvValue('Model')).toBe('vendor-model-1')
+    expect(kvValue('custom Flag')).toBe('strict')
+    expect(kvExists('empty Field')).toBe(false)
   })
 
   it('does not render provider-config field rows for the default provider', () => {

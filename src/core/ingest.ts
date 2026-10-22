@@ -17,14 +17,16 @@ import RE2 from 're2';
 import { isAdminMessage, parseAdminCommand } from './command-router.ts';
 import { handleAdminCommand, handleFallbackCommand, handleGrantCommand, sendApprovalRequest } from './admin.ts';
 import { shouldRespond } from './access-policy.ts';
+import { isBotMentioned } from './access-predicates.ts';
 import { resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
 import { toConversationKey } from './conversation-key.ts';
-import { isLidJid, bareNumber } from './jid-constants.ts';
+import { isLidJid, bareNumber, isStatusBroadcastJid } from './jid-constants.ts';
 import { stripSelfMentionsFrom } from '../lib/self-mention-strip.ts';
 import { extractProtocol, extractPayload, HealCompletePayloadSchema } from './heal-protocol.ts';
 import { handleHealComplete, handleHealEscalate } from './heal.ts';
 import { config } from '../config.ts';
 import { emitAlert } from '../lib/emit-alert.ts';
+import { startShadowGateAttempt, warmShadowGate } from './shadow-gate-adapter.ts';
 
 const log = createChildLogger('ingest');
 
@@ -286,6 +288,7 @@ export function createIngestHandler(
   instanceType?: string,
   grantManager?: CapabilityGrantManager,
 ): (msg: IncomingMessage) => void {
+  if (config.shadowGate?.mode === 'shadow') warmShadowGate(db);
   return function ingestMessage(msg: IncomingMessage): void {
     void (async () => {
       let slotAcquired = false;
@@ -306,15 +309,17 @@ export function createIngestHandler(
         // Correlate and idempotently store outbound echoes without consuming
         // bounded admission capacity. The shared helper below keeps the normal
         // downstream storage path behavior-identical without double writes.
-        if (msg.isFromMe && durability) {
-          try {
-            durability.matchEcho(msg.messageId);
-          } catch (err) {
-            log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
-          }
-        }
         if (msg.isFromMe) {
+          // Store first: settling a recovered turn's echo records its completed
+          // identity only when the outgoing message is stored.
           const storedEcho = persistIncomingMessage(db, msg);
+          if (durability) {
+            try {
+              durability.matchEcho(msg.messageId);
+            } catch (err) {
+              log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
+            }
+          }
           if (!storedEcho) return;
           if (!storedEcho.isNew) {
             log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');
@@ -483,8 +488,14 @@ export function createIngestHandler(
             'ingest: not dispatching',
           );
 
-          // 4. Send approval request for unknown senders
-          if (triggerResult.accessStatus === 'unknown') {
+          // 4. Send approval request for unknown senders. #3566: a group
+          // stranger (strict group mode) only asks when they @mentioned the
+          // bot; ordinary group chatter must not page the admin. The status
+          // broadcast is never a direct chat.
+          const approvalEligible = msg.isGroup
+            ? isBotMentioned(msg.mentionedJids, getBotJid(), getBotLid())
+            : !isStatusBroadcastJid(msg.chatJid);
+          if (triggerResult.accessStatus === 'unknown' && approvalEligible) {
             const approvalPhone = resolvePhoneFromJid(msg.senderJid, db);
             try {
               await sendApprovalRequest(db, messenger, approvalPhone, msg.senderName ?? '', msg.content ?? '', durability);
@@ -501,18 +512,32 @@ export function createIngestHandler(
           return;
         }
 
+        // 4b. Shadow gate: logged-only verdict on raw content; never changes dispatch
+        const shadowAttempt = config.shadowGate?.mode === 'shadow'
+          ? startShadowGateAttempt(msg, conversationKey, db, getBotJid, getBotLid, config)
+          : null;
+
         // 5. Journal inbound event before dispatch so runtime can link outbound ops
         const routedTo = runtime.constructor?.name?.toLowerCase() ?? 'runtime';
         let seq: number | undefined;
         if (durability) {
-          seq = durability.journalInbound(
-            msg.messageId,
-            conversationKey,
-            msg.chatJid,
-            routedTo,
-            ingressReceivedAtUnixSeconds,
-          );
+          try {
+            seq = durability.journalInbound(
+              msg.messageId,
+              conversationKey,
+              msg.chatJid,
+              routedTo,
+              ingressReceivedAtUnixSeconds,
+            );
+          } catch (err) {
+            shadowAttempt?.journalFailed();
+            throw err;
+          }
+          shadowAttempt?.settle(seq);
           msg.inboundSeq = seq;  // Thread seq into runtime for lifecycle tracking
+          // The exact key journaled above. The runtime reuses it for the turn
+          // identity instead of resolving the LID mapping a second time.
+          msg.journaledConversationKey = conversationKey;
           msg.receivedAtUnixSeconds = durability.getInboundReceivedAtUnixSeconds(seq);
           if (msg.receivedAtUnixSeconds === undefined) {
             log.warn(
@@ -520,6 +545,8 @@ export function createIngestHandler(
               'journaled inbound receipt is invalid — dispatching without chronology',
             );
           }
+        } else {
+          shadowAttempt?.settle(null);
         }
 
         // Strip the bot's own @mention token from inbound GROUP text so the agent

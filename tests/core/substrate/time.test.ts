@@ -60,6 +60,53 @@ describe('normalizeUnixTimestampSeconds', () => {
     expect(normalizeUnixTimestampSeconds('not-a-number', undefined, fakeClock(t0ms))).toBe(fakeNowSec);
     expect(normalizeUnixTimestampSeconds(Number.POSITIVE_INFINITY, undefined, fakeClock(t0ms))).toBe(fakeNowSec);
   });
+
+  // A protobuf Long that has been through JSON (for example a stored raw message)
+  // loses its prototype and becomes a plain { low, high, unsigned } word pair.
+  // Number() of that object is NaN, so it used to fall back to "now".
+  describe('Long word pairs that lost their prototype', () => {
+    it('decodes an unsigned seconds value', () => {
+      expect(normalizeUnixTimestampSeconds({ low: 1_789_108_312, high: 0, unsigned: true }, -1)).toBe(1_789_108_312);
+    });
+
+    it('decodes milliseconds whose low word is negative as an int32', () => {
+      // 1_789_108_312_123 ms = high word 416, low word 2_401_916_987 (-1_893_050_309 as int32).
+      expect(normalizeUnixTimestampSeconds({ low: -1_893_050_309, high: 416, unsigned: true }, -1)).toBe(1_789_108_312);
+      expect(normalizeUnixTimestampSeconds({ low: 2_401_916_987, high: 416, unsigned: true }, -1)).toBe(1_789_108_312);
+    });
+
+    it('decodes signed words, including when unsigned is omitted', () => {
+      expect(normalizeUnixTimestampSeconds({ low: -1_893_050_309, high: 416, unsigned: false }, -1)).toBe(1_789_108_312);
+      expect(normalizeUnixTimestampSeconds({ low: 1_789_108_312, high: 0 }, -1)).toBe(1_789_108_312);
+      expect(normalizeUnixTimestampSeconds({ low: -5, high: -1, unsigned: false }, 123)).toBe(-5);
+    });
+
+    it('returns the decoded instant instead of the clock when no fallback is given', () => {
+      const clock = fakeClock(2_000_000_000_000);
+      expect(normalizeUnixTimestampSeconds({ low: 1_789_108_312, high: 0, unsigned: true }, undefined, clock)).toBe(
+        1_789_108_312,
+      );
+    });
+
+    it('keeps falling back for malformed or out-of-range word pairs', () => {
+      const malformed: unknown[] = [
+        {},
+        { low: 1_789_108_312 },
+        { high: 0 },
+        { low: 'x', high: 0 },
+        { low: '1789108312', high: 0 },
+        { low: 1.5, high: 0 },
+        { low: 2 ** 32, high: 0 },
+        { low: 0, high: -(2 ** 31) - 1 },
+        { low: 1_789_108_312, high: 0, unsigned: 'yes' },
+        { low: -1, high: -1, unsigned: true }, // 2^64 - 1 is not a safe integer
+        [1_789_108_312, 0],
+      ];
+      for (const value of malformed) {
+        expect(normalizeUnixTimestampSeconds(value, 123), JSON.stringify(value)).toBe(123);
+      }
+    });
+  });
 });
 
 describe('clampTtl', () => {

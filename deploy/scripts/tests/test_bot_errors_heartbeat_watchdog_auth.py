@@ -771,14 +771,17 @@ def test_queue_backlog_directory_scan_error_is_reported_not_crashed(tmp_path: Pa
     outbox = tmp_path / "outbox"
     outbox.mkdir()
     monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(outbox))
-    original_glob = Path.glob
+    original_scandir = os.scandir
 
-    def glob(path: Path, pattern: str):
-        if path == outbox:
+    def scandir(path):
+        # scan_directory (#2460, fail-loud) enumerates the queue via os.scandir,
+        # not Path.glob; inject the directory-level failure at the real seam so
+        # the OSError propagates and is reported rather than silently swallowed.
+        if Path(path) == outbox:
             raise PermissionError("denied")
-        return original_glob(path, pattern)
+        return original_scandir(path)
 
-    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(os, "scandir", scandir)
 
     problems = mod.collect_problems(_watchdog_args(), {"queue_backlog"})
 
@@ -1187,4 +1190,6 @@ def test_terminal_auth_failure_class_inventory_matches_dispatcher_and_health_che
     assert mod.TERMINAL_AUTH_FAILURE_CLASSES == {
         "pairing_required",
         "serverside_logout_irreversible",
+        "auth_401_ambiguous_parked",
+        "auth_401_uninspected_exit",
     }

@@ -27,6 +27,28 @@ export const ZOMBIE_SESSION_SWEEP_INTERVAL_MS = envPositiveInt('WHATSOUP_ZOMBIE_
 export const AMBIGUOUS_SESSION_MAX_AGE_MS = envPositiveInt('WHATSOUP_AMBIGUOUS_SESSION_MAX_AGE_MS', MS_PER_DAY); // 24h
 export const MAX_RESIDENT_SESSIONS = envPositiveInt('WHATSOUP_MAX_SESSIONS', 12);
 export const SESSION_MIN_RESIDENCY_MS = envPositiveInt('WHATSOUP_SESSION_MIN_RESIDENCY_MS', 5 * MS_PER_MINUTE); // 5m
+// #3523: the zombie sweep exempts a current-process resident manager from
+// disposition, but that exemption used to be unconditional — a resident wedged
+// between turns (e.g. a compaction livelock) was protected forever and never
+// self-cleared. The exemption is now liveness-gated: a resident is only spared
+// while it is making turn progress (a turn in flight, or a turn completed within
+// this deadline, and not stuck re-arming auto-compact). A resident that has made
+// no turn progress for longer than this falls through to the normal
+// stale_live/stale_dead disposition instead of being permanently protected.
+//
+// Iteration 1 (#3527 review H3/S5/V5) — reconciled against the residency policy.
+// The default was 30m, HALF of SESSION_IDLE_MS and equal to
+// ZOMBIE_SESSION_SWEEP_INTERVAL_MS, so a merely-idle resident that the runtime
+// deliberately keeps for a full hour lost its exemption on the first sweep after
+// 30 minutes — and, with the authoritative_live disposition added in the same
+// iteration, that now RESETS the session rather than doing nothing. Timing alone
+// must not act before the runtime's own residency policy says a session is idle,
+// so the default is SESSION_IDLE_MS. Positive livelock evidence is unaffected and
+// still acts immediately: consecutiveNonConvergentCompactions (or the
+// rapid-rearm counter) at AUTO_COMPACT_CONVERGENCE_LIMIT makes
+// isResidentManagerMakingProgress false regardless of this deadline. Operators
+// wanting the older, more aggressive timing set the env override below.
+export const RESIDENT_TURN_PROGRESS_DEADLINE_MS = envPositiveInt('WHATSOUP_RESIDENT_TURN_PROGRESS_DEADLINE_MS', SESSION_IDLE_MS); // 1h (tracks SESSION_IDLE_MS)
 
 export const MAX_TOOL_FAILURE_ALERT_DEDUP_KEYS = 1_000;
 

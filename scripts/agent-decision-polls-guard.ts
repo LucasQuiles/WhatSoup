@@ -24,6 +24,10 @@ const DOCUMENTATION_ANCHORS: RequiredAnchor[] = [
     anchors: ['AskUserQuestion', 'send_poll', 'multiSelect', 'selectableCount', 'Known Limits'],
   },
   {
+    file: 'AGENTS.md',
+    anchors: ['docs/runbooks/agent-decision-polls.md'],
+  },
+  {
     file: 'CLAUDE.md',
     anchors: ['docs/runbooks/agent-decision-polls.md'],
   },

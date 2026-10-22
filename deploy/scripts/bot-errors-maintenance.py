@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import socket
 import sys
 import time
 from pathlib import Path
@@ -28,6 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from lib.bot_errors_envelope import event_machine
 from lib.durable_json import (
     DurableWriteError,
     durable_json_target,
@@ -147,7 +147,7 @@ def cmd_open(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    machine = args.machine or socket.gethostname()
+    machine = args.machine or event_machine()
     now = int(time.time())
     key = window_key(machine, args.instance)
     try:
@@ -188,7 +188,7 @@ def cmd_open(args: argparse.Namespace) -> int:
 
 
 def cmd_close(args: argparse.Namespace) -> int:
-    machine = args.machine or socket.gethostname()
+    machine = args.machine or event_machine()
     key = window_key(machine, args.instance)
     try:
         target, observation = _private_state_target()
@@ -236,13 +236,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_open = sub.add_parser("open", help="open a maintenance window for an instance")
     p_open.add_argument("instance", help="instance label to silence")
     p_open.add_argument("duration", help="window length, e.g. 30m, 2h, 90s, 1d")
-    p_open.add_argument("--machine", default=None, help="machine name (default: local hostname)")
+    p_open.add_argument("--machine", default=None, help="machine name (default: BOT_ERRORS_MACHINE, else the local hostname)")
     p_open.add_argument("--reason", default=None, help="optional human reason for the window")
     p_open.set_defaults(func=cmd_open)
 
     p_close = sub.add_parser("close", help="close (remove) a maintenance window")
     p_close.add_argument("instance", help="instance label to release")
-    p_close.add_argument("--machine", default=None, help="machine name (default: local hostname)")
+    p_close.add_argument("--machine", default=None, help="machine name (default: BOT_ERRORS_MACHINE, else the local hostname)")
     p_close.set_defaults(func=cmd_close)
 
     p_list = sub.add_parser("list", help="list active (non-expired) windows as JSON")

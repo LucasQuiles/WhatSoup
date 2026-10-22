@@ -7,6 +7,10 @@ import { expireOverdueCompletedDeliveryIdentityAdmissions } from './durability.t
 import { deleteOldMessages } from './messages.ts';
 import { maintainOutboundSends } from './outbound-sends.ts';
 import { systemClock } from '../lib/clock.ts';
+import {
+  HANDOFF_ARTIFACT_RETENTION_MS,
+  deleteExpiredHandoffArtifacts,
+} from './handoff-artifact-retention.ts';
 
 const log = createChildLogger('database:retention');
 
@@ -81,6 +85,8 @@ export interface DatabaseRetentionResult {
   messages: number;
   triggerRuns: number;
   triggerOccurrences: number;
+  /** Expired cross-provider continuity artifacts deleted from the optional agent table. */
+  handoffArtifacts: number;
   /** Reliability 4.1: quarantined identity admissions terminalized (state
    * transition with preserved receipt — not deletions). */
   identityAdmissionsExpired: number;
@@ -139,6 +145,15 @@ export function runDatabaseRetention(
   const factCutoff = daysModifier(retention.exportedFactDays);
 
   const result = withTransaction(db, () => {
+    // Handoff data is only continuity cache state. At 24 hours it becomes
+    // eligible for this sweep; successful sweeps drain that eligible backlog.
+    // The helper treats non-agent databases without the optional table as a
+    // legitimate zero-result state.
+    const handoffArtifacts = deleteExpiredHandoffArtifacts(
+      db,
+      systemClock.now() - HANDOFF_ARTIFACT_RETENTION_MS,
+    );
+
     const completedRecoveryTerminals = db.raw.prepare(`
       DELETE FROM turn_recovery_jobs
        WHERE state = 'completed'
@@ -147,6 +162,22 @@ export function runDatabaseRetention(
            SELECT 1
            FROM operator_catchup_closure_witnesses witness
            WHERE witness.recovery_job_id = turn_recovery_jobs.id
+         )
+         -- Keep the job whenever its terminal must be kept (the same guards
+         -- as the terminal delete below); otherwise the transferred terminal
+         -- survives alone as an orphan transfer, which blocks
+         -- turn_recovery_integrity.
+         AND NOT EXISTS (
+           SELECT 1
+           FROM turn_delivery_corroboration corroboration
+           WHERE corroboration.terminal_record_id = turn_recovery_jobs.terminal_record_id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM turn_terminal_records guarded
+           JOIN inbound_disposition_links link
+             ON link.superseded_by_seq = guarded.inbound_seq
+           WHERE guarded.id = turn_recovery_jobs.terminal_record_id
          )
          AND EXISTS (
            SELECT 1
@@ -462,6 +493,7 @@ export function runDatabaseRetention(
       messages,
       triggerRuns,
       triggerOccurrences,
+      handoffArtifacts,
       identityAdmissionsExpired,
     };
   });

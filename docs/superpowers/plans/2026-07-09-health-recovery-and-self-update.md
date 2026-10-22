@@ -212,6 +212,9 @@ git commit -m "fix(health): add typed database probe evidence"
 - Modify: `src/core/health.ts:1-149,1001-1285`
 - Modify: `tests/core/health.test.ts:184-217,1355-1390,2781-2815`
 - Modify: `docs/configuration.md:215-224`
+- Modify: `console/src/types.ts` and the console consumers of `LineInstance.health.sqlite` — carry nullable values and probe evidence without coercing an unreadable value to zero.
+
+**Contract reconciliation (2026-10-06):** the current console type still declares `messages_total` and `schema_version` as numbers. Before accepting this task, trace all readers of those fields, widen the shared contract, and prove that measured zero, unreadable/null and degraded-but-readable states render distinctly. A backend-only nullability change does not satisfy this plan's truthful-health requirement.
 
 **Interfaces:**
 - Consumes: `runHealthDbProbe` and `probeMetadata` from Task 1.
@@ -279,7 +282,7 @@ This endpoint intentionally performs no database, provider, WhatsApp, filesystem
 
 - [ ] **Step 4: Replace fallback reads with typed probes**
 
-Import `runHealthDbProbe`/`probeMetadata`, delete `safeDbQuery` and `latestSuccessfulOutboundSend`, and wrap these exact reads: `getMessageCount`, `getPendingCount`, latest successful `outbound_sends`, `PRAGMA schema_version`, maximum `schema_migrations.version`, and `pending_polls` count. Each failed probe logs only `{probe,errorType}`; each probe slower than 2,000 ms logs `{probe,elapsed}`. Treat `messages`, `access_list`, `schema_version`, `schema_migrations`, and `pending_polls` as critical. Any critical `ok:false` sets `status='unhealthy'`; a readable migration below `CURRENT_SCHEMA_MIGRATION` remains `degraded`.
+Import `runHealthDbProbe`/`probeMetadata`, delete `safeDbQuery` and `latestSuccessfulOutboundSend`, and wrap these exact reads: `getMessageCount`, `getPendingCount`, latest successful `outbound_sends`, `PRAGMA schema_version`, maximum `schema_migrations.version`, and `pending_polls` count. Each failed probe logs only `{probe,errorType}`; each probe slower than 2,000 ms logs `{probe,duration_ms}`, matching Task 1's metadata field. Treat `messages`, `access_list`, `schema_version`, `schema_migrations`, and `pending_polls` as critical. Any critical `ok:false` sets `status='unhealthy'`; a readable migration below `CURRENT_SCHEMA_MIGRATION` remains `degraded`.
 
 Serialize failed numeric/string values as `null`, never fallback zero/empty. Add `sqlite.probes` entries for all six probes using `probeMetadata`; set `pending_polls_readable` from the probe and preserve the existing HTTP mapping `unhealthy -> 503`, otherwise 200.
 

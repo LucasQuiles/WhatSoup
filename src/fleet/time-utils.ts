@@ -5,11 +5,17 @@
 //  src/fleet/, so they stay here and import the canonical primitive down
 //  from core.
 // ---------------------------------------------------------------------------
-import { normalizeUnixTimestampSeconds } from '../core/substrate/time.ts';
+import { UNIX_MILLISECONDS_THRESHOLD } from '../core/substrate/time.ts';
 
-/** Convert Unix timestamp (seconds or milliseconds) to ISO string. */
+/**
+ * Convert a Unix timestamp (seconds or milliseconds) to an ISO string that
+ * keeps the represented instant (#2526). This is a formatter, not the
+ * epoch-seconds storage boundary: it must not floor a millisecond value to
+ * whole seconds, or distinct records inside one second collapse to one time.
+ */
 export function toIsoFromUnix(ts: number): string {
-  return new Date(normalizeUnixTimestampSeconds(ts, ts) * 1000).toISOString();
+  const epochMs = Math.floor(ts) >= UNIX_MILLISECONDS_THRESHOLD ? ts : ts * 1000;
+  return new Date(epochMs).toISOString();
 }
 
 /**

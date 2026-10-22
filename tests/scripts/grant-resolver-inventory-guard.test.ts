@@ -13,7 +13,6 @@ import { fileURLToPath } from 'node:url';
 
 import {
   scanFileForGrantResolvers,
-  scanRepoGrantResolvers,
   scanRepoGrantResolversCounted,
   GRANT_RESOLVER_ALLOWLIST,
 } from '../../scripts/grant-resolver-inventory-guard.ts';
@@ -82,7 +81,7 @@ describe('grant-resolver-inventory-guard — scanFileForGrantResolvers', () => {
 
 describe('grant-resolver-inventory-guard — live tree', () => {
   it('the live src/ tree has ZERO ungated grant compositions (all migrated or allowlisted)', () => {
-    const findings = scanRepoGrantResolvers(REPO_ROOT);
+    const { findings } = scanRepoGrantResolversCounted(REPO_ROOT);
     expect(findings).toEqual([]);
   });
 

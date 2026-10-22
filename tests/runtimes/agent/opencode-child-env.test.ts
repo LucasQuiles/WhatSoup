@@ -30,9 +30,12 @@ const MODEL_CREDENTIAL_CASES = [
   ['google', 'GOOGLE_API_KEY'],
   ['fireworks-ai', 'FIREWORKS_API_KEY'],
   ['togetherai', 'TOGETHER_API_KEY'],
+  // OpenCode coding-plan provider ids read the variable listed in its catalogue.
+  ['zai-coding-plan', 'ZHIPU_API_KEY'],
+  ['minimax-coding-plan', 'MINIMAX_API_KEY'],
 ] as const;
 
-const PROVIDER_CREDENTIAL_KEYS = MODEL_CREDENTIAL_CASES.map(([, envVar]) => envVar);
+const PROVIDER_CREDENTIAL_KEYS = [...new Set(MODEL_CREDENTIAL_CASES.map(([, envVar]) => envVar))];
 
 const REQUIRED_PARENT_ENV = {
   PATH: '/test/bin',
@@ -183,6 +186,21 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
     expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual(['OPENAI_API_KEY']);
   });
 
+  it('forwards a coding-plan custom-endpoint apiKeyService under the variable OpenCode reads', () => {
+    lookupCredentialMock.mockImplementation((service) =>
+      service === 'zai-coding-plan' ? 'test-coding-plan-endpoint-key' : null,
+    );
+
+    const env = buildChildEnv('opencode-cli', undefined, 'synthetic-model', {
+      baseUrl: 'https://endpoint.example/v1',
+      apiKeyService: 'zai-coding-plan',
+    });
+
+    expect(lookupCredentialMock.mock.calls).toEqual([['zai-coding-plan']]);
+    expect(PROVIDER_CREDENTIAL_KEYS.filter((key) => hasKey(env, key))).toEqual(['ZHIPU_API_KEY']);
+    expect(env.ZHIPU_API_KEY).toBe('test-coding-plan-endpoint-key');
+  });
+
   it('does not copy privilege, mutation, non-selected credential, or unknown secret-shaped keys', () => {
     lookupCredentialMock.mockReturnValue('test-glm-key');
 
@@ -238,7 +256,7 @@ describe('buildChildEnv — opencode-cli least-authority environment', () => {
     },
   );
 
-  it.each([undefined, 'bare-model', 'unmapped-vendor/model-x'])(
+  it.each([undefined, 'bare-model', 'unmapped-vendor/model-x', 'kimi-for-coding/synthetic-model'])(
     'rejects a selected model without a mapped credential service: %j',
     (model) => {
       expect(() => buildChildEnv('opencode-cli', undefined, model)).toThrow(

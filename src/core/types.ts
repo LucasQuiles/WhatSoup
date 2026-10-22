@@ -77,6 +77,14 @@ export interface IncomingMessage {
   /** Journal receipt time captured at durable admission, in Unix epoch seconds. */
   receivedAtUnixSeconds?: number;
   /**
+   * Conversation key the inbound row was journaled under, set by the code that
+   * journaled it (ingest, the scheduled-job dispatcher). The turn identity
+   * reuses it instead of resolving the LID mapping again: a mapping written
+   * between the two reads would give the turn a key its inbound row lacks,
+   * and terminal finalization rejects that pair.
+   */
+  journaledConversationKey?: string;
+  /**
    * Set when this is a synthetic turn injected by the agent-job dispatcher
    * (a scheduled `agent_job` bead firing), not a real inbound WhatsApp message.
    * The runtime skips inbound-only side effects (e.g. the inline imperative

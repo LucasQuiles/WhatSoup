@@ -47,3 +47,10 @@
 {"id": "qr052-precision-event-count", "class": "make:benign-keep", "input": "event_count=5", "expected": "event_count=5"}
 {"id": "qr052-precision-message-id", "class": "make:benign-keep", "input": "message_id=wamid.ABCDEF", "expected": "message_id=wamid.ABCDEF"}
 {"id": "qr052-precision-session-id", "class": "make:benign-keep", "input": "session_id=sess_abc123def", "expected": "session_id=sess_abc123def"}
+{"id":"forensic-basic-quoted-double","class":"regress:quoted-basic","input":"{\"authorization\":\"Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=\"}","expected":"{\"authorization\":\"Basic [REDACTED]\"}"}
+{"id":"forensic-basic-quoted-single","class":"regress:quoted-basic","input":"{'authorization':'Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ='}","expected":"{'authorization':'Basic [REDACTED]'}"}
+{"id":"forensic-basic-quoted-escaped","class":"regress:quoted-basic","input":"{\\\"authorization\\\":\\\"Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=\\\"}","expected":"{\\\"authorization\\\":\\\"Basic [REDACTED]\\\"}"}
+{"id":"forensic-basic-quoted-escaped-twice","class":"regress:quoted-basic","input":"{\\\\\\\"authorization\\\\\\\":\\\\\\\"Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=\\\\\\\"}","expected":"{\\\\\\\"authorization\\\\\\\":\\\\\\\"Basic [REDACTED]\\\\\\\"}"}
+{"id":"forensic-basic-quoted-whitespace","class":"regress:quoted-basic","input":"{ \"Authorization\" \r\n : \t \"Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=\" }","expected":"{ \"Authorization\" \r\n : \t \"Basic [REDACTED]\" }"}
+{"id":"forensic-basic-quoted-benign","class":"make:benign-keep","input":"{\"description\":\"Basic rendering mode\"}","expected":"{\"description\":\"Basic rendering mode\"}"}
+{"id":"forensic-basic-quoted-unquoted","class":"regress:quoted-basic","input":"Authorization: Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtcGFzc3dvcmQ=","expected":"Authorization: Basic [REDACTED]"}

@@ -65,3 +65,28 @@ resolve_pytest_cmd() {
   echo "pytest is required to run sentinel Python tests" >&2
   return 2
 }
+
+# #3481: pytest-cov can round its exit comparison up to the floor while its
+# unrounded terminal verdict says FAIL. Precision alone does not close that
+# boundary. Require the native success verdict as well as a successful exit;
+# unknown, missing or contradictory output is not coverage evidence.
+run_pytest_coverage() {
+  local output="$1"
+  shift
+  local rc=0
+  "${PYTEST_CMD[@]}" "$@" --cov-branch --cov-fail-under=98 --cov-precision=2 \
+    --cov-report=term --color=no --import-mode=importlib -q > "$output" 2>&1 || rc=$?
+  local replay_rc=0
+  cat "$output" || replay_rc=$?
+  if [ "$rc" -ne 0 ]; then return "$rc"; fi
+  if [ "$replay_rc" -ne 0 ]; then return 2; fi
+
+  if ! awk '
+    /Required test coverage/ { verdicts++ }
+    /^Required test coverage of 98% reached\. Total coverage: (9[89](\.[0-9]+)?|100(\.0+)?)%$/ { reached++ }
+    END { exit verdicts != 1 || reached != 1 }
+  ' "$output"; then
+    echo "SENTINEL_COVERAGE_FAIL: missing, invalid or failed 98% coverage verdict despite pytest exit 0" >&2
+    return 1
+  fi
+}

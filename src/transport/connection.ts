@@ -17,6 +17,9 @@ import {
   jidNormalizedUser,
 } from '@whiskeysockets/baileys';
 import { shortHash } from '../lib/short-hash.ts';
+import { hasTransientAuthReadIssue } from '../lib/auth-bond-policy.ts';
+import { clockDriftHoldExtensionMs, systemClock } from '../lib/clock.ts';
+import { RECONNECT_RESET_REASONS } from '../lib/disconnect-classification.ts';
 import { resolveBondOwnerEvidence } from './bond-actor-receipt.ts';
 import {
   buildEffectiveClientReceipt,
@@ -28,7 +31,8 @@ import { decideConnectActivation, readTerminalLatchJournal, type ConnectActivati
 import { observeActiveTree, resolveAuthGenerationEvidenceV2 } from './auth-generation-v2.ts';
 import { isRecord } from '../lib/type-guards.ts';
 import { createTypingStartGuard, type TypingStartGuard } from '../lib/typing-start-guard.ts';
-import { appendPrivateJsonLineSync, readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { readFreshMarkerSync, writePrivateJsonMarkerSync } from '../lib/private-fs.ts';
+import { appendBondEventSync, scheduleBondEventMaintenance } from './bond-event-log.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../lib/time-units.ts';
 
 import { config } from '../config.ts';
@@ -58,7 +62,14 @@ import {
 import { OutboundFloodIncidentLifecycle } from './outbound-flood-incident.ts';
 import { PresenceCache } from './presence-cache.ts';
 import { jitteredDelay } from '../core/retry.ts';
-import { decideDisconnectAction } from './auth-disconnect-policy.ts';
+import { RECENT_DISCONNECT_DEGRADED_THRESHOLD } from '../core/health-reason-hold.ts';
+import {
+  buildDisconnectDecisionRecord,
+  decideDisconnectAction,
+  formatDisconnectDecision,
+  type DisconnectContext,
+} from './auth-disconnect-policy.ts';
+import type { DisconnectClassification, DisconnectDecisionRecord } from '../lib/disconnect-classification.ts';
 import { isBaileysEncryptedTmpEnoent } from './baileys-media-errors.ts';
 import { AuthBondGuard, type AuthBondSnapshot } from './auth-bond.ts';
 import { createAtomicCredsSaver } from './atomic-auth-save.ts';
@@ -66,6 +77,7 @@ import { installThirdPartyConsoleRedaction, SENSITIVE_KEY_RE } from './third-par
 import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
+import { HistorySyncWatch } from './history-sync-watch.ts';
 import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
@@ -103,6 +115,20 @@ export interface ConnectionRecentDisconnects {
   lastReason: string | null;
   lastStatusCode: number | null;
   byReason: Record<string, number>;
+  /**
+   * Until when, on the monotonic clock (performance.now()), the latest churn
+   * holds, capped at now: now while it holds, else that instant. Null if
+   * there has been none. Whether churn exists is decided only by `count`, the
+   * wall-clock window above, when a disconnect is recorded; the monotonic
+   * clock only measures how long it holds: until the third-newest counted
+   * disconnect leaves the window, plus clockDriftHoldExtensionMs, and at
+   * least until the disconnect that completed it. Health holds
+   * `connection_churn` from it, so churn is seen whether or not a health read
+   * fell inside it. Only the Baileys manager sets it, on the live snapshot
+   * only: monotonic time means nothing to another process, so the persisted
+   * runtime state omits it.
+   */
+  lastChurnMonotonicMs?: number | null;
 }
 
 /**
@@ -117,6 +143,8 @@ export interface ConnectionOutboundFlood {
   destCount: number;
   worstDestHash: string | null;
   worstCount: number;
+  /** See OutboundFloodStats.lastFloodingMonotonicMs. Only the Baileys manager sets it. */
+  lastFloodingMonotonicMs?: number | null;
 }
 
 export interface ConnectionStateSnapshot {
@@ -130,6 +158,18 @@ export interface ConnectionStateSnapshot {
   lastPongAt: string | null;
   lastDisconnectReason: string | null;
   lastStatusCode: number | null;
+  /**
+   * The transport policy's decision for the last close. Null means no close
+   * since process start or the last successful open. Absent (undefined) means
+   * the transport does not classify disconnects, and health falls back to its
+   * conservative status-code reading.
+   */
+  disconnectDecision?: DisconnectDecisionRecord | null;
+  /**
+   * #3722: the last reconnect-state reset (an exhaustion cycle or a graceful
+   * reconnect). Null after an open. A fixed reason token and a time only.
+   */
+  reconnectReset?: { reason: string; at: string | null } | null;
   recentDisconnects: ConnectionRecentDisconnects;
   outboundFlood?: ConnectionOutboundFlood;
   authBond?: AuthBondSnapshot;
@@ -140,6 +180,7 @@ export type CredentialLifecycleEventName =
   | 'connect_start'
   | 'auth_restore_succeeded'
   | 'auth_restore_failed'
+  | 'auth_restore_deferred'
   | 'auth_preflight_invalid'
   | 'baileys_version'
   | 'socket_created'
@@ -165,6 +206,7 @@ export interface CredentialLifecycleEvent {
   reason?: string;
   conflictType?: string | null;
   reconnectDecision?: string;
+  disconnectClassification?: DisconnectClassification;
   lastDisconnectDiagnostic?: unknown;
   baileysVersion?: string;
   authBondStatus?: AuthBondSnapshot['status'];
@@ -449,8 +491,19 @@ function extractStreamErrorConflictType(lastDisconnect: unknown): string | null 
   return sawStreamError ? null : undefined;
 }
 
-function formatReconnectDecision(action: ReturnType<typeof decideDisconnectAction>): string {
-  return `${action.type}:${action.reason}`;
+// The logged-out alert fires for three different exits; only one of them is a
+// server-confirmed removal, and the text must not claim more than that.
+function deviceBondLostFailureText(decision: DisconnectDecisionRecord | null): string {
+  switch (decision?.classification) {
+    case 'confirmed_device_removed':
+      return 'WhatsApp linked-device bond removed by server (stream:error conflict type=device_removed observed)';
+    case 'ambiguous_401_parked':
+      return 'WhatsApp 401 logout repeated after one bounded reconnect; device removal NOT confirmed (no device_removed conflict node)';
+    case 'uninspected_401_conservative_exit':
+      return 'WhatsApp 401 logout without an inspectable stream:error node; conservative exit, device removal NOT confirmed';
+    default:
+      return 'WhatsApp 401 logout; classification unavailable, device removal NOT confirmed';
+  }
 }
 
 type AuthBondClearCandidate = {
@@ -573,10 +626,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private lastPongAt: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastStatusCode: number | null = null;
-  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null }> = [];
+  /** Each disconnect also carries its monotonic instant, for the health hold
+   * only. It is absent only for an entry this process did not record (none
+   * today: nothing reloads the window). */
+  private recentDisconnects: Array<{ at: number; reason: string; statusCode: number | null; monotonicMs?: number }> = [];
+  /** When the latest churn stops holding (inclusive), on the monotonic clock, or null. */
+  private churnHeldUntilMonotonicMs: number | null = null;
   private lastDisconnectDiagnostic: unknown | null = null;
   private loggedOutAlertEmitted = false;
   private unclassified401ReconnectSpent = false;
+  // Process-local by design: a restart begins with no decision and a fresh
+  // bounded retry. Persisting it would let a stale park outlive a relink.
+  private lastDisconnectDecision: DisconnectDecisionRecord | null = null;
+  /** #3722: the last reconnect-state reset; cleared by a successful open. */
+  private lastReconnectReset: { reason: string; at: number } | null = null;
   private localAuthAlertEmitted = false;
   // #2394 (connection_exhausted): restart-safe incident ownership + the
   // stability timer that converts a fresh socket into recovery proof.
@@ -728,6 +791,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     getBotLid: () => this.botLid,
   });
 
+  private readonly historySyncWatch = new HistorySyncWatch(this.log);
+
   /** Expose the raw Baileys socket for MCP tools. Returns null when disconnected. */
   getSocket(): WhatsAppSocket | null {
     return this.sock;
@@ -777,6 +842,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.on('exhausted', () => {
       void this.handleExhausted();
     });
+    // Startup recovery of an interrupted bond-event rotation or compression.
+    // One directory read when there is nothing to do; never blocks connect.
+    this.scheduleBondEventLogMaintenance('startup');
+  }
+
+  private scheduleBondEventLogMaintenance(trigger: 'startup' | 'rotation'): void {
+    if (!config.dataRoot) return;
+    try {
+      scheduleBondEventMaintenance(config.dataRoot).then(
+        (report) => {
+          if (report.anomalies.length > 0 || report.pendingSegments > 0) {
+            this.log.warn(
+              { trigger, anomalies: report.anomalies, pendingSegments: report.pendingSegments },
+              'bond event log maintenance kept segments for operator review',
+            );
+          }
+        },
+        (err: unknown) => {
+          this.log.warn({ err, trigger }, 'bond event log maintenance failed');
+        },
+      );
+    } catch (err) {
+      this.log.warn({ err, trigger }, 'bond event log maintenance failed');
+    }
   }
 
   /**
@@ -852,7 +941,66 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.log.error({ error: restore.error, source: restore.source }, 'auth bond restore failed');
       }
 
+      // A restore withheld on a transient read has to be RETRIED, and this is
+      // the only path that can retry it. The guard refuses to act on a "not
+      // now" read, which is correct, but the activation used to continue
+      // regardless: it loaded the auth state, and the auth-state reader
+      // initialises FRESH CREDENTIALS when the existing ones cannot be read or
+      // parsed, so a credential that was merely unreadable for one open could
+      // be replaced by an empty one and taken to QR — after which nothing
+      // schedules another attempt. A /health read cannot rescue this: it
+      // re-reads the credential but never calls the restore.
+      //
+      // So abort BEFORE the auth state is loaded and put the retry on the
+      // existing reconnect policy. `transientReadPersistent` changes the
+      // health classification only; elapsed time cannot turn an unreadable
+      // credential into a definite absence or corruption verdict. Activation
+      // remains deferred until a later connect attempt gets a definite read.
+      if (restore.deferred === true) {
+        this.recordCredentialLifecycle('auth_restore_deferred', {
+          authBond: restore.snapshot,
+          note: restore.error ?? 'auth bond read was transient',
+        });
+        this.log.warn(
+          { error: restore.error },
+          'auth bond read was transient — deferring activation and scheduling a reconnect',
+        );
+        this.persistConnectionRuntimeState('auth_restore_deferred');
+        if (!this.shuttingDown) this.scheduleReconnect();
+        return;
+      }
+
       const preflight = this.authBond.inspect();
+
+      // The SECOND read, and it needs the same gate as the first.
+      //
+      // The restore above answers one read. This is an independent live read
+      // taken immediately after it, on a tree the restore may have just
+      // renamed into place, so it is a first look at fresh state rather than a
+      // re-read of a settled one. A transient open here produces the same
+      // non-'present' status that says nothing about the credential, and
+      // without this gate the run continued past it twice over: it paged a
+      // local auth-bond failure, which asserts something about the
+      // credential's INTEGRITY that an unfinished read never established, and
+      // then loaded the auth state, whose reader initialises FRESH credentials
+      // when the existing ones cannot be read.
+      //
+      // Same deferral as the withheld restore above: no page, no load, and the
+      // retry put on the reconnect policy so a later definite read decides.
+      if (hasTransientAuthReadIssue(preflight.issues)) {
+        this.recordCredentialLifecycle('auth_restore_deferred', {
+          authBond: preflight,
+          note: 'auth bond preflight read was transient',
+        });
+        this.log.warn(
+          { issues: preflight.issues },
+          'auth bond preflight read was transient — deferring activation and scheduling a reconnect',
+        );
+        this.persistConnectionRuntimeState('auth_restore_deferred');
+        if (!this.shuttingDown) this.scheduleReconnect();
+        return;
+      }
+
       if (preflight.status !== 'present') {
         this.recordCredentialLifecycle('auth_preflight_invalid', { authBond: preflight });
       }
@@ -881,7 +1029,14 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       installThirdPartyConsoleRedaction();
 
       const { state } = await useMultiFileAuthState(config.authDir);
-      const saveCredsAtomically = createAtomicCredsSaver(config.authDir, () => state.creds);
+      // Invalidate at the rename, not after the save promise settles: the
+      // saver renames and only then chmods, so a chmod failure used to leave
+      // committed credentials that the digest cache never heard about.
+      const saveCredsAtomically = createAtomicCredsSaver(
+        config.authDir,
+        () => state.creds,
+        () => { this.authBond.invalidateTreeCache('creds-file-committed'); },
+      );
       const resolvedVersion = await resolveBaileysVersion(config.baileysVersionPinned);
       this.latestBaileysVersion = baileysVersionLabel(resolvedVersion.version);
       this.recordCredentialLifecycle('baileys_version', {
@@ -902,7 +1057,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         logger: baileysLogger as any,
         auth: {
           creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
+          keys: this.invalidatingKeyStore(
+            makeCacheableSignalKeyStore(state.keys, baileysLogger as any),
+          ),
         },
         generateHighQualityLinkPreview: config.generateHighQualityLinkPreview,
       };
@@ -911,6 +1068,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       // is a false positive in the one direction that matters: a bond event would
       // then name a client that never existed.
       const sock = makeWASocket(socketConfig);
+      this.historySyncWatch.reset();
       effectiveClientRegistry.record(
         buildEffectiveClientReceipt(socketConfig, resolvedVersion, 'connection'),
       );
@@ -1193,6 +1351,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.stopKeepalive();
     // Clear poll vote grace timers to prevent post-shutdown emissions
     this.pollVoteDecryptor.dispose();
+    this.historySyncWatch.reset();
     if (this.sock) {
       try {
         this.sock.end(undefined);
@@ -1212,6 +1371,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reason?: string;
       conflictType?: string | null;
       reconnectDecision?: string;
+      disconnectClassification?: DisconnectClassification;
       lastDisconnectDiagnostic?: unknown;
       note?: string;
       baileysVersion?: string;
@@ -1231,6 +1391,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (options.reason !== undefined) entry.reason = options.reason;
     if ('conflictType' in options) entry.conflictType = options.conflictType ?? null;
     if (options.reconnectDecision !== undefined) entry.reconnectDecision = options.reconnectDecision;
+    if (options.disconnectClassification !== undefined) {
+      entry.disconnectClassification = options.disconnectClassification;
+    }
     if (options.lastDisconnectDiagnostic !== undefined) {
       entry.lastDisconnectDiagnostic = options.lastDisconnectDiagnostic;
     }
@@ -1278,6 +1441,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       reason: event.reason ?? null,
       conflictType: event.conflictType ?? null,
       reconnectDecision: event.reconnectDecision ?? null,
+      disconnectClassification: event.disconnectClassification ?? null,
       baileysVersion: event.baileysVersion ?? null,
       authBondStatus: event.authBondStatus ?? null,
       authBondIssues: (event.authBondIssues ?? []).map(redactAuthBondIssue),
@@ -1355,7 +1519,6 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
     try {
       const authBond = this.authBond.inspect();
-      const eventPath = join(config.dataRoot, 'bond-events.ndjson');
       const payload = {
         version: 1,
         eventId: shortHash(`${entry.at}:${config.botName}:${process.pid}:${entry.event}:${this.credentialLifecycleEvents.length}`, 24),
@@ -1407,6 +1570,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         reason: entry.reason ?? null,
         conflictType: entry.conflictType ?? null,
         reconnectDecision: entry.reconnectDecision ?? null,
+        // The full record for the close this event belongs to; null outside a
+        // disconnect (it resets on every open).
+        disconnectDecision: this.lastDisconnectDecision,
         rawDisconnect: {
           statusCode: entry.statusCode ?? null,
           reason: entry.reason ?? null,
@@ -1437,7 +1603,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         // `no_receipt_written`, which is the honest answer, not a bug.
         authGeneration: resolveAuthGenerationEvidence(config.stateRoot),
       };
-      appendPrivateJsonLineSync(eventPath, payload);
+      // Bounded by size rotation (see bond-event-log.ts). A rotation failure
+      // still appends the record; only the append itself can throw here.
+      const appended = appendBondEventSync(config.dataRoot, payload);
+      if (appended.rotationError) {
+        this.log.warn({ err: appended.rotationError }, 'failed to rotate WhatsApp bond event log');
+      }
+      if (appended.rotated) this.scheduleBondEventLogMaintenance('rotation');
     } catch (err) {
       this.log.warn({ err }, 'failed to persist WhatsApp bond event');
     }
@@ -1536,8 +1708,36 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     };
   }
 
+  /**
+   * Live connection state. Walks the auth tree inline, every call.
+   *
+   * This method is a SECURITY AND DELIVERY input, not an observability one, and
+   * it is deliberately not cached. src/core/scheduler.ts:466 uses it as a
+   * fail-closed de-link gate: when `connected` is false it holds scheduled rows
+   * for an instance whose auth bond reads 'missing' or 'invalid', and processes
+   * them otherwise. Serving that decision from a cache means a stale-clean
+   * digest lets a de-linked instance burn its retry budget on rows the live
+   * check would have preserved. An earlier revision of this branch made exactly
+   * that mistake by switching this getter wholesale.
+   *
+   * Observability readers want getHealthConnectionState() instead.
+   */
   getConnectionState(): ConnectionStateSnapshot {
-    const authBond = this.authBond.inspect();
+    return this.buildConnectionState(this.authBond.inspect());
+  }
+
+  /**
+   * Connection state for the /health projection only.
+   *
+   * Identical in shape to getConnectionState, but the auth-bond tree digest is
+   * served from the off-request cache. This is the one seam the P42 cost fix
+   * needs, and confining it here keeps every non-observability caller live.
+   */
+  getHealthConnectionState(): ConnectionStateSnapshot {
+    return this.buildConnectionState(this.authBond.inspectCached());
+  }
+
+  private buildConnectionState(authBond: AuthBondSnapshot): ConnectionStateSnapshot {
     return {
       state: this.connectionState,
       connected: this.connectionState === 'connected' && this.botJid !== null,
@@ -1549,7 +1749,11 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastPongAt: toIso(this.lastPongAt),
       lastDisconnectReason: this.lastDisconnectReason,
       lastStatusCode: this.lastStatusCode,
-      recentDisconnects: this.getRecentDisconnectStats(),
+      disconnectDecision: this.lastDisconnectDecision,
+      reconnectReset: this.lastReconnectReset === null
+        ? null
+        : { reason: this.lastReconnectReset.reason, at: toIso(this.lastReconnectReset.at) },
+      recentDisconnects: this.getRecentDisconnectSnapshot(),
       outboundFlood: this.getOutboundFloodStats(),
       authBond,
       credentialLifecycle: this.getCredentialLifecycleSnapshot(authBond),
@@ -1601,13 +1805,31 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       destCount: stats.destCount,
       worstDestHash: stats.worstKey ? shortHash(stats.worstKey) : null,
       worstCount: stats.worstCount,
+      lastFloodingMonotonicMs: stats.lastFloodingMonotonicMs,
     };
   }
 
   private recordDisconnect(statusCode: number | null, reason: string): void {
     const now = Date.now();
-    this.recentDisconnects.push({ at: now, reason, statusCode });
+    // Read after the wall clock, so a pause between the two reads can only
+    // lengthen the hold.
+    const monotonicMs = performance.now();
+    this.recentDisconnects.push({ at: now, reason, statusCode, monotonicMs });
     this.pruneRecentDisconnects(now);
+    // Base's own count decides whether churn exists; the monotonic instants
+    // only time it. It holds until the third-newest counted disconnect leaves
+    // the window, extended for clock drift, and at least until now. A counted
+    // disconnect without a monotonic instant holds it one window from now.
+    const counted = this.recentDisconnects;
+    if (counted.length < RECENT_DISCONNECT_DEGRADED_THRESHOLD) return;
+    const windowMs = ConnectionManager.RECENT_DISCONNECT_WINDOW_MS;
+    const holdWindowMs = windowMs + clockDriftHoldExtensionMs(windowMs);
+    const thirdNewestMs = counted.at(-RECENT_DISCONNECT_DEGRADED_THRESHOLD)!.monotonicMs;
+    const allPaired = counted.every((event) => event.monotonicMs !== undefined);
+    const heldUntilMs = allPaired && thirdNewestMs !== undefined
+      ? Math.max(thirdNewestMs + holdWindowMs, monotonicMs)
+      : monotonicMs + holdWindowMs;
+    this.churnHeldUntilMonotonicMs = Math.max(this.churnHeldUntilMonotonicMs ?? heldUntilMs, heldUntilMs);
   }
 
   private pruneRecentDisconnects(now = Date.now()): void {
@@ -1629,6 +1851,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       lastReason: last?.reason ?? null,
       lastStatusCode: last?.statusCode ?? null,
       byReason,
+    };
+  }
+
+  /** The live snapshot: base's window plus the churn hold stamp. */
+  private getRecentDisconnectSnapshot(): ConnectionRecentDisconnects {
+    const heldUntilMs = this.churnHeldUntilMonotonicMs ?? null;
+    return {
+      ...this.getRecentDisconnectStats(),
+      lastChurnMonotonicMs: heldUntilMs === null ? null : Math.min(heldUntilMs, performance.now()),
     };
   }
 
@@ -1674,6 +1905,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         lastPongAt: toIso(this.lastPongAt),
         lastDisconnectReason: this.lastDisconnectReason,
         lastStatusCode: this.lastStatusCode,
+        disconnectDecision: this.lastDisconnectDecision,
         recentDisconnects: this.getRecentDisconnectStats(),
         connectStartedAt: toIso(this.connectStartedAt),
         lastOpenAt: toIso(this.lastOpenAt),
@@ -1740,6 +1972,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       if (events['creds.update']) {
         try {
           await saveCreds();
+          // No invalidation here: the saver's post-rename commit hook already
+          // fired at the moment the bytes became visible, which is strictly
+          // earlier and survives a failure in the chmod that follows.
           this.clearAuthSnapshotSettledTimer();
           this.lastCredsUpdateAt = Date.now();
           this.credsUpdateCount += 1;
@@ -1759,6 +1994,13 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       }
 
       if (this.hasAuthKeyMaterialChurnSignal(events)) {
+        // Deliberately no cache invalidation here. Event names are a guess at
+        // when key material was written, and a wrong guess fails in both
+        // directions: this list fires on every inbound batch whether or not the
+        // key store was touched, and Baileys writes keys from paths that emit
+        // none of it (an outbound send calls authState.keys.set directly). The
+        // digest is invalidated at the key-store seam itself, in
+        // invalidatingKeyStore below.
         this.scheduleSettledAuthBondSnapshot('baileys-key-material-settled');
       }
 
@@ -1962,6 +2204,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
             chats?: Array<{ id: string; [key: string]: unknown }>;
             isLatest?: boolean;
           };
+          this.historySyncWatch.observeBatch();
           this.log.info(
             { messageCount: data.messages?.length ?? 0, isLatest: data.isLatest },
             'history sync received',
@@ -2144,6 +2387,8 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.lastDisconnectReason = null;
       this.loggedOutAlertEmitted = false;
       this.unclassified401ReconnectSpent = false;
+      this.lastDisconnectDecision = null;
+      this.lastReconnectReset = null;
       // #2394 (auth-bond): localAuthAlertEmitted deliberately NOT reset here.
       // Socket open is an observation, not recovery proof — resetting on every
       // reconnect stranded an accepted incident (the proof-gated clear path
@@ -2187,6 +2432,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.startKeepalive(sock);
       this.captureAuthBondSnapshot('connection-open');
       this.recordCredentialLifecycle('connection_open', { authBond: this.authBond.inspect() });
+      // Start the first off-thread walk now rather than letting the earliest
+      // health poll be the one to find an empty cache.
+      void this.authBond.warmTreeCache();
       this.persistConnectionRuntimeState('connection_open');
       this.log.info({ botJid: this.botJid, botLid: this.botLid }, 'WhatsApp connected');
       return;
@@ -2223,28 +2471,37 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         restartRequiredCount = this.restartRequiredTimestamps.length;
       }
 
-      const actionContext: {
-        restartRequiredCount: number;
-        conflictType?: string | null;
-        unclassified401Attempted?: boolean;
-      } = { restartRequiredCount };
+      const actionContext: DisconnectContext = { restartRequiredCount };
       if (conflictType !== undefined) actionContext.conflictType = conflictType;
       if (statusCode === DisconnectReason.loggedOut) {
         actionContext.unclassified401Attempted = this.unclassified401ReconnectSpent;
       }
       const action = decideDisconnectAction(statusCode, actionContext);
-      const reconnectDecision = formatReconnectDecision(action);
+      const reconnectDecision = formatDisconnectDecision(action);
+      this.lastDisconnectDecision = buildDisconnectDecisionRecord(
+        statusCode,
+        actionContext,
+        action,
+        this.lastCloseAt,
+      );
       this.recordCredentialLifecycle('connection_close', {
         statusCode,
         reason,
         conflictType,
         reconnectDecision,
+        disconnectClassification: this.lastDisconnectDecision.classification,
         lastDisconnectDiagnostic: this.lastDisconnectDiagnostic,
         authBond: this.authBond.inspect(),
       });
       this.persistConnectionRuntimeState('connection_close');
 
-      this.log.warn({ statusCode, reason, conflictType, reconnectDecision }, 'WhatsApp connection closed');
+      this.log.warn({
+        statusCode,
+        reason,
+        conflictType,
+        reconnectDecision,
+        disconnectClassification: this.lastDisconnectDecision.classification,
+      }, 'WhatsApp connection closed');
 
       if (action.type === 'exit') {
         this.setConnectionState('disconnected');
@@ -2292,12 +2549,15 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   ): void {
     if (this.loggedOutAlertEmitted) return;
 
+    const decision = this.lastDisconnectDecision;
+    const confirmedRemoval = decision?.classification === 'confirmed_device_removed';
     const authBond = this.authBond.inspect();
     this.recordCredentialLifecycle('device_bond_lost', {
       statusCode,
       reason,
       conflictType,
-      reconnectDecision: 'exit:logged-out',
+      reconnectDecision: decision?.decision ?? 'exit:logged-out',
+      ...(decision ? { disconnectClassification: decision.classification } : {}),
       lastDisconnectDiagnostic: this.lastDisconnectDiagnostic ?? redactDiagnosticValue(lastDisconnect),
       authBond,
     });
@@ -2306,7 +2566,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     const lockPath = config.lockPath ?? 'unknown';
     const evidence = [
       'classification: physical_intervention_required',
-      'failure: WhatsApp linked-device bond lost or removed by server',
+      `failure: ${deviceBondLostFailureText(decision)}`,
+      `disconnect_classification: ${decision?.classification ?? 'unknown'}`,
+      `disconnect_decision: ${decision?.decision ?? 'unknown'}`,
+      `conflict_inspected: ${decision ? String(decision.conflictInspected) : 'unknown'}`,
+      `conflict_type: ${decision?.conflictType ?? 'none'}`,
+      `decision_observed_at: ${decision?.observedAt ?? 'unknown'}`,
       `instance: ${config.botName}`,
       `host: ${lifecycle.environment.host}`,
       `pid: ${lifecycle.environment.pid}`,
@@ -2345,7 +2610,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       `lastDisconnectSanitized: ${compactJson(this.lastDisconnectDiagnostic ?? redactDiagnosticValue(lastDisconnect))}`,
       `recentCredentialLifecycle: ${compactJson(lifecycle.recentEvents)}`,
       `redaction: ${lifecycle.redaction.policy}`,
-      'operator_note: local auth restore can repair disk/config loss only; a server-side 401 device_removed requires verified WhatsApp re-link approval.',
+      confirmedRemoval
+        ? 'operator_note: local auth restore can repair disk/config loss only; a server-side 401 device_removed requires verified WhatsApp re-link approval.'
+        : 'operator_note: device removal is NOT confirmed — no device_removed conflict node was observed. Check the primary phone Linked Devices list before approving any re-link; do not restore or delete auth material on this evidence alone.',
       'q_action: investigate duplicate auth material, recent restarts, auth directory mutation, launchd/service overlap, and preserve auth backups before any destructive auth cleanup.',
     ].join('\n');
 
@@ -2353,10 +2620,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       this.loggedOutAlertEmitted = emitAlertChecked(
         config.botName,
         'whatsapp_device_bond_lost',
-        `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} lost WhatsApp linked-device bond`,
+        confirmedRemoval
+          ? `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} lost WhatsApp linked-device bond`
+          : `PHYSICAL INTERVENTION REQUIRED: whatsoup@${config.botName} parked after an unconfirmed WhatsApp 401 logout`,
         evidence,
         'critical',
-        this.deviceBondLostCriticalAsset(statusCode, reason),
+        this.deviceBondLostCriticalAsset(statusCode, reason, decision),
       );
     } catch (err) {
       this.log.error({ err }, 'failed to enqueue WhatsApp device bond lost alert');
@@ -2366,6 +2635,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   private deviceBondLostCriticalAsset(
     statusCode: number | undefined,
     reason: string,
+    decision: DisconnectDecisionRecord | null,
   ): BotErrorsCriticalAssetDiagnostic {
     const lifecycle = this.getCredentialLifecycleSnapshot();
     return {
@@ -2379,7 +2649,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         code: 'WA_AUTH_BOND_SERVER_REVOKED',
         domain: 'account_linkage',
         recoverability: 'manual_relink_required',
-        confidence: statusCode === DisconnectReason.loggedOut || reason === 'loggedOut' ? 'confirmed' : 'probable',
+        // A 401 status alone is not confirmation; only an observed
+        // device_removed conflict node is.
+        confidence: decision?.classification === 'confirmed_device_removed' ? 'confirmed' : 'probable',
         operatorAction: 'Preserve auth material and backups, investigate duplicate sessions/service overlap, and use phone-side WhatsApp relink only after non-physical recovery evidence is exhausted.',
         clearRequirement: 'clear only after WhatsApp is connected with a non-empty auth bond and a successful outbound send after the relinked creds mtime and after the incident',
       },
@@ -2421,7 +2693,10 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         authBond: result.snapshot,
         note: result.error ?? 'credential-write-in-flight',
       });
-      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred while credential write settles');
+      // Two conditions defer a capture now — a credential write still in
+      // flight and a read that did not finish — so the reason is carried in
+      // `error` rather than asserted by this line.
+      this.log.warn({ error: result.error, reason }, 'auth bond snapshot deferred');
       return;
     }
     this.lastAuthSnapshotFailedAt = Date.now();
@@ -2432,6 +2707,67 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     });
     this.log.error({ error: result.error, reason }, 'auth bond snapshot failed');
     this.emitLocalAuthBondFailureAlert(reason, result.snapshot);
+  }
+
+  /**
+   * Wrap the Signal key store so every write invalidates the auth-bond digest.
+   *
+   * This is the seam the filesystem mutation actually happens at. Baileys calls
+   * `authState.keys.set` directly from its outbound send path, which emits no
+   * socket event at all, so an event-name heuristic could never have covered it.
+   *
+   * Exactly ONE invalidation per write, taken AFTER it. An earlier revision also
+   * marked before the write, on the theory that it stopped a refresh starting
+   * mid-write. It did the opposite: the pre-mark started a walk, the post-mark
+   * bumped the generation microseconds later, and the walk was then fenced off
+   * and published nothing — so every key write bought a full tree walk that was
+   * discarded by construction. The generation fence alone already prevents a
+   * walk that began before the write from describing the tree after it.
+   */
+  private invalidatingKeyStore<T extends object>(keys: T): T {
+    const guard = this.authBond;
+    // Never let observability break a key write. Mirrors the credential saver's
+    // commit hook, which is the same hazard on the same change.
+    const mark = (seam: string): void => {
+      try {
+        guard.invalidateTreeCache(`key-store-${seam}`);
+      } catch (err) {
+        this.log.warn(
+          { err, seam },
+          'auth-bond digest invalidation failed after key-store write',
+        );
+      }
+    };
+    const wrap = (fn: (...args: unknown[]) => unknown, seam: string) =>
+      function (this: unknown, ...args: unknown[]): unknown {
+        const result = fn.apply(this, args);
+        if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+          return Promise.resolve(result).finally(() => { mark(seam); });
+        }
+        mark(seam);
+        return result;
+      };
+
+    // Wrapping mutates the store in place, which depends on the members being
+    // writable own properties. Baileys returns a plain object literal today, so
+    // this holds — but this call sits inline in the socket config, so a frozen
+    // or accessor-only member would throw here in strict module code and fail
+    // the whole connect. Losing the digest invalidation is a far smaller harm
+    // than losing the connection, so a refusal degrades rather than propagates.
+    const store = keys as Record<string, unknown>;
+    for (const seam of ['set', 'clear'] as const) {
+      const original = store[seam];
+      if (typeof original !== 'function') continue;
+      try {
+        store[seam] = wrap(original as (...args: unknown[]) => unknown, seam);
+      } catch (err) {
+        this.log.warn(
+          { err, seam },
+          'auth-bond digest will not track this key-store seam; member is not writable',
+        );
+      }
+    }
+    return keys;
   }
 
   private hasAuthKeyMaterialChurnSignal(events: Record<string, unknown>): boolean {
@@ -2450,6 +2786,20 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private scheduleSettledAuthBondSnapshot(reason: string): void {
+    // Deliberately does NOT invalidate the auth-bond tree cache. Five of this
+    // method's seven call sites are 'outbound-send-settled', which fires per
+    // send and does not change key material.
+    //
+    // Invalidation no longer REMOVES the digest — it marks the last observation
+    // stale and keeps serving it, so the old reason given here (a null
+    // tree_hash and an empty issue list on the next request) has not been the
+    // consequence since that fail-open was closed. The reason that still holds
+    // is cost and noise: each invalidation bumps the generation, fences off any
+    // walk in flight, and queues a successor, so invalidating per send buys a
+    // full tree walk per send and reports every send as a tree change. That is
+    // the churn the refresh floor exists to absorb, and it should not be
+    // manufactured here in the first place. Invalidation belongs at the two
+    // events that actually write key material, below.
     if (this.authSnapshotSettledTimer !== null) return;
     if (this.shuttingDown || this.loggedOutAlertEmitted) return;
     if (this.connectionState !== 'connected' || !this.sock) return;
@@ -2895,6 +3245,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages as WAMessage[]) {
+      this.historySyncWatch.observeUpsert(msg);
       if (msg.key.id && msg.key.fromMe === true) {
         this.confirmLocalAuthBondSendProof(msg.key.id, 'own_message_echo', msg.key.remoteJid ?? undefined);
       }
@@ -3182,6 +3533,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectAttempts = 0;
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
+    this.lastReconnectReset = { reason: RECONNECT_RESET_REASONS.exhaustion_cycle_retry, at: systemClock.now() };
     this.setConnectionState('reconnecting');
     this.persistConnectionRuntimeState('exhaustion_cycle_retry');
 
@@ -3207,6 +3559,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     this.reconnectAttempts = 0;
     this.reconnectPhase = 'backoff';
     this.firstFailureAt = null;
+    this.lastReconnectReset = { reason: RECONNECT_RESET_REASONS[reason], at: systemClock.now() };
     this.setConnectionState('reconnecting');
     this.persistConnectionRuntimeState(`graceful_reconnect_${reason}`);
 

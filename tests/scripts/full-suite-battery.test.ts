@@ -12,7 +12,7 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { buildVitestArgs, resolveBatteryTimeoutMs, runBoundedBattery } from '../../scripts/full-suite-battery.ts';
+import { buildVitestArgs, classifyGroupMembership, resolveBatteryTimeoutMs, runBoundedBattery } from '../../scripts/full-suite-battery.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const NODE = process.execPath;
@@ -26,6 +26,13 @@ const tmp = trackTmpDirs('battery-', { base: realpathSync(tmpdir()) });
  */
 function TIMING(waitMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
+
+/** Injected group kill that always fails the way macOS can after a timeout's SIGKILL. */
+function eperm(): never {
+  const e = new Error('operation not permitted') as NodeJS.ErrnoException;
+  e.code = 'EPERM';
+  throw e;
 }
 
 describe('runBoundedBattery (externally bounded full-suite runner)', () => {
@@ -132,17 +139,76 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     // EPERM, so the group can never be proven reaped — a descendant might still be alive. The
     // close-time verdict MUST be inconclusive/125. The pre-round-20 order checked `timedOut`
     // first and returned 124, hiding the un-reaped descendant behind an ordinary-timeout pass.
+    // Issue 3568: an EPERM now consults the group-membership probe, so the surviving descendant
+    // is stated through it — the probe reports a LIVE member.
     writeFileSync(child, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,500);');
-    const eperm = (): never => {
-      const e = new Error('operation not permitted') as NodeJS.ErrnoException;
-      e.code = 'EPERM';
-      throw e;
-    };
-    const r = await runBoundedBattery({ command: NODE, args: [child], timeoutMs: 200, stdio: 'ignore', graceMs: 5_000, kill: eperm });
+    const r = await runBoundedBattery({
+      command: NODE, args: [child], timeoutMs: 200, stdio: 'ignore', graceMs: 5_000, kill: eperm, probeGroup: () => 'live',
+    });
     expect(r.timedOut).toBe(true);
     expect(r.outcome).toBe('inconclusive'); // reap failure dominates the timeout
     expect(r.wrappedExit).toBe(125); // NOT 124 — a possibly-alive descendant is never a clean timeout
     expect(r.reapError).toMatch(/EPERM/);
+  }, 30_000);
+
+  it('issue 3568: an EPERM group kill whose group holds only zombies (or nothing) is reaped — the timeout is an ordinary 124, not 125', async () => {
+    const dir = tmp.make('eperm-zombies');
+    const child = join(dir, 'child.cjs');
+    // Same shape as the round-20 case above, but the probe finds no LIVE member: macOS can
+    // answer kill(-pgid) with EPERM while the group's members have exited and await reaping.
+    writeFileSync(child, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,500);');
+    const probed: number[] = [];
+    const r = await runBoundedBattery({
+      command: NODE, args: [child], timeoutMs: 200, stdio: 'ignore', graceMs: 5_000, kill: eperm,
+      probeGroup: (pgid) => { probed.push(pgid); return 'no-live-members'; },
+    });
+    expect(r.timedOut).toBe(true);
+    expect(r.outcome).toBe('timedOut');
+    expect(r.wrappedExit).toBe(124);
+    expect(probed.length).toBeGreaterThan(0);
+    expect(probed.every((pgid) => pgid > 0)).toBe(true); // the group id itself, never the negated kill target
+  }, 30_000);
+
+  it('issue 3568: with the DEFAULT probe (real ps), an EPERM group kill whose group keeps a LIVE descendant stays INCONCLUSIVE (125)', async () => {
+    const dir = tmp.make('eperm-live-descendant');
+    const child = join(dir, 'child.cjs');
+    // The child starts a same-group grandchild that stays alive ~2s, then exits at once. The
+    // injected kill cannot touch the group, so at close the real `ps` probe must still see the
+    // grandchild as a live member of the child's process group.
+    writeFileSync(child, [
+      'const cp=require("node:child_process");',
+      'cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2000)"],{stdio:"ignore"}).unref();',
+      'process.exit(0);',
+    ].join(''));
+    const r = await runBoundedBattery({ command: NODE, args: [child], timeoutMs: 10_000, stdio: 'ignore', kill: eperm });
+    expect(r.outcome).toBe('inconclusive');
+    expect(r.wrappedExit).toBe(125);
+    expect(r.reapError).toMatch(/EPERM; group membership probe: live/);
+  }, 30_000);
+
+  it('issue 3568: an EPERM group kill whose membership probe cannot answer stays INCONCLUSIVE (125) — fail closed', async () => {
+    const r = await runBoundedBattery({
+      command: NODE, args: ['-e', 'process.exit(0)'], timeoutMs: 10_000, stdio: 'ignore', kill: eperm, probeGroup: () => 'unknown',
+    });
+    expect(r.outcome).toBe('inconclusive');
+    expect(r.wrappedExit).toBe(125);
+    expect(r.reapError).toMatch(/EPERM/);
+  }, 30_000);
+
+  it('issue 3568: a group-kill error other than EPERM never consults the membership probe and stays INCONCLUSIVE (125)', async () => {
+    const einval = (): never => {
+      const e = new Error('invalid argument') as NodeJS.ErrnoException;
+      e.code = 'EINVAL';
+      throw e;
+    };
+    let probeCalls = 0;
+    const r = await runBoundedBattery({
+      command: NODE, args: ['-e', 'process.exit(0)'], timeoutMs: 10_000, stdio: 'ignore', kill: einval,
+      probeGroup: () => { probeCalls += 1; return 'no-live-members'; },
+    });
+    expect(r.outcome).toBe('inconclusive');
+    expect(r.wrappedExit).toBe(125);
+    expect(probeCalls).toBe(0);
   }, 30_000);
 
   it('FALSIFIER (round-20 finding 5): SIGHUP to the wrapper forwards a group kill — the detached child group is not orphaned', async () => {
@@ -182,6 +248,26 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
       wrapper.kill('SIGKILL'); // ensure no leak regardless of outcome
     }
   }, 30_000);
+});
+
+describe('classifyGroupMembership (issue 3568: the default probe parses `ps -A -o pid=,pgid=,stat=`)', () => {
+  it('a group whose only members are zombies has no live members', () => {
+    expect(classifyGroupMembership(' 101   100 Z\n 102   100 Z+\n 200   200 S\n', 100)).toBe('no-live-members');
+  });
+
+  it('one non-zombie member makes the group live', () => {
+    expect(classifyGroupMembership(' 101   100 Z\n 102   100 S+\n 200   200 S\n', 100)).toBe('live');
+  });
+
+  it('a group with no rows at all has no live members', () => {
+    expect(classifyGroupMembership(' 200   200 S\n 201   200 R\n', 100)).toBe('no-live-members');
+  });
+
+  it('an empty or malformed listing is unknown, never "no live members" (fail closed)', () => {
+    expect(classifyGroupMembership('', 100)).toBe('unknown');
+    expect(classifyGroupMembership(' 101   100\n', 100)).toBe('unknown');
+    expect(classifyGroupMembership(' 101   abc Z\n', 100)).toBe('unknown');
+  });
 });
 
 describe('resolveBatteryTimeoutMs (round-20 gap: invalid WHATSOUP_FULL_SUITE_BATTERY_TIMEOUT_MS is a config error, not an instant timeout)', () => {

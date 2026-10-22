@@ -12,6 +12,13 @@ import {
   TOOL_RESULT_MARKERS,
 } from '../../src/core/durability-evidence-contract.ts';
 import { createOutboundSendsWriter } from '../../src/core/outbound-sends.ts';
+import {
+  HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE,
+  HANDOFF_ARTIFACT_RETENTION_MS,
+  ensureHandoffArtifactSchema,
+  getHandoffArtifact,
+  upsertHandoffArtifact,
+} from '../../src/runtimes/agent/handoff-artifact.ts';
 
 describe('database retention', () => {
   let db: Database;
@@ -23,6 +30,130 @@ describe('database retention', () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it('prunes only expired handoff artifacts through the canonical retention sweep', () => {
+    const now = 2_000_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      ensureHandoffArtifactSchema(db);
+      for (const [conversationKey, updatedAt] of [
+        ['handoff-aged', now - HANDOFF_ARTIFACT_RETENTION_MS - 1],
+        ['handoff-exact-cutoff', now - HANDOFF_ARTIFACT_RETENTION_MS],
+        ['handoff-recent', now - HANDOFF_ARTIFACT_RETENTION_MS + 1],
+      ] as const) {
+        upsertHandoffArtifact(db, {
+          conversationKey,
+          summary: 'short-lived handoff summary',
+          seededArtifacts: 'short-lived seed',
+          updatedAt,
+          sourceProvider: 'test-provider',
+          sourceModel: 'test-model',
+          tokenBaseline: 1,
+        });
+      }
+
+      const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+      expect(result.handoffArtifacts).toBe(1);
+      expect(getHandoffArtifact(db, 'handoff-aged')).toBeNull();
+      expect(getHandoffArtifact(db, 'handoff-exact-cutoff')).not.toBeNull();
+      expect(getHandoffArtifact(db, 'handoff-recent')).not.toBeNull();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('reports zero handoff artifacts when the optional agent table is absent', () => {
+    expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts).toBe(0);
+  });
+
+  it('rolls back every bounded handoff batch after a later SQLite failure and drains it once on retry', () => {
+    const now = 2_000_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      ensureHandoffArtifactSchema(db);
+      for (let index = 0; index <= HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE; index += 1) {
+        upsertHandoffArtifact(db, {
+          conversationKey: `handoff-rollback-${String(index).padStart(3, '0')}`,
+          summary: 'must survive rollback',
+          seededArtifacts: null,
+          updatedAt: now - HANDOFF_ARTIFACT_RETENTION_MS - 1,
+          sourceProvider: 'test-provider',
+          sourceModel: null,
+          tokenBaseline: 0,
+        });
+      }
+      const oldBucket = (db.raw.prepare(
+        `SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-200 days') AS bucket`,
+      ).get() as { bucket: string }).bucket;
+      db.raw.prepare(
+        `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', 1)`,
+      ).run(oldBucket);
+      db.raw.exec(`
+        CREATE TRIGGER handoff_retention_later_failure
+        BEFORE DELETE ON metrics_hourly
+        BEGIN
+          SELECT RAISE(ABORT, 'injected later retention failure');
+        END;
+      `);
+
+      expect(() => runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION))
+        .toThrow('injected later retention failure');
+      expect(getHandoffArtifact(db, 'handoff-rollback-000')).not.toBeNull();
+      expect(getHandoffArtifact(db, `handoff-rollback-${String(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE).padStart(3, '0')}`)).not.toBeNull();
+
+      db.raw.exec('DROP TRIGGER handoff_retention_later_failure');
+      expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts)
+        .toBe(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE + 1);
+      expect(getHandoffArtifact(db, 'handoff-rollback-000')).toBeNull();
+      expect(getHandoffArtifact(db, `handoff-rollback-${String(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE).padStart(3, '0')}`)).toBeNull();
+      expect(runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION).handoffArtifacts).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('drains a restored expired handoff backlog immediately at timer start', async () => {
+    const now = 2_000_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const timer = new DatabaseRetentionTimer(db, DEFAULT_DATABASE_RETENTION);
+    try {
+      ensureHandoffArtifactSchema(db);
+      for (let index = 0; index <= HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE; index += 1) {
+        upsertHandoffArtifact(db, {
+          conversationKey: `restored-expired-handoff-${String(index).padStart(3, '0')}`,
+          summary: 'restored artifact',
+          seededArtifacts: null,
+          updatedAt: now - HANDOFF_ARTIFACT_RETENTION_MS - 1,
+          sourceProvider: 'test-provider',
+          sourceModel: null,
+          tokenBaseline: 0,
+        });
+      }
+      upsertHandoffArtifact(db, {
+        conversationKey: 'restored-recent-handoff',
+        summary: 'restored artifact',
+        seededArtifacts: null,
+        updatedAt: now - HANDOFF_ARTIFACT_RETENTION_MS + 1,
+        sourceProvider: 'test-provider',
+        sourceModel: null,
+        tokenBaseline: 0,
+      });
+
+      timer.start();
+      await Promise.resolve();
+
+      expect(getHandoffArtifact(db, 'restored-expired-handoff-000')).toBeNull();
+      expect(getHandoffArtifact(db, `restored-expired-handoff-${String(HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE).padStart(3, '0')}`)).toBeNull();
+      expect(getHandoffArtifact(db, 'restored-recent-handoff')).not.toBeNull();
+      expect(timer.getHealthSnapshot().lastResult).toMatchObject({
+        handoffArtifacts: HANDOFF_ARTIFACT_RETENTION_BATCH_SIZE + 1,
+      });
+    } finally {
+      timer.stop();
+      nowSpy.mockRestore();
+    }
   });
 
   it('deletes old terminal durability rows and exported facts', () => {
@@ -94,6 +225,7 @@ describe('database retention', () => {
       messages: 0,
       triggerRuns: 0,
       triggerOccurrences: 0,
+      handoffArtifacts: 0,
       identityAdmissionsExpired: 0,
     });
     expect(rowCount('inbound_events')).toBe(1);
@@ -584,6 +716,7 @@ describe('database retention', () => {
       messages: 0,
       triggerRuns: 0,
       triggerOccurrences: 0,
+      handoffArtifacts: 0,
       identityAdmissionsExpired: 0,
     });
     expect(rowCount('inbound_events')).toBe(2);
@@ -969,6 +1102,155 @@ describe('database retention', () => {
     }
   });
 
+  // Retention may drop a completed recovery job only when it can also drop the
+  // job's terminal. A 'transferred_to_recovery_owner' terminal left without its
+  // job is an orphan transfer, which health counts as blocking
+  // turn_recovery_integrity debt.
+  it('retains a completed recovery job whose terminal carries delivery corroboration', () => {
+    const corroborated = insertRecoveryChain(
+      'corroborated-completed',
+      'completed',
+      40,
+      40,
+      'delivery_unknown',
+    );
+    const proofTimestamp = timestampDaysAgo(40);
+    const corroboratingOp = Number(db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        echoed_at, source_inbound_seq, replay_policy
+      ) VALUES ('corroborated-completed-conversation', 'corroborated-completed@g.us',
+                'send_message', '{}', 'echoed', ?, ?, ?, 'unsafe')
+    `).run(proofTimestamp, proofTimestamp, corroborated.inboundSeq).lastInsertRowid);
+    db.raw.prepare(`
+      INSERT INTO turn_delivery_corroboration (
+        terminal_record_id, corroborating_op_id, basis, actor, evidence_ref
+      ) VALUES (?, ?, 'same_source_later_echoed_op', 'reconciler:test',
+                'test://retention-corroborated')
+    `).run(corroborated.terminalRecordId, corroboratingOp);
+    const unreferenced = insertRecoveryChain('corroboration-peer-completed', 'completed', 40);
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result).toMatchObject({
+      turnRecoveryJobs: 1,
+      turnTerminalRecords: 1,
+      inboundEvents: 1,
+      outboundOps: 1,
+    });
+    for (const [table, id, idColumn] of [
+      ['turn_recovery_jobs', corroborated.jobId, 'id'],
+      ['turn_terminal_records', corroborated.terminalRecordId, 'id'],
+      ['inbound_events', corroborated.inboundSeq, 'seq'],
+      ['outbound_ops', corroborated.outboundOpId, 'id'],
+      ['outbound_ops', corroboratingOp, 'id'],
+    ] as const) {
+      expect(rowExists(table, id, idColumn)).toBe(true);
+    }
+    for (const [table, id, idColumn] of [
+      ['turn_recovery_jobs', unreferenced.jobId, 'id'],
+      ['turn_terminal_records', unreferenced.terminalRecordId, 'id'],
+      ['inbound_events', unreferenced.inboundSeq, 'seq'],
+      ['outbound_ops', unreferenced.outboundOpId, 'id'],
+    ] as const) {
+      expect(rowExists(table, id, idColumn)).toBe(false);
+    }
+    expect(orphanTransferCount()).toBe(0);
+  });
+
+  it('retains a completed recovery job whose terminal inbound is a superseding catch-up target', () => {
+    db.raw.prepare(`
+      INSERT INTO recovery_plans (plan_id, origin, actor, summary)
+      VALUES ('retention-superseded-plan', 'operator', 'operator:test', 'superseded retention')
+    `).run();
+    const sourceSeq = Number(db.raw.prepare(`
+      INSERT INTO inbound_events (
+        message_id, conversation_key, chat_jid, received_at,
+        processing_status, completed_at, terminal_reason, failure_class
+      ) VALUES ('retention-superseded-source', 'superseded-completed-conversation',
+                'superseded-completed@g.us', datetime('now', '-41 days'),
+                'failed', datetime('now', '-41 days'), 'error', 'crash_recovery')
+    `).run().lastInsertRowid);
+    db.raw.prepare(`
+      INSERT INTO inbound_disposition_links (
+        inbound_seq, recovery_plan_id, disposition, superseded_by_seq,
+        reason, evidence_ref, actor
+      ) VALUES (?, 'retention-superseded-plan', 'recovery_pending_operator_catchup', NULL,
+                'pending catch-up', 'test://retention-superseded', 'operator:test')
+    `).run(sourceSeq);
+    const superseding = insertRecoveryChain('superseded-completed', 'completed', 40);
+    // A separate replied turn on the same catch-up inbound supplies the
+    // closure's delivery proof. The recovery job completed as a worker, so it
+    // is not a proof candidate and the closure witness names no recovery job.
+    const proofTimestamp = timestampDaysAgo(40);
+    const repliedOp = Number(db.raw.prepare(`
+      INSERT INTO outbound_ops (
+        conversation_key, chat_jid, op_type, payload, status, created_at,
+        echoed_at, source_inbound_seq, is_terminal
+      ) VALUES ('superseded-completed-conversation', 'superseded-completed@g.us',
+                'send_message', '{}', 'echoed', ?, ?, ?, 1)
+    `).run(proofTimestamp, proofTimestamp, superseding.inboundSeq).lastInsertRowid);
+    const repliedTerminal = Number(db.raw.prepare(`
+      INSERT INTO turn_terminal_records (
+        scope, conversation_key, delivery_jid, inbound_seq, inbound_seq_key,
+        logical_turn_id, manager_id, generation, attempt_kind,
+        inbound_disposition, delivery_kind, delivery_op_id,
+        reply_guarantee_disarmed, created_at
+      ) VALUES ('per_chat', 'superseded-completed-conversation',
+                'superseded-completed@g.us', ?, ?,
+                'superseded-completed-catchup-turn', 'superseded-completed-catchup-manager',
+                1, 'replied', 'finalized_replied', 'echoed', ?, 0, ?)
+    `).run(
+      superseding.inboundSeq,
+      superseding.inboundSeq,
+      repliedOp,
+      proofTimestamp,
+    ).lastInsertRowid);
+    closeOperatorCatchupRecovery(db, {
+      planId: 'retention-superseded-plan',
+      conversationKey: 'superseded-completed-conversation',
+      expectedSourceSeqs: [sourceSeq],
+      catchupSeq: superseding.inboundSeq,
+      actor: 'operator:test',
+      evidenceRef: 'test://retention-superseded',
+    });
+    expect(db.raw.prepare(`
+      SELECT terminal_record_id, recovery_job_id
+      FROM operator_catchup_closure_witnesses
+      WHERE recovery_plan_id = 'retention-superseded-plan'
+    `).get()).toEqual({ terminal_record_id: repliedTerminal, recovery_job_id: null });
+    const unreferenced = insertRecoveryChain('superseded-peer-completed', 'completed', 40);
+
+    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+
+    expect(result).toMatchObject({
+      turnRecoveryJobs: 1,
+      turnTerminalRecords: 1,
+      inboundEvents: 1,
+      outboundOps: 1,
+    });
+    for (const [table, id, idColumn] of [
+      ['turn_recovery_jobs', superseding.jobId, 'id'],
+      ['turn_terminal_records', superseding.terminalRecordId, 'id'],
+      ['turn_terminal_records', repliedTerminal, 'id'],
+      ['inbound_events', superseding.inboundSeq, 'seq'],
+      ['inbound_events', sourceSeq, 'seq'],
+      ['outbound_ops', superseding.outboundOpId, 'id'],
+      ['outbound_ops', repliedOp, 'id'],
+    ] as const) {
+      expect(rowExists(table, id, idColumn)).toBe(true);
+    }
+    for (const [table, id, idColumn] of [
+      ['turn_recovery_jobs', unreferenced.jobId, 'id'],
+      ['turn_terminal_records', unreferenced.terminalRecordId, 'id'],
+      ['inbound_events', unreferenced.inboundSeq, 'seq'],
+      ['outbound_ops', unreferenced.outboundOpId, 'id'],
+    ] as const) {
+      expect(rowExists(table, id, idColumn)).toBe(false);
+    }
+    expect(orphanTransferCount()).toBe(0);
+  });
+
   it('timer runs immediate and periodic cleanup, then stops idempotently', async () => {
     vi.useFakeTimers();
     try {
@@ -1062,6 +1344,7 @@ describe('database retention', () => {
         messages: 0,
         triggerRuns: 0,
         triggerOccurrences: 0,
+        handoffArtifacts: 0,
         identityAdmissionsExpired: 0,
       };
       const runSpy = vi.spyOn(timer, 'runCleanup')
@@ -1140,6 +1423,19 @@ describe('database retention', () => {
     return rows.map((row) => row.value);
   }
 
+  // Same predicate as the orphan_transfers CTE behind
+  // TurnRecoveryStore.getTurnRecoverySupervisorCounts().orphanTransfers.
+  function orphanTransferCount(): number {
+    return (db.raw.prepare(`
+      SELECT COUNT(*) AS count
+      FROM turn_terminal_records terminal
+      LEFT JOIN turn_recovery_jobs linked
+        ON linked.terminal_record_id = terminal.id
+      WHERE terminal.inbound_disposition = 'transferred_to_recovery_owner'
+        AND linked.id IS NULL
+    `).get() as { count: number }).count;
+  }
+
   function rowExists(tableName: string, id: number, idColumn = 'id'): boolean {
     return db.raw.prepare(
       `SELECT 1 FROM ${tableName} WHERE ${idColumn} = ?`,
@@ -1151,12 +1447,17 @@ describe('database retention', () => {
     state: 'pending' | 'completed',
     jobAgeDays: number,
     proofAgeDays = jobAgeDays,
+    // A transfer may only be recorded as delivery_unknown over a maybe_sent
+    // op (turn_terminal_transfer_requires_delivery), and only a
+    // delivery_unknown terminal can carry turn_delivery_corroboration.
+    deliveryKind: 'enqueued' | 'delivery_unknown' = 'enqueued',
   ): {
     inboundSeq: number;
     outboundOpId: number;
     terminalRecordId: number;
     jobId: number;
   } {
+    const initialOpStatus = deliveryKind === 'delivery_unknown' ? 'maybe_sent' : 'pending';
     const jobTimestamp = timestampDaysAgo(jobAgeDays);
     const proofTimestamp = timestampDaysAgo(proofAgeDays);
     const conversationKey = `${key}-conversation`;
@@ -1172,8 +1473,8 @@ describe('database retention', () => {
       INSERT INTO outbound_ops (
         conversation_key, chat_jid, op_type, payload, status, created_at,
         source_inbound_seq, is_terminal
-      ) VALUES (?, ?, 'send_message', '{}', 'pending', ?, ?, 1)
-    `).run(conversationKey, chatJid, proofTimestamp, inboundSeq).lastInsertRowid);
+      ) VALUES (?, ?, 'send_message', '{}', ?, ?, ?, 1)
+    `).run(conversationKey, chatJid, initialOpStatus, proofTimestamp, inboundSeq).lastInsertRowid);
     const terminalRecordId = Number(db.raw.prepare(`
       INSERT INTO turn_terminal_records (
         scope, conversation_key, delivery_jid,
@@ -1185,7 +1486,7 @@ describe('database retention', () => {
       ) VALUES (
         'per_chat', ?, ?, ?, ?,
         ?, ?, 1,
-        'failed', 'transferred_to_recovery_owner', 'enqueued', ?,
+        'failed', 'transferred_to_recovery_owner', ?, ?,
         ?, ?, 2, 0, ?
       )
     `).run(
@@ -1195,6 +1496,7 @@ describe('database retention', () => {
       inboundSeq,
       `${key}-source-turn`,
       `${key}-source-manager`,
+      deliveryKind,
       outboundOpId,
       `${key}-owner-turn`,
       `${key}-owner-manager`,

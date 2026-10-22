@@ -92,7 +92,10 @@ fi
 # commits are advisory. A long-uptime process on a drifted tracked tree is the
 # latent-landmine signature, so we block before restart.
 IS_RELEASE_EXPORT=0
-if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Stop git's upward discovery at the physical parent of REPO_ROOT, so an
+# unrelated ancestor .git cannot turn a non-git release export into git mode.
+REPO_ROOT_GIT_CEILING="$(dirname "$(cd "$REPO_ROOT" && pwd -P)")"
+if GIT_CEILING_DIRECTORIES="$REPO_ROOT_GIT_CEILING" git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   tracked_drift_count="$(git -C "$REPO_ROOT" diff --name-only HEAD -- | grep -c . || true)"
   : "${tracked_drift_count:=0}"
   if [ "$tracked_drift_count" -gt 0 ]; then

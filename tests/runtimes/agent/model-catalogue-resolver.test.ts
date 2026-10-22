@@ -16,6 +16,36 @@ beforeEach(() => {
 
 const T0 = 1_000_000; // arbitrary fixed clock base
 
+it.each([
+  { provider: 'opencode-cli', binary: 'opencode', dependency: 'listFn', sourceLabel: 'opencode CLI' },
+  { provider: 'codex-cli', binary: 'codex', dependency: 'codexFn', sourceLabel: 'codex CLI runtime catalogue (upstream freshness unreported)' },
+] as const)('$provider replaces a stale capture on recovery and ages the replacement from its own capture time', async ({ provider, binary, dependency, sourceLabel }) => {
+  const probe = vi.fn()
+    .mockResolvedValueOnce({ status: 'ok', ids: ['vendor/model-a'] })
+    .mockResolvedValueOnce({ status: 'unavailable', reason: 'timeout' })
+    .mockResolvedValueOnce({ status: 'ok', ids: ['vendor/model-b'] })
+    .mockResolvedValueOnce({ status: 'unavailable', reason: 'timeout' });
+  const resolveAt = (elapsedMs: number) => resolveModelCatalogue(provider, binary, {
+    nowMs: T0 + elapsedMs,
+    [dependency]: probe,
+  });
+
+  expect(await resolveAt(0)).toStrictEqual({ status: 'ok', ids: ['vendor/model-a'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenNthCalledWith(1, binary);
+  expect(await resolveAt(59_999)).toStrictEqual({ status: 'ok', ids: ['vendor/model-a'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenCalledTimes(1);
+
+  expect(await resolveAt(60_000)).toStrictEqual({ status: 'ok', ids: ['vendor/model-a'], sourceLabel, asOfLabel: '1m ago' });
+  expect(probe).toHaveBeenCalledTimes(2);
+  expect(await resolveAt(61_000)).toStrictEqual({ status: 'ok', ids: ['vendor/model-b'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenCalledTimes(3);
+
+  expect(await resolveAt(120_999)).toStrictEqual({ status: 'ok', ids: ['vendor/model-b'], sourceLabel, asOfLabel: 'just now' });
+  expect(probe).toHaveBeenCalledTimes(3);
+  expect(await resolveAt(121_000)).toStrictEqual({ status: 'ok', ids: ['vendor/model-b'], sourceLabel, asOfLabel: '1m ago' });
+  expect(probe).toHaveBeenCalledTimes(4);
+});
+
 describe('formatCaptureAsOf', () => {
   it('renders "just now" under a minute, "Nm ago" under an hour, "Nh ago (stale)" beyond', () => {
     expect(formatCaptureAsOf(T0, T0 + 30_000)).toBe('just now');
@@ -140,6 +170,15 @@ describe('resolveModelCatalogue — claude-cli', () => {
     const out = await resolveModelCatalogue('claude-cli', 'claude', { nowMs: T0, anthropicFn });
     expect(out).toStrictEqual({ status: 'unavailable', reason: { kind: 'empty' }, asOfLabel: 'just now' });
   });
+
+  it('also resolves via the anthropic-api provider id used by the managed adapter', async () => {
+    const anthropicFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['wrong-account-model'] });
+    const anthropicApiFn = vi.fn().mockResolvedValue({ status: 'ok', ids: ['vendor-model-1'] });
+    const out = await resolveModelCatalogue('anthropic-api', '', { nowMs: T0, anthropicFn, anthropicApiFn });
+    expect(out).toMatchObject({ status: 'ok', ids: ['vendor-model-1'] });
+    expect(anthropicApiFn).toHaveBeenCalledTimes(1);
+    expect(anthropicFn).not.toHaveBeenCalled();
+  });
 });
 
 describe('resolveModelCatalogue — unadapted harness', () => {
@@ -259,17 +298,47 @@ describe('resolveModelCatalogue — openai', () => {
 });
 
 describe('resolveModelCatalogue — codex-cli', () => {
-  // VERIFIED 2026-07-20 (live `codex --help` on this host): no `models`
-  // subcommand exists — `codex models` is parsed as a chat PROMPT, not a
-  // listing command. No call site injects a codex fn (there is no dep slot
-  // for one — see the seam comment on resolveCodex), so this no-adapter
-  // reason is the ONLY reachable production behavior, not one branch of a
-  // probe/cache path.
-  it('names codex-cli in a no-adapter reason (the only reachable production behavior)', async () => {
-    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 });
+  it('returns the native runtime catalogue with an honest freshness label and caches the capture', async () => {
+    const codexFn = vi.fn().mockResolvedValue({
+      status: 'ok',
+      ids: ['gpt-5.6-sol', 'gpt-5.5'],
+    });
+    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
+    expect(out).toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-5.6-sol', 'gpt-5.5'],
+      sourceLabel: 'codex CLI runtime catalogue (upstream freshness unreported)',
+      asOfLabel: 'just now',
+    });
+    await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0 + 30_000, codexFn });
+    expect(codexFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves a stale capture with disclosed age after a later diagnostic failure', async () => {
+    const codexFn = vi.fn()
+      .mockResolvedValueOnce({ status: 'ok', ids: ['gpt-5.6-sol'] })
+      .mockResolvedValueOnce({ status: 'unavailable', reason: 'command-error' });
+
+    await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
+    const out = await resolveModelCatalogue('codex-cli', 'codex', {
+      nowMs: T0 + 5 * 60_000,
+      codexFn,
+    });
+
+    expect(out).toStrictEqual({
+      status: 'ok',
+      ids: ['gpt-5.6-sol'],
+      sourceLabel: 'codex CLI runtime catalogue (upstream freshness unreported)',
+      asOfLabel: '5m ago',
+    });
+  });
+
+  it('maps a hidden-only catalogue to unavailable/empty when no capture exists', async () => {
+    const codexFn = vi.fn().mockResolvedValue({ status: 'unavailable', reason: 'empty' });
+    const out = await resolveModelCatalogue('codex-cli', 'codex', { nowMs: T0, codexFn });
     expect(out).toStrictEqual({
       status: 'unavailable',
-      reason: { kind: 'no-adapter', harness: 'codex-cli' },
+      reason: { kind: 'empty' },
       asOfLabel: 'just now',
     });
   });

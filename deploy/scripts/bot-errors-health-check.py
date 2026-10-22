@@ -31,9 +31,20 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
-from lib.bot_errors_envelope import new_event_fields
-from lib.target_provenance import safe_observer_provenance, safe_target_provenance
-from lib.health_reader import classify_projection, health_body_is_disclosed, instance_health_token, is_public_envelope
+from lib.bot_errors_envelope import event_machine, new_event_fields
+from lib.bot_errors_daily_health import daily_health_line_is_failure, daily_health_line_is_warning
+from lib.target_provenance import (
+    safe_observer_provenance,
+    safe_release_divergence,
+    safe_target_provenance,
+)
+from lib.health_reader import (
+    classify_projection,
+    disconnect_decision_reading,
+    health_body_is_disclosed,
+    instance_health_token,
+    is_public_envelope,
+)
 from lib.controller_log import (
     ControllerLogContext,
     controller_cycle,
@@ -50,8 +61,34 @@ from lib.durable_json import (
     publish_state_json,
     require_advance,
 )
-from lib.state_files import DEADMAN_STATE, DISPATCHER_STATE, Q_LOOP_STATE, TOOL_INVENTORY_STATE
+from lib.state_files import (
+    DEADMAN_STATE,
+    DISPATCHER_STATE,
+    HEALTH_PROFILE_MISSING_MARKER,
+    Q_LOOP_STATE,
+    TOOL_INVENTORY_STATE,
+)
 from lib.state_root import DEFAULT_STATE_ROOT, q_loop_state_root, state_root, test_state_root
+from lib.classify_health import recovery_debt_issue
+from lib.fleet_config import (
+    FAILURE_INVALID_JSON,
+    FAILURE_NOT_OBJECT,
+    HEALTH_PROFILE_ENV,
+    HEALTH_PROFILE_JSON_ENV,
+    PROFILE_MISSING_MARKER_KIND,
+    PROFILE_MISSING_MARKER_SCHEMA,
+    SOURCE_ENV,
+    SOURCE_ENV_JSON,
+    SOURCE_TRACKED,
+    FleetConfigError,
+    private_health_profile_path,
+    profile_missing_due,
+    read_json_object,
+    resolve_health_profile,
+    tracked_health_profile_path,
+    utc_day,
+)
+from lib.queue_age import scan_directory
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -129,12 +166,23 @@ SERVICE_ENV_MAP = {
     "google": "GOOGLE_API_KEY",
     "fireworks-ai": "FIREWORKS_API_KEY",
     "togetherai": "TOGETHER_API_KEY",
+    "zai-coding-plan": "ZHIPU_API_KEY",
+    "minimax-coding-plan": "MINIMAX_API_KEY",
     "pinecone": "PINECONE_API_KEY",
     "elevenlabs": "ELEVENLABS_API_KEY",
     "whatsoup-health-token": "WHATSOUP_HEALTH_TOKEN",
     "whatsoup_health": "WHATSOUP_HEALTH_TOKEN",
 }
-TERMINAL_AUTH_FAILURE_CLASSES = {"pairing_required", "serverside_logout_irreversible"}
+# Mirrors authFailureClasses in src/lib/fault-taxonomy-registry.json. The
+# auth_401_* classes are logged out without confirmed server removal; they
+# still need a human, but evidence carries the class so nobody reads them as a
+# confirmed device_removed.
+TERMINAL_AUTH_FAILURE_CLASSES = {
+    "pairing_required",
+    "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
+}
 LOGGED_OUT_STATUS_CODE = 401
 LOGGED_OUT_REASON_KEY = "loggedout"
 
@@ -259,6 +307,9 @@ HEALTH_PROBE_TIMEOUT_SECONDS = positive_env_float("BOT_ERRORS_HEALTH_PROBE_TIMEO
 PRIMARY_PHONE_EXPIRY_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_EXPIRY_DAYS", 14)
 PRIMARY_PHONE_WARN_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_WARN_DAYS", 10)
 PRIMARY_PHONE_FAIL_DAYS = positive_env_int("BOT_ERRORS_PRIMARY_PHONE_FAIL_DAYS", 12)
+# Clock-skew allowance for a verification timestamp; the recorder refuses and
+# the evaluator rejects anything later than now plus this.
+PRIMARY_PHONE_FUTURE_SKEW_SECONDS = 300
 
 
 def kernel_release() -> str:
@@ -573,77 +624,53 @@ def host_profile_name() -> str:
 
 
 def script_relative_profile_path() -> Path:
-    """Canonical in-repo per-host profile path, resolved relative to this script.
+    """Tracked in-repo per-host profile path, resolved relative to this script.
 
     Matches deploy/scripts/install-bot-errors-health-launchd.sh and setup.sh
-    (``REPO_ROOT/deploy/health-profiles/<host>.json``). Used as a self-healing
-    fallback when the baked ``BOT_ERRORS_HEALTH_PROFILE`` env path is stale —
-    e.g. a non-canonical checkout location — so a relay/leaf host never silently
-    falls back to role=central and fails every central-only check.
+    (``REPO_ROOT/deploy/health-profiles/<host>.json``). It is the last source
+    ``lib.fleet_config`` tries, after the env var and the private per-host file.
     """
-    return REPO_ROOT / "deploy" / "health-profiles" / f"{host_profile_name()}.json"
-
-
-def read_profile_file(path: Path) -> dict[str, Any]:
-    """Read and parse a profile JSON file.
-
-    Returns the parsed dict; raises on read, parse, or non-object content so the
-    caller can distinguish a usable profile from a failure.
-    """
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(loaded, dict):
-        raise ValueError(f"profile {path} must be an object")
-    return loaded
+    return tracked_health_profile_path(REPO_ROOT, host_profile_name())
 
 
 def load_health_profile() -> dict[str, Any]:
-    raw = os.environ.get("BOT_ERRORS_HEALTH_PROFILE_JSON")
-    path = os.environ.get("BOT_ERRORS_HEALTH_PROFILE")
+    """Load this host's health profile, or raise :class:`FleetConfigError`.
+
+    Order: ``BOT_ERRORS_HEALTH_PROFILE_JSON`` (inline), then the
+    ``lib.fleet_config`` order (env path, private file, tracked copy). A set
+    env var that cannot be used fails; it never self-heals from a later
+    source, and a missing profile never becomes role=central.
+    """
+    raw = os.environ.get(HEALTH_PROFILE_JSON_ENV)
     profile: dict[str, Any] = dict(DEFAULT_HEALTH_PROFILE)
     if raw:
         try:
             loaded = json.loads(raw)
         except json.JSONDecodeError as exc:
-            return profile | {"profileLoadError": f"invalid BOT_ERRORS_HEALTH_PROFILE_JSON: {exc}", "_explicitProfile": True}
-        if isinstance(loaded, dict):
-            profile.update(loaded)
-        else:
-            profile["profileLoadError"] = "BOT_ERRORS_HEALTH_PROFILE_JSON must be an object"
+            loaded = exc
+        if not isinstance(loaded, dict):
+            problem = f"is not valid JSON ({loaded})" if isinstance(loaded, Exception) else "is not a JSON object"
+            raise FleetConfigError(
+                f"health profile {problem}: {HEALTH_PROFILE_JSON_ENV} (source=env; "
+                f"{HEALTH_PROFILE_JSON_ENV} is set, so later sources were not tried); "
+                f"resolver order: 0) env {HEALTH_PROFILE_JSON_ENV} 1) env {HEALTH_PROFILE_ENV} "
+                f"2) private {private_health_profile_path()} 3) tracked {script_relative_profile_path()}",
+                private_health_profile_path(),
+                source=SOURCE_ENV_JSON,
+                kind=FAILURE_INVALID_JSON if isinstance(loaded, Exception) else FAILURE_NOT_OBJECT,
+            )
+        profile.update(loaded)
         profile["_explicitProfile"] = True
         return profile
 
-    fallback = script_relative_profile_path()
-    if path:
-        try:
-            profile.update(read_profile_file(Path(path)))
-            profile["_explicitProfile"] = True
-            profile["_profilePath"] = path
-            return profile
-        except Exception as env_exc:  # noqa: BLE001 - self-heal before reporting failure.
-            # Stale/unreadable baked env path (e.g. plist baked for a checkout
-            # that no longer exists). Self-heal from the in-repo per-host profile
-            # before defaulting to role=central, which would produce fleet-wide
-            # false-criticals on relay/leaf hosts.
-            try:
-                profile.update(read_profile_file(fallback))
-                profile["_explicitProfile"] = True
-                profile["_profilePath"] = str(fallback)
-                profile["profileFallback"] = f"env path unreadable ({path}: {env_exc}); recovered from {fallback}"
-                return profile
-            except Exception:  # noqa: BLE001 - daily health should report the original failure.
-                return profile | {"profileLoadError": f"cannot read profile {path}: {env_exc}", "_explicitProfile": True}
-
-    # No explicit env profile set — try the in-repo per-host profile before
-    # defaulting to role=central.
-    try:
-        profile.update(read_profile_file(fallback))
-        profile["_explicitProfile"] = True
-        profile["_profilePath"] = str(fallback)
-        profile["profileFallback"] = f"no BOT_ERRORS_HEALTH_PROFILE set; recovered from {fallback}"
-        return profile
-    except Exception:  # noqa: BLE001 - role=central default when no per-host profile exists.
-        profile["_explicitProfile"] = False
-        return profile
+    resolved = resolve_health_profile(script_relative_profile_path())
+    profile.update(read_json_object(resolved))
+    profile["_explicitProfile"] = True
+    # The env value is kept verbatim so the evidence line is unchanged.
+    profile["_profilePath"] = resolved.env_raw if resolved.source == SOURCE_ENV else str(resolved.path)
+    if resolved.source == SOURCE_TRACKED:
+        profile["profileFallback"] = f"no BOT_ERRORS_HEALTH_PROFILE set; recovered from {resolved.path}"
+    return profile
 
 
 def profile_bool(profile: dict[str, Any], key: str, default: bool) -> bool:
@@ -2504,7 +2531,7 @@ def outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": HOST_PLATFORM,
         "instance": "bot-errors-health",
         "source": source,
@@ -2543,12 +2570,23 @@ def outbox_event(
     # target instance distinct from the producer, resolve that target's own
     # provenance (fail-closed to unknown) instead of letting producer evidence
     # stand in for it.
-    event["observerProvenance"] = redact_json_value(
-        safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
-    )
+    observer_provenance = safe_observer_provenance("bot-errors-health-check", __file__, HOST_PLATFORM)
+    event["observerProvenance"] = redact_json_value(observer_provenance)
     target_instance = str(event["instance"])
     if target_instance and target_instance != "bot-errors-health":
-        event["targetProvenance"] = redact_json_value(safe_target_provenance(target_instance, HOST_PLATFORM))
+        target_provenance = safe_target_provenance(target_instance, HOST_PLATFORM)
+        event["targetProvenance"] = redact_json_value(target_provenance)
+        # #2358 C9/C10: classified only where a distinct target exists to
+        # compare against. A producer-self event has no target block, so there
+        # is nothing to diverge from and no verdict to attach.
+        #
+        # Classified from the RAW blocks, matching the runner, so both
+        # producers judge the same inputs. Reading the redacted copies here
+        # would let a future redaction rule that rewrote commit-shaped text
+        # move this verdict and not the runner. Only the verdict is redacted.
+        event["releaseDivergence"] = redact_json_value(
+            safe_release_divergence(observer_provenance, target_provenance)
+        )
     if force_notify:
         event["diagnostics"]["forceNotify"] = True
         event["diagnostics"]["forceNotifyLevel"] = "critical"
@@ -3069,6 +3107,14 @@ def instance_db_inventory() -> list[str]:
     EXCLUDES recovery-backups/ subtrees and *-wal/*-shm sidecars (benign
     snapshot artifacts). Alert text names the found path and points at
     docs/configuration.md's XDG table.
+
+    Fail-closed: every 0-byte .db directly in the instance dir FAILs unless
+    its name is in KNOWN_PLACEHOLDER_DB_NAMES, so an unknown or newly added
+    live DB is never hidden. The cost: a new placeholder name FAILs until it
+    is listed there. A 0-byte .db in a subfolder is evidence only — the
+    loader opens only top-level paths of the instance data root, so a
+    nested file cannot be live. The .db suffix and names match
+    case-insensitively because APFS is case-insensitive.
     """
     instances_root = Path.home() / ".local/share/whatsoup/instances"
     lines: list[str] = []
@@ -3078,12 +3124,25 @@ def instance_db_inventory() -> list[str]:
         if not entry.is_dir():
             continue
         instance_name = entry.name
-        _scan_instance_db_dir(entry, instance_name, lines)
+        _scan_instance_db_dir(entry, instance_name, lines, entry)
     return lines
 
 
-def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str]) -> None:
-    """Recurse into root, appending FAIL lines for 0-byte .db files.
+# Top-level instance-dir .db names that are known placeholders, lowercased.
+# The live DBs there are bot.db (src/fleet/paths.ts) and lifecycle-events.db
+# (src/runtimes/agent/runtime.ts); neither may be listed here.
+KNOWN_PLACEHOLDER_DB_NAMES = frozenset({
+    # No src/ code opens it.
+    "store.db",
+    # No src/ code opens it.
+    "whatsoup.db",
+})
+
+
+def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str], instance_root: Path) -> None:
+    """Recurse into root, appending a FAIL line for a 0-byte top-level .db
+    that is not a known placeholder and an evidence-only line for any other
+    0-byte .db file.
 
     Skips recovery-backups/ subtrees and *-wal/*-shm sidecars.
     """
@@ -3097,12 +3156,25 @@ def _scan_instance_db_dir(root: Path, instance_name: str, lines: list[str]) -> N
         if child.is_dir():
             if child.name == "recovery-backups":
                 continue
-            _scan_instance_db_dir(child, instance_name, lines)
+            _scan_instance_db_dir(child, instance_name, lines, instance_root)
             continue
         name = child.name
         if name.endswith("-wal") or name.endswith("-shm"):
             continue
-        if name.endswith(".db") and child.stat().st_size == 0:
+        if not name.lower().endswith(".db"):
+            continue
+        try:
+            size = child.stat().st_size
+        except OSError as exc:
+            # A dangling symlink must not crash the whole daily run.
+            lines.append(
+                f"WARN instance_db {instance_name}: unreadable_db path={child} error={type(exc).__name__}"
+            )
+            continue
+        if size == 0:
+            if root != instance_root or name.lower() in KNOWN_PLACEHOLDER_DB_NAMES:
+                lines.append(f"instance_db {instance_name}: zero_byte_placeholder_db path={child}")
+                continue
             lines.append(
                 f"FAIL instance_db {instance_name}: zero_byte_db path={child} — "
                 "see docs/configuration.md XDG table for expected layout"
@@ -3467,6 +3539,9 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             add_marker("health_status_unknown")
     elif status == 200:
         add_marker("health_status_missing")
+    debt_issue = recovery_debt_issue(data)
+    if debt_issue is not None:
+        add_marker(f"health_{debt_issue}")
     if status == 200:
         generated_at = data.get("generated_at")
         generated_at_epoch = parse_iso_epoch(generated_at)
@@ -3564,7 +3639,18 @@ def health_probe_details(status: int, body: str, expected_name: str | None = Non
             append_evidence_field(details, "credential_lifecycle_last_event_at", latest_event.get("at"))
             append_evidence_field(details, "credential_lifecycle_last_event_status_code", latest_event.get("statusCode"))
             append_evidence_field(details, "credential_lifecycle_last_event_reason", latest_event.get("reason"))
-    if (
+    # A body carrying the transport's disconnect decision is judged by the
+    # auth_failure_class above; the raw 401 / loggedOut fallback applies only
+    # to a legacy body without it (an ambiguous 401 inside its bounded retry
+    # also reports last_status_code=401 and is not a physical intervention).
+    decision_kind, decision_classification = disconnect_decision_reading(connection)
+    if decision_kind != "absent":
+        append_evidence_field(
+            details,
+            "disconnect_classification",
+            decision_classification if decision_kind == "classified" else decision_kind,
+        )
+    if decision_kind == "absent" and (
         is_logged_out_status_code(connection.get("last_status_code"))
         or is_logged_out_disconnect_reason(connection.get("last_disconnect_reason"))
     ):
@@ -3813,6 +3899,8 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
         or "auth_bond_at_risk" in details
         or "physical_intervention_required" in details
         or "health_unhealthy" in details
+        or "health_recovery_debt_invalid" in details
+        or "health_recovery_debt_status_contradiction" in details
     ):
         prefix = "FAIL "
     elif (
@@ -7333,6 +7421,7 @@ def unprofiled_config_inventory(root: Path, expected_names: set[str]) -> list[st
 
 
 SUPPORT_WHATSOUP_SERVICE_NAMES = {
+    "bot-errors-j1-collector",
     "dashboard",
     "fleet",
     "ms365-token-backup",
@@ -7748,6 +7837,11 @@ def auth_failure_log_inventory(name: str, expectation: str, health_probe: str | 
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=device_removed log={path}"]
         if text_has_terminal_auth_failure_class(text):
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=terminal_auth_failure_class log={path}"]
+        # A probe whose body carried the transport's disconnect decision is
+        # authoritative: a 401 log line then belongs to an ambiguous bounded
+        # retry as often as to a real logout, so only legacy probes use it.
+        if "disconnect_classification=" in health_probe:
+            continue
         if '"statusCode":401' in text or '"reason":"loggedOut"' in text:
             return [f"FAIL auth_bond {name}: physical_intervention_required recent_log_pattern=loggedOut log={path}"]
     return []
@@ -7837,7 +7931,7 @@ def write_primary_phone_verification(
     verified_epoch = parse_iso_epoch(verified_at)
     if verified_epoch is None:
         raise ValueError("verified-at must be an ISO timestamp or YYYY-MM-DD")
-    if verified_epoch > current_epoch() + 300:
+    if verified_epoch > current_epoch() + PRIMARY_PHONE_FUTURE_SKEW_SECONDS:
         raise ValueError("verified-at cannot be more than 5 minutes in the future")
 
     path = primary_phone_verifications_path()
@@ -7944,6 +8038,14 @@ def primary_phone_verification_inventory(profile: dict[str, Any], item: dict[str
         prefix = "FAIL " if required else "WARN "
         return [
             f"{prefix}{line_base} verification_invalid "
+            f"last_verified_source={last_verified_source} last_verified_at={last_verified}"
+        ]
+
+    if verified_epoch > current_epoch() + PRIMARY_PHONE_FUTURE_SKEW_SECONDS:
+        # Without this, a future timestamp clamps to age 0 below and reads "fresh".
+        prefix = "FAIL " if required else "WARN "
+        return [
+            f"{prefix}{line_base} verification_invalid reason=future_dated "
             f"last_verified_source={last_verified_source} last_verified_at={last_verified}"
         ]
 
@@ -8774,10 +8876,18 @@ def queue_inventory() -> list[str]:
     ))
     writefail_count = 0
     oldest_writefail = 0
+    writefail_failed = False
     for path in writefail_paths:
-        count, oldest = directory_stats(path, "*.writefail")
+        try:
+            count, oldest = directory_stats(path, "*.writefail")
+        except OSError as exc:
+            writefail_failed = True
+            lines.append(queue_observation_failure_line("writefail", path, "*.writefail", exc))
+            continue
         writefail_count += count
         oldest_writefail = max(oldest_writefail, oldest)
+    if writefail_failed:
+        return lines
     prefix = queue_prefix(
         writefail_count,
         oldest_writefail,
@@ -8793,57 +8903,8 @@ def queue_inventory() -> list[str]:
     return lines
 
 
-def _event_file_age_seconds(path: Path, now: float) -> float:
-    """Return the age in seconds for a JSON event file.
-
-    For *.json event files, reads the event's createdAt ISO8601 field as the
-    true creation time (age = now - createdAt).  Falls back to st_mtime on
-    any error (missing field, unparseable timestamp, unreadable file).
-    Non-JSON callers already pass non-matching patterns; this path is only
-    reached for *.json glob results.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            created_at = data.get("createdAt")
-            if isinstance(created_at, str) and created_at.strip():
-                parsed = datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
-                return max(0.0, now - parsed.timestamp())
-    except Exception:  # noqa: BLE001 - health path must never crash on malformed files
-        pass
-    try:
-        return max(0.0, now - path.stat().st_mtime)
-    except OSError:
-        return 0.0
-
-
-def _is_durable_internal_entry(path: Path) -> bool:
-    """Return True for durable_json internal artifacts (e.g. ``.durable-json.lock``).
-
-    These are never data entries and must be excluded from queue-depth counts
-    and age calculations. See #2727.
-    """
-    return path.name == ".durable-json.lock"
-
-
 def directory_stats(path: Path, pattern: str) -> tuple[int, int]:
-    if not path.exists():
-        return 0, 0
-    files = [
-        item
-        for item in path.glob(pattern)
-        if item.is_file() and not _is_durable_internal_entry(item)
-    ]
-    if not files:
-        return 0, 0
-    now = time.time()
-    is_json_pattern = pattern.endswith(".json") or pattern == "*.json"
-    if is_json_pattern:
-        oldest = max(_event_file_age_seconds(item, now) for item in files)
-    else:
-        oldest = now - min(item.stat().st_mtime for item in files)
-    return len(files), max(0, int(oldest))
+    return scan_directory(path, pattern, time.time())
 
 
 def queue_prefix(
@@ -8865,6 +8926,14 @@ def queue_prefix(
     return ""
 
 
+def queue_observation_failure_line(label: str, path: Path, pattern: str, exc: OSError) -> str:
+    return (
+        f"FAIL {label}: observation=failed count=unknown oldest_seconds=unknown "
+        f"path={path} pattern={pattern} error_class={type(exc).__name__} "
+        f"errno={exc.errno if exc.errno is not None else 'unknown'}"
+    )
+
+
 def queue_directory_line(
     label: str,
     path: Path,
@@ -8874,7 +8943,10 @@ def queue_directory_line(
     warn_oldest_seconds: int,
     critical_oldest_seconds: int,
 ) -> str:
-    count, oldest = directory_stats(path, pattern)
+    try:
+        count, oldest = directory_stats(path, pattern)
+    except OSError as exc:
+        return queue_observation_failure_line(label, path, pattern, exc)
     exists = path.exists()
     prefix = queue_prefix(count, oldest, warn_count, critical_count, warn_oldest_seconds, critical_oldest_seconds)
     return (
@@ -9042,8 +9114,213 @@ def record_daily_health_receipt(event_path: Path, severity: str) -> PublicationR
     return publication
 
 
+PROFILE_MISSING_PRODUCER = "health-check"
+PROFILE_MISSING_STDERR_PREFIX = "bot-errors-health-check: profile-missing"
+
+
+def _profile_missing_error_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
+def _profile_missing_error_sha256(exc: FleetConfigError) -> str:
+    return hashlib.sha256(str(exc).encode("utf-8")).hexdigest()
+
+
+def profile_missing_event_text(host: str, day: str, exc: FleetConfigError) -> tuple[str, str]:
+    """Summary and evidence for the profile-missing alert.
+
+    The error message names paths, and an env-var path outside the redacted
+    config tree would survive redaction, so the event carries only fixed
+    tokens and a hash. The full message stays on the stderr fail-closed line.
+    """
+    summary = f"health profile missing: {PROFILE_MISSING_PRODUCER} cannot load its health profile; exiting 2"
+    evidence = "\n".join([
+        "kind=profile-missing",
+        f"producer={PROFILE_MISSING_PRODUCER}",
+        f"host={host}",
+        f"utc_day={day}",
+        f"error_class={getattr(exc, 'kind', 'unknown')}",
+        f"source={getattr(exc, 'source', 'unknown')}",
+        f"error_sha256={_profile_missing_error_sha256(exc)}",
+    ])
+    return summary, evidence
+
+
+def profile_missing_marker_payload(host: str, day: str, event_path: Path, exc: FleetConfigError) -> dict[str, Any]:
+    # A hash, not the error text: the marker must not carry the private path.
+    return {
+        "schemaVersion": PROFILE_MISSING_MARKER_SCHEMA,
+        "kind": PROFILE_MISSING_MARKER_KIND,
+        "producer": PROFILE_MISSING_PRODUCER,
+        "host": host,
+        "utcDay": day,
+        "eventId": event_path.stem,
+        "errorSha256": _profile_missing_error_sha256(exc),
+    }
+
+
+def observe_profile_missing_marker() -> tuple[Any, Any]:
+    """Return ``(target, observation)`` for this producer's marker.
+
+    Raises when the marker cannot be read (unparseable, unreadable, wrong
+    type); the caller then moves it aside.
+    """
+    root = state_root()
+    ensure_private_dir(root)
+    target = _durable_target(root / HEALTH_PROFILE_MISSING_MARKER)
+    return target, observe_json(target)
+
+
+def move_profile_missing_marker_aside(epoch: int) -> Path:
+    """Rename an unreadable marker to a timestamped sibling, keeping its bytes.
+
+    The compare-and-swap cannot replace a marker it cannot read, so without
+    this every run would alert. The corrupt bytes are kept before the fresh
+    marker (a normal compare-and-swap from absent) supersedes them, the
+    ordering docs/superpowers/specs/2026-07-28-bot-errors-durability-stack-
+    design.md lines 514-517 ask for. Only the ordering: this plain rename
+    neither syncs the state directory nor takes the durable-JSON lock, so the
+    spec's "published and synced" guarantee and its Draft 3 transition
+    contract (lines 428-437) are not met here. Raises when the rename fails.
+    """
+    marker = state_root() / HEALTH_PROFILE_MISSING_MARKER
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
+    aside = marker.with_name(f"{marker.name}.corrupt-{stamp}")
+    if os.path.lexists(aside):
+        aside = marker.with_name(f"{marker.name}.corrupt-{stamp}-{os.getpid()}-{time.time_ns()}")
+    os.rename(marker, aside)
+    return aside
+
+
+def record_profile_missing_marker(target: Any, expected: JsonVersion, marker: dict[str, Any]) -> PublicationResult:
+    publication_operation = operation_id(
+        target,
+        marker,
+        component="health_check.profile_missing_marker",
+        predecessor=expected,
+    )
+    publication = publish_state_json(
+        target,
+        marker,
+        component="health_check.profile_missing_marker",
+        operation_id=publication_operation,
+        expected=expected,
+        generation=(expected.generation or 0) + 1,
+    )
+    require_advance(publication)
+    return publication
+
+
+def emit_profile_missing_event(exc: FleetConfigError) -> None:
+    """Queue the critical profile-missing alert at most once per (host, producer, UTC day).
+
+    This is daily suppression after a successfully recorded marker, not
+    exactly-once delivery. The event is published first and the marker second,
+    so a lost alert is never traded for a quiet day. Three known duplicates follow:
+    (a) the event is published but the marker write fails or the process dies
+    before it, so the next run alerts again; (b) two concurrent runs both read
+    "due" before either marker lands, so both publish (the loser's marker write
+    then fails its compare-and-swap); (c) a run that found the marker unreadable
+    renames aside whatever sits at the path, which can be a good marker a
+    concurrent run just wrote, so one more alert follows. The durable writer's
+    lock covers one state write, not the event-plus-marker pair, and the rename
+    takes no lock; no extra lock is taken here.
+
+    An unreadable marker is renamed aside and replaced. Only a state root where
+    no marker can be written (or moved) is left, and there every run alerts:
+    nothing can suppress without writable state, and that state-root failure is
+    itself what needs a page.
+
+    Every outcome is reported on stderr after the fail-closed line. Nothing
+    here raises: daily() returns 2 whatever this does.
+    """
+    prefix = PROFILE_MISSING_STDERR_PREFIX
+    try:
+        host = host_profile_name()
+        epoch = current_epoch()
+        day = utc_day(epoch)
+    except Exception as setup_exc:  # noqa: BLE001 - the exit code must stay 2.
+        print(f"{prefix} event not written (clock or host lookup failed): {_profile_missing_error_text(setup_exc)}", file=sys.stderr)
+        return
+    target: Any = None
+    observation: Any = None
+    try:
+        target, observation = observe_profile_missing_marker()
+    except Exception as read_exc:  # noqa: BLE001 - an unreadable marker must not suppress.
+        read_error = _profile_missing_error_text(read_exc)
+        try:
+            aside = move_profile_missing_marker_aside(epoch)
+        except Exception as move_exc:  # noqa: BLE001 - fall back to alerting without a marker.
+            print(
+                f"{prefix} marker read failed ({read_error}) and could not be moved aside "
+                f"({_profile_missing_error_text(move_exc)}); alerting without suppression and leaving the marker in place",
+                file=sys.stderr,
+            )
+        else:
+            print(f"{prefix} marker read failed ({read_error}); moved it aside to {aside}", file=sys.stderr)
+            try:
+                target, observation = observe_profile_missing_marker()
+            except Exception as reread_exc:  # noqa: BLE001 - alert without a marker.
+                print(
+                    f"{prefix} marker still unreadable after the move ({_profile_missing_error_text(reread_exc)})",
+                    file=sys.stderr,
+                )
+    if observation is not None:
+        decision = profile_missing_due(observation.payload, producer=PROFILE_MISSING_PRODUCER, host=host, day=day)
+        if not decision.due:
+            print(f"{prefix} event suppressed: already queued for {host} on {day}", file=sys.stderr)
+            return
+        if decision.anomaly:
+            print(f"{prefix} marker does not prove suppression ({decision.reason}); alerting", file=sys.stderr)
+    summary, evidence = profile_missing_event_text(host, day, exc)
+    try:
+        event_path = outbox_event(
+            summary,
+            evidence,
+            severity="critical",
+            source="daily-health",
+            event_type="alert",
+            alert_source=f"profile-missing:{PROFILE_MISSING_PRODUCER}",
+            force_notify=False,
+        )
+    except Exception as publish_exc:  # noqa: BLE001 - outbox_event already left a writefail breadcrumb.
+        print(
+            f"{prefix} event not written (event publish failed; no marker written): "
+            f"{_profile_missing_error_text(publish_exc)}",
+            file=sys.stderr,
+        )
+        return
+    if observation is None:
+        print(
+            f"{prefix} event queued at {event_path} but marker not written (existing marker unreadable); "
+            "the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    try:
+        record_profile_missing_marker(
+            target,
+            observation.version,
+            profile_missing_marker_payload(host, day, event_path, exc),
+        )
+    except Exception as marker_exc:  # noqa: BLE001 - the event is already queued.
+        print(
+            f"{prefix} event queued at {event_path} but marker write failed "
+            f"({_profile_missing_error_text(marker_exc)}); the next run will alert again",
+            file=sys.stderr,
+        )
+        return
+    print(f"{prefix} event queued: {event_path}", file=sys.stderr)
+
+
 def daily() -> int:
-    profile = load_health_profile()
+    try:
+        profile = load_health_profile()
+    except FleetConfigError as exc:
+        # Fail closed before any probe: a guessed profile checks the wrong things.
+        print(f"bot-errors-health-check: fail-closed: {exc}", file=sys.stderr)
+        emit_profile_missing_event(exc)
+        return 2
     tool_lines, tool_probe = tool_inventory(profile)
     tool_fail_line, tool_failure_entry, tool_summary_override = required_tools_daily_sections(tool_probe)
     tool_state = load_tool_inventory_state()
@@ -9067,9 +9344,8 @@ def daily() -> int:
     else:
         personal_socket_line = f"personal_socket: skipped by health profile {socket_label} exists={socket_exists}"
     lines = [
-        f"machine: {socket.gethostname()}",
+        f"machine: {event_machine()}",
         f"profile: role={profile.get('role', 'unknown')} path={profile.get('_profilePath') or os.environ.get('BOT_ERRORS_HEALTH_PROFILE', 'default')}",
-        *([f"FAIL profile: {profile['profileLoadError']}"] if profile.get("profileLoadError") else []),
         *([f"profile_fallback: {profile['profileFallback']}"] if profile.get("profileFallback") else []),
         dispatcher_line,
         f"dispatcher_enabled: {service_enabled(DISPATCHER_SERVICE)}",
@@ -9099,13 +9375,10 @@ def daily() -> int:
     ]
     if tool_fail_line:
         lines.insert(0, tool_fail_line)
-    failures = [
-        line for line in lines
-        if line.startswith("FAIL ") or " FAIL " in line or line.startswith("config ") and "invalid JSON" in line
-    ]
+    failures = [line for line in lines if daily_health_line_is_failure(line)]
     if tool_failure_entry:
         failures.append(tool_failure_entry)
-    warnings = [line for line in lines if line.startswith("WARN ") or " WARN " in line]
+    warnings = [line for line in lines if daily_health_line_is_warning(line)]
     severity = daily_summary_severity(failures, warnings)
     evidence = "\n".join(lines)
     critical_asset = critical_asset_from_health_evidence(evidence) if severity != "info" else None
@@ -9177,7 +9450,7 @@ def _deadman_onset_text(episode: dict[str, Any], cooldown_seconds: int) -> str:
     }
     return "\n".join([
         "BOT ERRORS DEADMAN - dispatcher supervision failed",
-        f"  > machine: {socket.gethostname()}",
+        f"  > machine: {event_machine()}",
         f"  > created: {now_iso()}",
         f"  > episode: {episode.get('episodeId')} revision={episode.get('revision')}",
         f"  > cooldown_seconds: {cooldown_seconds}",
@@ -9197,7 +9470,7 @@ def _deadman_recovery_text(episode: dict[str, Any]) -> str:
     )
     lines = [
         "BOT ERRORS DEADMAN RECOVERY - dispatcher supervision restored",
-        f"  > machine: {socket.gethostname()}",
+        f"  > machine: {event_machine()}",
         f"  > created: {now_iso()}",
         f"  > episode: {episode.get('episodeId')} revision={episode.get('revision')}",
         f"  > opened: {episode.get('openedAt') or 'unknown'}",

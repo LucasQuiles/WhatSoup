@@ -36,10 +36,20 @@ In production, the fleet server serves:
 - `/api/*` routes from `src/fleet/index.ts`
 - WebSocket updates from the fleet WebSocket server
 
-The production static handler injects fleet metadata into served HTML so the console API client can authenticate browser requests back to the same fleet origin.
+The production static handler adds public version and session-mode metadata to
+the HTML. It does not embed the fleet token. The console unlocks through
+`POST /api/console-session` and uses an HttpOnly session cookie. See
+[console authentication](../docs/console-guide.md#console-authentication) for
+the session and logout behavior.
 
 ## Mock Fallback
 
-The API client in `src/lib/api.ts` probes `/api/lines`. If the fleet server is unavailable, it falls back to `src/mock-data.ts` so design and demo views still render. This fallback is expected during UI iteration, but operational testing should run with the fleet server online.
+The API client in `src/lib/api.ts` probes `/api/lines`. Development builds can
+fall back to `src/mock-data.ts` for supported reads. Production builds disable
+that fallback unless built with `VITE_MOCK_MODE=1`; a failed live API remains an
+error. Writes always require a live fleet server.
 
-Mock fallback applies to read-oriented console surfaces. Mutating operations should be validated against a running local fleet server.
+The [console guide](../docs/console-guide.md) owns the page walkthrough and
+[mock-mode contract](../docs/console-guide.md#mock-mode). The
+[design-system index](../docs/design-system/README.md) separates design requirements
+from historical implementation evidence.

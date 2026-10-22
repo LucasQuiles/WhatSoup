@@ -17,6 +17,14 @@ import type {
   TurnRecoveryJobPersistenceParams,
 } from './turn-recovery-store.ts';
 
+/**
+ * #3613: inbound completion reason for a turn whose answers the client output
+ * policy withheld. Paired only with attempt kind `withheld_by_policy` under the
+ * `finalized_no_reply_policy` disposition. The columns are free text, so this
+ * needs no migration.
+ */
+export const CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON = 'client_output_withheld';
+
 export interface SessionCheckpointFields {
   sessionId?: string;
   transcriptPath?: string;
@@ -196,6 +204,15 @@ export interface FinalizeTurnTerminalResult extends RecordTurnTerminalResult {
 
 export type TurnFinalizationBookkeepingParams = Omit<TurnBookkeepingParams, 'lastOpId'>;
 
+/**
+ * How a capability decision joins C3. `atomic` (the default, the first
+ * finalization): a decision failure aborts the terminal too. `best_effort`
+ * (every supervisor retry): the decision may not block the terminal, so a
+ * failed write is recorded as `not_created_decision_lost_on_retry`, or only
+ * logged when that cannot be written either.
+ */
+export type CapabilityDecisionMode = 'atomic' | 'best_effort';
+
 export interface FinalizeTurnTerminalParams {
   terminal: TurnTerminalPersistenceParams;
   inbound?: TerminalInboundMutation;
@@ -209,6 +226,8 @@ export interface FinalizeTurnTerminalParams {
    * re-finalization cannot create a second obligation.
    */
   capabilityDecision?: CapabilityDecisionParams;
+  /** Absent means `atomic`. */
+  capabilityDecisionMode?: CapabilityDecisionMode;
 }
 
 export const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
@@ -223,7 +242,7 @@ export const TERMINAL_PROVIDER_FAILURE_CLASSES: ReadonlySet<string> = new Set([
 ]);
 
 function expectedTerminalInboundFailureClass(
-  terminal: TurnTerminalPersistenceParams,
+  terminal: Pick<TurnTerminalPersistenceParams, 'attemptKind' | 'attemptFailureClass'>,
 ): InboundFailureClass {
   if (terminal.attemptKind === 'admission_rejected') {
     // Lockstep with turn-terminal.ts#toInboundMutation via the shared mapping:
@@ -236,11 +255,48 @@ function expectedTerminalInboundFailureClass(
     throw new Error('failed_terminal terminal disposition requires an exact attempt failure class');
   }
   if (detailed === 'crash') return 'session_crash';
+  if (detailed === 'operator_cancelled') return 'operator_cancelled';
   if (detailed === 'processor_throw') return 'processor_throw';
   if (detailed === 'unknown_terminal') return 'unknown';
+  if (detailed === 'scheduled_answer_missing') return 'unknown';
   if (detailed === 'provider_stream_corrupt') return 'provider_failure';
   if (TERMINAL_PROVIDER_FAILURE_CLASSES.has(detailed)) return 'provider_failure';
   throw new Error('failed_terminal terminal disposition has an invalid attempt failure class');
+}
+
+/**
+ * The inbound mutation a terminal disposition implies, from its persisted
+ * axes alone. Shared by live finalization (turn-terminal.ts#toInboundMutation)
+ * and by reconciliation of an inbound left open behind a final terminal
+ * record, so both apply the same status. Undefined for dispositions that
+ * leave the inbound to another owner, and for terminals without an inbound.
+ */
+export function deriveTerminalInboundMutation(
+  terminal: Pick<
+    TurnTerminalPersistenceParams,
+    'inboundSeq' | 'inboundDisposition' | 'attemptKind' | 'attemptFailureClass'
+  >,
+): TerminalInboundMutation | undefined {
+  const seq = terminal.inboundSeq;
+  switch (terminal.inboundDisposition) {
+    case 'finalized_replied':
+      return seq === null ? undefined : { kind: 'complete', seq, terminalReason: 'response_echoed' };
+    case 'finalized_no_reply_policy':
+      if (seq === null) return undefined;
+      return {
+        kind: 'complete',
+        seq,
+        terminalReason: terminal.attemptKind === 'withheld_by_policy'
+          ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
+          : 'no_reply_policy',
+      };
+    case 'failed_terminal':
+      return seq === null
+        ? undefined
+        : { kind: 'failed', seq, failureClass: expectedTerminalInboundFailureClass(terminal) };
+    default:
+      return undefined;
+  }
 }
 
 export const DELIVERY_STATUS_PROOF: Readonly<Record<string, string>> = {
@@ -257,7 +313,10 @@ export function normalizeFinalizeTurnTerminalParams(
   if (!['per_chat', 'shared', 'singleton'].includes(terminal.scope)) {
     throw new Error('Terminal identity has an invalid scope');
   }
-  if (params.capabilityDecision !== undefined) {
+  // A best-effort decision is validated by the store inside its savepoint, so
+  // an invalid retained decision becomes a recorded loss there instead of
+  // failing the terminal before C3 on every retry.
+  if (params.capabilityDecision !== undefined && params.capabilityDecisionMode !== 'best_effort') {
     validateCapabilityDecisionParams(params.capabilityDecision);
   }
   validateBoundedRequired(
@@ -292,8 +351,10 @@ export function normalizeFinalizeTurnTerminalParams(
       detailed === null ||
       (
         detailed !== 'crash' &&
+        detailed !== 'operator_cancelled' &&
         detailed !== 'processor_throw' &&
         detailed !== 'unknown_terminal' &&
+        detailed !== 'scheduled_answer_missing' &&
         detailed !== 'provider_stream_corrupt' &&
         !TERMINAL_PROVIDER_FAILURE_CLASSES.has(detailed)
       )
@@ -310,7 +371,7 @@ export function normalizeFinalizeTurnTerminalParams(
       throw new Error('Terminal attempt axis has an incoherent failure class');
     }
   } else if (
-    !['completed', 'suppressed_by_policy'].includes(terminal.attemptKind) ||
+    !['completed', 'suppressed_by_policy', 'withheld_by_policy'].includes(terminal.attemptKind) ||
     terminal.attemptFailureClass !== null
   ) {
     throw new Error('Terminal attempt axis has an incoherent failure class');
@@ -355,13 +416,18 @@ export function normalizeFinalizeTurnTerminalParams(
         );
       }
       break;
-    case 'finalized_no_reply_policy':
+    case 'finalized_no_reply_policy': {
+      // #3613: a policy-withheld answer completes with its own reason so the
+      // record says the output was withheld, not that no reply was due.
+      const expectedReason = terminal.attemptKind === 'withheld_by_policy'
+        ? CLIENT_OUTPUT_WITHHELD_TERMINAL_REASON
+        : 'no_reply_policy';
       if (
-        terminal.attemptKind !== 'suppressed_by_policy' ||
+        (terminal.attemptKind !== 'suppressed_by_policy' && terminal.attemptKind !== 'withheld_by_policy') ||
         terminal.deliveryKind !== 'none' ||
         (requiresInboundMutation && (
           inbound?.kind !== 'complete' ||
-          inbound.terminalReason !== 'no_reply_policy'
+          inbound.terminalReason !== expectedReason
         )) ||
         (!requiresInboundMutation && inbound !== undefined)
       ) {
@@ -370,6 +436,7 @@ export function normalizeFinalizeTurnTerminalParams(
         );
       }
       break;
+    }
     case 'failed_terminal': {
       const expectedFailureClass = expectedTerminalInboundFailureClass(terminal);
       if (
@@ -538,7 +605,14 @@ export function normalizeFinalizeTurnTerminalParams(
   ) {
     throw new Error('Turn checkpoint completed identity requires a terminal inbound mutation');
   }
-  const completedIdentity = params.inbound === undefined || expectedInboundSeq === undefined
+  // #3295 S4: an admission-rejected turn never crossed the provider boundary,
+  // so it must not become the completed resumable identity. Leaving the
+  // fields unset keeps the prior identity (the checkpoint upsert coalesces).
+  const admissionRejected = terminal.attemptKind === 'admission_rejected';
+  if (admissionRejected && providedCompletedIdentity.some((value) => value !== undefined)) {
+    throw new Error('An admission-rejected terminal cannot carry a completed checkpoint identity');
+  }
+  const completedIdentity = params.inbound === undefined || expectedInboundSeq === undefined || admissionRejected
     ? undefined
     : {
         completedInboundSeq: expectedInboundSeq,

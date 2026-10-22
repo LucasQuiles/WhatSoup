@@ -1672,6 +1672,25 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
       expect(historyLogCalls).toHaveLength(0);
     });
+
+    it('records an all-noop batch at debug with its noop count', async () => {
+      const h = await importMainWithMocks();
+      const stats = { inserted: 0, upgraded: 0, placeholders: 0, skipped: 0, noop: 3, failed: 0 };
+      h.processHistoryBatch.mockReturnValueOnce(stats);
+      h.connection.emit('historyMessages', [{ id: 'history-1' }]);
+
+      expect(h.logger.debug).toHaveBeenCalledWith(stats, 'historyMessages: batch already stored');
+    });
+
+    it('logs a batch with failures at info and warns with the failed count', async () => {
+      const h = await importMainWithMocks();
+      const stats = { inserted: 1, upgraded: 0, placeholders: 0, skipped: 0, noop: 0, failed: 2 };
+      h.processHistoryBatch.mockReturnValueOnce(stats);
+      h.connection.emit('historyMessages', [{ id: 'history-1' }]);
+
+      expect(h.logger.info).toHaveBeenCalledWith(stats, 'historyMessages: batch processed');
+      expect(h.logger.warn).toHaveBeenCalledWith({ failed: 2 }, 'historyMessages: some history messages failed to store');
+    });
   });
 
   // ── K. Event handler error paths not covered by main test ─────────────────

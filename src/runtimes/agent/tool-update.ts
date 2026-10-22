@@ -11,6 +11,39 @@
 
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import type { ToolUpdate } from './outbound-queue.ts';
+import type { ToolCategory } from './providers/tool-mapping.ts';
+
+// Tool-update display tables, relocated verbatim from outbound-queue.ts.
+export const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
+  reading:   { label: 'Reading',   emoji: '📖' },
+  searching: { label: 'Searching', emoji: '🔎' },
+  modifying: { label: 'Modifying', emoji: '✏️' },
+  running:   { label: 'Running',   emoji: '🔧' },
+  agent:     { label: 'Agent',     emoji: '🤖' },
+  fetching:  { label: 'Fetching',  emoji: '🌐' },
+  planning:  { label: 'Planning',  emoji: '📝' },
+  skill:     { label: 'Skill',     emoji: '🧠' },
+  other:     { label: 'Using',     emoji: '🛠️' },
+  error:     { label: 'Error',     emoji: '⚠️' },
+  blocked:   { label: 'Blocked',  emoji: '🚫' },
+  cancelled: { label: 'Cancelled', emoji: '⏭️' },
+};
+
+/** User-friendly labels for 'friendly' mode — plain language, no jargon. */
+export const FRIENDLY_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
+  reading:   { label: 'Looking at',       emoji: '👀' },
+  searching: { label: 'Searching',        emoji: '🔍' },
+  modifying: { label: 'Updating',         emoji: '✏️' },
+  running:   { label: 'Working on',       emoji: '⚙️' },
+  agent:     { label: 'Getting help from', emoji: '🤝' },
+  fetching:  { label: 'Looking up',       emoji: '🌐' },
+  planning:  { label: 'Planning',         emoji: '📋' },
+  skill:     { label: 'Loading',          emoji: '📦' },
+  other:     { label: 'Working on',       emoji: '⚙️' },
+  error:     { label: 'Ran into an issue', emoji: '⚠️' },
+  blocked:   { label: 'Paused',           emoji: '⏸️' },
+  cancelled: { label: 'Skipped',          emoji: '⏭️' },
+};
 
 /** Max chars of tool-failure error text included in an operator alert excerpt. */
 const TOOL_FAILURE_ALERT_EXCERPT_CHARS = 1_200;

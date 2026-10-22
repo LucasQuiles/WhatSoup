@@ -177,6 +177,11 @@ export default function Operator() {
                 {kpis.connectivityUnknown > 0 && <span>{kpis.connectivityUnknown} unknown</span>}
               </span>
             )}
+            {kpis.recoveryDebtLines > 0 && (
+              <span className="font-mono text-s-warn text-label">
+                {kpis.recoveryDebtLines} with recovery debt
+              </span>
+            )}
             {feedError && (
               <span className="flex items-center font-mono text-s-crit gap-[var(--sp-1)] text-label">
                 <AlertTriangle size={12} strokeWidth={1.75} />

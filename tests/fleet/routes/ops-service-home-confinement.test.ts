@@ -17,8 +17,7 @@
  * render admission (assertValidLaunchdPlistRenderOptions -> reconcileLaunchdPlist,
  * src/fleet/platform.ts), so rejecting an out-of-home value there would stop an
  * instance that already persisted one from loading at all. These guards close
- * the ingress; an already-persisted out-of-home entry still passes render
- * admission.
+ * the ingress; final render admission independently revalidates persisted paths.
  *
  * Harness mirrors ops-create-service-passthrough.test.ts (HOME/XDG overridden
  * to a synthetic tmp tree) and ops-branches2.test.ts (handleConfigUpdate driven
@@ -156,6 +155,43 @@ describe('service block home-confinement (F3)', () => {
       'service.claudeConfigDir must be within the home directory',
     );
     expect(fs.existsSync(cfgPathFor('svc-create-cfg-escape'))).toBe(false);
+  });
+
+  it.each([false, true])('keeps a service-path transition to a dangling link within the confinement response (retarget=%s)', async (retarget) => {
+    const home = homeDir();
+    const target = path.join(home, 'target');
+    const alias = path.join(home, 'alias');
+    fs.mkdirSync(target);
+    fs.symlinkSync(target, alias);
+    const entry = path.join(alias, 'bin');
+    fs.mkdirSync(path.join(target, 'bin'));
+    const native = fs.realpathSync.native;
+    let observed = false;
+    const probe = vi.spyOn(fs.realpathSync, 'native').mockImplementation((...args) => {
+      const result = native(...args);
+      if (!observed && String(args[0]) === entry) {
+        observed = true;
+        if (retarget) fs.renameSync(target, path.join(home, 'moved-target'));
+      }
+      return result;
+    });
+    const name = retarget ? 'svc-becomes-dangling' : 'svc-remains-confined';
+    const deps = makeDeps<any>({});
+    const res = mockRes();
+    try {
+      await handleCreateLine(mockReq({ method: 'POST', body: createBody({ pathPrepend: [entry] }, name) }), res, deps);
+      expect(observed).toBe(true);
+      expect(res._status, res._body).toBe(retarget ? 400 : 201);
+      if (retarget) {
+        expect(JSON.parse(res._body).error).toMatch(/service.pathPrepend.*home directory/);
+        expect(fs.existsSync(cfgPathFor(name))).toBe(false);
+        expect(deps.serviceManager.enable).not.toHaveBeenCalled();
+      } else {
+        expect(fs.existsSync(cfgPathFor(name))).toBe(true);
+      }
+    } finally {
+      probe.mockRestore();
+    }
   });
 
   it('admits a CREATE whose service paths are inside the home directory and persists them verbatim', async () => {
@@ -599,7 +635,7 @@ describe('service block home-confinement (F3)', () => {
 
     expect(res._status, 'create must succeed: ' + res._body).toBe(201);
     const persisted = JSON.parse(fs.readFileSync(cfgPathFor('svc-real-trailing-slash'), 'utf-8'));
-    expect(persisted.service, 'the operator spelling is persisted verbatim').toEqual(service);
+    expect(persisted.service, 'the accepted physical path is persisted').toEqual({ pathPrepend: [realDir] });
   });
 
   it('still admits an absent LEAF inside an existing in-home parent', async () => {
@@ -808,6 +844,49 @@ describe('service block home-confinement (F3)', () => {
       const dir = path.join(process.env[root]!, 'whatsoup', 'instances', 'no-partial-instance');
       expect(fs.existsSync(dir), `${root} must hold no directory for the refused instance`).toBe(false);
     }
+  });
+
+  it('names the SPELLING rule, not containment, when cwd or pluginDirs is non-canonical', async () => {
+    // A `.` component is refused, which is correct, but the message said the
+    // path "must be within the home directory" - and it IS within the home
+    // directory. The operator is told the wrong thing to fix. The service block
+    // already distinguished the two; these two fields did not.
+    const home = homeDir();
+    const nonCanonical = `${home}/./pin/bin`;
+
+    const cwdRes = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'spelling-msg-cwd', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { cwd: nonCanonical },
+        }),
+      }),
+      cwdRes,
+      makeDeps<any>({}),
+    );
+    expect(cwdRes._status).toBe(400);
+    expect(JSON.parse(cwdRes._body).error).toBe(
+      'agentOptions.cwd must be a normalized absolute path within the home directory',
+    );
+
+    const pluginRes = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'spelling-msg-plugindirs', type: 'agent', adminPhones: ['15551234567'],
+          agentOptions: { pluginDirs: [nonCanonical] },
+        }),
+      }),
+      pluginRes,
+      makeDeps<any>({}),
+    );
+    expect(pluginRes._status).toBe(400);
+    expect(JSON.parse(pluginRes._body).error).toBe(
+      'each pluginDirs entry must be a normalized absolute path within the home directory',
+    );
   });
 
   it('accepts an in-home directory whose name merely starts with dots', async () => {

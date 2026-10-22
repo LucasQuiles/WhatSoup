@@ -41,6 +41,13 @@ describe('doc drift check', { timeout: 30_000 }, () => {
     process.exitCode = undefined;
   });
 
+  it('counts the runtime-gated self-restart tool in the canonical MCP surface', () => {
+    const registrations = findToolRegistrations(repoRoot);
+    expect(registrations.filter(({ name }) => name === 'restart_self')).toEqual([
+      expect.objectContaining({ filePath: 'src/runtimes/agent/self-restart.ts' }),
+    ]);
+  });
+
   it(
     'passes for current MCP tool, module count, and design inventory docs',
     () => {
@@ -97,8 +104,8 @@ describe('doc drift check', { timeout: 30_000 }, () => {
     writeFileSync(
       staleDoc,
       currentToolsDoc
-        .replace('| [substrate.ts](#substratets) | 22 |', '| [substrate.ts](#substratets) | 18 |')
-        .replace('| **Total** | **168** |', '| **Total** | **160** |'),
+        .replace('| [substrate.ts](#substratets) | 23 |', '| [substrate.ts](#substratets) | 18 |')
+        .replace(`| **Total** | **${currentToolCount}** |`, '| **Total** | **160** |'),
       'utf8',
     );
 
@@ -135,7 +142,7 @@ describe('doc drift check', { timeout: 30_000 }, () => {
     writeFileSync(
       staleDoc,
       currentConfigDoc
-        .replace('`contacts`', 'contacts')
+        .replace('Full schema DDL — `messages`, `contacts`', 'Full schema DDL — `messages`, contacts')
         .replace(
           '`inbound_events`, `outbound_ops`, `tool_calls`, `session_checkpoints`, `recovery_runs`',
           '`durability_queue`, `recovery_log`',

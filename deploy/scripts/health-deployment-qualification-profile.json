@@ -1,0 +1,5 @@
+{
+  "schema_version": "health.deployment-qualification-profile.v1",
+  "profile_kind": "deployment",
+  "timeout_seconds": 5
+}

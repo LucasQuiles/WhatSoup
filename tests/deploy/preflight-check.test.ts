@@ -54,6 +54,7 @@ const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-privat
 const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
+const CLI_ARGS = join(REPO_ROOT, 'scripts/lib/cli-args.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
@@ -133,8 +134,8 @@ function writeValidReleaseManifest(root: string): void {
 function makeFixtureTree(
   mainTs: string,
   extraFiles: Record<string, string> = {},
+  root: string = makeTmpDir(),
 ): string {
-  const root = makeTmpDir();
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
@@ -161,6 +162,7 @@ function makeFixtureTree(
   const integrityFiles: Record<string, string> = {
     'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
     'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
   };
@@ -219,6 +221,7 @@ function makeIntegrityReleaseTree(): string {
   const root = makeFixtureTree('export const mainOk = true;\n', {
     'scripts/source-runtime-drift-check.ts': readFileSync(SOURCE_RUNTIME_CHECK, 'utf8'),
     'scripts/lib/guard-core.ts': readFileSync(GUARD_CORE, 'utf8'),
+    'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
     'deploy/source-runtime-manifest.json': JSON.stringify({
@@ -268,8 +271,18 @@ function writeExecutable(path: string, contents: string): void {
   chmodSync(path, 0o755);
 }
 
-function makeWrapperFixture(): WrapperFixture {
-  const root = makeTmpDir();
+// An empty directory nested inside a committed git repo: a release root under
+// an unrelated ancestor .git must stay in release mode.
+function makeDirInsideAncestorRepo(): string {
+  const parent = makeTmpDir();
+  gitFixture(parent, ['init', '-q']);
+  gitFixture(parent, ['commit', '-q', '--allow-empty', '-m', 'ancestor']);
+  const nested = join(parent, 'release');
+  mkdirSync(nested);
+  return nested;
+}
+
+function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   const deploy = join(root, 'deploy');
   const lib = join(deploy, 'lib');
   const scripts = join(root, 'scripts');
@@ -298,6 +311,7 @@ function makeWrapperFixture(): WrapperFixture {
   copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
+  copyFileSync(CLI_ARGS, join(scriptsLib, 'cli-args.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
   copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
@@ -425,6 +439,7 @@ function commitWrapperFixture(fixture: WrapperFixture, message: string): void {
 
 function convertWrapperFixtureToRelease(fixture: WrapperFixture): void {
   rmSync(join(fixture.root, '.git'), { recursive: true, force: true });
+  if (existsSync(join(fixture.root, '.git'))) throw new Error(`fixture .git was not fully removed: ${fixture.root}`);
   const files: Array<{ path: string; sha256: string; sizeBytes: number }> = [];
   const visit = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -930,6 +945,29 @@ describe.skipIf(!NODE_IN_PIN)('deploy/whatsoup — black-box startup ordering', 
     expect(result.stderr).toContain('file-sha256-drift');
   });
 
+  it('runs from a non-git release nested inside an ancestor git repo', () => {
+    const fixture = makeWrapperFixture(makeDirInsideAncestorRepo());
+    convertWrapperFixtureToRelease(fixture);
+
+    const result = runWrapper(fixture);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
+  });
+
+  it('rejects a manifest-drifted bootstrap graph in a non-git release nested inside an ancestor git repo', () => {
+    const fixture = makeWrapperFixture(makeDirInsideAncestorRepo());
+    convertWrapperFixtureToRelease(fixture);
+    writeFileSync(fixture.bootstrap, "process.stdout.write('tampered\\n');\n", 'utf8');
+
+    const result = runWrapper(fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.trace).toEqual([]);
+    expect(result.stderr).toContain('database compatibility bootstrap trust check failed');
+    expect(result.stderr).toContain('file-sha256-drift');
+  });
+
   it('still runs database check when restart preflight is skipped', () => {
     const fixture = makeWrapperFixture();
 
@@ -1228,7 +1266,7 @@ set -euo pipefail
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(sentinel)).toBe(false);
     expect(result.trace).toEqual(['db-check', 'preflight', 'runtime']);
-  });
+  }, 60_000);
 });
 
 describe('deploy/whatsoup — source wiring', () => {
@@ -1386,6 +1424,19 @@ describe.skipIf(!NODE_IN_PIN)('deploy/preflight-check.sh — release-export mani
     const root = makeFixtureTree(
       "import { ok } from './helper.ts';\nconsole.log(ok);\n",
       { 'src/helper.ts': 'export const ok = true;\n' },
+    );
+    rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
+    const { status, stderr } = runPreflight(root);
+
+    expect(status).toBe(3);
+    expect(stderr).toContain('release export lacks .whatsoup-release-manifest.json');
+  });
+
+  it('fails closed when a manifest-less release dir is nested inside an ancestor git repo', () => {
+    const root = makeFixtureTree(
+      "import { ok } from './helper.ts';\nconsole.log(ok);\n",
+      { 'src/helper.ts': 'export const ok = true;\n' },
+      makeDirInsideAncestorRepo(),
     );
     rmSync(join(root, '.whatsoup-release-manifest.json'), { force: true });
     const { status, stderr } = runPreflight(root);

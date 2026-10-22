@@ -32,6 +32,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,8 +95,12 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     except sqlite3.Error as exc:
         emit({"check": "whatsoup-db-snapshot", "action": "snapshot", "error": f"source open failed: {str(exc)[:200]}"})
         return 1
+    pending: Path | None = None
     try:
-        dst = sqlite3.connect(str(dest))
+        fd, name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".pending", dir=out_root)
+        os.close(fd)
+        pending = Path(name)
+        dst = sqlite3.connect(str(pending))
         try:
             src.backup(dst)
             dst.commit()
@@ -103,17 +108,31 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
             counts = table_row_counts(dst)
         finally:
             dst.close()
-    except sqlite3.Error as exc:
+        if integrity != "ok":
+            emit({"check": "whatsoup-db-snapshot", "action": "snapshot", "error": "snapshot integrity check failed", "integrity": integrity})
+            return 1
+        fd = os.open(pending, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        # Publish without replacing a concurrent snapshot at the same timestamp.
+        os.link(pending, dest)
+        directory_fd = os.open(out_root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except FileExistsError:
+        emit({"check": "whatsoup-db-snapshot", "action": "snapshot", "error": f"refusing to clobber existing snapshot: {dest.name}"})
+        return 2
+    except (sqlite3.Error, OSError) as exc:
         emit({"check": "whatsoup-db-snapshot", "action": "snapshot", "error": f"backup failed: {str(exc)[:200]}"})
         return 1
     finally:
         src.close()
-    os.chmod(dest, 0o600)
-    fd = os.open(dest, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        if pending is not None:
+            pending.unlink()
     pruned = prune_snapshots(out_root, src_path.stem, args.retain)
     emit(
         {
@@ -127,7 +146,7 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
             "observed_epoch": epoch,
         }
     )
-    return 0 if integrity == "ok" else 1
+    return 0
 
 
 def cmd_rehearse(args: argparse.Namespace) -> int:

@@ -154,9 +154,15 @@ describe('preferences', () => {
 });
 
 afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  try {
+    cleanup();
+  } finally {
+    try {
+      vi.unstubAllGlobals();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -187,14 +193,17 @@ describe('metricsToCSV', () => {
 
 describe('MetricsTab CSV export integration', () => {
   it('exports MetricsTab message volume through the CSV download path', async () => {
-    const { MetricsTab } = await import('../../console/src/components/line-detail/MetricsTab.tsx');
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     const createObjectURL = vi.fn((blob: Blob) => {
       expect(blob).toBeInstanceOf(Blob);
       return 'blob:metrics';
     });
     const revokeObjectURL = vi.fn();
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL });
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL;
+      static revokeObjectURL = revokeObjectURL;
+    });
+    const { MetricsTab } = await import('../../console/src/components/line-detail/MetricsTab.tsx');
 
     render(createElement(MetricsTab, {
       metrics: {

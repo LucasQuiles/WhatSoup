@@ -482,3 +482,56 @@ describe('provider-fallback tunables (#2192 s4b): instance-first, env-second, cl
     expect(config.fallbackTunables.probeStallThreshold).toBe(12);
   });
 });
+
+describe('shadowGate section (logged-only shadow gate)', () => {
+  it('defaults to mode off with no events dir', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig());
+    const { config } = await import('../src/config.ts');
+    expect(config.shadowGate).toEqual({ mode: 'off', eventsDir: null });
+  });
+
+  it('accepts mode shadow with an events dir', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(
+      makeInstanceConfig({ shadowGate: { mode: 'shadow', eventsDir: path.join(tmpDir, 'events') } }),
+    );
+    const { config } = await import('../src/config.ts');
+    expect(config.shadowGate).toEqual({ mode: 'shadow', eventsDir: path.join(tmpDir, 'events') });
+  });
+
+  it('rejects an unknown mode (there is no enforce value) with ConfigValidationError', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({ shadowGate: { mode: 'bogus' } }));
+    // Same post-reset module graph as config.ts, so instanceof compares one class identity.
+    const { ConfigValidationError } = await import('../src/lib/startup-error.ts');
+    const loading = import('../src/config.ts');
+    await expect(loading).rejects.toBeInstanceOf(ConfigValidationError);
+    await expect(loading).rejects.toThrow(/shadowGate\.mode must be one of: off, shadow/);
+  });
+
+  it('rejects enforce, a non-string events dir and a non-object section', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({ shadowGate: { mode: 'enforce' } }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/shadowGate\.mode must be one of/);
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({ shadowGate: { eventsDir: 42 } }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/shadowGate\.eventsDir must be a non-empty string path/);
+    vi.resetModules();
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({ shadowGate: 'shadow' }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/shadowGate must be an object/);
+  });
+
+  it('rejects a relative or empty events dir with ConfigValidationError', async () => {
+    for (const eventsDir of ['relative/events', './events', '']) {
+      vi.resetModules();
+      process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({ shadowGate: { mode: 'shadow', eventsDir } }));
+      const { ConfigValidationError } = await import('../src/lib/startup-error.ts');
+      const loading = import('../src/config.ts');
+      await expect(loading, eventsDir).rejects.toBeInstanceOf(ConfigValidationError);
+      await expect(loading, eventsDir).rejects.toThrow(/shadowGate\.eventsDir must be (an absolute|a non-empty string) path/);
+    }
+  });
+
+  it('treats a null events dir as unset', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({ shadowGate: { mode: 'shadow', eventsDir: null } }));
+    const { config } = await import('../src/config.ts');
+    expect(config.shadowGate).toEqual({ mode: 'shadow', eventsDir: null });
+  });
+});

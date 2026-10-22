@@ -423,7 +423,7 @@ describe('strict exact-classification admission', () => {
     expect(() => (detached.classification.reasons as string[]).push('forged')).toThrowError(TypeError);
   });
 
-  it('preserves a genuine unknown-path system-wide inconclusive result without narrowing selection', () => {
+  it('preserves a genuine unknown-path system-wide inconclusive result without narrowing selection', { timeout: 60_000 }, () => {
     const { root, trustedInput } = fixture('mystery/run.bin');
     const created = createRiskClassificationReceipt(root, trustedInput);
     const admitted = admitRiskClassificationReceipt(root, trustedInput, created.receiptBytes);
@@ -490,7 +490,10 @@ describe('strict exact-classification admission', () => {
     }
   });
 
-  it('rejects strict JSON transport violations and canonical shape or array mutations', () => {
+  // Five full exact-classifier runs (receipt creation plus four canonical shape or array mutations),
+  // each about 1.2 s of git subprocesses under coverage: about 6 s, too close to the 10 s default.
+  // Same bound as the two heavier cases above.
+  it('rejects strict JSON transport violations and canonical shape or array mutations', { timeout: 60_000 }, () => {
     const { root, trustedInput } = fixture();
     const receipt = createRiskClassificationReceipt(root, trustedInput);
     const raw = Buffer.from(receipt.receiptBytes).toString('utf8');

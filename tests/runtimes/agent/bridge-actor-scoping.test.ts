@@ -21,6 +21,7 @@
 // actorJid the bridge hands the registry per call.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import { z } from 'zod';
 import type { Messenger, IncomingMessage } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -416,7 +417,8 @@ describe('provider-bridge actor scoping (#2976 residual)', () => {
     return seq;
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await prepareRuntimeHome();
     vi.clearAllMocks();
     resetDoubles();
     observedActors = [];

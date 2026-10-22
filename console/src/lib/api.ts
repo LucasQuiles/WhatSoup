@@ -47,6 +47,7 @@ import type {
   Message,
   MetricsRange,
   ProviderCatalogEntry,
+  ProviderModelsListing,
   ProviderStatus,
   ScheduledMessage,
 } from '../types.js';
@@ -575,6 +576,9 @@ export const api = {
 
   getProviders: () =>
     apiFetch<ProviderCatalogEntry[]>('/api/providers'),
+
+  getProviderModels: (provider: string) =>
+    apiFetch<ProviderModelsListing>(`/api/providers/${encodeURIComponent(provider)}/models`),
 
   getProviderStatus: (name: string) =>
     apiFetch<ProviderStatus>(`/api/lines/${encodeURIComponent(name)}/provider-status`),

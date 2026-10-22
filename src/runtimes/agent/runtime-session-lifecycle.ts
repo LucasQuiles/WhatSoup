@@ -10,6 +10,7 @@ import { formatChatRefForOwner } from '../../core/chat-display-name.ts';
 import { canonicalizeChatJid } from '../../core/lid-resolver.ts';
 import { createChildLogger } from '../../logger.ts';
 import { formatAge } from './session.ts';
+import type { OutboundMessageRole } from './outbound-queue.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -36,7 +37,7 @@ export interface RuntimeSessionLifecycleHost<
   getSession(): TSession | null;
   getActiveChatJid(): string | null;
   resolvePerChatMapKey(chatJid: string): string;
-  sendDirect(chatJid: string, text: string, force: boolean): void;
+  sendDirect(chatJid: string, text: string, role: OutboundMessageRole, force: boolean): void;
   abortPerChatQueue(mapKey: string): void;
   terminalizePerChatTurn(mapKey: string): Promise<TTeardown>;
   retirePerChatTurn(teardown: TTeardown): Promise<void>;
@@ -112,6 +113,7 @@ export function runSessionsCommand<
     entries.length > 0
       ? `*Active Sessions (${entries.length})*\n\n${entries.join('\n')}\n\n/kill-session <number> to terminate`
       : '_No active sessions._',
+    'status',
     true,
   );
 }
@@ -126,13 +128,13 @@ export async function runKillSessionCommand<
 ): Promise<void> {
   const targetIndex = /^\d+$/.test(rawIndex.trim()) ? Number(rawIndex.trim()) : NaN;
   if (!Number.isInteger(targetIndex) || targetIndex < 1) {
-    host.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', true);
+    host.sendDirect(chatJid, '_Usage: /kill-session <number>_\nRun /sessions first to see the list.', 'status', true);
     return;
   }
   if (host.sessionScope === 'per_chat') {
     const activeSessions = [...host.chatSessions].filter(([, session]) => session.getStatus().active);
     if (targetIndex > activeSessions.length) {
-      host.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, true);
+      host.sendDirect(chatJid, `_Invalid session number. ${activeSessions.length} active._`, 'status', true);
       return;
     }
     const [mapKey, session] = activeSessions[targetIndex - 1];
@@ -145,6 +147,7 @@ export async function runKillSessionCommand<
       host.sendDirect(
         chatJid,
         '_Session not killed: in-flight turn ownership could not be durably finalized._',
+        'status',
         true,
       );
       return;
@@ -157,6 +160,7 @@ export async function runKillSessionCommand<
     host.sendDirect(
       chatJid,
       `_Session killed: ${formatChatRefForOwner(host.db, mapKey)} (${label})_`,
+      'status',
       true,
     );
     return;
@@ -164,11 +168,11 @@ export async function runKillSessionCommand<
 
   const session = host.getSession();
   if (!session?.getStatus().active) {
-    host.sendDirect(chatJid, '_No active session to kill._', true);
+    host.sendDirect(chatJid, '_No active session to kill._', 'status', true);
     return;
   }
   if (targetIndex !== 1) {
-    host.sendDirect(chatJid, '_Invalid session number. 1 active._', true);
+    host.sendDirect(chatJid, '_Invalid session number. 1 active._', 'status', true);
     return;
   }
   const killedRef = host.getGlobalInterruptChatJid() ?? host.getActiveChatJid();
@@ -181,6 +185,7 @@ export async function runKillSessionCommand<
     host.sendDirect(
       chatJid,
       '_Session not killed: in-flight turn ownership could not be durably finalized._',
+      'status',
       true,
     );
     return;
@@ -195,6 +200,7 @@ export async function runKillSessionCommand<
     killedRef
       ? `_Session killed: ${formatChatRefForOwner(host.db, killedRef)}_`
       : '_Session killed._',
+    'status',
     true,
   );
 }

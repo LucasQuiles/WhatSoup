@@ -593,6 +593,48 @@ describe('handleAdminCommand ALLOW — DM-scope replay (group exclusion)', () =>
     expect(handleMessageFn).toHaveBeenCalledTimes(1);
   });
 
+  it('#3566: replays DM messages but skips the sender\'s status@broadcast posts', async () => {
+    const { config } = await import('../../src/config.ts');
+    (config as any).adminReplayMax = 10;
+    (config as any).adminReplayDelayMs = 0;
+
+    const db = openDb();
+    const messenger = makeMockMessenger();
+
+    storeMessageIfNew(db, {
+      chatJid: '15550356601@s.whatsapp.net',
+      conversationKey: '15550356601',
+      senderJid: '15550356601@s.whatsapp.net',
+      senderName: 'StatusPoster',
+      messageId: 'dm-msg-status-test-001',
+      content: 'hello from dm',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700001100,
+    });
+
+    // A status post is stored with the poster as sender_jid (parser participant).
+    storeMessageIfNew(db, {
+      chatJid: 'status@broadcast',
+      conversationKey: 'status_at_broadcast',
+      senderJid: '15550356601@s.whatsapp.net',
+      senderName: 'StatusPoster',
+      messageId: 'status-msg-status-test-001',
+      content: 'my status',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp: 1700001101,
+    });
+
+    const handleMessageFn = vi.fn().mockResolvedValue(undefined);
+    await handleAdminCommand(db, messenger, 'allow', 'phone', '15550356601', ADMIN_CHAT_JID, handleMessageFn);
+
+    const replayedMsgIds = handleMessageFn.mock.calls.map((c: any[]) => c[0].messageId as string);
+    expect(replayedMsgIds).toContain('dm-msg-status-test-001');
+    expect(replayedMsgIds).not.toContain('status-msg-status-test-001');
+    expect(handleMessageFn).toHaveBeenCalledTimes(1);
+  });
+
   it('group messages do not consume the replay cap', async () => {
     const { config } = await import('../../src/config.ts');
     (config as any).adminReplayMax = 1;
@@ -793,8 +835,8 @@ describe('handleAdminCommand ALLOW — admin notice wording', () => {
     const sentText = messenger.sendMessage.mock.calls[0][1] as string;
     // Should say "1 of 1 queued DM messages" (totalQueued = DM count after filter)
     expect(sentText).toContain('replaying 1 of 1 queued DM messages');
-    // Must include the group-skipped annotation
-    expect(sentText).toContain('1 group message');
+    // Must include the non-direct-skipped annotation
+    expect(sentText).toContain('(1 non-direct message skipped)');
   });
 
   it('keeps original notice wording when no group messages are present', async () => {
@@ -822,8 +864,8 @@ describe('handleAdminCommand ALLOW — admin notice wording', () => {
 
     const sentText = messenger.sendMessage.mock.calls[0][1] as string;
     expect(sentText).toContain('replaying 1 of 1 queued messages');
-    // Must NOT include the group suffix
-    expect(sentText).not.toContain('group message');
+    // Must NOT include the non-direct suffix
+    expect(sentText).not.toContain('skipped');
   });
 });
 
@@ -1028,6 +1070,94 @@ describe('admin.ts uncovered-branch coverage', () => {
       '1555777001@lid',
       expect.stringContaining('LidResolved'),
     );
+  });
+
+  // ----- resolveAdminChatJid — group rows are never an approval destination (#3566) -----
+
+  function storeAdminRow(db: Database, chatJid: string, senderJid: string, messageId: string, timestamp: number): void {
+    storeMessageIfNew(db, {
+      chatJid,
+      conversationKey: chatJid.split('@')[0]!,
+      senderJid,
+      senderName: 'Admin',
+      messageId,
+      content: 'roll call',
+      contentType: 'text',
+      isFromMe: false,
+      timestamp,
+    });
+  }
+
+  it('#3566: a newer admin-authored GROUP row does not displace the admin direct chat (phone identity)', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+    storeAdminRow(db, '15550100001@s.whatsapp.net', '15550100001@s.whatsapp.net', 'admin-dm-3566-phone', 1700070001);
+    storeAdminRow(db, '111111100003566@g.us', '15550100001@s.whatsapp.net', 'admin-group-3566-phone', 1700070002);
+
+    await sendApprovalRequest(db, messenger, '15550003566', 'GroupSkippedPhone', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).toHaveBeenCalledWith('15550100001@s.whatsapp.net', expect.stringContaining('GroupSkippedPhone'));
+  });
+
+  it('#3566: a newer admin-authored GROUP row does not displace the admin direct chat (mapped-LID identity)', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+    db.raw.prepare(
+      "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+    ).run('1555777066', '15550100001@s.whatsapp.net');
+    storeAdminRow(db, '1555777066@lid', '1555777066@lid', 'admin-dm-3566-lid', 1700070011);
+    storeAdminRow(db, '111111100003567@g.us', '1555777066@lid', 'admin-group-3566-lid', 1700070012);
+
+    await sendApprovalRequest(db, messenger, '15550003567', 'GroupSkippedLid', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).toHaveBeenCalledWith('1555777066@lid', expect.stringContaining('GroupSkippedLid'));
+  });
+
+  it('#3566: an admin whose only rows are in groups gets the configured direct JID, never the group', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+    db.raw.prepare(
+      "INSERT INTO lid_mappings (lid, phone_jid, updated_at) VALUES (?, ?, datetime('now'))",
+    ).run('1555777067', '15550100001@s.whatsapp.net');
+    storeAdminRow(db, '111111100003568@g.us', '15550100001@s.whatsapp.net', 'admin-group-only-phone', 1700070021);
+    storeAdminRow(db, '111111100003568@g.us', '1555777067@lid', 'admin-group-only-lid', 1700070022);
+
+    await sendApprovalRequest(db, messenger, '15550003568', 'GroupOnly', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).toHaveBeenCalledWith('15550100001@s.whatsapp.net', expect.stringContaining('GroupOnly'));
+  });
+
+  it('#3566: a Signal group row is skipped the same way (transport-neutral group check)', async () => {
+    const { config } = await import('../../src/config.ts');
+    const originalTransport = (config as any).transport;
+    (config as any).transport = 'signal';
+    try {
+      const db = openDb();
+      const messenger = makeMockMessenger();
+      storeAdminRow(db, 'c2lnbmFsLWdyb3VwLTM1NjY=@signal', '15550100001@signal', 'admin-signal-group-3566', 1700070031);
+
+      await sendApprovalRequest(db, messenger, '15550003569', 'SignalGroupSkipped', 'hi');
+
+      expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+      expect(messenger.sendMessage).toHaveBeenCalledWith('15550100001@signal', expect.stringContaining('SignalGroupSkipped'));
+    } finally {
+      (config as any).transport = originalTransport;
+    }
+  });
+
+  it('#3566: a newer admin-authored status@broadcast row does not displace the admin direct chat', async () => {
+    const db = openDb();
+    const messenger = makeMockMessenger();
+    storeAdminRow(db, '15550100001@s.whatsapp.net', '15550100001@s.whatsapp.net', 'admin-dm-3566-status', 1700070041);
+    storeAdminRow(db, 'status@broadcast', '15550100001@s.whatsapp.net', 'admin-status-3566', 1700070042);
+
+    await sendApprovalRequest(db, messenger, '15550003570', 'StatusSkipped', 'hi');
+
+    expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+    expect(messenger.sendMessage).toHaveBeenCalledWith('15550100001@s.whatsapp.net', expect.stringContaining('StatusSkipped'));
   });
 
   // ----- resolveAdminChatJid — no admin phones → returns null → no send -----

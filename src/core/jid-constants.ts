@@ -154,6 +154,18 @@ export function isGroupJid(jid: string): boolean {
     || (jid.endsWith(JID_SIGNAL) && isSignalGroupAddress(fromSignalJid(jid)));
 }
 
+/** WhatsApp status-broadcast pseudo-chat: every contact's status posts share this JID. */
+export const STATUS_BROADCAST_JID = 'status@broadcast';
+
+/**
+ * Check if a raw JID is the WhatsApp status broadcast. It is neither a group
+ * nor a direct chat, so isGroupJid is false for it and direct-chat callers
+ * must exclude it separately.
+ */
+export function isStatusBroadcastJid(jid: string | null | undefined): boolean {
+  return jid === STATUS_BROADCAST_JID;
+}
+
 /** Check if a JID is a Signal transport JID (@signal). */
 export function isSignalJid(jid: string | null | undefined): boolean {
   return !!jid && jid.endsWith(JID_SIGNAL);

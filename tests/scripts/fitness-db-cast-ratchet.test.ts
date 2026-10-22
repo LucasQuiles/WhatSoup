@@ -29,7 +29,7 @@ const WRAPPER_FILE = join('src', 'lib', 'db-query.ts');
 
 const DB_CAST_PATTERN = /\.(all|get)\([^)]*\)[^;]*as (unknown as|any)\b/;
 
-const DB_CAST_BASELINE = 52;
+const DB_CAST_BASELINE = 50;
 
 interface CastSite {
   file: string;

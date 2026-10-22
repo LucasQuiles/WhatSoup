@@ -19,6 +19,9 @@ DISPATCHER_META_STATE = "dispatcher-meta-state.json"
 # Maintenance window (written by BOTH dispatcher and maintenance.py — MUST share one constant)
 MAINTENANCE = "maintenance.json"
 
+# Credential re-page acknowledgements (written by bot-errors-credential-ack.py, read by the dispatcher)
+CREDENTIAL_ACK = "credential-ack.json"
+
 # Per-component self state
 HEARTBEAT_WATCHDOG_STATE = "heartbeat-watchdog-state.json"
 SELFCHECK_STATE = "selfcheck-state.json"
@@ -27,6 +30,10 @@ TOOL_INVENTORY_STATE = "tool-inventory-state.json"
 GUI_SESSION_MONITOR_STATE = "gui-session-monitor-state.json"
 RUNTIME_STALENESS_STATE = "runtime-staleness-state.json"
 REPLY_GUARANTEE_OBSERVER_STATE = "reply-guarantee-observer-state.json"
+
+# Daily profile-missing alert markers, one per producer
+HEALTH_PROFILE_MISSING_MARKER = "health-check-profile-missing.json"
+WATCHDOG_PROFILE_MISSING_MARKER = "heartbeat-watchdog-profile-missing.json"
 
 # Sentinel component (written under fleet-sentinel root; read cross-component by watchdog)
 SENTINEL_HEARTBEAT = "sentinel-heartbeat.json"

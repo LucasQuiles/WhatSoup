@@ -331,12 +331,12 @@ describe('process-tree fail-closed safety', () => {
       generationMarker: 'lease-a',
       termGraceMs: 0,
       killGraceMs: 0,
-    });
+    }).catch((error: unknown) => error);
 
     await expect(killSessionTree(ROOT_PID, 'SIGKILL', {
       generationMarker: 'lease-b',
     })).rejects.toThrow('Refusing process-tree lease change');
-    await expect(first).rejects.toMatchObject({ code: 'PROCESS_TREE_SURVIVORS_REMAIN' });
+    expect(await first).toMatchObject({ code: 'PROCESS_TREE_SURVIVORS_REMAIN' });
   });
 
   it('uses identity-checked per-PID signals when the self PGID row is missing', async () => {
@@ -1667,6 +1667,63 @@ describe('typed process-tree outcome contract', () => {
     expect(error.message).not.toContain('private operating-system detail');
     expect(killSpy).not.toHaveBeenCalled();
   });
+
+  it.each(['initial', 'pre-signal'] as const)(
+    'never signals a captured tree after a malformed %s census',
+    async (phase) => {
+      const target = {
+        pid: ROOT_PID,
+        exitCode: null,
+        signalCode: null,
+        kill: vi.fn(() => true),
+      };
+      const authority = captureProcessTreeRootAuthority(target)!;
+      if (phase === 'pre-signal') execFileSyncMock.mockReturnValueOnce(rootRows());
+      execFileSyncMock.mockReturnValue(`${rootRows()}\n51003 51001`);
+
+      const result = await killSessionTreeRaw(target, 'SIGTERM', {
+        generationMarker: `malformed-authority-${phase}`,
+        rootAuthority: authority,
+        termGraceMs: 0,
+        killGraceMs: 0,
+      }).catch((error: unknown) => error);
+
+      expect(result).toMatchObject({ code: 'PROCESS_TREE_CENSUS_MALFORMED' });
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(target.kill).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['initial', 'pre-signal'] as const)(
+    'refuses a captured-parent mismatch in the %s census before signalling',
+    async (phase) => {
+      const target = {
+        pid: ROOT_PID,
+        exitCode: null,
+        signalCode: null,
+        kill: vi.fn(() => true),
+      };
+      const authority = captureProcessTreeRootAuthority(target)!;
+      const changedParent = rootRows().replace(
+        `${ROOT_PID} ${process.pid} ${ROOT_PID}`,
+        `${ROOT_PID} ${process.pid + 1} ${ROOT_PID}`,
+      );
+      execFileSyncMock
+        .mockReturnValueOnce(phase === 'initial' ? changedParent : rootRows())
+        .mockReturnValueOnce(changedParent)
+        .mockReturnValueOnce(census([]));
+
+      const result = await killSessionTreeRaw(target, 'SIGKILL', {
+        generationMarker: `parent-mismatch-${phase}`,
+        killGraceMs: 0,
+        rootAuthority: authority,
+      }).catch((error: unknown) => error);
+
+      expect(result).toMatchObject({ code: 'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED' });
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(target.kill).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     '',

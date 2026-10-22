@@ -475,6 +475,53 @@ describe('StartupNotificationController', () => {
     });
   });
 
+  it('#3570: delivers every per-chat notice to its own chat without displacing a restart-loop alert', async () => {
+    const h = createHarness();
+
+    h.controller.onConnected({
+      generic: null,
+      event: { kind: 'restart_loop_guard_alert', chatJid: 'admin', text: 'guard tripped' },
+      intentionalRestartReceipt: null,
+      chatNotices: [
+        { kind: 'expired_session_notice', chatJid: 'chat-a', text: 'session expired' },
+        { kind: 'expired_session_notice', chatJid: 'chat-b', text: 'session expired' },
+      ],
+    });
+    await h.scheduler.advanceBy(2_999);
+    expect(h.send).not.toHaveBeenCalled();
+
+    await h.scheduler.advanceBy(1);
+    expect(h.send).toHaveBeenCalledTimes(3);
+    expect(h.send).toHaveBeenCalledWith('admin', 'guard tripped', {
+      replayPolicy: 'unsafe', opType: 'status_ping',
+    });
+    expect(h.send).toHaveBeenCalledWith('chat-a', 'session expired', { replayPolicy: 'safe' });
+    expect(h.send).toHaveBeenCalledWith('chat-b', 'session expired', { replayPolicy: 'safe' });
+    expect(h.journal.settleStartupNotification).not.toHaveBeenCalled();
+  });
+
+  it('#3570: waits for strict readiness before delivering per-chat notices', async () => {
+    const h = createHarness({ ready: false });
+
+    h.controller.onConnected({
+      generic: null,
+      event: null,
+      intentionalRestartReceipt: null,
+      chatNotices: [{ kind: 'expired_session_notice', chatJid: 'chat-a', text: 'session expired' }],
+    });
+    await h.scheduler.advanceBy(3_000);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.controller.getStartupNotificationHealth()).toMatchObject({
+      state: 'waiting_transport',
+      policy: 'expired_session_notice',
+    });
+
+    h.setReady(true);
+    await h.scheduler.advanceBy(3_000);
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.send).toHaveBeenCalledWith('chat-a', 'session expired', { replayPolicy: 'safe' });
+  });
+
   it('settles the whole batch before an intentional restart receipt and never sends a generic aggregate later', async () => {
     const h = createHarness();
 

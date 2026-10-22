@@ -10,7 +10,6 @@ import {
   lstatSync,
   openSync,
   readFileSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -24,8 +23,8 @@ import {
   forceEnsurePrivateDirectorySync,
   fsyncDirectory,
   readPrivateFileSync,
-  writeAtomicPrivateFileSync,
 } from '../lib/private-fs.ts';
+import { writeAtomicPrivateFileIsolatedSync } from '../lib/private-fs-isolated.ts';
 import { acquireProcessLock, releaseProcessLock } from '../lib/process-lock.ts';
 import { MS_PER_MINUTE } from '../lib/time-units.ts';
 
@@ -249,7 +248,7 @@ function noteLifecycleMarkerFailure(): void {
 
 function persistObservedGeneration(revision: string, observedAt: string, force = false): void {
   if (persistedLifecycleMarkerState === 'observed' && !force) return;
-  writeAtomicPrivateFileSync(
+  writeAtomicPrivateFileIsolatedSync(
     SILENCE_REGISTRY_GENERATION_FILE,
     `${JSON.stringify({ schemaVersion: 1, state: 'observed', revision, observedAt })}\n`,
     'fleet silence registry lifecycle marker',
@@ -262,7 +261,7 @@ function persistObservedGeneration(revision: string, observedAt: string, force =
 /** A missing store is current only after its first-run lifecycle state is durable. */
 function persistUninitializedGeneration(observedAt: string): void {
   if (persistedLifecycleMarkerState !== null) return;
-  writeAtomicPrivateFileSync(
+  writeAtomicPrivateFileIsolatedSync(
     SILENCE_REGISTRY_GENERATION_FILE,
     `${JSON.stringify({ schemaVersion: 1, state: 'uninitialized', observedAt })}\n`,
     'fleet silence registry lifecycle marker',
@@ -544,39 +543,21 @@ function requireMutableRules(): SilenceRule[] {
 
 function saveRules(rules: SilenceRule[]): void {
   ensureSilenceRegistryDirectory();
-  const tmpFile = join(CONFIG_DIR, `.fleet-silences.${process.pid}.${randomUUID()}.tmp`);
   const raw = JSON.stringify(rules, null, 2) + '\n';
   const observedAt = new Date().toISOString();
-  try {
-    // Persist a conservative observed marker before publication. If publication
-    // later fails, a restart treats absence as unavailable rather than silently
-    // reclassifying a potentially interrupted mutation as first run.
-    persistObservedGeneration(revisionFor(raw), observedAt);
-    // #2288-M5: fsync before rename. openSync + writeFileSync(fd, ...) +
-    // fsyncSync(fd) + closeSync(fd) (in a finally) before renameSync, following
-    // the in-file precedent (:636-641 persistObservedGeneration's init path)
-    // and the M6 sibling (incident-breaker.ts:79-86). Without the fsync
-    // barrier, a crash between write and rename flush can leave the tmp file
-    // present but empty → loadRules catches JSON.parse failure and returns []
-    // → every active silence silently vanishes, re-enabling alerting an
-    // operator deliberately suppressed.
-    const fd = openSync(tmpFile, 'w', 0o600);
-    try {
-      writeFileSync(fd, raw, 'utf8');
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tmpFile, SILENCES_FILE);
-    rememberObservedRules(rules, raw, observedAt);
-  } catch (err) {
-    try {
-      unlinkSync(tmpFile);
-    } catch {
-      // intentional: best-effort temp cleanup must not mask the persistence failure being rethrown
-    }
-    throw err;
-  }
+  // Persist a conservative observed marker before publication. If publication
+  // later fails, a restart treats absence as unavailable rather than silently
+  // reclassifying a potentially interrupted mutation as first run.
+  persistObservedGeneration(revisionFor(raw), observedAt);
+  // #2288-M5: fsync before rename. The isolated writer writes the temp, fsyncs
+  // it, and only then renames it over the registry (and fsyncs the directory),
+  // all inside a child bound to the registry directory's identity. Without the
+  // fsync barrier, a crash between write and rename flush can leave the file
+  // present but empty → loadRules catches JSON.parse failure and returns []
+  // → every active silence silently vanishes, re-enabling alerting an operator
+  // deliberately suppressed. The writer removes its own temp on failure.
+  writeAtomicPrivateFileIsolatedSync(SILENCES_FILE, raw, 'fleet silence registry');
+  rememberObservedRules(rules, raw, observedAt);
 }
 
 /**

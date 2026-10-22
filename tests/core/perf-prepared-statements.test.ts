@@ -26,65 +26,11 @@ describe('prepared statement caching', () => {
     const prepareSpy = vi.spyOn(db.raw, 'prepare');
     const engine = new DurabilityEngine(db);
 
-    // Fixed constructor statements, including turn finalization, recovery lifecycle,
-    // echo settlement/health diagnostics, duplicate receipts, completed-session lookup,
-    // exact-session lifecycle transitions, the cached BEGIN/COMMIT/ROLLBACK runner,
-    // eight recovery plan/run/disposition/corroboration evidence statements,
-    // the two recovery-owner reclaim statements (#1749: the bucket-4 reclaimable
-    // sweep query + the dead-delivery job reclaim update), the two maybe_sent
-    // durability-debt diagnostics (#1865: the maybe_sent count + oldest-submitted-at
-    // staleness probes that drive /health degradation), and the PR-C
-    // supersedeOutstandingStatus statement (one outstanding status ping per chat),
-    // the bounded live maybe_sent reconciliation scan, and five
-    // conversation-scoped lifecycle proof/mutation statements.
-    // Lifecycle methods must not prepare SQL per call.
-    // (+7 vs the historical 112: the E17/E22 idempotency probe
-    // agentSessionRowAlreadyInStatusForProvider — the true-repeat-only guard
-    // that lets a duplicate lifecycle close no-op instead of throwing — plus
-    // the live maybe_sent scan and five lifecycle statements above.)
-    // (+1 vs 114, PRESTAGE-T4: getTurnRecoveryOriginalDeliveryStatus — the
-    // pre-claim duplicate-send guard's read of the ORIGINAL selected
-    // delivery's outbound status, called before a recovery job is claimed
-    // so the supervisor never claims-then-replays a job whose original send
-    // is still ambiguous. A distinct statement from the pre-existing
-    // maybe_sent diagnostics above; getTurnRecoverySourceProof, added later
-    // in the same packet, deliberately REUSES getTurnRecoverySourceInboundStatus
-    // instead of adding its own, so it does not also bump this count.)
-    // (+1 vs 115, #2332: selectInboundReceipt reads the durable receipt that
-    // chronology must carry across queueing and recovery replay.)
-    // (+5 vs 116, provider-route-policy task3: the five conversation-scoped
-    // lifecycle proof/mutation statements enumerated above — merge union of
-    // this branch's +5 with main's +2.)
-    // (+1 vs 123, #2145: markInboundFailedIfProcessing caches the
-    // identity/state-fenced queue-admission failure update. 123 is landed
-    // main's count post-#2596 — recounted empirically against the rebased
-    // tree (124), not assumed additive.)
-    // (+5 vs 124, #2560: two quarantine-disposition classification statements
-    // plus the three cached immediate-transaction statements (BEGIN IMMEDIATE,
-    // COMMIT, ROLLBACK) pre-warmed in the constructor for
-    // withImmediateTransaction reuse.)
-    // (+7 vs 129, #2540: the completed-delivery identity admission ledger —
-    // getCompletedDeliveryIdentityAdmissionHealth, recordCompletedDelivery
-    // IdentityAdmission, quarantineExactSessionCheckpoint, selectQuarantinable
-    // AgentRowsForCheckpoint, selectExactQuarantinableAgentSessionForAdmission,
-    // markExactAgentResumeFailed, resolveCompletedDeliveryIdentityAdmissions
-    // ForFreshLifecycle — the bounded content-free admission/quarantine
-    // statements that keep unprovable resume identities resumable while
-    // health stays green. Merge union with main's +5 (#2560) on the rebased tree (136); verified by running this suite.)
-    // (+1 vs 136, #2155: getNewestInboundSeqForConversation — the operator
-    // promotion workflow's read-only newer-activity probe.)
-    // (+1 vs 137, #3374 ask 2: selectInboundReclaimState — the finalizer's
-    // sweep-owned-terminal recognition probe.)
-    // (+10 vs 138, #3295 S2: DeferredTurnStore is now constructed by the
-    // engine — its ten fenced obligation statements (enqueue, getBySource,
-    // claim/requeue/commit/terminalize family, expiry, listings) prepare
-    // once here.)
-    // (+4 vs 148, continuity-consumer (migration 64): the continuity-candidate
-    // consumed_at reconciliation statements — selectUnconsumedContinuityCandidates,
-    // countUnconsumedContinuityCandidates, stampContinuityCandidateConsumed, and
-    // continuityCandidateHasTerminalOrRecovery — prepared once in the constructor
-    // for reconcileContinuityCandidates() reuse.)
-    expect(prepareSpy).toHaveBeenCalledTimes(152);
+    // The engine and its stores prepare fixed SQL in the constructor, including
+    // synthetic-source classification, scheduled-turn loss counts and late-echo
+    // checkpoint identity. Recovery and lifecycle methods must reuse those
+    // statements without preparing more.
+    expect(prepareSpy).toHaveBeenCalledTimes(168);
     prepareSpy.mockClear();
 
     const seq = engine.journalInbound('msg-1', 'conv-1', 'jid-1@s.whatsapp.net', 'agent');
@@ -192,7 +138,9 @@ describe('prepared statement caching', () => {
       lastOpId: quarantinedOpId,
     });
 
+    engine.journalInbound('agentjob-7-1780000000-11', 'conv-scheduled', 'jid-5@s.whatsapp.net', 'agent');
     engine.preConnectRecovery();
+    expect(engine.getTurnRecoverySupervisorCounts().scheduledTurnsLost).toBe(1);
     engine.postConnectRecovery();
     engine.sweepStaleSubmitted();
     engine.getHealthStats();

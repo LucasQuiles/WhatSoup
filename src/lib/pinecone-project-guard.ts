@@ -1,3 +1,5 @@
+import { isNonEmptyString } from './type-guards.ts';
+
 export interface PineconeProjectGuard {
   projectId?: string;
   expectedHostSuffix?: string;
@@ -17,8 +19,42 @@ export interface PineconeProjectGuardMessages {
   projectMismatch(indexName: string): string;
 }
 
+/** Instance name of the operator's own bot. */
+export const OPERATOR_INSTANCE_NAME = 'q';
+
+/**
+ * Pinecone project the operator instance must reach: the operator's Default
+ * project. The operator instance is checked like every other instance; this
+ * constant supplies its expected project when its config sets no guard, so a
+ * host that runs `q` without `memory.pinecone` still fails closed on a key for
+ * another principal's project. A configured `projectId`/`expectedHostSuffix`
+ * takes precedence.
+ */
+export const OPERATOR_PINECONE_PROJECT_ID = 'o6fsxb8';
+
+export type PineconeProjectGuardSource = 'config' | 'operator_default' | 'none';
+
 export function hasPineconeProjectGuard(guard: PineconeProjectGuard): boolean {
   return Boolean(guard.projectId || guard.expectedHostSuffix);
+}
+
+export function isOperatorInstance(botName: unknown): boolean {
+  return isNonEmptyString(botName) && botName.trim().toLowerCase() === OPERATOR_INSTANCE_NAME;
+}
+
+/**
+ * The guard an instance is held to: its configured guard when it has one,
+ * otherwise the operator project for the operator instance, otherwise none.
+ */
+export function resolvePineconeProjectGuard(
+  botName: unknown,
+  configured: PineconeProjectGuard,
+): { guard: PineconeProjectGuard; source: PineconeProjectGuardSource } {
+  if (hasPineconeProjectGuard(configured)) return { guard: configured, source: 'config' };
+  if (isOperatorInstance(botName)) {
+    return { guard: { projectId: OPERATOR_PINECONE_PROJECT_ID }, source: 'operator_default' };
+  }
+  return { guard: configured, source: 'none' };
 }
 
 export function matchesPineconeProjectGuard(

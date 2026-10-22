@@ -461,7 +461,7 @@ export function releaseProcessLock(handle: ProcessLockHandle, options: ReleasePr
   return true;
 }
 
-function defaultIsProcessAlive(pid: number): boolean {
+export function defaultIsProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

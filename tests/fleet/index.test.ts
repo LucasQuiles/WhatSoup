@@ -24,13 +24,20 @@ import { WebSocket } from 'ws';
 // Mocks — must be set up before importing fleet modules
 // ---------------------------------------------------------------------------
 
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn((_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => {
-    cb(null, '');
-  }),
-  execFileSync: vi.fn(() => Buffer.from('abc1234')),
-  spawn: vi.fn(),
-}));
+// spawnSync stays the real builtin: the silence routes reach silence-manager,
+// whose store writes go through writeAtomicPrivateFileIsolatedSync (a
+// spawnSync-supervised child). Everything else stays mocked.
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return {
+    execFile: vi.fn((_cmd: string, _args: string[], cb: (err: Error | null, stdout?: string) => void) => {
+      cb(null, '');
+    }),
+    execFileSync: vi.fn(() => Buffer.from('abc1234')),
+    spawn: vi.fn(),
+    spawnSync: actual.spawnSync,
+  };
+});
 
 const mockSvcManager = {
   enable: vi.fn().mockResolvedValue(undefined),
@@ -599,6 +606,22 @@ describe('fleet server -- API route dispatch (real factory)', () => {
     expect(Array.isArray(body)).toBe(true);
     const claude = (body as Array<{ id: string; displayName: string }>).find((p) => p.id === 'claude-cli');
     expect(claude?.displayName).toBe('Claude CLI');
+  });
+
+  it('GET /api/providers/:name/models dispatches without fabricating an empty catalogue', async () => {
+    const res = await fetch(`${baseUrl}/api/providers/gemini-cli/models`, { headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'gemini-cli' },
+      asOfLabel: 'just now',
+    });
+  });
+
+  it('GET /api/providers/:name/models rejects unknown execution providers', async () => {
+    const res = await fetch(`${baseUrl}/api/providers/invented-provider/models`, { headers: auth });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "unknown provider 'invented-provider'" });
   });
 
   it('GET /api/lines/:name/provider-status dispatches with the extracted param', async () => {

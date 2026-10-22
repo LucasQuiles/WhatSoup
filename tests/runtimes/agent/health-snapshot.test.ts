@@ -6,6 +6,7 @@
  * lastSessionStartedAt (string | null), and fallback-state fields.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import type { AutoCompactController } from '../../../src/runtimes/agent/auto-compact-controller.ts';
@@ -176,6 +177,8 @@ vi.mock('../../../src/core/durability.ts', () => ({
 
 vi.mock('../../../src/core/conversation-key.ts', () => ({
   toConversationKey: vi.fn((jid: string) => jid),
+  // A well-formed per_chat checkpoint reaches the proactive-resume group check.
+  isGroupConversationKey: vi.fn(() => false),
   // runtime.ts derives its global scope-key constants from this at import time.
   GLOBAL_CONVERSATION_KEY: '__global__',
 }));
@@ -336,10 +339,29 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryBlockedUnsafe: 0,
     turnRecoveryExhausted: 0,
     turnRecoveryOpenRecoveries: 0,
+    turnRecoveryOpenRecoveriesSynthetic: 0,
+    turnRecoveryScheduledTurnsLost: 0,
     turnRecoveryQuarantinedDelivery: 0,
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
     turnRecoveryEchoConflicts: 0,
+    turnRecoveryCorruptLinksSettled: 0,
+    turnRecoveryEchoConflictsSettled: 0,
+    turnRecoveryBlockingOutstanding: 0,
+    turnRecoveryRetainedTerminal: 0,
+    turnRecoveryCorroboratedRetained: 0,
+    turnRecoveryBlockedUnsafeSynthetic: 0,
+    turnRecoveryBlockedUnsafeSuperseded: 0,
+    turnRecoveryBlockedUnsafeStranded: 0,
+  };
+}
+
+function expectedRecoveryClassificationDetails(): Record<string, unknown> {
+  return {
+    recoveryBlockingReasons: [],
+    recoveryDebtReasons: [],
+    completedDeliveryIdentityBlocking: 0,
+    completedDeliveryIdentityRetained: 0,
   };
 }
 
@@ -484,12 +506,14 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         degradedReasons: [],
         perChatSessionsWithoutOwner: 0,
         perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -535,12 +559,14 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
         degradedReasons: [],
         perChatSessionsWithoutOwner: 0,
         perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -552,6 +578,80 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
   it('activeSessions is 0 when no sessions exist', () => {
     const snapshot = runtime.getHealthSnapshot();
     expect(snapshot.details['activeSessions']).toBe(0);
+  });
+
+  it('projects each registered diagnostic counter onto its own health field', () => {
+    // Distinct value per field so a swapped mapping cannot pass.
+    const internals = runtime as unknown as {
+      proactiveResumeIdentityRejects: number;
+      unownedProviderEventRejects: number;
+      suppressedSystemTurnEffectRejects: number;
+      perChatSessionsWithoutOwner(): string[];
+      perChatRespawnAbandonedCount(): number;
+      turnChronology: { healthDetails(): Record<string, number> };
+      runtimeTurnCoordinator: {
+        turnQueueHaltHealth(scope: string): { turnQueueHalted: boolean; turnQueueHaltedScopes: number };
+      };
+    };
+    internals.proactiveResumeIdentityRejects = 11;
+    internals.unownedProviderEventRejects = 12;
+    internals.suppressedSystemTurnEffectRejects = 13;
+    vi.spyOn(internals, 'perChatSessionsWithoutOwner').mockReturnValue(['chat-a', 'chat-b']);
+    vi.spyOn(internals, 'perChatRespawnAbandonedCount').mockReturnValue(3);
+    vi.spyOn(internals.runtimeTurnCoordinator, 'turnQueueHaltHealth')
+      .mockReturnValue({ turnQueueHalted: true, turnQueueHaltedScopes: 4 });
+    vi.spyOn(internals.turnChronology, 'healthDetails').mockReturnValue({
+      chronologyDelayedDispatches: 21,
+      chronologyRecoveryReplayDispatches: 22,
+      chronologyMaxQueueAgeSeconds: 23,
+    });
+
+    expect(runtime.getHealthSnapshot().details).toMatchObject({
+      perChatSessionsWithoutOwner: 2,
+      perChatRespawnAbandoned: 3,
+      turnQueueHaltedScopes: 4,
+      proactiveResumeIdentityRejects: 11,
+      unownedProviderEventRejects: 12,
+      suppressedSystemTurnEffectRejects: 13,
+      chronologyDelayedDispatches: 21,
+      chronologyRecoveryReplayDispatches: 22,
+      chronologyMaxQueueAgeSeconds: 23,
+    });
+  });
+
+  it('projects each registered provider-fallback counter onto its own health field (#3586)', () => {
+    // Writes the runtime's real fallback state, so the getFallbackState()
+    // mapping itself is exercised. Distinct value per field so a swapped
+    // mapping cannot pass.
+    const internals = runtime as unknown as {
+      fallbackMetrics: {
+        turnsServed: number;
+        turnsEmpty: number;
+        activations: number;
+        reverts: number;
+        replays: number;
+      };
+      fallbackProbeAttempts: number;
+      fallbackChain: { failedKeys: Set<string> };
+    };
+    internals.fallbackMetrics.turnsServed = 31;
+    internals.fallbackMetrics.turnsEmpty = 32;
+    internals.fallbackMetrics.activations = 33;
+    internals.fallbackMetrics.reverts = 34;
+    internals.fallbackMetrics.replays = 35;
+    internals.fallbackProbeAttempts = 36;
+    internals.fallbackChain.failedKeys.add('provider-a:model-a');
+    internals.fallbackChain.failedKeys.add('provider-b:model-b');
+
+    expect(runtime.getHealthSnapshot().details).toMatchObject({
+      fallbackTurnsServed: 31,
+      fallbackTurnsEmpty: 32,
+      fallbackActivations: 33,
+      fallbackReverts: 34,
+      fallbackReplays: 35,
+      probeAttempts: 36,
+      failedEntryCount: 2,
+    });
   });
 
   it('degrades only while provider execution pressure is active', async () => {
@@ -836,12 +936,14 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         degradedReasons: [],
         perChatSessionsWithoutOwner: 0,
         perChatRespawnAbandoned: 0,
+        agentRespawnFailedClearPending: false,
         chronologyMaxQueueAgeSeconds: 0,
         turnFinalizationRetainedRetries: 0,
         turnFinalizationDegradedScopes: 0,
         turnFinalizationRetryAttempts: 0,
         turnFinalizationRetryRecoveries: 0,
         turnFinalizationRetryExhaustions: 0,
+        ...expectedRecoveryClassificationDetails(),
         ...expectedTurnQueueDetails(),
         ...expectedProviderExecutionDetails(),
         ...expectedTurnRecoveryDetails(),
@@ -960,6 +1062,7 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
       const mutableConfig = config as unknown as Record<string, unknown>;
       mutableConfig.proactiveResumeOnStartup = true;
       try {
+        await prepareRuntimeHome();
         await runtime.start();
       } finally {
         delete mutableConfig.proactiveResumeOnStartup;
@@ -972,6 +1075,60 @@ describe('AgentRuntime.getHealthSnapshot — single-session shape', () => {
         // quarantine record carries it through verbatim
         provider: 'claude-cli',
         reason,
+      });
+      expect(mockSession.spawnSession).not.toHaveBeenCalled();
+      expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
+    });
+
+    it('quarantines a well-formed completed identity that names an admission-rejected turn (#3295 S4)', async () => {
+      mockSession.spawnSession.mockClear();
+      // Well-formed per this file's toConversationKey mock (jid => jid): only
+      // the terminal lookup says the completed turn was rejected at admission.
+      const checkpoint = completedCheckpoint({
+        conversationKey: '15551230995@s.whatsapp.net',
+        deliveryJid: '15551230995@s.whatsapp.net',
+        deliveryNamespace: 's.whatsapp.net',
+        scope: 'per_chat',
+        sessionId: 'admission-rejected-proactive-session',
+      });
+      const db = {
+        assertWritableCompatibility: vi.fn(),
+        raw: {
+          exec: vi.fn(),
+          prepare: vi.fn((sql: string) => ({
+            run: vi.fn(),
+            get: vi.fn(() => (sql.includes("attempt_kind = 'admission_rejected'") ? { rejected: 1 } : undefined)),
+            all: vi.fn(() => []),
+          })),
+        },
+      } as unknown as Database;
+      const runtime = new AgentRuntime(db, makeMessenger(), 'test', {
+        sessionScope: 'per_chat',
+      });
+      const quarantine = vi.fn();
+      (runtime as unknown as { durability: unknown }).durability = {
+        getResumableCheckpoints: vi.fn(() => [
+          { conversation_key: checkpoint.conversation_key },
+        ]),
+        getSessionCheckpoint: vi.fn(() => checkpoint),
+        quarantineCompletedDeliveryIdentityCheckpoint: quarantine,
+        upsertSessionCheckpoint: vi.fn(),
+      };
+
+      const mutableConfig = config as unknown as Record<string, unknown>;
+      mutableConfig.proactiveResumeOnStartup = true;
+      try {
+        await prepareRuntimeHome();
+        await runtime.start();
+      } finally {
+        delete mutableConfig.proactiveResumeOnStartup;
+      }
+
+      expect(quarantine).toHaveBeenCalledWith({
+        conversationKey: '15551230995@s.whatsapp.net',
+        providerSessionId: 'admission-rejected-proactive-session',
+        provider: 'claude-cli',
+        reason: 'invalid',
       });
       expect(mockSession.spawnSession).not.toHaveBeenCalled();
       expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);

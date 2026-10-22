@@ -14,10 +14,10 @@
 // un-notified boot into one intentional message; fail-open on all
 // persistence errors (a broken journal must never block the notification or
 // the boot).
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 
 import {
   composeStartupNotification,
@@ -81,10 +81,17 @@ describe('recordStartupBoot', () => {
     ['malformed', '{not json\n'],
     ['future v2', '{"v":2,"boots":[1],"lastNotifiedAt":null}\n'],
     ['unreadable', '{"v":1,"boots":[1],"lastNotifiedAt":null}\n'],
-  ])('preserves an existing %s journal and returns journal_unreadable', (kind, source) => {
+  // #3551: the unreadable fixture sets its permissive mode explicitly, and
+  // every row runs under a restrictive and a conventional umask.
+  ].flatMap((row) => [['077', ...row], ['022', ...row]]))('(umask %s) preserves an existing %s journal and returns journal_unreadable', (umask, kind, source) => {
+    const previousUmask = process.umask(umask);
+    onTestFinished(() => { process.umask(previousUmask); });
     const p = statePath();
-    if (kind === 'unreadable') writeFileSync(p, source, 'utf8');
-    else writePrivateFixture(p, source);
+    if (kind === 'unreadable') {
+      writeFileSync(p, source, 'utf8');
+      chmodSync(p, 0o644);
+      expect(statSync(p).mode & 0o777).toBe(0o644);
+    } else writePrivateFixture(p, source);
 
     const result = recordStartupBoot(p, T0);
 

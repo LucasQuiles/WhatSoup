@@ -118,20 +118,23 @@ Each entry in `knowledgeProfiles` must satisfy:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `namespace` | string | yes | Primary namespace; use `""` to query the default |
-| `namespaces` | string[] | yes | Additional namespaces searched in order |
+| `namespace` | string | yes | Primary namespace; use `""` to query the default. Searched only when `namespaces` is empty; otherwise it only widens the `namespace` override allowlist |
+| `namespaces` | string[] | yes | Namespaces searched in order. For the instance's own memory index (`memory.pinecone.index`), the default namespace `__default__`, where `memory_write` writes, is always searched as well. Memory namespaces of that index are scoped to the calling conversation (this chat first; held to the group boundary in groups and, by default, to the chat itself in a non-admin contact's direct chat); document namespaces are merged in by relevance. See [Memory recall scope](../configuration.md#memory-recall-scope) |
 | `searchMode` | `"entity"` \| `"text"` \| `"vector"` | yes | `entity` = structured records; `text` = BM25; `vector` = dense embedding |
 | `rerank` | boolean | yes | Enable Pinecone rerank pass |
 | `rerankModel` | string | yes | e.g. `"pinecone-rerank-v0"`; `""` when `rerank: false` |
 | `topK` | number | yes | Initial candidate fetch count |
 | `rerankTopN` | number | yes | Results returned after rerank |
+| `minScore` | number | no | Finite score floor applied to ranked hits; an all-low-score result returns zero hits. |
 | `description` | string | yes | Human-readable label shown in tool listing |
 | `embedUrl` | string | no | Override embed endpoint; required for `vector` mode if non-standard |
 
-An index name in `allowedIndexes` that references a built-in profile name
-(`oneplatform-search`, `oneplatform-entities`, `mw-mind`) is rejected by the
-config validator for non-mw bots — those profiles target the mw project's
-host. Declare a custom profile with the same index name to override.
+An index name in `allowedIndexes` that references an undeclared built-in profile
+(`oneplatform-search`, `oneplatform-entities`, `mw-mind`) produces a deprecation
+warning in `src/config.ts` (expiry metadata: 2026-10-26); this check does not
+reject the configuration and is not limited to non-mw instances. Declare a
+custom profile with the same index name to bind retrieval to the intended
+project. Project routing guards still apply independently.
 
 ---
 

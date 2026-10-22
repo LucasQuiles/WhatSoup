@@ -398,4 +398,87 @@ describe('marker payload timestamp comes from the injectable clock', () => {
     // refactor cannot satisfy the equality above by hard-coding or omitting setAt.
     expect(nowIso).toHaveBeenCalled();
   });
+
+  it('lets the envelope win over a detail that tries to shadow it', async () => {
+    // The spread order `{ ...detail, source, setAt }` is a guard, not a style
+    // choice: a marker that could name a source it is not filed under would let
+    // a re-emitting reader act on the wrong key. Untested, the order is one
+    // refactor away from inverting silently.
+    const { setRecoveryMarker } = await store();
+    setRecoveryMarker('envelope:bot', {
+      source: 'attacker-chosen-source',
+      setAt: 'attacker-chosen-time',
+      kept: 'detail-field',
+    });
+
+    const payload = JSON.parse(readFileSync(markerFile('envelope:bot'), 'utf8')) as Record<string, unknown>;
+    expect(payload['source']).toBe('envelope:bot');
+    expect(payload['setAt']).not.toBe('attacker-chosen-time');
+    // Detail fields that do NOT collide are still stored — the guard is narrow.
+    expect(payload['kept']).toBe('detail-field');
+  });
+});
+
+describe('readRecoveryMarkerState', () => {
+  it('reports ok with the stored payload for a marker written with detail', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:ok', { scheduledId: 7, error: 'boom' });
+
+    const result = readRecoveryMarkerState('read:ok');
+    expect(result.state).toBe('ok');
+    expect(result.state === 'ok' && result.payload['scheduledId']).toBe(7);
+    expect(result.state === 'ok' && result.payload['source']).toBe('read:ok');
+  });
+
+  it('reports missing for a key that has no file', async () => {
+    const { readRecoveryMarkerState } = await store();
+    expect(readRecoveryMarkerState('read:absent')).toEqual({ state: 'missing' });
+  });
+
+  it('reports missing for a key held only in the legacy aggregate plane', async () => {
+    // The legacy file stores `true`, not a payload, so there is nothing to read
+    // back — distinct from corruption, and callers must not treat it as such.
+    writeFileSync(legacyPath(), JSON.stringify({ 'read:legacy': true }), 'utf-8');
+    const { readRecoveryMarkerState } = await store();
+    expect(readRecoveryMarkerState('read:legacy')).toEqual({ state: 'missing' });
+  });
+
+  it('reports invalid, not missing, for bytes that are not parseable JSON', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:corrupt');
+    writeFileSync(markerFile('read:corrupt'), '{"scheduledId":7,', 'utf-8');
+
+    // The whole point of the split: a caller that re-emits from this must be
+    // able to tell "nothing owed" from "bytes I cannot use".
+    expect(readRecoveryMarkerState('read:corrupt')).toEqual({ state: 'invalid' });
+  });
+
+  it('reports invalid for valid JSON that is not a plain object', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:array');
+    writeFileSync(markerFile('read:array'), '[1,2,3]', 'utf-8');
+
+    expect(readRecoveryMarkerState('read:array')).toEqual({ state: 'invalid' });
+  });
+
+  it('reports unreadable when the read itself fails', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:denied');
+    chmodSync(markerFile('read:denied'), 0o000);
+
+    try {
+      // Distinct from `invalid`: nothing is known about these bytes, so a caller
+      // must leave them alone rather than delete them.
+      expect(readRecoveryMarkerState('read:denied')).toEqual({ state: 'unreadable' });
+    } finally {
+      chmodSync(markerFile('read:denied'), 0o600);
+    }
+  });
+
+  it('reports a state rather than throwing for a key too long to encode', async () => {
+    // setRecoveryMarker throws RangeError on this key. The reader is called while
+    // iterating markers, so it must never abort the loop over one bad entry.
+    const { readRecoveryMarkerState } = await store();
+    expect(readRecoveryMarkerState('x'.repeat(300))).toEqual({ state: 'unreadable' });
+  });
 });

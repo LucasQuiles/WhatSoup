@@ -40,7 +40,7 @@ function writeExecutable(dir: string, name: string, body: string): void {
  * test) is what makes these assertions able to fail: a change to the script is
  * seen here directly.
  */
-function runWithHelpers(body: string, extraPath?: string): { status: number; stdout: string; stderr: string } {
+function runWithHelpers(body: string, extraPath?: string, inheritPath = true): { status: number; stdout: string; stderr: string } {
   const helpers = ['sha256_of', 'resolve_python']
     .map((fn) => {
       const start = scriptSource.indexOf(`${fn}() {`);
@@ -50,7 +50,7 @@ function runWithHelpers(body: string, extraPath?: string): { status: number; std
       return scriptSource.slice(start, end + 3);
     })
     .join('\n');
-  const pathPrefix = extraPath ? `export PATH="${extraPath}:$PATH"\n` : '';
+  const pathPrefix = extraPath ? `export PATH="${extraPath}${inheritPath ? ':$PATH' : ''}"\n` : '';
   const result = spawnSync('bash', ['-c', `set -uo pipefail\n${pathPrefix}${helpers}\n${body}`], {
     encoding: 'utf8',
     cwd: repoRoot,
@@ -105,12 +105,36 @@ describe('install-transcription-deps.sh — sha256_of', () => {
     // The original code called `shasum -a 256` unconditionally. shasum is a Perl
     // utility shipped with macOS and absent from minimal Linux images.
     const shim = makeTempRoot('itd-noshasum-');
-    writeExecutable(shim, 'shasum', '#!/bin/sh\nexit 127\n');
+    writeExecutable(shim, 'sha256sum', `#!${process.execPath}
+const { createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+process.stdout.write(createHash('sha256').update(readFileSync(process.argv[2])).digest('hex') + '  ' + process.argv[2] + '\\n');
+`);
     const root = makeTempRoot('itd-sha2-');
     fs.writeFileSync(path.join(root, 'f'), 'hello', 'utf8');
-    const res = runWithHelpers(`sha256_of "${path.join(root, 'f')}"`, shim);
+    const res = runWithHelpers(`sha256_of "${path.join(root, 'f')}"`, shim, false);
     expect(res.status).toBe(0);
     expect(res.stdout.trim()).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
+  });
+
+  it('fails closed when the only available hash tool fails', () => {
+    const shim = makeTempRoot('itd-broken-shasum-');
+    writeExecutable(shim, 'shasum', '#!/bin/sh\nexit 127\n');
+    const root = makeTempRoot('itd-broken-sha-');
+    fs.writeFileSync(path.join(root, 'f'), 'hello', 'utf8');
+    const res = runWithHelpers(`sha256_of "${path.join(root, 'f')}"`, shim, false);
+    expect(res.status).not.toBe(0);
+    expect(res.stdout.trim()).toBe('');
+  });
+
+  it('fails closed when neither hash tool is available', () => {
+    const shim = makeTempRoot('itd-no-hash-tools-');
+    const root = makeTempRoot('itd-no-hash-');
+    fs.writeFileSync(path.join(root, 'f'), 'hello', 'utf8');
+    const res = runWithHelpers(`sha256_of "${path.join(root, 'f')}"`, shim, false);
+    expect(res.status).not.toBe(0);
+    expect(res.stdout.trim()).toBe('');
+    expect(res.stderr).toContain('Neither sha256sum nor shasum is available');
   });
 
   it('fails closed on a missing file rather than emitting an empty digest', () => {

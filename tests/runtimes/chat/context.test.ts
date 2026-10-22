@@ -505,6 +505,59 @@ describe('loadContext', () => {
     expect(result).toContain('Things you (Loops) have said about yourself before');
     expect(result).toContain('Loops likes electronic music');
   });
+
+  it('holds the sender leg to this group when it may not cross chats, matching both key spellings', async () => {
+    const fromDm = makeResult('s-dm', 'sender fact from their direct chat');
+    fromDm.record.chatJid = '15550000002@s.whatsapp.net';
+    const fromGroupRaw = makeResult('s-raw', 'sender fact in this group, raw spelling');
+    fromGroupRaw.record.chatJid = '111111100000123@g.us';
+    const fromGroupKey = makeResult('s-key', 'sender fact in this group, key spelling');
+    fromGroupKey.record.chatJid = '111111100000123_at_g.us';
+    const pinecone = makeMockPinecone([], [fromDm, fromGroupRaw, fromGroupKey]);
+
+    for (const boundary of ['this_chat', 'group'] as const) {
+      const held = await loadContextDetailed(
+        pinecone as any, '111111100000123@g.us', '15550000002@s.whatsapp.net', 'query', undefined, boundary,
+      );
+      expect(held.text).not.toContain('from their direct chat');
+      expect(held.text).toContain('raw spelling');
+      expect(held.text).toContain('key spelling');
+    }
+
+    const crossing = await loadContextDetailed(
+      pinecone as any, '111111100000123@g.us', '15550000002@s.whatsapp.net', 'query', undefined, 'open',
+    );
+    expect(crossing.text).toContain('from their direct chat');
+  });
+
+  it('gives a group chat leg only shared records and the sender\'s own under the group boundary', async () => {
+    const withSender = (id: string, text: string, senderJid: string, memoryType: MemoryRecord['memoryType'] = 'user_fact') => {
+      const result = makeResult(id, text);
+      result.record.chatJid = '111111100000123@g.us';
+      result.record.senderJid = senderJid;
+      result.record.memoryType = memoryType;
+      return result;
+    };
+    const pinecone = makeMockPinecone([
+      withSender('own', 'the sender own fact', '15550000002@s.whatsapp.net'),
+      withSender('other', 'another member private fact', '15550000003@s.whatsapp.net'),
+      withSender('context', 'the group plans on fridays', '15550000003@s.whatsapp.net', 'group_context'),
+      withSender('unattributed', 'fact attributed to no member', ''),
+    ]);
+
+    const group = await loadContextDetailed(
+      pinecone as any, '111111100000123@g.us', '15550000002@s.whatsapp.net', 'query', undefined, 'group',
+    );
+    expect(group.text).toContain('the sender own fact');
+    expect(group.text).toContain('the group plans on fridays');
+    expect(group.text).toContain('fact attributed to no member');
+    expect(group.text).not.toContain('another member private fact');
+
+    const workflow = await loadContextDetailed(
+      pinecone as any, '111111100000123@g.us', '15550000002@s.whatsapp.net', 'query', undefined, 'this_chat',
+    );
+    expect(workflow.text).toContain('another member private fact');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,11 @@
-import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const RUNNER = join(process.cwd(), 'deploy/scripts/bot-errors-release-proof-run.sh');
+const REPO_SCRIPTS = join(process.cwd(), 'deploy/scripts');
 const tmp = trackTmpDirs('rp-');
 
 interface Fixture {
@@ -16,7 +17,21 @@ interface Fixture {
   stateDir: string;
 }
 
-function makeFixture(mode: string | null, opts: { flockRc?: number; noDetectors?: boolean } = {}): Fixture {
+interface FixtureOpts {
+  flockRc?: number;
+  noDetectors?: boolean;
+  // Stage the repository's own deploy/scripts/lib into the bundle and let the
+  // recorded python3 hand off to the real interpreter, so a receipt the runner
+  // asks for is actually written by the shipped writer rather than mimed.
+  realWriter?: boolean;
+}
+
+/** Absolute path of the interpreter the runner would find without the fixture's shim. */
+function realPython3(): string {
+  return execFileSync('bash', ['-c', 'command -v python3'], { encoding: 'utf8' }).trim();
+}
+
+function makeFixture(mode: string | null, opts: FixtureOpts = {}): Fixture {
   const home = tmp.make('run');
   const bin = join(home, 'bin');
   const bundle = join(home, 'bundle');
@@ -30,8 +45,14 @@ function makeFixture(mode: string | null, opts: { flockRc?: number; noDetectors?
       writeFileSync(join(bundle, 'deploy/scripts', script), '# detector placeholder\n');
     }
   }
-  // fake python3 records its argv, one line per invocation
-  writeFileSync(join(bin, 'python3'), `#!/usr/bin/env bash\necho "python3 $*" >> "${ledger}"\nexit 0\n`);
+  if (opts.realWriter) {
+    cpSync(join(REPO_SCRIPTS, 'lib'), join(bundle, 'deploy/scripts/lib'), { recursive: true });
+  }
+  // fake python3 records its argv, one line per invocation. With realWriter the
+  // recorded invocation is then handed to the real interpreter by absolute path
+  // (the shim owns the name `python3` on PATH, so a bare exec would recurse).
+  const handOff = opts.realWriter ? `exec ${realPython3()} "$@"\n` : 'exit 0\n';
+  writeFileSync(join(bin, 'python3'), `#!/usr/bin/env bash\necho "python3 $*" >> "${ledger}"\n${handOff}`);
   chmodSync(join(bin, 'python3'), 0o755);
   // fake flock: rc 0 grants the lock, 1 denies it
   const flockRc = opts.flockRc ?? 0;
@@ -43,6 +64,52 @@ function makeFixture(mode: string | null, opts: { flockRc?: number; noDetectors?
 }
 
 const USAGE_LINE = 'usage: bot-errors-release-proof-run.sh tree|runtime-staleness';
+
+// A fixed instant older than any stamp the runner can produce. The writer
+// stamps at second resolution, so a seed taken from the real clock could equal
+// the runner's own stamp and an assertion that a clock did NOT move would then
+// compare two equal values and hold whether or not the rule does.
+const SEED_STAMP = '2020-01-01T00:00:00Z';
+
+/**
+ * Give a producer's receipt both cadence clocks at SEED_STAMP.
+ *
+ * Runs the shipped writer directly by absolute interpreter path, so the seed
+ * never passes through the fixture's PATH shim and leaves the invocation ledger
+ * untouched. Returns the receipt path the writer itself resolved: the filenames
+ * belong to the writer module and are never restated here.
+ */
+function seedReceipt(fx: Fixture, unit: string): string {
+  const scripts = join(fx.bundle, 'deploy/scripts');
+  const seed = join(fx.home, 'seed.py');
+  const pathFile = join(fx.home, 'receipt-path.txt');
+  writeFileSync(
+    seed,
+    [
+      'import importlib, pathlib, sys',
+      `sys.path.insert(0, ${JSON.stringify(scripts)})`,
+      'pcr = importlib.import_module("lib.producer_cadence_receipt")',
+      `pcr.receipt_clock = lambda: ${JSON.stringify(SEED_STAMP)}`,
+      'producer = pcr.ProducerIdentity(sys.argv[1])',
+      'pcr.record_cycle_attempt(producer, mode=pcr.CadenceMode.OBSERVE)',
+      'pcr.record_cycle_success(producer, mode=pcr.CadenceMode.OBSERVE, durable_write=pcr.DurableWrite.NOT_OWED)',
+      `pathlib.Path(${JSON.stringify(pathFile)}).write_text(str(pcr.receipt_path(producer)))`,
+      '',
+    ].join('\n'),
+  );
+  const res = spawnSync(realPython3(), [seed, unit], {
+    encoding: 'utf8',
+    env: { ...process.env, BOT_ERRORS_STATE_DIR: fx.stateDir },
+  });
+  // The seed is scaffolding for the assertions below; a silent failure here
+  // would leave a receipt with null clocks and make "unchanged" trivially true.
+  expect(`${res.status} ${res.stderr}`).toBe('0 ');
+  return readFileSync(pathFile, 'utf8');
+}
+
+function readReceipt(path: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+}
 
 function runRunner(fx: Fixture, args: string[], extraEnv: Record<string, string> = {}) {
   return spawnSync('bash', [RUNNER, ...args], {
@@ -181,13 +248,59 @@ describe('bot-errors-release-proof-run.sh', () => {
     expect(res.stderr).toContain('missing detector');
   });
 
-  it('lock contention → exit 75 and a recorded skip', () => {
+  // Upgraded from "the ledger is empty" (#2341 leaf 2). An empty ledger proved
+  // no detector ran, but it also passed while the refused cycle left no trace at
+  // all — the state the receipt exists to end. This asserts the stronger pair:
+  // the runner routes a pre-exec lock-skip receipt, and it launches no detector.
+  it('lock contention → exit 75, a routed lock-skip receipt and no detector launch', () => {
     const fx = makeFixture('observe', { flockRc: 1 });
     const res = runRunner(fx, ['tree']);
     expect(res.status).toBe(75);
     expect(res.stderr).toContain('skipping cycle');
-    expect(ledgerLines(fx)).toHaveLength(0);
+    const lines = ledgerLines(fx);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('lock-skip tree observe');
+    expect(lines[0]).not.toContain('bot-errors-tree-provenance.py');
   });
+
+  // Both producers reach the lock through the one wrapper path, so both are
+  // named rather than one standing in for the other (contract item 4). The
+  // expectations differ in fetchStatus: the tree producer has a refresh step it
+  // did not use, the runtime-staleness producer has none at all.
+  const LOCK_SKIP_CASES = [
+    { component: 'tree', unit: 'bot-errors-tree-provenance', fetchStatus: 'not_attempted' },
+    { component: 'runtime-staleness', unit: 'bot-errors-runtime-staleness', fetchStatus: 'not_applicable' },
+  ];
+
+  for (const producer of LOCK_SKIP_CASES) {
+    it(`lock contention writes ${producer.unit} a lock_skip receipt that moves neither cadence clock`, () => {
+      const fx = makeFixture('observe', { flockRc: 1, realWriter: true });
+      const receiptPath = seedReceipt(fx, producer.unit);
+      const before = readReceipt(receiptPath);
+      expect(before.lastAttemptAt).toBe(SEED_STAMP);
+      expect(before.lastSuccessfulObservationAt).toBe(SEED_STAMP);
+
+      const res = runRunner(fx, [producer.component]);
+
+      expect(res.status).toBe(75);
+      const after = readReceipt(receiptPath);
+      expect(after.producer).toBe(producer.unit);
+      expect(after.outcome).toBe('lock_skip');
+      expect(after.stage).toBe('pre_exec');
+      expect(after.mode).toBe('observe');
+      expect(after.fetchStatus).toBe(producer.fetchStatus);
+      // The refused cycle never started and observed nothing, so both cadence
+      // clocks keep the values the seeded cycle left.
+      expect(after.lastAttemptAt).toBe(SEED_STAMP);
+      expect(after.lastSuccessfulObservationAt).toBe(SEED_STAMP);
+      // The invocation clock is what separates a contended lock from a stopped
+      // timer, so it is the one field that must move.
+      expect(after.lastInvocationAt).not.toBe(SEED_STAMP);
+      expect(String(after.lastInvocationAt) > SEED_STAMP).toBe(true);
+      // Pre-exec means pre-exec: the detector is never launched.
+      expect(ledgerLines(fx).join('\n')).not.toContain(`${producer.unit}.py`);
+    });
+  }
 
   it('contains no application service commands (structural)', () => {
     const text = readFileSync(RUNNER, 'utf8');

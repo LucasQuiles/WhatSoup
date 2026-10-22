@@ -46,8 +46,19 @@ def _runner_args(instance: str) -> argparse.Namespace:
     )
 
 
+# #2358 C9/C10 fixture: the observer and the target resolve to different
+# release commits while each side stays internally consistent.
+_OBSERVER_RELEASE_SHA = "1450192837" * 4
+_TARGET_RELEASE_SHA = "8675309124" * 4
+_TARGET_MANIFEST_DIGEST = "9078451236" * 6 + "abcd"
+_TARGET_CWD = "/srv/release"
+# A redactor that maps distinct commits onto one still-valid digest is the only
+# shape that can manufacture a false agreement, so it is the shape to pin.
+_COLLAPSED_RELEASE_SHA = "5150867530" * 4
+
+
 def _new_block_keys() -> set[str]:
-    return {"observerProvenance", "targetProvenance"}
+    return {"observerProvenance", "targetProvenance", "releaseDivergence"}
 
 
 def test_runner_failure_event_carries_separated_provenance_blocks(tmp_path, monkeypatch):
@@ -104,6 +115,252 @@ def test_health_self_event_has_observer_but_no_target_block(tmp_path, monkeypatc
     assert "observerProvenance" in event
     # A producer-self event has no distinct serving target to attribute.
     assert "targetProvenance" not in event
+
+
+def test_runner_envelope_names_the_target_when_releases_diverge(tmp_path, monkeypatch):
+    """#2358 C10: the originating defect. The producer ran from a different
+    checkout than the service it inspected, and the envelope has to say so --
+    naming the TARGET as the differing party, never the observer."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    mod = _load("bot_errors_runner_2358_divergence", _RUNNER)
+    tp = sys.modules["lib.target_provenance"]
+
+    def commit_for(cwd):
+        return _TARGET_RELEASE_SHA if cwd == _TARGET_CWD else _OBSERVER_RELEASE_SHA
+
+    monkeypatch.setattr(
+        tp, "default_probes",
+        lambda platform: tp.TargetProbes(
+            platform=platform,
+            service_state=lambda unit: "active",
+            service_pids=lambda unit: [4242],
+            process_started_epoch=lambda pid: 1_750_000_000,
+            process_cwd=lambda pid: _TARGET_CWD,
+            release_receipt=lambda cwd: {
+                "manifestDigest": _TARGET_MANIFEST_DIGEST,
+                "sourceCommit": commit_for(cwd),
+            },
+            git_head=commit_for,
+            now_iso=lambda: "2026-08-26T00:00:00Z",
+        ),
+    )
+    event = mod.build_failure_event(_runner_args("probe-instance"), ["true"], 1, 5, "", "boom", "nonzero_exit")
+
+    observer = event["observerProvenance"]
+    target = event["targetProvenance"]
+    # Precondition, so this cannot pass vacuously if both sides ever resolve
+    # to the same commit: the two releases really do differ, and each block
+    # agrees with itself, so only the cross-block axis is under test.
+    assert observer["release"]["sourceCommit"] == _OBSERVER_RELEASE_SHA
+    assert target["release"]["sourceCommit"] == _TARGET_RELEASE_SHA
+    assert observer["release"]["sourceCommit"] != target["release"]["sourceCommit"]
+    assert observer["release"]["agreement"] == "agree"
+    assert target["release"]["agreement"] == "agree"
+
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "diverged"
+    assert divergence["divergentParty"] == "target"
+
+
+def test_health_outbox_event_names_the_target_when_releases_diverge(tmp_path, monkeypatch):
+    """The health check attaches the verdict through redact_json_value, which
+    the runner path does not. Redaction must not disturb the classification."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_health_2358_divergence", _HEALTH)
+    tp = sys.modules["lib.target_provenance"]
+
+    def commit_for(cwd):
+        return _TARGET_RELEASE_SHA if cwd == _TARGET_CWD else _OBSERVER_RELEASE_SHA
+
+    monkeypatch.setattr(
+        tp, "default_probes",
+        lambda platform: tp.TargetProbes(
+            platform=platform,
+            service_state=lambda unit: "active",
+            service_pids=lambda unit: [4242],
+            process_started_epoch=lambda pid: 1_750_000_000,
+            process_cwd=lambda pid: _TARGET_CWD,
+            release_receipt=lambda cwd: {
+                "manifestDigest": _TARGET_MANIFEST_DIGEST,
+                "sourceCommit": commit_for(cwd),
+            },
+            git_head=commit_for,
+            now_iso=lambda: "2026-08-26T00:00:00Z",
+        ),
+    )
+    path = mod.outbox_event(
+        "probe summary",
+        "FAIL auth_bond probe-line: physical_intervention_required",
+        severity="critical",
+        source="daily-health",
+    )
+    event = json.loads(Path(path).read_text())
+
+    assert event["instance"] == "probe-line"
+    # Precondition: the two releases really differ once redaction has run.
+    assert event["observerProvenance"]["release"]["sourceCommit"] == _OBSERVER_RELEASE_SHA
+    assert event["targetProvenance"]["release"]["sourceCommit"] == _TARGET_RELEASE_SHA
+
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "diverged"
+    assert divergence["divergentParty"] == "target"
+
+
+def test_health_self_event_has_no_divergence_verdict(tmp_path, monkeypatch):
+    """A producer-self event carries no target block, so there is nothing to
+    diverge from and no verdict to attach -- rather than a vacuous one."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_health_2358_self_divergence", _HEALTH)
+    path = mod.outbox_event(
+        "probe summary",
+        "FAIL outbox: queue write latency",
+        severity="warning",
+        source="daily-health",
+    )
+    event = json.loads(Path(path).read_text())
+
+    assert event["instance"] == "bot-errors-health"
+    assert "targetProvenance" not in event
+    assert "releaseDivergence" not in event
+
+
+def _raise_classifier_defect(observer, target):
+    raise RuntimeError("classifier defect")
+
+
+def _break_the_classifier(monkeypatch, producer_module):
+    """Break every binding a producer could reach the classifier through.
+
+    The producer imports its wrapper by name, and the wrapper resolves the
+    classifier through module globals, so patching the library binding is what
+    exercises the wrapper. The producer-local binding is patched too, with
+    raising=False, so this test cannot pass merely because a producer stopped
+    calling the classifier under that name.
+    """
+    tp = sys.modules["lib.target_provenance"]
+    monkeypatch.setattr(tp, "classify_release_divergence", _raise_classifier_defect)
+    monkeypatch.setattr(
+        producer_module, "classify_release_divergence", _raise_classifier_defect, raising=False
+    )
+
+
+def test_runner_event_survives_a_classifier_defect(tmp_path, monkeypatch):
+    """build_failure_event is called outside the alert-preserving try, so a
+    raise in the classifier would lose the alert entirely rather than degrade
+    it. The verdict must fail closed instead."""
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_runner_2358_defect", _RUNNER)
+    _break_the_classifier(monkeypatch, mod)
+
+    event = mod.build_failure_event(_runner_args("probe-instance"), ["true"], 1, 5, "", "boom", "nonzero_exit")
+    written = mod.write_event(event)
+
+    assert Path(written).is_file()
+    assert event["targetProvenance"]["role"] == "target"
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "not_comparable"
+    assert divergence["notes"] == ["classifier_error"]
+
+
+def test_health_outbox_event_survives_a_classifier_defect(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+    mod = _load("bot_errors_health_2358_defect", _HEALTH)
+    _break_the_classifier(monkeypatch, mod)
+
+    path = mod.outbox_event(
+        "probe summary",
+        "FAIL auth_bond probe-line: physical_intervention_required",
+        severity="critical",
+        source="daily-health",
+    )
+    event = json.loads(Path(path).read_text())
+
+    assert event["instance"] == "probe-line"
+    divergence = event["releaseDivergence"]
+    assert divergence["classification"] == "not_comparable"
+    assert divergence["notes"] == ["classifier_error"]
+
+
+def _diverging_probes(tp):
+    def commit_for(cwd):
+        return _TARGET_RELEASE_SHA if cwd == _TARGET_CWD else _OBSERVER_RELEASE_SHA
+
+    return lambda platform: tp.TargetProbes(
+        platform=platform,
+        service_state=lambda unit: "active",
+        service_pids=lambda unit: [4242],
+        process_started_epoch=lambda pid: 1_750_000_000,
+        process_cwd=lambda pid: _TARGET_CWD,
+        release_receipt=lambda cwd: {
+            "manifestDigest": _TARGET_MANIFEST_DIGEST,
+            "sourceCommit": commit_for(cwd),
+        },
+        git_head=commit_for,
+        now_iso=lambda: "2026-08-26T00:00:00Z",
+    )
+
+
+def _collapse_release_commits(value):
+    """Stand-in for a future redaction rule that rewrites commit-shaped text."""
+    if isinstance(value, dict):
+        return {k: _collapse_release_commits(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_collapse_release_commits(v) for v in value]
+    if isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value):
+        return _COLLAPSED_RELEASE_SHA
+    return value
+
+
+def _install_collapsing_redactor(monkeypatch, module):
+    original = module.redact_json_value
+    monkeypatch.setattr(
+        module, "redact_json_value", lambda value: _collapse_release_commits(original(value))
+    )
+
+
+def test_both_producers_classify_the_same_inputs_under_a_redaction_rule_change(tmp_path, monkeypatch):
+    """The two producers must classify the same thing.
+
+    One site redacted its blocks before classifying and the other did not, so a
+    redaction rule that rewrote commit-shaped text would move one verdict and
+    not the other. Today every rule is the identity on a hex digest, which is
+    why the asymmetry was invisible. This installs a rule that is not, and
+    requires the two verdicts to stay equal.
+    """
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "outbox"))
+
+    runner = _load("bot_errors_runner_2358_redaction", _RUNNER)
+    tp = sys.modules["lib.target_provenance"]
+    monkeypatch.setattr(tp, "default_probes", _diverging_probes(tp))
+    _install_collapsing_redactor(monkeypatch, runner)
+    runner_event = runner.build_failure_event(
+        _runner_args("probe-instance"), ["true"], 1, 5, "", "boom", "nonzero_exit"
+    )
+
+    health = _load("bot_errors_health_2358_redaction", _HEALTH)
+    monkeypatch.setattr(tp, "default_probes", _diverging_probes(tp))
+    _install_collapsing_redactor(monkeypatch, health)
+    path = health.outbox_event(
+        "probe summary",
+        "FAIL auth_bond probe-line: physical_intervention_required",
+        severity="critical",
+        source="daily-health",
+    )
+    health_event = json.loads(Path(path).read_text())
+
+    # Positive control: the rule really fired on the health envelope, so a
+    # verdict computed from those blocks would have read agreement.
+    assert health_event["observerProvenance"]["release"]["sourceCommit"] == _COLLAPSED_RELEASE_SHA
+    assert health_event["targetProvenance"]["release"]["sourceCommit"] == _COLLAPSED_RELEASE_SHA
+
+    assert runner_event["releaseDivergence"] == health_event["releaseDivergence"]
+    assert health_event["releaseDivergence"]["classification"] == "diverged"
+    assert health_event["releaseDivergence"]["divergentParty"] == "target"
 
 
 def test_new_blocks_are_content_free(tmp_path, monkeypatch):

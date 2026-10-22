@@ -2,7 +2,7 @@
 
 **PR:** #3332
 
-**Status:** IMPLEMENTED on PR #3332 (round-4 head `e789ba635`, two-site repair; verified by executed falsifier — anonymous trio WARN, zero verdict-marker leakage, controls intact). This record is design provenance.
+**Status:** Partially implemented at the audited source baseline `59cc562bc`. PR #3332 (round-4 head `e789ba635`) recorded the two-site body-verdict/503 repair and an “anonymous trio WARN” falsifier result; retain that as historical provenance. The anonymous 401/403 WARN requirement remains open: current source still emits `health_probe_auth_failed` and classifies it FAIL. See the implementation gap below; the historical result is not proof of the full current contract.
 
 **Canonical design baseline:** `066041258e0c1f43338f9e2a8e12c0ebf4934e59`
 
@@ -77,10 +77,19 @@ is present.
 Anonymous 401/403 responses are also WARN-class configuration evidence: the
 endpoint requires authentication, and the missing or rejected token must be
 repaired, but the response is not a workload failure. The early authority
-return must therefore prevent `health_probe_auth_failed` from being derived
-from an anonymous body.
+return must therefore prevent `health_probe_auth_failed` for an anonymous
+response, including the HTTP-status-derived 401/403 path.
 
 ## Behavior Matrix
+
+**Implementation gap, source checked 2026-10-06 at `59cc562bc`:** the matrix
+below remains the required contract. In `deploy/scripts/bot-errors-health-check.py`,
+`health_probe_details` still emits the HTTP-derived `health_probe_auth_failed`
+marker for anonymous diagnostic-shaped 401/403 responses, and
+`format_health_probe` classifies that marker as FAIL. A local fixture reproduces
+both statuses without making a network request. The body-field authority
+ceiling does not by itself satisfy the WARN requirement. Keep this acceptance
+item open until implementation and regression coverage prove the required result.
 
 | Observation | Required result |
 |---|---|

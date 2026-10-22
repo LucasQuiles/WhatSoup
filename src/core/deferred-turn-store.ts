@@ -17,9 +17,9 @@
  *
  * Invariants:
  * - one obligation per (scope, inbound_seq); enqueue is idempotent;
- * - strict head-of-line FIFO: only the LOWEST open inbound_seq per scope is
- *   claimable — an exhausted or held head blocks the scope rather than
- *   permitting out-of-order replay;
+ * - strict head-of-line FIFO: only the LOWEST open inbound_seq per conversation
+ *   in per_chat mode (otherwise per scope) is claimable — an exhausted or held
+ *   head blocks its queue rather than permitting out-of-order replay;
  * - `dispatched_commit` is the requirement-4 point of no return: automatic
  *   input replay (requeue) is permanently refused after it;
  * - bounded envelope: oversize replay text and replay-unsafe sources are
@@ -28,6 +28,7 @@
  */
 import type { Database } from './database.ts';
 import { TURN_RECOVERY_MAX_TEXT_BYTES } from './turn-recovery-contract.ts';
+import { TURN_RECOVERY_MAX_ID_BYTES, validateBoundedRequired } from './turn-recovery-store.ts';
 
 export const DEFERRED_TURN_MAX_ATTEMPTS = 5;
 
@@ -205,7 +206,7 @@ export class DeferredTurnStore {
         WHERE scope = ? AND inbound_seq = ?
       `),
       // Strict head-of-line: claim ONLY the row that is the minimum open
-      // inbound_seq for the scope AND is pending with attempts left. If the
+      // inbound_seq for the selected queue AND is pending with attempts left. If the
       // head is claimed/committed/exhausted, no row matches — never skip.
       claimHead: prepare(`
         UPDATE deferred_turn_obligations
@@ -219,6 +220,7 @@ export class DeferredTurnStore {
         WHERE id = (
           SELECT id FROM deferred_turn_obligations
           WHERE scope = ?
+            AND (scope <> 'per_chat' OR conversation_key = ?)
             AND ${DEFERRED_TURN_NON_TERMINAL_STATUS_SQL}
           ORDER BY inbound_seq ASC
           LIMIT 1
@@ -324,8 +326,15 @@ export class DeferredTurnStore {
 
   claimNextEligible(
     scope: string,
-    opts: { claimToken: string; ttlSeconds: number },
+    opts: { conversationKey?: string; claimToken: string; ttlSeconds: number },
   ): DeferredTurnObligation | null {
+    if (scope === 'per_chat') {
+      validateBoundedRequired(
+        opts.conversationKey ?? '',
+        'Deferred turn conversation key',
+        TURN_RECOVERY_MAX_ID_BYTES,
+      );
+    }
     if (!CLAIM_TOKEN_RE.test(opts.claimToken)) {
       throw new Error('Deferred turn claim token has an invalid shape');
     }
@@ -336,6 +345,7 @@ export class DeferredTurnStore {
       opts.claimToken,
       `${opts.ttlSeconds} seconds`,
       scope,
+      opts.conversationKey ?? null,
     ) as ObligationRow | undefined;
     return row ? toObligation(row) : null;
   }

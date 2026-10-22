@@ -1,5 +1,7 @@
 # Scheduled Messages & Groups Management — Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Treat the task code and line anchors below as the original design record. The current database uses `node:sqlite` `DatabaseSync`; `src/core/cron.ts` owns timezone/DST handling and day-of-month/day-of-week matching, and `src/core/scheduler.ts` owns link-state gating and recovery. Do not restore the old cron or scheduler snippets over those implementations. Current tool contracts are in `docs/tools.md`; original recurrence, retry, group-management and UI acceptance requirements remain preserved.
+
 **Status:** completed - scheduled-message and WhatsApp group management surfaces shipped; current API/tool docs are canonical.
 **Superseded by:** `docs/tools.md`, `docs/public-surface.md`, `docs/console-guide.md`, and the live source files named below.
 

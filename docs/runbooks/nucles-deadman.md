@@ -127,8 +127,10 @@ declaring a failure.
 
 The deadman's own LaunchAgent on mini9 is itself watched by mini9's existing
 BOT-watchdog infrastructure (the watchdog does not currently monitor the
-deadman, but adding it to the ensure_loaded list is straightforward — add the
-label and plist path to the watchdog's ensure_loaded calls).
+deadman). The watchdog bootstraps an unloaded job only from `restart_label`,
+after a restart-worthy health observation, so adding the deadman means adding a
+check for it whose failure calls `restart_label` with its label; the plist is
+expected at `~/Library/LaunchAgents/<label>.plist`.
 
 ---
 

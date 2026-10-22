@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 
 import { cleanGitEnv } from '../../../src/lib/git-env.ts';
+import { SIGNAL } from '../../../src/lib/signals.ts';
+import { readExactBlobsWithinAggregateBudget } from '../ci-control/git-blob-input.ts';
 import type { ModuleSource } from './module-graph.ts';
 
 export type SemanticScope = 'branch' | 'tree';
@@ -44,6 +46,7 @@ function git(cwd: string, args: string[]): string {
     env: cleanGitEnv(),
     maxBuffer: GIT_MAX_BUFFER,
     timeout: 30_000,
+    killSignal: SIGNAL.KILL,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
@@ -110,6 +113,21 @@ function parseChangedPaths(output: string): ChangedPath[] {
       `${right.path}\0${right.status}\0${right.oldPath ?? ''}`,
     ),
   );
+}
+
+interface SourceEntry {
+  type: string;
+  oid: string;
+  path: string;
+}
+
+// One `ls-tree -r -z` record: `<mode> <type> <oid>\t<path>`.
+function parseSourceEntry(record: string): SourceEntry {
+  const tab = record.indexOf('\t');
+  const match = tab < 0 ? null : /^[0-7]{6} (\S+) ([0-9a-f]{40}|[0-9a-f]{64})$/.exec(record.slice(0, tab));
+  const [, type, oid] = match ?? [];
+  if (!type || !oid) throw new Error(`unparseable tree entry: ${record.slice(0, 120)}`);
+  return { type, oid, path: normalizeRepoPath(record.slice(tab + 1)) };
 }
 
 export function readCandidateTree(input: {
@@ -188,38 +206,57 @@ export function readCandidateTree(input: {
     }
   }
 
-  let sourcePaths: string[] = [];
+  let sourceEntries: SourceEntry[] = [];
   try {
-    sourcePaths = git(input.cwd, [
+    sourceEntries = git(input.cwd, [
       'ls-tree',
       '-r',
-      '--name-only',
       '-z',
       result.headOid,
       '--',
       'src',
     ])
       .split('\0')
-      .filter((path) => /\.tsx?$/.test(path) && !path.endsWith('.d.ts'))
-      .map(normalizeRepoPath)
-      .sort();
+      .filter((record) => record !== '')
+      .map(parseSourceEntry)
+      .filter((entry) => /\.tsx?$/.test(entry.path) && !entry.path.endsWith('.d.ts'))
+      .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   } catch (error) {
     limitations.push(`head source tree could not be listed: ${boundedError(error)}`);
   }
+  const sourcePaths = sourceEntries.map((entry) => entry.path);
 
   if (sourcePaths.length === 0) {
     limitations.push(`no TypeScript source files were found at head ${result.headOid}`);
   }
 
-  for (const sourcePath of sourcePaths) {
-    try {
-      result.sources.push({
-        path: sourcePath,
-        text: git(input.cwd, ['show', `${result.headOid}:${sourcePath}`]),
-      });
-    } catch (error) {
-      limitations.push(`head blob ${sourcePath} could not be read: ${boundedError(error)}`);
+  // A gitlink names a commit, which `git show` printed as text; it has no blob.
+  // Each non-blob entry is refused per path before the read, whatever its outcome.
+  for (const entry of sourceEntries) {
+    if (entry.type !== 'blob') {
+      limitations.push(`head blob ${entry.path} could not be read: object is a ${entry.type}, not a blob`);
     }
+  }
+
+  // The exact blob reader the ci-control guards use reads the whole tree in one
+  // check batch and one content batch, instead of one `git show` per file. It
+  // returns every requested blob or throws, so a failure is one limitation and
+  // leaves the map empty.
+  const blobTexts = new Map<string, string>();
+  const blobOids = sourceEntries.filter((entry) => entry.type === 'blob').map((entry) => entry.oid);
+  if (blobOids.length > 0) {
+    try {
+      for (const blob of readExactBlobsWithinAggregateBudget(input.cwd, blobOids, GIT_MAX_BUFFER)) {
+        blobTexts.set(blob.oid, Buffer.from(blob.bytes).toString('utf8'));
+      }
+    } catch (error) {
+      limitations.push(`head blobs could not be read: ${boundedError(error)}`);
+    }
+  }
+
+  for (const entry of sourceEntries) {
+    const text = entry.type === 'blob' ? blobTexts.get(entry.oid) : undefined;
+    if (text !== undefined) result.sources.push({ path: entry.path, text });
   }
 
   if (result.sources.length !== sourcePaths.length) {

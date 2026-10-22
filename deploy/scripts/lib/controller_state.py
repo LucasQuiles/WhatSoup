@@ -338,6 +338,13 @@ def _make_envelope(
     return {**_deep_copy(payload), "_controllerState": metadata}
 
 
+def _envelope_payload_digest(envelope: Mapping[str, Any]) -> str:
+    """Digest of the payload members an envelope actually publishes."""
+    return _digest(
+        {key: value for key, value in envelope.items() if key != "_controllerState"}
+    )
+
+
 def _signed_sidecar(value: Mapping[str, Any]) -> dict[str, Any]:
     result = _deep_copy(dict(value))
     result.pop("integritySha256", None)
@@ -625,6 +632,7 @@ class StateWriteCapability:
         "_marker_highwater_integrity",
         "_authority_namespace",
         "_kind",
+        "_payload_digest",
         "_active",
     )
 
@@ -641,6 +649,7 @@ class StateWriteCapability:
         marker_highwater_integrity: str | None,
         authority_namespace: tuple[tuple[str, bytes], ...],
         kind: str,
+        payload_digest: str | None = None,
     ) -> None:
         if token is not session._capability_token:
             raise TypeError("StateWriteCapability has no public constructor")
@@ -655,6 +664,10 @@ class StateWriteCapability:
         self._marker_highwater_integrity = marker_highwater_integrity
         self._authority_namespace = authority_namespace
         self._kind = kind
+        # Digest of the payload the primary publishes at this capability's
+        # generation, or None when it is not known exactly. Only
+        # ``unchanged_commit`` reads it; None always means "write".
+        self._payload_digest = payload_digest
         self._active = True
 
 
@@ -890,6 +903,7 @@ class ControllerStateSession:
         primary_integrity: str | None,
         marker_highwater_integrity: str | None,
         kind: str,
+        payload_digest: str | None = None,
     ) -> StateWriteCapability:
         authority_namespace = self._authority_namespace_snapshot()
         self._invalidate_capability()
@@ -905,6 +919,7 @@ class ControllerStateSession:
             marker_highwater_integrity,
             authority_namespace,
             kind,
+            payload_digest,
         )
         self._active_capability = capability
         return capability
@@ -1330,6 +1345,7 @@ class ControllerStateSession:
         marker_highwater_integrity: str | None,
         kind: str,
         receipt: dict[str, Any] | None = None,
+        payload_digest: str | None = None,
     ) -> StateLoadResult:
         capability = self._new_capability(
             store_id=store_id,
@@ -1339,6 +1355,7 @@ class ControllerStateSession:
             primary_integrity=primary_integrity,
             marker_highwater_integrity=marker_highwater_integrity,
             kind=kind,
+            payload_digest=payload_digest,
         )
         diagnostic = self._diagnostic(
             mode,
@@ -1461,6 +1478,7 @@ class ControllerStateSession:
                 "highWaterIntegritySha256"
             ],
             kind="normal",
+            payload_digest=_envelope_payload_digest(target),
         )
 
     def _receipt_evidence_leaf(self, receipt: Mapping[str, Any]) -> str:
@@ -2402,6 +2420,7 @@ class ControllerStateSession:
             ],
             kind="normal",
             receipt=receipt,
+            payload_digest=_envelope_payload_digest(primary),
         )
 
     def reload(self) -> StateLoadResult:
@@ -2471,6 +2490,59 @@ class ControllerStateSession:
         ):
             raise self._required("generation_invalid")
         return marker, primary
+
+    def unchanged_commit(
+        self,
+        payload: Mapping[str, Any],
+        capability: StateWriteCapability,
+    ) -> StateCommitResult | None:
+        """Return a no-I/O commit result when ``save`` would publish nothing new.
+
+        A normal ``save`` of a payload that is byte-identical to the one the
+        primary already publishes still writes the journal four times (each
+        copy carrying both full envelopes), ``.previous``, the primary and the
+        marker, all fsynced, only to advance the generation over identical
+        content. When the validated *payload* digests to exactly the payload
+        bound to *capability*, this returns a ``valid`` result at the CURRENT
+        generation carrying the same, still-active capability, and touches no
+        file: no journal, no rotation, no marker re-sign, no generation
+        advance. Nothing on disk changes, so every crash-recovery state stays
+        what the last real commit left.
+
+        Returns ``None`` -- the caller must ``save`` -- whenever the payload
+        differs, the capability is not this session's live ``normal``
+        capability, its committed payload is not known exactly (bootstrap,
+        recovered-for-reconciliation), or the payload does not validate (so
+        ``save`` raises the same error it always did).
+
+        Detection of an out-of-band change to the files is deferred, not lost:
+        the next real ``save`` revalidates the capability against disk, and
+        the next ``load`` revalidates everything.
+        """
+        self._ensure_open()
+        if (
+            not isinstance(capability, StateWriteCapability)
+            or capability is not self._active_capability
+            or not capability._active
+            or capability._session is not self
+            or capability._component != self._component
+            or capability._kind != "normal"
+            or capability._payload_digest is None
+            or capability._generation is None
+        ):
+            return None
+        try:
+            validated = _validate_payload_copy(payload, self._validate_payload)
+        except (TypeError, ValueError, RecursionError):
+            return None
+        if _digest(validated) != capability._payload_digest:
+            return None
+        return StateCommitResult(
+            "valid",
+            capability._generation,
+            capability,
+            self._diagnostic("valid", current=capability._generation, count=0),
+        )
 
     def _commit_transaction(
         self, journal: dict[str, Any], marker: dict[str, Any]
@@ -2600,6 +2672,7 @@ class ControllerStateSession:
                 "highWaterIntegritySha256"
             ],
             kind="normal",
+            payload_digest=_envelope_payload_digest(target),
         )
         diagnostic = self._diagnostic(
             "valid", current=target_generation, count=0
@@ -2798,6 +2871,7 @@ class ControllerStateSession:
                 "highWaterIntegritySha256"
             ],
             kind="normal",
+            payload_digest=_envelope_payload_digest(journal["targetEnvelope"]),
         )
         diagnostic = self._diagnostic(
             "reconciled",

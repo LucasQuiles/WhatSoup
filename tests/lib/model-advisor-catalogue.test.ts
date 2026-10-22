@@ -8,6 +8,8 @@
  *   - fetchAnthropicModelIdsWithStatus: anthropic-ONLY live listing, classified.
  *     Prefers the OAuth credential (no separate key needed on q); falls back to
  *     an explicit ANTHROPIC_API_KEY (x-api-key).
+ *   - fetchAnthropicApiModelIdsWithStatus: the managed API adapter's distinct
+ *     x-api-key identity; it never borrows a CLI OAuth catalogue.
  *
  * fetch + ANTHROPIC_API_KEY are stubbed (same pattern as model-advisor.test.ts);
  * the OAuth credential is injected (no real creds file read in unit tests).
@@ -16,6 +18,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   classifyModelFetchFailure,
   resolveClaudeOAuthCred,
+  fetchAnthropicApiModelIdsWithStatus,
   fetchAnthropicModelIdsWithStatus,
   type ClaudeOAuthCredResult,
 } from '../../src/lib/model-advisor.ts';
@@ -197,5 +200,57 @@ describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth c
       status: 'failed',
       category: 'timeout',
     });
+  });
+});
+
+describe('fetchAnthropicApiModelIdsWithStatus — managed API credential path', () => {
+  it('uses the managed API key and never a CLI OAuth bearer', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [{ id: 'vendor-model-1' }] }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    expect(await fetchAnthropicApiModelIdsWithStatus({ resolveKey: () => 'managed-key-fixture' }))
+      .toStrictEqual({ status: 'ok', ids: ['vendor-model-1'] });
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(init.headers.Authorization).toBeUndefined();
+    expect(init.headers['x-api-key']).toBe('managed-key-fixture');
+  });
+
+  it('returns no-key without issuing a request when the managed key is absent', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    expect(await fetchAnthropicApiModelIdsWithStatus({ resolveKey: () => '' }))
+      .toStrictEqual({ status: 'no-key' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // The adapter catalogue is resolved while a request waits, so it makes one
+  // attempt. Only the background currency monitor retries transient failures;
+  // its 2 s + 8 s backoff must never reach this path.
+  it('makes a single attempt on a transient 503 and never waits out a retry backoff', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+    vi.stubGlobal('fetch', fetchSpy);
+    const realSetTimeout = globalThis.setTimeout;
+    const backoffDelays: number[] = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      cb: (...a: unknown[]) => void,
+      ms?: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms === 2_000 || ms === 8_000) {
+        backoffDelays.push(ms);
+        cb();
+        return { unref: () => {} } as unknown as NodeJS.Timeout;
+      }
+      return realSetTimeout(cb, ms, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
+
+    expect(await fetchAnthropicApiModelIdsWithStatus({ resolveKey: () => 'managed-key-fixture' }))
+      .toStrictEqual({ status: 'failed', category: 'lookup-failed' });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(backoffDelays).toEqual([]);
   });
 });

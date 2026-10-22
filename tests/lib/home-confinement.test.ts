@@ -16,6 +16,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 import {
+  admitHomeConfinedPath,
+  ensureHomeConfinedDirectory,
   nothingExistsAt,
   realpathLongestAbsentTolerantPrefix,
   pathIsInsideRoot,
@@ -37,6 +39,22 @@ describe('home-confinement primitive', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('provisions a planned default workspace before final admission', () => {
+    const workspace = path.join(home, '.local', 'share', 'whatsoup', 'workspace');
+    expect(() => admitHomeConfinedPath(workspace, home)).toThrow();
+    const accepted = ensureHomeConfinedDirectory(workspace, home);
+    expect(accepted).toBe(workspace);
+    expect(fs.statSync(accepted).isDirectory()).toBe(true);
+    expect(admitHomeConfinedPath(workspace, home)).toBe(accepted);
+  });
+
+  it('refuses provisioning through an escaping or dangling link without outside writes', () => {
+    expect(() => ensureHomeConfinedDirectory(path.join(home, 'jump', 'new'), home)).toThrow();
+    fs.symlinkSync(path.join(outside, 'missing'), path.join(home, 'dangling'));
+    expect(() => ensureHomeConfinedDirectory(path.join(home, 'dangling', 'new'), home)).toThrow();
+    expect(fs.readdirSync(outside)).toEqual([]);
   });
 
   it('the two realpath bindings genuinely disagree on `..` after a symlink', () => {

@@ -192,9 +192,11 @@ describe('send_message resolved-chatJid echo + dryRun (issue 3150 remainder)', (
       { tier: 'global', conversationKey: PIN_PHONE },
     );
 
+    // Issue 3457: denied by the registry's post-resolution guard point, in
+    // the same plain text as a pre-handler denial.
     expect(result.isError).toBe(true);
     expect(calls).toHaveLength(0);
-    const body = JSON.parse(result.content[0].text);
-    expect(body.error).toMatch(/does not match session conversation/);
+    expect(result.content[0].text).toMatch(/does not match session conversation/);
+    expect(() => JSON.parse(result.content[0].text)).toThrow();
   });
 });

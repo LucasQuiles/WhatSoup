@@ -24,6 +24,9 @@ export type StartupNotificationEvent =
       text: string;
     };
 
+/** A per-chat notice raised before the transport connected (#3570). */
+export type StartupChatNotice = Extract<StartupNotificationEvent, { kind: 'expired_session_notice' }>;
+
 export interface StartupNotificationIntentionalRestartReceipt {
   chatJid: string;
   text: string;
@@ -76,6 +79,8 @@ export interface StartupNotificationConnectedInput {
   generic: StartupNotificationGenericPolicy | null;
   event: StartupNotificationEvent | null;
   intentionalRestartReceipt: StartupNotificationIntentionalRestartReceipt | null;
+  /** Per-chat notices, each delivered to its own chat independently of `event`. */
+  chatNotices?: readonly StartupChatNotice[];
 }
 
 export interface StartupNotificationControllerHealth {
@@ -149,6 +154,15 @@ export class StartupNotificationController {
     if (this.stopped) return;
 
     const { event, intentionalRestartReceipt } = input;
+    const chatNotices = input.chatNotices ?? [];
+    if (chatNotices.length > 0) {
+      // #3570: one notice per chat whose context could not be restored. They
+      // never settle the generic boot batch and never displace `event`.
+      if (!event && !intentionalRestartReceipt) this.policy = 'expired_session_notice';
+      this.schedulePrompt(async () => {
+        for (const notice of chatNotices) await this.submitEvent(notice);
+      });
+    }
     const promptSettlesBatch = intentionalRestartReceipt !== null || event?.kind === 'resume';
     if (event || intentionalRestartReceipt) {
       this.policy = event?.kind ?? 'intentional_restart';

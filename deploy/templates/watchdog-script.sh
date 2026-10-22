@@ -6,10 +6,17 @@
 #   USERNAME      — macOS user account (the bot operator account)
 #   BOT_HEALTH    — health endpoint URL for THIS bot (check port map in
 #                   docs/runbooks/macos-host-setup.md before assuming 9099)
-#   FLEET_HEALTH  — fleet console URL for THIS host (standard 9099; except
+#   FLEET_HEALTH  — fleet liveness URL (/livez) for THIS host (standard 9099; except
 #                   some hosts run the fleet API on a non-default port — see the host port map)
 #   NODE_BIN      — absolute path to pinned node binary, e.g.
 #                   __HOME__/.nvm/versions/node/v24.15.0/bin/node
+#   __BOT_ERRORS_EMIT__ — absolute path of the BOT ERRORS emitter. Render with
+#                   deploy/scripts/render-watchdog.py, which bakes the emitter
+#                   of the release tree the template is rendered from.
+#   __HEALTH_READER_PATH__ / __HEALTH_READER_SHA256__ — the loopback health
+#                   reader (deploy/scripts/lib/health_reader.py) of that same
+#                   release tree and its runtime-manifest digest, baked by
+#                   render-watchdog.py. Every read re-verifies the digest.
 #
 # Install to: ~/.local/bin/BOT_NAME-watchdog
 # chmod +x that file after writing.
@@ -35,8 +42,35 @@ LOCK="$LOG_DIR/BOT_NAME-watchdog.lock"
 # "dead until proven recovered", not "dead as of the last cycle". External
 # alert paths may stat this file; no in-repo consumer exists.
 CRED_MARKER="$LOG_DIR/BOT_NAME-credential-dead.marker"
+# Present while a CREDENTIAL-DEAD page is outstanding. Written only AFTER the
+# emitter accepted the page, so a failed send retries next cycle and a host
+# that was already dead (marker, no stamp) when paging shipped still pages.
+# Its content counts consecutive failed recovery clears (empty = 0); it is
+# removed after the clear is accepted, or abandoned after
+# CRED_CLEAR_MAX_ATTEMPTS failures so an unreachable outbox cannot keep the
+# watchdog in ERROR forever.
+CRED_PAGED="$LOG_DIR/BOT_NAME-credential-dead.paged"
+# Present once this dead episode has logged the "no emitter" detail line, so
+# it is written once per episode, not every two minutes (the ERROR state and
+# nonzero exit still repeat every cycle). Removed on recovery and after a page
+# lands.
+CRED_UNPAGED="$LOG_DIR/BOT_NAME-credential-dead.unpaged"
+# Present while a recovery has happened but its page stamp is still on disk (the
+# clear is being retried, or the stamp could not be removed). A dead cycle that
+# finds both files knows the stamp belongs to the previous episode and pages
+# again. Written by recovery, removed with the stamp.
+CRED_RECOVERED="$LOG_DIR/BOT_NAME-credential-dead.recovered"
+CRED_CLEAR_MAX_ATTEMPTS=3
+# The shipped BOT ERRORS emitter writes to the host's durable outbox. Hosts run
+# from per-release trees, so the path is baked at render time by
+# render-watchdog.py (the emitter of the release this was rendered from) rather
+# than guessed from a checkout location at run time.
+BOT_ERRORS_EMIT="__BOT_ERRORS_EMIT__"
+CRED_ALERT_SOURCE="provider_credential_dead"
 WD_FINAL="ok"
 WD_EXIT=0
+typeset +x HEALTH_TOKEN
+HEALTH_TOKEN=""
 
 BOT_LABEL="com.whatsoup.BOT_NAME"
 FLEET_LABEL="com.whatsoup.whatsoup-fleet"
@@ -44,7 +78,37 @@ BOT_PLIST="$HOME_DIR/Library/LaunchAgents/$BOT_LABEL.plist"
 FLEET_PLIST="$HOME_DIR/Library/LaunchAgents/$FLEET_LABEL.plist"
 
 BOT_HEALTH="http://127.0.0.1:BOT_PORT/health"
-FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/"
+FLEET_HEALTH="http://127.0.0.1:FLEET_PORT/livez"
+HEALTH_READER_PATH="__HEALTH_READER_PATH__"
+HEALTH_READER_SHA256="__HEALTH_READER_SHA256__"
+# The reader's per-socket timeout must expire well before the wall deadline,
+# so a target that accepts TCP but never answers yields a typed transport
+# failure (restart) instead of a killed reader. The deadline is the backstop
+# for a read that still has not finished (e.g. a trickling response).
+HEALTH_READ_TIMEOUT_SECONDS=5
+HEALTH_READ_DEADLINE_SECONDS=8
+# Confirm window for SILENT reads. A silent read got its connection accepted
+# and then no answer: an OS-level failure while waiting for or reading the
+# response (a timeout, a reset, or EOF before the status line), or a read
+# killed at the deadline with no output. A blocked event loop looks exactly
+# like this and recovers on its own: every recorded restart of a live target
+# followed a silence of 20.5 to 83.2 s. So when a silent read would restart
+# its target and every restart gate is open, restart_label first re-reads
+# that target every CONFIRM_STEP_SECONDS until CONFIRM_WINDOW_SECONDS have
+# passed (confirm_silent_read). A trusted answer cancels the restart
+# (RESTART-AVOIDED). Otherwise, at the window's end, a reader that no longer
+# verifies ends the run (as at its start), and a job identity that changed or
+# could not be read at either end defers the restart to the next run; only a
+# job as the silent read saw it is restarted, through every gate again.
+# Nothing is kept between runs. On a steady clock a confirm read is running
+# at the window's end or starts then, so the last one starts about 82 to 90 s
+# (the window less one 8 s read deadline, up to the window) after the window
+# opens. The silence had already lasted the silent read's own wait: 5 s for a
+# reader timeout, 8 s at the deadline, none for a reset or EOF. Each confirm
+# read of a silent target costs one reader timeout, so a 15 s step makes
+# about five reads.
+CONFIRM_WINDOW_SECONDS=90
+CONFIRM_STEP_SECONDS=15
 
 # Use the pinned node binary — never /usr/bin/env node (see macOS-host-setup runbook).
 NODE_BIN="__HOME__/.nvm/versions/node/v24.15.0/bin/node"
@@ -149,17 +213,22 @@ trap 'release_mutex "$LOCK"' EXIT
 # overwritten by a later, lower-priority one (the fleet check runs after the
 # bot check, and a credential verdict outranks a restart outcome). Restart
 # outcomes are severity-ordered — a failed kickstart beats a successful one
-# beats a suppression — so a mixed bot/fleet cycle reports the most actionable
-# outcome; per-job detail stays in the preceding log lines. Strict > means
-# identical states keep the first writer.
+# beats a suppression beats a restart avoided by a confirm read — so a mixed
+# bot/fleet cycle reports the most actionable outcome; per-job detail stays in
+# the preceding log lines. RESTART-AVOIDED still outranks ERROR so a run that
+# confirmed a silent target shows it; the ERROR keeps its exit status. Strict >
+# means identical states keep the first writer.
+# deploy/observation-plane/outcome-projections.json (watchdog_wd_rank) holds a
+# closed copy of these states; keep both in step.
 wd_rank() {
   case "$1" in
-    OUTBOUND-POISON) print 9 ;;
-    CREDENTIAL-DEAD) print 8 ;;
-    HEALTH-UNKNOWN) print 7 ;;
-    RESTART-FAILED) print 6 ;;
-    RESTARTED) print 5 ;;
-    RESTART-SUPPRESSED) print 4 ;;
+    OUTBOUND-POISON) print 10 ;;
+    CREDENTIAL-DEAD) print 9 ;;
+    HEALTH-UNKNOWN) print 8 ;;
+    RESTART-FAILED) print 7 ;;
+    RESTARTED) print 6 ;;
+    RESTART-SUPPRESSED) print 5 ;;
+    RESTART-AVOIDED) print 4 ;;
     ERROR) print 3 ;;
     CREDENTIAL-UNKNOWN) print 2 ;;
     *) print 1 ;;
@@ -181,9 +250,14 @@ health_unknown() {
 # for the state operation, and exit 2 means unsafe or otherwise unusable.
 # Existing owned 0644 markers remain valid for upgrade compatibility; newly
 # created markers are 0600. Symlinks and non-regular paths are never followed,
-# cleared, or treated as evidence of prior credential death.
+# cleared, or treated as evidence of prior credential death. The optional
+# second argument selects another state file under the same rules (the
+# CRED_PAGED / CRED_UNPAGED stamps); the default is CRED_MARKER. `bump`
+# increments the integer an EXISTING file holds (empty = 0), prints the new
+# value, exits 1 when the file is absent, and exits 3 when its content is not a
+# count (so the caller can stop retrying instead of failing forever).
 credential_marker() {
-  python3 - "$1" "$CRED_MARKER" 2>>"$LOG" <<'MARKER_PY'
+  python3 - "$1" "${2:-$CRED_MARKER}" 2>>"$LOG" <<'MARKER_PY'
 import os
 import stat
 import sys
@@ -242,6 +316,26 @@ try:
         if marker is not None:
             os.unlink(name, dir_fd=directory_fd)
         raise SystemExit(0)
+    if operation == "bump":
+        if marker is None:
+            raise SystemExit(1)
+        marker_fd = os.open(name, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+        opened = os.fstat(marker_fd)
+        if (opened.st_dev, opened.st_ino) != (marker.st_dev, marker.st_ino):
+            reject()
+        try:
+            raw = os.read(marker_fd, 64).decode("ascii").strip()
+            count = (int(raw) if raw else 0) + 1
+        except ValueError:
+            raise SystemExit(3)
+        # A negative stored count is corrupt too: it would defer the cap.
+        if count < 1:
+            raise SystemExit(3)
+        os.lseek(marker_fd, 0, os.SEEK_SET)
+        os.ftruncate(marker_fd, 0)
+        os.write(marker_fd, f"{count}\n".encode("ascii"))
+        print(count)
+        raise SystemExit(0)
     reject()
 except SystemExit:
     raise
@@ -281,10 +375,10 @@ run_with_timeout() {
   local cmd_pid exit_code killer_pid
   "$@" &
   cmd_pid=$!
-  (
-    sleep "$timeout_sec"
-    kill -9 "$cmd_pid" 2>/dev/null
-  ) < /dev/null > /dev/null 2>&1 &
+  # One timer process: cancelling a shell around external sleep would orphan
+  # the sleeper. Python is already required by every diagnostic read.
+  python3 -c 'import os, signal, sys, time; time.sleep(float(sys.argv[1])); os.kill(int(sys.argv[2]), signal.SIGKILL)' \
+    "$timeout_sec" "$cmd_pid" < /dev/null > /dev/null 2>&1 &
   killer_pid=$!
   wait "$cmd_pid" 2>/dev/null
   exit_code=$?
@@ -296,10 +390,44 @@ run_with_timeout() {
   return $exit_code
 }
 
-# Ensure a launchd job is loaded; bootstrap from its plist if not.
+# credential_page alert|clear — one BOT ERRORS event for a CREDENTIAL-DEAD
+# episode, written to the durable outbox by the shipped emitter. Both events
+# carry --instance and --source, so the clear keys to the same
+# machine|instance|source incident the alert opened. Returns 0 when the
+# emitter accepted it, 1 when it failed or timed out, 2 when this host has no
+# emitter at BOT_ERRORS_EMIT.
+credential_page() {
+  if [ ! -r "$BOT_ERRORS_EMIT" ]; then
+    return 2
+  fi
+  if [ "$1" = "alert" ]; then
+    run_with_timeout 30 python3 "$BOT_ERRORS_EMIT" \
+      --instance "BOT_NAME" \
+      --source "$CRED_ALERT_SOURCE" \
+      --severity critical \
+      --summary "BOT_NAME provider credential is dead; reauth required (restart suppressed)" \
+      --evidence "watchdog=BOT_NAME-watchdog marker=$CRED_MARKER log=$LOG" >> "$LOG" 2>&1 || return 1
+  else
+    run_with_timeout 30 python3 "$BOT_ERRORS_EMIT" --clear \
+      --instance "BOT_NAME" \
+      --source "$CRED_ALERT_SOURCE" \
+      --summary "BOT_NAME provider credential recovered" >> "$LOG" 2>&1 || return 1
+  fi
+  return 0
+}
+
+# Called only after restart-worthy evidence. Exit 2 means bootstrap succeeded,
+# so the caller must not immediately kickstart that newly started process.
+# A third argument "kickstart-only" (only a restart confirmed on a job loaded
+# at both ends of a confirm window passes it) never bootstraps: any failed
+# print here, not only "not found", gives exit 3, and the caller defers the
+# restart.
 ensure_loaded() {
-  local job_label="$1" plist="$2"
+  local job_label="$1" plist="$2" mode="${3:-}"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
+    if [ "$mode" = kickstart-only ]; then
+      return 3
+    fi
     log "$job_label not loaded; bootstrapping"
     if ! run_with_timeout 30 launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1; then
       log "ERROR: bootstrap failed for $job_label"
@@ -307,7 +435,9 @@ ensure_loaded() {
       WD_EXIT=1
       return 1
     fi
+    return 2
   fi
+  return 0
 }
 
 launchd_reports_permanent_stop() {
@@ -333,12 +463,52 @@ launchd_reports_permanent_stop() {
   '
 }
 
-# Restart a job with a 5-minute cooldown to avoid restart storms.
+# The job's launchd identity, compared across a confirm window: load state
+# plus pids, so it cannot tell a reload that ends with the same pid, or two
+# job generations that both show no pid. "loaded, pid" and every pid launchd
+# prints for the job ("none" when it is not running); "unloaded" only for
+# launchctl's "could not find service" status (exit 113, verified on macOS
+# 26; other macOS versions in the fleet are not verified, and a different
+# not-found code there only defers); "unreadable" for any other failure or a
+# timeout, which says nothing about the job, a missing domain's exit 112
+# included.
+job_identity() {
+  local job_label="$1" launchd_state print_rc
+  launchd_state="$(run_with_timeout 15 launchctl print "$domain/$job_label" 2>/dev/null)"
+  print_rc=$?
+  if [ "$print_rc" -eq 113 ]; then
+    print -r -- unloaded
+    return 0
+  fi
+  if [ "$print_rc" -ne 0 ]; then
+    print -r -- unreadable
+    return 0
+  fi
+  print -r -- "$launchd_state" | awk '
+    /^[[:space:]]*pid[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      pids = pids " " value
+    }
+    END {
+      if (pids == "") pids = " none"
+      print "loaded, pid" pids
+    }
+  '
+}
+
+# Restart a job with a 5-minute cooldown to avoid restart storms. A third
+# argument "silent" marks evidence from a read that connected but got no
+# answer: once every gate below has passed, such a restart is confirmed first
+# (confirm_silent_read) instead of acting at once. "kickstart-only" marks the
+# restart that follows a confirm window on a job loaded at both of its ends:
+# it may kickstart that job but never bootstrap one (see ensure_loaded).
 restart_label() {
-  local job_label="$1" reason="$2"
+  local job_label="$1" reason="$2" evidence="${3:-}"
   local stamp="$LOG_DIR/$job_label.last-restart"
   local rlock="$LOG_DIR/$job_label.restart.lock"
-  local now last
+  local now last load_rc action_rc identity current verify_resp verify_rc
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
     wd_note RESTART-SUPPRESSED
@@ -387,8 +557,79 @@ restart_label() {
     release_mutex "$rlock"
     return 0
   fi
-  log "restarting $job_label: $reason"
-  if run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1; then
+  # Every gate has passed: this is where a restart acts. A silent read first
+  # confirms. The lock is released for the window so no other watchdog can
+  # reclaim it as stale mid-window. A restart still due at the window's end
+  # acts only through a reader that still verifies: the run's start check
+  # again, and on failure the run ends there as it does at its start (exit 2,
+  # nothing else read or restarted; the last line is HEALTH-UNKNOWN unless the
+  # run already noted a higher-ranked state, as the ladder does anywhere else).
+  # It acts only on the job as the silent read saw it (job_identity, equal at
+  # both ends); an identity that changed, or that launchctl could not report
+  # at either end, leaves the job to the next run's own read
+  # (RESTART-SUPPRESSED). An identity unreadable at the silent read still runs
+  # the window, so a trusted answer can still cancel the restart. The restart
+  # then comes back through this function without the silent flag, so every
+  # gate above is evaluated again, in this order; bootstrap is possible only
+  # for a job unloaded at both ends, and a job loaded at both ends may only be
+  # kickstarted.
+  if [ "$evidence" = silent ]; then
+    identity="$(job_identity "$job_label")"
+    release_mutex "$rlock"
+    if confirm_silent_read "$job_label" "$reason"; then
+      return 0
+    fi
+    verify_resp="$(read_health_response 0 verify </dev/null 2>>"$LOG")"
+    verify_rc=$?
+    if [ "$verify_rc" -ne 0 ] || [ "$verify_resp" != VERIFIED ]; then
+      health_unknown "health reader binding unavailable or invalid"
+      log "$WD_FINAL"
+      exit "$WD_EXIT"
+    fi
+    if [ "$identity" = unreadable ]; then
+      log "$job_label restart deferred: job identity unreadable at the silent read: $reason"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+    current="$(job_identity "$job_label")"
+    if [ "$current" = unreadable ]; then
+      log "$job_label restart deferred: job identity unreadable at the window's end: $reason"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+    if [ "$current" != "$identity" ]; then
+      log "$job_label restart deferred: job changed during the confirm window (at the silent read: $identity; now: $current): $reason"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+    # Unloaded at both ends: bootstrap stays possible, as base would at the
+    # silent read. Loaded at both ends: kickstart only, so a job booted out
+    # after this check is not brought back by a bootstrap base never made.
+    if [ "$current" = unloaded ]; then
+      restart_label "$job_label" "$reason"
+    else
+      restart_label "$job_label" "$reason" kickstart-only
+    fi
+    return
+  fi
+  ensure_loaded "$job_label" "$HOME_DIR/Library/LaunchAgents/$job_label.plist" "$evidence"
+  load_rc=$?
+  if [ "$load_rc" -eq 3 ]; then
+    log "$job_label restart deferred: job not confirmed loaded after the window check: $reason"
+    wd_note RESTART-SUPPRESSED
+    release_mutex "$rlock"
+    return 0
+  elif [ "$load_rc" -eq 1 ]; then
+    release_mutex "$rlock"
+    return 1
+  elif [ "$load_rc" -eq 2 ]; then
+    action_rc=0
+  else
+    log "restarting $job_label: $reason"
+    run_with_timeout 30 launchctl kickstart -k "$domain/$job_label" >> "$LOG" 2>&1
+    action_rc=$?
+  fi
+  if [ "$action_rc" -eq 0 ]; then
     wd_note RESTARTED
     # Arm the cooldown only for a restart that actually happened; a failed
     # kickstart must retry next cycle, not sit suppressed for 5 minutes.
@@ -404,14 +645,115 @@ restart_label() {
   release_mutex "$rlock"
 }
 
-ensure_loaded "$BOT_LABEL" "$BOT_PLIST"
-ensure_loaded "$FLEET_LABEL" "$FLEET_PLIST"
+# One confirm read ($2 numbers it in the log) of a target whose silent read
+# would restart it, with the same reader, binding and token handling as the
+# main read. Exit 0 only for a trusted answer: the fleet console's HTTP status
+# below 400, or a bot body the decision block reads without a restart verdict
+# (exits 0, 3, 4, 5 and 7). Every other result, a restart verdict (1) and an
+# untrusted body (6) included, is exit 1. It changes no run state: no
+# wd_note, no exit status, no marker or paging; only log lines.
+confirm_read() {
+  local job_label="$1" number="$2" answer answer_rc answer_code answer_body token decision_rc
+  if [ "$job_label" = "$FLEET_LABEL" ]; then
+    answer="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
+    answer_rc=$?
+    answer_code="${answer##*$'\n'}"
+    if [ "$answer_rc" -ne 0 ] || [[ "$answer_code" != [1-5][0-9][0-9] ]]; then
+      log "$job_label confirm read $number: no HTTP answer (reader exit $answer_rc)"
+      return 1
+    fi
+    log "$job_label confirm read $number: HTTP $answer_code"
+    [ "$answer_code" -lt 400 ]
+    return
+  fi
+  if ! token="$(read_health_token 2>>"$LOG")"; then
+    token=""
+    log "$job_label confirm read $number: diagnostic health token unavailable"
+    return 1
+  fi
+  answer="$(print -rn -- "$token" | read_health_response BOT_PORT /health 2>>"$LOG")"
+  answer_rc=$?
+  token=""
+  answer_code="${answer##*$'\n'}"
+  answer_body="${answer%$'\n'*}"
+  if [ "$answer_rc" -ne 0 ] || [[ "$answer_code" != [1-5][0-9][0-9] ]]; then
+    log "$job_label confirm read $number: no HTTP answer (reader exit $answer_rc)"
+    return 1
+  fi
+  if [ -z "$answer_body" ] || [ "$(LC_ALL=C print -rn -- "$answer_body" | wc -c)" -gt 65536 ]; then
+    log "$job_label confirm read $number: empty or oversized diagnostic body (HTTP $answer_code)"
+    return 1
+  fi
+  bot_decision "$answer_body" "$answer_code"
+  decision_rc=$?
+  log "$job_label confirm read $number: HTTP $answer_code, decision exit $decision_rc"
+  case "$decision_rc" in
+    (0|3|4|5|7) return 0 ;;
+  esac
+  return 1
+}
+
+# Confirm a silent read's restart (see CONFIRM_WINDOW_SECONDS) once every
+# restart gate has passed. Re-reads the target every CONFIRM_STEP_SECONDS and
+# ends with the first read that finishes at or after the window's end, so on
+# a steady clock a read is running at that moment or starts then, and the
+# window lasts at most CONFIRM_WINDOW_SECONDS plus one 8 s read deadline. The
+# window is measured by the clock and the reads are capped at max_reads: a
+# forward clock step shortens the window, and a backward one lengthens it up
+# to that cap, every read after a full step: 6 x (15 s + 8 s), about 138 s.
+# A sleep that fails ends the window at once, with the restart still due.
+# Exit 0 when a confirm read got a trusted answer: the restart is avoided.
+# Exit 1 when the window ended without one: the restart is still due.
+# Around the window restart_label also runs launchctl print (15 s limit) for
+# the job's identity at the silent read and at the window's end and for the
+# second gate pass, and one binding check (8 s), so a restart comes at most
+# about 191 s later than an immediate restart, and about 90 to 100 s later
+# when nothing hangs. Those figures count the timed reads, the launchctl
+# queries and the binding check only: the per-read token and decision steps
+# (read_health_token, bot_decision) and ensure_loaded's launchctl print have
+# no deadline, as at base. Counting the bounded steps alone, a run with a bot
+# and a fleet window takes at most about 500 s, inside the invocation lock's
+# 600 s. Such a run can outlast the 120 s StartInterval: launchd never runs
+# two instances of one job, so the next run starts late. A watchdog killed
+# during a window performs no restart for that read; the next run decides
+# again from its own read.
+confirm_silent_read() {
+  local job_label="$1" reason="$2" deadline pause reads=0 max_reads sleep_rc
+  max_reads=$(( (CONFIRM_WINDOW_SECONDS + CONFIRM_STEP_SECONDS - 1) / CONFIRM_STEP_SECONDS ))
+  deadline=$(( $(date +%s) + CONFIRM_WINDOW_SECONDS ))
+  log "$job_label silent read; confirming before restarting (a read every ${CONFIRM_STEP_SECONDS}s for ${CONFIRM_WINDOW_SECONDS}s): $reason"
+  while [ "$reads" -lt "$max_reads" ]; do
+    pause=$(( deadline - $(date +%s) ))
+    if [ "$pause" -gt "$CONFIRM_STEP_SECONDS" ]; then
+      pause=$CONFIRM_STEP_SECONDS
+    fi
+    if [ "$pause" -gt 0 ]; then
+      sleep "$pause"
+      sleep_rc=$?
+      if [ "$sleep_rc" -ne 0 ]; then
+        log "$job_label confirm window ended: sleep failed (exit $sleep_rc) after $reads confirm reads; restart still due: $reason"
+        return 1
+      fi
+    fi
+    reads=$((reads + 1))
+    if confirm_read "$job_label" "$reads"; then
+      log "$job_label answered on confirm read $reads; restart avoided: $reason"
+      wd_note RESTART-AVOIDED
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      break
+    fi
+  done
+  log "$job_label no trusted answer in ${CONFIRM_WINDOW_SECONDS}s ($reads confirm reads); restart still due: $reason"
+  return 1
+}
 
 # --- Bot health check ---
 # The diagnostic body is auth-gated. Read the transitional token file through
 # a verified descriptor using the same contract as src/fleet/health-token-file.ts.
-# The validated token remains in an unexported shell variable and is sent to
-# curl through config stdin, never argv, the environment, a new file, or logs.
+# The validated token remains in an unexported shell variable and reaches the
+# pinned health reader through a pipe, never argv, environment, files or logs.
 BOT_TOKENS_ENV="$HOME_DIR/.config/whatsoup/instances/BOT_NAME/tokens.env"
 read_health_token() {
   python3 - "$BOT_TOKENS_ENV" <<'PY'
@@ -507,28 +849,84 @@ finally:
 PY
 }
 
-# Capture the body EVEN on an HTTP error status. A logged-out / terminally
-# auth-failed bot returns HTTP 503 *with* a body carrying
-# whatsapp.connection.auth_failure_class — `curl --fail` would discard that body
-# and send us down the "unreachable" restart path, restart-looping a bot a
-# restart cannot fix. So: no --fail; capture body + code; treat only a real
-# TRANSPORT failure (no HTTP response at all) as unreachable, and let the
-# decision block below act on the body (incl. the terminal-no-restart branch).
-HEALTH_TOKEN=""
-if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
-  bot_resp="$(print -r -- "header = \"Authorization: Bearer $HEALTH_TOKEN\"" | curl --config - --silent --show-error --max-time 8 -w $'\n%{http_code}' "$BOT_HEALTH" 2>>"$LOG")"
-  curl_rc=$?
-  HEALTH_TOKEN=""
-  bot_code="${bot_resp##*$'\n'}"
-  bot_json="${bot_resp%$'\n'*}"
-  if [ "$curl_rc" -ne 0 ] || [ -z "$bot_code" ]; then
-    restart_label "$BOT_LABEL" "health endpoint unreachable"
-  elif [ -z "$bot_json" ]; then
-    health_unknown "empty diagnostic health body"
-  elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
-    health_unknown "diagnostic health body exceeds 65536 bytes"
-  else
-    BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
+read_health_response() {
+  # FD 3 preserves the anonymous token pipe through the timeout's background
+  # command. Execute the bytes just hashed, avoiding a path reopen after check.
+  run_with_timeout "$HEALTH_READ_DEADLINE_SECONDS" python3 -c '
+import errno, hashlib, os, re, stat, sys
+try:
+    source_path, expected, port_text, request_path, timeout_text = sys.argv[1:]
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ValueError()
+    if re.fullmatch(r"[1-9][0-9]?", timeout_text) is None:
+        raise ValueError()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(source_path, flags)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError()
+        contents = source.read(262145)
+    if len(contents) > 262144 or hashlib.sha256(contents).hexdigest() != expected:
+        raise ValueError()
+    namespace = {"__name__": "watchdog_health_reader", "__file__": source_path}
+    exec(compile(contents, source_path, "exec"), namespace)
+    if request_path == "verify":
+        if not callable(namespace.get("fetch_loopback_health")) or not isinstance(namespace.get("HealthTransportError"), type):
+            raise ValueError()
+        print("VERIFIED")
+        raise SystemExit(0)
+    with os.fdopen(3, "rb") as token_pipe:
+        token = token_pipe.read(65).decode("ascii")
+    if request_path == "/health":
+        if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            raise ValueError()
+        headers = {"Authorization": "Bearer " + token}
+    elif request_path == "/livez" and not token:
+        headers = {}
+    else:
+        raise ValueError()
+    try:
+        code, body = namespace["fetch_loopback_health"](int(port_text), request_path, headers, timeout=int(timeout_text))
+    except namespace["HealthTransportError"] as error:
+        if (error.stage not in ("connect", "request", "response", "read")
+                or (error.errno is not None and type(error.errno) is not int)):
+            raise ValueError()
+        if error.stage == "connect" and error.errno == errno.EADDRNOTAVAIL:
+            print("EADDRNOTAVAIL")
+            raise SystemExit(2)
+        if error.stage in ("response", "read"):
+            print("TRANSPORT_SILENT")
+            raise SystemExit(8)
+        print("TRANSPORT_FAILURE")
+        raise SystemExit(7)
+    if type(code) is not int or not 100 <= code <= 599 or not isinstance(body, str):
+        raise ValueError()
+    if len(body.encode("utf-8")) > 65536:
+        raise ValueError()
+    print(body + "\n" + str(code), end="")
+except Exception:
+    print("watchdog: health reader unavailable or invalid", file=sys.stderr)
+    raise SystemExit(3)
+' "$HEALTH_READER_PATH" "$HEALTH_READER_SHA256" "$1" "$2" "$HEALTH_READ_TIMEOUT_SECONDS" 3<&0
+}
+
+# An unverifiable reader leaves this cycle without evidence: no restart, no
+# bootstrap, and no credential verdict (the paging state is left untouched).
+# restart_label repeats this check, with the same exit, before a restart at
+# the end of a confirm window.
+binding_resp="$(read_health_response 0 verify </dev/null 2>>"$LOG")"
+binding_rc=$?
+if [ "$binding_rc" -ne 0 ] || [ "$binding_resp" != VERIFIED ]; then
+  health_unknown "health reader binding unavailable or invalid"
+  log "$WD_FINAL"
+  exit "$WD_EXIT"
+fi
+
+# The bot decision block, as a function so a confirm read (confirm_read) can
+# classify a body exactly as the main read does. $1 is the body, $2 the HTTP
+# status; the exits are documented at the end of the block.
+bot_decision() {
+  BOT_JSON="$1" BOT_CODE="$2" python3 - <<'PY' 2>>"$LOG"
 import datetime as dt
 import json
 import math
@@ -611,6 +1009,128 @@ turn_capability_raw = data.get("turn_capability")
 if turn_capability_raw is not None and not isinstance(turn_capability_raw, dict):
     print("untrusted turn capability object shape", file=sys.stderr)
     sys.exit(6)
+recovery_debt_raw = data.get("recovery_debt")
+if "recovery_debt" in data:
+    if not isinstance(recovery_debt_raw, dict):
+        print("untrusted recovery debt object shape", file=sys.stderr)
+        sys.exit(6)
+    recovery_open = recovery_debt_raw.get("open")
+    recovery_service_blocking = recovery_debt_raw.get("service_blocking")
+    recovery_attention = recovery_debt_raw.get("attention")
+    if type(recovery_open) is not bool or type(recovery_service_blocking) is not bool:
+        print("untrusted recovery debt fields", file=sys.stderr)
+        sys.exit(6)
+    recovery_reason_order = (
+        "continuity_gap_unreadable", "continuity_gap_open",
+        "recovery_evidence_unreadable", "delivery_evidence_unreadable",
+        "turn_finalization_active", "turn_recovery_actionable",
+        "turn_recovery_integrity", "turn_recovery_unclassified",
+        "completed_delivery_identity_unclassified", "uncorroborated_delivery_ambiguity",
+        "turn_recovery_terminal", "turn_recovery_quarantined",
+        "historical_turn_catchup", "corroborated_delivery_retained",
+        "completed_delivery_identity_fresh_inbound", "completed_delivery_identity_operator",
+    )
+    recovery_blocking_reasons = {
+        "continuity_gap_unreadable", "recovery_evidence_unreadable",
+        "delivery_evidence_unreadable", "turn_finalization_active",
+        "turn_recovery_actionable", "turn_recovery_integrity",
+        "turn_recovery_unclassified", "completed_delivery_identity_unclassified",
+    }
+    recovery_reasons = recovery_debt_raw.get("reasons")
+    if (
+        not isinstance(recovery_reasons, list)
+        or len(recovery_reasons) > 32
+        or any(not isinstance(reason, str) or reason not in recovery_reason_order for reason in recovery_reasons)
+        or len(set(recovery_reasons)) != len(recovery_reasons)
+        or recovery_reasons != sorted(recovery_reasons, key=recovery_reason_order.index)
+    ):
+        print("untrusted recovery debt reasons", file=sys.stderr)
+        sys.exit(6)
+    recovery_continuity = recovery_debt_raw.get("continuity")
+    recovery_turn = recovery_debt_raw.get("turn_recovery")
+    recovery_identity = recovery_debt_raw.get("completed_delivery_identity")
+    recovery_delivery = recovery_debt_raw.get("delivery")
+    recovery_sections = (recovery_continuity, recovery_turn, recovery_identity, recovery_delivery)
+    if (
+        not all(isinstance(section, dict) for section in recovery_sections)
+        or any(type(section.get("readable")) is not bool for section in recovery_sections)
+    ):
+        print("untrusted recovery debt sections", file=sys.stderr)
+        sys.exit(6)
+    recovery_count_fields = (
+        (recovery_continuity, "open"), (recovery_continuity, "unresolved"),
+        (recovery_continuity, "ambiguous"), (recovery_turn, "blocking_outstanding"),
+        (recovery_turn, "retained_terminal"), (recovery_turn, "open_catchups"),
+        (recovery_turn, "corroborated_retained"), (recovery_identity, "blocking"),
+        (recovery_identity, "retained"), (recovery_delivery, "blocking_ambiguous"),
+        (recovery_delivery, "uncorroborated_ambiguous"),
+        (recovery_delivery, "corroborated_retained"),
+    )
+    recovery_counts = [section.get(field) for section, field in recovery_count_fields]
+    if any(
+        type(value) is not int or value < 0 or value > 9_007_199_254_740_991
+        for value in recovery_counts
+    ):
+        print("untrusted recovery debt counts", file=sys.stderr)
+        sys.exit(6)
+    if (
+        "reason" not in recovery_debt_raw
+        or "next_action" not in recovery_identity
+        or "oldest_uncorroborated_at" not in recovery_delivery
+    ):
+        print("missing recovery debt nullable fields", file=sys.stderr)
+        sys.exit(6)
+    recovery_next_action = recovery_identity.get("next_action")
+    recovery_oldest = recovery_delivery.get("oldest_uncorroborated_at")
+    recovery_oldest_valid = False
+    if isinstance(recovery_oldest, str):
+        try:
+            dt.datetime.fromisoformat(recovery_oldest.replace("Z", "+00:00"))
+            recovery_oldest_valid = True
+        except ValueError:
+            pass
+    if (
+        recovery_next_action not in (None, "fresh_inbound", "operator")
+        or (recovery_counts[10] > 0 and not recovery_oldest_valid)
+        or (recovery_counts[10] == 0 and recovery_oldest is not None)
+        or recovery_counts[9] > recovery_counts[10]
+    ):
+        print("contradictory recovery debt category fields", file=sys.stderr)
+        sys.exit(6)
+    expected_recovery_reason = (
+        "continuity_gap_unreadable" if not recovery_continuity["readable"]
+        else "continuity_gap_open" if recovery_counts[0] > 0 else None
+    )
+    recovery_blocking_evidence = (
+        any(not section["readable"] for section in recovery_sections)
+        or recovery_counts[3] > 0
+        or recovery_counts[7] > 0
+        or recovery_counts[9] > 0
+        or any(reason in recovery_blocking_reasons for reason in recovery_reasons)
+    )
+    # Skip continuity unresolved/ambiguous (parts of continuity open) and
+    # delivery blocking_ambiguous (part of uncorroborated): count each once.
+    recovery_gauge_total = sum(
+        value for index, value in enumerate(recovery_counts) if index not in (1, 2, 9)
+    )
+    if recovery_gauge_total > 9_007_199_254_740_991:
+        print("untrusted recovery debt aggregate", file=sys.stderr)
+        sys.exit(6)
+    expected_recovery_open = (
+        recovery_gauge_total > 0 or bool(recovery_reasons) or recovery_service_blocking
+    )
+    expected_recovery_attention = (
+        "urgent" if recovery_service_blocking else "routine" if recovery_open else "none"
+    )
+    if (
+        recovery_attention != expected_recovery_attention
+        or recovery_debt_raw.get("reason") != expected_recovery_reason
+        or recovery_open != expected_recovery_open
+        or recovery_service_blocking != recovery_blocking_evidence
+        or (status == "healthy" and recovery_service_blocking)
+    ):
+        print("contradictory recovery debt fields", file=sys.stderr)
+        sys.exit(6)
 connected = whatsapp.get("connected") is True
 state = conn.get("state")
 last_pong = conn.get("last_pong_at")
@@ -691,7 +1211,7 @@ if service_mode == "inspection_only":
     sys.exit(1)
 
 # Terminal auth failures cannot be fixed by a restart — the bond is gone
-# server-side (device_removed / 401), pairing is required, or the local auth
+# server-side (a 401 carrying device_removed), pairing is required, or the local auth
 # store is unrestorably corrupt. Kicking the bot here only replays the
 # cold-start burst against a dead bond every cooldown window (the restart-loop
 # risk on a logged-out instance, e.g. ml-bot/mini8). Stop and wait for a human
@@ -699,9 +1219,26 @@ if service_mode == "inspection_only":
 # alert at logout time, so the watchdog stays silent (no duplicate page) and
 # simply declines to restart. Mirrors `authFailureIsUnhealthy` in
 # src/core/health.ts; the class is surfaced at whatsapp.connection.auth_failure_class.
+#
+# `auth_bond_read_persistent` is deliberately ABSENT from this tuple. It means
+# the credential could not be READ for longer than the stale-risk bound, which
+# is not evidence that it is broken — a restart may well clear the read fault,
+# so this class must fall through to the ordinary restart policy below. Routing
+# an unreadable credential to "human relink required" would suppress the one
+# recovery that could work. This list is an allowlist, so the fall-through is
+# automatic; it is named here because a future editor tempted to add it should
+# read this first.
+#
+# The two auth_401_* classes are logged out WITHOUT a confirmed device_removed
+# node: the transport already spent its one bounded reconnect (parked) or could
+# not inspect the stream:error (uninspected). A restart would buy a fresh retry,
+# park again and loop, so they are no-restart here too — but they are not
+# confirmed server revocation; the class in the log line says which it was.
 TERMINAL_AUTH_FAILURES = (
     "pairing_required",
     "serverside_logout_irreversible",
+    "auth_401_ambiguous_parked",
+    "auth_401_uninspected_exit",
     "local_corruption_unrestorable",
 )
 if auth_failure_class in TERMINAL_AUTH_FAILURES:
@@ -894,6 +1431,48 @@ if fallback_reason is not None:
     sys.exit(5)
 sys.exit(4)
 PY
+}
+
+# Capture the body EVEN on an HTTP error status. A logged-out / terminally
+# auth-failed bot returns HTTP 503 *with* a body carrying
+# whatsapp.connection.auth_failure_class; discarding that body would send us
+# down the "unreachable" restart path, restart-looping a bot a restart cannot
+# fix. So the reader returns body + code for every HTTP response, and the
+# decision block above acts on the body (incl. the terminal-no-restart branch).
+# Only a typed transport failure with no HTTP response is unreachable, and only
+# a connect-stage EADDRNOTAVAIL (local ephemeral-port exhaustion) is
+# HEALTH-UNKNOWN instead: restarting a healthy target cannot free local ports.
+# Ordinary refusal, and every other connect- or request-stage failure, retains
+# the existing restart policy. A SILENT read (TRANSPORT_SILENT: the connection
+# was accepted, then the response timed out or was reset) is restart evidence
+# that restart_label confirms before acting (CONFIRM_WINDOW_SECONDS). So is a
+# read killed at the wall deadline (run_with_timeout 124, no output), as
+# `curl --max-time` was: the reader's own shorter socket timeout already turns
+# a silent target into a typed failure, so reaching the deadline means the
+# response did not complete in time (e.g. a trickling target).
+HEALTH_TOKEN=""
+if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
+  bot_resp="$(print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health 2>>"$LOG")"
+  probe_rc=$?
+  HEALTH_TOKEN=""
+  bot_code="${bot_resp##*$'\n'}"
+  bot_json="${bot_resp%$'\n'*}"
+  if [ "$probe_rc" -eq 2 ] && [ "$bot_resp" = EADDRNOTAVAIL ]; then
+    health_unknown "bot loopback connect failed: EADDRNOTAVAIL"
+  elif [ "$probe_rc" -eq 7 ] && [ "$bot_resp" = TRANSPORT_FAILURE ]; then
+    restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ "$probe_rc" -eq 8 ] && [ "$bot_resp" = TRANSPORT_SILENT ]; then
+    restart_label "$BOT_LABEL" "health endpoint unreachable: connection accepted, response timed out or was reset" silent
+  elif [ "$probe_rc" -eq 124 ] && [ -z "$bot_resp" ]; then
+    restart_label "$BOT_LABEL" "health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s" silent
+  elif [ "$probe_rc" -ne 0 ] || [[ "$bot_code" != [1-5][0-9][0-9] ]]; then
+    health_unknown "bot health reader unavailable or invalid"
+  elif [ -z "$bot_json" ]; then
+    health_unknown "empty diagnostic health body"
+  elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
+    health_unknown "diagnostic health body exceeds 65536 bytes"
+  else
+    bot_decision "$bot_json" "$bot_code"
   py_rc=$?
   if [ "$py_rc" -eq 7 ]; then
     # The bot is connected but its active outbound lane is deliberately
@@ -911,6 +1490,86 @@ PY
       log "ERROR: failed to create credential marker $CRED_MARKER; retrying next cycle"
       wd_note ERROR
       WD_EXIT=1
+    fi
+    # Page once per transition: only while no page is outstanding.
+    #
+    # Invariant: no failure of these state files may silence a page. When the
+    # stamp or the recovery flag cannot be read safely or removed, the watchdog
+    # pages anyway and logs ERROR. The worst case is a repeated page on a later
+    # cycle, which BOT ERRORS folds into the open machine|instance|source
+    # incident. (A stamp suppresses only an incident that is still open: the
+    # recovery flag is written before any clear is sent, so a stamp whose clear
+    # went out always has its flag.)
+    credential_marker state "$CRED_PAGED"
+    paged_rc=$?
+    if [ "$paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; paging without it (repeats are possible)"
+      wd_note ERROR
+      WD_EXIT=1
+      paged_rc=1
+    elif [ "$paged_rc" -eq 0 ]; then
+      # A stamp that outlived a recovery (its clear is still being retried, or
+      # it could not be removed) must not suppress this new episode's page. The
+      # recovery flag, not marker history, identifies it: a failed marker
+      # create never makes the current episode's stamp look stale.
+      credential_marker state "$CRED_RECOVERED"
+      flag_rc=$?
+      if [ "$flag_rc" -eq 2 ]; then
+        log "ERROR: unsafe recovery flag $CRED_RECOVERED; cannot tell whether $CRED_PAGED is current, paging (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+        paged_rc=1
+      elif [ "$flag_rc" -eq 0 ]; then
+        log "WARN: credential page stamp $CRED_PAGED is left from a previous episode; paging this one"
+        paged_rc=1
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to drop stale credential page stamp $CRED_PAGED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        elif ! credential_marker clear "$CRED_RECOVERED"; then
+          log "ERROR: failed to remove recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      fi
+    else
+      # A flag with no stamp is left from a recovery that died after removing
+      # the stamp. Drop it before this episode's stamp exists, or the next
+      # cycle would read the new stamp as stale and page again.
+      credential_marker state "$CRED_RECOVERED"
+      if [ $? -eq 0 ] && ! credential_marker clear "$CRED_RECOVERED"; then
+        log "ERROR: failed to remove leftover recovery flag $CRED_RECOVERED; paging anyway (repeats are possible)"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+    fi
+    if [ "$paged_rc" -eq 1 ]; then
+      credential_page alert
+      page_rc=$?
+      if [ "$page_rc" -eq 0 ]; then
+        log "CREDENTIAL-DEAD: paged BOT ERRORS ($CRED_ALERT_SOURCE)"
+        if ! credential_marker create "$CRED_PAGED"; then
+          log "ERROR: failed to record credential page stamp $CRED_PAGED; the page may repeat next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+        credential_marker clear "$CRED_UNPAGED" || true
+      elif [ "$page_rc" -eq 2 ]; then
+        # A dead credential nobody is told about is an error, every cycle. The
+        # page is retried each cycle (the emitter may reappear); the detail
+        # line is written once per episode.
+        wd_note ERROR
+        WD_EXIT=1
+        credential_marker state "$CRED_UNPAGED"
+        if [ $? -eq 1 ]; then
+          log "ERROR: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-DEAD not paged (re-render this watchdog from the running release with render-watchdog.py; retried each cycle, logged once per episode)"
+          credential_marker create "$CRED_UNPAGED" || true
+        fi
+      else
+        log "ERROR: CREDENTIAL-DEAD page failed via $BOT_ERRORS_EMIT; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
     fi
     wd_note CREDENTIAL-DEAD
   elif [ "$py_rc" -eq 4 ] || [ "$py_rc" -eq 5 ]; then
@@ -934,12 +1593,84 @@ PY
   elif [ "$py_rc" -ne 0 ]; then
     restart_label "$BOT_LABEL" "unhealthy JSON response"
   else
-    if ! credential_marker clear; then
-      # Recovery evidence remains valid, but the watchdog invocation is not
-      # healthy while an unsafe or unusable marker path persists.
-      log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+    # Recovery closes an outstanding page exactly once. The stamp is removed
+    # after the clear was accepted, so a failed clear retries; after
+    # CRED_CLEAR_MAX_ATTEMPTS consecutive failures (a missing emitter counts)
+    # it is dropped with a WARN instead of holding the watchdog in ERROR.
+    credential_marker state "$CRED_PAGED"
+    recovered_paged_rc=$?
+    # The recovery flag is written before anything else changes, so a process
+    # that dies at any later step still leaves the stamp marked as belonging to
+    # a recovered episode. If it cannot be written, nothing else changes: the
+    # page stays open and the next healthy cycle retries the whole recovery.
+    recovery_recorded=1
+    if [ "$recovered_paged_rc" -eq 0 ] && ! credential_marker create "$CRED_RECOVERED"; then
+      log "ERROR: failed to record recovery flag $CRED_RECOVERED; recovery not applied, retrying next cycle"
       wd_note ERROR
       WD_EXIT=1
+      recovery_recorded=0
+    fi
+    if [ "$recovery_recorded" -eq 1 ]; then
+      if ! credential_marker clear; then
+        # Recovery evidence remains valid, but the watchdog invocation is not
+        # healthy while an unsafe or unusable marker path persists.
+        log "ERROR: failed to clear credential marker $CRED_MARKER; retrying next cycle"
+        wd_note ERROR
+        WD_EXIT=1
+      fi
+      # Recovery ends the episode: the next dead episode may warn again.
+      credential_marker clear "$CRED_UNPAGED" || true
+    fi
+    if [ "$recovered_paged_rc" -eq 2 ]; then
+      log "ERROR: unsafe credential page stamp $CRED_PAGED; not clearing"
+      wd_note ERROR
+      WD_EXIT=1
+    elif [ "$recovered_paged_rc" -eq 0 ] && [ "$recovery_recorded" -eq 1 ]; then
+      credential_page clear
+      clear_rc=$?
+      if [ "$clear_rc" -eq 0 ]; then
+        log "CREDENTIAL-RECOVERED: cleared BOT ERRORS ($CRED_ALERT_SOURCE)"
+        if ! credential_marker clear "$CRED_PAGED"; then
+          log "ERROR: failed to clear credential page stamp $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      else
+        clear_failures="$(credential_marker bump "$CRED_PAGED")"
+        bump_rc=$?
+        if [ "$bump_rc" -eq 3 ]; then
+          # A corrupt count cannot be trusted to ever reach the cap: treat it
+          # as the cap rather than retrying without bound.
+          log "WARN: unreadable clear-failure count in $CRED_PAGED; dropping it — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$bump_rc" -ne 0 ] || [ -z "$clear_failures" ]; then
+          log "ERROR: cannot count failed clears in $CRED_PAGED; retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        elif [ "$clear_failures" -ge "$CRED_CLEAR_MAX_ATTEMPTS" ]; then
+          log "WARN: CREDENTIAL-RECOVERED clear failed $clear_failures consecutive times via $BOT_ERRORS_EMIT; dropping $CRED_PAGED — the BOT ERRORS incident ($CRED_ALERT_SOURCE) stays open until cleared by hand"
+          if ! credential_marker clear "$CRED_PAGED"; then
+            log "ERROR: failed to drop credential page stamp $CRED_PAGED"
+            wd_note ERROR
+            WD_EXIT=1
+          fi
+        elif [ "$clear_rc" -eq 2 ]; then
+          log "WARN: BOT ERRORS emitter $BOT_ERRORS_EMIT not found; CREDENTIAL-RECOVERED clear not sent (attempt $clear_failures of $CRED_CLEAR_MAX_ATTEMPTS)"
+        else
+          log "ERROR: CREDENTIAL-RECOVERED clear failed via $BOT_ERRORS_EMIT (attempt $clear_failures of $CRED_CLEAR_MAX_ATTEMPTS); retrying next cycle"
+          wd_note ERROR
+          WD_EXIT=1
+        fi
+      fi
+    fi
+    # Once no page stamp remains, the recovery flag has nothing to mark.
+    credential_marker state "$CRED_PAGED"
+    if [ $? -eq 1 ]; then
+      credential_marker clear "$CRED_RECOVERED" || true
     fi
   fi
   fi
@@ -949,7 +1680,26 @@ else
 fi
 
 # --- Fleet console health check ---
-if ! curl --fail --silent --show-error --max-time 8 "$FLEET_HEALTH" >/dev/null 2>>"$LOG"; then
+# Probe /livez, not the console root: the root serves built static assets and
+# 404s on a release without them while the fleet process is healthy. It runs
+# after the bot section, so after a bot confirm window it starts later than it
+# would have: about 90 to 100 s, at most about 191 s (confirm_silent_read).
+# It does not run at all when the reader stopped verifying by the end of a bot
+# window: that ends the run (restart_label).
+fleet_resp="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
+probe_rc=$?
+fleet_code="${fleet_resp##*$'\n'}"
+if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
+  health_unknown "fleet loopback connect failed: EADDRNOTAVAIL"
+elif [ "$probe_rc" -eq 7 ] && [ "$fleet_resp" = TRANSPORT_FAILURE ]; then
+  restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$probe_rc" -eq 8 ] && [ "$fleet_resp" = TRANSPORT_SILENT ]; then
+  restart_label "$FLEET_LABEL" "fleet console unreachable: connection accepted, response timed out or was reset" silent
+elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
+  restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s" silent
+elif [ "$probe_rc" -ne 0 ] || [[ "$fleet_code" != [1-5][0-9][0-9] ]]; then
+  health_unknown "fleet health reader unavailable or invalid"
+elif [ "$fleet_code" -ge 400 ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable"
 fi
 

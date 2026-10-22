@@ -161,6 +161,11 @@ Per-instance configs live in `~/.config/whatsoup/instances/<instance>/`.
   not group- or world-writable.
 - `auth/` - Baileys session credentials.
 - `stdout.log`, `stderr.log` - service output when the plist redirects logs.
+  The generated plist sets `WHATSOUP_LOG_STDOUT_SINK=off`, so `stdout.log`
+  carries only output from before the logger starts and crash output; the
+  structured log is the rolling `logs/whatsoup.log` (#3704). A plist installed
+  before that key gained it picks it up on the next
+  `reconcile-launchd-restart-policy --apply`.
 
 Do not confuse per-instance `tokens.env` with the unscoped credential mirror at
 `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`. An unscoped lookup may
@@ -190,7 +195,24 @@ instance `config.json` `service` block (schema:
   pointing the launchd service context at a dedicated claude-cli config root
   (e.g. `$HOME/.claude-<instance>`). The block governs only which config root
   the service resolves; credentials for that root stay keychain-resident and
-  are neither created nor copied by rendering.
+  are neither created nor copied by rendering. The host-level timers
+  (`com.whatsoup.harness-maintenance`, `com.whatsoup.reply-guarantee`,
+  `com.whatsoup.release-drift-check`) carry the same `CLAUDE_CONFIG_DIR` so
+  every job that runs the provider CLI uses the bot's store:
+  `deploy/setup.sh` and `scripts/check-launchd-drift.sh` inject the host's one
+  distinct value, and `deploy/scripts/render-release-drift-launchd.sh` injects
+  its `--instance` value. When config gives no value (unset, or several
+  different values), all three carry forward the `CLAUDE_CONFIG_DIR` the
+  installed plist already has (`--preserve-from <installed plist>`; pass the
+  live plist when re-rendering release-drift by hand), so a re-render keeps a
+  hand-added key and the drift check agrees with the install. A configured
+  value always wins. Make the value config-owned (below) so it is not only a
+  hand edit. An installed plist that mentions `CLAUDE_CONFIG_DIR` but whose
+  `EnvironmentVariables` the reader refuses (duplicated, unparseable, or using
+  a numeric character reference such as `&#45;`, which the reader does not
+  decode) stops
+  the render: `deploy/setup.sh` runs under `set -e`, so it aborts at that
+  timer and installs nothing further until the plist is repaired or removed.
 - `service.pathPrepend` → directories prepended, in order, ahead of the
   generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
   `$HOME/.local/bin` so an opencode fallback binary resolves under launchd), and
@@ -264,6 +286,32 @@ cannot be enumerated. `scripts/check-launchd-drift.sh` keeps its separate
 structural-only checks for bot plists; the governed-key comparison lives in
 the reconciler because only the render path knows the expected values.
 
+### Preflight: service paths that are already persisted
+
+Plist render refuses a `service` path that is not a canonical absolute path
+inside the instance user's home directory, or whose intermediate components do not
+resolve. Only the final leaf may be absent; accepted paths are rendered in their
+physical form. The refusal happens before any bytes are written, so an instance
+carrying such a value keeps running its installed plist but cannot be installed
+or reconciled until the value is corrected. Sweep the hosts before upgrading.
+
+For each instance, dry-run the reconciler:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
+```
+
+A normal governed-env report means the block is fine. A `LaunchdRenderConfigError`
+names the offending key, `service.claudeConfigDir` or `service.pathPrepend[N]`,
+and the rule it broke, without echoing the value. Then edit that key in the
+instance's `config.json`: make it an absolute path with no `.` or `..`
+component, inside the home directory, and create missing intermediate directories or repair unresolved symlinks. Dropping the entry is also a fix. Re-run
+the dry-run until it reports drift instead of refusing, then apply as usual.
+
+See [`service` (launchd render options)](../configuration.md#service-launchd-render-options)
+for the full rule list and for the trusted-ancestry boundary this check does
+not cover.
+
 ### Adopting a hand-patched PATH (or claude root) into config
 
 For a host whose bot plist was hand-patched — for example `$HOME/.local/bin`
@@ -292,6 +340,14 @@ renders it instead of destroying it:
    ```bash
    bash scripts/run-with-pinned-node.sh scripts/reconcile-launchd-restart-policy.ts --instance <instance>
    ```
+
+   The dry run is refused outright when the persisted `service` block names a
+   path outside the instance user's home directory, or one whose intermediate
+   segment is absent or does not resolve. Render-admission confinement runs
+   before the dry-run early return, so the command exits with a
+   `LaunchdRenderConfigError` naming the offending field instead of printing a
+   report. Correct that entry in `config.json` — or drop it from the block — and
+   re-run; the same refusal would otherwise have stopped `--apply` at step 4.
 
 3. Read the `installed plist has N non-governed EnvironmentVariables keys
    (…) that --apply will drop` line of the same report. Reconciling
@@ -448,6 +504,159 @@ Those are wrong tiers. `.gitignore` covers `*.db` to prevent accidental commit.
 
 ## Restart Procedures
 
+### Watchdog health reader binding
+
+Render the watchdog from the release tree the host runs, the same way the BOT
+ERRORS emitter is baked. `deploy/scripts/render-watchdog.py` binds that tree's
+`deploy/scripts/lib/health_reader.py` and takes its digest from that tree's
+`deploy/bot-errors-runtime-manifest.json`; `--health-reader` and
+`--runtime-manifest` name others. The render refuses (`BAD_INPUT`, exit 4) when
+the reader is missing, is not listed exactly once in the manifest, or differs
+from its pinned digest. For example, from the release tree:
+
+```bash
+python3 deploy/scripts/render-watchdog.py render \
+  --template deploy/templates/watchdog-script.sh \
+  --bot-name example-agent --bot-port 9001 --fleet-port 9002 \
+  --home /opt/operator-home --out ./watchdog-rendered.sh --json
+```
+
+The render receipt reports `health_reader_path` and `health_reader_sha256`.
+Before its first health read, each watchdog cycle verifies the reader digest
+and executes those verified bytes. A missing, changed, or invalid reader at
+that point produces `HEALTH-UNKNOWN` and exit 2 without authorizing any
+service action, and that cycle reaches no credential verdict, so credential
+paging state is left unchanged. Every later read also executes only bytes it
+has just verified. On a confirm read (below) an unverifiable reader only
+continues the window, and the binding is checked again, as at the start,
+before a restart at the window's end: a reader still unverifiable then ends
+the run there, as at the start, with exit 2, and nothing else is read or
+restarted in that run. Its last line is `HEALTH-UNKNOWN` unless the run had
+already noted a higher-ranked state (`CREDENTIAL-DEAD` or `OUTBOUND-POISON`
+from the bot section, before a fleet window).
+
+The shared reader makes one direct IPv4 loopback connection, without proxies,
+redirects, or a separate connectivity probe. The watchdog keeps its private
+token-file validation and passes the token to the reader through an anonymous
+descriptor. Only a connect-stage `EADDRNOTAVAIL` (local ephemeral-port
+exhaustion) suppresses restart for that target: the bot or fleet console is
+logged `HEALTH-UNKNOWN` instead of being restarted, because restarting a healthy
+target cannot free local ports. It remains a diagnostic failure, not an auth
+verdict. Ordinary connection refusal keeps the restart policy. Bootstrap now
+happens only after a restart-worthy observation passes the existing restart
+gates, and a successful bootstrap does not also kickstart the newly loaded job.
+A mixed cycle can restart the refused target while leaving the target that saw
+`EADDRNOTAVAIL` untouched.
+
+Review the final watchdog status and the per-target log lines together. The
+reader's socket timeout (`HEALTH_READ_TIMEOUT_SECONDS`, 5 s) is deliberately
+below the eight-second process deadline (`HEALTH_READ_DEADLINE_SECONDS`), so a
+target that accepts the connection but never answers yields a typed transport
+failure and is restart evidence (`health endpoint unreachable: connection
+accepted, response timed out or was reset` / `fleet console unreachable: …`),
+as `curl --max-time 8` was. A read killed at the deadline with no output (for
+example a trickling response) is also restart evidence, logged as `health read
+exceeded 8s`; a hang and a slow response are indistinguishable at that point,
+and the previous curl contract restarted both. These two are *silent* reads,
+and the watchdog confirms them in the same run before it restarts:
+
+- The restart gates run first, in their usual order (permanent launchd stop,
+  pairing lease, restart mutex, 5-minute cooldown). A closed gate suppresses
+  the restart at once, as before, with no confirm read.
+- With every gate open, the watchdog notes the job's launchd identity (its
+  load state and pid; an unreadable identity still runs the window, so a
+  trusted answer can still cancel the restart), releases the restart mutex
+  and re-reads that
+  target every 15 s (`CONFIRM_STEP_SECONDS`) until 90 s
+  (`CONFIRM_WINDOW_SECONDS`) have passed. The window ends with the first read
+  that finishes at or after 90 s, so on a steady clock a read is running at
+  that moment or starts then. Each read logs `<label> confirm read N: …`.
+- A trusted answer (an HTTP status below 400 from the fleet console, or a bot
+  body the decision block reads without a restart verdict) cancels the
+  restart: `<label> answered on confirm read N; restart avoided: …`, state
+  `RESTART-AVOIDED`. That answer's own credential or outbound-poison verdict
+  is acted on by the next run whose main read answers.
+- Every other result (silent again, refused, `EADDRNOTAVAIL`, an unavailable or
+  unverifiable reader or token, an empty, oversized or untrusted body, a bot
+  restart verdict, a fleet HTTP error) continues the window and changes
+  nothing else in the run. A `sleep` that fails ends the window at once
+  (`<label> confirm window ended: sleep failed …`).
+- Without a trusted answer, the restart runs when the window ends only if the
+  reader binding still verifies (otherwise the run ends there, exit 2) and
+  the job's identity was readable at both ends and is unchanged. "Unloaded"
+  means launchctl's "could not find service" status (exit 113, verified on
+  macOS 26; other macOS versions in the fleet are not verified, and a
+  different not-found code there only defers the restart, as unreadable);
+  any other failure, including a missing domain's exit 112, or
+  the 15 s limit, logs `<label> restart deferred: job identity unreadable …`
+  (an identity unreadable at the silent read is not read again). A job
+  unloaded, loaded or running a different pid since logs `<label> restart
+  deferred: job changed during the confirm window …`. Both record
+  `RESTART-SUPPRESSED` and leave that target to the next run's own read; the
+  rest of the run goes on, so after a bot window the fleet console is still
+  read and can be restarted. Load state and pid cannot show a reload that
+  ends with the same pid, or two job generations that both show no pid. The
+  restart then takes the normal restart path: every gate is checked again. A
+  job unloaded at both ends may be bootstrapped; a job loaded at both ends
+  may only be kickstarted, and if the restart's own `launchctl print` then
+  fails, for any reason and not only "not found", the run logs `<label>
+  restart deferred: job not confirmed loaded after the window check …`
+  (`RESTART-SUPPRESSED`) and bootstraps nothing; like the other deferrals it
+  keeps nothing and arms no cooldown. A gate that closed during the window
+  stops the restart. Another watchdog's restart or a permanent stop also
+  changes the job's pid, so it usually shows as `restart deferred` instead of
+  the gate's own line; either way that target is not restarted.
+
+One race remains after the window-end check, as base has over its own gate
+pass: an outside `launchctl bootstrap` or reload during the second gate pass
+can lead to a kickstart of a job that has just started or of a new pid. That
+pass usually takes milliseconds; its permanent-stop query is limited to
+15 s, but `ensure_loaded`'s own `launchctl print` has no time limit, so the
+window has no strict bound. A successful restart by another watchdog whose
+cooldown stamp was written cannot cause it: that watchdog writes the stamp
+before it releases the restart mutex, and this pass checks the cooldown after
+taking it. Another watchdog's restart that wrote no stamp (a failed stamp
+write after its kickstart, or a failed or timed-out kickstart) leaves the
+cooldown open, so it can.
+
+Nothing is kept between runs. A restart comes later than it would have, or
+not at all for that target when it answered within the window, its identity
+changed or could not be read, or a job loaded at both ends was not confirmed
+loaded when the restart acted; only a reader that no longer verifies ends
+the run.
+On a steady clock the window lasts at most 90 s plus one 8 s read deadline; a
+forward clock step shortens it, and a backward one lengthens it up to six
+full steps and reads, about 138 s. With the `launchctl print` identity and
+gate checks (15 s limit each) and the binding check (8 s) around it, a
+restart comes at most about 191 s later than an immediate restart, and about
+90 to 100 s later when nothing hangs. These figures count the timed reads,
+the `launchctl print` queries and the binding check only: the per-read token
+and decision steps, and `ensure_loaded`'s own `launchctl print` (as at base),
+have no deadline. Counting the bounded steps alone, a run with a bot and a
+fleet window takes at most about 500 s, inside the invocation lock's 600 s. A
+watchdog killed during a window performs no restart for that read; the next
+run decides again from its own read. An avoided restart arms no cooldown, so
+a restart-worthy read in the next 5 minutes is not held back by the cooldown
+an immediate restart would have armed. A deferred restart arms none either,
+so the next run may act on a respawned or reloaded job sooner than that
+cooldown would have allowed. Every recorded restart of a live target followed
+a silence of 20.5 to 83.2 s. On a steady clock the last confirm read starts
+about 82 to 90 s after the window opens; before the window opened, the
+silence had already lasted the silent read's own wait (5 s for a reader
+timeout, 8 s at the deadline, none for a reset or EOF). A target whose
+silences always end within the window is never restarted (the `restart
+avoided` lines in the watchdog log show it; nothing alerts on them). Each
+silent target adds about 90 to 100 s to a run, at most about 191 s, and the
+bot and the fleet console can both be silent in one run (the fleet console is
+still read after the bot section). That can exceed the 120 s
+`StartInterval`: launchd never runs two instances of one job, so the next run
+then starts late.
+Any other malformed
+or incomplete reader output is `HEALTH-UNKNOWN`. Replacing the reader requires re-rendering
+the watchdog against the new manifest digest. Keep the previous script and its
+matching release tree available for rollback; installing either alone leaves
+diagnostics unknown. Rendering does not install or activate any job.
+
 Restart fleet only:
 
 ```bash
@@ -459,11 +668,14 @@ Restart one instance:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
-tail -F ~/.config/whatsoup/instances/<instance>/stdout.log
+tail -F ~/.local/share/whatsoup/instances/<instance>/logs/whatsoup.log
 ```
 
-Expect credential-load or runtime health logs within a few seconds. For agent
-instances, a restart interrupts in-flight turns.
+Expect credential-load or runtime health logs within a few seconds. The
+rolling `logs/whatsoup.log` is the instance's structured log; its `stdout.log`
+holds only pre-logger and crash output once the plist carries
+`WHATSOUP_LOG_STDOUT_SINK=off` (#3704). For agent instances, a restart
+interrupts in-flight turns.
 
 ### Plist changes and the keychain-session hazard
 
@@ -512,6 +724,15 @@ file:
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.whatsoup.<instance>
 ```
+
+For a release switch (wrapper symlink plus instance and auxiliary plists), use
+`npm run release:activate` (see
+[release-deployment.md → Activating a release](release-deployment.md#activating-a-release)).
+It applies this whole sequence to every label it switches: bootout, a bounded
+wait for the old pid to exit, bootstrap with the bounded transient-error retry,
+then `kickstart -k`. It runs the same launchctl verbs, so the session hazards
+above still apply to where you run it from. The manual commands in this section
+remain the fallback reference.
 
 ### Generated-instance restart-policy migration
 
@@ -563,22 +784,84 @@ launchctl kickstart -k "$domain/com.whatsoup.<instance>"
 
 Do not turn this per-instance command into a fleet-wide loop.
 
-**Acceptance gate after any restart of a keychain-backed instance: confirm
-`turn_capability.model_usable=true`, not just health HTTP 200** (which is true even
-while degraded):
+**Acceptance after a restart requires authenticated health for the intended
+instance, `status=healthy`, `turn_capability.model_usable=true`, and explicit
+`turn_capability.model_usable_stale=false`.** Run the helper with kickstarts
+disabled so the acceptance command cannot restart the service:
 
 ```bash
-curl -s --fail-with-body http://127.0.0.1:<port>/health | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); print(d["status"], d["turn_capability"]["model_usable"])'
+deploy/scripts/whatsoup-keychain-heal.sh \
+  --label com.whatsoup.<instance> --port <port> --max-kickstarts 0
 ```
 
-If an instance is found model-degraded, run the bounded, fail-closed remediation
-helper (it re-probes `/health` and, while degraded, issues `kickstart -k` up to a
-bounded number of times, exiting non-zero to escalate if it cannot recover):
+Exit 0 confirms this acceptance signal. Exit 1 reports observed degradation;
+with `--max-kickstarts 0` it performs no remediation. Exit 2 reports unavailable
+runtime/token, transport, HTTP authentication or diagnostic evidence. Exit 3
+reports authenticated evidence with missing/mismatched instance identity or
+missing/invalid model freshness fields. Neither exit 2 nor exit 3 authorizes a
+kickstart. An authenticated HTTP 503 diagnostic response can establish model
+degradation; HTTP 401/403 and public health envelopes cannot.
+
+Use the canonical label `com.whatsoup.<instance>` (instance names start with a
+lowercase letter, contain only lowercase letters, digits or hyphens, and have
+at most 30 characters). Run as the same OS user that owns the instance and its
+token; `--uid`, if supplied, must equal `id -u`. The helper requires the exact
+authenticated `instance.name` to match the label. Before invocation, verify
+that the supplied port belongs to that label's current process: the helper
+does not prove the launchd label/PID-to-port relationship.
+
+The canonical token file is
+`${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/<instance>/tokens.env`.
+The config root must match the target runtime's configuration. The file must
+be a same-user, nonsymlink regular file with mode 0600, inside a same-user real
+directory that is not group/world writable. Its sole assignment must be
+`WHATSOUP_HEALTH_TOKEN=` followed by exactly 64 lowercase hexadecimal characters
+(an optional final newline is permitted). Unsafe, missing or unreadable files
+fail closed; there is no environment-token or keyring fallback. The helper
+disables shell tracing before the read and passes the token only through curl
+config stdin, never a command argument, exported variable or temporary file.
+
+Run the helper from a complete release containing `deploy/lib/resolve-node.sh`,
+`deploy/lib/bounded-exec.sh`, `deploy/lib/read-private-health-token.mjs`,
+`src/fleet/health-token-file.ts`, and both `deploy/scripts/lib/health_reader.py`
+and `classify_health.py`. Node must satisfy that release's `.nvmrc` and
+`package.json` compatibility checks; the installed dependency tree must include
+the lockfile's `zod`. `WHATSOUP_NODE` can select an already installed compatible
+binary under the existing resolver contract. The helper does not install Node
+or dependencies. A partial bot-errors scripts deployment does not supply this
+complete dependency closure. The shared token reader and timeout helper support
+Linux and macOS; kickstart remediation here is specifically for macOS launchd.
+`--health-timeout` is a positive integer budget applied separately to Node
+resolution, each token read, each HTTP request and each launchctl kickstart.
+An external timeout backend may add its bounded termination grace. A failed or
+timed-out kickstart exits 2 without another remediation attempt. The configured
+`--settle` pause and `--max-kickstarts` attempt count still apply; this is not an
+overall run deadline.
+
+For authenticated model degradation, run the bounded remediation helper. It
+re-probes `/health` and issues at most the configured number of kickstarts:
 
 ```bash
 deploy/scripts/whatsoup-keychain-heal.sh --label com.whatsoup.<instance> --port <port>
 ```
+
+The helper requires an explicit boolean `turn_capability.model_usable_stale`.
+An authenticated degraded or unhealthy response with a fresh usable model exits
+2 without a kickstart: queue, transport or other non-model failures do not
+establish a keychain remediation case. Inspect those health signals separately.
+Missing, null or malformed freshness evidence exits 3 without a kickstart; inspect
+the health projection and producer schema before retrying. The helper trusts the
+runtime's stale verdict and does not independently validate provider-proof times.
+This F1 requirement does not qualify future timestamps or other independent
+freshness policies; acceptance evidence must name the tested release revision.
+The runtime itself reports a future-dated or non-finite provider proof time as
+stale (`model_usable` null, `model_usable_stale` true).
+
+The diagnostic bundle's `health-snapshot` finding uses the same canonical
+readiness and freshness fields. Missing, stale, future-dated or in-flight
+provider proof is inconclusive (`ok: false`, confidence `suspected`); the raw
+model status alone cannot confirm health or failure. An active fallback window
+still confirms degraded primary service.
 
 Last-resort escalation if `whatsoup-keychain-heal.sh` exits 1 (still degraded): the
 login keychain itself needs unlocking from the GUI session context — open a GUI
@@ -593,8 +876,8 @@ the bot user is logged in.
 | Surface | Healthy signal | Where to check |
 | --- | --- | --- |
 | Fleet | `fleet scan complete`; expected instance count | fleet stdout log |
-| Agent instance | runtime health stats | instance stdout log |
-| Passive/chat instance | credential save or message-processing logs, no repeated auth errors | instance stdout log |
+| Agent instance | runtime health stats | instance rolling log (`logs/whatsoup.log`) |
+| Passive/chat instance | credential save or message-processing logs, no repeated auth errors | instance rolling log (`logs/whatsoup.log`) |
 | Disabled instances | `fleet scan: skipping disabled instance` | fleet stdout log |
 
 Fleet emits health-poller warnings when a polled instance is unreachable. If the

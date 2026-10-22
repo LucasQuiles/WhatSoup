@@ -62,7 +62,7 @@ export class HandoffDistillCoordinator {
   private readonly instanceName: string;
   private readonly isEnabled: () => boolean;
   private readonly getModel: () => string | null;
-  /** #2401: conversation keys currently degraded. Cleared each sweep. */
+  /** Degraded conversations remain until distillation and persistence succeed. */
   private degradedConversations = new Set<string>();
   private hadDegradedConversations = false;
 
@@ -110,6 +110,11 @@ export class HandoffDistillCoordinator {
       this.timer = null;
     }
     this.runner = null;
+  }
+
+  /** Fence an in-flight distill before a conversation artifact is invalidated. */
+  invalidateConversation(conversationKey: string): void {
+    this.runner?.invalidateConversation(conversationKey);
   }
 
   /** Construct the production runner. `resolved` is captured for distillFor. */
@@ -160,6 +165,7 @@ export class HandoffDistillCoordinator {
       distillFor,
       persist: (artifact: HandoffArtifact) => upsertHandoffArtifact(this.db, artifact),
       onDegraded: (conversationKey, reason) => this.onDegraded(conversationKey, reason),
+      onSucceeded: (conversationKey) => this.degradedConversations.delete(conversationKey),
       sourceFor: () => ({ provider: resolved.provider, model: resolved.model }),
     });
   }
@@ -200,8 +206,9 @@ export class HandoffDistillCoordinator {
       // If all conversations recovered during this sweep, emit idempotent
       // clear (#2401). No-op if no incident exists.
       if (this.hadDegradedConversations && this.degradedConversations.size === 0) {
-        this.hadDegradedConversations = false;
-        clearAlertSourceChecked(this.instanceName, `handoff-distill:${this.instanceName}`);
+        if (clearAlertSourceChecked(this.instanceName, `handoff-distill:${this.instanceName}`)) {
+          this.hadDegradedConversations = false;
+        }
       }
       log.info(
         { instance: this.instanceName, ticked: seen.size, degraded: this.degradedConversations.size },

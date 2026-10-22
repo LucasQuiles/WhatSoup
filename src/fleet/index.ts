@@ -10,6 +10,7 @@ import { HealthPoller } from './health-poller.ts';
 import { FleetDbReader } from './db-reader.ts';
 import { createStaticHandler } from './static.ts';
 import { createLivenessHandler } from './livez.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 import { defaultIncidentDbPath, openIncidentDb } from './incidents/db.ts';
 import { IncidentStore } from './incidents/store.ts';
 import { ProducerStore } from './incidents/producers.ts';
@@ -18,7 +19,7 @@ import { errorMessage } from '../lib/error-message.ts';
 import { handleGetLines, handleGetLine, handleGetLineProviderStatus } from './routes/lines.ts';
 import { handleGetLineCheckpoints, handleRestoreCheckpoint } from './routes/checkpoints.ts';
 import { handleGetLiveSessions } from './routes/live-sessions.ts';
-import { handleGetProviders } from './routes/providers.ts';
+import { handleGetProviderModels, handleGetProviders } from './routes/providers.ts';
 import { handlePutCredential, handleDeleteCredential, handleVerifyCredential, handleGetCredential, setExtraCredentialServices, type CredentialDeps } from './routes/credentials.ts';
 import { handleGetSilences, handleAddSilence, handleRemoveSilence } from './routes/silence.ts';
 import { handleGetChats, handleGetMessages, handleSearchMessages, handleGetAccess, handleGetLogs, handleGetTyping, handleCheckExists, handleCheckDirectory } from './routes/data.ts';
@@ -97,6 +98,8 @@ export interface FleetDeps {
    * canonical XDG path. The fleet server owns the returned handle: start()
    * probes it once, stop() closes it exactly once. */
   openIncidentDatabase?: () => DatabaseSync;
+  /** #2200: clock for the recorded start time and /livez uptime; defaults to systemClock. */
+  clock?: Clock;
 }
 
 export interface RouteDeps {
@@ -120,6 +123,7 @@ type NameJidRouteParams = { name: string; jid: string };
 
 type RouteParamsByHandler = {
   getProviders: EmptyRouteParams;
+  getProviderModels: NameRouteParams;
   putCredential: NameRouteParams;
   deleteCredential: NameRouteParams;
   verifyCredential: NameRouteParams;
@@ -202,6 +206,7 @@ type RouteHandler<K extends RouteKey> = (
 
 const EMPTY_ROUTE_PARAMS: EmptyRouteParams = {};
 const NAME_ROUTE_HANDLERS = new Set<NamedRouteKey>([
+  'getProviderModels',
   'getLine',
   'getLineProviderStatus',
   'getLineCheckpoints',
@@ -263,6 +268,7 @@ function hasNameParam(handler: RouteKey): handler is NamedRouteKey {
 
 const handlers: { [K in RouteKey]: RouteHandler<K> } = {
   getProviders: (req, res, _deps, _params) => handleGetProviders(req, res),
+  getProviderModels: (req, res, _deps, params) => handleGetProviderModels(req, res, params),
   putCredential: (req, res, _deps, params) => handlePutCredential(req, res, params),
   deleteCredential: (req, res, deps, params) => handleDeleteCredential(req, res, params, buildCredentialDeps(deps)),
   verifyCredential: (req, res, _deps, params) => handleVerifyCredential(req, res, params),
@@ -365,6 +371,7 @@ const ROUTES = [
   { method: 'GET',   path: /^\/api\/feed$/, handler: 'getFeed' },
   { method: 'GET',   path: /^\/api\/directories\/check$/, handler: 'checkDirectory' },
   { method: 'GET',   path: /^\/api\/providers$/, handler: 'getProviders' },
+  { method: 'GET',   path: /^\/api\/providers\/(?<name>[^/]+)\/models$/, handler: 'getProviderModels' },
   { method: 'PUT',    path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'putCredential' },
   { method: 'DELETE', path: /^\/api\/credentials\/(?<name>[^/]+)$/, handler: 'deleteCredential' },
   { method: 'POST',   path: /^\/api\/credentials\/(?<name>[^/]+)\/verify$/, handler: 'verifyCredential' },
@@ -489,7 +496,7 @@ export function createFleetServer(deps: FleetDeps) {
   }
 
   const staticHandler = createStaticHandler(distDir, getVersion);
-  const livenessHandler = createLivenessHandler({ selfName: deps.selfName, startedAtMs: Date.now() });
+  const livenessHandler = createLivenessHandler({ selfName: deps.selfName, startedAtMs: (deps.clock ?? systemClock).now(), clock: deps.clock });
   // Realtime publisher is wired after wsServer creation — use a deferred reference
   let realtimePublish: (event: import('./websocket-server.ts').WsEvent) => void = () => {};
   const realtime: FleetRealtimePublisher = { publish: (event) => realtimePublish(event) };

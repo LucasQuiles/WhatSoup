@@ -22,7 +22,7 @@
 ## Related Runbooks
 
 - [Fleet Bot Hardening Standard](runbooks/fleet-bot-hardening-standard.md)
-- [Release Snapshot Deployment](runbooks/release-deployment.md)
+- [Release Snapshot Deployment](runbooks/release-deployment.md) — includes `npm run release:activate`, the coordinated macOS launchd release switch with verification and automatic rollback
 - [macOS Launchd Deployment](runbooks/macos-launchd-deployment.md)
 
 ---
@@ -53,6 +53,14 @@ architectures. The Node 25 CI lane deliberately emits `compatibility_only`; it
 tests the package engine range but does not make a host ready. `path_hidden`
 means a tool was found in the canonical service roots but not the invoking
 shell's `PATH`; fix the caller environment rather than installing a duplicate.
+
+Version and architecture output is evidence only after its originating probe
+exits successfully. Failed probes, failed output formatting, and empty version
+output produce `inconclusive` rather than `available`; doctor exits 2. Platform
+discovery must also succeed before doctor evaluates capabilities or the installer
+selects packages. The installer rejects a failed Python probe before creating its
+managed environment and requires the post-install doctor to pass. These checks
+do not prove a service is running or that a particular agent runtime can use it.
 
 Quality and release setup create a private managed interpreter at
 `${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
@@ -199,6 +207,20 @@ Two further dark-by-default checks ship alongside it:
   `BOT_ERRORS_CLOCK_SKEW_ALLOWANCE_SECONDS` (default 5); fail-closed when
   enabled without a usable reference.
 
+Watchdog renotify backoff: an open incident is re-sent every
+`BOT_ERRORS_WATCHDOG_RENOTIFY_SECONDS` (default 21600). Once it is escalated,
+each re-send whose evidence is unchanged (ages and timestamps ignored, counts
+compared) doubles the next interval, capped by
+`BOT_ERRORS_WATCHDOG_RENOTIFY_MAX_SECONDS` (default 86400). Changed evidence
+resets the interval to the base. The incident records `renotifyCount` and
+`lastNotifiedEvidence`. A `session_collision:` incident pages critical when it
+opens and re-sends as a warning.
+
+`browser_debug` ignores debug browsers an owner keeps alive on purpose:
+`BOT_ERRORS_WATCHDOG_BROWSER_DEBUG_OWNED` is a comma-separated list of
+`--user-data-dir` paths (for example a scheduled watcher's keep-alive CDP
+Chrome profile). Unlisted debug browsers still warn.
+
 #### Instance-database snapshots (dark by default)
 
 `deploy/scripts/whatsoup-db-snapshot.py` writes a coherent per-instance
@@ -230,6 +252,11 @@ rendered from `deploy/com.whatsoup.*.plist` templates:
 
 Both plists pin `RunAtLoad=false`, so installing or re-loading them never fires
 the job immediately. Logs land in `~/Library/Logs/whatsoup/`.
+
+What the harness-maintenance job changes, its exit codes, the side-effect
+boundary of `--check`, and the agent CLI update and self-update observation
+events are described in
+[docs/runbooks/host-maintenance.md](runbooks/host-maintenance.md).
 
 **Install / update** — `deploy/setup.sh` step 4 renders both plists into
 `~/Library/LaunchAgents` (idempotent; a differing pre-existing plist is backed
@@ -345,6 +372,63 @@ journalctl --user -u whatsoup@sandbox-agent | grep '15551234567'
 journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|quarantine'
 ```
 
+### Bond Event Log (`bond-events.ndjson`)
+
+Each instance appends redacted WhatsApp bond lifecycle records (one JSON object
+per line, fsynced per record) to `<dataRoot>/bond-events.ndjson`. Storage is
+bounded and crash-recoverable (`src/transport/bond-event-log.ts`):
+
+- **Rotation.** Before an append would take the live file past 50 MiB, the live
+  file is renamed to `bond-events.ndjson.<id>` and the record starts a new live
+  file. `<id>` is a UTC stamp plus a random suffix
+  (`20260924T010339123Z-1a2b3c4d`). Each new stamp is forced past the newest
+  existing one, so sorting the names gives the order the segments were closed.
+  A record larger than 50 MiB is written on its own and is never dropped. If a
+  rotation fails, the record is still appended to the live file and
+  `failed to rotate WhatsApp bond event log` is logged. An append failure logs
+  `failed to persist WhatsApp bond event`. Neither failure affects the
+  WhatsApp connection.
+- **Compression.** Compression runs asynchronously at startup and after each
+  rotation, under `bond-events.ndjson.maintenance.lock`. Each closed segment is
+  gzipped to `<id>.gz.partial` and fsynced, then decompressed and compared
+  (byte count and SHA-256) with the segment. Only after that comparison passes
+  is it renamed to `<id>.gz`, followed by a directory fsync. The closed segment
+  is unlinked last.
+- **Retention.** The 10 newest finalized `.gz` archives are kept. Older ones
+  are deleted. This is the only intended loss of history: roughly the newest
+  10 × 50 MiB of uncompressed records plus the live file survive.
+- **Crash recovery.** Recovery runs at startup and at the start of every pass.
+  - A `.gz.partial` next to its closed segment is discarded and the segment is
+    compressed again.
+  - A `.gz` next to its closed segment is verified again. The segment is
+    unlinked only when the `.gz` matches.
+  - A missing live file is recreated by the next append.
+- **Ambiguous states are kept and reported.** Recovery keeps the files and logs
+  `bond event log maintenance kept segments for operator review`, with a
+  per-segment reason, in these cases:
+  - a `.gz` that does not match its segment (`archive_does_not_match_source`)
+  - a `.gz.partial` with no segment (`partial_without_source`)
+  - a `.gz.partial` next to a `.gz` (`partial_beside_archive`)
+  - a non-regular file under a segment name (`non_regular_entry`)
+  - a segment that keeps failing to compress (`compression_failed`)
+
+  Recovery never deletes these files. Inspect them by hand: for example, compare
+  `gzip -dc <id>.gz` against `<id>` before removing either one. Closed segments
+  that keep failing are not subject to retention and accumulate until they are
+  resolved. `pendingSegments` in that warning counts them.
+- **Maintenance lock.** A corrupt `bond-events.ndjson.maintenance.lock` makes
+  every maintenance pass fail closed (`bond event log maintenance failed`).
+  Confirm that no WhatSoup process for the instance is running before you
+  remove that lock (§5.6).
+
+To read the full history, decompress the archives in name order, then read the
+live file:
+
+```bash
+cd ~/.local/share/whatsoup/instances/<name>
+for f in $(ls bond-events.ndjson.*.gz | sort); do gzip -dc "$f"; done; cat bond-events.ndjson
+```
+
 ---
 
 ## 4. Health Endpoint
@@ -360,7 +444,31 @@ journalctl --user -u whatsoup@sandbox-agent | grep -E 'preConnect|postConnect|qu
 
 ### Authentication
 
-The `GET /health` endpoint requires no authentication.
+`GET /health` is reachable without a token, but an unauthenticated caller gets only the public
+liveness envelope: `{ "schema_version": "health.public.v1", "status", "generated_at",
+"startupNotification" }`, with HTTP 503 when the transport is down and not recovering. Every
+other field in this section, including `whatsapp`, `sqlite`, `durability`, `runtime` and
+`shadowGate`, is in the diagnostic body. That body requires the same bearer token as the mutation
+routes:
+
+```
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health
+```
+
+The diagnostic examples in this runbook pass that header.
+
+### Health invariants block
+
+The diagnostic body (never the public envelope) carries
+`health_invariants: { "schema": "whatsoup.health-invariants.v1", "ids": [...] }`.
+The ids are compile-time constants from `src/core/health-invariants.ts` naming
+the invariants the loaded code implements, for example
+`turn_capability.stale_evidence_degrades` (#2446). They are not runtime state.
+A release that predates the block does not emit it. `release:activate --apply`
+classifies the block against its own floor and records a report-only verdict;
+see [release-deployment.md](runbooks/release-deployment.md#health-invariants-verdict-report-only-2481).
+The top-level `schema_version` is unchanged and still appears only on the
+public envelope.
 
 Every mutation endpoint on the per-line health server requires a `Bearer` token, not just `POST /send`. The currently-gated mutation routes are:
 
@@ -392,6 +500,8 @@ Optional fields:
 Request errors such as both targets, neither target, unknown alias, unknown profile, or invalid `link_preview` return HTTP 400 and do not send.
 
 ### Response Format
+
+The authenticated diagnostic body (excerpt):
 
 ```json
 {
@@ -429,6 +539,18 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
       }
     ]
   },
+  "shadowGate": {
+    "mode": "shadow",
+    "recorder": "ready",
+    "sinkState": "ready",
+    "sinkDegradedReason": null,
+    "counts": {
+      "evaluated": 42, "recorded": 42, "written": 43,
+      "droppedQueueFull": 0, "droppedOversize": 0, "droppedClosed": 0, "droppedDegraded": 0,
+      "droppedWriteFailed": 0, "droppedUnserializable": 0,
+      "invalid": 0, "writeErrors": 0, "journalFailures": 0
+    }
+  },
   "durability": {
     "pendingOutbound": 0,
     "quarantinedOutbound": 0,
@@ -436,6 +558,8 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
   }
 }
 ```
+
+`shadowGate` is `{ "mode": "off" }` unless the shadow gate is enabled; see [Shadow Gate](#shadow-gate) → "Live status" for every field and `recorder` value.
 
 `model_advisories` carries the latest model-currency check (`checkedAt` is `null` until the first check completes; `advisories` is empty when every configured model is current). Levels: `upgrade-available`, `deprecated` (with `retiresAt`), `retired`. See `docs/configuration.md` → "Model currency advisories" for the full behavior.
 
@@ -447,7 +571,7 @@ Request errors such as both targets, neither target, unknown alias, unknown prof
 | `degraded` | 200 | WhatsApp connected but enrichment stale (>10 min) or runtime reports degraded state. Service is operational but impaired. |
 | `unhealthy` | 503 | WhatsApp is disconnected or a runtime-global safety condition, such as database compatibility loss, blocks safe message processing. |
 
-**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding/corrupt recovery jobs, echo conflicts, and preserved crash-exhaustion history also degrade agent health even when WhatsApp remains connected.
+**Important:** `degraded` returns HTTP 200 — enrichment staleness is a warning, not an outage. Monitoring scripts must inspect the JSON `status` field, not just the HTTP status code. Retained turn-finalization retries, outstanding (pending/claimed) recovery jobs, orphan transfers, and corrupt links or echo conflicts on live recovery jobs degrade agent health even when WhatsApp remains connected; the same residue on completed or exhausted jobs, and preserved crash-exhaustion history, stay visible as diagnostic counts (`turnRecoveryCorruptLinksSettled`, `turnRecoveryEchoConflictsSettled`, `turnRecoveryExhausted`) without degrading health.
 
 ### Degradation silence latch (`degradation_silence_unproven`)
 
@@ -460,7 +584,171 @@ evidence arrives. The latch lifecycle, implemented in `src/core/health.ts`:
   degraded path, which checks every reason source) observes real EARLY-path
   reasons and its final verdict is `degraded`. Unhealthy verdicts and
   late-computed-only reasons (schema/durability/retention/pending-polls/fact
-  export/late runtime status — all directly probed each poll) never arm.
+  export/late runtime status — all directly probed each poll) never arm on
+  their own. Only an early reason the latch can hold opens the arm gate: a
+  never-latched reason (below), live or held, does not, and neither does a
+  first-walk `auth_bond_at_risk`. Beside one, a late reason arms nothing,
+  because it never latched alone. Base armed the late reasons in that case;
+  the change covers all six of base's own members
+  (`runtime.per_chat_session_without_owner`,
+  `runtime.per_chat_respawn_abandoned`,
+  `runtime.agent_respawn_failed_clear_pending`, `recovery_debt_blocking`,
+  `runtime.turn_finalization_debt` and
+  `runtime.completed_delivery_identity_debt`) as well as the newer ones.
+- **Never latched.** The directly re-probed reasons
+  (`DIRECTLY_REPROBED_STATUS_REASONS`) never arm and never enter a latched set:
+  the per-chat ownership reasons, `runtime.agent_respawn_failed_clear_pending`,
+  `recovery_debt_blocking`, `runtime.turn_finalization_debt`,
+  `runtime.completed_delivery_identity_debt`, `runtime.auto_compact_backoff`,
+  `durability_delivery_debt`, `event_loop_starvation`, `connection_churn`,
+  and `outbound_flood`. Each is recomputed from live or durable state on every
+  evaluation. The durable ones fail closed while unreadable (through
+  `recovery_debt_blocking`) and clear on the first poll after repair. The
+  auto-compact backoff clears when its cooldown window ends; a backoff never
+  blocks turns, so a turn could not have proven it. `durability_delivery_debt`
+  implies `recovery_debt_blocking`, but blocking can hold without it (a
+  continuity gap or unreadable runtime evidence, for example).
+- **Windowed reasons hold.** Starvation, churn and flood are rolling windows,
+  and a recurring fault can leave a window between detections. Each therefore
+  stays reported, with the same reason and cause, until a hold has passed
+  since the condition was last detected. It then clears with no turn
+  (`src/core/health-reason-hold.ts`). The producer records when the condition
+  last held as it computes it, so detection does not depend on when or how
+  often `/health` is read. Health also counts the evaluations at which it sees
+  the condition, or an unreadable input, itself. Each hold, and when the
+  reason clears:
+  - `connection_churn`, 10 minutes (the length of the disconnect window).
+    Churn exists while the window counts 3 disconnects, so it ends when the
+    third-newest counted one leaves the window. The reason clears 10 minutes
+    after that, plus a clock-drift extension of 1% of the window (6 s), or 10
+    minutes after the disconnect that completed it if that is later. A steady
+    flap with a period of 5 minutes or less reaches 3 in every cycle, and the
+    gaps between those stretches last at most 5 minutes, so it reads degraded
+    continuously from the third disconnect. The one exception is a forward
+    wall-clock step larger than 10 minutes minus twice the flap period: any
+    step for a period of 5 minutes, and just over 12 s for a period of 4.9
+    minutes. Base then counts 3 again only at the third disconnect after the
+    step. Until then the reason can read clear for up to five flap periods
+    minus 20 minutes 6 s: never for a period up to about 4 minutes, and about
+    4.4 minutes at a period of 4.9 minutes. Base's own churn reason is clear
+    for that time too.
+  - `outbound_flood`, 5 minutes (the flood detector's window). A destination
+    floods while the detector counts 20 sends to it, so its flood ends when
+    its twentieth-newest counted send leaves the window. The reason clears 5
+    minutes after that, plus a clock-drift extension of 1% of the window
+    (3 s), or 5 minutes after the send that completed the flood if that is
+    later, for whichever destination ends last. A flood that trips again
+    within those 5 minutes reads continuously.
+  - `event_loop_starvation`, 5 minutes (30 sampler windows and 60 fleet polls,
+    the same as the starvation warning's repeat). The reason clears 5 minutes
+    after the last detection: the last starved sample, the sample that ended a
+    starved window, or the last evaluation that saw a new discontinuity or a
+    window refilling after one.
+
+  Unreadable input counts as holding. A loop stall over 10 s empties the
+  20-sample loop-lag window. Starvation is therefore read only from a full
+  window with no new discontinuity since the previous evaluation, including
+  one before the first evaluation. A window refilling after a discontinuity,
+  or a new discontinuity, counts as starved from that evaluation. This
+  detection still depends on reads, because the hold starts at the
+  evaluation, not at the stall:
+  - Stalls over 10 s recurring within about 5 minutes of the previous
+    detection read degraded continuously.
+  - A 12 s stall every 7 minutes reads clear for about 2 minutes of each cycle.
+  - A full window reads starved while 2 or more of its 20 samples exceed
+    250 ms, since its 95th percentile is the second-largest sample.
+  - A partial window at startup, or after the sampler restarts, reads clear
+    as before.
+  - A stall just under 10 s that lands at most once per window is never seen,
+    as before.
+
+  Transports: the Baileys manager supplies both the disconnect window and the
+  flood snapshot with their last-held times. The SMS, Signal and iMessage
+  bridges supply an empty disconnect window (`emptyConnectionStateSnapshot`)
+  and never a flood snapshot. A missing disconnect window counts as churn. A
+  missing flood snapshot counts as a flood only once one has been seen, so the
+  bridges read clear.
+
+  Clock: whether churn or a flood exists is decided only by base's own
+  wall-clock count (the disconnect window's `count` and the flood detector's
+  per-destination count) when a disconnect or send is recorded. The monotonic
+  clock (`performance.now()`) only measures how long the hold lasts:
+  - Each recorded entry also carries its monotonic instant, read after the
+    wall clock, so a pause between the two reads can only lengthen a hold.
+  - A detected episode holds until its threshold-th newest counted entry
+    leaves the window on the monotonic clock, plus 1% of the window, and at
+    least until it was detected. The extension covers the wall clock drifting
+    from the monotonic clock while NTP slews it (macOS slews at up to about
+    5000 ppm). It only lengthens holds and never decides detection.
+  - A counted entry with no monotonic instant would hold the episode one
+    window, plus the extension, from detection. None exists today: nothing
+    reloads these windows from disk.
+  - A read at which base's `count` or `flooding` meets the threshold also
+    reports the reason and holds it for one hold from that read.
+
+  A wall-clock step does not shorten or stretch a hold already recorded. It
+  moves base's windows, and so detection, exactly as in base:
+  - Stepped back: stored disconnects and sends, including expired ones not
+    yet pruned, are now later than the wall clock, and base counts them until
+    the wall clock is one window past them. For a flood, later sends to the
+    same destination stay counted behind them. A new entry counted with them
+    completes an episode, as base's verdict would read. Between new entries,
+    only reads refresh the hold from base's verdict, so the reason clears one
+    hold after the last read that saw it meet the threshold, or one hold
+    after the producer's own held-until if that is later. With aligned clock
+    rates after a backward step, measured since the episode's counted entries
+    were recorded, a step of up to the drift extension (6 s for churn, 3 s
+    for a flood) never clears the reason before one hold after base's verdict
+    clears, however rarely health is read. After a larger step, sparse reads
+    can let it clear sooner, by at most the step minus the extension. With no
+    new entries it clears no later than the step plus the window plus the
+    drift extension plus the hold after the step. These bounds assume no
+    further steps or clock-rate divergence while those entries remain counted.
+    Concurrent drift adds to the backward displacement and can invalidate the
+    small-step guarantee; steps before an entry was recorded do not offset a
+    later backward step for that entry.
+  - Stepped forward: base drops the entries. An episode already detected
+    keeps its recorded hold. Entries the step dropped can no longer complete
+    an episode, so churn or a flood that base stops counting is not detected
+    either, exactly as base's count reads. An ongoing flap or flood can
+    therefore read clear after its recorded hold ends, until base counts the
+    threshold again from entries after the step. For a churn flap with a
+    period P, this needs a step larger than 10 minutes minus 2 times P (any
+    step at P = 5 minutes, just over 12 s at P = 4.9 minutes), and lasts up
+    to 5 times P minus 20 minutes 6 s: nothing for P up to about 4 minutes,
+    about 4.4 minutes at P = 4.9 minutes. Base's own reason is clear for that
+    time too.
+  - Host suspend: the monotonic clock may not advance while the host sleeps
+    (not verified on a host). A recorded hold then lasts longer in wall time,
+    which fails closed. Detection is unaffected, since it uses base's
+    wall-clock count.
+
+  The body's `event_loop.locally_starved` and the starvation warning keep the
+  sampler's raw verdict. The hold is in memory per process, so a restart
+  starts clean; monotonic time also starts again with the process, and
+  nothing monotonic is persisted.
+
+  One detection is new. An isolated stall over 10 s, at any time, now reads
+  `event_loop_starvation` (cause `event_loop_starved`) for the window refill
+  plus 5 minutes from the evaluation that sees it. Base read clear. The noise
+  is bounded:
+  - all three causes are hold-tier in the fault taxonomy, so BOT ERRORS holds
+    them and promotes only after 30 minutes;
+  - the watchdog never restarts on `degraded`;
+  - the fleet poller's `health_body_degraded` page opens and clears on its own
+    about 5 minutes later.
+- **First auth-tree walk.** `/health` reads the auth bond from a cache that is
+  empty until the first tree walk since process start publishes, and
+  connect-time credential writes supersede walks in flight (the walk finishes
+  and its result is discarded). Until then the bond
+  reads `unknown` and health reports `auth_failure.auth_bond_at_risk` as
+  before, but that reason does not arm or enter the latch while the first walk
+  is pending: at most the auth bond's stale-risk bound (four tree-cache max
+  ages, 120 s by default) after process start. A completed walk that finds a
+  problem, a transient read, a backup error, or a first walk that does not
+  complete within the bound latches as before.
+- **Log.** The `degradation silence latch set` line carries `reasons`, the
+  sorted latched reason codes, so a latch-only reading names what armed it.
 - **Advance.** Every later evaluation that observes real degradation reasons
   advances the latch point and updates the latched reason set: a
   full-visibility evaluation REPLACES the set with what it observed (a reason
@@ -503,12 +791,58 @@ transport and process liveness pass:
   `fallbackReason=auth-required`, or an `auth-required` turn error that has not
   been superseded by a later successful turn. The watchdog creates/retains the
   marker (`~/Library/Logs/whatsoup/<instance>-credential-dead.marker`) and does
-  not restart the bot; a restart cannot restore provider credentials.
+  not restart the bot; a restart cannot restore provider credentials. On the
+  first dead cycle with no page outstanding it writes ONE critical BOT ERRORS
+  alert (`--instance <instance> --source provider_credential_dead`) to the
+  durable outbox through the shipped emitter,
+  `deploy/scripts/bot-errors-emit.py` of the release the watchdog was rendered
+  from (`deploy/scripts/render-watchdog.py` bakes that absolute path into the
+  script, or `--bot-errors-emit <path>`; it refuses to render when the emitter
+  is missing; it binds that release's loopback health reader the same way,
+  see `docs/runbooks/macos-launchd-deployment.md`), and records `<instance>-credential-dead.paged`. The stamp is written only
+  after the emitter accepts the page, so a failed write logs
+  `ERROR: CREDENTIAL-DEAD page failed …` and retries next cycle. With no
+  emitter at the baked path (for example, the release tree was removed) every
+  cycle exits nonzero in the ERROR state and retries the page; the detail line
+  `ERROR: BOT ERRORS emitter … not found; CREDENTIAL-DEAD not paged` is written
+  once per dead episode (tracked by `<instance>-credential-dead.unpaged`).
+  Re-render the watchdog from the running release to fix it.
 - **recovered** — recovery is affirmative AND fresh: HTTP `200`, `generated_at`
   within the freshness window, `model_usable=true`, the result is not stale,
   status is `usable`, and no fallback window is active. Only this state clears
   an existing credential marker; missing, stale, or HTTP-incoherent evidence
-  never does.
+  never does. When a page is outstanding, recovery writes one `--clear` with
+  the same `--instance` and `--source` and removes the `.paged` stamp after the
+  emitter accepts it. A failed clear logs `ERROR` and retries; after 3
+  consecutive failures (a missing emitter counts, logged as `WARN`) the watchdog
+  drops the stamp with `WARN: CREDENTIAL-RECOVERED clear failed 3 consecutive
+  times …` and the BOT ERRORS incident stays open until cleared by hand. A
+  stamp whose count is unreadable or negative is treated as having reached the
+  cap (`WARN: unreadable clear-failure count …`), and an unsafe stamp (symlink,
+  foreign owner, writable by others) is an `ERROR` that is never followed.
+  While a page is outstanding, recovery first writes
+  `<instance>-credential-dead.recovered`, before it removes the credential
+  marker or sends its clear, and removes the flag once the stamp is gone. If
+  the flag cannot be written, recovery changes nothing (`ERROR: failed to
+  record recovery flag …`): the marker, the stamp and the open page stay, and
+  the next healthy cycle retries. A dead cycle that finds both the stamp and
+  this flag knows the stamp is left over from the previous episode (its clear
+  was still being retried, its removal failed, or the watchdog died mid-way).
+  It logs `WARN: credential page stamp … is left from a previous episode`,
+  drops the stamp and the flag, and pages the new episode. A flag with no
+  stamp is dropped before the new episode's stamp is written. Without the
+  flag, the stamp belongs to the current episode and keeps suppressing
+  repeats.
+
+  **No state-file failure silences a page.** When the stamp or the flag is
+  unsafe (symlink, foreign owner, writable by others) or cannot be removed,
+  the watchdog pages anyway and logs `ERROR` (`… paging anyway (repeats are
+  possible)`, `… paging without it …`, `ERROR: unsafe recovery flag …`). The
+  cost is a repeated page on a later cycle; BOT ERRORS folds a repeat into the
+  open `machine|instance|source` incident, so the group and the owner are not
+  paged again. A stamp suppresses only an incident that is still open, because
+  the flag is written before any clear is sent: if the flag cannot be written,
+  recovery changes nothing and the incident stays open.
 - **unknown** — provider evidence is absent, stale, or otherwise inconclusive
   (including non-agent instances, which carry no `turn_capability` at all).
   The watchdog neither restarts the bot nor changes the marker.
@@ -516,9 +850,9 @@ transport and process liveness pass:
 **Final log states** (last line of
 `~/Library/Logs/whatsoup/<instance>-watchdog.log` per cycle): `ok`,
 `OUTBOUND-POISON`, `CREDENTIAL-DEAD`, `HEALTH-UNKNOWN`, `RESTARTED`, `RESTART-SUPPRESSED`,
-`RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
+`RESTART-AVOIDED`, `RESTART-FAILED`, `ERROR`, and `CREDENTIAL-UNKNOWN`. The line is chosen by an
 upgrade-only ladder — `OUTBOUND-POISON` > `CREDENTIAL-DEAD` > `HEALTH-UNKNOWN` >
-`RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
+`RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `RESTART-AVOIDED` > `ERROR` >
 `CREDENTIAL-UNKNOWN` > `ok` — so untrusted diagnostic evidence cannot be
 masked by a restart outcome, a restart-worthy cycle never reports `ok`, a
 mixed bot/fleet cycle reports the most actionable restart outcome, and a
@@ -531,12 +865,187 @@ window is active; a quiescent unknown (healthy idle bot past the 30-minute
 usability-probe TTL, or any non-agent instance) stays `ok`.
 `HEALTH-UNKNOWN` means the authenticated diagnostic body or its supporting
 token/timestamp evidence could not be trusted; it exits the watchdog invocation
-with status `2`, never restarts, and never changes the credential marker.
+with status `2`, never restarts, and never changes the credential marker. It
+also covers a loopback read that could not start: a connect-stage
+`EADDRNOTAVAIL` (local ephemeral-port exhaustion) on the bot or fleet-console
+read, or a bound health reader that is missing or fails its digest check at
+the run's start or when a confirm window ends (below).
+Ordinary connection refusal, and every other connect- or request-stage
+failure, is still restart evidence on its first observation. A target that
+accepts the connection but does not answer gives a *silent* read: an OS-level
+failure while waiting for or reading the response (a timeout, a reset, or EOF
+before the status line), logged as `health endpoint unreachable: connection
+accepted, response timed out or was reset` (`fleet console unreachable: …` for
+the fleet console), or a read killed at the 8 s deadline, logged as `health
+read exceeded 8s` (`fleet console health read exceeded 8s`). A response cut
+short without an OS error (`http.client`'s `IncompleteRead`, or a short body
+that does not parse) is not silent; it stays `HEALTH-UNKNOWN`. A silent read is
+still restart evidence, but the watchdog confirms it in the same run before it
+acts:
+
+- The restart gates run first, in their usual order: a permanent launchd stop,
+  a pairing coordination lease, another watchdog's restart in progress (the
+  restart mutex) and the 5-minute cooldown. If one of them stops the restart,
+  nothing else happens, as before.
+- If every gate is open, the watchdog notes the job's launchd identity (its
+  load state and pid, from `launchctl print`; an unreadable identity still
+  runs the window, so a trusted answer can still cancel the restart), logs
+  `<label> silent read; confirming before restarting …`, releases the
+  restart mutex and re-reads that target every 15 s (`CONFIRM_STEP_SECONDS`)
+  until 90 s
+  (`CONFIRM_WINDOW_SECONDS`) have passed. The window ends with the first
+  read that finishes at or after 90 s, so on a steady clock a read is running
+  at that moment or starts then. Each read logs `<label> confirm read N: …`.
+- A trusted answer ends the window and cancels the restart: `<label> answered
+  on confirm read N; restart avoided: …` and the state `RESTART-AVOIDED`. A
+  trusted answer is an HTTP status below 400 from the fleet console, or a bot
+  body the decision block reads without a restart verdict (healthy,
+  credential-dead, credential-unknown or outbound-poison). That read's own
+  verdict is not acted on in this run: a credential-dead or outbound-poisoned
+  bot is reported by the next run whose main read answers.
+- Every other result continues the window and changes nothing else in the run:
+  another silent read, a refusal, `EADDRNOTAVAIL`, an unavailable or
+  unverifiable reader or token, an empty, oversized or untrusted body, a bot
+  restart verdict, or a fleet HTTP error status.
+- A `sleep` that fails ends the window at once: `<label> confirm window ended:
+  sleep failed (exit N) after M confirm reads; restart still due: …`. The
+  checks below follow as at any window's end.
+- When the window ends without a trusted answer, the watchdog logs `<label> no
+  trusted answer in 90s (N confirm reads); restart still due: …` and checks
+  two things before it restarts:
+  - The reader binding, exactly as at the run's start. A reader still
+    unverifiable then logs `HEALTH-UNKNOWN: health reader binding unavailable
+    or invalid` and ends the run there, as at its start: exit status `2`,
+    and nothing else is read or restarted in that run (after a bot window,
+    the fleet console is not read). The last line is `HEALTH-UNKNOWN` unless
+    the run had already noted a higher-ranked state (`CREDENTIAL-DEAD` or
+    `OUTBOUND-POISON` from the bot section, before a fleet window). This is
+    the only window-end result that ends the run.
+  - The job's launchd identity. "Unloaded" means launchctl's "could not find
+    service" status (exit 113, verified on macOS 26; other macOS versions in
+    the fleet are not verified, and a different not-found code there only
+    defers the restart, as unreadable). Any other failure,
+    including a missing domain's exit 112, or the 15 s limit, leaves the
+    identity unreadable. If it was unreadable at the silent read, it is not
+    read again and the run logs `<label> restart deferred: job identity
+    unreadable at the silent read: …`. Otherwise it is read again: if
+    unreadable now, the run logs `<label> restart deferred: job identity
+    unreadable at the window's end: …`. A job unloaded, loaded or running a
+    different pid since the silent read logs `<label> restart deferred: job
+    changed during the confirm window (at the silent read: …; now: …)`. Each
+    of these records `RESTART-SUPPRESSED` and restarts nothing for that
+    target; the rest of the run goes on (after a bot window the fleet
+    console is still read and can be restarted), and the next run decides
+    from its own read. Load state and pid cannot show a reload that ends
+    with the same pid, or two job generations that both show no pid; such a
+    job counts as unchanged.
+
+  Otherwise it restarts through the same path as any other restart. Every gate
+  above is checked again at that moment. A job unloaded at both ends may be
+  bootstrapped, as at the silent read. A job loaded at both ends may only be
+  kickstarted: if the restart's own `launchctl print` fails when it acts,
+  for any reason and not only "not found", the run logs `<label> restart
+  deferred: job not confirmed loaded after the window check: …`
+  (`RESTART-SUPPRESSED`) and bootstraps nothing. Like the other deferrals,
+  it keeps nothing and arms no cooldown; the next run decides from its own
+  read. A gate that closed during the window (another watchdog's restart
+  starting the cooldown, a pairing lease, a permanent stop) stops the restart
+  as it would stop any restart. Another watchdog's restart or a permanent
+  stop also changes the job's pid, so it usually shows as `restart deferred`
+  instead of the gate's own line; either way that target is not restarted.
+
+  One race remains after the window-end check, as base has over its own gate
+  pass: an outside `launchctl bootstrap` or reload during the second gate
+  pass can lead to a kickstart of a job that has just started or of a new
+  pid. That pass usually takes milliseconds; its permanent-stop query is
+  limited to 15 s, but the restart's own `launchctl print` in
+  `ensure_loaded` has no time limit, so the window has no strict bound. A
+  successful restart by another watchdog whose cooldown stamp was written
+  cannot cause it: that watchdog writes the stamp before it releases the
+  restart mutex, and this pass checks the cooldown after taking it. Another
+  watchdog's restart that wrote no stamp (a failed stamp write after its
+  kickstart, or a failed or timed-out kickstart) leaves the cooldown open,
+  so it can.
+
+Nothing is kept between runs: every restart is still the watchdog's own decision
+on a read in the same run, through the gates as they stand at that moment.
+Compared with restarting at once:
+
+- A restart comes later, or not at all when the target answers within the
+  window. On a steady clock the window lasts at most 90 s plus one 8 s read
+  deadline. It is measured by the clock, with at most six confirm reads: a
+  forward clock step shortens it, and a backward one lengthens it up to six
+  full 15 s steps and 8 s reads, about 138 s. `launchctl print` for the job's
+  identity at both ends and for the second gate pass (15 s limit each) and the
+  binding check (8 s) add to that, so a restart comes at most about 191 s
+  later than an immediate restart, and about 90 to 100 s later when nothing
+  hangs. These figures count the timed reads, the `launchctl print` queries
+  and the binding check only. The per-read token and decision steps, and the
+  restart path's own `launchctl print` in `ensure_loaded` (as at base), have
+  no deadline. Counting the bounded steps alone, a run with a bot and a fleet
+  window takes at most about 500 s, inside the invocation lock's 600 s.
+- An avoided restart arms no cooldown, so a restart-worthy read in the next 5
+  minutes (a refusal, an HTTP error, a silent read confirmed silent) is not
+  held back by the cooldown an immediate restart would have armed.
+- A deferred restart (`restart deferred: …`) arms no cooldown either, so the
+  next run may act on a respawned or reloaded job sooner than the 5-minute
+  cooldown of an immediate restart would have allowed.
+- A watchdog killed during a window (an unload, a reboot, a crash) performs no
+  restart for that read. The next run decides again from its own read.
+- A job whose identity changed or could not be read, or that was loaded at
+  both ends and is not confirmed loaded when the restart acts, gets no
+  restart from that read; the rest of the run goes on. A reader that no longer
+  verifies at the window's end ends the run.
+
+Every recorded restart of a live target followed a silence of 20.5 to 83.2 s.
+On a steady clock the last confirm read starts about 82 to 90 s after the
+window opens (the window less one read deadline, up to the window). Before
+the window opened, the silence had already lasted the silent read's own wait:
+5 s for a reader timeout, 8 s at the deadline, none for a reset or EOF.
+
+A job that is not loaded
+is bootstrapped only on the restart path, and a successful bootstrap is not
+followed by a kickstart.
 `ERROR` records a lower-ranked watchdog-internal failure such as an unsafe marker
 path when no stronger credential, health-evidence, or restart outcome applies.
 
 **Operator notes:**
 
+- `RESTART-AVOIDED` → a silent read would have restarted the target, but a
+  confirm read in the same run got a trusted answer; nothing was restarted.
+  Limits of the rule:
+  - A target whose silences always end within the 90 s window is never
+    restarted, where the watchdog used to restart it on each silent read
+    (subject to the cooldown). This is intended: each answer shows the target
+    serving. The `restart avoided` lines in the watchdog log are where to see
+    it; nothing alerts on them.
+  - Each silent target adds about 90 to 100 s to a run, at most about 191 s,
+    and the bot and the fleet console can both read silent in one run (the
+    fleet console is read after the bot section, as before). That can exceed
+    the 120 s `StartInterval`: launchd never runs two instances of one job, so
+    the next run then starts late. The invocation lock is reclaimed as stale
+    only after 600 s, and the restart mutex is not held during the window.
+- `<label> restart deferred: job changed during the confirm window` (state
+  `RESTART-SUPPRESSED`) → the job was unloaded, loaded or respawned while a
+  silent read was being confirmed, for example by an operator, a release
+  activation, another watchdog's restart, a crash and launchd respawn, or a
+  stop with exit code 78. That target was not restarted; the rest of the run
+  went on (after a bot window the fleet console is still read and may be
+  restarted), and the next run reads the job afresh.
+- `<label> restart deferred: job identity unreadable at the silent read` (or
+  `at the window's end`; state `RESTART-SUPPRESSED`) → `launchctl print`
+  failed for that job, other than reporting it not found, or took longer than
+  15 s, so the watchdog could not tell which job it would restart. That
+  target was not restarted; the rest of the run went on, and the next run
+  reads the job afresh. If it repeats, look at launchd itself.
+- `<label> restart deferred: job not confirmed loaded after the window check`
+  (state `RESTART-SUPPRESSED`) → the job was loaded at both ends of the
+  confirm window, but the restart's own `launchctl print` failed when it
+  acted: the job was booted out after the check (for example by an
+  operator), or launchctl failed for another reason. The watchdog does not
+  bootstrap a job that was loaded when its silent read was taken. That
+  target was not restarted, nothing is kept and no cooldown is armed; the
+  next run decides.
 - `OUTBOUND-POISON` → preserve the first outbound failure and durable turn
   evidence, then reconcile delivery ownership before a controlled restart.
   The watchdog accepts only the exact connected agent poison shape and does
@@ -677,7 +1186,7 @@ exits 78; repair the directory boundary instead of restart-looping the service.
 # Check all instances
 for port in 9091 9092 9093 9094; do
   echo -n "Port $port: "
-  curl -s http://127.0.0.1:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], '| WA:', d['whatsapp']['connected'])"
+  curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:$port/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], '| WA:', d['whatsapp']['connected'])"
 done
 ```
 
@@ -696,7 +1205,7 @@ done
 systemctl --user status whatsoup@q
 
 # 2. Check WhatsApp connection
-curl -s http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9092/health | python3 -c "import sys,json; d=json.load(sys.stdin); print(d)"
 
 # 3. Check logs for the conversation
 journalctl --user -u whatsoup@q -n 50 | grep -E 'ingest|dispatch|session|error'
@@ -738,7 +1247,7 @@ lifecycle (supported resume providers are Claude CLI, Codex CLI, and OpenCode CL
 
 ```bash
 # 1. Get the full health response
-curl -s http://127.0.0.1:9091/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -m json.tool
 
 # 2. Check enrichment last_run timestamp
 # If enrichment.last_run is > 10 minutes ago on a chat instance, this triggers degraded.
@@ -799,7 +1308,11 @@ On `agent_respawn_failed` / auto-respawn exhaustion, do not delete the session, 
 checkpoint to force green health. The runtime marks that manager exhausted and defers destructive
 cleanup until the crashed turn's evidence reaches durable terminal state; a journaled turn with
 no immutable context is retained instead. Even after proof-gated cleanup, crash history remains
-degraded so the exhausted episode is not hidden.
+degraded so the exhausted episode is not hidden. Each exhaustion episode is retained as an alert
+owner until the chat respawns successfully or one hour passes; only that episode's own timer can
+retire it, so a later re-exhaustion of the same chat is never retired early by an older timer.
+Retirement attempts the shared `agent_respawn_failed` clear under the same rule as abandonment
+below: only once no chat is either exhausted or abandoned, with a refused clear kept as retry debt.
 
 The same alert source has a second path, and the two behave differently, so read the body first.
 An **abandoned respawn** pages with a body naming a count of abandoned chats and the deferral
@@ -815,15 +1328,21 @@ The chat recovers on its own. The abandonment settles when the chat's next inbou
 it back into service, when a new owned session is indexed for it, or when the record ages out of
 the retention window. Which of the first two routes the turn takes depends on the shape: a session
 that had gone inactive is respawned in place and settled by that re-activation, while one that
-still reported active when it was abandoned is settled on the served-turn path. Settling clears
-this alert only when no chat is either exhausted or abandoned. Health reports
-`per_chat_respawn_abandoned` until it settles.
+still reported active when it was abandoned is settled at the provider-ready served-turn boundary,
+after the before-send hook, executing-actor publication, and typing indication. Settlement retires
+the chat's abandonment immediately. Once no chat is either exhausted or abandoned, the runtime
+attempts the shared alert clear. An accepted clear finishes the incident; a refused or throwing
+clear leaves the content-free `agentRespawnFailedClearPending: true` health field and the
+`runtime.agent_respawn_failed_clear_pending` / `agent_respawn_failed_clear_pending` reason/cause
+pair degraded. Later health polls and provider-ready settlement boundaries retry while both owner
+populations remain empty. A new abandonment or exhaustion blocks the retry without erasing the
+obligation. Health reports `per_chat_respawn_abandoned` only until the abandonment itself settles.
 
 For `provider_execution_queue_pressure` or a crash classified
 `provider_state_locked`, correlate before intervening:
 
 ```bash
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import json,sys; print(json.load(sys.stdin)['runtime']['agent']['providerExecution'])"
 pgrep -af opencode
 journalctl --user -u whatsoup@chat-bot --since '-15 min' --no-pager | \
@@ -852,7 +1371,45 @@ journalctl --user -u whatsoup@sandbox-agent -n 30 | grep -E 'disconnect|loggedOu
 
 **If the process is reconnecting automatically:** Wait — the connection manager retries on transient disconnects (e.g. `restartRequired`).
 
-**If logged out (credentials expired):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
+**A 401 is not proof the device was removed.** Read the authenticated health body's
+`whatsapp.connection.disconnect_decision` (the transport's own decision for the
+last close; `null` after a successful open or at process start) and
+`auth_failure_class`:
+
+| `disconnect_decision.classification` | `auth_failure_class` | HTTP | Meaning / action |
+|---|---|---|---|
+| `confirmed_device_removed` | `serverside_logout_irreversible` | 503 | The stream:error carried `conflict type="device_removed"`. The server removed the linked device; re-pair (§6.1) after owner approval. |
+| `ambiguous_401_reconnecting` | `auth_401_ambiguous_retrying` | 200 (degraded) | An inspected 401 without `device_removed`. The transport is spending its **one** bounded reconnect. Wait one poll. |
+| `ambiguous_401_parked` | `auth_401_ambiguous_parked` | 503 | A second ambiguous 401 after the bounded reconnect. The transport stopped; removal is **not** confirmed. Check the primary phone's Linked Devices before any re-pair. |
+| `uninspected_401_conservative_exit` | `auth_401_uninspected_exit` | 503 | A 401 whose stream:error node could not be inspected. Conservative exit; removal is **not** confirmed. Check Linked Devices first. |
+
+The parked and uninspected classes are no-restart for every watchdog (a restart
+would buy a fresh bounded retry, park again and loop). The decision is
+process-local: a restart starts with no decision and a fresh bounded retry. A
+health body without the `disconnect_decision` key comes from an older binary or a
+non-Baileys transport; consumers keep the old conservative rule for it (any
+401/`loggedOut` reads as `serverside_logout_irreversible`). The same fields are
+in the `whatsapp_device_bond_lost` alert evidence (`disconnect_classification:`,
+`conflict_inspected:`), whose title and `confidence` say whether removal was
+confirmed.
+
+**Reconnecting, not logged out (#3722).** Beside `disconnect_decision`, the same
+connection block carries `reconnect_reset`: `{ reason, at }` when the transport
+last reset its reconnect state, with `reason` one of the following:
+
+| `reconnect_reset.reason` | Written when |
+|---|---|
+| `exhaustion_cycle_retry` | The transport forced a fresh connect after an exhausted reconnect cycle. |
+| `graceful_reconnect_keepalive_failed` | A keepalive failure triggered a graceful reconnect. |
+| `graceful_reconnect_connection_exhausted` | Recognised by the poller, but no current transport path writes it: only the keepalive path calls the graceful reconnect. |
+
+It is `null` at process start, after every successful open, and while connected;
+the key is absent on transports that do not report it. With a reason set,
+`reconnect_phase: backoff` and zero `reconnect_attempts` mean a fresh reconnect,
+not a logout. The fleet poller holds its weak logged-out signal on that basis
+for at most one reconnect cycle (6 minutes), then pages as before.
+
+**If logged out with confirmed removal (or you have checked Linked Devices):** Credentials must be refreshed via QR code. See §6.1 — Re-pairing WhatsApp.
 
 **If the service keeps restart-looping:**
 ```bash
@@ -1012,11 +1569,11 @@ sqlite3 ~/.local/share/whatsoup/instances/sandbox-agent/bot.db \
    ORDER BY count DESC, disposition;"
 
 # 3. Check health for durability stats
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import sys,json; d=json.load(sys.stdin)['durability']; print('pending:', d['pendingOutbound'], '| quarantine dispositions:', d['outboundQuarantineDispositions'])"
 
 # 4. Check WhatsApp is connected
-curl -s http://127.0.0.1:9091/health | python3 -c \
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health | python3 -c \
   "import sys,json; d=json.load(sys.stdin); print(d['whatsapp'])"
 ```
 
@@ -1265,7 +1822,8 @@ mv ${DB}.recovered $DB
 # 4. If unrecoverable, start fresh (auth state is separate — preserved)
 mv $DB ${DB}.corrupted.$(date +%Y%m%d%H%M%S)
 # The next startup will create a fresh database and run the current migration
-# set through version 40.
+# set registered in src/core/database.ts; consult src/core/database-schema-version.ts
+# for the current version.
 # If another instance has the same phone's message history, a warm-start import
 # will be attempted automatically from legacy paths.
 
@@ -1279,7 +1837,7 @@ systemctl --user start whatsoup@$INSTANCE
 
 ### 7.1 Approve or Block Users
 
-Admins receive approval requests as WhatsApp messages when an unknown sender contacts the bot. Reply directly in WhatsApp:
+Admins receive approval requests as WhatsApp messages in their direct chat when an unknown sender contacts the bot in a direct chat. In a group under strict group-sender mode (`groupSenderPolicy: allowlisted_only`), an unknown sender only produces an approval request when they @mention the bot; ordinary group chatter and status broadcasts never do. Reply directly in WhatsApp:
 
 ```
 ALLOW 15551234567       # approve a phone number
@@ -1463,6 +2021,77 @@ sqlite3 $DB \
    FROM session_checkpoints ORDER BY updated_at DESC LIMIT 10;"
 ```
 
+#### Verify history backfill after a relink (read-only)
+
+After a relink, the primary phone pushes history-sync notifications. WhatSoup stores each
+notification envelope from `messages.upsert` and, separately, stores the downloaded history from
+`messaging-history.set`. Stored envelopes therefore do not prove that history arrived, and no single
+log line proves it either:
+
+- `historyMessages: batch processed` also fires for batches that were only skipped or failed; read
+  its `inserted`, `upgraded`, `placeholders`, `skipped`, `noop` and `failed` counts.
+- A batch whose rows all already existed logs only at debug (`historyMessages: batch already stored`).
+- `historyMessages: some history messages failed to store` means usable messages were lost.
+- `history sync notification is not marked as ours; the self-only guard drops it` means a
+  notification was discarded before download: a spoof, or a library regression like Baileys
+  7.0.0-rc12's.
+- `history sync notifications received but no history batch arrived` means eligible notifications
+  were stored and no history batch at all arrived within five minutes afterwards. It is a liveness
+  check: Baileys can merge several notifications' history into one batch, so a batch clears every
+  pending notification and its absence of warnings never proves completeness. FULL notifications
+  are skipped by policy and never raise this.
+
+Prove recovery per message instead. Take the message IDs you expect from the primary phone or
+from an independent continuity manifest, and check each one against a consistent snapshot of the
+instance database (never open a live WAL database with `immutable=1`):
+
+```bash
+sqlite3 "$SNAPSHOT_DB" \
+  "SELECT message_id, conversation_key, content_type, is_from_me, timestamp
+   FROM messages WHERE message_id IN ('<id-1>', '<id-2>');"
+```
+
+A returned row with a real `content_type` means the body is stored. `content_type = 'history'` is
+an envelope-only placeholder; the body never arrived. A missing row means the message is absent.
+Treat a repeated batch as successful only when the expected row already exists. Stored history is
+not an inbound admission: backfilled messages are never answered automatically, so use the
+continuity manifest audit below to decide on any catch-up.
+
+#### Prepare recovered voice notes before catch-up
+
+History sync stores voice notes without media or a transcript, and nothing transcribes them
+automatically. In agent context an untranscribed voice note appears as
+`[Voice note — not transcribed (message <id>)]`, never as raw JSON; a stored transcript appears as
+`[Voice note transcription]: …`, truncated at the context-line cap with a pointer to the message.
+Before any catch-up that depends on recovered voice notes, prepare exactly the selected messages:
+
+```bash
+# 1. Preview against a consistent snapshot: validates the selection and budgets, writes only the manifest.
+npm run prepare-recovered-audio -- --db "$SNAPSHOT_DB" --out preview.json \
+  --message-id '<id-1>' --message-id '<id-2>'
+# 2. Apply on the live database with a deliberately chosen local provider.
+npm run prepare-recovered-audio -- --db "$DB" --out prepared.json --apply \
+  --provider whisper.cpp --media-dir "$MEDIA_DIR" \
+  --message-id '<id-1>' --message-id '<id-2>' [--exclude '<id>'] [--max-wall-seconds 900]
+```
+
+- Only the local providers `whisper.cpp` and `faster-whisper` are accepted: no paid API calls and
+  no provider alert markers. The provider must already be installed on the host.
+- Hard limits: 10 messages, 3600 seconds of audio, 100 MB declared size and 1800 seconds of wall
+  time per run. Any unusable selection (not found, not audio, deleted, unreadable raw message,
+  unknown duration, over budget) blocks the whole run before any work (exit 2).
+- Each item is downloaded from its stored `raw_message`, transcribed, and written with a
+  compare-and-set: if the row changed meanwhile, it is left alone and reported `row_changed`.
+  The transcription fallback text is never stored as a transcript.
+- After the wall budget is spent, no new item starts and a late result is discarded; the command
+  waits for an in-flight provider call (bounded by the provider's own timeout) before exiting.
+- The manifest (mode 0600, never overwritten) records per item the status and reason, row, audio
+  and transcript SHA-256, and the media path.
+- **Catch-up is blocked unless the apply run exits 0**: every selected item is `ready` or
+  explicitly `--exclude`d by the operator. Exit 3 means at least one item failed, was cancelled by
+  the budget or changed; fix or exclude it and run again. Already transcribed items report
+  `already_transcribed` without new work.
+
 #### Audit an independent continuity manifest (read-only)
 
 Receiver-local health and an empty durability queue cannot prove that a linked client received
@@ -1540,43 +2169,280 @@ fingerprints and bounded taxonomy into the existing recovery ledger; it never st
 destination, manifest, or evidence values. Repeating the command is idempotent. Its JSON output
 contains only audit counts plus created/existing/unresolved/ambiguous ledger counts.
 
-After recording, `/health` reports `status: "healthy"` with a `recovery_debt` field (#2973
-Option A — continuity gaps no longer flip the top-level status). The `continuity` block and
-`continuity_gap_open`/`continuity_gap_unreadable` in `degradation_causes` are both preserved:
+After recording, authenticated `/health` reports the normalized recovery-debt projection separately
+from current service status. A readable retained continuity gap does not flip an otherwise healthy
+service to degraded. A blocking episode (`recovery_debt_blocking`, `durability_delivery_debt`,
+`runtime.turn_finalization_debt`, `runtime.completed_delivery_identity_debt`) does not arm the
+silence latch: those reasons are recomputed from durable state on every poll, so status returns to
+`healthy` on the first poll whose evidence reads non-blocking, without a restart, while unreadable
+evidence keeps `recovery_debt_blocking` present on every poll. See "Degradation silence latch"
+above. The compatibility `continuity` block remains available:
 
 ```json
 {
   "status": "healthy",
+  "status_reasons": [],
   "recovery_debt": {
     "open": true,
+    "service_blocking": false,
+    "attention": "routine",
     "reason": "continuity_gap_open",
+    "reasons": ["continuity_gap_open"],
     "continuity": {
       "readable": true,
       "open": 3,
       "unresolved": 2,
       "ambiguous": 1
+    },
+    "turn_recovery": {
+      "readable": true,
+      "blocking_outstanding": 0,
+      "retained_terminal": 0,
+      "open_catchups": 0,
+      "corroborated_retained": 0,
+      "scheduled_turns_lost": 0
+    },
+    "completed_delivery_identity": {
+      "readable": true,
+      "blocking": 0,
+      "retained": 0,
+      "next_action": null
+    },
+    "delivery": {
+      "readable": true,
+      "blocking_ambiguous": 0,
+      "uncorroborated_ambiguous": 0,
+      "corroborated_retained": 0,
+      "oldest_uncorroborated_at": null
     }
   },
   "continuity": {
     "readable": true,
+    "closure_ledger": "present",
+    "total": 4,
     "open": 3,
     "unresolved": 2,
-    "ambiguous": 1
+    "ambiguous": 1,
+    "ambiguous_total": 1,
+    "closed": 1,
+    "addressed": 1,
+    "declined": 0
   }
 }
 ```
 
-If the ledger cannot be parsed exactly, health reports `recovery_debt.reason: "continuity_gap_unreadable"`
-with `degradation_causes` still containing `continuity_gap_unreadable`.
-Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
-rows to force green health; controlled catch-up and terminal closure require a later proof-bound
-mechanism.
+The counts always reconcile: `total = open + closed`, `open = unresolved + ambiguous`, and
+`closed = addressed + declined`. `unresolved` and `ambiguous` count only open gaps; an originally
+ambiguous gap that was later closed leaves `ambiguous` but stays in `ambiguous_total`. Only
+`open > 0` raises `continuity_gap_open`; `turn_recovery_degraded` is derived separately and a closure
+never clears it. A database that has not applied migration 66 reports `closure_ledger: "absent"`
+with `total`, `closed`, `addressed`, and `declined` set to `null` (its open counts are real; its
+closure history is unknown). `recovery_debt.continuity` keeps its four-field shape and is normalized
+from the same reading, so a closed gap leaves its open counts too; the closure counts appear only in
+the top-level block.
 
-#### Close a proven operator catch-up recovery (exact schema 43 only)
+If any required recovery evidence cannot be parsed exactly, health fails closed with
+`status: "degraded"`, `status_reasons: ["recovery_debt_blocking"]`,
+`recovery_debt.service_blocking: true`, and `attention: "urgent"`. A malformed or contradictory
+present debt projection is likewise not valid green evidence for release, heal, watchdog, or fleet
+consumers.
+`blocking_ambiguous` is the sampled stale subset of `uncorroborated_ambiguous`; it is the delivery
+gauge that contributes to `service_blocking`. A fresh uncorroborated ambiguity remains routine debt
+until its dwell threshold expires. Fleet and console summaries call their numeric value an aggregate
+gauge total because category gauges can overlap and are not a count of distinct obligations.
+`turn_recovery.scheduled_turns_lost` (#3754) counts retained scheduled agent-job turns failed by crash
+recovery in the last 7 days. If `terminalDurabilityDays` is below 7, pruning can remove rows inside
+that window and undercount losses; zero does not establish that no losses occurred. It is additive
+visibility owed to no user: it never sets `open`, `attention` or a
+reason, consumers do not add it to the aggregate gauge total, and it is `null` when the runtime did not
+report a valid count.
+
+If the ledger or a closure row cannot be read exactly (malformed, orphaned, duplicated, conflicting
+with its plan, or missing its append-only guards), health reports
+`recovery_debt.reason: "continuity_gap_unreadable"` with `service_blocking: true`, every count in the
+top-level `continuity` block is `null` rather than zero, and `degradation_causes` contains
+`continuity_gap_unreadable`.
+Recording does not send, replay, synthesize an inbound, or close a gap. Do not edit the recovery
+rows to force green health; close a gap only through `close-continuity-gap` below.
+
+#### Close a continuity gap (addressed or declined)
+
+`close-continuity-gap` appends one immutable row to `continuity_gap_closures` (migration 66) for one
+recorded gap. It never sends, replays, admits, or edits the recorded plan or run; a closure cannot be
+updated or deleted. One gap has at most one closure, so decide the final disposition before applying.
+Deployment of this command does not authorize closing any existing gap: each closure needs its own
+evidence and an operator decision.
+
+**Evidence root.** Put every evidence file under one protected directory (mode `0700`, not group- or
+world-writable). The command resolves each referenced path beneath that root and refuses absolute
+paths, `..` segments, and symlinks that resolve outside it. JSON files that carry private identifiers
+(the evidence manifest, the original continuity manifest, decision records) must be mode `0600`.
+Every referenced file is bound by its SHA-256; a digest alone is never authority.
+
+The version-1 evidence manifest (`continuity-closure-evidence.v1`) is strict JSON:
+
+```json
+{
+  "contract": "continuity-closure-evidence.v1",
+  "planId": "continuity-gap:v1:<64 hex>",
+  "original": {
+    "manifest": { "path": "original/continuity-manifest.json", "sha256": "<64 hex>" },
+    "ordinal": 1,
+    "receiptFingerprint": "<64 hex>",
+    "contentType": "audio",
+    "conversationFingerprint": "<64 hex>"
+  },
+  "disposition": "addressed",
+  "proofKind": "live_reissue",
+  "actor": "operator:IDENTITY",
+  "authority": "owner-request:REFERENCE",
+  "observedAt": "2026-01-01T00:10:00.000Z",
+  "decidedAt": "2026-01-01T00:05:00.000Z",
+  "liveInbound": { "seq": 123, "messageSha256": "<sha256 of the live message ID>" },
+  "proofs": [
+    { "role": "context_witness", "path": "witness/context.json", "sha256": "<64 hex>" },
+    { "role": "original_media", "path": "audio/original.ogg", "sha256": "<64 hex>" },
+    { "role": "transcript", "path": "audio/transcript.txt", "sha256": "<64 hex>" }
+  ],
+  "audio": { "mediaSha256": "<64 hex>", "transcriptSha256": "<64 hex>", "enrichmentComplete": true },
+  "ambiguityResolution": null,
+  "decision": null
+}
+```
+
+The original continuity manifest is the same file given to `record-continuity-manifest`. The command
+re-derives the receipt, destination, manifest and evidence fingerprints from it and requires them to
+reproduce the recorded plan exactly. The message type comes from that original receipt, never from the
+evidence manifest: a manifest that calls an audio receipt `text` is rejected.
+
+- **`addressed`** (`proofKind: live_reissue`) requires a later, completed, non-self inbound in the same
+  conversation (`liveInbound`), a terminal delivery proof for it (the existing
+  `operator_catchup_delivery_proofs` view: echoed or corroborated reply), and a `context_witness` file.
+  An audio receipt also requires `original_media` and `transcript` files whose digests equal the
+  `audio` hashes, with `enrichmentComplete: true`. A later reply, elapsed time, a generic recovery note,
+  or replaying the historical text is not proof.
+- **`declined`** (`proofKind: sender_declined` or `owner_declined`) requires `--policy` and a `decision`
+  referencing a real decision inbound plus a `continuity-closure-decision.v1` record that binds the plan,
+  receipt, inbound message hash and the SHA-256 of the inbound's exact text. `original_sender_inbound`
+  accepts only the original sender, in the same conversation; `owner_inbound` accepts only a sender
+  listed in the policy's owner fingerprints. `owner_session_export` is always Blocked: there is no
+  independent actor/session verifier for it yet. A decline carries no live reissue, transcript or
+  audio-ready claim. Alert acknowledgement, silence, or operator convenience is not a decision.
+- **Originally ambiguous gaps** also require `ambiguityResolution` (a file proving the one exact
+  candidate); without it the gap stays open.
+
+**Authority policy (`continuity-closure-authority.v1`).** `declined` is Blocked unless `--policy` names
+an owner-approved instance policy (mode `0600`, owned by the operating user, not a symlink) and
+`--instance` matches its `instanceId`:
+
+```json
+{
+  "contract": "continuity-closure-authority.v1",
+  "policyVersion": "OWNER-CHOSEN-VERSION",
+  "instanceId": "INSTANCE-NAME",
+  "ownerIdentityFingerprints": ["<sha256 of an owner sender JID>"],
+  "acceptedDecisionSources": [
+    { "verifierId": "original_sender_inbound", "version": 1 },
+    { "verifierId": "owner_inbound", "version": 1 }
+  ],
+  "effectiveFrom": "2026-01-01T00:00:00.000Z",
+  "effectiveUntil": null,
+  "approvedBy": "<one of ownerIdentityFingerprints>",
+  "approvedAt": "2026-01-01T00:00:00.000Z"
+}
+```
+
+Both now and `decidedAt` must fall inside `[effectiveFrom, effectiveUntil)`. Every declined closure
+stores the policy's exact SHA-256 and `policyVersion`. The repository ships no policy file; the owner
+places one per instance. The existing recorder actor and admin allowlists are not owner attestations.
+
+**Trust anchor, stated plainly.** The only trust anchor for `declined` is the protected placement of
+the policy file: a regular, non-symlink file, owned by the operating user, with no group or other
+permission bits. `approvedBy` is checked only against the same file's `ownerIdentityFingerprints`, so
+it is self-consistent, not independently attested. No signature or out-of-band approval record is
+verified. Whoever can write that file as the operating user can authorize declines. Without a policy
+file, `declined` is Blocked.
+
+**Not supported yet (fail closed).**
+- Any `proofKind` other than `live_reissue`, `sender_declined`, or `owner_declined` is Blocked with
+  `proof_kind_unsupported`. That includes external-action outcomes: `addressed` accepts only a live
+  reissue with a terminal delivery proof.
+- `owner_session_export` decisions are Blocked (`decision_source_unverified`): no verifier binds an
+  owner-session export to an actor and session.
+- One closure per gap. There is no supersession or correction path; a wrong closure cannot be edited.
+
+**Preview (default).** Preview reads only a static copy of the database, never the live file. Make the
+copy with SQLite's own snapshot, then preview against it:
+
+```bash
+install -d -m 700 "$SNAP_DIR"
+# -readonly: never open the live file for writing; the destination must not exist yet.
+sqlite3 -readonly "$DB" "VACUUM INTO '$SNAP_DIR/bot.snapshot.db'"
+npm run close-continuity-gap -- \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --evidence closures/receipt-1.json \
+  --snapshot "$SNAP_DIR/bot.snapshot.db" \
+  [--policy "$POLICY" --instance "$INSTANCE"]
+```
+
+The snapshot is opened `immutable=1` and must have no `-wal` or `-journal` sidecar (a plain read-only
+open of a WAL-mode file creates `-wal`/`-shm` files). The command rechecks the snapshot's identity, size
+and mtime afterwards. It writes no database row, schema, salt, lock, receipt, or sidecar.
+
+**Apply.** After the preview reports `decision: "ready"`, apply against the live database:
+
+```bash
+npm run close-continuity-gap -- \
+  --evidence-root "$EVIDENCE_ROOT" \
+  --evidence closures/receipt-1.json \
+  --db "$DB" --apply \
+  [--policy "$POLICY" --instance "$INSTANCE"]
+```
+
+Apply takes `BEGIN IMMEDIATE`, re-checks the schema ceiling, re-reads and re-hashes every evidence
+file, re-verifies every database link and that the gap is still open, then appends the row or nothing.
+The same evidence again returns `decision: "already_closed"` with the same `operationId`. A different
+closure for an already-closed gap, a stale fingerprint, a changed transcript or decision, or a wrong
+conversation fails with no write. The command never runs migrations: a database without migration 66
+reports `schema_not_migrated`.
+
+Output is one JSON line with `ok`, `mode`, `decision` (`ready`, `applied`, `already_closed`, `blocked`,
+`conflict`), `code` (`null`, `CLOSURE_BLOCKED`, `CLOSURE_PROOF_CONFLICT`), `condition`, `planId`,
+`operationId`, `disposition`, and the passed `checks`. Exit `0` means ready, applied or already closed;
+`2` Blocked (missing input, predecessor or authority); `3` `CLOSURE_PROOF_CONFLICT` (evidence
+contradicts the recorded gap or an existing closure); `1` usage or I/O error. Output never contains
+message text, JIDs, or media.
+
+**Schema 66 rollback.** Migration 66 adds only the new table. After it is recorded, a binary whose
+ceiling is 65 refuses the database and will not write, so **binary-only rollback is unavailable**.
+Keep the 66-aware release for containment or forward repair. Restoring a pre-migration backup is an
+owner decision that requires a proven zero-new-writes window. **Never overwrite a newer database with
+an older backup**: messages received after the upgrade would be lost.
+
+The refusal is rehearsed with two real checkouts on disposable files. The work directory must not
+exist; the harness creates its own database there:
+
+```bash
+git clone --no-checkout <repository> "$OLD" && git -C "$OLD" checkout --detach <previous release sha>
+ln -s "$PWD/node_modules" "$OLD/node_modules"   # only when both lockfiles are identical
+bash scripts/run-with-pinned-node.sh scripts/schema-rollback-rehearsal.ts \
+  --old-root "$OLD" --new-root "$PWD" --work-dir "$SCRATCH/rehearsal"
+```
+
+The old binary creates the database at 65, this release migrates it to 66, and the old binary reopens
+it. Exit `0` means the old binary refused with `DatabaseCompatibilityError` reason `future_schema`
+("Database schema migration 66 exceeds binary ceiling 65; refusing writes") and every file in the
+work directory, including the WAL and shared-memory sidecars, stayed byte-identical.
+
+#### Close a proven operator catch-up recovery (admitted inbound sequences)
 
 This command records that a newer, independently delivered operator catch-up supersedes an exact set
-of pending source inbounds. It never sends or replays a message. The database must already be an
-existing canonical schema-43 file; the command neither creates a database nor runs migrations.
+of pending source inbounds. It never sends or replays a message. The database must already exist
+and its migration ledger must be contiguous from 1 through the current migration, with at least 43
+entries; any later schema, including 66, is accepted. The command neither creates a database nor runs
+migrations. It closes only sources that were admitted as `inbound_events` with pending disposition
+links; a continuity gap whose source was never admitted cannot use it. Use `close-continuity-gap` for
+those gaps.
 
 Run the read-only proof inspection first:
 
@@ -1660,6 +2526,246 @@ database (dry-run previews taken before the loss will no longer match confirmed 
 back it up alongside the database if you rely on cross-run fingerprint correlation. It contains no
 identifying information by itself and only lets past/future runs against the SAME database correlate —
 it does not need to be treated as a credential, but if it changes, expect fingerprints to change with it.
+
+#### Close every caught-up operator catch-up recovery (batch)
+
+`npm run close-recovery-catchups` closes every open `recovery_pending_operator_catchup` group whose
+conversation has caught up, in one pass. It selects each group's target with the automatic reconciler's
+rule (`selectOperatorCatchupCandidates`: the earliest same-chat `operator_catchup_delivery_proofs` target
+later than every source sequence). Each group is then proven with `inspectOperatorCatchupRecovery` or
+closed with `closeOperatorCatchupRecoveryRaw`, the same primitive as the single-group command above, so it
+adds no proof rule of its own. Closures record the operator's `--actor` and `--evidence-ref`, not the
+reconciler's.
+
+```bash
+npm --silent run close-recovery-catchups -- \
+  --db "$DB" --actor operator:IDENTITY --evidence-ref evidence:REFERENCE
+```
+
+The dry run (the default) changes no database rows. It still creates the redaction salt file described
+above on first use. Add `--confirm --backup-dir /abs/dir` to close. `--confirm` without `--backup-dir` is a
+usage error. The confirmed pass first writes a quick_check-verified, mode-0600 backup into that directory.
+If the backup fails, nothing is closed. The pass then re-enumerates the groups on the writable connection,
+and each group closes in its own writer transaction. Groups that are already closed no longer appear, so
+repeating the command closes nothing more. `--group-limit N` (default 50) applies the reconciler's two
+budgets.
+
+Output is one JSON document: `ok`, `dryRun`, `groupLimit`, `backup`, `summary` (`examined`, `ready`,
+`closed`, `idempotent`, `skipped`, `linksClosed`, `errors`), and `groups[]`. Each group carries the same
+keyed fingerprints as the single-group command (`planFingerprint`, `conversationFingerprint`,
+`catchupSeqFingerprint`), plus `nSourceSeqs`, `status` (`ready`, `closed`, `idempotent` or `skipped`), and
+a `reason` for skips (`no_catchup_candidate`, `closure_rejected`, `busy` or `error`). Raw identifiers,
+chat JIDs, sequences, the actor and the evidence reference are never printed. Exit `0` means no group hit
+`busy` or `error`; `1` means at least one did, or the pass failed; `2` is a usage error.
+
+#### Close an open inbound left behind a final terminal record
+
+An inbound row can sit in `pending`, `processing` or `turn_done` while its `turn_terminal_records` row
+already says `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`. Live finalization
+writes both atomically, so only an older release leaves this state. The stuck-inbound sweep never
+closes such rows: it only reports them (bucket 5 in `docs/durability.md` §4.5, the
+`terminalRecordCloseCandidates` count and a log line with their seqs). Each close is an operator
+decision, taken for ONE named row with `turn-recovery-operator close-inbound`, which applies the same
+rules without the five-minute grace window. Each sweep evaluates one bounded window (at most 1000
+rows) of a scan cycle, so the log line also carries `refusedByReason` (for example
+`delivery_proof_invalid`, `record_contract_invalid`) and `complete`: when `complete` is false the
+reported seqs cover only part of the backlog, and later sweeps report the rest. The line lists at
+most 200 seqs; `inboundSeqsTruncated` is true when the window found more, and `count` is the full number.
+
+```bash
+# 1. Dry run (the default). Read-only: it never opens the migrating database layer, never migrates,
+#    and on a stopped instance creates no -wal/-shm files. Prints the record's disposition, the status
+#    it implies, whether the schema is current, and a digest.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ
+
+# 2. Back up the database, then apply, passing the digest the dry run printed.
+npm --silent run turn-recovery-operator -- close-inbound --db "$DB" --seq SEQ --apply --expect-digest DIGEST
+```
+
+The digest binds the apply to the dry run: it covers the database file identity (device and inode), the
+row, its terminal record and the exact status to be written. `--apply` refuses (`digest_mismatch`) if any
+of these changed, including when the same content sits in a different file. It also refuses unless the
+database is at exactly the schema this checkout knows (`schema_not_current`): apply never migrates, so an
+instance running an older release must be upgraded first. It opens the existing file without SQLite's
+create fallback and re-checks the file identity, schema, eligibility and digest inside its write
+transaction.
+
+The status comes from the terminal record, through the same mapping live finalization uses:
+`finalized_replied` closes `complete` with `response_echoed`, `finalized_no_reply_policy` closes
+`complete` with `no_reply_policy`, and `failed_terminal` closes `failed` with the record's failure class.
+The command refuses and exits `1`, changing no database row, when the row does not exist
+(`inbound_not_found`), has no terminal record (`no_terminal_record`) or more than one
+(`multiple_terminal_records`), when the record is not final (`non_final_disposition`, e.g.
+`transferred_to_recovery_owner`), when its identity does not match the row (`identity_mismatch`), when an
+`inbound_disposition_links` row or a `turn_recovery_jobs` row references the row (`disposition_link`,
+`recovery_job`), when its selected delivery op no longer proves the recorded delivery
+(`delivery_proof_invalid`: missing, belonging to another row, or no longer `echoed`), when the record
+fails the finalize contract (`record_contract_invalid`), or when the row is already closed with a
+different status (`closed_differently`). A rerun on a row already closed as its record implies prints
+`alreadyClosed: true` and exits `0`.
+
+When a close applies to a record with a selected delivery op, the same transaction also marks that op
+`is_terminal = 1`, as live finalization does.
+
+Every evaluated dry run and apply, including a refusal and an already-closed rerun, appends one line to
+the audit receipt `turn-recovery-operator-audit.jsonl` next to the database (or `--audit-file`); that
+file is the only thing a dry run writes. An invocation that stops before the row is evaluated (an argument
+error, or a database that is missing or cannot be opened or preflighted) exits `1` without a receipt. An
+`--apply` that throws while opening, writing or committing its transaction rolls back and appends an
+apply-mode receipt with outcome `failed` and reason `write_transaction_error`, then exits `1` with the
+original error. If that append also fails, stderr reports both errors. A failure to close the database
+connection after the commit is reported on stderr and does not turn the committed close into a failure. If
+the audit file itself cannot be appended, a dry run, refusal or already-closed rerun exits `1` with that
+error and leaves no receipt (nothing was written to the database); after a committed close it exits `3`,
+below. Output and
+receipts carry only the inbound seq, record id, disposition, statuses and reason codes, never chat JIDs,
+conversation keys or message ids.
+
+Exit codes: `0` closed, previewed, or already closed as the record implies; `1` refused or failed with
+nothing applied; `3` the close WAS applied and committed (stdout carries `applied: true` and the closed
+row) but its audit receipt could not be appended — do not re-run; record the close from stdout.
+
+Scope: `close-inbound` handles only OPEN rows. It does not touch rows that are already `failed` and
+parked behind `recovery_pending_operator_catchup` disposition links. Some such links have no catch-up
+target and currently cannot be closed by any tool. Since #3754 crash recovery no longer enrolls synthetic
+scheduled-job (`agentjob-*`) inbounds; links enrolled before then remain as append-only receipts, counted
+in `runtime.agent.turnRecoveryOpenRecoveriesSynthetic` rather than as user-facing open catch-ups, and a
+newly reclaimed scheduled turn is counted in `recovery_debt.turn_recovery.scheduled_turns_lost` (7-day
+window, visibility only).
+
+#### Settle an orphan recovery transfer
+
+An orphan transfer is a `turn_terminal_records` row with disposition `transferred_to_recovery_owner` and
+no `turn_recovery_jobs` row. Live finalization writes both in one transaction, so current finalization
+cannot produce one. Where a given orphan came from is not established in general. Retention is one known
+generator of a different shape: it deletes an aged `completed` job whose selected op is `echoed`,
+`failed_permanent` or `quarantined`, then keeps the terminal record when a delivery corroboration or
+disposition link still references it. Preventing that is tracked separately, and this command does not
+admit that shape. Nothing repairs an orphan. Health counts it in `runtime.agent.turnRecoveryOrphanTransfers`,
+`turnRecoveryCorruptLinks` and `turnRecoveryOutstanding`, so `recovery_debt.service_blocking` stays `true`
+with blocking reason `turn_recovery_integrity`, and a new integrity fault cannot be told apart from it. An
+orphan blocks admission for its scope only when it is uncorroborated. A corroborated orphan counts in
+`turnRecoveryCorroboratedRetained` instead of `turnRecoveryBlockingOutstanding`.
+
+`turn-recovery-operator settle-orphan-transfer` settles ONE record of the shape it was reviewed for. It
+writes the missing job directly in the settled `exhausted` state, with no replayable content, plus an
+append-only `recovery_plans` row (`origin = 'operator'`, plan ID `turn-recovery-orphan-settle:v1:<terminal
+id>`, your evidence reference in `evidence_ref`). The job's `replay_safety_proof_id` is that plan ID. The
+terminal record is never modified or deleted. The new job's foreign key keeps it, its source inbound and its
+selected delivery op as evidence.
+
+Admission is an allowlist. The record is admitted only when all of these hold:
+
+- no recovery job is linked to it;
+- its selected delivery op carries the record's own conversation, destination and source seq, and its
+  source inbound (found by that seq) carries the record's conversation and destination, so the written
+  job links to them validly;
+- its selected delivery op is `maybe_sent`, has `is_terminal = 1` and has a NULL `wa_message_id`, so no echo
+  can ever be matched to it. An empty-string `wa_message_id` counts as a message id, because echo matching
+  compares the exact value;
+- the record passes the valid delivery-corroboration predicate that health uses. The database then keeps
+  the selected op immutable, so its status cannot change after the settle;
+- its source inbound exists and is `complete` or `failed`, and is not `complete` with `terminal_reason =
+  'response_echoed'`. That is the only source state from which echo settlement could complete the job;
+- no open `inbound_disposition_links` row references its source inbound seq. Open means a
+  `recovery_pending_operator_catchup` row with no `superseded_by_operator_catchup` row for the same inbound
+  seq and recovery plan, the predicate of the supervisor's `open_recoveries` count. An open link is a catch-up
+  obligation, and a settle forbids replay.
+
+```bash
+# 1. List orphan transfers (read-only; prints terminal record ids).
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB"
+
+# 2. Dry run for one record (read-only, never migrates). Prints the delivery kind, the op's status,
+#    terminal flag and message-id presence, the source inbound's status and terminal reason, whether a
+#    later echo corroborates delivery, the recovery owner the job will name (logical turn id, manager
+#    id, generation), and a digest.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF
+
+# 3. Back up the database, then apply with the digest the dry run printed.
+npm --silent run turn-recovery-operator -- settle-orphan-transfer --db "$DB" \
+  --terminal ID --evidence-ref REF --apply --expect-digest DIGEST
+```
+
+The command does not take the backup itself. Take one before step 3.
+
+`--evidence-ref` is required and names the operator investigation record (8-120 characters of
+`A-Z a-z 0-9 _ . : / -`, e.g. a ticket or incident ref) that establishes the transfer will never be
+replayed. The digest (version 3) binds the apply to the dry run in the same way as `close-inbound`. It
+covers the database file identity; every value the settled job copies from the terminal record and its
+source inbound (record id, scope, conversation key, delivery JID, source seq, source logical turn id,
+manager id and generation, source message id, the recovery owner's logical turn id, manager id and
+generation, and the group flag derived from the delivery JID); every admission input printed in step 2;
+and the evidence reference. Step 2 prints the recovery owner but not the conversation key, JID or message
+id; those are hashed into the digest only. For an admitted record the database already freezes every
+copied terminal-record value, because trigger `corroborated_terminal_proof_immutable` blocks changes to a
+record that has a corroboration row. Nothing freezes the source inbound's message id while no job exists,
+so the digest is what stops an apply from writing a job whose values differ from the dry run's.
+`--apply` refuses `digest_mismatch` or `schema_not_current`, and re-proves eligibility and recomputes the
+digest inside its write transaction.
+
+The command refuses and exits `1`, writing nothing, with one of these reasons:
+
+| Reason | Meaning |
+|---|---|
+| `terminal_not_found` | No such record. |
+| `not_transferred` | The record is not a recovery transfer. |
+| `recovery_job_exists` | A job is linked: it is not an orphan. |
+| `owner_identity_conflict` | The record names its own source as recovery owner. |
+| `settlement_conflict` | A settle plan exists without its job. |
+| `delivery_op_missing` | The selected op row is gone. |
+| `delivery_identity_mismatch` | The op's conversation, chat or source inbound seq differs from the record's. |
+| `delivery_status_not_admitted` | The op is not `maybe_sent`. `pending`, `sending` and `submitted` are live queue work; `echoed` and the terminal failures are outside the reviewed shape. |
+| `delivery_not_terminal` | The op is `maybe_sent` with `is_terminal = 0`. |
+| `delivery_has_wa_message_id` | The op carries a provider message id (an empty string counts), so a late echo could still match it. |
+| `uncorroborated` | The record fails the valid delivery-corroboration predicate. |
+| `source_inbound_missing` | The source inbound row is gone. |
+| `source_inbound_identity_mismatch` | The source inbound's conversation or chat differs from the record's conversation or delivery JID. The settled job would be a broken link. |
+| `source_inbound_open` | The source inbound is still `pending`, `processing` or `turn_done`. |
+| `source_inbound_echo_settled` | The source inbound is `complete` with `response_echoed`. |
+| `open_disposition_link` | An open `recovery_pending_operator_catchup` link references the source inbound seq. |
+| `digest_mismatch` | `--apply` only: the digest differs from `--expect-digest`, before or inside the write transaction. |
+| `schema_not_current` | `--apply` only: the database is not at the current schema. |
+| `state_changed` | `--apply` only, inside the write transaction: the recheck returned a verdict the command does not handle. The current evaluator never returns one; this is a fail-closed default. |
+
+A refusal means the record needs investigation, not a different command. A rerun on a record it already
+settled prints `alreadySettled: true` and exits `0`. So does an `--apply` whose recheck inside the write
+transaction finds the record already settled by this command, which happens when a concurrent apply
+committed first; it writes nothing. Receipts and exit codes (`0`, `1`, `3`) follow `close-inbound`,
+including the `failed` receipt for an apply that throws inside its write transaction. The list mode (no
+`--terminal`) evaluates no record and appends no receipt. Output carries ids,
+kinds, statuses and reason codes only.
+
+After the settle, `turn-recovery-operator show --job <job id>` prints an `operatorSettlement` block (plan ID,
+origin, actor, plan creation time) found by joining `recovery_plans` on the job's proof ID. It prints that
+block only when the plan exists with origin `operator` and the CLI actor, and the job is `exhausted` and
+assigned to the CLI actor. A job whose proof ID carries the settle prefix without that full shape gets a
+`settlePlan` block with the same facts and no settlement label. The block is the only thing that tells this
+row apart from real attempt exhaustion. `list` still shows `blocked_unsafe` jobs only.
+
+The reply-guarantee observer (`deploy/scripts/reply-guarantee-observer.py`) counts every `blocked_unsafe`
+or `exhausted` job in `blockedOrExhaustedRecoveryJobs`. Retention never prunes `exhausted` jobs, so a settle
+raises that count by one permanently, and the observer cannot tell the row from real exhaustion. Even once
+every other debt is resolved, that row alone keeps the observer's recovery-debt warning latch open. The observer alerts on latch flips, not on
+count changes, so no new alert fires when the latch is already open. The critical active-breach latch is not
+affected: the observer counts a recovery job there only while its source inbound is open, and the admission
+rule requires a terminal source inbound.
+
+Verify after apply:
+
+- Authenticated `GET /health` (`runtime.agent` gauges):
+  - `turnRecoveryOrphanTransfers` drops by one; `turnRecoveryCorruptLinks`, `turnRecoveryOutstanding` and
+    `turnRecoveryCorroboratedRetained` stop counting it.
+  - `turnRecoveryExhausted` and `turnRecoveryRetainedTerminal` rise by one (retained reason
+    `turn_recovery_terminal`, not blocking).
+  - `recovery_debt.service_blocking` is `false` unless another blocking reason remains. If
+    `turn_recovery_integrity` is still listed, another orphan, corrupt link or echo conflict exists:
+    re-run step 1.
+- `show --job <job id>` reports `operatorSettlement` with `planFound: true` and state `exhausted`.
+- The reply-guarantee observer's `blockedOrExhaustedRecoveryJobs` is one higher than before the apply,
+  and its state is not `active-breach` because of this record.
+- After the next restart, `show` still reports state `exhausted`.
 
 ### 7.7 Useful SQL Queries
 
@@ -1897,6 +3003,34 @@ this contract with direct ad hoc deletes.
 
 Migration 51 removes old raw columns from the live schema, but migration success alone is not forensic erasure. SQLite free pages, WAL files, backups, and snapshots may retain prior bytes; schedule any `VACUUM`, `secure_delete` policy, or backup retirement separately under the deployment's maintenance controls.
 
+### Handoff artifact retention
+
+`agent_handoff_artifacts` is a short-lived continuity cache for agent fallback.
+Its summary, seeded artifact content, source provider, source model, and token
+baseline are eligible for online deletion 24 hours after `updated_at`. The single
+canonical database-retention runner drains every eligible artifact through
+deterministic statements of no more than 100 rows inside its normal transaction.
+It runs immediately at startup and then on its periodic interval (daily by default),
+so a restored database's expired backlog is removed by the first successful cleanup.
+Eligibility does not promise exact wall-clock deletion: a stopped process or failed
+sweep delays online removal. Check
+`health.retention.database.lastResult.handoffArtifacts` for the count from the
+latest successful sweep; chat/passive instances that do not have the optional table
+report zero.
+
+Chat clear, message revoke/delete, and agent `/new` workspace reset invalidate the
+affected conversation's artifact. For revoke/delete, the runtime finds all owning
+conversation keys before soft-deleting message rows, then invalidates their
+artifacts first. The prompt-injection freshness TTL is distinct: it decides whether
+an artifact may enter a prompt, while this lifecycle controls how long the row can
+remain on disk. There is currently no application privacy-erasure endpoint; a
+future one must call the same invalidation seam.
+
+Online deletion does not erase bytes already captured in backups, WAL copies,
+storage snapshots, or provider copies. Operate backup rotation/destruction and
+provider-data retention under their separate controls. This runbook describes the
+implemented lifecycle; it does not attest any deployed system or external copy.
+
 ---
 
 ## 8. Monitoring
@@ -1907,6 +3041,7 @@ Migration 51 removes old raw columns from the live schema, but migration success
 |--------|-------|-----------------|
 | WhatsApp connected | `health.whatsapp.connected` | False for >2 min |
 | Health status | `health.status` | `unhealthy` |
+| Recovery debt | `health.recovery_debt.open` / `service_blocking` / `attention` | Retained `routine` debt needs operator review but is not an outage; `service_blocking=true` is owned by degraded health. |
 | Enrichment staleness | `health.enrichment.last_run` | Null or >15 min ago (chat instances only) |
 | Quarantined outbound ops | `health.durability.outboundQuarantineDispositions` | Any `delivery_ambiguous_unsafe` or `legacy_unclassified` group needs review; coarse count alone does not prove loss. |
 | Pending outbound | `health.durability.pendingOutbound` | >50 (queue buildup) |
@@ -1946,21 +3081,86 @@ machine-readable disposition registry for sources that participate in fault clas
 
 | Source | Producer owner | Policy / proof owner |
 |---|---|---|
-| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges |
+| `health_body_degraded`, `instance_never_reachable` | `src/fleet/health-poller.ts` | `deploy/scripts/bot-errors-dispatcher.py`; verify the complete health body, transport connection, service generation, and recovery gauges. A `health_body_degraded` alert carries `diagnostics.degradationCauses` (fixed registry codes; an unknown cause becomes `unrecognized`) and `diagnostics.whatsappConnected`, because its evidence text is confined to a digest. `whatsappConnected` is true only when the connection state is also `connected`. The dispatcher holds the event at warning tier only when the instance is connected and every cause is hold-tier in the registry. Promotion is event-driven: the first alert on the same key at least `TRANSIENT_PROMOTE_SECONDS` (default 1800 s) after the first hold pages. The poller re-sends a still-degraded instance at most every 15 minutes, so a lasting hold-tier degradation nominally pages after 30 to 45 minutes; delivery delay, a maintenance window, inhibition or an intervening clear can stretch that, and nothing promotes a held event if re-sends stop. An alert that retires an open logout or bond-loss incident skips the transient hold, and when it is sent its page names the closed incident in a `closes_incident` line; duplicate suppression and cooldown still apply to it. An event without these fields pages at once |
+| `recovery_debt_attention` | `src/fleet/health-poller.ts` | Informational, non-paging operator debt lifecycle, emitted under the same instance silence and 15-minute throttle as other poller alerts; clear only from a fresh readable `open=false` sample and never restart or heal from this source alone. |
 | `whatsapp_device_bond_lost` | `src/transport/connection.ts` and fleet health polling | Physical linked-device state; never infer repair from HTTP reachability |
 | `outbound_flood` | `src/transport/connection.ts` | `src/core/health.ts`; correlate distinct sends, source inbound IDs, and echo state |
 | `bead_proposal_backlog` | `src/core/substrate/poller.ts` | Proposal state and `review_by_at`, not message volume |
 | `fallback_recovery_stalled` | `src/runtimes/agent/runtime.ts` | Persisted fallback window plus current primary-provider recovery probe |
 | `provider_execution_queue_pressure` | `src/runtimes/agent/provider-execution-gate.ts` and `src/runtimes/agent/runtime.ts` | `runtime.agent.providerExecution`, exact OpenCode child lifetimes, and external processes sharing the XDG data root; recovery requires an idle gate |
 | `agent_reply_guarantee_breach` | `src/runtimes/agent/turn-finalizer.ts` | Exact terminal record, inbound failure class, delivery proof, and continuity-candidate row |
-| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair |
-| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates, failed terminals, and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
+| `reply-guarantee-active-breach` | `deploy/scripts/reply-guarantee-observer.py` | Stale open inbound or due/expired recovery work from the normal read-only WAL-aware database view; preserve evidence before repair. Attribute each stale `processing` row with `scripts/inbound-ownership-snapshot.ts` (below) before any restart or replay |
+| `reply-guarantee-recovery-debt` | `deploy/scripts/reply-guarantee-observer.py` | Historical continuity candidates other than synthetic scheduled-job (`agentjob-*`) marks, which are reported as `syntheticContinuityCandidates` and never debt; failed terminals other than operator `/stop` cancellations (`operator_cancelled`); and blocked/exhausted recovery jobs; advisory only and never runtime degradation by itself |
 | `reply-guarantee-observer` | `deploy/scripts/reply-guarantee-observer.py` | Probe authority, target-user/GUI context, canonical data root, schema compatibility, and read-only SQLite access |
 | `release-drift` | `scripts/live-release-drift-alert.ts` through `scripts/live-release-observers.ts` | Release manifest, artifact tree, and running service provenance |
 | `release-currency` | `scripts/live-release-currency-alert.ts` through `scripts/live-release-observers.ts` | Exact deployed manifest commit and explicitly configured remote ref; differing commits are advisory and never alter runtime health |
 | `heartbeat-watchdog` | `deploy/scripts/bot-errors-heartbeat-watchdog.py` | Roster entry and current producer heartbeat; retired entries must not page |
 | `remote-claim-failed` | `deploy/scripts/bot-errors-collector.py` | Collector claim/lease state and target reachability |
 | `stale-autoclose` | `deploy/scripts/bot-errors-dispatcher.py` | Incident ledger transition and explicit source clear evidence |
+
+### Who owns a stale `processing` inbound
+
+`scripts/inbound-ownership-snapshot.ts` (#3560) answers, per row, who owns every inbound that has sat
+in `processing` longer than `--min-age-minutes` (default 15, the observer's stale threshold). It opens
+the database read-only (`query_only`, never `immutable=1`), writes nothing, and prints one
+content-free JSON line: sequences, states, epochs, ages, turn ids and 12-hex chat scope hashes only.
+Capture the provider-execution gate first and pass it in, because the database alone cannot show a
+turn that is executing in the process:
+
+```bash
+HEALTH_JSON=$(mktemp)
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/health > "$HEALTH_JSON"
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$HEALTH_JSON"
+# shared/single instances serialize every chat on one queue:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --queue-scope global --provider-execution-json "$HEALTH_JSON"
+# a bare providerExecution object carries no generated_at; date it explicitly:
+node scripts/inbound-ownership-snapshot.ts --db "$DB" --provider-execution-json "$PE_JSON" \
+  --provider-captured-at 2026-09-28T07:20:00Z
+```
+
+The full `/health` body carries its own `generated_at`, which dates the capture. Use
+`--provider-captured-at <ISO-8601 instant with zone>` only for a capture without one, such as a
+bare `runtime.agent.providerExecution` object.
+
+Each row is classified:
+
+| Class | Meaning |
+|---|---|
+| `deferred` | A non-terminal `deferred_turn_obligations` row owns it (an exhausted one is `no_owner`). |
+| `queued` | A pending recovery job, the chat's persisted FIFO head (`queued_behind_fifo_head`), another outstanding recovery job for the scope, or the oldest provider-lane waiter owns it. A row queued behind an unowned head reports `healthy: false`. |
+| `executing` | A live recovery claim, or the provider lane is held by a `turn` whose scope hash equals this chat's (FIFO head only; a `probe` hold never counts), according to a fresh capture that no completed checkpoint contradicts. |
+| `no_owner` | Nothing attributable, including a terminal record or finished recovery job left beside an open row. Never healthy. |
+
+Exit `0` means every reported row has a healthy owner, `3` means at least one does not, and `2` is a
+usage, capture or open error. Record the output as evidence. Do not replay, reset a checkpoint or
+restart on its basis alone.
+
+Evidence limits. Read every classification against these:
+
+- **Persisted FIFO proxy, not the TurnQueue.** `queue` is derived from open inbounds per conversation
+  (or globally with `--queue-scope global`) in seq order. The runtime's in-process per-chat TurnQueue
+  (depth, position, active turn) is not readable from outside the process and is not reported.
+- **No lease generation.** The provider gate does not publish its lease generation, so a capture cannot
+  say which hold it saw. Only recovery jobs, terminal records and the checkpoint's completed identity
+  carry a turn id and generation.
+- **`active_turn_id` is dead telemetry.** `checkpoint.activeTurnId` is reported as stored, but current
+  writers only ever store null, so it never names an owner.
+- **The capture is a separate observation.** The health capture and the database read are not
+  simultaneous. The capture time comes from, in order: the body's own top-level `generated_at`;
+  else `--provider-captured-at`; else it is unknown, which counts as stale. `providerCaptureTimeSource`
+  reports which (`payload_generated_at`, `operator_flag`, `unknown`). The file's modification time is
+  never used, because a copied, touched or re-saved file would make an old body look fresh. A
+  `generated_at` that is present but unparseable is unknown; the flag does not override it. If the
+  capture is older than 60 seconds (`PROVIDER_CAPTURE_MAX_AGE_SECONDS`), more than 5 seconds in the
+  future, or undated, every row reads `providerExecution.evidence: stale` and it attributes nothing
+  (`provider_capture_stale`). Re-capture immediately before running the script.
+- **Unmatched scope reads unowned.** A turn held for a different scope hash (another chat, or the same
+  chat under its `@lid`/`@s.whatsapp.net` alias) is `active_other_scope`: the row is `no_owner`, never
+  `executing`.
+- **Contradiction reads unowned.** If the capture shows a turn for this chat but the chat's
+  `session_checkpoints.completed_inbound_seq` is at or past the row, the held turn cannot be this row's:
+  the row is `no_owner` with `provider_active_contradicts_completed_checkpoint`, never healthy. A
+  terminal record on the row itself takes precedence over any capture (`terminal_record_inbound_open`).
 
 Machine-local probes not present in this repository are an ownership gap, not an implicit
 WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner
@@ -1979,7 +3179,7 @@ INSTANCES=( "primary-line:9094" "operator-agent:9092" "sandbox-agent:9091" "chat
 for entry in "${INSTANCES[@]}"; do
   name="${entry%%:*}"
   port="${entry##*:}"
-  result=$(curl -s --max-time 3 "http://127.0.0.1:$port/health" 2>/dev/null)
+  result=$(curl -s --max-time 3 -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" "http://127.0.0.1:$port/health" 2>/dev/null)
   if [ -z "$result" ]; then
     echo "[$name] UNREACHABLE (service may be down)"
     continue
@@ -2024,7 +3224,7 @@ Key log patterns to monitor:
 
 ## AskUserQuestion Poll Bridge
 
-When an agent subprocess calls `AskUserQuestion` in per-chat DM mode, the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with a 2-hour nudge timer and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
+When an agent subprocess calls `AskUserQuestion` in a per-chat session (DM or group), the runtime intercepts it and renders the options as a WhatsApp poll. Poll state is held in memory with soft/hard expiry timers and is persisted via the `pending_polls` table (migration 28). The persistence path (`PendingPollPersistence` in `src/runtimes/agent/pending-poll-persistence.ts`) writes each pending poll on send, and the runtime rehydrates surviving polls at startup (`rehydratePendingPolls`), so polls survive restarts.
 
 ### Pending poll state
 
@@ -2038,13 +3238,13 @@ If a user reports they voted but the agent didn't respond:
 2. If `pollVoteFailed` fired, the runtime should have sent a text fallback — check for `"poll vote failure switched AskUserQuestion to text fallback"` in logs
 3. If the service restarted between poll send and vote, the pending state is rehydrated from the `pending_polls` table at startup, so the poll should still be live (unless its hard close time elapsed during downtime, in which case it is pruned and the chat is notified)
 
-### Nudge timer
+### Expiry
 
-Pending polls send a gentle reminder ("Still waiting on your answer") every 2 hours. There is no hard expiry — polls persist until answered or the session is cleaned up. The nudge timer is `unref`'d and does not block shutdown.
+There is no reminder nudge. Soft expiry fires at the poll's `timeoutMs` (default 1 h via `pollResolution.defaultTimeoutMs`): an unanswered poll switches to a numbered text fallback, while `majority-after-timeout` and `admin-wins` resolve from the recorded votes. Hard expiry fires at `timeoutMs * 2`: the runtime sends "This decision has expired — please re-trigger when ready." for unanswered questions and clears the poll. Both timers are `unref`'d and do not block shutdown.
 
-### Group chats
+### Groups and shared sessions
 
-AskUserQuestion poll injection is disabled in group chats. The runtime falls through to normal provider handling (agent asks as text). This is by design — AskUserQuestion is a single-answer turn-unblock protocol incompatible with multi-voter group semantics.
+Per-chat group sessions use the poll bridge too; the instance-level `pollResolution.defaultStrategy` (default `first-vote-wins`) picks the group resolution strategy. Shared/global sessions fall through to normal provider handling (agent asks as text). See [runbooks/agent-decision-polls.md](runbooks/agent-decision-polls.md) for the full contract and trigger matrix.
 
 ---
 
@@ -2081,20 +3281,24 @@ only the older released slot.
 ### Diagnosis
 
 ```bash
+# Choose the instance, then inspect its XDG rolling logs (see §3).
+INSTANCE=operator-agent
+LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/instances/$INSTANCE/logs"
+
 # Check if prompt-too-long fired
-grep "prompt too long" /var/log/whatsoup/<instance>.log
+rg "prompt too long" "$LOG_DIR"
 
 # Check auto-compact activity
-grep -E "auto compact triggered|auto compact timed out" /var/log/whatsoup/<instance>.log
+rg "auto compact triggered|auto compact timed out" "$LOG_DIR"
 
 # Check bounded-spiral detections
-grep -E "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" /var/log/whatsoup/<instance>.log
+rg "auto compact rapid re-arm detected|auto compact next turn input exceeded threshold" "$LOG_DIR"
 
 # Check current state followed by lifetime counters
-curl -s http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:<port>/health | python3 -c "import json,sys; a=json.load(sys.stdin)['runtime']['agent']; print(a['autoCompactState'], a['autoCompactActiveBackoffScopes'], a['autoCompactWorstCurrentBackoffTier'], a['autoCompactIneffective'], a['autoCompactConsecutiveRapidRearmsMax'], a['autoCompactNextTurnOverThreshold'])"
 
 # Verify current threshold
-grep "autoCompactInputTokens" instances/<name>/instance.json
+rg "autoCompactInputTokens" "${XDG_CONFIG_HOME:-$HOME/.config}/whatsoup/instances/$INSTANCE/config.json"
 ```
 
 Canary a compact change on one host first. During the canary window, the pass
@@ -2130,7 +3334,7 @@ cd ~/LAB/WhatSoup && npm test
 
 ### Health checks
 ```
-curl -s localhost:<port>/health | python3 -m json.tool
+curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" localhost:<port>/health | python3 -m json.tool
 ```
 Instance ports: primary-line=9094, sandbox-agent=9091, operator-agent=9092, chat-bot=9093
 
@@ -2164,7 +3368,7 @@ WhatSoup can run in a Docker container as an alternative to the systemd/launchd 
 docker compose build
 ```
 
-The multi-stage build installs dependencies, builds the console frontend, and produces a slim runtime image (~300MB) based on `node:24-slim`.
+The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
 
 ### Configure
 
@@ -2240,7 +3444,7 @@ docker compose logs -f whatsoup 2>&1 | grep fleet
 # Fleet health (from host)
 curl http://localhost:9099/api/lines
 
-# Instance health (if port exposed in compose)
+# Instance liveness (if port exposed in compose); add the bearer header for the diagnostic body
 curl http://localhost:9090/health
 ```
 
@@ -2299,18 +3503,22 @@ docker compose up -d
 
 ### Rollback
 
-To remove Docker and revert to host deployment:
+To return to host deployment, preserve the instance configuration, credentials,
+database (including its WAL/SHM state), media, and Docker volumes before changing
+service ownership. If the checkout has local work, preserve it with
+`git stash --include-untracked` before changing revisions. Follow the host's
+deployment runbook and restart-safety preflight; do not start the host instance
+while the container still owns the same account or data.
 
 ```bash
-# Stop and remove containers (keep volumes for safety)
+# Stop and remove containers; named volumes are retained without --volumes.
 docker compose down
-
-# Remove Docker files from the repo
-git checkout -- src/fleet/platform.ts src/core/health.ts
-rm -rf docker/ docker-compose.yml .dockerignore .env.example .env
 ```
 
-Volumes persist until explicitly removed with `docker volume rm`.
+Docker support files are part of the application and need no deletion for host
+deployment. Select a verified release if a code rollback is required. Keep the
+volumes and saved configuration until host health, durable delivery state, and
+recovery have been verified; stopping containers alone does not migrate their data.
 
 ## Restart-safety preflight blocked a start
 
@@ -2353,3 +3561,158 @@ uses to call an open inbound stale) block the stop. Older open rows are reported
 stay restartable, since restart is how a wedge gets cleared.
 
 The verdict reports `liveTurns.windowSeconds`, so a deploy receipt can record the exact predicate applied.
+
+## Shadow Gate
+
+The shadow gate is a logged-only reply-worthiness classifier (`src/core/shadow-gate-adapter.ts`). For
+every message that passes the access policy and reaches dispatch it records an advisory SPAWN/SUPPRESS
+verdict. It is advisory only: it never changes dispatch, and there is no enforcing mode.
+
+**Enable.** Set `"shadowGate": { "mode": "shadow" }` in the instance's `config.json` (optionally
+`"eventsDir": "/abs/path"`; see [configuration](configuration.md)), then restart the instance. The
+restart is an owner action: run the `--mode stop` check above first. The section is read only at
+startup.
+
+**Where events live.** NDJSON segments `shadow-gate-events.NNNNNN.ndjson` (six-digit index) in
+`eventsDir`, by default `~/.config/whatsoup/instances/<name>/`. The segments sit next to a
+`shadow-gate-events.lock` file, which the report ignores. Records contain metadata and closed codes
+only, never message text. The id rules (below) rule out JIDs and standalone phone-number digit runs,
+but not digits glued to letters inside an id.
+
+**Measure.** Never read or `cp` the live database. Take a self-contained snapshot through the SQLite
+backup API, and copy the segment directory:
+
+```bash
+INSTANCE=operator-agent
+DB=~/.local/share/whatsoup/instances/$INSTANCE/bot.db
+SNAP=$(mktemp -d)
+sqlite3 "$DB" ".backup '$SNAP/bot.db'"
+cp -p ~/.config/whatsoup/instances/$INSTANCE/shadow-gate-events.*.ndjson "$SNAP/"
+npm run report:shadow-gate -- --db "$SNAP/bot.db" --events "$SNAP" \
+  --instance "$INSTANCE" --since 1790000000 --until 1790086400 [--lineage <hash>] [--json]
+```
+
+- `--instance` is the recorded id: `botName` with characters outside `A-Za-z0-9._:-` replaced by `_`
+  (at most 128 characters). It is not necessarily the directory name.
+- `--since`/`--until` are required integer unix seconds (no fractions, no milliseconds); the window
+  is `[since, until)` over `inbound_events.received_at`.
+- The report opens the snapshot `immutable=1`, which creates no `-wal`/`-shm` sidecars. It refuses
+  a snapshot that has a non-empty `-wal` next to it, because that mode would ignore the rows inside it.
+- The database lineage is a hash of the live database path and inode, so it cannot be recomputed from
+  a snapshot. The report prints the lineages it sees, in verdicts and in coverage markers inside the
+  window. When more than one is present it exits `65`, naming how many; pick one with `--lineage`.
+
+Exit `0` means a report was completed, even one whose rates are `inconclusive`. Exit `64` is a usage
+error. Exit `65` means the evidence cannot be measured honestly: an unreadable `--db` or `--events`,
+an invalid interior NDJSON line (named by file, line number and the validator's closed problem code,
+never its content), more than 64 segments, more than
+200 MiB in total, a line over 4 KiB, a non-empty `-wal`, or an ambiguous lineage. The 4 KiB bound is
+checked before the torn-tail check, so a final line without a newline that is over 4 KiB also exits
+`65` rather than being counted as a torn tail.
+
+Events written by a newer release carry a newer `schemaVersion`. An older report counts them across
+all segments and exits `65` with `unsupported_schema_version`, the count and the first file and
+line. Run the report from the newest release that wrote the segments.
+
+**Reading the output.** Coverage prints first:
+
+- `eligible` counts `inbound_events` rows in the window whose `routed_to` is not
+  `none`/`admin`/`control`/`passive`.
+- Scheduled-job (`agentjob-…`) and obligation (`obl:…`) turns never pass ingest; neither does any
+  row journalled with `routed_to = 'agent'` (the route scheduled jobs and obligations use). They are
+  excluded and counted separately as synthetic.
+- Any other `routed_to` value that is not a known runtime is listed and counted as eligible.
+- `missing` counts eligible rows without exactly one valid joined verdict. Conflicting verdicts,
+  seq mismatches and a torn final line all leave a row missing.
+- The recorder counters (`invalid`, `written`, `recorderDropped`, `journalFailures`) are summed over
+  each boot's latest coverage marker. They are cumulative per boot up to that marker, not limited to
+  the window, and they exclude anything that happened after the boot's last marker.
+  - `recorded` (per boot) counts verdicts the recorder accepted into the sink queue, not verdicts
+    written to disk.
+  - `written` counts every record the sink wrote, verdicts and coverage markers together.
+  - `recorderDropped` sums the sink drop counters. Those also cover both verdicts and markers, so
+    they are not a count of lost verdicts.
+  - `invalid` counts records the validator rejected before queueing. A message id outside the id
+    rules is rejected this way and its row shows up as missing.
+- Each boot line also prints the sink state from its last written marker. A sink that degrades
+  (for example `segment_cap_reached` or `write_failed`) writes nothing further, not even a marker,
+  so its degraded state never appears in the segments. For the running process, read it from
+  `shadowGate` in the authenticated `/health` body (see "Live status" below). For a past boot, look
+  for `counts` markers that stop early and for the `shadow gate warning` log line carrying the
+  reason code.
+
+**Live status.** The authenticated (bearer-token) `/health` body carries a `shadowGate` object.
+It is advisory: it never changes `status`, `status_reasons` or `degradation_causes`. A degraded or
+disabled recorder leaves the instance `healthy`, so a monitor that needs to catch that must read
+`shadowGate.recorder`.
+
+- Mode `off` (or no `shadowGate` section): exactly `{ "mode": "off" }`.
+- Mode `shadow`: `{ mode, recorder, sinkState, sinkDegradedReason, counts }`, metadata only.
+  - `recorder` is `not_started` until the first message reaches dispatch, because the recorder is
+    created then. This is the normal state after a restart.
+  - `recorder` is `starting` while the sink is still creating its directory and taking its lock.
+    This normally lasts well under a second. `starting` for more than about 30 seconds is a fault,
+    usually a stalled `mkdir` or lock on the events directory's filesystem. Verdicts queue and then
+    drop as `droppedQueueFull` while it lasts.
+  - `recorder` is `ready` once the sink is ready.
+  - `recorder` is `disabled` if creating the recorder failed. This is latched until restart.
+  - `recorder` is `degraded` whenever the sink has a degraded reason, even if the sink has since
+    closed. `sinkDegradedReason` gives the closed reason code, for example `mkdir_failed`,
+    `competing_writer`, `segment_cap_reached` or `write_failed`. A reason outside the recorded id
+    charset is reported as `unknown`, so no free text or path reaches the body.
+  - `recorder` is `unavailable` if the sink is closed without a degraded reason, or its status
+    cannot be read. A running service never closes the sink, so `unavailable` is not expected in
+    production. If it appears, report it as a defect.
+  - `counts` carries the same counters the coverage markers carry, for the current process.
+
+The id rules: every id uses the charset `A-Za-z0-9._:-` (at most 128 characters), and `messageId` and
+`instance` also reject a standalone run of 7–15 digits, the length of a phone number. Digits glued to
+letters are not detected. Consequences:
+
+- Signal instances record no verdicts. Their message ids (`signal:` plus a JSON key) fail the
+  charset, so every Signal verdict is counted as `invalid`. The recorder logs each warning code at
+  most once per 60 s.
+- iMessage message ids are the Messages `guid`, normally a bare UUID. A UUID whose 8- or
+  12-character group happens to be all digits is rejected, which is roughly 3% of messages. Those
+  rows show up as `invalid` and missing. Twilio SIDs (`SM` plus hex) and WhatsApp hex ids are not
+  affected.
+- An instance whose recorded id contains a standalone 7–15 digit run (for example a name ending in
+  `-20260923`) records nothing at all. Every event is rejected, and `--instance` refuses the id.
+
+For the proxy rates, an ERROR verdict counts as SPAWN. The disagreement rate against `response_echoed`
+is printed four ways:
+
+- over echoed rows with an OK verdict;
+- over echoed rows with any verdict;
+- over all echoed rows;
+- conservatively, with every missing or ERROR echoed row counted as a disagreement.
+
+Each carries a one-sided 95% Clopper–Pearson upper bound. `response_echoed` is historical behaviour, not
+proof that a reply was required, so none of these is a gold false-suppress rate. The per-rule table
+counts SPAWN/SUPPRESS for OK results only, with ERROR in its own column. Latency is printed over every
+received row (OK and ERROR, including OVERRUN) and separately over OK rows. If more than one
+gate/rules/feature version is present, rates are printed per partition only, never pooled.
+
+**Disable / roll back.** Set `"mode": "off"` (or remove `shadowGate`) and restart. Existing segments
+are inert and can be archived.
+
+**Segment retention.** Segments never rotate out. The sink writes up to 32 segments of 5 MiB
+(160 MiB). When the next segment would exceed that, the sink degrades with `segment_cap_reached`
+and records nothing further, and every later restart degrades the same way, until an operator
+archives the segments. To archive, stop the instance (owner action), move the
+`shadow-gate-events.*.ndjson` files out of `eventsDir`, and start it again; numbering restarts at
+`000001`.
+
+**Known limits.**
+
+- Advisory only. Nothing reads verdicts at runtime.
+- There is no `disarmed` marker on process exit. The 10-minute `counts` markers bound the
+  unrecorded tail, and the report flags any boot that has no `armed` marker.
+- The pending-obligation feature (whether the bot's previous message asked a question) misses a bot
+  question stored in the same second as the inbound message. DMs skip the lookup entirely and record
+  it as unknown: `S02_DM` decides every DM before it matters.
+- Signal instances record no verdicts (see the id rules above).
+- In `shadow` mode the rules file is read and compiled once, when the ingest handler is created at
+  startup. Edits to the rules file take effect only after a restart.
+- The first read is final for the process: if the rules file is unreadable or invalid then, every
+  evaluation records `ERROR`/`E_THROW` until the process restarts, even after the file is fixed.

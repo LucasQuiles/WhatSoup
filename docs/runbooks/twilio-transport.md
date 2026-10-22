@@ -15,13 +15,15 @@ Automated tests are mock-based and do not prove live deliverability.
 
 ## How it works
 
-- `src/transport/registry.ts` — transport ID registry: `baileys` (default) and
-  `twilio`. Unknown IDs are rejected at config validation and again at the
+- `src/transport/registry.ts` re-exports the canonical ID registry in
+  `src/core/transport-refs.ts`: `baileys` (default), `twilio`, `signal`, and
+  `imessage`. Unknown IDs are rejected at config validation and again at the
   factory switch (`assertNeverTransport`).
 - `src/transport/factory.ts` — `createConnection(config)` returns the Baileys
-  `ConnectionManager` for `baileys`, or a `TwilioConnection` (bridge) wrapping
-  `TwilioSmsAdapter` + `SdkTwilioSmsPort` for `twilio`. The twilio arm throws
-  at startup if `twilioConfig` is missing.
+  `ConnectionManager` for `baileys`, a `TwilioConnection` (bridge) wrapping
+  `TwilioSmsAdapter` + `SdkTwilioSmsPort` for `twilio`, `SignalConnection` for
+  `signal`, or `ImessageConnection` for `imessage`. Transport-specific
+  configuration requirements are owned by [configuration.md](../configuration.md).
 - `src/transport/twilio/adapter.ts` — send path, inbound poll loop, health
   state, typed error mapping.
 - `src/transport/twilio/twilio-port.ts` — the only file that touches the
@@ -71,7 +73,7 @@ Per-field notes (validation rules are exact — see
 
 | Field | Required | Default | Validation / behaviour |
 |-------|----------|---------|------------------------|
-| `transport` (top level) | no | `baileys` | Must be `baileys` or `twilio` when present. `twilioConfig` is **required** when `twilio`, and **rejected** when the transport is anything else. |
+| `transport` (top level) | no | `baileys` | Must be a registered transport ID: `baileys`, `twilio`, `signal`, or `imessage`. `twilioConfig` is **required** when `twilio`, and **rejected** when the transport is anything else. |
 | `twilioConfig.account` | yes | — | Channel account segment used to build the channel ID (`sms:<account>`). Must match `^[a-z][a-z0-9-]{0,63}$` (lowercase, starts with a letter). Pick a stable name; changing it changes the channel identity. |
 | `twilioConfig.accountSid` | yes | — | Must match `^AC[0-9a-f]{32}$` — hex must be **lowercase**. |
 | `twilioConfig.authTokenService` | yes | — | Keyring **service name**, not the token itself. Non-empty, no whitespace, max 128 chars. See [Credentials](#credentials-keyring). |
@@ -85,7 +87,7 @@ Per-field notes (validation rules are exact — see
 | `twilioConfig.voice.voicemailMaxLengthSec` | no | `120` | Max recording length in seconds (`[5, 600]`). |
 | `twilioConfig.voice.voicemailGreeting` | no | built-in | Custom `<Say>` greeting text (≤ 500 chars). |
 | `twilioConfig.pollIntervalMs` | no | `15000` | Integer in `[5000, 86400000]`. Floor protects against rate-limit storms; the 24h ceiling catches typos that would silently disable inbound. Also the inbound *lookback window* at connect (see below). |
-| `twilioConfig.rateLimit.smsPerMinute` | no | `30` | Integer in `[1, 600]`. Enforced per destination as a sliding one-minute window in the adapter's `sendText` path (validation runs first; the limiter never sees an invalid send). Over-cap sends are **delayed (FIFO queue per destination), never rejected**. In-process, in-memory only — a restart resets the window, and multiple processes sending from the same number each enforce their own independent cap. See [Current limitations](#current-limitations). |
+| `twilioConfig.rateLimit.smsPerMinute` | no | `30` | Integer in `[1, 600]`. Enforced per destination as a sliding one-minute window in `sendText`, after request validation. Over-cap sends queue FIFO; a reservation requiring more than 14 seconds fails with `TransientProviderError` and provider code `rate_limited`. This bounds the reservation wait, not total FIFO queue time. In-process, in-memory only; see [Current limitations](#current-limitations). |
 
 The `transport` and `twilioConfig` fields are also documented in the
 instance.json schema in [`docs/configuration.md`](../configuration.md).
@@ -169,7 +171,8 @@ not be re-emitted by the other.
 
 - **At connect:** `connect()` verifies credentials with an account fetch.
   Failure throws a typed error (`AuthRequiredError` for 401/Twilio code 20003,
-  `RateLimitedError` for 429/20429, `PermanentProviderError` otherwise), which
+  `RateLimitedError` for 429/20429, `TransientProviderError` for network/5xx
+  failures, and `PermanentProviderError` otherwise), which
   fails startup — `main.ts` logs `failed to start` (fatal) and shuts down. A
   missing keyring entry surfaces here as
   `Twilio auth token not found in keyring for service "<name>"`.
@@ -192,7 +195,8 @@ not be re-emitted by the other.
 
 ## Current limitations
 
-Each item below is verified against the code on this branch.
+These limitations describe source behavior; deployment status requires a check
+of the running instance.
 
 - **Voicemail audio download is not implemented.** Inbound voice delivers
   transcript text only. The recording SID is available as
@@ -209,11 +213,17 @@ Each item below is verified against the code on this branch.
   `src/transport/twilio/`.
 - **`rateLimit.smsPerMinute` is enforced, not merely validated — with
   per-process caveats.** `SmsRateLimiter`
-  (`src/transport/twilio/sms-rate-limiter.ts`) enforces it per destination as
+  (`src/transport/twilio/sms-rate-limiter.ts`, a compatibility re-export of
+  `src/transport/outbound-rate-limiter.ts`) enforces it per destination as
   a sliding one-minute window at the adapter's `sendText` seam, reserving a
   slot *after* request validation (invalid sends never consume a slot) and
-  *before* the port call. Over-cap sends are **delayed — queued FIFO per
-  destination — never rejected**; callers do not see a throttling failure.
+  *before* the port call. Over-cap sends queue FIFO per destination. The
+  adapter passes a 14-second reservation-wait bound, intended to stay below
+  the caller's 15-second timeout. A capped reservation throws
+  `TransientProviderError` with provider code `rate_limited` before submitting
+  the send. The shared limiter does not bound cumulative FIFO queue time;
+  concurrent same-destination calls can still settle after 14 seconds. Do not
+  treat this reservation bound as proof of a total send deadline.
   The cap is in-process, in-memory state only: a restart resets it, and it
   is **not** shared across multiple processes sending from the same Twilio
   number — each process enforces its own independent cap, so N processes

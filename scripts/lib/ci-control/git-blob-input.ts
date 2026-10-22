@@ -6,52 +6,23 @@ import {
   MAX_EXACT_AGGREGATE_BLOB_BYTES,
   MAX_EXACT_BLOB_COUNT,
   MAX_EXACT_SINGLE_BLOB_BYTES,
-  canonicalAsciiLine,
-  exactInputGitBytes,
-  parseBoundedInteger,
+  readObjectBatch,
   requireFullOid,
   requireSha1ObjectFormat,
 } from "./git-input-core.ts";
-import type { ExactBlobV1 } from "./git-input-core.ts";
+import type { EvidenceGitErrorCodes, ExactBlobV1 } from "./git-input-core.ts";
 
 const UINT8_ARRAY_FROM = Uint8Array.from.bind(Uint8Array);
+
+const BLOB_GIT_CODES: EvidenceGitErrorCodes = {
+  unavailable: "ci.input.blob-unavailable",
+  timeout: "ci.input.git-execution-timeout",
+  budget: "ci.input.blob-set-budget",
+};
 
 interface BlobPreflight {
   oid: string;
   byteLength: number;
-}
-
-function preflightBlob(cwd: string, oid: string): BlobPreflight {
-  const type = canonicalAsciiLine(exactInputGitBytes(
-    cwd,
-    ["cat-file", "-t", "--", oid],
-    "ci.input.blob-unavailable",
-    "ci.input.blob-set-budget",
-    64,
-  ), "ci.input.blob-set-malformed");
-  if (type !== "blob") {
-    throw new ExactGitInputError(
-      "ci.input.blob-type-unsupported",
-      "ci.input.blob-type-unsupported",
-    );
-  }
-  const byteLength = parseBoundedInteger(
-    exactInputGitBytes(
-      cwd,
-      ["cat-file", "-s", "--", oid],
-      "ci.input.blob-unavailable",
-      "ci.input.blob-set-budget",
-      64,
-    ),
-    "ci.input.blob-set-malformed",
-  );
-  if (byteLength > MAX_EXACT_SINGLE_BLOB_BYTES) {
-    throw new ExactGitInputError(
-      "ci.input.blob-set-budget",
-      "ci.input.blob-set-budget",
-    );
-  }
-  return { oid, byteLength };
 }
 
 export function readExactBlobs(
@@ -138,29 +109,66 @@ export function readExactBlobsWithinAggregateBudget(
   );
   const oids = [...new Set(validatedOids)].sort();
 
+  // One check batch, then one content batch. The rows keep the per-object order
+  // of checks: missing, then type, then the single and aggregate budgets.
+  const checks = readObjectBatch(
+    cwd,
+    oids,
+    "check",
+    BLOB_GIT_CODES,
+    "ci.input.blob-set-malformed",
+    oids.length * 128 + 1_024,
+  );
   const preflight: BlobPreflight[] = [];
   let aggregateBytes = 0;
-  for (const oid of oids) {
-    const blob = preflightBlob(cwd, oid);
-    aggregateBytes += blob.byteLength;
+  for (const row of checks) {
+    if (row.kind === "missing") {
+      throw new ExactGitInputError(
+        "ci.input.blob-unavailable",
+        "ci.input.blob-unavailable",
+      );
+    }
+    if (row.type !== "blob") {
+      throw new ExactGitInputError(
+        "ci.input.blob-type-unsupported",
+        "ci.input.blob-type-unsupported",
+      );
+    }
+    if (row.size > MAX_EXACT_SINGLE_BLOB_BYTES) {
+      throw new ExactGitInputError(
+        "ci.input.blob-set-budget",
+        "ci.input.blob-set-budget",
+      );
+    }
+    aggregateBytes += row.size;
     if (aggregateBytes > aggregateByteLimit) {
       throw new ExactGitInputError(
         "ci.input.blob-set-budget",
         "ci.input.blob-set-budget",
       );
     }
-    preflight.push(blob);
+    preflight.push({ oid: row.oid, byteLength: row.size });
   }
 
+  const contents = readObjectBatch(
+    cwd,
+    oids,
+    "content",
+    BLOB_GIT_CODES,
+    "ci.input.blob-set-malformed",
+    aggregateBytes + oids.length * 128 + 1_024,
+  );
   const blobs: ExactBlobV1[] = [];
-  for (const blob of preflight) {
-    const content = exactInputGitBytes(
-      cwd,
-      ["cat-file", "blob", "--", blob.oid],
-      "ci.input.blob-unavailable",
-      "ci.input.blob-set-budget",
-      Math.max(1_024, blob.byteLength + 1),
-    );
+  for (const [index, blob] of preflight.entries()) {
+    const row = contents[index]!;
+    // `cat-file blob` failed on a missing object or another type; so does this.
+    if (row.kind === "missing" || row.type !== "blob" || row.bytes === null) {
+      throw new ExactGitInputError(
+        "ci.input.blob-unavailable",
+        "ci.input.blob-unavailable",
+      );
+    }
+    const content = row.bytes;
     const identity = createHash("sha1")
       .update(`blob ${blob.byteLength}\0`)
       .update(content)

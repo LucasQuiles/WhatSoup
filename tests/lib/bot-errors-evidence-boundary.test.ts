@@ -55,6 +55,16 @@ describe('confineAlertContent (issue #2386)', () => {
     expect(confineAlertContent('evidence', 'RangeError: bad').failureClass).toBe('RangeError');
     expect(confineAlertContent('evidence', 'provider_unknown_terminal slice').failureClass).toBe('provider_unknown');
     expect(confineAlertContent('evidence', 'runtime_verify_failed rc=1').failureClass).toBe('runtime_verify_failed');
+    // A scope held by an unfinalized turn wins over an Error class named in the
+    // same string, and a longer token that merely starts the same does not match.
+    expect(confineAlertContent(
+      'evidence',
+      'inbound_seq=7 reason=pre_dispatch_error automatic_replay=false scope=per_chat scope_blocked=finalization',
+    ).failureClass).toBe('scope_blocked');
+    expect(confineAlertContent('evidence', 'Error: TypeError while admitting scope_blocked=finalization').failureClass)
+      .toBe('scope_blocked');
+    expect(confineAlertContent('evidence', 'inbound_seq=7 reason=scope_blocked_recovery automatic_replay=false').failureClass)
+      .toBe('unknown');
   });
 
   it('returns unknown for unrecognized content', () => {

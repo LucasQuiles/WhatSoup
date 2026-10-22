@@ -1,7 +1,7 @@
 # console/eslint-waivers.yaml
 #
 # Waiver / exception registry for SOUP Design System v3 lint rules.
-# Schema (all 7 fields mandatory):
+# Schema (all 12 fields mandatory):
 #   id                            unique identifier (WVR-NNN)
 #   rule                          soup/* rule or no-restricted-syntax selector group
 #   owner                         accountable person/agent handle

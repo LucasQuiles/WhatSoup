@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -113,11 +114,121 @@ def test_load_roster_fails_closed(tmp_path: Path):
 
 
 def test_default_roster_path_resolves_canonical_and_env(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no private roster
     monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
-    assert _mod.default_roster_path().name == "bot-errors-expected-fleet.json"
+    assert _mod.default_roster_path() == _mod._repo_root() / "deploy" / "bot-errors-expected-fleet.json"
     override = tmp_path / "private-roster.json"
     monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(override))
     assert _mod.default_roster_path() == override
+
+
+# --------------------------------------------------------------------------
+# Resolver order (lib/fleet_config.py): BOT_ERRORS_FLEET_SENTINEL_HOSTS ->
+# ~/.config/whatsoup/bot-errors-expected-fleet.json -> tracked copy -> fail.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated(monkeypatch, tmp_path: Path) -> dict:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", raising=False)
+    monkeypatch.setattr(_mod, "_repo_root", lambda: repo)
+    return {
+        "private": home / ".config" / "whatsoup" / "bot-errors-expected-fleet.json",
+        "tracked": repo / "deploy" / "bot-errors-expected-fleet.json",
+    }
+
+
+def _write_roster(path: Path, payload) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _one_host(host: str) -> dict:
+    return _roster([{"host": host, "role": "bot-host", "instances": []}])
+
+
+def test_private_roster_present_is_used(isolated):
+    _write_roster(isolated["private"], _one_host("host-a"))
+    _write_roster(isolated["tracked"], _one_host("host-b"))
+
+    assert _mod.default_roster_path() == isolated["private"]
+    _data, inv = _mod.load_roster()
+    assert inv["expectedHosts"] == ["host-a"]
+    assert _mod.roster_epoch() == int(isolated["private"].stat().st_mtime)
+
+
+def test_private_roster_missing_uses_tracked(isolated):
+    _write_roster(isolated["tracked"], _one_host("host-b"))
+
+    _data, inv = _mod.load_roster()
+    assert inv["expectedHosts"] == ["host-b"]
+
+
+def test_no_roster_anywhere_fails_naming_paths_and_order(isolated):
+    with pytest.raises(_mod.RosterError) as info:
+        _mod.load_roster()
+
+    message = str(info.value)
+    assert "fleet roster missing" in message
+    assert str(isolated["private"]) in message
+    assert str(isolated["tracked"]) in message
+    assert "resolver order: 1) env BOT_ERRORS_FLEET_SENTINEL_HOSTS 2) private" in message
+    with pytest.raises(_mod.RosterError, match="resolver order"):
+        _mod.default_roster_path()
+    assert _mod.roster_epoch() is None
+
+
+def test_env_roster_missing_does_not_fall_through(isolated, monkeypatch, tmp_path: Path):
+    _write_roster(isolated["private"], _one_host("host-a"))
+    _write_roster(isolated["tracked"], _one_host("host-b"))
+    missing = tmp_path / "gone-roster.json"
+    monkeypatch.setenv("BOT_ERRORS_FLEET_SENTINEL_HOSTS", str(missing))
+
+    with pytest.raises(_mod.RosterError) as info:
+        _mod.load_roster()
+
+    message = str(info.value)
+    assert f"fleet roster missing: {missing}" in message
+    assert "BOT_ERRORS_FLEET_SENTINEL_HOSTS is set, so later sources were not tried" in message
+
+
+def test_invalid_private_roster_does_not_fall_through(isolated):
+    _write_roster(isolated["private"], "{not json")
+    _write_roster(isolated["tracked"], _one_host("host-b"))
+
+    with pytest.raises(_mod.RosterError, match="fleet roster is not valid JSON"):
+        _mod.load_roster()
+
+
+def test_non_object_roster_fails(isolated):
+    _write_roster(isolated["tracked"], "[]")
+
+    with pytest.raises(_mod.RosterError, match="is not a JSON object"):
+        _mod.load_roster()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_unreadable_private_roster_does_not_fall_through(isolated):
+    private = _write_roster(isolated["private"], _one_host("host-a"))
+    _write_roster(isolated["tracked"], _one_host("host-b"))
+    private.chmod(0)
+    try:
+        with pytest.raises(_mod.RosterError, match=r"unreadable \(PermissionError\)"):
+            _mod.load_roster()
+    finally:
+        private.chmod(0o600)
+
+
+def test_structurally_invalid_resolved_roster_fails(isolated):
+    _write_roster(isolated["private"], {"schemaVersion": 1, "hosts": [{"role": "bot-host"}]})
+
+    with pytest.raises(_mod.RosterError, match="missing host"):
+        _mod.load_roster()
 
 
 def test_real_canonical_roster_is_loadable_and_nonzero():

@@ -190,6 +190,7 @@ describe('check-contrast-matrix.mjs', () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
+    expect(existsSync(outPath)).toBe(false);
     const parsed = JSON.parse(result.stdout) as { verdict: string; pair_count: number; failed_count: number };
     expect(parsed.verdict).toBe('PASS');
     expect(parsed.failed_count).toBe(0);

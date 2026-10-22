@@ -57,6 +57,7 @@ function fakeStatus(overrides: Partial<InstanceStatus> = {}): InstanceStatus {
     lastAlertAt: null,
     silencedUntil: null,
     activeAlertSources: [],
+    recoveryDebt: null,
     ...overrides,
   };
 }
@@ -141,6 +142,43 @@ describe('handleGetLines', () => {
     // not from poller's lastPollAt. With empty mock data, it may be null or a
     // mock-derived value depending on what dbReader.query returns.
     expect(body[0]).toHaveProperty('lastActive');
+  });
+
+  it('projects normalized recovery debt independently from raw health', () => {
+    const inst = fakeInstance({ name: 'debt-line' });
+    const recoveryDebt = {
+      open: true,
+      serviceBlocking: false,
+      attention: 'routine' as const,
+      reasons: ['historical_turn_catchup'],
+      gaugeTotal: 2,
+    };
+    const status = fakeStatus({
+      name: 'debt-line',
+      status: 'online',
+      health: { status: 'healthy', recovery_debt: { raw: 'producer-shape' } },
+      recoveryDebt,
+    });
+    const deps = makeDeps({
+      discovery: {
+        getInstances: vi.fn(() => new Map([['debt-line', inst]])),
+        getInstance: vi.fn(),
+      } as any,
+      healthPoller: {
+        getStatuses: vi.fn(() => new Map([['debt-line', status]])),
+        getStatus: vi.fn(() => status),
+      } as any,
+    });
+
+    const res = mockRes();
+    handleGetLines(mockReq(), res, deps);
+
+    expect(JSON.parse(res._body)[0]).toMatchObject({
+      name: 'debt-line',
+      status: 'online',
+      recoveryDebt,
+      health: { recovery_debt: { raw: 'producer-shape' } },
+    });
   });
 
   it('preserves bounded outbound-poison health evidence for console consumers', () => {
@@ -1492,6 +1530,57 @@ describe('handleGetLine config and adminPhones', () => {
       expect(res._status).toBe(200);
       const body = JSON.parse(res._body);
       expect(body.config).toEqual({ name: 'mybot', webhookUrl: 'http://example.com' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts client-output blocked terms and public keys from the detailed config response', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-policy-cfg-'));
+    try {
+      const privateTerm = 'private-term-that-must-not-escape';
+      const publicKey = Buffer.concat([
+        Buffer.from('302a300506032b6570032100', 'hex'),
+        Buffer.alloc(32, 11),
+      ]).toString('base64url');
+      const rawConfig = {
+        name: 'policy-line',
+        clientOutputPolicies: [{
+          conversationKey: 'synthetic-conversation',
+          maxCodePoints: 500,
+          maxQuestionMarks: 1,
+          blockedTerms: [{ value: privateTerm, match: 'whole_word', caseSensitive: false }],
+          rejectInternalArtifacts: true,
+          rejectWhatsAppJids: true,
+          authorization: {
+            keyId: 'synthetic-key',
+            publicKey,
+            requiredActions: ['send_message'],
+          },
+        }],
+      };
+      const configPath = path.join(tmp, 'config.json');
+      fs.writeFileSync(configPath, JSON.stringify(rawConfig));
+      const inst = fakeInstance({ name: 'policy-line', configPath });
+      const deps = makeDeps({
+        discovery: { getInstance: vi.fn(() => inst), getInstances: vi.fn() } as any,
+        healthPoller: { getStatus: vi.fn(() => undefined), getStatuses: vi.fn() } as any,
+      });
+
+      const res = mockRes();
+      await handleGetLine(mockReq(), res, deps, { name: 'policy-line' });
+      const response = JSON.parse(res._body);
+      const serialized = JSON.stringify(response);
+
+      expect(res._status).toBe(200);
+      expect(serialized).not.toContain(privateTerm);
+      expect(serialized).not.toContain(publicKey);
+      expect(response.config.clientOutputPolicies[0]).toMatchObject({
+        conversationKey: 'synthetic-conversation',
+        blockedTerms: [{ value: '[redacted]', match: 'whole_word', caseSensitive: false }],
+        authorization: { keyId: 'synthetic-key', publicKey: '[redacted]' },
+      });
+      expect(JSON.parse(fs.readFileSync(configPath, 'utf8'))).toEqual(rawConfig);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

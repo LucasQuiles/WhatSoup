@@ -5,6 +5,7 @@ import { probePrimaryModelUsability } from '../../../src/runtimes/agent/provider
 import { probeBinaryCommand as runBinaryCommandProbe } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
+import { deferred } from '../../helpers/deferred.ts';
 
 describe('createPrimaryModelProbeAdapters', () => {
   afterEach(() => {
@@ -211,6 +212,72 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
+  it('reports a granted OpenCode model probe as executing with fresh progress', async () => {
+    let now = 10_000;
+    const gate = new ProviderExecutionGate({ now: () => now });
+    const pendingProbe = deferred<{ status: 'ok'; output: string }>();
+    const probeBinaryCommand = vi.fn(() => pendingProbe.promise);
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+    });
+
+    const probe = adapters.probeBinaryModel?.({
+      provider: 'opencode-cli',
+      model: 'openai/some-model',
+    });
+    await Promise.resolve();
+
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'probe',
+      activePhase: 'executing',
+      progressAgeMs: 0,
+    });
+
+    now = 10_100;
+    pendingProbe.resolve({ status: 'ok', output: 'OK' });
+    await expect(probe).resolves.toEqual({ status: 'ok' });
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('does not repaint an aborted granted OpenCode probe as executing', async () => {
+    const gate = new ProviderExecutionGate({ now: () => 10_000 });
+    const controller = new AbortController();
+    const originalAcquire = gate.acquire.bind(gate);
+    vi.spyOn(gate, 'acquire').mockImplementation(async (...args) => {
+      const lease = await originalAcquire(...args);
+      controller.abort();
+      return lease;
+    });
+    const pendingProbe = deferred<{ status: 'ok'; output: string }>();
+    const probeBinaryCommand = vi.fn(() => pendingProbe.promise);
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'opencode'),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+    });
+
+    const probe = adapters.probeBinaryModel?.(
+      { provider: 'opencode-cli', model: 'openai/some-model' },
+      controller.signal,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'probe',
+      activePhase: 'terminalizing',
+      progressAgeMs: 0,
+    });
+
+    pendingProbe.resolve({ status: 'ok', output: 'OK' });
+    await expect(probe).resolves.toEqual({ status: 'ok' });
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
   it('cancels a timed-out OpenCode probe before its queued execution can start later', async () => {
     vi.useFakeTimers();
     try {
@@ -303,7 +370,8 @@ describe('createPrimaryModelProbeAdapters', () => {
   });
 
   it('retains the OpenCode execution lease until an aborted probe process closes', async () => {
-    const gate = new ProviderExecutionGate();
+    let now = 20_000;
+    const gate = new ProviderExecutionGate({ now: () => now });
     const controller = new AbortController();
     const child = new EventEmitter() as EventEmitter & {
       pid: number;
@@ -339,13 +407,21 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(gate.snapshot()).toMatchObject({
       active: true,
       activeWorkKind: 'probe',
+      activePhase: 'executing',
+      progressAgeMs: 0,
       pending: 0,
     });
 
+    now = 20_010;
     controller.abort();
     await Promise.resolve();
     expect(child.kill).toHaveBeenCalledOnce();
-    expect(gate.snapshot()).toMatchObject({ active: true, activeWorkKind: 'probe' });
+    expect(gate.snapshot()).toMatchObject({
+      active: true,
+      activeWorkKind: 'probe',
+      activePhase: 'terminalizing',
+      progressAgeMs: 0,
+    });
     let successorGranted = false;
     const successor = gate.acquire({
       work: { kind: 'turn', scopeHash: 'bbbbbbbbbbbb' },
@@ -358,6 +434,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(gate.snapshot()).toMatchObject({
       active: true,
       activeWorkKind: 'probe',
+      activePhase: 'terminalizing',
       pending: 1,
     });
 
@@ -367,7 +444,15 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(gate.snapshot()).toMatchObject({
       active: true,
       activeWorkKind: 'turn',
+      activePhase: 'queued_to_spawn',
       pending: 0,
+    });
+    now = 20_020;
+    child.emit('close', null, 'SIGTERM');
+    expect(gate.snapshot()).toMatchObject({
+      activeWorkKind: 'turn',
+      activePhase: 'queued_to_spawn',
+      progressAgeMs: 10,
     });
     successorLease.release();
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });

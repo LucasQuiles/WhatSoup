@@ -95,10 +95,13 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
   // which actions are eligible. A recovery row that supersedes an older
   // incident remains visible to the eligibility scan even when hidden by a
   // filter (e.g. `errors`), so the resolved incident cannot be resurrected.
-  const actionableKeys = useMemo(() => {
-    if (paused || error) return new Set<string>();
+  // #2525: the winner is recorded by object identity, not by eventKey, because
+  // two incidents for one line at the same time share a key string. Live,
+  // `filtered` holds the same references as `events`.
+  const actionableEvents = useMemo(() => {
+    if (paused || error) return new Set<FeedEvent>();
     const seen = new Set<string>();
-    const keys = new Set<string>();
+    const winners = new Set<FeedEvent>();
     for (const event of events) {
       const inst = event.instance;
       const d = event.detail;
@@ -109,10 +112,10 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
       const isHealthErr = d?.type === "health" && statusNeedsAttention(d.status);
       if (isConnErr || isHealthErr) {
         seen.add(inst);
-        keys.add(eventKey(event));
+        winners.add(event);
       }
     }
-    return keys;
+    return winners;
   }, [events, paused, error]);
 
   // Per-instance pending lock
@@ -217,7 +220,7 @@ const ActivityFeed: FC<ActivityFeedProps> = ({ events, error, onRetry }) => {
           </div>
         ) : filtered.map((event) => {
           const key = eventKey(event);
-          const canAct = actionableKeys.has(key);
+          const canAct = actionableEvents.has(event);
           return (
             <FeedCard
               key={key}

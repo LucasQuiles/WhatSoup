@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveTrustedGit } from '../../scripts/lib/ci-control/trusted-git.ts';
-import { __setTestGitPath, gitBytes } from '../../scripts/lib/ci-control/git-input-core.ts';
+import { __setTestGitPath, GIT_TIMEOUT_MS, gitBytes } from '../../scripts/lib/ci-control/git-input-core.ts';
 
 import {
   ExactGitInputError,
@@ -78,6 +78,7 @@ import {
   extractModuleSpecifiers,
   GitShimResponse,
   responseKey,
+  resolveShimResponse,
   withGitShim,
   addedLineShimResponses,
   addedFactsShimResponses,
@@ -278,6 +279,110 @@ describe('exact candidate tree entries', () => {
       treeOid: git(root, ['rev-parse', `${baseOid}^{tree}`]),
       entries: [],
     });
+  });
+
+  it('reads three exact trees with seven native processes including a separate reread', async () => {
+    const { root } = fixture();
+    write(root, 'a/b/leaf.txt', 'leaf\n');
+    const candidateOid = commit(root, 'nested trees');
+    const treeOids = new Set(['', ':a', ':a/b'].map((suffix) =>
+      git(root, ['rev-parse', suffix === '' ? `${candidateOid}^{tree}` : `${candidateOid}${suffix}`])));
+    const leafOid = git(root, ['rev-parse', `${candidateOid}:a/b/leaf.txt`]);
+    const calls: Array<{ args: string[]; input: string }> = [];
+    await withMockedGitInput((file, args, options) => {
+      const input = String(options?.input ?? '');
+      if (treeOids.has(args.at(-1) ?? '') || input.trim().split('\n').some((oid) => treeOids.has(oid))) {
+        calls.push({ args: args.slice(1), input });
+      }
+      return execFileSync(file, args, options as never) as unknown as Buffer;
+    }, (isolated) => {
+      expect(isolated.readExactTreeEntries(root, { candidateOid, paths: ['a/b/leaf.txt'] }).entries)
+        .toEqual([{ path: 'a/b/leaf.txt', presence: 'present', mode: '100644', objectType: 'blob', objectOid: leafOid }]);
+    });
+    expect(calls).toHaveLength(7);
+    const rereads = calls.filter(({ args }) => responseKey(args) === responseKey(['cat-file', '--batch']));
+    expect(rereads).toHaveLength(1);
+    expect(rereads[0]?.input).toBe(`${[...treeOids].sort().join('\n')}\n`);
+  });
+
+  it('carries the shared tree deadline into a nested check batch', async () => {
+    const childBody = Buffer.alloc(0);
+    const childOid = treeOid(childBody);
+    const rootBody = rawTreeBody([{ mode: '40000', name: 'nested', oid: childOid }]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    const responses = treeLookupResponses({ candidateOid, commitBody, trees: new Map([[rootOid, rootBody], [childOid, childBody]]) });
+    let now = 100;
+    let observedTimeout: number | undefined;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    try {
+      await withMockedGitInput((_file, args, options) => {
+        const key = responseKey(args.slice(1));
+        if (key === responseKey(['cat-file', 'tree', '--', rootOid])) now = GIT_TIMEOUT_MS - 900;
+        if (key === responseKey(['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'])
+          && String(options?.input) === `${childOid}\n`) observedTimeout = options?.timeout;
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
+        if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
+        return response.stdoutBase64 === undefined
+          ? Buffer.from(response.stdout ?? '', 'utf8') : Buffer.from(response.stdoutBase64, 'base64');
+      }, (isolated) => {
+        expect(isolated.readExactTreeEntries('/isolated-fixture', { candidateOid, paths: ['nested'] }).entries)
+          .toEqual([{ path: 'nested', presence: 'present', mode: '040000', objectType: 'tree', objectOid: childOid }]);
+      });
+      expect(observedTimeout).toBe(1_000);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('maps an explicit missing tree check row to unavailable', () => {
+    const rootOid = 'a'.repeat(40);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    const responses = treeLookupResponses({ candidateOid, commitBody, trees: new Map() });
+    responses[responseKey(['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'], `${rootOid}\n`)]
+      = { stdout: `${rootOid} missing\n` };
+    expectCode(() => withGitShim(responses,
+      (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: [] })), 'ci.input.tree-entry-unavailable');
+  });
+
+  it('rejects a missing independent tree reread after a valid initial read', () => {
+    const rootBody = Buffer.alloc(0);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    const responses = treeLookupResponses({ candidateOid, commitBody, trees: new Map([[rootOid, rootBody]]) });
+    responses[responseKey(['cat-file', '--batch'], `${rootOid}\n`)]
+      = { stdout: `${rootOid} missing\n` };
+    expectCode(() => withGitShim(responses,
+      (cwd) => readExactTreeEntries(cwd, { candidateOid, paths: [] })), 'ci.input.tree-entry-unavailable');
+  });
+
+  it('rejects an oversized blob in a tree position before size rejection or content access', async () => {
+    const wrongOid = 'a'.repeat(40);
+    const rootBody = rawTreeBody([{ mode: '40000', name: 'nested', oid: wrongOid }]);
+    const rootOid = treeOid(rootBody);
+    const commitBody = rawCommitBody({ treeOid: rootOid });
+    const candidateOid = commitOid(commitBody);
+    const responses = treeLookupResponses({ candidateOid, commitBody, trees: new Map([[rootOid, rootBody]]), objectTypes: new Map([[wrongOid, 'blob']]) });
+    responses[responseKey(['cat-file', '-s', '--', wrongOid])] = { stdout: `${MAX_EXACT_SINGLE_TREE_BYTES + 1}\n` };
+    let wrongContentReads = 0;
+    await withMockedGitInput((_file, args, options) => {
+      const key = responseKey(args.slice(1));
+      if (key === responseKey(['cat-file', 'tree', '--', wrongOid])) wrongContentReads += 1;
+      const response = resolveShimResponse(responses, args.slice(1), options?.input);
+      if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
+      return response.stdoutBase64 === undefined
+        ? Buffer.from(response.stdout ?? '', 'utf8') : Buffer.from(response.stdoutBase64, 'base64');
+    }, (isolated) => {
+      let thrown: unknown;
+      try {
+        isolated.readExactTreeEntries('/isolated-fixture', { candidateOid, paths: ['nested'] });
+      } catch (error) { thrown = error; }
+      expect(thrown).toMatchObject({ code: 'ci.input.tree-entry-identity-mismatch' });
+    });
+    expect(wrongContentReads).toBe(0);
   });
 
   it('rejects hostile input and path arrays before accessors or Git', () => {
@@ -504,9 +609,9 @@ describe('exact candidate tree entries', () => {
           stdoutBase64: body.toString('base64'),
         };
       }
-      return withMockedGitInput((_file, args) => {
+      return withMockedGitInput((_file, args, options) => {
         const key = responseKey(args.slice(1));
-        const response = responses[key];
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
         if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
         const treeMatch = key.match(/^\["cat-file","tree","--","([0-9a-f]{40})"\]$/u);
         if (treeMatch !== null) {
@@ -608,9 +713,9 @@ describe('exact candidate tree entries', () => {
         trees: new Map([[rootOid, rootBody], [childOid, childBody]]),
         objectTypes: new Map([['2'.repeat(40), 'blob']]),
       });
-      return withMockedGitInput((_file, args) => {
+      return withMockedGitInput((_file, args, options) => {
         const key = responseKey(args.slice(1));
-        const response = responses[key];
+        const response = resolveShimResponse(responses, args.slice(1), options?.input);
         if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
         return response.stdoutBase64 === undefined
           ? Buffer.from(response.stdout ?? '', 'utf8')
@@ -698,7 +803,7 @@ describe('exact candidate tree entries', () => {
       objectTypes: new Map([[leafOid, 'blob']]),
     });
     const reads = new Map<string, number>();
-    await withMockedGitInput((_file, args) => {
+    await withMockedGitInput((_file, args, options) => {
       const key = responseKey(args.slice(1));
       if (key === responseKey(['cat-file', 'tree', '--', childOid])) {
         const count = (reads.get(childOid) ?? 0) + 1;
@@ -708,7 +813,14 @@ describe('exact candidate tree entries', () => {
       if (key === responseKey(['cat-file', 'tree', '--', rootOid])) {
         reads.set(rootOid, (reads.get(rootOid) ?? 0) + 1);
       }
-      const response = responses[key];
+      const batchOids = key === responseKey(['cat-file', '--batch']) ? String(options?.input).trim().split('\n') : [];
+      for (const oid of batchOids) {
+        if (oid === rootOid || oid === childOid) reads.set(oid, (reads.get(oid) ?? 0) + 1);
+      }
+      const selected = batchOids.includes(childOid)
+        ? { ...responses, [responseKey(['cat-file', 'tree', '--', childOid])]: { stdoutBase64: childSecond.toString('base64') } }
+        : responses;
+      const response = resolveShimResponse(selected, args.slice(1), options?.input);
       if (response === undefined) throw new Error(`unexpected synthetic command: ${key}`);
       return response.stdoutBase64 === undefined
         ? Buffer.from(response.stdout ?? '', 'utf8')
@@ -1292,6 +1404,7 @@ describe('exact commit metadata', () => {
     ]);
     assertImportSurface('scripts/lib/ci-control/git-input-core.ts', [
         '../../../src/lib/git-env.ts',
+        './input-limits.ts',
         './trusted-git.ts',
         'node:child_process',
         'node:crypto',
@@ -1300,6 +1413,7 @@ describe('exact commit metadata', () => {
         'node:perf_hooks',
         'node:util',
     ]);
+    assertImportSurface('scripts/lib/ci-control/input-limits.ts', []);
   });
 
   it('#2843: resolveGit() uses resolveTrustedGit() — fails closed when no candidate exists', () => {
@@ -1353,6 +1467,8 @@ describe('exact commit metadata', () => {
         GIT_COMMITTER_EMAIL: 'worker@invalid.example',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     });
     const unsafeOid = git(root, ['rev-parse', 'HEAD']);
     write(root, 'safe.txt', 'safe ambient head\n');
@@ -1581,22 +1697,25 @@ describe('exact commit metadata', () => {
     expect(secondBody.byteLength).toBe(firstBody.byteLength);
     const oid = commitOid(firstBody);
     let bodyReads = 0;
+    const CHECK_ARGS = ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'];
+    const BATCH_ARGS = ['cat-file', '--batch'];
+    const batchInputs: string[] = [];
     vi.resetModules();
     vi.doMock('node:child_process', () => ({
-      execFileSync: (_file: string, rawArgs: string[]) => {
+      execFileSync: (_file: string, rawArgs: string[], options?: { input?: Buffer | string }) => {
         const args = rawArgs.slice(1);
         if (responseKey(args) === responseKey(['rev-parse', '--show-object-format'])) {
           return Buffer.from('sha1\n');
         }
-        if (responseKey(args) === responseKey(['cat-file', '-t', '--', oid])) {
-          return Buffer.from('commit\n');
+        if (responseKey(args) === responseKey(CHECK_ARGS)) {
+          batchInputs.push(String(options?.input));
+          return Buffer.from(`${oid} commit ${firstBody.byteLength}\n`);
         }
-        if (responseKey(args) === responseKey(['cat-file', '-s', '--', oid])) {
-          return Buffer.from(`${firstBody.byteLength}\n`);
-        }
-        if (responseKey(args) === responseKey(['cat-file', 'commit', '--', oid])) {
+        if (responseKey(args) === responseKey(BATCH_ARGS)) {
+          batchInputs.push(String(options?.input));
           bodyReads += 1;
-          return bodyReads === 1 ? firstBody : secondBody;
+          const body = bodyReads === 1 ? firstBody : secondBody; // same length, same framed header
+          return Buffer.concat([Buffer.from(`${oid} commit ${body.byteLength}\n`), body, Buffer.from('\n')]);
         }
         throw new Error('unexpected synthetic command');
       },
@@ -1613,6 +1732,7 @@ describe('exact commit metadata', () => {
       expect(String(thrown)).not.toContain('private first body');
       expect(String(thrown)).not.toContain('private other body');
       expect(bodyReads).toBe(2);
+      expect(batchInputs).toEqual([`${oid}\n`, `${oid}\n`, `${oid}\n`]);
     } finally {
       vi.doUnmock('node:child_process');
       vi.resetModules();

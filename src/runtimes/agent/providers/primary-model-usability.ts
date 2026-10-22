@@ -65,20 +65,38 @@ export type ApiModelAccessProbeResult =
   | { status: 'timeout' }
   | { status: 'unknown'; reason?: string };
 
+// #3557: the probe stage an adapter has entered. A cancelled probe's timeout
+// reason names the stage that was in flight, so a stalled credential heal, gate
+// wait, child run, or API request is distinguishable after the fact. Bounded,
+// content-free vocabulary: it is surfaced verbatim in /health
+// primaryModelUsability.reason and in the diagnostic finding's data.
+export type PrimaryModelProbeStage =
+  | 'prepare'
+  | 'credential-heal'
+  | 'gate-wait'
+  | 'child-run'
+  | 'api-request';
+
+export type PrimaryModelProbeStageReporter = (stage: PrimaryModelProbeStage) => void;
+
 export interface PrimaryModelProbeAdapters {
   // model: null = probe the CLI's own default model (claude-cli only) — a
   // model-less instance must still be probeable or recovery can never pass.
   // When a signal is supplied, production adapters must settle after abort so
   // the caller's timeout receipt cannot precede cancellation acknowledgement.
+  // onStage is called synchronously on entry to each stage; an adapter that
+  // never calls it yields an '-unreported' stage on cancellation.
   probeBinaryModel?: (
     target: { provider: string; model: string | null },
     signal?: AbortSignal,
+    onStage?: PrimaryModelProbeStageReporter,
   ) => Promise<BinaryModelProbeResult>;
   // Despite the legacy name, this must exercise a generation-class API path:
   // catalog/list-model checks can pass while quota-limited turns still fail.
   probeApiModelAccess?: (
     target: { provider: 'openai-api' | 'anthropic-api'; model: string },
     signal?: AbortSignal,
+    onStage?: PrimaryModelProbeStageReporter,
   ) => Promise<ApiModelAccessProbeResult>;
 }
 
@@ -90,6 +108,14 @@ export interface PrimaryModelProbeOptions {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT = Symbol('primary-model-probe-timeout');
 const PROBE_THROW = Symbol('primary-model-probe-throw');
+
+// A cancelled probe. reason is one of: 'caller-pre-aborted',
+// 'deadline-nonpositive', or '<cause>-<stage>' where cause is 'deadline' or
+// 'caller-abort' and stage is a PrimaryModelProbeStage or 'unreported'.
+interface ProbeTimeout {
+  readonly kind: typeof TIMEOUT;
+  readonly reason: string;
+}
 
 export async function probePrimaryModelUsability(
   target: PrimaryModelProbeTarget,
@@ -117,11 +143,11 @@ export async function probePrimaryModelUsability(
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
     }
     const probe = await withCancellationDeadline(
-      (signal) => adapters.probeBinaryModel!({ provider, model }, signal),
+      (signal, onStage) => adapters.probeBinaryModel!({ provider, model }, signal, onStage),
       timeoutMs,
       options.signal,
     );
-    if (probe === TIMEOUT) return result(target, model, 'timeout');
+    if (isProbeTimeout(probe)) return result(target, model, 'timeout', probe.reason);
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapBinaryModelProbe(target, model, probe);
   }
@@ -137,11 +163,11 @@ export async function probePrimaryModelUsability(
       return result(target, model, 'unknown', 'api-model-probe-unavailable');
     }
     const probe = await withCancellationDeadline(
-      (signal) => adapters.probeApiModelAccess!({ provider, model }, signal),
+      (signal, onStage) => adapters.probeApiModelAccess!({ provider, model }, signal, onStage),
       timeoutMs,
       options.signal,
     );
-    if (probe === TIMEOUT) return result(target, model, 'timeout');
+    if (isProbeTimeout(probe)) return result(target, model, 'timeout', probe.reason);
     if (probe === PROBE_THROW) return result(target, model, 'unknown', 'probe-threw');
     return mapApiModelProbe(target, model, probe);
   }
@@ -211,35 +237,67 @@ function normalizedModel(value: string | null | undefined): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
+function probeTimeout(reason: string): ProbeTimeout {
+  return { kind: TIMEOUT, reason };
+}
+
+function isProbeTimeout(value: unknown): value is ProbeTimeout {
+  return typeof value === 'object' && value !== null && (value as ProbeTimeout).kind === TIMEOUT;
+}
+
 async function withCancellationDeadline<T>(
-  run: (signal: AbortSignal) => Promise<T>,
+  run: (signal: AbortSignal, onStage: PrimaryModelProbeStageReporter) => Promise<T>,
   timeoutMs: number,
   callerSignal?: AbortSignal,
-): Promise<T | typeof TIMEOUT | typeof PROBE_THROW> {
-  if (timeoutMs <= 0 || callerSignal?.aborted) return TIMEOUT;
+): Promise<T | ProbeTimeout | typeof PROBE_THROW> {
+  if (callerSignal?.aborted) return probeTimeout('caller-pre-aborted');
+  if (timeoutMs <= 0) return probeTimeout('deadline-nonpositive');
 
   const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  callerSignal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(abort, timeoutMs);
+  // Monotonic, like the timer: a wall-clock step must not move the deadline.
+  const deadlineAt = performance.now() + timeoutMs;
+  let cause: 'deadline' | 'caller-abort' | null = null;
+  let currentStage: PrimaryModelProbeStage | null = null;
+  // Adapter stages can be synchronous (the credential heal blocks the event
+  // loop), so the deadline timer may only run after a later stage has begun.
+  // Attribute a deadline to the stage in flight at the deadline instant, not
+  // the stage in flight when the timer callback finally runs.
+  let stageAtDeadline: PrimaryModelProbeStage | null = null;
+  const onStage = (stage: PrimaryModelProbeStage): void => {
+    if (controller.signal.aborted) return;
+    currentStage = stage;
+    if (performance.now() <= deadlineAt) stageAtDeadline = stage;
+  };
+  const abortFor = (kind: 'deadline' | 'caller-abort') => (): void => {
+    cause ??= kind;
+    controller.abort();
+  };
+  const onCallerAbort = abortFor('caller-abort');
+  callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+  const timer = setTimeout(abortFor('deadline'), timeoutMs);
   timer.unref?.();
+  const timedOut = (): ProbeTimeout => {
+    const kind = cause ?? 'caller-abort';
+    const stage = kind === 'deadline' ? stageAtDeadline : currentStage;
+    return probeTimeout(`${kind}-${stage ?? 'unreported'}`);
+  };
 
   try {
     let promise: Promise<T>;
     try {
-      promise = run(controller.signal);
+      promise = run(controller.signal, onStage);
     } catch {
-      return controller.signal.aborted ? TIMEOUT : PROBE_THROW;
+      return controller.signal.aborted ? timedOut() : PROBE_THROW;
     }
     try {
       const value = await promise;
-      return controller.signal.aborted ? TIMEOUT : value;
+      return controller.signal.aborted ? timedOut() : value;
     } catch {
-      return controller.signal.aborted ? TIMEOUT : PROBE_THROW;
+      return controller.signal.aborted ? timedOut() : PROBE_THROW;
     }
   } finally {
     clearTimeout(timer);
-    callerSignal?.removeEventListener('abort', abort);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
   }
 }
 

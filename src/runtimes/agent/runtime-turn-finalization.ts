@@ -29,7 +29,11 @@ export async function collectRuntimeTurnAnswerEvidence(
 ): Promise<RuntimeAnswerEvidence> {
   try {
     const evidence = await queue.flushTurnEvidence(turnId);
-    return { kind: 'ready', opIds: evidence.answerOpIds };
+    return {
+      kind: 'ready',
+      opIds: evidence.answerOpIds,
+      withheldAnswerCount: evidence.withheldAnswerCount,
+    };
   } catch (error) {
     onFlushError?.(error);
     return { kind: 'failed' };

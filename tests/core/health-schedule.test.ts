@@ -173,6 +173,18 @@ describe('POST /schedule', () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
+  // A10: the route shares the enqueue validator, so a payload the scheduler
+  // could never send is refused before any row exists.
+  it('returns 400 for an empty media file (payload_undecodable missing_media) and inserts nothing', async () => {
+    await start();
+    const pdf = join(root, 'empty.pdf');
+    writeFileSync(pdf, Buffer.alloc(0));
+    const { status, body } = await httpReq(port, '/schedule', 'POST', JSON.stringify({ chatJid: CHAT, filePath: pdf, mediaType: 'document' }), AUTH_HEADER);
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toMatch(/payload_undecodable shape=missing_media/);
+    expect(countRows(db)).toBe(0);
+  });
+
   it('returns 400 when chatJid is missing', async () => {
     await start();
     const { status, body } = await httpReq(port, '/schedule', 'POST', JSON.stringify({ text: 'hi' }), AUTH_HEADER);

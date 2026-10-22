@@ -1,5 +1,7 @@
 # IA and Operator-Workflow Review — WhatSoup Console
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 Part of the SOUP Design System v3 audit (00-inventory). Every claim cites repo-relative `file:line` evidence from the current tree. Items that cannot be verified from the console source alone are marked **Inconclusive**. The v2 design precedent baseline is `docs/console-mockups/gap-analysis.html`; section 6.5 reconciles its findings against the shipped code.
 
 ---

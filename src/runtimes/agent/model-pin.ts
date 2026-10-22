@@ -38,7 +38,7 @@ import { isExplicitModelId } from './commands.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import { getProviderBinary, type SessionManager } from './session.ts';
 import type { SendDirectOutcome } from './chat-transport.ts';
-import type { IOutboundQueue } from './outbound-queue.ts';
+import type { IOutboundQueue, OutboundMessageRole } from './outbound-queue.ts';
 import type { TurnQueue } from './turn-queue.ts';
 import type { OperationTracker } from './operation-tracker.ts';
 import {
@@ -218,7 +218,7 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
    * module still goes through the void `sendDirect`, so the widening adds no
    * new obligation at the other call sites.
    */
-  sendDirectWithReceipt(chatJid: string, text: string): Promise<SendDirectOutcome>;
+  sendDirectWithReceipt(chatJid: string, text: string, role: OutboundMessageRole): Promise<SendDirectOutcome>;
 }
 
 /**
@@ -254,7 +254,7 @@ export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult,
   if (!isBareKeep && !isThreadedToPinReceipt(port, keys.chatKey, msg)) return false;
   const keepReply = handleBareKeep(port, chatJid, keys, msg.timestamp * 1000);
   if (keepReply === null) return false;
-  port.sendDirect(chatJid, keepReply);
+  port.sendDirect(chatJid, keepReply, 'status');
   port.completeLocalInbound(msg.inboundSeq);
   return true;
 }
@@ -337,7 +337,7 @@ async function sendPinReceipt(
     // that landed after the fall-through would authenticate a confirmation the
     // user sent while the pin was still unauthenticated.
     outcome = await withBoundedTimeout(
-      () => port.sendDirectWithReceipt(chatJid, text),
+      () => port.sendDirectWithReceipt(chatJid, text, 'status'),
       PIN_RECEIPT_SEND_TIMEOUT_MS,
       {
         onLateSettle: (late) =>
@@ -380,7 +380,7 @@ async function sendPinEcho(
   echo: PinEcho,
 ): Promise<void> {
   if (!echo.keepPromising) {
-    port.sendDirect(chatJid, echo.text);
+    port.sendDirect(chatJid, echo.text, 'status');
     return;
   }
   await sendPinReceipt(port, chatJid, chatKey, senderKey, echo.text);
@@ -476,7 +476,7 @@ export function recordRouteModelPin(
   providerId: string,
   model: string,
   effort: string | null = null,
-): 'set' | 'refreshed' | 'sticky_kept' {
+): 'set' | 'refreshed' | 'sticky_kept' | 'reverify_pending' {
   const now = Date.now();
   const existing = getPreference(port.db, chatKey, senderKey, now);
   if (
@@ -489,6 +489,20 @@ export function recordRouteModelPin(
     // a fresh 'set' + re-verify + recycle), never a no-op 'refreshed'.
     (existing.requestedEffort ?? null) === effort
   ) {
+    // A matching pin that never passed its catalogue check is not a completed
+    // re-confirm. Keep the row pending and let the caller run the normal
+    // verification seam again; the resolver's failure backoff bounds retries.
+    if (existing.modelPinVerified === false) {
+      if (existing.expiresAt !== null) {
+        setPreference(port.db, {
+          ...existing,
+          updatedAt: now,
+          expiresAt: now + PREFERENCE_TTL_MS,
+          keepReceiptMessageId: null,
+        });
+      }
+      return 'reverify_pending';
+    }
     if (existing.expiresAt !== null) {
       // A3 (#2121 follow-up): `{ ...existing }` carries the captured
       // `keepReceiptMessageId`, so this refresh used to PRESERVE the id and
@@ -541,7 +555,7 @@ export function recordRouteModelPin(
  * (decideModelPinResolution, config-surface.ts — the SSOT) needs to
  * consume it. The catalogue probes are injectable
  * (modelCatalogueListFn/modelCatalogueAnthropicFn on AgentRuntimeOptions,
- * mirroring resolveModelCatalogue's own listFn/anthropicFn seam) so a test
+ * mirroring resolveModelCatalogue's CLI-list/anthropicFn seam) so a test
  * never spawns the real binary or hits the real keychain.
  *
  * Acts on decideModelPinResolution's verdict against the just-written
@@ -562,7 +576,7 @@ export function recordRouteModelPin(
  * The ONE provider-catalogue fetch preamble both the pin-time verify
  * ({@link verifyModelPinAgainstCatalogue}) and the drill Level-2 render
  * (`sendModelDrillModelLevel`) need: resolve the provider binary, then fetch
- * via the injectable listFn/anthropicFn seam (a test never spawns a binary or
+ * via the injectable CLI-list/anthropicFn seam (a test never spawns a binary or
  * hits the keychain). Callers diverge AFTER on the returned listing (verify
  * runs decideModelPinResolution; the drill renders it). Slice-3 forward-reuse.
  */
@@ -574,6 +588,7 @@ async function fetchProviderCatalogue(
   return resolveModelCatalogue(providerId, binary, {
     nowMs: Date.now(),
     listFn: port.modelCatalogueListFn,
+    codexFn: port.modelCatalogueListFn,
     anthropicFn: port.modelCatalogueAnthropicFn,
   });
 }
@@ -1054,7 +1069,7 @@ async function pinConfiguredModelEntry(
 ): Promise<void> {
   const { chatJid, senderJid, perChatMapKey, chatKey, senderKey } = ctx;
   const outcome = recordRouteModelPin(port, chatJid, chatKey, senderKey, providerId, modelId, effort);
-  if (await echoPinReconfirm(port, ctx, outcome, modelId)) return;
+  if (outcome !== 'reverify_pending' && await echoPinReconfirm(port, ctx, outcome, modelId)) return;
   // Task H: verify the fresh pin against the catalogue BEFORE the echo
   // (awaited — no fire-and-forget) so a subsequent read (this same reply,
   // /model status, a next-session spawn) never observes an unverified pin
@@ -1064,6 +1079,7 @@ async function pinConfiguredModelEntry(
     port.sendDirect(
       chatJid,
       `_Couldn't pin ${modelId} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
+      'status',
     );
     return;
   }
@@ -1077,6 +1093,7 @@ async function pinConfiguredModelEntry(
     port.sendDirect(
       chatJid,
       `_Pinned ${providerId} — ${modelId} pending a catalogue check; using ${providerId}'s default until then. /reset to undo._`,
+      'status',
     );
     return;
   }
@@ -1130,16 +1147,16 @@ function sendModelDrillBrandLevel(port: ModelPinPort, chatJid: string, senderJid
   const result = computeBrandLevel(port, chatJid, senderJid);
   if ('degraded' in result) {
     port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'brand', []);
-    port.sendDirect(chatJid, "_Couldn't read your configured providers right now — try again._");
+    port.sendDirect(chatJid, "_Couldn't read your configured providers right now — try again._", 'status');
     return;
   }
   const { rendered } = result;
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'brand', rendered.entries);
   if (rendered.entries.length === 0) {
-    port.sendDirect(chatJid, '_No providers are set up to pick from yet._');
+    port.sendDirect(chatJid, '_No providers are set up to pick from yet._', 'status');
     return;
   }
-  port.sendDirect(chatJid, rendered.text);
+  port.sendDirect(chatJid, rendered.text, 'status');
 }
 
 /**
@@ -1157,25 +1174,29 @@ async function sendModelDrillModelLevel(
   senderJid: string,
   brand: string,
   provider: string,
+  offset = 0,
 ): Promise<void> {
   const listing = await fetchProviderCatalogue(port, provider);
   if (listing.status !== 'ok') {
-    port.sendDirect(chatJid, `_Couldn't load ${brand} models right now — try again._`);
+    port.sendDirect(chatJid, `_Couldn't load ${brand} models right now — try again._`, 'status');
     return;
   }
   const route = port.resolveRouteForTurn(chatJid, senderJid);
   const currentModel = route.provider === provider ? route.model : null;
-  // Bound the render the same way the flat menu does (MODEL_CATALOGUE_CAP): a
-  // chatty provider's live catalogue is unbounded, and an uncapped numbered
-  // list makes an unusable WhatsApp message. The snapshot stores exactly what
-  // was SHOWN, so a number always resolves to a visible row.
-  const shown = listing.ids.slice(0, MODEL_CATALOGUE_CAP);
-  const rendered = renderModelLevel(brand, provider, shown, currentModel);
+  // A non-final page reserves its twelfth visible row for an explicit next
+  // page. The snapshot stores precisely those visible model and More rows.
+  const safeOffset = Number.isSafeInteger(offset) && offset >= 0 && offset < listing.ids.length ? offset : 0;
+  const pageSize = listing.ids.length - safeOffset > MODEL_CATALOGUE_CAP
+    ? MODEL_CATALOGUE_CAP - 1
+    : MODEL_CATALOGUE_CAP;
+  const shown = listing.ids.slice(safeOffset, safeOffset + pageSize);
+  const nextOffset = safeOffset + shown.length < listing.ids.length ? safeOffset + shown.length : null;
+  const rendered = renderModelLevel(brand, provider, shown, currentModel, nextOffset);
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'model', rendered.entries);
-  const text = shown.length < listing.ids.length
-    ? `${rendered.text}\n_showing 1–${shown.length} of ${listing.ids.length}_`
+  const text = nextOffset !== null || safeOffset > 0
+    ? `${rendered.text}\n_showing ${safeOffset + 1}–${safeOffset + shown.length} of ${listing.ids.length}_`
     : rendered.text;
-  port.sendDirect(chatJid, text);
+  port.sendDirect(chatJid, text, 'status');
 }
 
 /**
@@ -1198,7 +1219,7 @@ function sendModelDrillEffortLevel(
   const currentEffort = route.provider === provider && route.model === model ? route.effort ?? null : null;
   const rendered = renderEffortLevel(model, provider, control, currentEffort);
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'effort', rendered.entries);
-  port.sendDirect(chatJid, rendered.text);
+  port.sendDirect(chatJid, rendered.text, 'status');
 }
 
 /**
@@ -1211,7 +1232,7 @@ function sendModelDrillEffortLevel(
  * stable re-entry).
  */
 function reRenderCurrentMenuOnMiss(port: ModelPinPort, chatJid: string, senderJid: string): void {
-  port.sendDirect(chatJid, "_That list moved — here's the current one._");
+  port.sendDirect(chatJid, "_That list moved — here's the current one._", 'status');
   if (port.catalogueSnapshot.latestSnapshotKind(chatJid, senderJid) === 'flat') {
     sendModelCatalogue(port, chatJid, senderJid, null);
     return;
@@ -1259,7 +1280,7 @@ export async function handleModelCommand(
   }
   if (sub === '' || sub === 'status') {
     // Explicit `/model status` (or the defensive empty arg) → the route readout.
-    port.sendDirect(chatJid, port.renderRouteStatus(chatJid, senderJid));
+    port.sendDirect(chatJid, port.renderRouteStatus(chatJid, senderJid), 'status');
     return;
   }
   if (sub === 'list' || sub.startsWith('list ')) {
@@ -1335,6 +1356,17 @@ export async function handleModelCommand(
       await sendModelDrillModelLevel(port, chatJid, senderJid, pick.entry.brand, pick.entry.provider);
       return;
     }
+    if (pick.entry.kind === 'more') {
+      await sendModelDrillModelLevel(
+        port,
+        chatJid,
+        senderJid,
+        pick.entry.brand,
+        pick.entry.provider,
+        pick.entry.offset,
+      );
+      return;
+    }
     if (pick.entry.kind === 'model') {
       // Slice 3: a model with native reasoning control (claude-cli today) opens
       // Level-3 to pick an effort instead of pinning immediately.
@@ -1375,6 +1407,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${shownId} isn't configured on this instance. Use /model list to see configured models._`,
+        'status',
       );
       return;
     }
@@ -1385,6 +1418,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${shownId} matches more than one configured route. Use /model list and reply with its number._`,
+        'status',
       );
       return;
     }
@@ -1401,6 +1435,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${shownId} isn't available on this instance right now. Use /model list to see what you can pick._`,
+        'status',
       );
       return;
     }
@@ -1423,6 +1458,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
+        'status',
       );
       return;
     }
@@ -1439,6 +1475,7 @@ export async function handleModelCommand(
     port.sendDirect(
       chatJid,
       `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
+      'status',
     );
     return;
   }

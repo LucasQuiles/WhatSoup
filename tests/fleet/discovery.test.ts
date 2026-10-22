@@ -350,6 +350,30 @@ describe('FleetDiscovery.scan — malformed config.json', () => {
     expect(broken?.configError).toMatch(/duplicate alias/i);
   });
 
+  it('surfaces a value-free policy config error without projecting the raw policy', () => {
+    const privateTerm = 'private-term-that-must-not-escape';
+    writeInstanceConfig('policy-error', {
+      ...agentInstance,
+      name: 'policy-error',
+      clientOutputPolicies: [{
+        conversationKey: 'synthetic-conversation',
+        maxCodePoints: 500,
+        maxQuestionMarks: 1,
+        blockedTerms: [{ value: privateTerm, match: 'invalid', caseSensitive: false }],
+        rejectInternalArtifacts: true,
+        rejectWhatsAppJids: true,
+      }],
+    });
+
+    const discovery = new FleetDiscovery(configRoot);
+    const discovered = discovery.scan().get('policy-error');
+    const serialized = JSON.stringify(discovered);
+
+    expect(discovered?.configError).toMatch(/clientOutputPolicies\[0\]\.blockedTerms\[0\]\.match/);
+    expect(serialized).not.toContain(privateTerm);
+    expect(discovered).not.toHaveProperty('clientOutputPolicies');
+  });
+
 
   it('skips directories without config.json', () => {
     writeInstanceConfig('loops', chatInstance);

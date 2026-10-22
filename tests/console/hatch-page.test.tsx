@@ -9,9 +9,10 @@
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router'
+import type { ProviderCatalogEntry } from '../../console/src/types'
 
 const toastMock = { toast: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn(), dismiss: vi.fn(), clear: vi.fn() }
 vi.mock('../../console/src/hooks/toast-context', () => ({
@@ -22,10 +23,20 @@ vi.mock('../../console/src/hooks/toast-context', () => ({
 vi.mock('../../console/src/lib/api', () => ({
   api: {
     getProviders: vi.fn().mockResolvedValue([
-      { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, providerConfig: [] },
-      { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, providerConfig: [] },
-      { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, providerConfig: [] },
+      { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+      { id: 'opencode-cli', displayName: 'OpenCode', type: 'cli', needsApiKey: true, credentialService: null, providerConfig: [] },
+      { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, credentialService: 'anthropic', providerConfig: [] },
+      { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, credentialService: 'openai', providerConfig: [] },
+      { id: 'new-adapter', displayName: 'New Adapter', type: 'api', needsApiKey: true, credentialService: null, providerConfig: [] },
     ]),
+    getProviderModels: vi.fn(async (provider: string) => ({
+      status: 'ok',
+      ids: provider === 'opencode-cli'
+        ? ['new-provider/frontier-1', 'future/new-model']
+        : ['future/default-model'],
+      sourceLabel: `${provider} live test catalogue`,
+      asOfLabel: 'just now',
+    })),
     createLine: vi.fn().mockResolvedValue({ name: 'quinn', healthPort: 9096 }),
     updateConfig: vi.fn().mockResolvedValue({}),
     setCredential: vi.fn().mockResolvedValue({ ok: true }),
@@ -52,9 +63,11 @@ import { api } from '../../console/src/lib/api'
 
 const createLineMock = api.createLine as unknown as ReturnType<typeof vi.fn>
 const sendMessageMock = api.sendMessage as unknown as ReturnType<typeof vi.fn>
+const getProviderModelsMock = api.getProviderModels as unknown as ReturnType<typeof vi.fn>
+const getProvidersMock = api.getProviders as unknown as ReturnType<typeof vi.fn>
+const setCredentialMock = api.setCredential as unknown as ReturnType<typeof vi.fn>
 
-function renderHatch() {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderHatch(qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
@@ -69,11 +82,175 @@ beforeEach(() => {
   navigateMock.mockClear()
   createLineMock.mockClear().mockResolvedValue({ name: 'quinn', healthPort: 9096 })
   sendMessageMock.mockClear().mockResolvedValue({ sent: true })
+  getProviderModelsMock.mockClear()
+  getProvidersMock.mockClear()
+  setCredentialMock.mockClear()
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+async function enterKeyedDraft() {
+  vi.stubGlobal('EventSource', class {
+    addEventListener() {}
+    close() {}
+  })
+  const client = new QueryClient({ defaultOptions: { queries: { retry: 1, retryDelay: 0 } } })
+  const view = renderHatch(client)
+  const { container } = view
+  await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+  fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue'))!)
+  await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+  fireEvent.click([...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue with WhatsApp'))!)
+  await waitFor(() => expect(container.querySelector('#hatch-provider option[value="anthropic-api"]')).not.toBeNull())
+  fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'anthropic-api' } })
+  fireEvent.change(container.querySelector('#hatch-key')!, { target: { value: 'fixture-input-value' } })
+  fireEvent.change(container.querySelector('#hatch-admin')!, { target: { value: '+1 555 0100' } })
+  const submit = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Continue to link'))!
+  return { ...view, client, submit }
+}
 
 describe('hatch flow — step discipline (14-onboarding §1, wave-4 law)', () => {
+  it('stores an entered key once for the server-advertised credential service', async () => {
+    const { submit } = await enterKeyedDraft()
+
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setCredentialMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).toHaveBeenCalledWith('anthropic', 'fixture-input-value')
+  })
+
+  it('does not lose an entered key when a provider refetch fails before creation', async () => {
+    const { container, client, submit } = await enterKeyedDraft()
+    getProvidersMock.mockRejectedValueOnce(new Error('catalogue offline'))
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).toContain('Provider catalogue request failed'))
+    expect(getProvidersMock).toHaveBeenCalledTimes(2)
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setCredentialMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).toHaveBeenCalledWith('anthropic', 'fixture-input-value')
+  })
+
+  it.each(['empty catalogue', 'provider removed', 'credential route removed'] as const)(
+    'refuses creation when an entered key no longer has a reported credential route: %s', async (change) => {
+      const { container, client, submit } = await enterKeyedDraft()
+      const reported = client.getQueryData<{ providers: ProviderCatalogEntry[] }>(['providers'])!.providers
+      const next = change === 'empty catalogue'
+        ? []
+        : change === 'provider removed'
+          ? reported.filter((provider) => provider.id !== 'anthropic-api')
+          : reported.map((provider) => ({ ...provider, credentialService: null }))
+      getProvidersMock.mockResolvedValueOnce(next)
+
+      await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+      await waitFor(() => expect(container.textContent).not.toContain('anthropic API key'))
+      fireEvent.click(submit)
+
+      expect(createLineMock).not.toHaveBeenCalled()
+      expect(setCredentialMock).not.toHaveBeenCalled()
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('credential route'))
+    },
+  )
+
+  it('retains keyless creation when the configured provider is no longer reported', async () => {
+    const { container, client, submit } = await enterKeyedDraft()
+    fireEvent.change(container.querySelector('#hatch-key')!, { target: { value: '' } })
+    getProvidersMock.mockResolvedValueOnce([])
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).toContain('0 execution providers'))
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['catalogue removal', 'keyless selection'] as const)(
+    'allows explicit key clearing after an unrouted-key refusal: %s', async (change) => {
+      const { container, client, submit } = await enterKeyedDraft()
+      if (change === 'catalogue removal') {
+        getProvidersMock.mockResolvedValueOnce([])
+        await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+      } else {
+        fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'claude-cli' } })
+      }
+      await waitFor(() => expect(container.textContent).not.toContain('anthropic API key'))
+      fireEvent.click(submit)
+      expect(createLineMock).not.toHaveBeenCalled()
+      expect(setCredentialMock).not.toHaveBeenCalled()
+      expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining('credential route'))
+
+      const key = container.querySelector<HTMLInputElement>('#hatch-key')
+      expect(key).not.toBeNull()
+      expect(key!.value).toBe('fixture-input-value')
+      fireEvent.change(key!, { target: { value: '' } })
+      fireEvent.click(submit)
+
+      await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+      expect(setCredentialMock).not.toHaveBeenCalled()
+    },
+  )
+
+  it('stores the retained key once after its reported credential route returns', async () => {
+    const { container, client, submit } = await enterKeyedDraft()
+    getProvidersMock.mockResolvedValueOnce([])
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).not.toContain('anthropic API key'))
+    fireEvent.click(submit)
+    expect(createLineMock).not.toHaveBeenCalled()
+    expect(setCredentialMock).not.toHaveBeenCalled()
+
+    await act(async () => { await client.invalidateQueries({ queryKey: ['providers'] }) })
+    await waitFor(() => expect(container.textContent).toContain('anthropic API key'))
+    expect(container.querySelector<HTMLInputElement>('#hatch-key')!.value).toBe('fixture-input-value')
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(createLineMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(setCredentialMock).toHaveBeenCalledTimes(1))
+    expect(setCredentialMock).toHaveBeenCalledWith('anthropic', 'fixture-input-value')
+  })
+
+  it('uses live provider-native model suggestions while preserving manual entry', async () => {
+    const { container } = renderHatch()
+    await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue'))!)
+    await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue with WhatsApp'))!)
+    await waitFor(() => expect(container.textContent).toContain('Name your agent'))
+
+    const input = container.querySelector('#hatch-model') as HTMLInputElement
+    await waitFor(() => expect(getProviderModelsMock).toHaveBeenCalledWith('claude-cli'))
+    await waitFor(() => expect(input.getAttribute('list')).toBe('hatch-model-catalogue'))
+    expect(Array.from(container.querySelectorAll('#hatch-model-catalogue option')).map((option) => option.getAttribute('value')))
+      .toEqual(['future/default-model'])
+
+    fireEvent.change(input, { target: { value: 'private/manual-model' } })
+    expect(input.value).toBe('private/manual-model')
+
+    fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'opencode-cli' } })
+    expect(input.value).toBe('')
+    await waitFor(() => expect(getProviderModelsMock).toHaveBeenCalledWith('opencode-cli'))
+  })
+
+  it('describes an unfixed credential route without naming a compiled provider', async () => {
+    const { container } = renderHatch()
+    await waitFor(() => expect(container.textContent).toContain('Pick a kind'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue'))!)
+    await waitFor(() => expect(container.textContent).toContain('Pick a channel'))
+    fireEvent.click([...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Continue with WhatsApp'))!)
+    await waitFor(() => expect(container.textContent).toContain('Name your agent'))
+
+    fireEvent.change(container.querySelector('#hatch-provider')!, { target: { value: 'new-adapter' } })
+    expect(container.textContent).toContain('does not advertise a fixed credential service')
+    expect(container.textContent).not.toContain('OpenCode resolves its key service')
+  })
+
   it('renders exactly one step at a time with the rail tracking state', async () => {
     const { container } = renderHatch()
     await waitFor(() => expect(container.querySelector('.journey-card')).not.toBeNull())

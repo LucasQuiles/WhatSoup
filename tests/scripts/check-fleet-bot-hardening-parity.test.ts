@@ -7,6 +7,11 @@ import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   checkFleetBotHardeningParity,
   DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH,
+  FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS,
+  FLEET_BOT_HARDENING_PARITY_STALE_REMEDY,
+  FLEET_BOT_HARDENING_PARITY_WARNING_DAYS,
+  fleetBotHardeningParityExpiry,
+  fleetBotHardeningParityProofNotice,
   run,
 } from '../../scripts/check-fleet-bot-hardening-parity.ts';
 import { receiptCapabilityDigest } from '../../scripts/lib/fleet-receipt-digest.ts';
@@ -184,6 +189,122 @@ describe('fleet bot hardening parity guard', () => {
 
     expect(result.ok).toBe(true);
     expect(result.findings).toEqual([]);
+  });
+
+  describe('a date-driven failure is announced before it happens', () => {
+    it('names the claim that ages out first, when the guard starts failing, and the days left', () => {
+      const payload = {
+        updated: '2026-06-15',
+        rows: [
+          { verifiedAt: '2026-06-01' },
+          { receipt: { capturedAt: '2026-05-20T12:00:00Z' } },
+          { verifiedAt: 'not-a-date', receipt: { capturedAt: 'yesterday' } },
+          'not-a-row',
+        ],
+      };
+      expect(fleetBotHardeningParityExpiry(payload, new Date('2026-08-10T00:00:00Z'))).toEqual({
+        source: 'rows[1].receipt.capturedAt',
+        date: '2026-05-20T12:00:00Z',
+        failsFrom: '2026-08-18T12:00:00.000Z',
+        lastGoodDay: '2026-08-17',
+        daysRemaining: 8,
+      });
+      expect(fleetBotHardeningParityExpiry({ updated: '2026-06-15', rows: [] }, new Date('2026-09-20T00:00:00Z')))
+        .toMatchObject({ source: 'updated', failsFrom: '2026-09-13T00:00:00.000Z', lastGoodDay: '2026-09-12', daysRemaining: -7 });
+      expect(fleetBotHardeningParityExpiry({ rows: [] }, new Date())).toBeNull();
+      expect(fleetBotHardeningParityExpiry('not-an-object', new Date())).toBeNull();
+    });
+
+    it('agrees with the age check to the millisecond: passing at failsFrom, failing just after it', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, { updated: '2026-06-15' });
+      const manifest = JSON.parse(readFileSync(path.join(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH), 'utf8'));
+      const { failsFrom } = fleetBotHardeningParityExpiry(manifest, new Date('2026-09-01T00:00:00Z'))!;
+      const atLimit = new Date(failsFrom);
+      const justAfter = new Date(atLimit.getTime() + 1);
+
+      expect(checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, atLimit).ok).toBe(true);
+      expect(checkFleetBotHardeningParity(root, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH, justAfter).findings)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ code: 'stale-updated' })]));
+    });
+
+    it('warns only inside the window, on a run that still passes, with the remedy nobody needs an operator for', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, { updated: '2026-06-15' });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      const printed = (): string => error.mock.calls.flat().join('\n');
+
+      // Exactly 15 whole days before failsFrom: one day outside the window.
+      expect(run([], root, new Date('2026-08-29T00:00:00Z')).ok).toBe(true);
+      expect(printed()).toBe('');
+
+      expect(run([], root, new Date('2026-08-30T00:00:00Z')).ok).toBe(true);
+      expect(printed()).toContain(
+        `WARN fleet bot hardening parity: updated 2026-06-15 leaves the ${FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS}-day`
+          + ` freshness budget in ${FLEET_BOT_HARDENING_PARITY_WARNING_DAYS} day(s) (last good day 2026-09-12).`
+          + ' From 2026-09-13T00:00:00.000Z this guard fails every push and every CI run on every branch',
+      );
+      expect(printed()).toContain(FLEET_BOT_HARDENING_PARITY_STALE_REMEDY.join('\n'));
+      expect(printed()).toContain('a row still claims live proof older than the budget (any contributor)');
+      // One row of this fixture carries a dated live proof, so a green result still means something.
+      expect(printed()).not.toContain('NOTE fleet bot hardening parity');
+      expect(process.exitCode ?? 0).toBe(0);
+    });
+
+    it('says what green means once no row carries live proof, and never suggests a bare re-date', () => {
+      const proven = { rows: [{ verifiedAt: '2026-06-15' }, { status: 'blocked' }] };
+      const unproven = { rows: [{ status: 'blocked', verifiedAt: null }, { status: 'pending-rollout' }, 'not-a-row'] };
+      expect(fleetBotHardeningParityProofNotice(proven)).toBeNull();
+      expect(fleetBotHardeningParityProofNotice('not-an-object')).toBeNull();
+      expect(fleetBotHardeningParityProofNotice({ rows: 'not-a-list' })).toBeNull();
+      expect(fleetBotHardeningParityProofNotice(unproven)).toContain('0 of 2 row(s) carry a dated live proof');
+      expect(fleetBotHardeningParityProofNotice(unproven)).toContain('proves no runtime hardening');
+
+      const remedy = FLEET_BOT_HARDENING_PARITY_STALE_REMEDY.join('\n');
+      expect(remedy).toContain('no row claims live proof any more');
+      expect(remedy).toContain('A new date over unchanged row text is a false record');
+      expect(remedy).toContain('Only this restores `hardened`');
+
+      // The tracked manifest is in exactly that state today; the CLI says so beside the warning only.
+      const tracked = JSON.parse(readFileSync(path.join(repoRoot, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH), 'utf8'));
+      const { failsFrom } = fleetBotHardeningParityExpiry(tracked, new Date())!;
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      expect(run([], repoRoot, new Date(Date.parse(failsFrom) - 40 * 86_400_000)).ok).toBe(true);
+      expect(error.mock.calls.flat().join('\n')).toBe('');
+      expect(run([], repoRoot, new Date(Date.parse(failsFrom) - 3 * 86_400_000)).ok).toBe(true);
+      const hasLiveProof = (tracked.rows as Array<{ verifiedAt?: unknown }>)
+        .some((row) => typeof row.verifiedAt === 'string');
+      expect(error.mock.calls.flat().join('\n').includes('NOTE fleet bot hardening parity')).toBe(!hasLiveProof);
+    });
+
+    it('prints the remedies with an age failure and not with any other failure', () => {
+      const root = makeRoot();
+      writeFixtureStandard(root);
+      writeFixtureManifest(root, { updated: '2026-06-15' });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      expect(run([], root, new Date('2027-01-01T00:00:00Z')).ok).toBe(false);
+      expect(error.mock.calls.flat().join('\n')).toContain('stale-updated');
+      expect(error.mock.calls.flat().join('\n')).toContain(FLEET_BOT_HARDENING_PARITY_STALE_REMEDY.join('\n'));
+
+      error.mockClear();
+      writeFixtureManifest(root, { updated: '2026-06-15', schemaVersion: 2 });
+      expect(run([], root, new Date('2026-06-20T00:00:00Z')).ok).toBe(false);
+      expect(error.mock.calls.flat().join('\n')).toContain('unsupported-schema');
+      expect(error.mock.calls.flat().join('\n')).not.toContain('remedies, in order');
+    });
+
+    it('reads the tracked manifest, so the next repo-wide red day is a known date, not a surprise', () => {
+      const tracked = JSON.parse(readFileSync(path.join(repoRoot, DEFAULT_FLEET_BOT_HARDENING_PARITY_PATH), 'utf8'));
+      const expiry = fleetBotHardeningParityExpiry(tracked, new Date());
+      expect(expiry).not.toBeNull();
+      const claimedMs = Date.parse(expiry!.date.length === 10 ? `${expiry!.date}T00:00:00Z` : expiry!.date);
+      expect(Date.parse(expiry!.failsFrom) - claimedMs).toBe(FLEET_BOT_HARDENING_PARITY_MAX_AGE_DAYS * 86_400_000);
+    });
   });
 
   it('fails when a row verifiedAt timestamp is older than the freshness budget', () => {

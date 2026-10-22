@@ -144,6 +144,74 @@ def test_window_elapsed_emits_single_digest(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# T2a: a pending digest can become due on a quiet sweep. Its successful send
+#      must persist before the next process reloads the state.
+# ---------------------------------------------------------------------------
+
+def test_quiet_pending_digest_success_persists_and_does_not_resend_after_reload(tmp_path):
+    env = {"BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS": "3600"}
+    mod = _load(tmp_path, env)
+    now = int(time.time())
+    _write_state(
+        mod,
+        incidents={},
+        digest={
+            "firstPendingAt": now - 4000,
+            "lastDigestAt": now - 4000,
+            "pendingCount": 1,
+            "pendingKeys": ["host-a|instance-x|runtime-tool-error:provider-cli:old"],
+        },
+    )
+
+    sends = _capture_sends(mod)
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    assert len(sends) == 1
+    persisted = _read_state(mod)["staleAutocloseDigest"]
+    assert persisted["pendingCount"] == 0
+    assert persisted["pendingKeys"] == []
+    assert persisted["lastDigestAt"] >= now
+
+    reloaded = _load(tmp_path, env)
+    reloaded_sends = _capture_sends(reloaded)
+    sent, failed, err = reloaded.sweep_stale_incidents(reloaded.state_paths())
+
+    assert sent == 0 and failed == 0 and err is None
+    assert reloaded_sends == []
+
+
+# ---------------------------------------------------------------------------
+# T2b: an attempted quiet pending digest remains available after a failed send.
+# ---------------------------------------------------------------------------
+
+def test_quiet_pending_digest_failure_stays_pending_for_retry(tmp_path):
+    mod = _load(tmp_path, {"BOT_ERRORS_STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS": "3600"})
+    now = int(time.time())
+    _write_state(
+        mod,
+        incidents={},
+        digest={
+            "firstPendingAt": now - 4000,
+            "lastDigestAt": now - 4000,
+            "pendingCount": 1,
+            "pendingKeys": ["host-a|instance-x|runtime-tool-error:provider-cli:old"],
+        },
+    )
+
+    def _boom(text, *a, **k):
+        raise RuntimeError("whatsapp down")
+
+    mod.send_whatsapp = _boom  # type: ignore[assignment]
+    sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
+
+    assert sent == 0 and failed == 0 and err is not None
+    persisted = _read_state(mod)["staleAutocloseDigest"]
+    assert persisted["pendingCount"] == 1
+    assert persisted["lastDigestAt"] == now - 4000
+
+
+# ---------------------------------------------------------------------------
 # T3: a large batch trips the burst cap and emits immediately even inside the
 #     window, so a real flood is still reported promptly.
 # ---------------------------------------------------------------------------

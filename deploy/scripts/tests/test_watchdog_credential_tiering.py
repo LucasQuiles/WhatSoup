@@ -5,7 +5,7 @@ embedded decision block's exits and statically pins the shell wiring, and
 test_watchdog_terminal_logout_e2e.py proves the marker state machine
 behaviorally — but neither reads the watchdog's own log. These tests render
 the shipped template and run the whole script under zsh with deterministic
-curl/launchctl stubs, pinning the FINAL LOG contract
+health-reader/launchctl stubs, pinning the FINAL LOG contract
 (docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md):
 
 - the last log line per cycle is one machine-readable state chosen by an
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import hashlib
 import os
 import shutil
 import stat
@@ -100,7 +101,7 @@ def _recovered_body() -> str:
 
 
 class Harness:
-    """Rendered watchdog + curl/launchctl stubs in an isolated HOME.
+    """Rendered watchdog + health-reader/launchctl stubs in an isolated HOME.
 
     Mirrors the stub pattern of test_watchdog_terminal_logout_e2e.py: the
     template hardcodes PATH with $HOME_DIR/.local/bin first, so stubs must
@@ -124,21 +125,10 @@ class Harness:
         binroot = self.home / ".local" / "bin"
         binroot.mkdir(parents=True)
         self.calls = binroot / "launchctl.calls"
-        self.curl_argv = binroot / "curl.argv"
-        self.curl_config = binroot / "curl.config"
-
-        rendered = (
-            _TEMPLATE.read_text(encoding="utf-8")
-            .replace("__HOME__", str(self.home))
-            .replace("FLEET_PORT", "9998")
-            .replace("BOT_PORT", "9999")
-            .replace("BOT_NAME", bot_name)
-            .replace("USERNAME", os.environ.get("USER", "tester"))
-        )
+        self.probe_argv = binroot / "probe.argv"
+        self.probe_auth = binroot / "probe.auth"
         self.script = self.home / f"{bot_name}-watchdog"
-        self.script.write_text(rendered, encoding="utf-8")
-        self.script.chmod(self.script.stat().st_mode | stat.S_IEXEC)
-        self.write_curl_stub(bot_body, fleet_ok)
+        self.write_health_stub(bot_body, fleet_ok)
         self.write_launchctl_stub()
 
     def write_token_file(self, contents: str | None = None, mode: int = 0o600):
@@ -198,45 +188,55 @@ class Harness:
         )
         lc.chmod(0o755)
 
-    def write_curl_stub(
+    def write_health_stub(
         self,
         bot_body: str,
         fleet_ok: bool = True,
         bot_unreachable: bool = False,
         steal_lock: Path | None = None,
+        bot_status: int = 200,
     ):
         # steal_lock simulates a newer invocation age-reclaiming a mutex
         # mid-run: the bot health call replaces it with a foreign owner (pid 1).
-        steal_line = (
-            f"rm -rf '{steal_lock}'; mkdir -p '{steal_lock}'; echo 1 > '{steal_lock}/pid'; "
-            if steal_lock
-            else ""
+        # The script is re-rendered because the bound digest follows the stub.
+        helper = self.home / "health_reader.py"
+        helper.write_text(f'''import errno, json, os, shutil, sys
+from pathlib import Path
+class HealthTransportError(Exception):
+    def __init__(self, stage, number): self.stage=stage; self.errno=number
+def fetch_loopback_health(port, path, headers, **kwargs):
+    with Path({str(self.probe_argv)!r}).open("a") as stream:
+        stream.write(str(port)+path+"\\n"+json.dumps(sys.argv)+"\\n")
+    token=headers.get("Authorization", "")
+    if token:
+        assert token.removeprefix("Bearer ") not in json.dumps(dict(os.environ))
+        with Path({str(self.probe_auth)!r}).open("a") as stream: stream.write(token+"\\n")
+    if port == 9999:
+        if {bot_unreachable!r}: raise HealthTransportError("connect", errno.ECONNREFUSED)
+        lock={str(steal_lock) if steal_lock else None!r}
+        if lock:
+            shutil.rmtree(lock); Path(lock).mkdir(); (Path(lock)/"pid").write_text("1")
+        return {bot_status!r}, {bot_body!r}
+    if port == 9998:
+        assert not token
+        if not {fleet_ok!r}: raise HealthTransportError("connect", errno.ECONNREFUSED)
+        return 200, "ok"
+    raise ValueError("unexpected test target")
+''', encoding="utf-8")
+        rendered = (
+            _TEMPLATE.read_text(encoding="utf-8")
+            # render-watchdog.py bakes the release's emitter; use this repo's.
+            .replace("__BOT_ERRORS_EMIT__", str(Path(__file__).resolve().parents[1] / "bot-errors-emit.py"))
+            .replace("__HOME__", str(self.home))
+            .replace("FLEET_PORT", "9998")
+            .replace("BOT_PORT", "9999")
+            .replace("BOT_NAME", self.bot_name)
+            .replace("USERNAME", os.environ.get("USER", "tester"))
+            .replace("__HEALTH_READER_PATH__", str(helper))
+            .replace("__HEALTH_READER_SHA256__", hashlib.sha256(helper.read_bytes()).hexdigest())
         )
-        bot_line = (
-            "exit 7"
-            if bot_unreachable
-            else f"{steal_line}printf '%s\\n200' '{bot_body}'; exit 0"
-        )
-        fleet_line = "printf 'ok\\n200'; exit 0" if fleet_ok else "exit 7"
-        curl = self.home / ".local" / "bin" / "curl"
-        curl.write_text(
-            "#!/bin/sh\n"
-            f"printf '%s\\n' \"$@\" >> '{self.curl_argv}'\n"
-            "read_config=0\n"
-            "previous=''\n"
-            'for a in "$@"; do\n'
-            '  [ "$previous" = "--config" ] && [ "$a" = "-" ] && read_config=1\n'
-            '  previous="$a"\n'
-            "done\n"
-            f"[ \"$read_config\" -eq 1 ] && cat >> '{self.curl_config}'\n"
-            'for a in "$@"; do case "$a" in\n'
-            f"  *9999/health) {bot_line};;\n"
-            f"  *9998/*) {fleet_line};;\n"
-            "esac; done\n"
-            "printf '\\n000'; exit 7\n",
-            encoding="utf-8",
-        )
-        curl.chmod(0o755)
+        self.script.write_text(rendered, encoding="utf-8")
+        self.script.chmod(self.script.stat().st_mode | stat.S_IEXEC)
 
     def seed_restart_stamp(self, job_label: str):
         """Arm the 5-minute restart cooldown for a launchd label."""
@@ -258,7 +258,8 @@ class Harness:
     def run(self) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["zsh", str(self.script)],
-            env=dict(os.environ, HOME=str(self.home)),
+            env=dict(os.environ, HOME=str(self.home),
+                     BOT_ERRORS_OUTBOX_DIR=str(self.home / "bot-errors-outbox")),
             capture_output=True,
             text=True,
             timeout=20,
@@ -339,7 +340,7 @@ def test_permanent_stop_final_log_is_restart_suppressed(tmp_path):
     # launchd reports a clean stopped/exit-78 snapshot: kickstart must be
     # suppressed AND the cycle must end on exactly RESTART-SUPPRESSED.
     h = Harness(tmp_path, "tier-permstop-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     h.write_launchctl_stub(
         print_body="gui = {\n  state = stopped\n  last exit code = 78\n}"
     )
@@ -362,7 +363,7 @@ def test_recovered_clears_marker_and_logs_ok(tmp_path):
 
 def test_unreachable_bot_final_log_is_restarted(tmp_path):
     h = Harness(tmp_path, "tier-unreach-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
     assert "kickstart -k" in h.launchctl_calls()
@@ -371,7 +372,7 @@ def test_unreachable_bot_final_log_is_restarted(tmp_path):
 
 def test_cooldown_suppressed_restart_final_log_is_restart_suppressed(tmp_path):
     h = Harness(tmp_path, "tier-cooldown-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     h.seed_restart_stamp("com.whatsoup.tier-cooldown-bot")
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
@@ -384,7 +385,7 @@ def test_kickstart_failure_final_log_is_restart_failed(tmp_path):
     # and must not arm the cooldown (the next cycle should retry, not sit
     # suppressed for 5 minutes on a restart that never happened).
     h = Harness(tmp_path, "tier-kickfail-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     h.write_launchctl_stub(kickstart_rc=1)
     proc = h.run()
     assert proc.returncode != 0, "a failed restart is an operational failure; exit nonzero"
@@ -401,7 +402,7 @@ def test_cooldown_stamp_write_failure_logs_error_after_successful_kickstart(tmp_
     # succeeded — final state stays RESTARTED and the failure is surfaced as
     # an ERROR line instead of silently repeating the restart every cycle.
     h = Harness(tmp_path, "tier-stampfail-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     (h.log_dir / "com.whatsoup.tier-stampfail-bot.last-restart").mkdir()
     proc = h.run()
     assert proc.returncode != 0, "an unarmed cooldown is an operational failure; exit nonzero"
@@ -513,7 +514,7 @@ def test_mixed_bot_suppressed_fleet_restarted_final_is_restarted(tmp_path):
     # Mixed bot/fleet outcomes: a suppressed bot restart must not hide that a
     # fleet kickstart actually fired — the more actionable outcome wins.
     h = Harness(tmp_path, "tier-mix-supp-bot", _unknown_body(), fleet_ok=False)
-    h.write_curl_stub("", fleet_ok=False, bot_unreachable=True)
+    h.write_health_stub("", fleet_ok=False, bot_unreachable=True)
     h.seed_restart_stamp("com.whatsoup.tier-mix-supp-bot")
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
@@ -528,7 +529,7 @@ def test_mixed_bot_restarted_fleet_kickstart_failure_final_is_restart_failed(tmp
     # The inverse: an earlier successful bot restart must not hide a later
     # failed fleet kickstart.
     h = Harness(tmp_path, "tier-mix-fail-bot", _unknown_body(), fleet_ok=False)
-    h.write_curl_stub("", fleet_ok=False, bot_unreachable=True)
+    h.write_health_stub("", fleet_ok=False, bot_unreachable=True)
     h.write_launchctl_stub(kickstart_fail_label="whatsoup-fleet")
     proc = h.run()
     assert proc.returncode != 0, "a failed fleet kickstart must surface in the exit code"
@@ -558,7 +559,7 @@ def test_garbage_cooldown_stamp_is_ignored_and_logged(tmp_path):
     # A corrupted stamp must not wedge the cooldown check; it reads as
     # unarmed, gets logged, and the restart proceeds.
     h = Harness(tmp_path, "tier-badstamp-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     (h.log_dir / "com.whatsoup.tier-badstamp-bot.last-restart").write_text(
         "not a number\n", encoding="utf-8"
     )
@@ -611,10 +612,10 @@ def test_stale_lock_with_dead_holder_is_reclaimed(tmp_path):
 def test_exit_trap_spares_lock_reclaimed_by_newer_invocation(tmp_path):
     # A hung invocation whose lock was age-reclaimed by a newer one must not
     # delete the new owner's lock on exit. Simulate the mid-run reclaim via a
-    # curl side effect that replaces the lock with a foreign owner (pid 1).
+    # health-read side effect that replaces the lock with a foreign owner (pid 1).
     h = Harness(tmp_path, "tier-lockowner-bot", _unknown_body())
     lock = h.log_dir / "tier-lockowner-bot-watchdog.lock"
-    h.write_curl_stub(_unknown_body(), steal_lock=lock)
+    h.write_health_stub(_unknown_body(), steal_lock=lock)
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
     assert lock.is_dir(), "a lock owned by another invocation must survive the EXIT trap"
@@ -774,7 +775,7 @@ def test_future_pong_is_health_unknown_not_fresh_recovery(tmp_path):
         ),
     ],
 )
-def test_missing_or_malformed_token_is_health_unknown_without_bot_curl(
+def test_missing_or_malformed_token_is_health_unknown_without_bot_request(
     tmp_path, token_contents
 ):
     h = Harness(tmp_path, "tier-invalid-token-bot", _recovered_body())
@@ -786,7 +787,7 @@ def test_missing_or_malformed_token_is_health_unknown_without_bot_curl(
     proc = h.run()
     assert proc.returncode == 2
     assert h.final_log_state() == "HEALTH-UNKNOWN"
-    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    argv_text = h.probe_argv.read_text(encoding="utf-8")
     assert "9999/health" not in argv_text
     assert "--config" not in argv_text
     assert "kickstart" not in h.launchctl_calls()
@@ -799,10 +800,10 @@ def test_non_private_token_file_is_health_unknown(tmp_path):
     proc = h.run()
     assert proc.returncode == 2
     assert h.final_log_state() == "HEALTH-UNKNOWN"
-    assert "9999/health" not in h.curl_argv.read_text(encoding="utf-8")
+    assert "9999/health" not in h.probe_argv.read_text(encoding="utf-8")
 
 
-def test_symlink_token_file_is_health_unknown_without_bot_curl(tmp_path):
+def test_symlink_token_file_is_health_unknown_without_bot_request(tmp_path):
     h = Harness(tmp_path, "tier-token-symlink-bot", _recovered_body())
     target = h.token_file.with_name("real-token.env")
     target.write_text(f"WHATSOUP_HEALTH_TOKEN={_VALID_TOKEN}\n", encoding="utf-8")
@@ -812,7 +813,7 @@ def test_symlink_token_file_is_health_unknown_without_bot_curl(tmp_path):
     proc = h.run()
     assert proc.returncode == 2
     assert h.final_log_state() == "HEALTH-UNKNOWN"
-    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    argv_text = h.probe_argv.read_text(encoding="utf-8")
     assert "9999/health" not in argv_text
     assert "--config" not in argv_text
 
@@ -826,28 +827,36 @@ def test_group_writable_token_directory_is_health_unknown(tmp_path):
         h.token_file.parent.chmod(0o700)
     assert proc.returncode == 2
     assert h.final_log_state() == "HEALTH-UNKNOWN"
-    argv_text = h.curl_argv.read_text(encoding="utf-8")
+    argv_text = h.probe_argv.read_text(encoding="utf-8")
     assert "9999/health" not in argv_text
     assert "--config" not in argv_text
 
 
-def test_valid_token_uses_curl_config_stdin_without_argv_or_environment_leak(tmp_path):
+def test_valid_token_uses_token_pipe_without_argv_or_environment_leak(tmp_path):
     h = Harness(tmp_path, "tier-token-transport-bot", _recovered_body())
     proc = h.run()
     assert proc.returncode == 0, proc.stderr
-    argv_text = h.curl_argv.read_text(encoding="utf-8")
-    assert "--config" in argv_text
+    argv_text = h.probe_argv.read_text(encoding="utf-8")
+    assert "9999/health" in argv_text
     assert _VALID_TOKEN not in argv_text
     assert "Authorization" not in argv_text
     assert "-H" not in argv_text.splitlines()
-    assert f"Authorization: Bearer {_VALID_TOKEN}" in h.curl_config.read_text(
+    assert f"Bearer {_VALID_TOKEN}" in h.probe_auth.read_text(
         encoding="utf-8"
     )
 
 
+def test_inherited_health_token_export_does_not_export_validated_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALTH_TOKEN", "synthetic-inherited-placeholder")
+    h = Harness(tmp_path, "tier-inherited-token-bot", _recovered_body())
+    proc = h.run()
+    assert proc.returncode == 0, proc.stderr
+    assert "Bearer " + _VALID_TOKEN in h.probe_auth.read_text()
+
+
 def test_future_cooldown_stamp_does_not_suppress_restart_and_exits_nonzero(tmp_path):
     h = Harness(tmp_path, "tier-future-stamp-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     stamp = h.log_dir / "com.whatsoup.tier-future-stamp-bot.last-restart"
     stamp.write_text("4102444800\n", encoding="utf-8")
     proc = h.run()
@@ -859,7 +868,7 @@ def test_future_cooldown_stamp_does_not_suppress_restart_and_exits_nonzero(tmp_p
 
 def test_future_cooldown_with_failed_kickstart_is_restart_failed(tmp_path):
     h = Harness(tmp_path, "tier-future-stamp-kickfail-bot", _unknown_body())
-    h.write_curl_stub("", bot_unreachable=True)
+    h.write_health_stub("", bot_unreachable=True)
     h.write_launchctl_stub(kickstart_rc=1)
     stamp = h.log_dir / "com.whatsoup.tier-future-stamp-kickfail-bot.last-restart"
     stamp.write_text("4102444800\n", encoding="utf-8")
@@ -872,6 +881,7 @@ def test_future_cooldown_with_failed_kickstart_is_restart_failed(tmp_path):
 
 def test_bootstrap_failure_is_nonzero_and_not_final_ok(tmp_path):
     h = Harness(tmp_path, "tier-bootstrap-fail-bot", _recovered_body())
+    h.write_health_stub("", bot_unreachable=True)
     h.write_launchctl_stub(print_rc=1, bootstrap_rc=1)
     proc = h.run()
     assert proc.returncode != 0
@@ -895,6 +905,7 @@ def test_post_preflight_log_append_failure_is_nonzero_and_visible_on_stderr(tmp_
     if os.geteuid() == 0:
         pytest.skip("root can append despite the permission fixture")
     h = Harness(tmp_path, "tier-log-append-fail-bot", _recovered_body())
+    h.write_health_stub("", bot_unreachable=True)
     h.write_launchctl_stub(make_log_readonly_on_print=True)
     try:
         proc = h.run()

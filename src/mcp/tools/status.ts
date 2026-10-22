@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
 import { z } from 'zod';
-import { JID_PERSONAL } from '../../core/jid-constants.ts';
+import { JID_PERSONAL, STATUS_BROADCAST_JID } from '../../core/jid-constants.ts';
 import { rowToMessage, type MessageRow } from '../../core/messages.ts';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -10,7 +10,6 @@ import type { ToolRegistry } from '../registry.ts';
 import { isPathWithinAllowedRoot, type SessionContext, type ToolDeclaration, type ExtendedBaileysSocket } from '../types.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
-const STATUS_BROADCAST_JID = 'status@broadcast';
 const MAX_STATUS_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const log = createChildLogger('mcp:status');
 

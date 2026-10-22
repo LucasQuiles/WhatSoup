@@ -51,6 +51,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from lib.health_reader import (  # noqa: E402
     PUBLIC_HEALTH_SCHEMA_PREFIX as PUBLIC_SCHEMA_PREFIX,
+    disconnect_decision_reading,
     health_body_is_disclosed,
     instance_health_token as read_instance_token,
 )
@@ -109,23 +110,37 @@ def _verdict(axis: str, verdict: str, because: str, evidence_ms: dict) -> dict:
 def _bond_axis(health: dict, now_ms: int, verdicts: list) -> dict:
     wa = health.get("whatsapp") or {}
     conn = wa.get("connection") or {}
+    decision_kind, classification = disconnect_decision_reading(conn)
     axis = {
         "connected": wa.get("connected"),
         "state": conn.get("state"),
         "auth_failure_class": conn.get("auth_failure_class"),
         "last_status_code": conn.get("last_status_code"),
+        "disconnect_classification": classification if decision_kind == "classified" else decision_kind,
         "observed_at_ms": health.get("generated_at_ms"),
     }
-    terminal = (
-        conn.get("auth_failure_class") == "serverside_logout_irreversible"
-        or (wa.get("connected") is False and conn.get("last_status_code") == 401)
+    auth_class = conn.get("auth_failure_class")
+    # Only a confirmed removal is "server revoked". A bare 401 decides alone
+    # only for a legacy body that carries no disconnect_decision.
+    confirmed = auth_class == "serverside_logout_irreversible" or (
+        decision_kind == "absent"
+        and wa.get("connected") is False and conn.get("last_status_code") == 401
     )
-    if terminal:
+    if confirmed:
         verdicts.append(_verdict(
             "bond", "needs_physical_repair",
             "server revoked the linked-device bond (401/serverside_logout_"
             "irreversible): restart_will_not_fix — a human must re-pair via "
             "QR/pairing-code on the primary phone",
+            {"observed_at_ms": axis["observed_at_ms"]},
+        ))
+    elif auth_class in ("auth_401_ambiguous_parked", "auth_401_uninspected_exit"):
+        verdicts.append(_verdict(
+            "bond", "needs_investigation",
+            f"logged out on an unconfirmed 401 ({auth_class}): no device_removed "
+            "conflict was observed and the transport stopped retrying — check the "
+            "primary phone's Linked Devices before any re-pair; a restart would "
+            "only repeat the bounded retry",
             {"observed_at_ms": axis["observed_at_ms"]},
         ))
     return axis

@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock child_process before importing the module
+// Mock child_process before importing the module. spawnSync stays the real
+// builtin: keyring's credential file-store writes go through
+// writeAtomicPrivateFileIsolatedSync, which publishes via a spawnSync-supervised
+// child. Without it those writes fail inside keyring's catch arms and surface as
+// KEYRING_WRITE_FAILED. Everything else stays mocked.
 vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
   const { childProcessMock } = await import('../helpers/child-process.ts');
-  return childProcessMock();
+  return { ...childProcessMock(), spawnSync: actual.spawnSync };
 });
 
 import {
@@ -231,6 +236,8 @@ describe('keyring', () => {
         ['google/gemini-2.5-pro', 'google', 'GOOGLE_API_KEY'],
         ['fireworks-ai/accounts/fireworks/models/kimi-k2-instruct', 'fireworks-ai', 'FIREWORKS_API_KEY'],
         ['togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo', 'togetherai', 'TOGETHER_API_KEY'],
+        ['zai-coding-plan/synthetic-model', 'zai-coding-plan', 'ZHIPU_API_KEY'],
+        ['minimax-coding-plan/synthetic-model', 'minimax-coding-plan', 'MINIMAX_API_KEY'],
       ];
       for (const [model, service, envVar] of expected) {
         expect(resolveProviderKeyService('opencode-cli', model)).toBe(service);

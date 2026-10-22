@@ -48,7 +48,8 @@ export type DrillLevel = 'brand' | 'model' | 'effort';
  * assertions): a 'brand' entry (Level-1) carries brand+provider (picking it
  * renders Level-2 for that provider); a 'model' entry (Level-2) carries
  * provider+model (picking it pins that leaf, OR opens Level-3 when the model
- * has native reasoning control); a Slice-3 'effort' entry (Level-3) carries
+ * has native reasoning control); a 'more' entry carries the next Level-2 page
+ * coordinate; a Slice-3 'effort' entry (Level-3) carries
  * provider+model+effort (picking it pins that leaf at that effort — `effort`
  * is null for the "Default (no override)" row). `label` is what was rendered
  * at that number.
@@ -56,6 +57,7 @@ export type DrillLevel = 'brand' | 'model' | 'effort';
 export type DrillEntry =
   | { kind: 'brand'; label: string; brand: string; provider: string }
   | { kind: 'model'; label: string; provider: string; model: string }
+  | { kind: 'more'; label: string; brand: string; provider: string; offset: number }
   | { kind: 'effort'; label: string; provider: string; model: string; effort: string | null };
 
 /** resolveLatestPick's tagged result — the caller dispatches on `kind`. */

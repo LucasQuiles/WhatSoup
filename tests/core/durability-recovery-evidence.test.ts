@@ -378,6 +378,7 @@ describe('durable recovery evidence ordering', () => {
       completedTurnDone: 0,
       failedStale: 1,
       reclaimedRecoveryOwned: 0,
+      terminalRecordCloseCandidates: 0,
     });
     expect(db.raw.prepare('SELECT plans, runs FROM recovery_order_audit').get())
       .toEqual({ plans: 1, runs: 1 });
@@ -594,6 +595,12 @@ describe('durable recovery evidence ordering', () => {
     expect(db.raw.prepare(
       'SELECT COUNT(*) AS count FROM outbound_ops WHERE source_inbound_seq = ?',
     ).get(INCIDENT_INBOUND_SEQ)).toEqual(sourceCountBefore);
+    expect(freshEngine.getHealthStats().deliveryAmbiguity).toEqual({
+      readable: true,
+      uncorroboratedAmbiguous: 0,
+      corroboratedRetained: 1,
+      oldestUncorroboratedAt: null,
+    });
     expect(db.raw.prepare(`
       SELECT evidence_ref
       FROM turn_delivery_corroboration

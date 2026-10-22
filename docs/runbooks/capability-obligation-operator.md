@@ -90,10 +90,11 @@ resolver, run against `sha256(probeSource)`, exited 0 within bound and produced 
 cannot establish that. Per the design spec §3.3 the fulfillment proof is the D6 execution
 receipt + the normal-delivery chain, not the canary.
 
-> The attestation ROW has no probe-evidence columns; adding them needs migration 58, which
-> bumps `CURRENT_SCHEMA_MIGRATION` **inside the attestation binding** — invalidating every
-> computed digest and reopening AS-01. Evidence therefore lives in the `--receipt-out` file,
-> correlated to the row by `nonce`, not in the row. This is deliberate, not an oversight.
+> Since migration 63 the attestation ROW carries the probe-evidence columns
+> (`probe_stdout_ref`, `probe_stderr_ref`, `probe_exit`, `canary_input_ref`,
+> `media_root_readable`; nullable, so pre-63 rows carry NULL and keep their evidence only in
+> their receipt files). The `--receipt-out` file, correlated to the row by `nonce`, is now
+> corroborating rather than the sole preservation.
 
 ## 2. Approve + arm a group drain — `scripts/capability-obligation-approve-drain.ts`
 
@@ -211,9 +212,9 @@ oracle when the automated harness cannot run; keep both receipts.
 - Recording an attestation and approving a group drain are owner-gated actions (H5 / AS-08);
   a live migration additionally requires the AS-01 old-binary rehearsal to pass. Migration 63
   (#3221 Debt 2: attestation-evidence columns in the row; the `--receipt-out` file is now
-  corroborating) bumps the schema INSIDE the attestation binding — before its rollout the
-  AS-01 rehearsal must be re-run 44→63, and every previously recorded attestation digest
-  stops admitting on the new binary by design (re-attest after upgrade).
+  corroborating) is on main and bumped the schema INSIDE the attestation binding — rolling it
+  out to a host requires the AS-01 rehearsal re-run 44→63, and every previously recorded
+  attestation digest stops admitting on the new binary by design (re-attest after upgrade).
 - The same-UID staged-copy window (F4, incl. the EUID-owned interpreter) and the direct-mode
   positional-code residual (awk-shape) are OWNER-RATIFIED threat-model boundaries
   (2026-08-13) — documented in `docs/durability.md` §5.7, not open defects. The drain-now

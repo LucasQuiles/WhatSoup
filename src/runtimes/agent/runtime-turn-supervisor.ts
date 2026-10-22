@@ -1,3 +1,4 @@
+import type { CapabilityDecisionParams } from '../../core/capability-obligation-store.ts';
 import type { TurnFinalizationBookkeepingParams } from '../../core/durability.ts';
 import {
   finalizeRuntimeTurn,
@@ -41,6 +42,8 @@ export interface RetainedRuntimeTurnFinalization<TPostEffects> {
   answerEvidence: RuntimeAnswerEvidence;
   readonly refreshAnswerEvidence?: () => Promise<RuntimeAnswerEvidence>;
   readonly bookkeeping: TurnFinalizationBookkeepingParams;
+  /** The decision the first finalization derived; every retry writes it best-effort. */
+  readonly capabilityDecision?: CapabilityDecisionParams;
   readonly postEffects: TPostEffects;
   readonly failureStage: NonTerminalFinalization['failureStage'];
   incidentDurable: boolean;
@@ -63,25 +66,6 @@ export interface RuntimeTurnSupervisorHealth {
   readonly retryAttempts: number;
   readonly retryRecoveries: number;
   readonly retryExhaustions: number;
-}
-
-export function runtimeTurnRecoveryIsDegraded(
-  finalization: RuntimeTurnSupervisorHealth,
-  recovery: {
-    turnRecoveryOutstanding: number;
-    turnRecoveryExhausted: number;
-    turnRecoveryOpenRecoveries: number;
-    turnRecoveryCorruptLinks: number;
-    turnRecoveryEchoConflicts: number;
-  },
-): boolean {
-  return finalization.retainedRetries > 0
-    || finalization.degradedScopes > 0
-    || recovery.turnRecoveryOutstanding > 0
-    || recovery.turnRecoveryExhausted > 0
-    || recovery.turnRecoveryOpenRecoveries > 0
-    || recovery.turnRecoveryCorruptLinks > 0
-    || recovery.turnRecoveryEchoConflicts > 0;
 }
 
 interface RecoveryWaiter {
@@ -292,6 +276,12 @@ export class RuntimeTurnSupervisor<TPostEffects> {
           recoveryOwner: retained.context.recoveryOwner,
           replay: retained.context.replay,
           bookkeeping: retained.bookkeeping,
+          // Best-effort on every retry: a decision that cannot be written is
+          // recorded as lost and the terminal still commits, so the decision
+          // can never keep this turn (and its chat) retained.
+          ...(retained.capabilityDecision === undefined
+            ? {}
+            : { capabilityDecision: retained.capabilityDecision, capabilityDecisionMode: 'best_effort' as const }),
         });
         if (result.kind === 'terminal' || result.kind === 'reclaimed_by_sweep') {
           await this.applyRecovered(result, retained);

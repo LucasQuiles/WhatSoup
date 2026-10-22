@@ -6,24 +6,18 @@ installed on maclab, nucles, or another WhatSoup instance.
 
 ## Pinecone key in the dedicated keychain
 
-Store or update the Pinecone key in the mwlab dedicated keychain:
+Use the shared [secret injection procedure](pinecone-transcription-bridge.md#secret-injection),
+including its presence-only probe, with the deployment attributes recorded below:
 
-```bash
-security add-generic-password -U \
-  -k ~/.config/mwlab-secrets.keychain-db \
-  -a mw \
-  -s pinecone \
-  -w 'pcsk_...'
+```text
+keychain: <deployment-keychain-path>
+account: <deployment-account>
+service: pinecone
 ```
 
-Verify wrapper injection without printing the secret:
-
-```bash
-~/.local/bin/with-pinecone-env python3 - <<'PY'
-import os
-print('PINECONE_ENV_OK' if os.environ.get('PINECONE_API_KEY') else 'PINECONE_ENV_MISSING')
-PY
-```
+The keychain path and account are required deployment parameters. Resolve them
+from the private deployment record before using the shared procedure. This
+configuration is not a fresh credential check.
 
 ## Launch agent wrapper
 
@@ -61,46 +55,41 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsoup.mw-bot.plis
 }
 ```
 
-Keep `memory.pinecone.allowedIndexes` empty until `mw-mind` should be exposed through `knowledge_search`. If `mw-mind` is added later, the agent still needs either `agentOptions.sandboxPerChat: true` or `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true`; the default is fail-closed for non-sandboxed global sessions.
+Keep `memory.pinecone.allowedIndexes` empty until the configured index should be
+exposed through `knowledge_search`. When adding that index, the agent also needs
+either `agentOptions.sessionScope: "per_chat"` with `agentOptions.sandboxPerChat: true`,
+or `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions: true`; the default
+is fail-closed for non-sandboxed global sessions.
 
-Legacy fields such as `pineconeIndex` and `pineconeAllowedIndexes` are still read at runtime, but new writes should be canonical. Migrate without touching auth:
-
-```bash
-cd ~/LAB/WhatSoup
-npm run migrate-memory-config -- --instance mw-bot
-npm run migrate-memory-config -- --instance mw-bot --write
-```
-
-The migration helper rewrites only `config.json` and creates `config.json.bak-*` by default. It does not touch `auth/`, `tokens.env`, `bot.db`, or the mwlab keychain, so a successful config migration should not require a WhatsApp QR re-auth.
+Use the shared [config migration procedure](pinecone-transcription-bridge.md#instance-config)
+with the configured instance ID, including `--keep-legacy` and the recency-gap check.
+Preserve `auth/`, `tokens.env`, `bot.db`, and the dedicated keychain; the migration
+only rewrites `config.json` and creates a backup by default.
 
 ## Local transcription bootstrap
 
-Run from the deployment worktree:
-
-```bash
-cd ~/LAB/WhatSoup
-bash scripts/install-transcription-deps.sh
-```
-
-This installs:
-- Homebrew `ffmpeg`
-- Homebrew `whisper-cpp`
-- Homebrew `python@3.12`
-- dedicated venv at `~/.local/share/whatsoup/transcription-venv`
-- faster-whisper cache under `~/.local/share/whatsoup/models/faster-whisper`
-- whisper.cpp model at `~/.local/share/whatsoup/models/whisper.cpp/ggml-small.bin`
+Follow the shared [local transcription bootstrap](pinecone-transcription-bridge.md#local-transcription-bootstrap)
+from the deployment worktree. The recorded whisper.cpp model path is
+`~/.local/share/whatsoup/models/whisper.cpp/ggml-small.bin`.
 
 ## Phase 3 gate G1 — migration trigger (`mw-bot` restart)
 
-Phase 3 introduced schema migration 20 (`fact_export_queue` table) in `src/core/database.ts`. Migrations fire at `src/main.ts:141-142` when `db.open()` is called — this is the de-facto migration trigger for the live `bot.db`.
+This gate records the April 2026 rollout, which introduced migration 20
+(`fact_export_queue`); that number is the historical acceptance target, not the
+current schema ceiling. Confirm the current migration registry and deployed
+service path before any restart. Runtime startup calls `Database.open()` on
+its instance DB; writable maintenance tools can also trigger migrations.
 
-Only `com.whatsoup.mw-bot` triggers migration for `~/.local/share/whatsoup/instances/mw-bot/bot.db`. `com.whatsoup.mw-cell` has a separate DB at `~/.local/share/whatsoup/instances/mw-cell/` — restarting it does **not** create missing tables in mw-bot's DB. `com.whatsoup.whatsoup-fleet` opens instance DBs read-only via `src/fleet/db-reader.ts:53-55` (`READ_ONLY_DATABASE_OPTIONS`) and does **not** run migrations under any circumstance.
+For this rollout, the writable instance process owns migration of its database;
+restarting a different instance does not migrate that database. Use the actor
+table below to select the recorded instance. Fleet reads through `src/fleet/db-reader.ts`
+with `READ_ONLY_DATABASE_OPTIONS` and does not migrate instance DBs.
 
 ### Actor contract
 
 | Actor | DB path | Migration authority |
 |---|---|---|
-| `com.whatsoup.mw-bot` | `~/.local/share/whatsoup/instances/mw-bot/bot.db` | Yes — `db.open()` at `src/main.ts:141-142` |
+| Configured primary instance | `<instance-state-dir>/bot.db` | Yes — writable `Database.open()` on startup |
 | `com.whatsoup.mw-cell` | `~/.local/share/whatsoup/instances/mw-cell/` | Separate DB — writes to mw-bot path would be a bug |
 | `com.whatsoup.whatsoup-fleet` | opens instance DBs via `src/fleet/db-reader.ts` | Read-only (`READ_ONLY_DATABASE_OPTIONS`) — never migrates |
 
@@ -136,80 +125,47 @@ The 2026-04-17 incident where `fact_export_queue` was absent from live bot.db be
 
 ## `backfill-enrichment --strict` (P3.6-H2) operator guide
 
-Operator-invoked retroactive enrichment of messages with `enrichment_processed_at IS NULL`. Preferred invocation:
-
-```bash
-npm run backfill-enrichment -- --strict --provider {anthropic|openai} --run-id <id>
-```
+Use the shared [backfill enrichment strict-mode procedure](pinecone-transcription-bridge.md#backfill-enrichment-strict-mode)
+with the configured instance ID. Its source-backed behavior, exit codes, stages, and
+recovery steps are canonical for this deployment too.
 
 ### What `--strict` changes
 
-Flips the backfill into fail-closed mode. If `extractFacts()` or `validateFacts()` raises an `ExtractionError` / `ValidationError`, the script:
-
-- Does **not** call `markMessagesProcessed` for the affected batch (messages stay retry-eligible)
-- Records the failure in `BackfillSummary.failedBatches[]` with fields `{chatJid, messageIds, errorType, stage, details}`
-- Writes `backfill_strict_fail_<stage>` to `enrichment_runs.error` (distinct from the `backfill_fail` tag used for T1 accounting-invariant failures)
-- Exits with code `6` if `failedBatches.length > 0` (dry-run exempt — exits `0`)
+See the shared procedure for retry eligibility, structured failure records,
+strict-failure markers, and the dry-run exception. A dry-run exit `0` does not
+prove that extraction or validation succeeded.
 
 ### Exit code taxonomy
 
-From `scripts/backfill-enrichment.ts`:
-
-| Code | Meaning |
-|---|---|
-| `0` | Success (or dry-run) |
-| `2` | Unhandled exception |
-| `3` | `bot.db` missing |
-| `4` | T1 accounting-invariant failure (`summary.batchesFailed > 0`), or argument parse error (unknown flag, missing required value) |
-| `5` | Provider config error (missing API key or invalid model) |
-| `6` | **P3.6-H2 strict-mode fail-closed** (ambiguous-empty model output caught) |
+The shared procedure owns the exit-code table for `scripts/backfill-enrichment.ts`.
 
 ### Stage values for exit `6`
 
-The `<stage>` in `backfill_strict_fail_<stage>`:
-
-| Stage | Meaning |
-|---|---|
-| `provider-call` | Provider throw / timeout / network |
-| `json-parse` | Malformed JSON from model |
-| `schema-shape` | Top-level not an array (e.g. model returned object) |
-| `schema-items-all-dropped` | Every item in the array failed schema (the 2026-04-18 qwen3:32b-tuned regression class) |
-
-Note: the same stage vocabulary covers both `ExtractionError` and `ValidationError`. Check `failedBatches[].errorType` in the final telemetry record (see Recovery step 1) to determine which function fired.
+The shared procedure owns the stage table and `errorType` interpretation. The
+incident below is the historical `schema-items-all-dropped` regression.
 
 ### Recovery steps for exit code `6`
 
-1. Read the final `run_complete` telemetry record. `runBackfill` emits this as the last JSONL line of every run (action: `run_complete`), with `inputs.failedBatches` carrying the full structured list:
-   ```bash
-   jq 'select(.action == "run_complete") | .inputs.failedBatches' \
-     $MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl
-   ```
-   — or the last stdout block.
-2. Identify the `stage`:
-   - `provider-call` usually means transient — retry.
-   - `schema-*` means the model is producing the wrong shape — do **not** retry with the same model.
-3. For `schema-*` failures: swap `--provider`, swap `EXTRACTION_MODEL` / `VALIDATION_MODEL`, or revert to Anthropic.
-4. For `provider-call` failures: check Ollama health (`curl http://localhost:11434/api/tags`), check for cold-load timeouts (raise via `WHATSOUP_API_TIMEOUT_MS` env var (in ms) or pre-warm model), retry.
-5. Messages are retry-eligible based on `enrichment_processed_at IS NULL` (no DB reset needed); the `--run-id` is a run label, not a retry key — any value (same or different) works.
+Follow the shared recovery steps. The original closeout stored telemetry at
+`$MW_MIND_CLOSEOUT_DIR/task-5-backfill-telemetry.jsonl`; resolve the actual
+current run's output path before inspecting `inputs.failedBatches`.
 
 ### Regression reference
 
-On 2026-04-18, `qwen3:32b-tuned` returned `[{"fact":"..."}]` (missing the required `text` field), which caused the non-strict path to silently mark 282 messages as processed with zero facts. Strict mode is the structural defense against this class. Unit test `tests/runtimes/chat/enrichment/extractor.test.ts:350` reproduces the exact malformed shape as a regression guard.
+On 2026-04-18, `qwen3:32b-tuned` returned `[{"fact":"..."}]` (missing the required `text` field), which caused the non-strict path to silently mark 282 messages as processed with zero facts. Strict mode is the structural defense against this class. Unit tests in `tests/runtimes/chat/enrichment/extractor.test.ts` cover malformed extraction shapes.
 
 ### Local-model recipe (cloud-key-free)
 
-```bash
-ANTHROPIC_API_KEY=""
-OPENAI_API_KEY="ollama-placeholder"   # SDK rejects literal empty string
-OPENAI_BASE_URL="http://localhost:11434/v1"
-EXTRACTION_MODEL=gemma3:27b
-VALIDATION_MODEL=gemma3:27b
-WHATSOUP_API_TIMEOUT_MS=60000 \
-  npm run backfill-enrichment -- --strict --provider openai --instance mw-bot
-```
+Use the shared [command-scoped local model recipe](pinecone-transcription-bridge.md#local-model-recipe)
+with the configured instance ID and models validated on the current host.
 
-Only `gemma3:27b` has been proven viable in the default 30s `apiTimeoutMs`. `qwen2.5:72b` and `qwen3:32b-tuned` have both timed out at cold-load — set `WHATSOUP_API_TIMEOUT_MS=60000` (or higher; value is in ms) before invoking the script if using them. The env var overrides the built-in `config.apiTimeoutMs` default without a code edit.
+In the April 2026 measurements, `gemma3:27b` completed within the default 30s
+timeout; `qwen2.5:72b` and `qwen3:32b-tuned` timed out on cold load. The recorded
+mitigation was pre-warming or `WHATSOUP_API_TIMEOUT_MS=60000` (milliseconds).
+Those measurements are historical evidence, not a current model recommendation.
 
 ## Open item
 
-OpenAI L1 transcription is still pending live verification on mwlab because `OPENAI_API_KEY` is not configured there yet.
+The original run left OpenAI L1 transcription unverified because its API key
+was absent. Confirm current credential presence without printing its value and
+capture a fresh live result before closing this item.

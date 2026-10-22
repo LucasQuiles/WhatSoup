@@ -21,6 +21,26 @@ import {
   providerFailureArmsFallback,
 } from '../../../src/runtimes/agent/failure-taxonomy.ts';
 
+describe('isUsageLimitMessage', () => {
+  it('does not suppress ordinary discussion of usage limits or quotas', () => {
+    expect(isUsageLimitMessage(
+      'Please document how usage limit and quota exceeded errors should be handled.',
+    )).toBe(false);
+  });
+
+  it('matches distinctive provider usage-cap notices', () => {
+    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
+    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
+    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
+    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
+  });
+
+  it('requires reset-time evidence for generic quota wording', () => {
+    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
+    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
+  });
+});
+
 function statusError(status: number): Error & { status: number } {
   const err = new Error(`http ${status}`) as Error & { status: number };
   err.status = status;
@@ -56,6 +76,20 @@ describe('agent failure taxonomy detectors', () => {
     expect(isUsageLimitMessage('Claude resets at 9pm after maintenance.')).toBe(false);
     expect(isUsageLimitMessage('Prompt is too long: maximum context length exceeded.')).toBe(false);
     expect(isPromptTooLongMessage('Prompt is too long: maximum context length exceeded.')).toBe(true);
+  });
+
+  it('classifies the bare CLI credit-balance sentence as a usage limit', () => {
+    // An API-key account with no credit prints only this sentence: no billing_error
+    // token and no provider/billing co-word.
+    expect(isUsageLimitMessage('Credit balance is too low')).toBe(true);
+    expect(classifyProviderFailure('Credit balance is too low\n')).toBe('usage-limit');
+    expect(providerFailureArmsFallback('usage-limit')).toBe(true);
+  });
+
+  it('does not treat other credit-balance wording as a usage limit', () => {
+    expect(isUsageLimitMessage('Your credit balance is $40.')).toBe(false);
+    expect(classifyProviderFailure('Your credit balance is $40.')).toBeNull();
+    expect(isUsageLimitMessage('Credit balance exhausted.')).toBe(false);
   });
 
   it('does not classify ordinary discussion of quota handling as a provider cap', () => {
@@ -440,6 +474,12 @@ describe('classifyAgentFailure', () => {
       label: 'provider credit balance exhausted',
       source: 'provider_result' as const,
       message: 'Provider error: insufficient credits. Please add credits to continue.',
+      expected: 'provider_usage_limit' as const,
+    },
+    {
+      label: 'bare CLI credit balance too low',
+      source: 'provider_result' as const,
+      message: 'Credit balance is too low',
       expected: 'provider_usage_limit' as const,
     },
     {

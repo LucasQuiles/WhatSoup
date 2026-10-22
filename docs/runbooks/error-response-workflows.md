@@ -49,6 +49,16 @@ Alert: `provider_failure_diagnostics`, title
 `Diagnostics for <kind> on <provider>`, evidence a per-finding digest
 (`id:ok|flagged/confidence ...`) plus the parsed reset time when known.
 
+## Tool-failure alert acceptance
+
+The runtime's existing tool-error classifier selects operator-actionable failures
+for `runtime-tool-error:<provider>:<tool>`. The helper consumes its 60-second
+deduplication window only after the structured emitter confirms a durable outbox
+write. Rejected writes, capture-only sinks and unconfirmed legacy-helper results
+leave a later matching result eligible. This adds no autonomous retry timer;
+legacy-helper throttling still applies. Outbox acceptance does not prove WhatsApp
+delivery.
+
 ## Health signals
 
 `GET /health` (it spreads `getFallbackState()` verbatim) exposes, in addition to

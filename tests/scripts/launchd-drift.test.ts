@@ -86,6 +86,29 @@ const MS365_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'ms365-token-backup')
   .replace('__WHATSOUP_REPO_ROOT__/deploy/scripts/harness.sh', '__HOME__/.local/bin/ms365-token-backup');
 
+// The collector surface carries a schedule the guard cross-checks against the wrapper's default slot minute.
+const J1_COLLECTOR_TEMPLATE = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<plist version="1.0"><dict>',
+  '  <key>Label</key><string>com.whatsoup.bot-errors-j1-collector</string>',
+  '  <key>ProgramArguments</key><array>',
+  '    <string>__HOME__/.local/bin/bot-errors-j1-collector</string>',
+  '  </array>',
+  '  <key>RunAtLoad</key><false/>',
+  '  <key>StartCalendarInterval</key><dict><key>Minute</key><integer>17</integer></dict>',
+  '  <key>StandardOutPath</key><string>__HOME__/.local/state/whatsoup-logs/bot-errors-j1-collector.out</string>',
+  '</dict></plist>',
+  '',
+].join('\n');
+
+// The wrapper template carries no placeholders; the guard compares the installed copy byte-for-byte and reads
+// the default slot minute from it.
+const J1_WRAPPER_TEMPLATE = '#!/usr/bin/env bash\nSLOT_MINUTE="${BOT_ERRORS_J1_SLOT_MINUTE:-17}"\necho ok\n';
+
+// Real repo artifacts for the tests that exercise the shipped files rather than fixtures.
+const REAL_J1_PLIST_TEMPLATE = join(process.cwd(), 'deploy/templates/com.whatsoup.bot-errors-j1-collector.plist');
+const REAL_J1_WRAPPER_TEMPLATE = join(process.cwd(), 'deploy/templates/bot-errors-j1-collector.sh');
+
 const WATCHDOG_TEMPLATE = [
   '<?xml version="1.0" encoding="UTF-8"?>',
   '<plist version="1.0"><dict>',
@@ -118,6 +141,8 @@ function makeFixture(): { repo: string; launchd: string; bin: string; home: stri
   writeFileSync(join(repo, 'deploy/com.whatsoup.harness-maintenance.plist'), HARNESS_TEMPLATE);
   writeFileSync(join(repo, 'deploy/com.whatsoup.reply-guarantee.plist'), REPLY_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/com.whatsoup.ms365-token-backup.plist'), MS365_TEMPLATE);
+  writeFileSync(join(repo, 'deploy/templates/com.whatsoup.bot-errors-j1-collector.plist'), J1_COLLECTOR_TEMPLATE);
+  writeFileSync(join(repo, 'deploy/templates/bot-errors-j1-collector.sh'), J1_WRAPPER_TEMPLATE);
   writeFileSync(join(repo, 'deploy/templates/com.whatsoup.__BOT_NAME__-watchdog.plist'), WATCHDOG_TEMPLATE);
   // fake render-release-drift (deterministic)
   const renderRd = join(repo, 'deploy/scripts/render-release-drift-launchd.sh');
@@ -158,6 +183,17 @@ function installAllOk(f: { repo: string; launchd: string; bin: string; home: str
   writeFileSync(join(f.bin, 'tbot-watchdog'), '#!/usr/bin/env bash\necho ok\n');
   chmodSync(join(f.bin, 'tbot-watchdog'), 0o755);
   writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for tbot\n');
+}
+
+// Install the optional bot-errors-j1-collector surface correctly: rendered plist, template-identical wrapper,
+// host config (existence only — it carries a marker that must never appear in guard output) and the log directory.
+function installJ1Ok(f: { repo: string; launchd: string; bin: string; home: string }): void {
+  writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'), subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home));
+  writeFileSync(join(f.bin, 'bot-errors-j1-collector'), J1_WRAPPER_TEMPLATE);
+  chmodSync(join(f.bin, 'bot-errors-j1-collector'), 0o755);
+  mkdirSync(join(f.home, '.config/whatsoup'), { recursive: true });
+  writeFileSync(join(f.home, '.config/whatsoup/bot-errors-j1-collector.env'), 'BOT_ERRORS_J1_GROUP_JID=J1_SECRET_MARKER\n');
+  mkdirSync(join(f.home, '.local/state/whatsoup-logs'), { recursive: true });
 }
 
 function run(
@@ -387,6 +423,231 @@ describe('static template surfaces (substitute-then-compare)', () => {
     expect(result.stdout).toContain('skip: ms365-token-backup');
   });
 
+  it('skips bot-errors-j1-collector when not installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('skip: bot-errors-j1-collector');
+    expect(result.stdout).not.toContain('bot-errors-j1-collector script');
+  });
+
+  it('passes bot-errors-j1-collector when the rendered plist, the template-identical script and the host prerequisites are installed', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ok: bot-errors-j1-collector');
+    expect(result.stdout).toContain('ok: bot-errors-j1-collector script (matches template; host config and log directory present; slot minute 17)');
+    expect(result.stdout).not.toContain('warn: unmanaged launchd surface: com.whatsoup.bot-errors-j1-collector.plist');
+    expect(result.stdout).not.toContain('warn: unmanaged collector job');
+    // the env file is an existence check only: its bytes must never reach the guard's output
+    expect(result.stdout + result.stderr).not.toContain('J1_SECRET_MARKER');
+  });
+
+  it('reports drift when the plist schedule minute and the wrapper default slot minute disagree', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'),
+      subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home).replace('<integer>17</integer>', '<integer>18</integer>'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('slot minute mismatch (plist Minute=18, wrapper default=17)');
+  });
+
+  it('warns (without counting drift) about another LaunchAgent that runs the collector under an unmanaged label', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.launchd, 'com.example.sched.bot-errors-j1-collector.plist'),
+      plistXml('com.example.sched.bot-errors-j1-collector', '/bin/bash').replace('</dict></plist>',
+        '  <key>ProgramArguments2</key><array><string>python3 /somewhere/bot_errors_j1_collector.py --live</string></array>\n</dict></plist>'));
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('warn: unmanaged collector job: com.example.sched.bot-errors-j1-collector');
+  });
+
+  it('fails when the bot-errors-j1-collector plist is installed but its script is missing', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    rmSync(join(f.bin, 'bot-errors-j1-collector'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing installed bot-errors-j1-collector script');
+  });
+
+  it('fails when the bot-errors-j1-collector script path is a directory rather than a readable executable file', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    rmSync(join(f.bin, 'bot-errors-j1-collector'));
+    mkdirSync(join(f.bin, 'bot-errors-j1-collector'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing installed bot-errors-j1-collector script');
+    expect(result.stdout).not.toContain('ok: bot-errors-j1-collector script');
+  });
+
+  it('fails when the installed bot-errors-j1-collector script has surviving placeholders', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.bin, 'bot-errors-j1-collector'), '#!/usr/bin/env bash\necho __HOME__\n');
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: bot-errors-j1-collector script has surviving placeholders');
+  });
+
+  it('reports drift when the installed bot-errors-j1-collector script differs from its tracked template', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.bin, 'bot-errors-j1-collector'), '#!/usr/bin/env bash\nexit 0\n');
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: bot-errors-j1-collector script differs from deploy/templates/bot-errors-j1-collector.sh');
+  });
+
+  it('fails when the bot-errors-j1-collector host config is absent (existence only, never read)', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    rmSync(join(f.home, '.config/whatsoup/bot-errors-j1-collector.env'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing host config for bot-errors-j1-collector');
+  });
+
+  it('fails when the launchd log directory for bot-errors-j1-collector is absent', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    rmSync(join(f.home, '.local/state/whatsoup-logs'), { recursive: true });
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing log directory for bot-errors-j1-collector');
+  });
+
+  it('reports drift when the installed bot-errors-j1-collector plist differs from its template render', () => {
+    const f = makeFixture();
+    installAllOk(f);
+    installJ1Ok(f);
+    writeFileSync(join(f.launchd, 'com.whatsoup.bot-errors-j1-collector.plist'),
+      subst(J1_COLLECTOR_TEMPLATE, f.repo, f.home).replace('bot-errors-j1-collector</string>', 'bot-errors-j1-collector-edited</string>'));
+    const result = run(f);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('drift: bot-errors-j1-collector');
+  });
+
+  // Shipped bot-errors-j1-collector templates: the real repo files, not fixtures.
+  it('renders the plist template with only __HOME__ and keeps the launchd contract', () => {
+    const raw = readFileSync(REAL_J1_PLIST_TEMPLATE, 'utf8');
+    const home = '/tmp/j1-home';
+    const rendered = raw.replaceAll('__HOME__', home);
+    expect(rendered).not.toMatch(/__[A-Z][A-Z_]*__/);
+    expect(rendered).toContain('<string>com.whatsoup.bot-errors-j1-collector</string>');
+    expect(rendered).toContain(`<string>${home}/.local/bin/bot-errors-j1-collector</string>`);
+    expect(rendered).toMatch(/<key>RunAtLoad<\/key>\s*<false\/>/);
+    expect(rendered).toMatch(/<key>StartCalendarInterval<\/key>\s*<dict>\s*<key>Minute<\/key>\s*<integer>17<\/integer>\s*<\/dict>/);
+    expect(rendered).toContain(`<string>${home}/.local/state/whatsoup-logs/bot-errors-j1-collector.out</string>`);
+    expect(rendered).not.toMatch(/\d+@g\.us|\/Users\/[a-z]/);
+  });
+
+  function runWrapper(home: string, env: Record<string, string> = {}) {
+    return spawnSync('bash', [REAL_J1_WRAPPER_TEMPLATE], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home, ...env },
+    });
+  }
+
+  function makeWrapperHome(): { home: string; collector: string; root: string } {
+    const home = tmp.make('whatsoup-j1-wrapper');
+    mkdirSync(join(home, '.config/whatsoup'), { recursive: true });
+    const root = join(home, 'loop-root');
+    mkdirSync(root, { recursive: true });
+    const collector = join(home, 'collector.py');
+    writeFileSync(collector, 'print("collector argv:", __import__("sys").argv[1:])\n');
+    return { home, collector, root };
+  }
+
+  function writeEnv(home: string, lines: string[], mode = 0o600): void {
+    const p = join(home, '.config/whatsoup/bot-errors-j1-collector.env');
+    writeFileSync(p, lines.join('\n') + '\n');
+    chmodSync(p, mode);
+  }
+
+  it('parses under bash -n and carries no placeholders', () => {
+    expect(spawnSync('bash', ['-n', REAL_J1_WRAPPER_TEMPLATE], { encoding: 'utf8' }).status).toBe(0);
+    expect(readFileSync(REAL_J1_WRAPPER_TEMPLATE, 'utf8')).not.toMatch(/__[A-Z][A-Z_]*__/);
+  });
+
+  it('exits 78 when the host config is missing', () => {
+    const { home } = makeWrapperHome();
+    const r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('missing or unreadable host config');
+  });
+
+  it('exits 78 when the host config is not mode 600 or 400', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`], 0o644);
+    const r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('must be mode 600 or 400 (got 644)');
+  });
+
+  it('parses the host config instead of executing it: a shell line is a configuration error, not a silent exit 0', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'exit 0', 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`]);
+    const r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('unparseable line 2');
+    expect(r.stdout).not.toContain('collector argv');
+  });
+
+  it('exits 78 when the pinned collector sha256 does not match the file', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`,
+      'BOT_ERRORS_J1_COLLECTOR_SHA256=0000000000000000000000000000000000000000000000000000000000000000']);
+    const r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('collector sha256 mismatch');
+  });
+
+  it('exits 78 when a required value is empty, when the collector is missing, and when the slot minute is out of range', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=', `BOT_ERRORS_J1_COLLECTOR=${collector}`]);
+    let r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('BOT_ERRORS_J1_GROUP_JID unset or empty');
+
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${join(home, 'absent.py')}`]);
+    r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('collector script missing');
+
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`, 'BOT_ERRORS_J1_SLOT_MINUTE=99']);
+    r = runWrapper(home);
+    expect(r.status).toBe(78);
+    expect(r.stderr).toContain('BOT_ERRORS_J1_SLOT_MINUTE must be an integer 0-59');
+  });
+
+  it('execs the collector with --live and the slot minute, propagating its exit status', () => {
+    const { home, collector, root } = makeWrapperHome();
+    writeEnv(home, [`BOT_ERRORS_J1_ROOT=${root}`, 'BOT_ERRORS_J1_GROUP_JID=x', `BOT_ERRORS_J1_COLLECTOR=${collector}`]);
+    const ok = runWrapper(home);
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toContain("collector argv: ['--live', '--slot-minute', '17']");
+    expect(ok.stdout).toContain('bot-errors-j1-collector: start slot=17');
+
+    writeFileSync(collector, 'raise SystemExit(3)\n');
+    const failing = runWrapper(home);
+    expect(failing.status).toBe(3);
+  });
+
   it('exits 2 fail-closed when a placeholder survives substitution', () => {
     const f = makeFixture();
     installAllOk(f);
@@ -601,6 +862,8 @@ describe('manifest parity (deploy/managed-components.json)', () => {
       'release-drift-check': () => count('check_release_drift_surface') >= 2,
       'ms365-token-backup': () => src.includes('check_optional_template_surface "ms365-token-backup"')
         && count('check_ms365_script') >= 2,
+      'bot-errors-j1-collector': () => src.includes('check_optional_template_surface "bot-errors-j1-collector"')
+        && count('check_j1_collector_script') >= 2,
     };
     for (const entry of manifest.protective_services.entries) {
       const probe = WIRED[entry.name];

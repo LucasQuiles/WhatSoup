@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
+import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -146,7 +148,12 @@ const { mockKillSessionTree } = vi.hoisted(() => ({
 }));
 
 const { mockEmitAlert, mockClearAlertSource } = vi.hoisted(() => ({
-  mockEmitAlert: vi.fn(),
+  mockEmitAlert: vi.fn<typeof import('../../../src/lib/emit-alert.ts').emitAlert>(() => ({
+    ok: true,
+    channel: 'outbox',
+    status: 'durably_queued',
+    outbox: { eventId: 'fixture-event', path: '/tmp/fixture-event.json' },
+  })),
   mockClearAlertSource: vi.fn(),
 }));
 
@@ -179,7 +186,8 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', async (importOriginal) =>
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlert: mockEmitAlert,
-  emitAlertChecked: mockEmitAlert,
+  emitAlertChecked: (...args: Parameters<typeof mockEmitAlert>) => mockEmitAlert(...args).ok,
+  observeAlertEmission: vi.fn(),
   emitObservationChecked: vi.fn(() => true),
   clearAlertSource: mockClearAlertSource,
   clearAlertSourceChecked: mockClearAlertSource,
@@ -431,7 +439,23 @@ vi.mock('../../../src/mcp/socket-server.ts', () => ({
 vi.mock('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts', async () => {
   const { FakePerChatMcpSocketManager } =
     await import('./helpers/fake-per-chat-mcp-socket-manager.ts');
-  return { PerChatMcpSocketManager: FakePerChatMcpSocketManager };
+  type Options = ConstructorParameters<
+    typeof import('../../../src/runtimes/agent/per-chat-mcp-socket-manager.ts').PerChatMcpSocketManager
+  >[0];
+  class CapturingPerChatMcpSocketManager extends FakePerChatMcpSocketManager {
+    readonly consumedAllowedRoots: string[] = [];
+
+    constructor(readonly capturedOptions: Options) {
+      super();
+    }
+
+    override acquire(identity: string): { socketPath: string; ready: Promise<void> } {
+      // Observe the same option read the real manager performs at acquisition.
+      this.consumedAllowedRoots.push(this.capturedOptions.allowedRoot);
+      return super.acquire(identity);
+    }
+  }
+  return { PerChatMcpSocketManager: CapturingPerChatMcpSocketManager };
 });
 
 const { mockMediaBridgeHandle, mockStartMediaBridge, mockSetMediaBridgeChat } = vi.hoisted(() => {
@@ -514,7 +538,7 @@ void _mockQueueTypeCheck; // suppress unused-variable warning
 // ─── Import after mocks ───────────────────────────────────────────────────────
 
 import * as registerAllModule from '../../../src/mcp/register-all.ts';
-import { AgentRuntime, isUsageLimitMessage, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
+import { AgentRuntime, serializePendingPoll, type PendingPollQuestion } from '../../../src/runtimes/agent/runtime.ts';
 import { parseGeminiAcpEvent } from '../../../src/runtimes/agent/providers/gemini-acp-parser.ts';
 import { __resetModelCatalogueCacheForTest } from '../../../src/runtimes/agent/model-catalogue-resolver.ts';
 import { providerServerErrorNoFallbackNotice, providerUnknownTerminalNotice, renderUserMessage } from '../../../src/runtimes/agent/response-templates.ts';
@@ -534,7 +558,7 @@ import {
   type PerChatCleanupRuntimeState, type PerChatSendTurnRuntimeState,
   getPerChatCleanupState, setOwnedTestSession, type PendingSystemResultTrackerView,
   pendingSystemResults, markOwnedSystemTurn, publishSingletonTestOwner,
-  handlePerChatProviderEvent, currentCrashIdentity,
+  handlePerChatProviderEvent, currentCrashIdentity, awaitDispatchedTurn, retireDispatchedTurn,
   type AutoCompactView, type ImageCoalescerView,
 } from './lib/runtime-mock-scaffold.ts';
 
@@ -680,27 +704,15 @@ function handleEventDownstreamWithoutAdmission(
   );
 }
 
-describe('isUsageLimitMessage', () => {
-  it('does not suppress ordinary discussion of usage limits or quotas', () => {
-    expect(isUsageLimitMessage(
-      'Please document how usage limit and quota exceeded errors should be handled.',
-    )).toBe(false);
-  });
-
-  it('matches distinctive provider usage-cap notices', () => {
-    expect(isUsageLimitMessage("You're out of extra usage. Claude will be available at 8pm.")).toBe(true);
-    expect(isUsageLimitMessage('You have hit your usage limit.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for Anthropic API request.')).toBe(true);
-    expect(isUsageLimitMessage('Insufficient credits for this request.')).toBe(false);
-  });
-
-  it('requires reset-time evidence for generic quota wording', () => {
-    expect(isUsageLimitMessage('The integration returned quota exceeded while replaying fixtures.')).toBe(false);
-    expect(isUsageLimitMessage('Quota exceeded. Usage resets at 8pm.')).toBe(true);
-  });
-});
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+// The runtime keeps its mkdir mock; only harness-owned positive roots exist.
+beforeEach(async () => {
+  const fs = await prepareRuntimeHome();
+  // Keep the real restart guard without sharing boot history between tests.
+  mockConfig.stateRoot = fs.mkdtempSync(join(tmpdir(), 'runtime-state-'));
+});
 
 describe('AgentRuntime', () => {
   beforeEach(async () => {
@@ -715,6 +727,7 @@ describe('AgentRuntime', () => {
     // makes the suite order-dependent and obscures the real terminal owner.
     mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
+    mockKillSessionTree.mockReset().mockResolvedValue(undefined);
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.captureEvidenceBinding.mockReset().mockImplementation(() => Object.freeze({}));
@@ -826,6 +839,11 @@ describe('AgentRuntime', () => {
     }));
     mockQueue.targetChatJid = 'test@s.whatsapp.net';
   });
+
+  registerRuntimeHomeConfinementTests(
+    options => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', options),
+    mockSession,
+  );
 
   it('start() calls ensureAgentSchema', async () => {
     const { ensureAgentSchema } = await import('../../../src/runtimes/agent/session-db.ts');
@@ -1010,6 +1028,7 @@ describe('AgentRuntime', () => {
   });
 
   it('start() uses the read-only inspector for user-level ~/.claude when cwd != home', async () => {
+    const cwd = await ownedRuntimeCwd('whatsoup-non-home-cwd');
     const { ensurePermissionsSettings } = await import('../../../src/core/workspace.ts');
     const { inspectUserClaudeSettings } = await import('../../../src/core/user-claude-settings.ts');
     const { homedir } = await import('node:os');
@@ -1018,7 +1037,7 @@ describe('AgentRuntime', () => {
     const { messenger } = makeMessenger();
     // cwd != home: the agent-sandbox hook in user-level ~/.claude is cwd-independent
     // (applies to every session) and is NOT covered by reconciling the cwd-derived dir.
-    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: '/tmp/whatsoup-non-home-cwd' });
+    const runtime = new AgentRuntime(db, messenger, 'test', { cwd: cwd });
     await runtime.start();
 
     expect(inspectUserClaudeSettings).toHaveBeenCalledWith(join(homedir(), '.claude'), expect.stringMatching(/deploy\/hooks\/agent-sandbox\.sh$/));
@@ -2051,16 +2070,17 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee instance and global MCP socket env into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hello claude' }));
 
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       whatsoupInstance: 'line-a',
-      whatsoupMcpSocket: '/tmp/rgp-global/.claude/whatsoup.sock',
+      whatsoupMcpSocket: join(cwd, '.claude/whatsoup.sock'),
     });
 
     await emitAgentResultWithoutTokens('done');
@@ -2068,13 +2088,14 @@ describe('AgentRuntime', () => {
   });
 
   it('cleans up partial global MCP socket resources when startup fails', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
     mockSocketServerInstance.start.mockImplementationOnce(() => {
       throw startErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2086,12 +2107,13 @@ describe('AgentRuntime', () => {
     expect(state.globalSocketServer).toBeNull();
     expect(state.globalMcpSocketPath).toBeNull();
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
   });
 
   it('logs cleanup failures after global MCP socket startup errors', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-global-stop-fail');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const startErr = new Error('socket bind failed');
@@ -2102,7 +2124,7 @@ describe('AgentRuntime', () => {
     mockSocketServerInstance.stop.mockImplementationOnce(() => {
       throw stopErr;
     });
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-global-stop-fail' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
 
     await expect(runtime.start()).rejects.toThrow('socket bind failed');
 
@@ -2111,11 +2133,11 @@ describe('AgentRuntime', () => {
       globalMcpSocketPath: string | null;
     };
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
-      { err: stopErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: stopErr, agentCwd: cwd },
       'failed to clean up global socket server after startup error',
     );
     expect(mockRuntimeLogger.error).toHaveBeenCalledWith(
-      { err: startErr, agentCwd: '/tmp/rgp-global-stop-fail' },
+      { err: startErr, agentCwd: cwd },
       'failed to initialize global MCP socket resources',
     );
     expect(state.globalSocketServer).toBeNull();
@@ -2124,10 +2146,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards configured system prompt into created sessions', async () => {
+    const cwd = await ownedRuntimeCwd('config-prompt');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/config-prompt',
+      cwd: cwd,
       configSystemPrompt: 'Configured operator prompt.',
     });
 
@@ -2140,10 +2163,11 @@ describe('AgentRuntime', () => {
   });
 
   it('forwards reply-guarantee workspace socket env for sandbox per-chat sessions', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-workspaces');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'line-a', {
-      cwd: '/tmp/rgp-workspaces',
+      cwd: cwd,
       sessionScope: 'per_chat',
       sandboxPerChat: true,
       sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false } },
@@ -2159,9 +2183,10 @@ describe('AgentRuntime', () => {
   });
 
   it('arms and disarms reply guarantee around a non-shared turn', async () => {
+    const cwd = await ownedRuntimeCwd('rgp-turn');
     const db = makeDb();
     const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: '/tmp/rgp-turn' });
+    const runtime = new AgentRuntime(db, messenger, 'line-a', { cwd: cwd });
     const durability = {
       getInboundStatus: vi.fn(() => 'processing'),
       completeTurn: vi.fn(),
@@ -2665,7 +2690,7 @@ describe('AgentRuntime', () => {
     expect((runtime as unknown as { perChatTurnText: Map<string, string> }).perChatTurnText.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { perChatAssistantItemText: Map<string, Map<number, string>> }).perChatAssistantItemText.has('test@s.whatsapp.net')).toBe(false);
     expect((runtime as unknown as { activeToolNames: Map<string, string> }).activeToolNames.size).toBe(0);
-    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'));
+    expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('exited with code 1'), 'status');
     expect(mockQueue.flush).toHaveBeenCalledTimes(1);
   });
 
@@ -3420,12 +3445,13 @@ describe('AgentRuntime', () => {
   });
 
   it('sandbox per_chat notification preserves the crashed workspace owner and state', async () => {
+    const cwd = await ownedRuntimeCwd('cwd');
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', {
       sessionScope: 'per_chat',
       sandboxPerChat: true,
-      cwd: '/agent/cwd',
+      cwd: cwd,
     });
     const state = runtime as unknown as PerChatCleanupRuntimeState & {
       chatSessions: Map<string, { getStatus: () => ReturnType<typeof mockSession.getStatus> }>;
@@ -3582,7 +3608,8 @@ describe('AgentRuntime', () => {
         texts: ['image-a', 'image-b'],
         inboundSeqs: [6, 7],
       });
-      expect(state.imageCoalesce.buffers.get(canonicalJid)?.msg.chatJid).toBe(canonicalJid);
+      // The buffered message keeps its journaled chat JID.
+      expect(state.imageCoalesce.buffers.get(canonicalJid)?.msg.chatJid).toBe(lidKey);
       expect(state.imageCoalesce.buffers.get(canonicalJid)?.timer).not.toBe(imageTimer);
       const migratedPoll = state.pendingPolls.questions.get(canonicalJid);
       expect(migratedPoll?.chatJid).toBe(canonicalJid);
@@ -3843,7 +3870,7 @@ describe('AgentRuntime', () => {
 
     await vi.waitFor(() => expect(state.chatSessions.has(canonicalJid)).toBe(true));
     expect(state.chatQueues.get(canonicalJid)).toBe(mockQueue);
-    expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('remapped result');
+    expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('remapped result', 'answer');
     expect(state.perChatInboundSeqQueue.has(canonicalJid)).toBe(false);
     expect(state.pendingTurnText.has(canonicalJid)).toBe(false);
     expect(mockRuntimeLogger.debug.mock.calls.some(
@@ -3892,7 +3919,7 @@ describe('AgentRuntime', () => {
 
     await vi.waitFor(() => expect(state.chatSessions.has(canonicalJid)).toBe(true));
     expect(mockQueue.enqueueStreamingText.mock.calls.map(([text]) => text)).toEqual(['Hello ', 'world']);
-    expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('!');
+    expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('!', 'answer');
     expect(state.perChatTurnText.has(canonicalJid)).toBe(false);
   });
 
@@ -3937,7 +3964,7 @@ describe('AgentRuntime', () => {
       }),
       'media processing failed — using fallback label',
     );
-    expect(mockSession.sendTurn).toHaveBeenCalledWith('[audio message — processing failed]');
+    await awaitDispatchedTurn(mockSession.sendTurn, '[audio message — processing failed]');
     expect(durability.markInboundSkipped).not.toHaveBeenCalled();
     expect(durability.markInboundFailed).not.toHaveBeenCalled();
   });
@@ -4026,7 +4053,9 @@ describe('AgentRuntime', () => {
 
       const sentTurns = (mockSession.sendTurn.mock.calls as unknown as Array<[string]>).map(([text]) => text);
       expect(sentTurns).toEqual(['image one', 'after image']);
-      expect(mockQueue.setInboundSeq.mock.calls.map(([seq]) => seq)).toEqual([10, 11]);
+      // Each turn's sequence is written twice: by the turn-queue processor before
+      // the dispatch, and at the dispatch boundary on the queue the turn is sent through.
+      expect(mockQueue.setInboundSeq.mock.calls.map(([seq]) => seq)).toEqual([10, 10, 11, 11]);
     } finally {
       vi.useRealTimers();
     }
@@ -4599,7 +4628,7 @@ describe('AgentRuntime', () => {
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     await runtime.start();
     await sendAndDrain(runtime, makeMsg({ chatJid: groupJid, isGroup: true, content: 'hello' }));
-    mockSession.sendTurn.mockClear();
+    await retireDispatchedTurn(mockSession.sendTurn, 'hello');
     (runtime as unknown as { perChatInboundSeqQueue: Map<string, number[]> }).perChatInboundSeqQueue.set(groupJid, [42]);
 
     await expect(runtime.handleAgentCommand({
@@ -4803,8 +4832,8 @@ describe('AgentRuntime', () => {
       expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     });
 
-    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
-    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
+    expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(expect.stringContaining('ompact'));
+    expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContain('_(no response)_');
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
     expect(mockQueue.endTurn).toHaveBeenCalledOnce();
   });
@@ -4851,8 +4880,8 @@ describe('AgentRuntime', () => {
       expect(mockSession.completeProviderTurn).toHaveBeenCalledOnce();
     });
 
-    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('ompact'));
-    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('_(no response)_');
+    expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(expect.stringContaining('ompact'));
+    expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContain('_(no response)_');
     expect(mockQueue.enqueueResultText).not.toHaveBeenCalled();
     expect(mockQueue.endTurn).toHaveBeenCalledOnce();
   });
@@ -5088,7 +5117,7 @@ describe('AgentRuntime', () => {
 
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Hello there!' });
 
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Hello there!', 'answer');
   });
 
   it('suppresses internal assistant_text narration before it reaches WhatsApp', async () => {
@@ -5175,7 +5204,7 @@ describe('AgentRuntime', () => {
     const reply = 'Yes — it looks like the OAuth token expired, so we should reconnect the account and re-run login.';
     capturedOnEventRef.current!({ type: 'assistant_text', text: reply });
 
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(reply);
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(reply, 'answer');
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ chatJid: 'test@s.whatsapp.net', kind: 'auth-required' }),
       'delivered assistant_text despite provider-failure classification',
@@ -5195,7 +5224,7 @@ describe('AgentRuntime', () => {
     const reply = 'Right — the OAuth token expired; let us reconnect the provider account and continue.';
     capturedOnEventRef.current!({ type: 'assistant_text', text: reply });
 
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(reply);
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(reply, 'answer');
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'auth-required' }),
       'delivered assistant_text despite provider-failure classification',
@@ -5290,7 +5319,7 @@ describe('AgentRuntime', () => {
     const text = 'Your OAuth token has expired - run claude login to reconnect, then retry.';
     capturedOnEventRef.current!({ type: 'assistant_text', text });
 
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text);
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text, 'answer');
     expect(replyGuarantee.notifyActivity).toHaveBeenCalledWith('test@s.whatsapp.net');
     expect(mockRuntimeLogger.warn).not.toHaveBeenCalledWith(
       expect.objectContaining({ textPreview: expect.stringContaining('OAuth token') }),
@@ -5399,7 +5428,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'compact_boundary' });
 
     expect(mockQueue.enqueueText).toHaveBeenCalledWith(
-      expect.stringContaining('ompact'),
+      expect.stringContaining('ompact'), 'lifecycle',
     );
   });
 
@@ -5428,7 +5457,7 @@ describe('AgentRuntime', () => {
 
     // No assistant_text event — go straight to result
     capturedOnEventRef.current!({ type: 'result', text: null });
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_'));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_', 'status'));
 
     const calls = mockQueue.enqueueText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('_(no response)_');
@@ -5444,7 +5473,7 @@ describe('AgentRuntime', () => {
 
     // No assistant_text event, no tool_use — pure empty-output terminal result.
     capturedOnEventRef.current!({ type: 'result', text: null });
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_'));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith('_(no response)_', 'status'));
 
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -5465,7 +5494,7 @@ describe('AgentRuntime', () => {
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'result', text: 'Context limit reached' });
-    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Context limit reached'));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Context limit reached', 'answer'));
 
     const calls = mockQueue.enqueueResultText.mock.calls.map((args) => args[0] as string);
     expect(calls).toContain('Context limit reached');
@@ -5473,6 +5502,7 @@ describe('AgentRuntime', () => {
   });
 
   it('context-overflow provider result sends the template notice instead of raw provider text', async () => {
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -5487,8 +5517,8 @@ describe('AgentRuntime', () => {
       bundle: null,
       formatClock: () => 'unused',
     });
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expected));
-    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expected, 'status'));
+    expect(mockQueue.enqueueResultText.mock.calls.map((c) => c[0])).not.toContain(raw);
     expect(mockSession.shutdown).toHaveBeenCalled();
   });
 
@@ -5529,7 +5559,7 @@ describe('AgentRuntime', () => {
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
     await vi.waitFor(() =>
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('automatic recovery failed')),
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('automatic recovery failed'), 'status'),
     );
     const forwardedRaw = mockQueue.enqueueResultText.mock.calls.map((a) => a[0] as string);
     expect(forwardedRaw).not.toContain(raw);
@@ -5545,7 +5575,7 @@ describe('AgentRuntime', () => {
     mockQueue.enqueueResultText.mockClear();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'follow up' }));
     capturedOnEventRef.current!({ type: 'result', text: 'Recovered reply', isError: false });
-    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply'));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply', 'answer'));
 
     turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastSuccessfulTurnAt).toEqual(expect.any(Number));
@@ -5571,7 +5601,7 @@ describe('AgentRuntime', () => {
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'served by the existing fallback session' }));
 
     capturedOnEventRef.current!({ type: 'result', text: 'Recovered reply', isError: false });
-    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply'));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Recovered reply', 'answer'));
 
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastSuccessfulTurnProvider).toBe('opencode-cli');
@@ -5594,7 +5624,7 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'complete before restart' }));
     capturedOnEventRef.current!({ type: 'result', text: 'Completed reply', isError: false });
-    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Completed reply'));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('Completed reply', 'answer'));
 
     let turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastSuccessfulTurnSessionCurrent).toBe(true);
@@ -5675,7 +5705,7 @@ describe('AgentRuntime', () => {
     // A bare end-of-turn carries no text; emit a genuine assistant reply first,
     // then prove the (non-error) result path forwards visible text untouched.
     capturedOnEventRef.current!({ type: 'result', text: 'a genuine Gemini reply', isError: false });
-    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine Gemini reply'));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine Gemini reply', 'answer'));
     // The parsed success event must not have been flagged as an error.
     expect((parsedSuccess as { isError?: boolean }).isError).toBeUndefined();
   });
@@ -5753,6 +5783,7 @@ describe('AgentRuntime', () => {
   });
 
   it('auth-required result arms fallback and shuts down when replay is blocked by tool activity (single path)', async () => {
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     const savedMinimaxKey = process.env.MINIMAX_API_KEY;
     process.env.MINIMAX_API_KEY = 'test-minimax-key';
     try {
@@ -5787,14 +5818,14 @@ describe('AgentRuntime', () => {
         'Provider fallback window activated',
         expect.stringContaining('reason=auth-required'),
       );
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'));
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'), 'lifecycle');
       expect(mockSession.shutdown).toHaveBeenCalled();
       expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_fallback_replayed')).toBeUndefined();
-      expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+      expect(mockQueue.enqueueResultText.mock.calls.map((c) => c[0])).not.toContain(raw);
       // QR-211 regression guard: a fallback DID activate here, so the no-fallback
       // re-auth notice (emitNoFallbackReauthNotice) must NOT also fire — only the
       // activation notice above ('will not replay it automatically') is sent.
-      expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+      expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(expect.stringContaining('re-authentication'));
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
       expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
     } finally {
@@ -5804,6 +5835,7 @@ describe('AgentRuntime', () => {
   });
 
   it('server-error result without fallback sends the safe terminal notice and shuts down (single path)', async () => {
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -5813,10 +5845,10 @@ describe('AgentRuntime', () => {
     const raw = 'API Error 503: Service temporarily unavailable. overloaded_error';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerServerErrorNoFallbackNotice()));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(providerServerErrorNoFallbackNotice(), 'status'));
     expect(runtime.getFallbackState().fallbackReason).toBeNull();
     expect(mockSession.shutdown).toHaveBeenCalled();
-    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    expect(mockQueue.enqueueResultText.mock.calls.map((c) => c[0])).not.toContain(raw);
     expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_unknown_terminal')).toBeUndefined();
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('server-error');
@@ -5826,6 +5858,7 @@ describe('AgentRuntime', () => {
   // configured, or activation failed) used to end in permanent user-visible
   // silence — the session shuts down with nothing ever forwarded to the chat.
   it('auth-required result without fallback emits a generic re-auth notice and shuts down (single path)', async () => {
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger);
@@ -5835,10 +5868,10 @@ describe('AgentRuntime', () => {
     const raw = 'Authentication required. Sign in to continue.';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication')));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'), 'status'));
     expect(runtime.getFallbackState().fallbackReason).toBeNull();
     expect(mockSession.shutdown).toHaveBeenCalled();
-    expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+    expect(mockQueue.enqueueResultText.mock.calls.map((c) => c[0])).not.toContain(raw);
     const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
     expect(turnCapability.lastTurnErrorClass).toBe('auth-required');
   });
@@ -5859,7 +5892,7 @@ describe('AgentRuntime', () => {
     const raw = 'Authentication required. Sign in to continue.';
     capturedOnEventRef.current!({ type: 'result', text: raw, isError: true });
 
-    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication')));
+    await vi.waitFor(() => expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'), 'status'));
     // The notice's "operator has been notified" must be backed by a real alert.
     expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_auth_required_no_fallback')).toBeDefined();
     // Redaction: raw provider text is never forwarded to the user.
@@ -5902,6 +5935,7 @@ describe('AgentRuntime', () => {
   });
 
   it('model-unavailable result with fallback notifies and shuts down when replay is blocked (single path)', async () => {
+    delete process.env['WHATSOUP_RESPONSE_REGISTRY_DISPATCH'];
     const savedMinimaxKey = process.env.MINIMAX_API_KEY;
     process.env.MINIMAX_API_KEY = 'test-minimax-key';
     try {
@@ -5936,10 +5970,10 @@ describe('AgentRuntime', () => {
         'Provider fallback window activated',
         expect.stringContaining('reason=model-unavailable'),
       );
-      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'));
+      expect(mockQueue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'), 'lifecycle');
       expect(mockSession.shutdown).toHaveBeenCalled();
       expect(mockEmitAlert.mock.calls.find((c) => c[1] === 'provider_fallback_replayed')).toBeUndefined();
-      expect(mockQueue.enqueueResultText).not.toHaveBeenCalledWith(raw);
+      expect(mockQueue.enqueueResultText.mock.calls.map((c) => c[0])).not.toContain(raw);
       const turnCapability = (runtime.getHealthSnapshot().details as Record<string, any>).turnCapability;
       expect(turnCapability.lastTurnErrorClass).toBe('model-unavailable');
     } finally {
@@ -5961,7 +5995,7 @@ describe('AgentRuntime', () => {
     });
 
     expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(
-      '_Model auto-switched from Opus 4.8 to Opus 4.7 (high demand). Continuing normally._',
+      '_Model auto-switched from Opus 4.8 to Opus 4.7 (high demand). Continuing normally._', 'lifecycle',
     );
     expect(runtime.getFallbackState().fallbackActiveUntil).toBeNull();
     expect(mockRuntimeLogger.info).toHaveBeenCalledWith(
@@ -5978,7 +6012,7 @@ describe('AgentRuntime', () => {
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
     capturedOnEventRef.current!({ type: 'result', text: 'a genuine terminal reply', isError: false });
-    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine terminal reply'));
+    await vi.waitFor(() => expect(mockQueue.enqueueResultText).toHaveBeenCalledWith('a genuine terminal reply', 'answer'));
   });
 
   it('model-unavailable assistant_text is suppressed from streaming (single path)', async () => {
@@ -6050,7 +6084,7 @@ describe('AgentRuntime', () => {
 
     // Now assistant_text for turn 2 should go through
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Turn 2 response' });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Turn 2 response');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Turn 2 response', 'answer');
   });
 
   it('downstream singleton post-turn gate suppresses tool_use after result', async () => {
@@ -6374,7 +6408,7 @@ describe('AgentRuntime', () => {
         }),
       }),
     ));
-    expect(mockQueue.enqueueText).not.toHaveBeenCalledWith('private malformed record');
+    expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContain('private malformed record');
   });
 
   it('cancels only the rejected source system lease after exact teardown proof', async () => {
@@ -6525,7 +6559,7 @@ describe('AgentRuntime', () => {
       { type: 'assistant_text', text: 'current source output' },
       'source-bound#tool',
     );
-    expect(queue.enqueueStreamingText).toHaveBeenCalledWith('current source output');
+    expect(queue.enqueueStreamingText).toHaveBeenCalledWith('current source output', 'answer');
   });
 
   it('reconstructs a missing per-chat output route before terminalizing its exact owner', async () => {
@@ -6674,7 +6708,7 @@ describe('AgentRuntime', () => {
     // The real user turn's output that follows must be delivered, not gated.
     mockQueue.enqueueStreamingText.mockClear();
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Real reply' });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply', 'answer');
   });
 
   it('per_chat: real user-turn result still arms the post-turn gate (phantom suppressed)', async () => {
@@ -6727,7 +6761,7 @@ describe('AgentRuntime', () => {
     // Real output that follows the system turn must be delivered, not gated.
     mockQueue.enqueueStreamingText.mockClear();
     capturedOnEventRef.current!({ type: 'assistant_text', text: 'Real reply' });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Real reply', 'answer');
   });
 
   it('per_chat: a failed context-injection send does not leak a pending system result', async () => {
@@ -6940,7 +6974,7 @@ describe('AgentRuntime', () => {
 
     state.handleEvent(sourceSession, { type: 'compact_boundary' });
     expect(queue.indicateTyping).toHaveBeenCalledTimes(1);
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context compacted'));
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context compacted'), 'lifecycle');
     expect(tracker.onAnyActivity).toHaveBeenCalled();
 
     state.handleEvent(sourceSession, {
@@ -7424,7 +7458,10 @@ describe('AgentRuntime', () => {
     expect(evidence).toContain('error_excerpt:');
   });
 
-  it('deduplicates repeated tool_result BOT ERRORS alerts in one runtime', async () => {
+  it.each([
+    ['an accepted first enqueue', true, 1],
+    ['a rejected first enqueue', false, 2],
+  ] as const)('deduplicates repeated tool_result BOT ERRORS alerts after %s', async (_label, firstAccepted, expectedAlerts) => {
     const db = makeDb();
     const { messenger } = makeMessenger();
 
@@ -7432,33 +7469,14 @@ describe('AgentRuntime', () => {
     await runtime.start();
     await sendAndAwaitProviderDispatch(runtime, makeMsg({ content: 'hi' }));
 
-    capturedOnEventRef.current!({
-      type: 'tool_use',
-      toolId: 'tool-1',
-      toolName: 'Bash',
-      toolInput: { command: 'npm test' },
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_result',
-      isError: true,
-      toolId: 'tool-1',
-      content: 'ENOSPC: no space left on device',
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_use',
-      toolId: 'tool-2',
-      toolName: 'Bash',
-      toolInput: { command: 'npm test' },
-    });
-    capturedOnEventRef.current!({
-      type: 'tool_result',
-      isError: true,
-      toolId: 'tool-2',
-      content: 'ENOSPC: no space left on device',
-    });
+    if (!firstAccepted) mockEmitAlert.mockReturnValueOnce({ ok: false, channel: 'none', status: 'failed', outboxError: 'ENOSPC' });
+    for (const toolId of ['tool-1', 'tool-2']) {
+      capturedOnEventRef.current!({ type: 'tool_use', toolId, toolName: 'Bash', toolInput: { command: 'npm test' } });
+      capturedOnEventRef.current!({ type: 'tool_result', isError: true, toolId, content: 'ENOSPC: no space left on device' });
+    }
 
     expect(mockQueue.enqueueToolUpdate).toHaveBeenCalledTimes(4);
-    expect(mockEmitAlert).toHaveBeenCalledOnce();
+    expect(mockEmitAlert).toHaveBeenCalledTimes(expectedAlerts);
   });
 
   it('does NOT alert for benign agent-recoverable tool errors (noise gate)', async () => {
@@ -8909,7 +8927,7 @@ describe('AgentRuntime', () => {
       'stdin write timed out — notifying user',
     );
     expect(mockQueue.enqueueText).toHaveBeenCalledWith(
-      'Agent is not responding — try /new to start a fresh session.',
+      'Agent is not responding — try /new to start a fresh session.', 'status',
     );
   });
 
@@ -10598,7 +10616,7 @@ describe('AgentRuntime', () => {
     const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
     expect(forwardedRaw).not.toContain(socketText);
     // Generic user notice is sent
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'));
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'), 'status');
   });
 
   // QR-211: mirrors the transient-network test above (same handleEventWithContext
@@ -10666,7 +10684,7 @@ describe('AgentRuntime', () => {
     const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
     expect(forwardedRaw).not.toContain(raw);
     // Generic re-auth notice is sent instead of permanent silence
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'), 'status');
     expect(session.shutdown).toHaveBeenCalled();
   });
 
@@ -10804,7 +10822,7 @@ describe('AgentRuntime', () => {
         'warning',
       );
       // Generic notice reaches the user.
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'));
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('resend'), 'status');
       // Raw provider text is not forwarded.
       const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
       expect(forwardedRaw).not.toContain(SOCKET_TEXT);
@@ -10867,7 +10885,7 @@ describe('AgentRuntime', () => {
         '111#session',
       );
 
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'));
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('re-authentication'), 'status');
       expect(session.shutdown).toHaveBeenCalled();
       const forwardedRaw = (queue.enqueueResultText as ReturnType<typeof vi.fn>).mock.calls.map((a: unknown[]) => a[0] as string);
       expect(forwardedRaw).not.toContain(raw);
@@ -11282,7 +11300,7 @@ describe('AgentRuntime', () => {
       capturedNotifyUserRef.current?.('resume callback notice');
 
       expect(resumedQueue?.abortTurn).not.toHaveBeenCalled();
-      expect(resumedQueue?.enqueueText).toHaveBeenCalledWith('resume callback notice');
+      expect(resumedQueue?.enqueueText).toHaveBeenCalledWith('resume callback notice', 'status');
       expect(resumedQueue?.flush).toHaveBeenCalled();
       expect(state.chatSessions.has(mapKey)).toBe(true);
       expect(state.chatQueues.has(mapKey)).toBe(true);
@@ -11577,9 +11595,12 @@ describe('AgentRuntime', () => {
       expect(runtime.popStartupNotificationEvent()).toBeNull();
       expect(runtime.getHealthSnapshot().details['proactiveResumeIdentityRejects']).toBe(1);
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
+        status: 'healthy',
         details: {
-          degradedReasons: expect.arrayContaining(['completed_delivery_identity_debt']),
+          degradedReasons: [],
+          recoveryDebtReasons: ['completed_delivery_identity_operator'],
+          completedDeliveryIdentityBlocking: 0,
+          completedDeliveryIdentityRetained: 1,
           completedDeliveryIdentityAdmissions: COMPLETED_DELIVERY_IDENTITY_DEBT_HEALTH,
         },
       });
@@ -13129,7 +13150,7 @@ describe('AgentRuntime', () => {
       await vi.waitFor(() => {
         expect(sendTurnTexts().some((arg) => arg.includes('A: Submitted'))).toBe(true);
       });
-      expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('waiting for the poll vote itself'));
+      expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(expect.stringContaining('waiting for the poll vote itself'));
     });
 
     it('injects an Other poll vote as a structured interview directive', async () => {
@@ -13464,7 +13485,7 @@ describe('AgentRuntime', () => {
       expect(pending?.mode).toBe('poll');
       expect(pending?.pollMessageIdToQuestionIndex.has('POLL_STALE_NEW')).toBe(true);
       expect(pending?.pollMessageIdToQuestionIndex.has('POLL_STALE_OLD')).toBe(false);
-      expect(mockQueue.enqueueText).not.toHaveBeenCalledWith(expect.stringContaining('Old async decision?'));
+      expect(mockQueue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(expect.stringContaining('Old async decision?'));
     });
 
     it('hard-expiry clears pending poll state and ignores later replies', async () => {
@@ -13743,13 +13764,7 @@ describe('AgentRuntime', () => {
         chatJid: string;
         reason: string;
       }) => void;
-      registerSendPollAwaiter: (
-        pollId: string,
-        chatJid: string,
-        options: string[],
-        resolution: 'first-vote-wins' | 'admin-only' | 'admin-wins' | 'majority-after-timeout',
-        timeoutMs: number,
-      ) => Promise<string>;
+      registerSendPollAwaiter: AgentRuntime['registerSendPollAwaiter'];
       deletePendingPollQuestions: (mapKey: string) => void;
     };
 
@@ -13963,7 +13978,6 @@ describe('AgentRuntime', () => {
       const { messenger } = makeMessenger();
       const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
       const state = runtime as unknown as AdminRuntimeState & {
-        registerSendPollAwaiter: (pollId: string, chatJid: string, options: string[], resolution: string, timeoutMs: number) => Promise<string>;
         fetchGroupAdminJids: (chatJid: string) => Promise<Set<string> | null>;
       };
       await runtime.start();
@@ -13973,24 +13987,36 @@ describe('AgentRuntime', () => {
 
       const pollId = 'POLL_QR036';
       const mapKey = `send_poll:${pollId}`;
-      // Fire-and-forget the awaiter (its promise resolves only on a qualifying vote / timeout).
-      void state.registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000);
+      let settled: string | null = null;
+      const awaiter = state
+        .registerSendPollAwaiter(pollId, groupJid, ['Yes', 'No'], 'admin-only', 60_000)
+        .then((answer) => { settled = answer; })
+        .catch((err: Error) => { settled = `rejected:${err.message}`; });
 
-      await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
-      await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
+      try {
+        await vi.waitFor(() => expect(spy).toHaveBeenCalledWith(groupJid));
+        await Promise.resolve(); // flush the fetchGroupAdminJids().then() microtask
 
-      const pending = state.pendingPolls.questions.get(mapKey);
-      expect(pending).toBeDefined();
-      // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
-      // this was downgraded to 'first-vote-wins', letting any member resolve).
-      expect(pending!.resolution).toBe('admin-only');
-      expect(pending!.adminJids ?? null).toBeNull();
+        const pending = state.pendingPolls.questions.get(mapKey);
+        expect(pending).toBeDefined();
+        // FAIL-CLOSED: the strategy stays admin-only with a null admin set (pre-QR-036
+        // this was downgraded to 'first-vote-wins', letting any member resolve).
+        expect(pending!.resolution).toBe('admin-only');
+        expect(pending!.adminJids ?? null).toBeNull();
 
-      // A non-admin vote must NOT resolve the gated decision.
-      state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
-      expect(pending!.answersCollected[0]).toBeUndefined();
-      expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
-      expect(mockSession.sendTurn).not.toHaveBeenCalled();
+        // A non-admin vote must NOT resolve the gated decision.
+        state.handlePollVoteReceived({ pollMessageId: pollId, chatJid: groupJid, voterJid: nonAdminA, selectedOptions: ['No'] });
+        await Promise.resolve();
+        expect(settled).toBeNull();
+        expect(pending!.answersCollected[0]).toBeUndefined();
+        expect(state.pendingPolls.questions.has(mapKey)).toBe(true);
+        expect(mockSession.sendTurn).not.toHaveBeenCalled();
+      } finally {
+        state.deletePendingPollQuestions(mapKey);
+        await awaiter;
+      }
+      expect(settled).toMatch(/^rejected:Poll abandoned/);
+      expect(state.pendingPolls.questions.has(mapKey)).toBe(false);
     });
 
     it('QR-051 — send_poll admin-only stays fail-closed when group admin metadata is unavailable', async () => {
@@ -15882,7 +15908,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       type: 'assistant_text',
       text: '[[wa-route: strongest]]\nOkay — from your next session.',
     });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Okay — from your next session.');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Okay — from your next session.', 'answer');
     const rows = prefRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].intent).toBe('strongest');
@@ -15902,7 +15928,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       type: 'assistant_text',
       text: '[[wa-route: give-me-admin]]\nSure.',
     });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Sure.');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Sure.', 'answer');
     expect(prefRows()).toHaveLength(0);
   });
 
@@ -15959,7 +15985,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     // No marker, whitespace-only: the flag-off path delivers this, so flag-on
     // must too — it must not be swallowed by the marker-strip suppression.
     handleRoutingEvent(runtime, { type: 'assistant_text', text: '   ' });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('   ');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('   ', 'answer');
   });
 
   it('NL reset clears the row silently (the agent carries the acknowledgement)', async () => {
@@ -15988,7 +16014,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
     mockQueue.enqueueStreamingText.mockClear();
     const text = '[[wa-route: strongest]]\nHello.';
     handleRoutingEvent(runtime, { type: 'assistant_text', text });
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text);
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith(text, 'answer');
     const tables = (routingDb.raw as unknown as { prepare: (s: string) => { all: () => unknown[] } })
       .prepare("SELECT name FROM sqlite_master WHERE name='chat_model_preference'");
     expect(tables.all()).toHaveLength(0);
@@ -16060,7 +16086,7 @@ describe('NL routing handlers (nlRouting flag)', () => {
       text: '[[wa-route: strongest]]\nDone.',
     });
     // Reply is delivered (marker stripped) even though the apply failed.
-    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Done.');
+    expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Done.', 'answer');
     expect(mockRuntimeLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ intent: 'strongest', instance: 'test' }),
       'route-intent apply failed - reply delivered without state change',

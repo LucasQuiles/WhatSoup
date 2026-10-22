@@ -13,6 +13,13 @@ import {
   type MemoryOperationFailureCode,
 } from '../../lib/memory-operation-telemetry.ts';
 import { routeQuery } from './memory/query-router.ts';
+import {
+  foldChatAttribution,
+  isOwnOrSharedGroupRecord,
+  memoryIdentityFold,
+  verifiedSenderIdentity,
+  type ChatRecallBoundary,
+} from '../../core/memory-scope.ts';
 
 const log = createChildLogger('conversation');
 
@@ -120,6 +127,13 @@ export async function loadContextDetailed(
   senderJid: string,
   messageText: string,
   traceId?: string,
+  /**
+   * Recall boundary (see chatRecallBoundary). 'this_chat' holds the sender leg to
+   * this chat; 'group' also holds the chat leg to the group's shared records and
+   * the sender's own, so a group never recalls a member's DMs or another
+   * member's private records.
+   */
+  boundary: ChatRecallBoundary = 'open',
 ): Promise<ContextLoadResult> {
   if (!messageText.trim()) {
     return { text: '', status: 'not_attempted', scopes: [] };
@@ -174,8 +188,17 @@ export async function loadContextDetailed(
         : pinecone.searchSelfFactsDetailed(messageText),
     ),
   ]);
-  const chatResults = chatDetails.results;
-  const senderResults = senderDetails.results;
+  const thisChat = foldChatAttribution(chatJid);
+  const fold = memoryIdentityFold();
+  const sender = verifiedSenderIdentity(senderJid);
+  const chatResults = boundary === 'group'
+    ? chatDetails.results.filter((result) => isOwnOrSharedGroupRecord(
+      { sender_jid: result.record.senderJid, memory_type: result.record.memoryType }, sender, fold,
+    ))
+    : chatDetails.results;
+  const senderResults = boundary === 'open'
+    ? senderDetails.results
+    : senderDetails.results.filter((result) => foldChatAttribution(result.record.chatJid) === thisChat);
   const selfResults = selfDetails.results;
   const scopes = [
     scopeOutcome('chat', chatDetails),

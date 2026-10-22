@@ -23,6 +23,7 @@ describe('probePrimaryModelUsability', () => {
         model: 'primary-model-a',
       },
       expect.any(AbortSignal),
+      expect.any(Function),
     );
   });
 
@@ -59,6 +60,7 @@ describe('probePrimaryModelUsability', () => {
         model: 'vendor/model-a',
       },
       expect.any(AbortSignal),
+      expect.any(Function),
     );
 
     const missingAdapters: PrimaryModelProbeAdapters = {
@@ -423,6 +425,7 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
       status: 'timeout',
       provider: 'claude-cli',
       model: 'primary-model-a',
+      reason: 'deadline-nonpositive',
     });
     expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
   });
@@ -441,6 +444,7 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
       status: 'timeout',
       provider: 'openai-api',
       model: 'primary-model-a',
+      reason: 'deadline-nonpositive',
     });
     expect(adapters.probeApiModelAccess).not.toHaveBeenCalled();
   });
@@ -462,6 +466,7 @@ describe('primary-model-usability.ts uncovered-branch coverage', () => {
       status: 'timeout',
       provider: 'claude-cli',
       model: 'primary-model-a',
+      reason: 'caller-pre-aborted',
     });
     expect(adapters.probeBinaryModel).not.toHaveBeenCalled();
   });
@@ -659,6 +664,7 @@ describe('claude-cli default-model probing (fleet recovery-stall fix)', () => {
     expect(probeBinaryModel).toHaveBeenCalledWith(
       { provider: 'claude-cli', model: null },
       expect.any(AbortSignal),
+      expect.any(Function),
     );
     expect(result).toEqual({ status: 'usable', provider: 'claude-cli', model: null });
   });

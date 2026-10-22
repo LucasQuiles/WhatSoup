@@ -2,8 +2,13 @@
 # Node version pinned to match .nvmrc and package.json#volta.node.
 FROM node:24.15.0-slim AS deps
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY patches/ ./patches/
 RUN npm ci --omit=dev
 
 # Console has its own dependency tree (React, Vite, Tailwind)
@@ -13,6 +18,8 @@ RUN cd console && npm ci
 # ── Stage 2: Build console frontend ───────────────────────────────────────────
 FROM deps AS console-build
 
+# Console imports canonical shared modules from the application source.
+COPY src/ /app/src/
 WORKDIR /app/console
 COPY console/ .
 # 'npm run build' runs 'tsc -b && vite build' — matches the CI Console

@@ -18,16 +18,25 @@ import {
   type OutboundFailureEvidenceV1,
 } from '../../core/outbound-failure-disposition.ts';
 import { redactInternalArtifacts, resolveOutboundAudience } from '../../core/outbound-message-safety.ts';
+import type { ClientOutputPolicyRegistry } from '../../core/client-output-policy-config.ts';
+import { enforceClientOutputPolicy } from '../../core/client-output-policy-gate.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { formatProviderErrorForUser } from '../../lib/provider-errors.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE } from '../../lib/time-units.ts';
 import { isGroupJid } from '../../core/jid-constants.ts';
 import { config } from '../../config.ts';
-import { hasVisibleToolText } from './tool-update.ts';
-import { markdownToWhatsApp, repairChunkFormatting } from './whatsapp-format.ts';
+import { FRIENDLY_CATEGORY_META, hasVisibleToolText, TOOL_CATEGORY_META } from './tool-update.ts';
+import { preprocessText, repairChunkFormatting, splitMessage } from './whatsapp-format.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 export type { ToolCategory } from './providers/tool-mapping.ts';
 import type { ProgressEvent } from './operation-tracker.ts';
+import {
+  copyTurnEvidence,
+  freezeTurnEvidence,
+  type MutableTurnDeliveryEvidence,
+  type TurnEvidenceFlush,
+  type TurnOutboundAttribution,
+} from './outbound-turn-evidence.ts';
 
 const log = createChildLogger('outbound-queue');
 
@@ -43,6 +52,12 @@ export interface TurnDeliveryEvidence {
   readonly answerOpIds: readonly number[];
   readonly lifecycleOpIds: readonly number[];
   readonly statusOpIds: readonly number[];
+  /**
+   * #3613: answers the client output policy withheld this turn. They create no
+   * op, so the finalizer needs this count to tell a deliberate policy drop
+   * from an empty turn. Absent means none; OutboundQueue always sets it.
+   */
+  readonly withheldAnswerCount?: number;
 }
 
 export class OutboundQueueClosedError extends Error {
@@ -76,17 +91,11 @@ export interface OutboundQueueOptions {
   readonly peerIsAdmin?: (chatJid: string) => boolean;
   /** Exact authenticated internal-DM predicate injected by the runtime. */
   readonly peerIsTrustedInternal?: (chatJid: string) => boolean;
-}
-
-interface MutableTurnDeliveryEvidence {
-  readonly turnId: string;
-  readonly epoch: number;
-  readonly opIds: Record<OutboundMessageRole, number[]>;
-}
-
-interface TurnEvidenceFlush {
-  readonly evidence: MutableTurnDeliveryEvidence;
-  readonly completion: Promise<TurnDeliveryEvidence>;
+  /**
+   * #3613: per-conversation client output policies, keyed by canonical
+   * conversation key. Defaults to the instance's `config.clientOutputPolicies`.
+   */
+  readonly clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
 interface QueuedOutboundChunk {
@@ -122,46 +131,7 @@ interface BufferedToolUpdate {
 
 type OutboundAttribution = Omit<QueuedOutboundChunk, 'text'>;
 
-const TOOL_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
-  reading:   { label: 'Reading',   emoji: '📖' },
-  searching: { label: 'Searching', emoji: '🔎' },
-  modifying: { label: 'Modifying', emoji: '✏️' },
-  running:   { label: 'Running',   emoji: '🔧' },
-  agent:     { label: 'Agent',     emoji: '🤖' },
-  fetching:  { label: 'Fetching',  emoji: '🌐' },
-  planning:  { label: 'Planning',  emoji: '📝' },
-  skill:     { label: 'Skill',     emoji: '🧠' },
-  other:     { label: 'Using',     emoji: '🛠️' },
-  error:     { label: 'Error',     emoji: '⚠️' },
-  blocked:   { label: 'Blocked',  emoji: '🚫' },
-  cancelled: { label: 'Cancelled', emoji: '⏭️' },
-};
-
-/** User-friendly labels for 'friendly' mode — plain language, no jargon. */
-const FRIENDLY_CATEGORY_META: Record<ToolCategory, { label: string; emoji: string }> = {
-  reading:   { label: 'Looking at',       emoji: '👀' },
-  searching: { label: 'Searching',        emoji: '🔍' },
-  modifying: { label: 'Updating',         emoji: '✏️' },
-  running:   { label: 'Working on',       emoji: '⚙️' },
-  agent:     { label: 'Getting help from', emoji: '🤝' },
-  fetching:  { label: 'Looking up',       emoji: '🌐' },
-  planning:  { label: 'Planning',         emoji: '📋' },
-  skill:     { label: 'Loading',          emoji: '📦' },
-  other:     { label: 'Working on',       emoji: '⚙️' },
-  error:     { label: 'Ran into an issue', emoji: '⚠️' },
-  blocked:   { label: 'Paused',           emoji: '⏸️' },
-  cancelled: { label: 'Skipped',          emoji: '⏭️' },
-};
-
-const MAX_MESSAGE_LENGTH = 4000;
-// QR-126: hard cap on how many chunks a single reply may fan out into. Without it,
-// splitMessage emits ceil(len / MAX_MESSAGE_LENGTH) messages, so a prompt-injected
-// max-length agent reply becomes single-turn message amplification — group spam plus a
-// WhatsApp anti-spam / bot-ban availability risk (a crafted reply reaches ~64 chunks).
-// At the cap the bot delivers MAX_CHUNKS-1 full content chunks (~44 KB) followed by a
-// visible truncation notice; the tail is dropped rather than flooding the chat.
-export const MAX_CHUNKS = 12;
-const CHUNK_TRUNCATION_NOTICE = '… [reply truncated]';
+// QR-126 chunk cap (MAX_CHUNKS) and message shaping live in whatsapp-format.ts.
 // Exported so tests can import the exact values rather than hardcoding them.
 // Changing a constant here will automatically break tests that rely on it.
 export const TOOL_BATCH_DELAY_MS = 5 * MS_PER_SECOND;
@@ -303,56 +273,6 @@ function statusMessageWindowState(senderToken: string, now: number): StatusMessa
   return created;
 }
 
-/**
- * Pre-process text for WhatsApp delivery:
- * 1. Convert markdown task-list syntax to checkbox characters
- * 2. Convert GitHub-flavored markdown to WhatsApp formatting
- */
-function preprocessText(text: string): string {
-  let out = text
-    .replace(/^- \[x\] /gim, '▪︎ ')
-    .replace(/^- \[X\] /gim, '▪︎ ')
-    .replace(/^- \[ \] /gim, '▫︎ ');
-  out = markdownToWhatsApp(out);
-  return out;
-}
-
-/** Split a string into chunks that fit within maxLen characters. */
-function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH): string[] {
-  if (text.length <= maxLen) {
-    return [text];
-  }
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > maxLen) {
-    let splitAt = remaining.lastIndexOf('\n\n', maxLen);
-    if (splitAt <= 0) {
-      splitAt = remaining.lastIndexOf(' ', maxLen);
-    }
-    if (splitAt <= 0) {
-      splitAt = maxLen;
-    }
-    chunks.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt).trimStart();
-  }
-
-  if (remaining.length > 0) {
-    chunks.push(remaining);
-  }
-
-  // QR-126: bound the fan-out. repairChunkFormatting (the sole downstream transform in
-  // both send paths) only rewrites existing chunks in place — it never adds chunks — so
-  // capping here bounds the number of WhatsApp messages actually sent. Keep the first
-  // MAX_CHUNKS-1 content chunks and replace the tail with a single visible notice.
-  if (chunks.length > MAX_CHUNKS) {
-    return [...chunks.slice(0, MAX_CHUNKS - 1), CHUNK_TRUNCATION_NOTICE];
-  }
-
-  return chunks;
-}
-
 /** Format milliseconds as human-readable elapsed: "30s", "1m", "2m 15s". */
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.round(ms / 1000);
@@ -369,15 +289,16 @@ function formatElapsed(ms: number): string {
  */
 export interface IOutboundQueue {
   lastActivity?: number;
-  enqueueText(text: string, role?: OutboundMessageRole): void;
+  /** Every caller names the role: only an 'answer' op becomes a turn's answer evidence. */
+  enqueueText(text: string, role: OutboundMessageRole): void;
   /** Enqueue streaming text delta — aggregated with debounce to prevent per-token message spam from streaming providers. */
-  enqueueStreamingText(text: string, role?: OutboundMessageRole, onCommit?: () => void): void;
+  enqueueStreamingText(text: string, role: OutboundMessageRole, onCommit?: () => void): void;
   /** Commit buffered streaming text at the outbound-queue delivery boundary. */
   commitStreamingText(): void;
   /** Drop provisional assistant narration when a real tool call follows it in minimal mode. */
   discardPreToolAssistantText(): void;
   /** Enqueue result/summary text. In minimal mode, suppressed if the turn already sent visible output. */
-  enqueueResultText(text: string, role?: OutboundMessageRole): boolean;
+  enqueueResultText(text: string, role: OutboundMessageRole): boolean;
   enqueueToolUpdate(update: ToolUpdate): void;
   enqueueProgressUpdate(event: ProgressEvent, instanceName: string): void;
   /** Set the tool update display mode. 'minimal' hides technical details, 'friendly' shows all in plain language. */
@@ -418,8 +339,8 @@ export interface IOutboundQueue {
   getLastOpId(): number | undefined;
   /** Clear the tracked last outbound op id without touching durability. */
   clearLastOpId(): void;
-  /** Start collecting durability op ids for one logical turn. */
-  beginTurnEvidence(turnId: string): void;
+  /** Start collecting durability op ids for one logical turn; its ops carry `attribution` when given. */
+  beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void;
   /** Flush all sends and consume an immutable durability evidence snapshot for the turn. */
   flushTurnEvidence(turnId: string): Promise<TurnDeliveryEvidence>;
   /** Mark the last outbound op created by this queue as terminal. */
@@ -434,8 +355,15 @@ export interface IOutboundQueue {
    * Turn-end choke point. Called unconditionally when a `result` event is
    * received, so the typing indicator is cleared even on early-return branches
    * of the runtime result handler that never reach flush(). Idempotent.
+   * `resultTextPending`: the handler will enqueue a result text, so skip path C.
    */
-  endTurn(): void;
+  endTurn(options?: { resultTextPending?: boolean }): void;
+  /**
+   * #3613: true once when the client output policy withheld an answer since
+   * the last call or turn abort. The result handler uses it to keep withheld
+   * text out of the voice reply.
+   */
+  consumeClientOutputWithheld?(): boolean;
 }
 
 export class OutboundQueue implements IOutboundQueue {
@@ -544,6 +472,10 @@ export class OutboundQueue implements IOutboundQueue {
   /** T8-F1: injected admin-peer resolver (see OutboundQueueOptions). */
   private readonly peerIsAdminFn: ((chatJid: string) => boolean) | undefined;
   private readonly peerIsTrustedInternalFn: ((chatJid: string) => boolean) | undefined;
+  /** #3613: client output policies (see OutboundQueueOptions). */
+  private readonly clientOutputPolicies: ClientOutputPolicyRegistry | undefined;
+  /** #3613: an answer was withheld since the last consume or turn abort. */
+  private clientOutputWithheld = false;
 
   constructor(
     messenger: Messenger,
@@ -564,6 +496,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.fallbackActiveFn = options?.fallbackActive;
     this.peerIsAdminFn = options?.peerIsAdmin;
     this.peerIsTrustedInternalFn = options?.peerIsTrustedInternal;
+    this.clientOutputPolicies = options?.clientOutputPolicies ?? config.clientOutputPolicies;
   }
 
   /** The echo-guard token for this queue (QR-069: inherited by a replacement). */
@@ -595,7 +528,7 @@ export class OutboundQueue implements IOutboundQueue {
     this.currentInboundSeq = seq;
   }
 
-  beginTurnEvidence(turnId: string): void {
+  beginTurnEvidence(turnId: string, attribution?: TurnOutboundAttribution): void {
     if (turnId.trim() === '') {
       throw new Error('Turn evidence requires a non-empty turn id');
     }
@@ -612,11 +545,13 @@ export class OutboundQueue implements IOutboundQueue {
     this.activeTurnEvidence = {
       turnId,
       epoch: ++this.nextTurnEvidenceEpoch,
+      attribution,
       opIds: {
         answer: [],
         lifecycle: [],
         status: [],
       },
+      withheldAnswerCount: 0,
     };
   }
 
@@ -626,13 +561,13 @@ export class OutboundQueue implements IOutboundQueue {
       if (inFlight.evidence.turnId !== turnId) {
         throw new Error(`Turn evidence belongs to ${inFlight.evidence.turnId}; cannot flush ${turnId}`);
       }
-      return OutboundQueue.copyTurnEvidence(await inFlight.completion);
+      return copyTurnEvidence(await inFlight.completion);
     }
 
     const active = this.activeTurnEvidence;
     if (!active) {
       if (this.completedTurnEvidence?.turnId === turnId) {
-        return OutboundQueue.copyTurnEvidence(this.completedTurnEvidence);
+        return copyTurnEvidence(this.completedTurnEvidence);
       }
       throw new Error(`No active turn evidence belongs to ${turnId}`);
     }
@@ -642,7 +577,7 @@ export class OutboundQueue implements IOutboundQueue {
 
     const completion = this.completeTurnEvidence(active);
     this.turnEvidenceFlush = { evidence: active, completion };
-    return OutboundQueue.copyTurnEvidence(await completion);
+    return copyTurnEvidence(await completion);
   }
 
   private async completeTurnEvidence(
@@ -655,7 +590,7 @@ export class OutboundQueue implements IOutboundQueue {
           throw new Error(`Turn evidence for ${active.turnId} was invalidated before flush completed`);
         }
 
-        const completed = OutboundQueue.freezeTurnEvidence(active);
+        const completed = freezeTurnEvidence(active);
         this.activeTurnEvidence = undefined;
         this.completedTurnEvidence = completed;
         return completed;
@@ -665,24 +600,6 @@ export class OutboundQueue implements IOutboundQueue {
         this.turnEvidenceFlush = undefined;
       }
     }
-  }
-
-  private static freezeTurnEvidence(evidence: MutableTurnDeliveryEvidence): TurnDeliveryEvidence {
-    return Object.freeze({
-      turnId: evidence.turnId,
-      answerOpIds: Object.freeze([...evidence.opIds.answer]),
-      lifecycleOpIds: Object.freeze([...evidence.opIds.lifecycle]),
-      statusOpIds: Object.freeze([...evidence.opIds.status]),
-    });
-  }
-
-  private static copyTurnEvidence(evidence: TurnDeliveryEvidence): TurnDeliveryEvidence {
-    return Object.freeze({
-      turnId: evidence.turnId,
-      answerOpIds: Object.freeze([...evidence.answerOpIds]),
-      lifecycleOpIds: Object.freeze([...evidence.lifecycleOpIds]),
-      statusOpIds: Object.freeze([...evidence.statusOpIds]),
-    });
   }
 
   private recordTurnOp(chunk: QueuedOutboundChunk, opId: number): void {
@@ -695,12 +612,15 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   private snapshotAttribution(role: OutboundMessageRole): OutboundAttribution {
+    // A turn's ops carry its own inbound key and chat JID, which the delivery proofs compare with;
+    // ops outside a turn keep the queue's frozen key and current JID.
+    const turn = this.activeTurnEvidence?.attribution;
     return {
       role,
       turnId: this.activeTurnEvidence?.turnId,
       turnEvidenceEpoch: this.activeTurnEvidence?.epoch,
-      chatJid: this.deliveryJid,
-      conversationKey: this.conversationKey,
+      chatJid: turn?.chatJid ?? this.deliveryJid,
+      conversationKey: turn?.conversationKey ?? this.conversationKey,
       sourceInboundSeq: this.currentInboundSeq,
     };
   }
@@ -785,7 +705,7 @@ export class OutboundQueue implements IOutboundQueue {
   }
 
   /** Enqueue a text message for immediate sending (after pacing). */
-  enqueueText(text: string, role: OutboundMessageRole = 'answer'): void {
+  enqueueText(text: string, role: OutboundMessageRole): void {
     if (!isNonEmptyString(text)) return;
     if (this.rejectPostClosureEnqueue()) return;
     const attribution = this.snapshotAttribution(role);
@@ -795,10 +715,53 @@ export class OutboundQueue implements IOutboundQueue {
     this.enqueuePreparedText(text, attribution);
   }
 
+  /**
+   * #3613: enforce the client output policy on one logical message before it
+   * is split; false means drop it. A withheld answer is counted in the turn
+   * evidence (the finalizer ends the turn as withheld_by_policy) and sets a
+   * consumable flag that keeps the text out of the voice reply.
+   */
+  private admitClientOutput(
+    sourceText: string,
+    finalText: string,
+    attribution: OutboundAttribution,
+  ): boolean {
+    // The queue's key and a turn's key can name one chat by two aliases, or two chats in single
+    // scope; a policy under either one applies.
+    const keys = new Set([this.conversationKey, attribution.conversationKey]);
+    const admitted = [...keys].every((conversationKey) => enforceClientOutputPolicy({
+      registry: this.clientOutputPolicies,
+      conversationKey,
+      sourceText,
+      finalText,
+      messageKind: attribution.role,
+      log,
+    }).admitted);
+    if (admitted) return true;
+    if (attribution.role === 'answer') {
+      this.clientOutputWithheld = true;
+      if (
+        attribution.turnId !== undefined
+        && this.activeTurnEvidence?.turnId === attribution.turnId
+        && this.activeTurnEvidence.epoch === attribution.turnEvidenceEpoch
+      ) {
+        this.activeTurnEvidence.withheldAnswerCount += 1;
+      }
+    }
+    return false;
+  }
+
+  consumeClientOutputWithheld(): boolean {
+    const withheld = this.clientOutputWithheld;
+    this.clientOutputWithheld = false;
+    return withheld;
+  }
+
+  /** Returns false when the client output policy dropped the message. */
   private enqueuePreparedText(
     text: string,
     attribution: OutboundAttribution,
-  ): void {
+  ): boolean {
     // QR-114: scrub operator-local internal artifacts (home/tilde/whatsoup paths,
     // provider secrets/tokens, tailnet IPs) before the reply reaches the user —
     // mirrors the chat runtime's redactInternalArtifacts on the response. Applied
@@ -824,10 +787,13 @@ export class OutboundQueue implements IOutboundQueue {
         }
       : undefined;
     const safe = redactInternalArtifacts(text, resolveOutboundAudience(attribution.chatJid, ctx)).text;
-    const chunks = repairChunkFormatting(splitMessage(preprocessText(safe)));
+    const finalText = preprocessText(safe);
+    if (!this.admitClientOutput(text, finalText, attribution)) return false;
+    const chunks = repairChunkFormatting(splitMessage(finalText));
     for (const chunk of chunks) {
       this.enqueue(chunk, attribution);
     }
+    return true;
   }
 
   /**
@@ -841,7 +807,7 @@ export class OutboundQueue implements IOutboundQueue {
    */
   enqueueStreamingText(
     text: string,
-    role: OutboundMessageRole = 'answer',
+    role: OutboundMessageRole,
     onCommit?: () => void,
   ): void {
     if (!text) return;
@@ -870,6 +836,10 @@ export class OutboundQueue implements IOutboundQueue {
       const text = group.map((part) => part.text).join('');
       if (text.trim() !== '') {
         this.markVisibleTextDelivered();
+        // Commit callbacks fire for policy-withheld text too: the runtime reads
+        // them as "the agent produced output", which must block a fallback
+        // replay and the empty-turn fallback. The policy decision satisfies the
+        // reply guarantee (#3613); the turn evidence records the withholding.
         this.enqueuePreparedText(text, attribution);
         for (const part of group) part.onCommit?.();
       }
@@ -962,7 +932,7 @@ export class OutboundQueue implements IOutboundQueue {
    * output — Claude Code often appends an internal task summary ("Done — I sent
    * the message and asked for...") that shouldn't reach non-technical users.
    */
-  enqueueResultText(text: string, role: OutboundMessageRole = 'answer'): boolean {
+  enqueueResultText(text: string, role: OutboundMessageRole): boolean {
     if (!isNonEmptyString(text)) return false;
     if (this.rejectPostClosureEnqueue()) return false;
     const hasBufferedVisibleText = this.streamBufferParts.some((part) => part.text.trim() !== '');
@@ -1136,6 +1106,16 @@ export class OutboundQueue implements IOutboundQueue {
       log.info({ chatJid: this.deliveryJid, windowMs: PROGRESS_TEXT_DEDUPE_WINDOW_MS }, 'coalesced duplicate progress placeholder');
       return;
     }
+    // #3613: placeholders bypass enqueuePreparedText, so enforce the client
+    // output policy here. A dropped placeholder takes the floor and text-dedupe
+    // slots like a sent one, so repeated stalls log one audit line per floor
+    // window instead of one per stall, and keeps the typing signal alive.
+    if (!this.admitClientOutput(text, text, attribution)) {
+      this.recentProgressTextAt.set(text, now);
+      this.lastProgressEmittedAt = now;
+      this.startTyping();
+      return;
+    }
     // PR-E: hard per-turn status-narration cap. The floor + text window above
     // already decided this placeholder WOULD emit; enforce the per-turn count
     // now so a single turn can't flood the chat with narration. Past the cap,
@@ -1287,6 +1267,9 @@ export class OutboundQueue implements IOutboundQueue {
    * the session is in trouble.
    */
   abortTurn(options: { preserveEvidence?: boolean; salvageOwedReply?: boolean } = {}): void {
+    // #3613: an aborted turn never reaches the result handler that consumes
+    // this flag, so clear it here rather than leak it into the next turn.
+    this.clientOutputWithheld = false;
     if (this.toolTimer !== null) { clearTimeout(this.toolTimer); this.toolTimer = null; }
     if (this.toolMaxAgeTimer !== null) { clearTimeout(this.toolMaxAgeTimer); this.toolMaxAgeTimer = null; }
     if (this.streamTimer !== null) { clearTimeout(this.streamTimer); this.streamTimer = null; }
@@ -1500,14 +1483,14 @@ export class OutboundQueue implements IOutboundQueue {
    * Then stop typing. The subsequent queue.flush() on the normal path is a no-op
    * for both (buffer already empty, typing already stopped).
    */
-  endTurn(): void {
+  endTurn(options?: { resultTextPending?: boolean }): void {
     this.flushStreamBuffer();
     // Path C recovery: the turn is ending. If it never delivered visible text
     // yet we deferred pre-tool buffered text, that text WAS the user-owed reply —
     // flush it now rather than dropping it into silence. Route it back through
     // the streaming buffer so grouping, attribution, evidence, and onCommit all
-    // apply exactly as a normal flush would.
-    if (!this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
+    // apply exactly as a normal flush would. A pending result text is the reply (#3420).
+    if (options?.resultTextPending !== true && !this.turnHasVisibleText && this.provisionalPreToolDiscard.length > 0) {
       const recovered = this.provisionalPreToolDiscard.flat();
       this.provisionalPreToolDiscard = [];
       const characterCount = recovered.reduce((total, part) => total + part.text.length, 0);

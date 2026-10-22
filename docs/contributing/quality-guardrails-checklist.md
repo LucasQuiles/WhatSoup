@@ -4,7 +4,7 @@
 
 ## Layer 1 — CI gates (must pass for merge)
 
-> **This table is a curated subset.** As of 2026-07-21 the live `quality.yml` runs ~40+ steps: the full `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. Blocking authority for the 36-rule architectural-fitness registry (`scripts/lib/fitness/registry.ts`) lives in the **guard ring** (`verify:push:branch`), not the ESLint ring, which is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
+> **This table is a curated subset.** `.github/workflows/quality.yml` owns the current step inventory: the `guard:*` family, coverage (`coverage:check`), browser/Playwright suites, console design checks, mutation via `deploy/scripts/run-sentinel-tests.sh` (pytest `--cov-fail-under=98` + deployer mutation drill — note `stryker.conf.json` is dormant/unwired), and tokenomics/drills. `scripts/lib/fitness/registry.ts` owns the architectural-fitness rule inventory. Its blocking authority lives in the **guard ring** (`verify:push:branch`); the ESLint fitness mirror is warn-only. Semantic-quality (`semantic-quality-check.ts`) runs in **shadow mode** (exit 0) everywhere it is wired; its enforce path is unwired/on-demand.
 
 The `Quality` workflow (`.github/workflows/quality.yml`) runs on every PR and
 every push to `main`, with two explicit required-context jobs:
@@ -46,6 +46,51 @@ toolchains and Docker images, report every action, and re-measure. Malformed
 disk observations are inconclusive (exit 2); a measured post-reclaim shortfall
 is blocking (exit 1). Cleanup failures are never hidden with `|| true`.
 
+Vitest's shared setup creates an owned temporary HOME and prepends synthetic
+`security` and `secret-tool` commands to `PATH`. Reads find nothing: `security
+find-generic-password` exits 44 with the real tool's not-found message, and
+`secret-tool lookup` returns empty. Writes, deletes and unsupported operations
+are rejected. The two write operations (`add-generic-password` and `store`)
+first read stdin to the end, unless stdin is closed or a terminal, and report
+the discarded byte count; every other rejected operation leaves stdin unread.
+The synthetic `secret-tool` reports a probe failure (exit 127), so Linux runs
+use the env-only backend and backend selection matches a host without
+libsecret. The keyring module classifies that failure as an errored probe: a
+Linux test file that reaches unmocked backend detection logs an error-level
+downgrade line, which is expected. The setup also clears `REQUIRE_OS_KEYRING`
+so that failure cannot throw. The production resolver and its precedence still
+run; dedicated keyring tests keep their own explicit process mocks. This also
+covers child processes that inherit `PATH`.
+
+The synthetic commands have limits. `secret-tool lookup` exits 0 with empty
+output, where the real tool exits 1, so on Linux a shell caller that tests the
+exit status sees a missing credential as present but empty. `command -v
+secret-tool` succeeds although the probe reports the tool absent. Absolute
+executable paths and tests that replace `PATH` require their own controlled
+fixtures: changing HOME alone does not isolate the OS credential store. The
+`portability.no-hardcoded-platform-binaries` guard matches a line that holds
+a quote character (single, double or backtick) directly followed by
+`/usr/bin/security` or `/usr/bin/secret-tool`. The match is a substring test
+on each line and does not parse strings: a comment matches, a quote character
+inside another string matches, and so does a longer path that begins with
+either one. It reads `.ts`, `.py` and `.sh` files under `src`, `scripts`,
+`deploy/scripts` and `tools/agent-runtime-probes`, outside any `node_modules`,
+`.git` or `dist` directory. It skips every file whose path starts with an
+entry of the rule's `allowlistPaths`, file entries included. A new match
+fails the guard; a match whose file and pattern are already in the ratchet
+baseline (`.claude/fitness/platform-baseline.json`) passes, and so does a
+further occurrence of that pattern in that file. On 2026-10-01 the baseline
+held no entry for either credential command. Nothing outside those four roots
+is scanned: under `deploy` only `deploy/scripts` is, so top-level `deploy/`,
+`deploy/lib`, `deploy/hooks` and `tests/` are not. It also skips `.mjs` and
+extensionless files, and it matches neither path unless a quote character
+stands directly before it in the source text, and no path outside
+`/usr/bin`. The credential-isolation
+regression runs real Vitest against decoy stores, checks the selected backend,
+resolver fallback and child-process reads, and verifies write and delete
+rejection; a sibling test pins the `PATH` order and the cleared
+`REQUIRE_OS_KEYRING` under the real configuration.
+
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
 The `.husky/pre-commit` hook first runs the deterministic
@@ -74,6 +119,16 @@ architectural-drift signal only surfaces drift earlier. Skip only that signal
 with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
 ## Layer 2 — Local pre-push guards
+
+The shared push and release runner accepts `VITEST_MAX_WORKERS` as an integer
+from 1 through 4 and forwards it to gate children. Other values fail before
+any gate child starts. Omitting it preserves each suite's own configuration;
+the root Node suite in `vitest.config.ts` defaults to four workers. On a busy
+host, `VITEST_MAX_WORKERS=2` reduces that suite's concurrency to two workers.
+The auxiliary guard and browser suites use separate configurations; their
+concurrency controls still apply. The override does not skip tests, raise
+timeouts, or remove gate stages. The runner still excludes the four skip
+variables listed in `NEUTRALIZED_SKIP_VARS`.
 
 Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
 update—including delete-only pushes—it requires a complete Git-estate scan and
@@ -141,6 +196,28 @@ tampering; a same-user attacker who can rewrite both payload and digest is outsi
 this local guard's threat boundary. Baseline acceptance is therefore an explicit
 owner action, not an automatic way to bless a newly observed conflict.
 
+To acknowledge one retained stash without accepting other new findings, use its
+full object ID and a non-sensitive reason:
+
+```bash
+npm run guard:git-estate -- baseline accept-stash --oid <full-object-id> --reason 'preserved work awaiting integration' --json
+```
+
+This requires a valid existing baseline, two complete matching estate snapshots,
+and matching stash parents with all reachable objects present and of supported
+types. It adds only the selected stash finding; other finding IDs, counts and
+container identities retain their prior values. A different stash, conflict or
+worktree lock still blocks. The JSON receipt includes the reason; the baseline
+does not. This acknowledgment does not prove restored content, integration or
+retirement eligibility, and does not apply or drop the stash.
+
+Both baseline writers use one process lock under the common Git directory. An
+active, corrupt or unrecoverable stale lock refuses the operation. Same-boot
+stale locks are not automatically reclaimed. Success is reported only after
+verified lock release. A lost lock or release error reports an unknown outcome;
+inspect the baseline and current owner before retrying because the write may
+already have occurred.
+
 Linked worktrees must use a worktree-relative hook path:
 
 ```bash
@@ -153,8 +230,8 @@ the primary worktree's potentially stale or in-flight hook bytes.
 
 | Push target | Composite script | Required checks |
 |---|---|---|
-| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
-| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks --fileParallelism=false`, and coverage thresholds |
+| Branch push | `npm run verify:push:branch` | repo hygiene staged smoke, repo hygiene branch/base diff, publication staged guard, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, `npm run typecheck:all`, the targeted guard test list below, design-system hygiene guard, harness-maintenance manifest guard, tokenomics Python tests, and console lint + build (#1105: these last four mirror blocking CI quality-job steps so console strict-tsconfig/design-system/tokenomics violations fail fast locally; the slow coverage/drills/browser tail stays in `verify:release` and CI) |
+| `main` or release tag push | `npm run verify:release` | release repo hygiene, full publication audit, doc drift guard, public-surface drift guard, work-index guard, node-pin guard, source-runtime drift guard, BOT ERRORS runtime-manifest guard, simulation matrix guard, Claude settings guard, AskUser poll protocol guard, safeguard diagnostics, semantic guard-test coverage enforcement, test-integrity baseline, ring/boundary/service/config guards, tokenomics/drills, `tools/whatsoup_guard` install/typecheck/test, console dependency install/lint/build, `npm run typecheck:all`, full Vitest suite with `--pool=forks` (four workers by default in the root `vitest.config.ts`, matching CI; `VITEST_MAX_WORKERS=1`, `2`, or `3` lowers that concurrency), and coverage thresholds |
 | Delete-only push | metadata-only dispatcher path | `design:metrics` and `design:burndown`, each once through the pinned npm wrapper; content verification and console dependency prerequisites are skipped |
 
 Before branch or release verification starts, the dispatcher checks that the
@@ -180,8 +257,8 @@ guards that `verify:push:branch` runs. Spelled out:
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |
 | Fleet bot-hardening parity | `npm run guard:fleet-bot-hardening-parity` | Verify the redacted fleet bot-hardening parity manifest and its source anchors stay aligned with the A–D provider-resilience standard. | yes |
 | ARC binding drift | `npm run guard:arc-binding-drift` | Verify the tracked `.arc/` shim. Always-on vendored-pin check (`.arc/.canonical-sha` vs the payload sha in `arc.toml`/`ARC_BINDING.md`) hard-blocks a stale `.arc/` even in CI without the sibling repo; when the sibling agent-runtime-protocol is reachable (via `ARC_REPO_DIR`), additionally runs the full byte-for-byte adopt-generator comparison and cross-checks the pin against the live sha. | yes |
-| Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | Meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch`, or carry a `// meta-guard:no-test <reason>` opt-out. | no (pre-push only) |
-| PNG estate ratchet | `npm run guard:png-estate` | #2219 Option A: `artifacts/` PNGs are untracked by policy and the tracked-PNG census (count and bytes, `docs/design-system` + `docs/screenshots`) may only shrink; the `--staged` variant (pre-commit, CI-only) rejects any staged `artifacts/` PNG or a new/changed PNG over 100 KiB. Refuses INCONCLUSIVE (exit 2) on an empty scan root. | yes |
+| Guard test coverage (meta-guard) | `npm run guard:guard-test-coverage` | AST-backed meta-guard: every guard-family script (`scripts/*guard*.ts`, `scripts/check-*.ts`) must ship a companion test wired into `verify:push:branch` and prove a real failure path, or carry a `// meta-guard:no-test <reason>` opt-out. Branch and release manifests pass `--semantic-mode enforce`; `--format json` emits the bounded native schema and `--verbose` adds the covered/allowlisted inventory. Exit 2 means inconclusive evidence, never clean. | yes (full-suite companion test) |
+| PNG estate ratchet | `npm run guard:png-estate` | #2219: `artifacts/` PNGs are untracked by policy and the tracked-PNG census (count and bytes, `docs/design-system` + `docs/screenshots`) may only shrink; each tracked PNG is at most its committed size in the per-path baseline and any PNG path outside that baseline is at most 100 KiB. The `--staged` variant (pre-commit, CI-only) rejects any staged `artifacts/` PNG, any in-place change that grows a tracked `docs/screenshots` PNG (a tracked screenshot may not grow), and any other new or changed PNG over 100 KiB. Refuses INCONCLUSIVE (exit 2) on an empty scan root. | yes |
 
 ### Regenerating the ARC binding shim (`.arc/`)
 

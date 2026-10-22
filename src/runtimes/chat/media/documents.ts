@@ -4,10 +4,9 @@ const log = createChildLogger('media:documents');
 
 const MAX_TEXT_LENGTH = 2000;
 
-// QR-058: the 2000-char output cap bounds nothing about the DECODE work — pdf-parse's
-// getText() decodes the WHOLE document (every page + content stream) into memory BEFORE
-// the slice, so a small attacker PDF (e.g. ~50k pages in 7MB, under the 25MB download cap)
-// pins this inline media handler for tens of seconds / >1GB RSS. Bound it two ways:
+// QR-058: slicing the returned text to 2000 chars does not bound decode work.
+// The current getText call requests only the first MAX_PDF_PAGES pages; it is
+// not an unrestricted whole-document extraction. Keep both safeguards:
 //   (1) parse only the first N pages — the output is tiny, so a handful of pages is plenty;
 //   (2) wall-clock-bound the parse so a single decompression-bomb page cannot hang forever.
 // The timeout abandons the await but cannot cancel the pdfjs worker (same uncancellable-work

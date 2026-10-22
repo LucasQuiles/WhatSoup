@@ -30,6 +30,7 @@ import { FLEET_LIFECYCLE_PHASES, isFleetLifecyclePhase } from './observability/f
 import { validateServiceIdentityConfig } from '../lib/service-identity-config.ts';
 import { isSamePhysicalDirectory } from '../lib/home-path.ts';
 import { resolveAgentModel } from './agent-model.ts';
+import { validateTurnRecoveryCatchupReconcileConfig } from './turn-recovery-catchup-config.ts';
 import {
   fallbackEntryKey,
   isSameAsPrimaryFallbackEntry,
@@ -55,6 +56,7 @@ import {
   WHATSOUP_HEADLESS_EXECUTION_PROFILE,
 } from '../lib/opencode-execution-profile-contract.ts';
 import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
+import { parseClientOutputPoliciesForInstance } from './client-output-policy-config.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -228,6 +230,11 @@ function validateAgentModelConsistency(raw: Record<string, unknown>): Validation
   }
 
   return null;
+}
+
+function validateClientOutputPolicyConfig(raw: Record<string, unknown>): ValidationError | null {
+  const parsed = parseClientOutputPoliciesForInstance(raw);
+  return parsed.ok ? null : err(parsed.error.field, `${parsed.error.field} ${parsed.error.reason}`);
 }
 
 /**
@@ -434,6 +441,9 @@ export function validateInstanceConfig(
 
   const transportErr = validateTransportConfig(raw);
   if (transportErr) return transportErr;
+
+  const clientOutputPolicyErr = validateClientOutputPolicyConfig(raw);
+  if (clientOutputPolicyErr) return clientOutputPolicyErr;
 
   // --- service block (launchd render options) ---
   // Shape rules live in lib/launchd-service-config.ts, the same source of
@@ -910,6 +920,25 @@ function validateAgentOptions(
     );
   }
 
+  // queuedTurnReceipt (#2949): default ON, so config.ts disarms it only on
+  // `=== false`. Strictly boolean — a mistyped "false"/0 would otherwise pass
+  // validation and silently leave the receipt on.
+  if (opts['queuedTurnReceipt'] !== undefined && typeof opts['queuedTurnReceipt'] !== 'boolean') {
+    return err(
+      'agentOptions.queuedTurnReceipt',
+      'agentOptions.queuedTurnReceipt must be a boolean when provided',
+    );
+  }
+
+  // scopeBlockedAlertToken: default OFF, so config.ts arms it only on
+  // `=== true`. Strictly boolean — a mistyped "true"/1 would silently leave it off.
+  if (opts['scopeBlockedAlertToken'] !== undefined && typeof opts['scopeBlockedAlertToken'] !== 'boolean') {
+    return err(
+      'agentOptions.scopeBlockedAlertToken',
+      'agentOptions.scopeBlockedAlertToken must be a boolean when provided',
+    );
+  }
+
   // nlRoutingTiers: optional intent→provider map for NL routing.
   if (opts['nlRoutingTiers'] !== undefined) {
     const tiers = opts['nlRoutingTiers'];
@@ -960,6 +989,9 @@ function validateAgentOptions(
       );
     }
   }
+
+  const catchupErr = validateTurnRecoveryCatchupReconcileConfig(opts['turnRecoveryCatchupReconcile']);
+  if (catchupErr) return err(catchupErr.field, catchupErr.message);
 
   // provider: must be a canonical ID from the shared registry (#447). The
   // session.ts switches throw on unknown IDs, so rejecting drift here gives

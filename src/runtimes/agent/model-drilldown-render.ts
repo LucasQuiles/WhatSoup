@@ -58,18 +58,26 @@ export function renderModelLevel(
   brand: string,
   provider: string,
   models: readonly string[],
-  currentModel?: string | null
+  currentModel?: string | null,
+  nextOffset: number | null = null,
 ): RenderedLevel {
-  const entries: DrillEntry[] = models.map((model) => ({
+  const entries: Array<
+    Extract<DrillEntry, { kind: 'model' }> | Extract<DrillEntry, { kind: 'more' }>
+  > = models.map((model) => ({
     kind: 'model',
     label: model,
     provider,
     model,
   }));
 
-  const lines = models.map((model, i) => {
-    const current = model === currentModel ? ' (current)' : '';
-    return `${i + 1}. ${model}${current}`;
+  if (nextOffset !== null) {
+    entries.push({ kind: 'more', label: 'More models', brand, provider, offset: nextOffset });
+  }
+
+  const lines = entries.map((entry, i) => {
+    if (entry.kind === 'more') return `${i + 1}. ${entry.label}`;
+    const current = entry.model === currentModel ? ' (current)' : '';
+    return `${i + 1}. ${entry.model}${current}`;
   });
 
   // FW-3 (owner-adjudicated A14): up-nav retired — the footer no longer

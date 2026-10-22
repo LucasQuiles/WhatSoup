@@ -125,6 +125,13 @@ vi.mock('node:fs', async (importOriginal) => ({
   mkdirSync: vi.fn(),
 }));
 
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const cwd = process.cwd();
+  const parent = cwd.slice(0, cwd.lastIndexOf('/')) || '/';
+  return { ...actual, homedir: vi.fn(() => parent) };
+});
+
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 
 interface RuntimeProcessTreeView {
@@ -222,7 +229,7 @@ function makeStartupRuntime(blockedConversationKey: string): {
     consumeQueuedPollDecisions: vi.fn(async () => {}),
     createSessionManager,
     currentTurnChatJid: null,
-    cwd: '/tmp/whatsoup-process-tree-start-test',
+    cwd: process.cwd(),
     db: { assertWritableCompatibility: vi.fn() },
     durability: {
       getResumableCheckpoints: vi.fn(() => [{ conversation_key: blockedConversationKey }]),
@@ -496,6 +503,206 @@ describe('AgentRuntime process-tree caller transitions', () => {
 
     expect(mockMarkOrphaned).not.toHaveBeenCalled();
   });
+
+  it('refuses ownership cleanup success for a null PID while tree proof is pending', async () => {
+    const runtime = makeRuntime();
+    const session = {
+      getProcessTreeTerminationLease: () => null,
+      getStatus: () => ({ pid: null, providerTerminated: false }),
+    };
+
+    await expect(runtime.terminateOwnedSessionProcessTree(session)).rejects.toMatchObject({
+      code: 'PROCESS_TREE_ROOT_IDENTITY_UNVERIFIED',
+    });
+    expect(mockKillSessionTree).not.toHaveBeenCalled();
+  });
+
+  it('accepts ownership cleanup with no lease only after provider termination is proved', async () => {
+    const runtime = makeRuntime();
+    const session = {
+      getProcessTreeTerminationLease: () => null,
+      getStatus: () => ({ pid: null, providerTerminated: true }),
+    };
+
+    await expect(runtime.terminateOwnedSessionProcessTree(session)).resolves.toBeUndefined();
+    expect(mockKillSessionTree).not.toHaveBeenCalled();
+  });
+
+  it.each(['stale_dead', 'ambiguous'] as const)(
+    'retains descendant cleanup when a later stale sweep observes %s', async (classification) => {
+      const runtime = makeRuntime();
+      const session = staleSession({ id: 148, claudePid: 4888, conversationKey: 'root-exited' });
+      mockClassifyActiveSessions.mockReturnValueOnce([session]).mockReturnValue([
+        { ...session, classification },
+      ]);
+      mockKillSessionTree.mockResolvedValueOnce(unresolvedOutcome);
+      mockRetryKillSessionTree.mockResolvedValueOnce(unresolvedOutcome);
+
+      await runtime.sweepStaleAgentSessions();
+      mockGetRegisteredProcessTreeTerminationLease.mockReturnValue(null);
+      const blocked = await runtime.sweepStaleAgentSessions();
+
+      expect(mockMarkOrphaned).not.toHaveBeenCalled();
+      expect(blocked).toEqual(new Set(['root-exited']));
+      expect(mockKillSessionTree).toHaveBeenCalledTimes(1);
+      expect(mockRetryKillSessionTree).toHaveBeenCalledWith(
+        4888,
+        'stale:148:ses-live-stale:4888',
+      );
+    },
+  );
+
+  it('still retires a dead stale row with no pending tree cleanup without signaling', async () => {
+    const runtime = makeRuntime();
+    mockClassifyActiveSessions.mockReturnValue([
+      staleSession({ id: 149, claudePid: 4889, classification: 'stale_dead' }),
+    ]);
+
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(new Set());
+
+    expect(mockMarkOrphaned).toHaveBeenCalledWith(runtime.db, 149);
+    expect(mockKillSessionTree).not.toHaveBeenCalled();
+    expect(mockRetryKillSessionTree).not.toHaveBeenCalled();
+  });
+
+  it('preserves permission-denied cleanup after root exit without another signal attempt', async () => {
+    const runtime = makeRuntime();
+    const session = staleSession({ id: 150, claudePid: 4890, conversationKey: 'permission-root-exit' });
+    mockClassifyActiveSessions.mockReturnValueOnce([session]).mockReturnValue([
+      { ...session, classification: 'stale_dead' },
+    ]);
+    mockKillSessionTree.mockRejectedValueOnce(new ProcessTreeTerminationError(
+      'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+      'permission denied',
+    ));
+
+    await runtime.sweepStaleAgentSessions();
+    mockGetRegisteredProcessTreeTerminationLease.mockReturnValue(null);
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(
+      new Set(['permission-root-exit']),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(mockMarkOrphaned).not.toHaveBeenCalled();
+    expect(mockKillSessionTree).toHaveBeenCalledTimes(1);
+    expect(mockRetryKillSessionTree).not.toHaveBeenCalled();
+  });
+
+  it('keeps root-exit cleanup blocked after retry exhaustion without rearming its timer', async () => {
+    const runtime = makeRuntime();
+    const session = staleSession({ id: 151, claudePid: 4891, conversationKey: 'exhausted-root-exit' });
+    mockClassifyActiveSessions.mockReturnValueOnce([session]).mockReturnValue([
+      { ...session, classification: 'stale_dead' },
+    ]);
+    mockKillSessionTree.mockResolvedValueOnce(unresolvedOutcome);
+    mockRetryKillSessionTree.mockRejectedValueOnce(new ProcessTreeTerminationError(
+      'PROCESS_TREE_RETRY_ATTEMPTS_EXHAUSTED',
+      'bounded retry exhausted',
+    ));
+
+    await runtime.sweepStaleAgentSessions();
+    mockGetRegisteredProcessTreeTerminationLease.mockReturnValue(null);
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(
+      new Set(['exhausted-root-exit']),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(mockMarkOrphaned).not.toHaveBeenCalled();
+    expect(mockKillSessionTree).toHaveBeenCalledTimes(1);
+    expect(mockRetryKillSessionTree).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { sessionId: 'replacement-session' },
+    { provider: 'codex-cli' },
+  ])('does not reuse a retained retry across row-identity change %j', async (replacement) => {
+    const runtime = makeRuntime();
+    const session = staleSession({ id: 152, claudePid: 4892 });
+    mockClassifyActiveSessions.mockReturnValueOnce([session]).mockReturnValue([
+      { ...session, ...replacement },
+    ]);
+    mockKillSessionTree.mockResolvedValueOnce(unresolvedOutcome);
+    await runtime.sweepStaleAgentSessions();
+    mockGetRegisteredProcessTreeTerminationLease.mockReturnValue(null);
+
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(new Set(['stale-live']));
+
+    expect(mockMarkOrphaned).not.toHaveBeenCalled();
+    expect(mockKillSessionTree).toHaveBeenCalledTimes(1);
+    expect(mockRetryKillSessionTree).not.toHaveBeenCalled();
+  });
+
+  it('refuses fresh cleanup at retry capacity without dropping admitted tree obligations', async () => {
+    const runtime = makeRuntime();
+    const sessions = Array.from({ length: 65 }, (_, index) => staleSession({
+      id: 200 + index,
+      claudePid: 5200 + index,
+      conversationKey: `capacity-${index}`,
+    }));
+    mockClassifyActiveSessions.mockReturnValue(sessions);
+    mockKillSessionTree.mockResolvedValue(unresolvedOutcome);
+    mockRetryKillSessionTree.mockResolvedValue(unresolvedOutcome);
+
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toHaveProperty('size', 65);
+
+    expect(mockKillSessionTree).toHaveBeenCalledTimes(64);
+    mockClassifyActiveSessions.mockReturnValue(sessions.slice(0, 64).map((session) => ({
+      ...session,
+      classification: 'stale_dead',
+    })));
+    mockGetRegisteredProcessTreeTerminationLease.mockReturnValue(null);
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toHaveProperty('size', 64);
+    expect(mockMarkOrphaned).not.toHaveBeenCalled();
+    expect(mockRetryKillSessionTree).toHaveBeenCalledTimes(64);
+
+    mockRetryKillSessionTree.mockResolvedValue(terminatedOutcome);
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(new Set());
+    expect(mockMarkOrphaned).toHaveBeenCalledTimes(64);
+    mockGetRegisteredProcessTreeTerminationLease.mockImplementation((_rowId, pid) => registeredLease(pid));
+    mockClassifyActiveSessions.mockReturnValue([sessions[64]!]);
+    mockKillSessionTree.mockResolvedValue(terminatedOutcome);
+    await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(new Set());
+    expect(mockKillSessionTree).toHaveBeenCalledTimes(65);
+    expect(mockMarkOrphaned).toHaveBeenCalledWith(runtime.db, 264);
+  });
+
+  it.each(['stale_live', 'stale_dead'] as const)(
+    'does not invent a retained lease after capacity refusal followed by %s', async (classification) => {
+      const runtime = makeRuntime();
+      const held = Array.from({ length: 64 }, (_, index) => staleSession({
+        id: 300 + index,
+        claudePid: 6300 + index,
+        conversationKey: `permission-capacity-${index}`,
+      }));
+      const refused = staleSession({ id: 364, claudePid: 6364, conversationKey: 'not-admitted' });
+      mockClassifyActiveSessions.mockReturnValue([...held, refused]);
+      for (const _session of held) {
+        mockKillSessionTree.mockRejectedValueOnce(new ProcessTreeTerminationError(
+          'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
+          'permission-held lease',
+        ));
+      }
+      mockKillSessionTree.mockRejectedValueOnce(new ProcessTreeTerminationError(
+        'PROCESS_TREE_LEASE_CAPACITY',
+        'no lease admitted',
+      ));
+      mockRetryKillSessionTree.mockRejectedValue(new ProcessTreeTerminationError(
+        'PROCESS_TREE_RETRY_LEASE_MISSING',
+        'no lease exists for the refused request',
+      ));
+
+      await expect(runtime.sweepStaleAgentSessions()).resolves.toHaveProperty('size', 65);
+      expect(mockMarkOrphaned).not.toHaveBeenCalled();
+      expect(mockKillSessionTree).toHaveBeenCalledTimes(65);
+
+      mockClassifyActiveSessions.mockReturnValue([{ ...refused, classification }]);
+      mockKillSessionTree.mockResolvedValue(terminatedOutcome);
+      await expect(runtime.sweepStaleAgentSessions()).resolves.toEqual(new Set());
+      expect(mockRetryKillSessionTree).not.toHaveBeenCalled();
+      expect(mockKillSessionTree).toHaveBeenCalledTimes(classification === 'stale_live' ? 66 : 65);
+      expect(mockMarkOrphaned).toHaveBeenCalledWith(runtime.db, 364);
+    },
+  );
 
   it('retries a retained stale-session lease before the zombie-sweep interval', async () => {
     const runtime = makeRuntime();

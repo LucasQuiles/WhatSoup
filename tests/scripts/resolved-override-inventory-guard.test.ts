@@ -18,6 +18,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -283,6 +284,35 @@ describe('resolved-override-inventory-guard — subprocess exits', () => {
     expect(status, output).toBe(EXIT_PASS);
     expect(output).toMatch(/no resolved-override sites outside the test-only allowlist/);
     expect(output).toMatch(/inventory pinned/);
+  });
+
+  it.each([
+    ['.ts', EXIT_INCONCLUSIVE],
+    ['.sock', EXIT_PASS],
+  ] as const)('classifies a non-regular %s entry without losing the candidate-read contract', async (extension, expectedExit) => {
+    const dir = fixtureRepo('socket');
+    const control = runGuardIn(dir);
+    expect(control.status, control.output).toBe(EXIT_PASS);
+
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(path.join(dir, `src/c${extension}`), resolve);
+    });
+    try {
+      const result = runGuardIn(dir);
+      expect(result.status, result.output).toBe(expectedExit);
+      if (expectedExit === EXIT_INCONCLUSIVE) {
+        expect(result.output).toMatch(/INCONCLUSIVE/);
+        expect(result.output).not.toMatch(/no resolved-override sites/);
+      } else {
+        expect(result.output).toMatch(/inventory pinned/);
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
   });
 
   it('exits 1 BLOCK when a PRODUCTION file sets the override off-allowlist', () => {

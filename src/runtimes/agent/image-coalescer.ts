@@ -41,6 +41,12 @@ export interface ImageCoalesceEntry {
   timer: ReturnType<typeof setTimeout>;
   msg: IncomingMessage;
   inboundSeqs: number[];
+  /**
+   * The last buffered message that has a journal row. Its sequence is the
+   * last of inboundSeqs, and the flushed turn's inbound identity comes from
+   * it. Absent when no buffered image is journaled.
+   */
+  journaledMsg?: IncomingMessage;
 }
 
 export class ImageCoalescer {

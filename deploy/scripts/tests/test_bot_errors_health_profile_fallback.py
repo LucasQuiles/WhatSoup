@@ -1,20 +1,30 @@
-"""Tests for load_health_profile() script-relative fallback.
+"""Tests for load_health_profile() resolution and its fail-closed contract.
 
-Regression coverage for the fleet-wide false-critical daily-health storm
-(2026-06-23): a stale baked ``BOT_ERRORS_HEALTH_PROFILE`` env path (plist baked
-for a checkout location that no longer exists) caused load_health_profile() to
-silently fall back to ``DEFAULT_HEALTH_PROFILE`` (role=central), so relay/leaf
-hosts failed every central-only check. The fix self-heals from the in-repo
-per-host profile (``REPO_ROOT/deploy/health-profiles/<host>.json``) before
-defaulting to role=central.
+History: on 2026-06-23 a stale baked ``BOT_ERRORS_HEALTH_PROFILE`` path made
+load_health_profile() fall back to ``DEFAULT_HEALTH_PROFILE`` (role=central), so
+relay/leaf hosts failed every central-only check. The first fix self-healed
+from the tracked per-host profile. Profiles are moving out of the public repo,
+so that fallback chain became a way to silently check the wrong things. The
+loader now resolves through ``lib/fleet_config.py``:
+
+  BOT_ERRORS_HEALTH_PROFILE_JSON -> BOT_ERRORS_HEALTH_PROFILE
+  -> ~/.config/whatsoup/health-profile.json -> tracked deploy/health-profiles/<host>.json
+
+and any failure raises FleetConfigError; daily() then queues the daily
+profile-missing alert (covered in test_bot_errors_profile_missing_event.py) and
+exits 2. A set env var never self-heals from a later source, and a missing
+profile never becomes role=central.
 
 Loads bot-errors-health-check.py via importlib (hyphen in filename prevents
-normal import).
+normal import). HOME, the state root and the outbox point at temp dirs so real
+private files are never read and no real alert is queued.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -33,9 +43,23 @@ _mod = _load_module()
 
 
 @pytest.fixture(autouse=True)
-def _clear_profile_env(monkeypatch):
+def _isolate(monkeypatch, tmp_path):
     monkeypatch.delenv("BOT_ERRORS_HEALTH_PROFILE", raising=False)
     monkeypatch.delenv("BOT_ERRORS_HEALTH_PROFILE_JSON", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    # daily() now writes an event and a marker on a profile failure.
+    monkeypatch.setenv("BOT_ERRORS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("BOT_ERRORS_OUTBOX_DIR", str(tmp_path / "state" / "outbox"))
+    monkeypatch.setenv(
+        "BOT_ERRORS_DRY_NOW_EPOCH",
+        str(int(datetime(2026, 9, 27, 12, tzinfo=timezone.utc).timestamp())),
+    )
+
+
+def _private_path() -> Path:
+    return Path(os.environ["HOME"]) / ".config" / "whatsoup" / "health-profile.json"
 
 
 def _write_profile(path: Path, role: str = "relay") -> Path:
@@ -44,20 +68,27 @@ def _write_profile(path: Path, role: str = "relay") -> Path:
     return path
 
 
-def _point_fallback_at(monkeypatch, path: Path | None):
+def _point_tracked_at(monkeypatch, path: Path | None):
     """Force script_relative_profile_path() to a known location (or a missing one)."""
     target = path if path is not None else Path("/nonexistent/health-profiles/none.json")
     monkeypatch.setattr(_mod, "script_relative_profile_path", lambda: target)
+    return target
+
+
+def _load_error() -> str:
+    with pytest.raises(_mod.FleetConfigError) as info:
+        _mod.load_health_profile()
+    return str(info.value)
 
 
 # ---------------------------------------------------------------------------
-# Explicit env path
+# Resolution order
 # ---------------------------------------------------------------------------
 
 def test_valid_env_path_loads_without_fallback(monkeypatch, tmp_path):
     prof = _write_profile(tmp_path / "host.json", role="relay")
     monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(prof))
-    _point_fallback_at(monkeypatch, None)  # fallback must NOT be consulted
+    _point_tracked_at(monkeypatch, None)  # tracked copy must NOT be consulted
 
     result = _mod.load_health_profile()
 
@@ -68,72 +99,34 @@ def test_valid_env_path_loads_without_fallback(monkeypatch, tmp_path):
     assert "profileLoadError" not in result
 
 
-def test_stale_env_path_recovers_from_fallback(monkeypatch, tmp_path):
-    """The storm case: baked env path is gone, in-repo per-host profile exists."""
-    stale = tmp_path / "stale" / "missing.json"  # does not exist
-    fallback = _write_profile(tmp_path / "repo" / "leaf.json", role="leaf")
-    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(stale))
-    _point_fallback_at(monkeypatch, fallback)
-
-    result = _mod.load_health_profile()
-
-    assert result["role"] == "leaf"  # NOT role=central
-    assert result["_explicitProfile"] is True
-    assert result["_profilePath"] == str(fallback)
-    assert "profileFallback" in result
-    assert str(stale) in result["profileFallback"]
-    assert "profileLoadError" not in result  # self-healed: no FAIL line
-
-
-def test_stale_env_path_and_no_fallback_reports_error(monkeypatch, tmp_path):
-    stale = tmp_path / "missing.json"
-    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(stale))
-    _point_fallback_at(monkeypatch, None)
-
-    result = _mod.load_health_profile()
-
-    assert "profileLoadError" in result
-    assert str(stale) in result["profileLoadError"]
-    assert result["_explicitProfile"] is True
-    assert result["role"] == "central"  # DEFAULT_HEALTH_PROFILE
-
-
-# ---------------------------------------------------------------------------
-# No explicit env
-# ---------------------------------------------------------------------------
-
-def test_no_env_recovers_from_fallback(monkeypatch, tmp_path):
-    fallback = _write_profile(tmp_path / "relay.json", role="relay")
-    _point_fallback_at(monkeypatch, fallback)
+def test_private_profile_present_is_used(monkeypatch, tmp_path):
+    private = _write_profile(_private_path(), role="relay")
+    _point_tracked_at(monkeypatch, _write_profile(tmp_path / "repo" / "host-a.json", role="leaf"))
 
     result = _mod.load_health_profile()
 
     assert result["role"] == "relay"
     assert result["_explicitProfile"] is True
-    assert result["_profilePath"] == str(fallback)
-    assert "profileFallback" in result
-    assert "profileLoadError" not in result
-
-
-def test_no_env_no_fallback_defaults_to_central(monkeypatch):
-    _point_fallback_at(monkeypatch, None)
-
-    result = _mod.load_health_profile()
-
-    assert result["role"] == "central"
-    assert result["_explicitProfile"] is False
-    assert "profileLoadError" not in result  # absence of a profile is not a failure
+    assert result["_profilePath"] == str(private)
     assert "profileFallback" not in result
 
 
-# ---------------------------------------------------------------------------
-# JSON env wins; malformed inputs
-# ---------------------------------------------------------------------------
+def test_private_missing_uses_tracked_copy(monkeypatch, tmp_path):
+    tracked = _point_tracked_at(monkeypatch, _write_profile(tmp_path / "relay.json", role="relay"))
 
-def test_json_env_wins_and_skips_fallback(monkeypatch, tmp_path):
+    result = _mod.load_health_profile()
+
+    assert result["role"] == "relay"
+    assert result["_explicitProfile"] is True
+    assert result["_profilePath"] == str(tracked)
+    # Same evidence text as before the resolver existed.
+    assert result["profileFallback"] == f"no BOT_ERRORS_HEALTH_PROFILE set; recovered from {tracked}"
+
+
+def test_json_env_wins_and_skips_files(monkeypatch, tmp_path):
     monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE_JSON", json.dumps({"role": "relay"}))
     monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(tmp_path / "ignored.json"))
-    _point_fallback_at(monkeypatch, None)  # must not be consulted
+    _point_tracked_at(monkeypatch, None)
 
     result = _mod.load_health_profile()
 
@@ -142,27 +135,110 @@ def test_json_env_wins_and_skips_fallback(monkeypatch, tmp_path):
     assert "profileFallback" not in result
 
 
-def test_invalid_json_env_reports_error(monkeypatch):
-    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE_JSON", "{not json")
+# ---------------------------------------------------------------------------
+# Fail closed: never role=central, never self-heal past a set env var
+# ---------------------------------------------------------------------------
 
-    result = _mod.load_health_profile()
+def test_no_profile_anywhere_fails_instead_of_role_central(monkeypatch):
+    tracked = _point_tracked_at(monkeypatch, None)
 
-    assert "profileLoadError" in result
-    assert result["_explicitProfile"] is True
+    message = _load_error()
+
+    assert "health profile missing" in message
+    assert str(_private_path()) in message
+    assert str(tracked) in message
+    assert "resolver order: 1) env BOT_ERRORS_HEALTH_PROFILE 2) private" in message
 
 
-def test_env_profile_not_object_reports_error(monkeypatch, tmp_path):
+def test_stale_env_path_fails_even_when_later_sources_exist(monkeypatch, tmp_path):
+    """The 2026-06-23 storm input: the baked env path is gone. It must now fail
+    loudly rather than self-heal from the private or tracked copy."""
+    stale = tmp_path / "stale" / "missing.json"
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(stale))
+    _write_profile(_private_path(), role="relay")
+    _point_tracked_at(monkeypatch, _write_profile(tmp_path / "repo" / "leaf.json", role="leaf"))
+
+    message = _load_error()
+
+    assert f"health profile missing: {stale}" in message
+    assert "BOT_ERRORS_HEALTH_PROFILE is set, so later sources were not tried" in message
+
+
+def test_invalid_json_env_file_fails(monkeypatch, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(bad))
+    _point_tracked_at(monkeypatch, _write_profile(tmp_path / "leaf.json", role="leaf"))
+
+    assert "is not valid JSON" in _load_error()
+
+
+def test_env_profile_not_object_fails(monkeypatch, tmp_path):
     bad = tmp_path / "list.json"
     bad.write_text("[1, 2, 3]", encoding="utf-8")
     monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE", str(bad))
-    fallback = _write_profile(tmp_path / "leaf.json", role="leaf")
-    _point_fallback_at(monkeypatch, fallback)
+    _point_tracked_at(monkeypatch, _write_profile(tmp_path / "leaf.json", role="leaf"))
 
-    # A non-object env profile is a read failure -> self-heal from fallback.
-    result = _mod.load_health_profile()
+    assert "is not a JSON object" in _load_error()
 
-    assert result["role"] == "leaf"
-    assert "profileFallback" in result
+
+def test_invalid_json_private_does_not_fall_back_to_tracked(monkeypatch, tmp_path):
+    private = _private_path()
+    private.parent.mkdir(parents=True)
+    private.write_text("{not json", encoding="utf-8")
+    _point_tracked_at(monkeypatch, _write_profile(tmp_path / "leaf.json", role="leaf"))
+
+    message = _load_error()
+
+    assert "health profile is not valid JSON" in message
+    assert str(private) in message
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads mode-000 files")
+def test_unreadable_private_does_not_fall_back_to_tracked(monkeypatch, tmp_path):
+    private = _write_profile(_private_path(), role="relay")
+    _point_tracked_at(monkeypatch, _write_profile(tmp_path / "leaf.json", role="leaf"))
+    private.chmod(0)
+    try:
+        assert "unreadable (PermissionError)" in _load_error()
+    finally:
+        private.chmod(0o600)
+
+
+def test_invalid_json_env_inline_fails(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE_JSON", "{not json")
+
+    message = _load_error()
+
+    assert "BOT_ERRORS_HEALTH_PROFILE_JSON" in message
+    assert "is not valid JSON" in message
+    assert "resolver order: 0) env BOT_ERRORS_HEALTH_PROFILE_JSON" in message
+
+
+def test_non_object_env_inline_fails(monkeypatch):
+    monkeypatch.setenv("BOT_ERRORS_HEALTH_PROFILE_JSON", "[1]")
+
+    assert "is not a JSON object" in _load_error()
+
+
+def test_daily_exits_2_before_any_probe_when_profile_missing(monkeypatch, capsys):
+    _point_tracked_at(monkeypatch, None)
+
+    def _no_probe(*_args, **_kwargs):
+        raise AssertionError("daily() probed with no profile")
+
+    monkeypatch.setattr(_mod, "tool_inventory", _no_probe)
+
+    assert _mod.daily() == 2
+
+    captured = capsys.readouterr()
+    lines = captured.err.strip().splitlines()
+    # The fail-closed line stays first; the profile-missing outcome follows it.
+    assert len(lines) == 2
+    assert lines[0].startswith("bot-errors-health-check: fail-closed: health profile missing")
+    assert "resolver order:" in lines[0]
+    assert lines[1].startswith("bot-errors-health-check: profile-missing event queued: ")
+    assert "role=central" not in captured.out
 
 
 # ---------------------------------------------------------------------------

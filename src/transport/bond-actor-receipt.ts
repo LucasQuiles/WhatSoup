@@ -48,12 +48,24 @@ import { systemClock } from '../lib/clock.ts';
 export type BondActorRoute = 'mcp' | 'fleet_api' | 'pairing_cli' | 'watchdog' | 'autonomous';
 
 /**
- * The plan's approved actor taxonomy. DERIVED from route plus the presence of an
- * actor identity — see `deriveActorClass`. Both this and the raw `route` are
- * recorded so the derivation stays auditable and the observable survives if the
- * mapping is later judged wrong.
+ * The plan's approved actor taxonomy. DERIVED from the route and, for `mcp`,
+ * from whether the call came from the executing turn's own helper — see
+ * `deriveActorClass`. Both this and the raw `route` are recorded so the
+ * derivation stays auditable and the observable survives if the mapping is
+ * later judged wrong.
+ *
+ * #3421 step 1 replaced `operator`/`api` for `mcp` with `turn_agent` and
+ * `outside_caller` (receipt version 2): an actor identity alone could not tell
+ * the turn's own call from an outside caller that inherited the turn's sender.
  */
-export type BondActorClass = 'operator' | 'api' | 'scheduler' | 'autonomous' | 'unattributed';
+export type BondActorClass =
+  | 'operator'
+  | 'api'
+  | 'turn_agent'
+  | 'outside_caller'
+  | 'scheduler'
+  | 'autonomous'
+  | 'unattributed';
 
 /** Effect class of a generic control-plane action, for reader context only. */
 export type ControlPlaneEffect = 'read_only' | 'external' | 'unknown';
@@ -89,8 +101,11 @@ export interface ControlPlaneActionReceipt {
 export type BondOwnerEvidence =
   | {
       status: 'consulted';
-      /** Contract version, so a reader can tell this from the old literal. */
-      version: 1;
+      /**
+       * Contract version, so a reader can tell this from the old literal.
+       * 2 since #3421, when the `mcp` classes changed.
+       */
+      version: 2;
       resolvedAt: string;
       /**
        * `unattributed` whenever `bondRemovalRequest` is null. Never synthesised
@@ -108,7 +123,7 @@ export type BondOwnerEvidence =
     }
   | {
       status: 'unavailable';
-      version: 1;
+      version: 2;
       reason: 'resolver_threw' | 'ledger_absent';
       resolvedAt: string | null;
     };
@@ -118,6 +133,11 @@ export interface BondRemovalRequestInput {
   action: string;
   actorIdentity: string | null;
   requestId: string | null;
+  /**
+   * `mcp` only: the call came from the executing turn's own helper (#3421).
+   * Absent means unknown, which reads as an outside caller.
+   */
+  turnOwned?: boolean;
 }
 
 export interface ControlPlaneActionInput extends BondRemovalRequestInput {
@@ -132,18 +152,18 @@ function hashOrNull(value: string | null): string | null {
 }
 
 /**
- * route + actor identity -> the plan's actor class.
+ * route + turn ownership -> the plan's actor class.
  *
  * Stated as a table rather than inline logic because it is the one interpretive
  * step in this module, and a reviewer should be able to disagree with it without
- * reading control flow. An `mcp` call carrying an actor identity is an operator
- * acting through an API surface; the same call without one is an unattended API
- * caller, which is a materially different thing to see next to a revocation.
+ * reading control flow. An `mcp` call from the executing turn's own helper is
+ * the turn agent; any other `mcp` caller is outside the turn, even when it
+ * landed mid-turn and so carries the turn's actor identity (#3421).
  */
-function deriveActorClass(route: BondActorRoute, hasActorIdentity: boolean): BondActorClass {
+function deriveActorClass(route: BondActorRoute, turnOwned: boolean): BondActorClass {
   switch (route) {
     case 'mcp':
-      return hasActorIdentity ? 'operator' : 'api';
+      return turnOwned ? 'turn_agent' : 'outside_caller';
     case 'pairing_cli':
       return 'operator';
     case 'fleet_api':
@@ -197,10 +217,10 @@ export class BondActorLedger {
     const removalActorHash = removal ? hashOrNull(removal.input.actorIdentity) : null;
     return {
       status: 'consulted',
-      version: 1,
+      version: 2,
       resolvedAt: new Date(nowMs).toISOString(),
       actorClass: removal
-        ? deriveActorClass(removal.input.route, removalActorHash !== null)
+        ? deriveActorClass(removal.input.route, removal.input.turnOwned === true)
         : 'unattributed',
       bondRemovalRequest: removal
         ? {
@@ -242,14 +262,14 @@ export const bondActorLedger = new BondActorLedger();
  */
 const UNAVAILABLE_RESOLVER_THREW: BondOwnerEvidence = Object.freeze({
   status: 'unavailable' as const,
-  version: 1 as const,
+  version: 2 as const,
   reason: 'resolver_threw' as const,
   resolvedAt: null,
 });
 
 const UNAVAILABLE_LEDGER_ABSENT: BondOwnerEvidence = Object.freeze({
   status: 'unavailable' as const,
-  version: 1 as const,
+  version: 2 as const,
   reason: 'ledger_absent' as const,
   resolvedAt: null,
 });

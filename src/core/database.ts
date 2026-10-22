@@ -56,6 +56,8 @@ import { runMigration61 as runMigration61Impl } from './database-migration-61.ts
 import { runMigration62 as runMigration62Impl } from './database-migration-62.ts';
 import { runMigration63 as runMigration63Impl } from './database-migration-63.ts';
 import { runMigration64 as runMigration64Impl } from './database-migration-64.ts';
+import { runMigration65 as runMigration65Impl } from './database-migration-65.ts';
+import { runMigration66 as runMigration66Impl } from './database-migration-66.ts';
 
 export { CURRENT_SCHEMA_MIGRATION } from './database-schema-version.ts';
 export {
@@ -847,6 +849,8 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [62, runMigration62],
   [63, runMigration63],
   [64, runMigration64],
+  [65, runMigration65],
+  [66, runMigration66],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1276,6 +1280,14 @@ function runMigration63(db: DatabaseSync): void {
 
 function runMigration64(db: DatabaseSync): void {
   runMigration64Impl(db);
+}
+
+function runMigration65(db: DatabaseSync): void {
+  runMigration65Impl(db);
+}
+
+function runMigration66(db: DatabaseSync): void {
+  runMigration66Impl(db);
 }
 
 function runMigration60(db: DatabaseSync): void {
@@ -2150,6 +2162,24 @@ export class Database {
        WHERE conversation_key = ? AND deleted_at IS NULL`,
     ).run(conversationKey);
     return Number(result.changes);
+  }
+
+  /**
+   * Return the distinct conversations that own the supplied WhatsApp message
+   * ids. Call this before soft deletion when related per-conversation data
+   * must be invalidated with the messages. Empty ids are ignored.
+   */
+  getConversationKeysForMessageIds(messageIds: readonly string[]): string[] {
+    const ids = [...new Set(messageIds.filter((messageId) => messageId.length > 0))];
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT DISTINCT conversation_key
+         FROM messages
+        WHERE message_id IN (${placeholders})
+        ORDER BY conversation_key ASC`,
+    ).all(...ids) as Array<{ conversation_key: string }>;
+    return rows.map((row) => row.conversation_key);
   }
 
   /**

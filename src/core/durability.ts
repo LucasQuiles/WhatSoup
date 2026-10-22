@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
 import { createChildLogger } from '../logger.ts';
+import {
+  validDeliveryCorroboratedSelectedOpsSql,
+} from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
 import { DeferredTurnStore } from './deferred-turn-store.ts';
-import type { CapabilityDecisionOutcome } from './capability-obligation-store.ts';
+import type { CapabilityDecisionOutcome, CapabilityDecisionParams } from './capability-obligation-store.ts';
 import { emitAlertChecked, clearAlertSourceChecked } from '../lib/emit-alert.ts';
 import { gateQuarantineClear } from '../lib/fleet-health-gate.ts';
 import {
@@ -17,6 +21,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Database } from './database.ts';
+import {
+  reconcileOperatorCatchupRecoveries,
+  type ReconcileOperatorCatchupParams,
+  type ReconcileOperatorCatchupReport,
+} from './recovery-catchup-closure.ts';
 import { isInboundStatus } from './inbound-status.ts';
 import type { InboundStatus } from './inbound-status.ts';
 import type { Messenger } from './types.ts';
@@ -26,9 +35,11 @@ import { getImmediateTransactionRunner, withImmediateTransaction, withTransactio
 import {
   createRecoveryStats,
   DurabilityRecoveryEvidence,
+  NOT_SCHEDULED_TURN_LOSS_ROW_SQL,
   type RecoveryStats,
 } from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
+import { TerminalRecordInboundCloser } from './terminal-record-inbound-close.ts';
 import type { InboundFailureClass } from './inbound-failure-class.ts';
 import { config } from '../config.ts';
 import {
@@ -58,6 +69,7 @@ import {
   normalizeToolDurabilityGroup,
   TOOL_INPUT_MARKER,
   TOOL_RESULT_MARKERS,
+  type ToolCallCallerEvidence,
   type ToolCompletionEvidence,
 } from './durability-evidence-contract.ts';
 import {
@@ -98,6 +110,7 @@ import type {
   RequeueTurnRecoveryJobResult,
   RenewTurnRecoveryClaimResult,
   TurnRecoveryAssignmentFence,
+  TurnRecoveryAdmissionState,
   TurnRecoveryClaimFence,
   TurnRecoveryEnumerationPage,
   TurnRecoveryJobPersistenceParams,
@@ -147,6 +160,15 @@ export type {
   QuarantineCompletedDeliveryIdentityAgentSessionParams,
   QuarantineCompletedDeliveryIdentityCheckpointParams,
 } from './session-lifecycle-store.ts';
+
+/** Store supervisor counts plus the inbound-ledger loss count the engine adds. */
+export interface DurabilityTurnRecoveryCounts extends TurnRecoverySupervisorCounts {
+  /**
+   * DurabilityRecoveryEvidence.countScheduledTurnsLost (#3754); not a store
+   * count. Null when that diagnostic read failed.
+   */
+  scheduledTurnsLost?: number | null;
+}
 
 export interface CompletedDeliveryIdentityAdmissionHealth {
   unresolvedCount: number;
@@ -260,6 +282,74 @@ export function expireOverdueCompletedDeliveryIdentityAdmissions(
 }
 
 const log = createChildLogger('durability');
+
+/**
+ * The error's identity for a decision-loss record: its name and node:sqlite's
+ * numeric errcode (every SQLite error has code ERR_SQLITE_ERROR), never its
+ * message, so the audit detail stays redaction-safe.
+ */
+function capabilityDecisionErrorClass(err: unknown): { name: string; errcode: number | null } {
+  try {
+    const errcode = (err as { errcode?: unknown } | null | undefined)?.errcode;
+    return {
+      name: err instanceof Error ? err.name : typeof err,
+      errcode: typeof errcode === 'number' ? errcode : null,
+    };
+  } catch {
+    return { name: 'unknown', errcode: null };
+  }
+}
+
+/**
+ * The audit event recorded in place of a retained decision that a retry could
+ * not write. The decision may itself be malformed (that can be why it failed),
+ * so its fields are read defensively.
+ */
+function capabilityDecisionLostEvent(
+  decision: CapabilityDecisionParams,
+  err: unknown,
+): CapabilityDecisionParams {
+  const auditEvent = (decision as Partial<CapabilityDecisionParams> | undefined)?.auditEvent;
+  return {
+    auditEvent: {
+      action: 'obligation.not_created',
+      actorType: 'runtime',
+      reasonCode: 'not_created_decision_lost_on_retry',
+      sourceHash: auditEvent?.sourceHash ?? null,
+      detail: {
+        derivedAction: auditEvent?.action ?? null,
+        derivedReasonCode: auditEvent?.reasonCode ?? null,
+        error: capabilityDecisionErrorClass(err),
+      },
+    },
+  };
+}
+
+/**
+ * The floor of the decision-loss record: one error line for each retry whose
+ * real decision failed, written before either transaction guard can rethrow.
+ * It runs inside C3 and outside any savepoint, so it must never throw. The
+ * error's class is logged as `errorClass`: the log sanitizer redacts a `name`
+ * key as an identity, and this line may be the only record of the loss.
+ */
+function logCapabilityDecisionLoss(
+  decision: CapabilityDecisionParams,
+  terminal: TurnTerminalPersistenceParams,
+  err: unknown,
+): void {
+  try {
+    const auditEvent = (decision as Partial<CapabilityDecisionParams> | undefined)?.auditEvent;
+    const errorIdentity = capabilityDecisionErrorClass(err);
+    log.error({
+      logicalTurnId: terminal.logicalTurnId,
+      inboundSeq: terminal.inboundSeq,
+      derivedAction: auditEvent?.action ?? null,
+      derivedReasonCode: auditEvent?.reasonCode ?? null,
+      errorClass: errorIdentity.name,
+      errcode: errorIdentity.errcode,
+    }, 'capability decision lost on retry');
+  } catch { /* intentional: the decision-loss floor must never abort C3 */ }
+}
 
 /**
  * PR-C: max age a `status_ping` op may sit in `pending` before the drain ages it
@@ -561,6 +651,12 @@ export interface StuckInboundSweepResult {
    * claimed owning job driven to `exhausted` so the scope becomes admissible.
    */
   reclaimedRecoveryOwned: number;
+  /**
+   * Report-only: open inbound rows behind their own FINAL terminal record
+   * that `turn-recovery-operator close-inbound` could close (see
+   * terminal-record-inbound-close.ts). The sweep never closes them.
+   */
+  terminalRecordCloseCandidates: number;
 }
 
 export interface OutboundOpParams {
@@ -672,6 +768,7 @@ type DurabilityStatements = {
   getQuarantineClearContributorCounts: PreparedStatement;
   getMaybeSentOutboundCount: PreparedStatement;
   getOldestMaybeSentSubmittedAt: PreparedStatement;
+  getMaybeSentDeliveryAmbiguityHealth: PreparedStatement;
   getRecentOutboundFailureEvidence: PreparedStatement;
   getLastRecoveryRunCompletedAt: PreparedStatement;
   getCompletedDeliveryIdentityAdmissionHealth: PreparedStatement;
@@ -683,7 +780,9 @@ export class DurabilityEngine {
   private db: Database;
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
+  private readonly scheduledTurnsLostLog = new ProbeErrorThrottle();
   private readonly turnRecovery: TurnRecoveryStore;
+  private readonly terminalRecordInboundCloser: TerminalRecordInboundCloser;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
   readonly capabilityObligations: CapabilityObligationStore;
   /** #3295 S2: deferred recovery-blocked followers (admission behind a default-OFF flag). */
@@ -700,14 +799,20 @@ export class DurabilityEngine {
          )
          VALUES (?, ?, ?, ?, 'processing', COALESCE(datetime(?, 'unixepoch'), datetime('now')))`,
       ),
-      markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
+      // #3754: these three seq-keyed writers and markInboundSkipped leave a
+      // scheduled-turn loss row as recovery wrote it: the first terminal wins.
+      markTurnDone: prepare(
+        `UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ? AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
+      ),
       markInboundComplete: prepare(
-        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
+        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?
+           AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       markInboundFailed: prepare(
         // terminal_reason stays exactly 'error' (external matcher contract); the
         // bounded, content-free failure_class column carries the driver split.
-        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
+        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?
+           AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       selectInboundReclaimState: prepare(
         `SELECT processing_status, failure_class FROM inbound_events WHERE seq = ?`,
@@ -785,7 +890,8 @@ export class DurabilityEngine {
          LIMIT 1`,
       ),
       markInboundSkipped: prepare(
-        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
+        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?
+           AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       selectInboundStatus: prepare(
         `SELECT processing_status, conversation_key, chat_jid, message_id
@@ -908,10 +1014,14 @@ export class DurabilityEngine {
            conversation_key, session_checkpoint_id, tool_name, tool_group,
            tool_input, status, replay_policy, outcome_code,
            retry_disposition, operator_action, evidence_coverage,
-           logical_turn_id, source_inbound_seq
+           logical_turn_id, source_inbound_seq,
+           caller_transport, caller_connection_id, caller_client_name,
+           caller_client_version, caller_token_result, caller_turn_owned,
+           caller_actor_source, tool_sensitive
          )
          VALUES (?, ?, ?, ?, ?, 'pending', ?, 'not_terminal',
-                 'not_applicable', 'none', 'complete', ?, ?)`,
+                 'not_applicable', 'none', 'complete', ?, ?,
+                 ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
       markToolExecuting: prepare(`UPDATE tool_calls SET status = 'executing' WHERE id = ?`),
       markToolComplete: prepare(
@@ -946,7 +1056,7 @@ export class DurabilityEngine {
           session_status, completed_inbound_seq, completed_delivery_jid,
           completed_delivery_namespace, completed_scope,
           completed_logical_turn_id, completed_manager_id, completed_generation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'active'), ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(conversation_key) DO UPDATE SET
           session_id = COALESCE(excluded.session_id, session_checkpoints.session_id),
           transcript_path = COALESCE(excluded.transcript_path, session_checkpoints.transcript_path),
@@ -961,7 +1071,19 @@ export class DurabilityEngine {
           watchdog_state = COALESCE(excluded.watchdog_state, watchdog_state),
           workspace_path = COALESCE(excluded.workspace_path, workspace_path),
           claude_pid = COALESCE(excluded.claude_pid, claude_pid),
-          session_status = COALESCE(excluded.session_status, session_status),
+          -- #3658: excluded.session_status carries the insert default, so
+          -- the update reads the caller's own, possibly absent, status. A
+          -- write that keeps the same provider session never reopens an
+          -- ended checkpoint as suspended or orphaned; only a lifecycle method
+          -- or a new session does that.
+          session_status = CASE
+            WHEN session_checkpoints.session_status = 'ended'
+              AND (excluded.session_id IS NULL
+                OR excluded.session_id IS session_checkpoints.session_id)
+              AND ? IN ('suspended', 'orphaned')
+              THEN session_checkpoints.session_status
+            ELSE COALESCE(?, session_checkpoints.session_status)
+          END,
           completed_inbound_seq = CASE
             WHEN excluded.session_id IS NOT NULL
               AND excluded.session_id IS NOT session_checkpoints.session_id
@@ -1250,6 +1372,28 @@ export class DurabilityEngine {
       getOldestMaybeSentSubmittedAt: prepare(
         `SELECT MIN(${maybeSentDwellAtSql()}) as at FROM outbound_ops WHERE status = 'maybe_sent'`,
       ),
+      getMaybeSentDeliveryAmbiguityHealth: prepare(`
+        WITH valid_corroborated_selected AS (
+          ${validDeliveryCorroboratedSelectedOpsSql()}
+        )
+        SELECT
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 0
+            ELSE 1
+          END), 0) AS uncorroborated_ambiguous,
+          COALESCE(SUM(CASE
+            WHEN proof.selected_op_id IS NOT NULL THEN 1
+            ELSE 0
+          END), 0) AS corroborated_retained,
+          MIN(CASE
+            WHEN proof.selected_op_id IS NULL
+            THEN ${maybeSentDwellAtSql('o.')}
+            ELSE NULL
+          END) AS oldest_uncorroborated_at
+        FROM outbound_ops o
+        LEFT JOIN valid_corroborated_selected proof ON proof.selected_op_id = o.id
+        WHERE o.status = 'maybe_sent'
+      `),
       getRecentOutboundFailureEvidence: prepare(
         `SELECT status, error
          FROM outbound_ops
@@ -1357,6 +1501,7 @@ export class DurabilityEngine {
     this.turnRecovery = new TurnRecoveryStore(db, () => (
       this.statements.selectNow.get() as { now: string }
     ).now);
+    this.terminalRecordInboundCloser = new TerminalRecordInboundCloser(db.raw);
     this.capabilityObligations = new CapabilityObligationStore(db);
     this.deferredTurns = new DeferredTurnStore(db);
     this.sessionLifecycle = new SessionLifecycleStore(db);
@@ -1374,7 +1519,9 @@ export class DurabilityEngine {
       fields.activeTurnId ?? null, fields.lastInboundSeq ?? null,
       fields.lastFlushedOutboundId ?? null, fields.watchdogState ?? null,
       fields.workspacePath ?? null, fields.claudePid ?? null,
-      fields.sessionStatus ?? 'active',
+      // #3658: only lifecycle writers change the status. A new row still gets
+      // 'active' in SQL; an update that omits the status keeps the stored one.
+      fields.sessionStatus ?? null,
       fields.completedInboundSeq ?? null,
       fields.completedDeliveryJid ?? null,
       fields.completedDeliveryNamespace ?? null,
@@ -1382,6 +1529,9 @@ export class DurabilityEngine {
       fields.completedLogicalTurnId ?? null,
       fields.completedManagerId ?? null,
       fields.completedGeneration ?? null,
+      // The conflict clause reads the status twice: the ended guard, then the write.
+      fields.sessionStatus ?? null,
+      fields.sessionStatus ?? null,
     );
   }
 
@@ -1828,13 +1978,17 @@ export class DurabilityEngine {
           );
         }
         if (normalized.capabilityDecision !== undefined) {
-          // D4: the typed capability-debt decision shares C3 atomicity — an
-          // audit/store failure here aborts the terminal record too. The
-          // duplicate-winner branch below is read-only, so a re-finalization
-          // can never apply the decision twice.
-          capabilityDecision = this.capabilityObligations.applyDecisionWithinCallerTransaction(
-            normalized.capabilityDecision,
-          );
+          // D4: on the first finalization the typed capability-debt decision
+          // shares C3 atomicity — an audit/store failure here aborts the
+          // terminal record too. A supervisor retry passes best_effort, so the
+          // decision can no longer keep the turn retained. The duplicate-winner
+          // branch below is read-only, so a re-finalization can never apply
+          // the decision twice.
+          capabilityDecision = normalized.capabilityDecisionMode === 'best_effort'
+            ? this.applyCapabilityDecisionBestEffort(normalized.capabilityDecision, normalized.terminal)
+            : this.capabilityObligations.applyDecisionWithinCallerTransaction(
+              normalized.capabilityDecision,
+            );
         }
         if (normalized.bookkeeping) this.runTurnBookkeeping(normalized.bookkeeping);
         if (normalized.inbound) {
@@ -1909,6 +2063,37 @@ export class DurabilityEngine {
     }
   }
 
+  /**
+   * A supervisor retry's decision write (capability-decision-dropped-on-retry).
+   * The decision may not keep the terminal from committing: savepoint 1 writes
+   * it; if that fails, savepoint 2 records `not_created_decision_lost_on_retry`
+   * in its place; if that fails too, the error log line is the only record.
+   * Either failure can also have ended C3 itself (SQLite rolls the whole
+   * transaction back on some errors). The error is then rethrown, so no later
+   * terminal write runs outside the transaction and the turn stays retained.
+   */
+  private applyCapabilityDecisionBestEffort(
+    decision: CapabilityDecisionParams,
+    terminal: TurnTerminalPersistenceParams,
+  ): CapabilityDecisionOutcome | undefined {
+    try {
+      return withTransaction(this.db, () =>
+        this.capabilityObligations.applyDecisionWithinCallerTransaction(decision));
+    } catch (decisionErr) {
+      logCapabilityDecisionLoss(decision, terminal, decisionErr);
+      if (!this.db.raw.isTransaction) throw decisionErr;
+      try {
+        return withTransaction(this.db, () =>
+          this.capabilityObligations.applyDecisionWithinCallerTransaction(
+            capabilityDecisionLostEvent(decision, decisionErr),
+          ));
+      } catch (lostEventErr) {
+        if (!this.db.raw.isTransaction) throw lostEventErr;
+        return undefined;
+      }
+    }
+  }
+
   getTurnTerminal(
     inboundSeq: number | null,
     logicalTurnId: string,
@@ -1967,6 +2152,21 @@ export class DurabilityEngine {
 
   recoverStaleTurnRecoveryJobs(limit = 200): { requeued: number; exhausted: number } {
     return this.turnRecovery.recoverStaleTurnRecoveryJobs(limit);
+  }
+
+  /**
+   * Automatic catch-up reconciliation (turn-recovery continuity PR2): close
+   * open `recovery_pending_operator_catchup` links whose conversation has a
+   * delivered catch-up reply. Pure delegation to the hardened core selector —
+   * every closure is still independently re-proven by the closure primitive
+   * and the `inbound_disposition_closure_validate_insert` trigger. Never
+   * throws for per-group rejections (recorded as bounded skips in the report);
+   * see src/core/recovery-catchup-closure.ts.
+   */
+  reconcileOperatorCatchupRecoveries(
+    params: ReconcileOperatorCatchupParams = {},
+  ): ReconcileOperatorCatchupReport {
+    return reconcileOperatorCatchupRecoveries(this.db.raw, params);
   }
 
   reassignPendingTurnRecoveryJob(
@@ -2045,8 +2245,29 @@ export class DurabilityEngine {
     return this.turnRecovery.getNewestInboundSeqForConversation(conversationKey);
   }
 
-  getTurnRecoverySupervisorCounts(): TurnRecoverySupervisorCounts {
-    return this.turnRecovery.getTurnRecoverySupervisorCounts();
+  getTurnRecoverySupervisorCounts(): DurabilityTurnRecoveryCounts {
+    return {
+      ...this.turnRecovery.getTurnRecoverySupervisorCounts(),
+      scheduledTurnsLost: this.readScheduledTurnsLost(),
+    };
+  }
+
+  // A diagnostic count must not fail the health readers that carry it (the
+  // turn-recovery deadman, /health, the health-stats log), so a failed read
+  // reports null (#3754); the warning is throttled so a persistent fault logs
+  // O(log reads) lines, not one per read.
+  private readScheduledTurnsLost(): number | null {
+    try {
+      const count = this.recoveryEvidence.countScheduledTurnsLost();
+      this.scheduledTurnsLostLog.onSuccess('read');
+      return count;
+    } catch (err) {
+      const failures = this.scheduledTurnsLostLog.onFailure('read');
+      if (failures !== null) {
+        log.warn({ err, failures }, 'getTurnRecoverySupervisorCounts: scheduled-turns-lost count failed');
+      }
+      return null;
+    }
   }
 
   hasOutstandingTurnRecoveryForScope(
@@ -2055,6 +2276,14 @@ export class DurabilityEngine {
     options?: { excludeJobId?: number },
   ): boolean {
     return this.turnRecovery.hasOutstandingTurnRecoveryForScope(scope, conversationKey, options);
+  }
+
+  getTurnRecoveryAdmissionStateForScope(
+    scope: 'per_chat' | 'shared' | 'singleton',
+    conversationKey: string,
+    options?: { excludeJobId?: number },
+  ): TurnRecoveryAdmissionState {
+    return this.turnRecovery.getTurnRecoveryAdmissionStateForScope(scope, conversationKey, options);
   }
 
   // ── Outbound ops ──
@@ -2366,6 +2595,8 @@ export class DurabilityEngine {
     checkpointId?: number,
     /** AS-04 turn correlation, captured at the single writer (registry.call). */
     correlation?: { logicalTurnId: string; inboundSeq: number | null } | null,
+    /** #3421 step 1: who made the call. Absent means the columns stay NULL. */
+    caller?: ToolCallCallerEvidence | null,
   ): number {
     const result = this.statements.recordToolCall.run(
       conversationKey,
@@ -2376,6 +2607,14 @@ export class DurabilityEngine {
       replayPolicy,
       correlation?.logicalTurnId ?? null,
       correlation?.inboundSeq ?? null,
+      caller?.transport ?? null,
+      caller?.connectionId ?? null,
+      caller?.clientName ?? null,
+      caller?.clientVersion ?? null,
+      caller?.tokenResult ?? null,
+      caller ? (caller.turnOwned ? 1 : 0) : null,
+      caller?.actorSource ?? null,
+      caller ? (caller.toolSensitive ? 1 : 0) : null,
     );
     const id = Number(result.lastInsertRowid);
     log.debug({ id, toolName, replayPolicy }, 'recordToolCall');
@@ -3206,7 +3445,16 @@ export class DurabilityEngine {
   /** Atomically finalize live echoed/no-reply strands and fail stale open turns. */
   sweepStuckInbound(): StuckInboundSweepResult {
     const reclaimedStaleRows: StaleReclaimedInbound[] = [];
-    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows);
+    // Bucket 5 is advisory and writes nothing, so it reads in its own snapshot
+    // before the mutating sweep instead of lengthening that transaction; the
+    // operator close path re-evaluates every row before it writes. The buckets
+    // are disjoint: buckets 1-3 require no terminal record, bucket 4 requires a
+    // `transferred_to_recovery_owner` record, and bucket 5 requires a final one.
+    const terminalRecordCloseCandidates = withTransaction(
+      this.db,
+      () => this.reportTerminalRecordCloseCandidates(),
+    );
+    const result = this.runSweepStuckInboundTransaction(reclaimedStaleRows, terminalRecordCloseCandidates);
     if (reclaimedStaleRows.length > 0 && this.staleInboundReclaimListener) {
       try {
         this.staleInboundReclaimListener(reclaimedStaleRows);
@@ -3219,6 +3467,7 @@ export class DurabilityEngine {
 
   private runSweepStuckInboundTransaction(
     reclaimedStaleRows: StaleReclaimedInbound[],
+    terminalRecordCloseCandidates: number,
   ): StuckInboundSweepResult {
     return withTransaction(this.db, () => {
       let completedEchoed = 0;
@@ -3244,7 +3493,9 @@ export class DurabilityEngine {
         staleOpen.length === 0 &&
         recoveryOwned.length === 0
       ) {
-        return { completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned };
+        return {
+          completedEchoed, completedTurnDone, failedStale, reclaimedRecoveryOwned, terminalRecordCloseCandidates,
+        };
       }
 
       const recovery = this.recoveryEvidence.startWithinTransaction(
@@ -3309,6 +3560,7 @@ export class DurabilityEngine {
         completedTurnDone,
         failedStale,
         reclaimedRecoveryOwned,
+        terminalRecordCloseCandidates,
       };
       const recoveryStats = createRecoveryStats(recovery);
       recoveryStats.openRecoveries = this.recoveryEvidence.countOpen();
@@ -3329,11 +3581,56 @@ export class DurabilityEngine {
     });
   }
 
+  /**
+   * Report-only: open inbound rows behind a final terminal record that an
+   * operator could close with `turn-recovery-operator close-inbound`. Each
+   * close is an operator decision, so the sweep writes nothing here — not the
+   * row, and no recovery evidence. Each call evaluates one bounded window of
+   * the scan cycle; a window whose rows were all refused is logged too, so a
+   * backlog of refused rows stays visible instead of reading as zero.
+   */
+  private reportTerminalRecordCloseCandidates(): number {
+    const startedAt = systemClock.now();
+    const scan = this.terminalRecordInboundCloser.scan();
+    if (scan.scanned > 0) {
+      const fields = {
+        count: scan.eligible.length,
+        // Bounded by scanCap; the old fixed window logged up to 200, so keep
+        // that and flag truncation instead of silently hiding later seqs.
+        inboundSeqs: scan.eligible.slice(0, 200),
+        inboundSeqsTruncated: scan.eligible.length > 200,
+        scanned: scan.scanned,
+        complete: scan.complete,
+        refusedByReason: scan.refusedByReason,
+        cycleUpperSeq: scan.cycleUpperSeq,
+        elapsedMs: systemClock.now() - startedAt,
+      };
+      if (scan.eligible.length > 0) {
+        log.warn(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record await operator close-inbound',
+        );
+      } else {
+        log.info(
+          fields,
+          'sweepStuckInbound: open inbound rows behind a final terminal record were all refused in this scan window',
+        );
+      }
+    }
+    return scan.eligible.length;
+  }
+
   getHealthStats(): {
     pendingOutbound: number;
     quarantinedOutbound: number;
     maybeSentOutbound: number;
     oldestMaybeSentAt: string | null;
+    deliveryAmbiguity: {
+      readable: true;
+      uncorroboratedAmbiguous: number;
+      corroboratedRetained: number;
+      oldestUncorroboratedAt: string | null;
+    };
     outboundFailureEvidence: OutboundFailureHealthProjection;
     outboundQuarantineDispositions: OutboundQuarantineDispositionHealthProjection;
     lastRecoveryAt: string | null;
@@ -3345,6 +3642,11 @@ export class DurabilityEngine {
     const oldestMaybeSent = this.statements.getOldestMaybeSentSubmittedAt.get() as
       | { at: string | null }
       | undefined;
+    const deliveryAmbiguity = this.statements.getMaybeSentDeliveryAmbiguityHealth.get() as {
+      uncorroborated_ambiguous: number;
+      corroborated_retained: number;
+      oldest_uncorroborated_at: string | null;
+    };
     const evidenceRows = this.statements.getRecentOutboundFailureEvidence.all() as Array<{
       status: string;
       error: string | null;
@@ -3452,6 +3754,12 @@ export class DurabilityEngine {
       quarantinedOutbound: quarantined.count,
       maybeSentOutbound: maybeSent.count,
       oldestMaybeSentAt: oldestMaybeSent?.at ?? null,
+      deliveryAmbiguity: {
+        readable: true,
+        uncorroboratedAmbiguous: deliveryAmbiguity.uncorroborated_ambiguous,
+        corroboratedRetained: deliveryAmbiguity.corroborated_retained,
+        oldestUncorroboratedAt: deliveryAmbiguity.oldest_uncorroborated_at,
+      },
       outboundFailureEvidence,
       outboundQuarantineDispositions,
       lastRecoveryAt: lastRecovery?.completed_at ?? null,

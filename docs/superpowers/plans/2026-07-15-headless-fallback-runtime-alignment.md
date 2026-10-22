@@ -11,6 +11,18 @@
 **Status:** source implementation start `Ready with Constraints`; source exit and fleet
 rollout remain `Not Ready`
 
+**Execution reconciliation (2026-10-06, `59cc562bc`):** the readiness statement
+above belongs to the original plan. Migration 45 is occupied; the current schema
+constant is in `src/core/database-schema-version.ts`. Reserve any new migration
+against the then-current registry. `opencode-execution-profile.ts` already exists;
+inspect its behavior and tests before treating Task 1 as new work. Configuration
+handlers moved from the `ops.ts` re-export shim to `src/fleet/routes/ops-config.ts`.
+The current `session-db.ts` scopes resumability through agent-session provider
+identity and deliberately keeps provider off checkpoints. Task 6's additional
+identity requirements remain requirements to reconcile, not proof that its
+proposed columns or acceptance criteria have shipped. Preserve the exact-row,
+ambiguous-row quarantine, credential and rollout constraints below.
+
 ---
 
 ## Global Constraints

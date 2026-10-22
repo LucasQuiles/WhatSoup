@@ -23,6 +23,7 @@ import { Database } from '../../src/core/database.ts';
 import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../helpers/resolved-tool-registry.ts';
 import { PresenceCache } from '../../src/transport/presence-cache.ts';
 import { registerAllTools } from '../../src/mcp/register-all.ts';
+import { IN_PROCESS_CALLER } from '../../src/mcp/caller-attribution.ts';
 import {
   bondActorLedger,
   resolveBondOwnerEvidence,
@@ -226,7 +227,29 @@ describe('S1 — logout records an actor receipt at the socket dispatch seam', (
     expect(evidence.status).toBe('consulted');
     if (evidence.status !== 'consulted') return;
     expect(evidence.bondRemovalRequest?.action).toBe('mcp_tool:logout');
-    expect(evidence.actorClass).toBe('operator');
+    // #3421: this session carries no caller attribution, so nothing shows the
+    // call came from the turn's own helper.
+    expect(evidence.actorClass).toBe('outside_caller');
+  });
+
+  it('#3421: labels a removal request from the turn\'s own helper turn_agent', async () => {
+    bondActorLedger.reset();
+    socketState.current = {
+      logout: async () => { throw new Error('socket disconnected after dispatch'); },
+    } as unknown as ExtendedBaileysSocket;
+    const registry = hostRealLogout();
+    registry.setSensitiveToolAuthorizer(() => true);
+
+    const res = await registry.call('logout', {}, { ...ADMIN, callerAttribution: IN_PROCESS_CALLER });
+
+    socketState.current = null;
+    expect(res.isError).toBe(true);
+    const evidence = resolveBondOwnerEvidence(bondActorLedger);
+    expect(evidence).toMatchObject({
+      status: 'consulted',
+      actorClass: 'turn_agent',
+      bondRemovalRequest: { action: 'mcp_tool:logout', route: 'mcp' },
+    });
   });
 
   it('does not let an ordinary tool call forge a removal request', async () => {

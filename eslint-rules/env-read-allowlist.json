@@ -88,8 +88,8 @@
     },
     {
       "file": "src/lib/bot-errors-outbox.ts",
-      "allowedUnmarkedSites": 19,
-      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). SAFE_SHAPE_CRED_PATH is config-published (#2192 slice 3b); the DIR/test/identity vars stay env-late (absence semantics feed vitest isolation + outbox provenance policy)."
+      "allowedUnmarkedSites": 18,
+      "reason": "outbox config group (BOT_ERRORS_*) + VITEST detection + TMPDIR (env-late by design: lib cannot import config, and config WRITES TMPDIR at load \u2014 the env var is the sanctioned lib-side channel). The DIR/test/identity vars stay env-late because their absence semantics feed vitest isolation and outbox provenance policy."
     },
     {
       "file": "src/lib/emit-alert.ts",
@@ -127,9 +127,14 @@
       "reason": "env-late by design (#2192 slice 3c): BOT_ERRORS_STATE_DIR absence selects the XDG default (absence load-bearing); XDG_DATA_HOME is OS-ambient; WHATSOUP_INSTANCE is deploy-injected identity (systemd/launchd), never set in src."
     },
     {
+      "file": "src/lib/redaction-text.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "BOT_ERRORS_SAFE_SHAPE_CRED_PATH is config-published (#2192 slice 3b); the shared redaction helper stays env-late because runtime and script consumers use it without importing the runtime config singleton."
+    },
+    {
       "file": "src/logger.ts",
-      "allowedUnmarkedSites": 3,
-      "reason": "bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST) \u2014 cannot import config (eval-order cycle)."
+      "allowedUnmarkedSites": 4,
+      "reason": "bootstrap-early logger (LOG_LEVEL/LOG_DIR/VITEST/WHATSOUP_LOG_STDOUT_SINK) \u2014 cannot import config (eval-order cycle)."
     },
     {
       "file": "src/main.ts",
@@ -165,6 +170,11 @@
       "file": "src/runtimes/agent/process-tree.ts",
       "allowedUnmarkedSites": 1,
       "reason": "Test-only destructive reset requires both Vitest identity and worker provenance before clearing live termination and row-authority safety fences."
+    },
+    {
+      "file": "src/runtimes/agent/host-work-admission.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "single injectable host-env seam: the opt-in predicate and helper lookup default to it; tests inject their own env."
     },
     {
       "file": "src/runtimes/agent/provider-canary-proof.ts",

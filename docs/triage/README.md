@@ -9,21 +9,39 @@ The canonical artifacts are:
 - `open-issue-registry.json`: the validated machine-readable evidence registry;
 - `open-issue-registry.md`: a byte-for-byte generated view of that registry;
 - `open-issue-review-ledger.jsonl`: an append-only, hash-linked mutation receipt;
-- `plans/*.json`: tracked, body-free mutation plans; and
+- `plans/*.json`: tracked, body-free mutation plans;
 - `reviews/*.json`: tracked review manifests that bind exact body-free evidence
-  records to one source registry and main revision; and
+  records to one source registry and main revision;
 - `snapshots/*.json`: bounded, field-projected live-inventory captures and
-  immutable reconciliation seals; and
+  immutable reconciliation seals;
 - `open-issue-priority-clusters-20260728.{json,md}`: the sealed, numeric-only
-  P0/P1 cluster inventory and its deterministic generated view.
+  P0/P1 cluster inventory and its deterministic generated view; and
+- `CLUSTER-*.md`: historical review catalogs, whose issue and PR statements
+  describe their recorded snapshot rather than current GitHub state.
 
 Every tracked plan or snapshot needs its own `PUBLIC` row in
 `docs/publication-audit.md` in the same commit. The publication guard rejects an
 unclassified path; wildcard prose here is not an audit classification.
 
-The registry and generated view are added only after one final live capture covers every
-open issue exactly once. Until then, the tooling is deliberately not wired into
-pre-commit, pre-push, or CI.
+The registry and generated view are present. Their sealed inventory is tied to
+the recorded source digest and revision; it is not a live issue list. Before
+using it for new decisions, perform the capture and reconciliation procedure
+below. Read the current hook/workflow source to establish gate wiring.
+
+## Historical cluster catalogs
+
+> **Triage catalog — not a closure record, and not a PR body.**
+> Authored as `draft(cluster)` PR bodies (#2763–#2781; all closed, **none merged**) and
+> committed verbatim by #2787 for their grouping and per-issue summaries. `Tracks #N` is a
+> reference, never a closing directive — the original `Closes` keyword bound only to the
+> issue immediately after it and asserted closure of work that is largely still open. The
+> original `All guards pass` line has been removed: no per-issue verification stands behind
+> it. Read the issues for real status.
+
+`Refs #N` has the same reference-only meaning as `Tracks #N`. Neither closes
+an issue or proves a fix. The per-cluster catalogs retain their original
+grouping, acceptance requirements, and issue summaries; this section owns their
+common scope and reading rules.
 
 ## Offline checks
 

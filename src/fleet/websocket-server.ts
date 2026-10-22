@@ -19,7 +19,7 @@ import { URL } from 'node:url';
 import { createChildLogger } from '../logger.ts';
 import type { TicketStore } from './ws-ticket.ts';
 import { errorMessage } from '../lib/error-message.ts';
-import { systemClock } from '../lib/clock.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 import type { RealtimePollerHealthSnapshot } from './realtime-event-poller.ts';
 
 const log = createChildLogger('fleet:ws');
@@ -126,6 +126,8 @@ export interface FleetWsLifecycleOptions {
   logThrottleMs?: number;
   /** Monotonic clock; injectable for deterministic tests. */
   monotonicNow?: () => number;
+  /** #2200: wall clock for the hello timestamp and broadcast emitted_at; defaults to systemClock. */
+  clock?: Clock;
 }
 
 /** Aggregate, bounded health projection — no identities, addresses, or payloads. */
@@ -166,6 +168,7 @@ export class FleetWebSocketServer {
   private readonly outcomeWindowMs: number;
   private readonly logThrottleMs: number;
   private readonly monotonicNow: () => number;
+  private readonly clock: Clock;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private lastHeartbeatAtMs: number | null = null;
   /** Stream identity (#2519 draft-1): a fresh generation per server instance, a
@@ -210,6 +213,7 @@ export class FleetWebSocketServer {
     this.outcomeWindowMs = options.outcomeWindowMs ?? 300_000;
     this.logThrottleMs = options.logThrottleMs ?? 30_000;
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.clock = options.clock ?? systemClock;
     this.outcomeWindowStartMs = this.monotonicNow();
     this.wss = new WebSocketServer({ noServer: true });
 
@@ -268,7 +272,7 @@ export class FleetWebSocketServer {
       ws.send(
         JSON.stringify({
           type: 'connected',
-          timestamp: Date.now(),
+          timestamp: this.clock.now(),
           schema_version: 1,
           stream_generation: this.streamGeneration,
           sequence: this.sequence,
@@ -359,7 +363,7 @@ export class FleetWebSocketServer {
       stream_generation: this.streamGeneration,
       sequence: this.sequence,
       durable_sequence: this.durableSequence,
-      emitted_at: systemClock.now(),
+      emitted_at: this.clock.now(),
     });
     this.recordOutcome('broadcast_attempted');
     for (const [client, record] of this.clients) {

@@ -23,6 +23,7 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { cleanGitEnv } from '../src/lib/git-env.ts';
+import { TEST_WORKER_LIMIT } from './lib/test-worker-limit.ts';
 
 export interface GateStep {
   readonly name: string;
@@ -86,11 +87,14 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/tmpdir-helper-migration.test.ts',
   'tests/scripts/grant-resolver-inventory-guard.test.ts',
   'tests/scripts/resolved-override-inventory-guard.test.ts',
+  'tests/scripts/source-inventory-enforcement.test.ts',
+  'tests/scripts/source-inventory-native-read.test.ts',
   'tests/scripts/ssot-pattern-guard.test.ts',
   'tests/scripts/ring-boundary-guard.test.ts',
   'tests/scripts/check-service-units.test.ts',
   'tests/scripts/check-insecure-tempfile.test.ts',
   'tests/scripts/check-zero-byte-tracked.test.ts',
+  'tests/scripts/sql-schema-guard.test.ts',
   'tests/scripts/check-provenance-references.test.ts',
   'tests/scripts/no-destructive-git-guard.test.ts',
   'tests/scripts/nonempty-string-ratchet.test.ts',
@@ -180,6 +184,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:service-units'),
   guard('guard:insecure-tempfile'),
   guard('guard:zero-byte-tracked'),
+  guard('guard:sql-schema'),
   guard('guard:no-destructive-git'),
   guard('guard:baseline-growth'),
   guard('guard:png-estate'),
@@ -191,7 +196,10 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:resolved-override'),
   guard('guard:instance-config'),
   guard('guard:process-tree-diagnostics'),
-  guard('guard:guard-test-coverage'),
+  step(
+    'guard:guard-test-coverage',
+    'npm run guard:guard-test-coverage -- --semantic-mode enforce',
+  ),
   guard('guard:lint:src'),
   step('typecheck:all', 'npm run typecheck:all'),
   step('typecheck:scripts', 'npm run typecheck:scripts'),
@@ -200,6 +208,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:design-system-hygiene'),
   guard('guard:harness-maintenance'),
   step('test:tokenomics', 'npm run test:tokenomics'),
+  step('test:deployment-qualification', 'npm run test:deployment-qualification'),
   step('console-lint', 'bash scripts/run-with-pinned-npm.sh --prefix console run lint'),
   step('console-build', 'bash scripts/run-with-pinned-npm.sh --prefix console run build'),
   step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh'),
@@ -231,6 +240,7 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   guard('guard:service-units'),
   guard('guard:insecure-tempfile'),
   guard('guard:zero-byte-tracked'),
+  guard('guard:sql-schema'),
   guard('guard:platform-patterns'),
   guard('guard:no-destructive-git'),
   guard('guard:catch-ratchet'),
@@ -238,9 +248,13 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   guard('guard:resolved-override'),
   guard('guard:instance-config'),
   guard('guard:process-tree-diagnostics'),
-  guard('guard:guard-test-coverage'),
+  step(
+    'guard:guard-test-coverage',
+    'npm run guard:guard-test-coverage -- --semantic-mode enforce',
+  ),
   guard('guard:lint:src'),
   step('test:tokenomics', 'npm run test:tokenomics'),
+  step('test:deployment-qualification', 'npm run test:deployment-qualification'),
   step('test:drills', 'npm run test:drills'),
   step('whatsoup-guard-ci', 'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard ci'),
   step('whatsoup-guard-typecheck', 'bash scripts/run-with-pinned-npm.sh --prefix tools/whatsoup_guard run typecheck'),
@@ -248,7 +262,7 @@ export const RELEASE_STEPS: readonly GateStep[] = [
   step('console-ci', 'bash scripts/run-with-pinned-npm.sh --prefix console ci'),
   step('console-lint', 'bash scripts/run-with-pinned-npm.sh --prefix console run lint'),
   step('typecheck:all', 'npm run typecheck:all'),
-  step('coverage:check', 'npm run coverage:check -- --pool=forks --fileParallelism=false'),
+  step('coverage:check', 'npm run coverage:check -- --pool=forks'),
   step('console-build', 'bash scripts/run-with-pinned-npm.sh --prefix console run build'),
   step('verify:console-design:live', 'npm run verify:console-design:live'),
   step('verify:console-browser', 'npm run verify:console-browser'),
@@ -290,10 +304,18 @@ export const CI_ONLY_GUARDS: ReadonlyArray<{ readonly name: string; readonly rea
  * Base is the repo's git-child allowlist (PATH/HOME/TMPDIR/XDG/…); WHATSOUP_*
  * vars pass through EXCEPT the neutralized skip-vars — which implements the
  * legacy `unset WHATSOUP_SKIP_*` preamble structurally rather than by
- * mutation: the skips simply never reach the children.
+ * mutation: the skips simply never reach the children. Vitest's worker-count
+ * setting may reduce the repository default so resource limits reach both lanes.
  */
 export function pushGateChildEnv(): NodeJS.ProcessEnv {
   const env = cleanGitEnv();
+  const workers = process.env.VITEST_MAX_WORKERS;
+  if (workers !== undefined) {
+    if (!/^[1-9]\d*$/.test(workers) || Number(workers) > TEST_WORKER_LIMIT) {
+      throw new Error(`VITEST_MAX_WORKERS must be an integer from 1 through ${TEST_WORKER_LIMIT}`);
+    }
+    env.VITEST_MAX_WORKERS = workers;
+  }
   for (const [key, value] of Object.entries(process.env)) {
     if (
       key.startsWith('WHATSOUP_')

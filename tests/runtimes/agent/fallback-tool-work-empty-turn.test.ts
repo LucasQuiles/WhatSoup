@@ -206,7 +206,7 @@ describe('fallback empty-turn suppression when turn had tool work', () => {
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(0);
     // Arming fallback emits exactly the activation alert — no fallback_empty_turn.
     expect(vi.mocked(emitAlert).mock.calls.map((c) => c[1])).toEqual(['provider_fallback_activated']);
-    expect(queue.enqueueText).not.toHaveBeenCalledWith(
+    expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('no reply'),
     );
   });
@@ -236,6 +236,7 @@ describe('fallback empty-turn suppression when turn had tool work', () => {
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
+      'status',
     );
   });
 
@@ -278,6 +279,7 @@ describe('fallback empty-turn suppression when turn had tool work', () => {
     expect(runtime.getFallbackState().fallbackTurnsEmpty).toBe(1);
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
+      'status',
     );
   });
 
@@ -332,6 +334,7 @@ describe('fallback empty-turn suppression when turn had tool work', () => {
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('no reply'),
+      'status',
     );
   });
 });

@@ -745,7 +745,41 @@ assert_in "affected_hosts: 13" "$CAPTURE" "D20a/D20e digest carries affected hos
 for host in MACLAB MWLAB mini1 mini2 mini3 mini4 mini5 mini6 mini7 mini8 mini9 mini10 mini11; do
   assert_in "$host" "$CAPTURE" "D20a/D20e digest names $host"
 done
-assert_in "storm_manifest:" "$CAPTURE" "D20a/D20e digest names manifest path"
+# #2387: the digest text no longer names the manifest path. The path is private
+# topology and nothing reads it programmatically, so it must not reach the
+# operator page. What ties the page to its window is the window identity, and it
+# reaches the operator through the incident key. The expected identity is built
+# from the manifest this same window wrote, so the drill never hard-codes a
+# fingerprint or a clock-derived window start.
+assert_not_in "storm_manifest:" "$CAPTURE" "D20a/D20e digest omits the manifest path"
+d20_window_identity="$(python3 - "$BOT_ERRORS_STATE_DIR/storm-manifests" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+manifests = sorted(Path(sys.argv[1]).glob("*.json"))
+if len(manifests) != 1:
+    raise SystemExit(f"expected exactly one storm manifest, found {len(manifests)}")
+record = json.loads(manifests[0].read_text(encoding="utf-8"))
+fingerprint = str(record["fingerprint"])
+window_start = record["windowStartEpoch"]
+# Shape-checked so a renamed or absent manifest field cannot degrade the
+# assertion below into a prefix match that any digest would satisfy.
+if not re.fullmatch(r"[0-9a-f]{16}", fingerprint):
+    raise SystemExit(f"manifest fingerprint is not a 16-hex digest: {fingerprint!r}")
+if not isinstance(window_start, int) or isinstance(window_start, bool):
+    raise SystemExit(f"manifest windowStartEpoch is not an integer: {window_start!r}")
+print(f"storm-{fingerprint}-{window_start}")
+PY
+)"
+if [ -z "$d20_window_identity" ]; then
+  fail "D20a/D20e window identity resolved from the manifest"
+else
+  pass "D20a/D20e window identity resolved from the manifest"
+  assert_in "incident_key: fleet|storm-collapse|storm-collapse.$d20_window_identity" "$CAPTURE" \
+    "D20a/D20e digest carries the window identity"
+fi
 assert_count "$BOT_ERRORS_STATE_DIR/storm-collapsed" "*.collapsed" 13 "D20a original storm events retained as collapsed evidence"
 assert_count "$BOT_ERRORS_STATE_DIR/storm-manifests" "*.json" 1 "D20a manifest written"
 assert_count "$BOT_ERRORS_STATE_DIR/sent" "*.sent" 1 "D20a digest sent once"
@@ -986,9 +1020,19 @@ for index, message in enumerate(messages, start=1):
         missing.append(">=2 evidence paths")
     if "BOT ERRORS storm collapse" in message:
         storm_messages += 1
-        for needle in ("> affected_hosts:", "> affected_host_list:", "> storm_manifest:"):
+        for needle in ("> affected_hosts:", "> affected_host_list:"):
             if needle not in message:
                 missing.append(needle)
+        # #2387: the manifest path left the digest text. The window identity in
+        # the incident key is what now ties the page to the window it collapsed,
+        # so the audit requires the identity and refuses the path.
+        if "> storm_manifest:" in message:
+            missing.append("no > storm_manifest: line")
+        if not re.search(
+            r"> incident_key: fleet\|storm-collapse\|storm-collapse\.storm-[0-9a-f]{16}-\d+",
+            message,
+        ):
+            missing.append("> incident_key: carrying the window identity")
     if missing:
         failures.append(f"message {index}: {', '.join(missing)}")
 if storm_messages < 1:

@@ -35,6 +35,70 @@ describe('HandoffDistillRunner', () => {
     expect(persisted).toHaveLength(0);
   });
 
+  it('reports success only after persistence, never for a concurrent skipped tick', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const events: string[] = [];
+    const { runner } = harness({
+      distillFor: async () => { await pending; return { summary: 's', tokensUsed: 1 }; },
+      persist: () => { events.push('persisted'); },
+      onSucceeded: (key) => { events.push(`succeeded:${key}`); },
+    });
+    const first = runner.tickConversation('c1');
+    await runner.tickConversation('c1');
+    expect(events).toEqual([]);
+    release();
+    await first;
+    expect(events).toEqual(['persisted', 'succeeded:c1']);
+  });
+
+  it('suppresses an invalidated in-flight distill before it can persist or report success', async () => {
+    let resolve!: (outcome: { summary: string; seededArtifacts: null; tokensUsed: number }) => void;
+    const pending = new Promise<{ summary: string; seededArtifacts: null; tokensUsed: number }>((release) => {
+      resolve = release;
+    });
+    const persist = vi.fn();
+    const onSucceeded = vi.fn();
+    const { runner } = harness({ distillFor: () => pending, persist, onSucceeded });
+
+    const tick = runner.tickConversation('cleared-conversation');
+    runner.invalidateConversation('cleared-conversation');
+    resolve({ summary: 'stale summary', seededArtifacts: null, tokensUsed: 1 });
+    await tick;
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(onSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('treats invalidation during a failed distill as benign and suppresses degradation', async () => {
+    let reject!: (reason: Error) => void;
+    const pending = new Promise<never>((_resolve, fail) => { reject = fail; });
+    const onDegraded = vi.fn();
+    const onSucceeded = vi.fn();
+    const { runner, persisted } = harness({ distillFor: () => pending, onDegraded, onSucceeded });
+
+    const tick = runner.tickConversation('revoked-conversation');
+    runner.invalidateConversation('revoked-conversation');
+    reject(new Error('request canceled by revoke'));
+    await tick;
+
+    expect(persisted).toEqual([]);
+    expect(onDegraded).not.toHaveBeenCalled();
+    expect(onSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('does not report success when a failed attempt exhausts the call budget', async () => {
+    const onSucceeded = vi.fn();
+    const distillFor = vi.fn().mockRejectedValueOnce(new Error('provider unavailable'))
+      .mockResolvedValue({ summary: 's', tokensUsed: 1 });
+    const { runner, persisted } = harness({ config: { ...config, maxCallsPerWindow: 1 }, distillFor, onSucceeded });
+    await runner.tickConversation('c1');
+    await runner.tickConversation('c1');
+    expect(distillFor).toHaveBeenCalledTimes(1);
+    expect(persisted).toEqual([]);
+    expect(onSucceeded).not.toHaveBeenCalled();
+  });
+
   it('prune() forgets gate state so a no-longer-active conversation distills fresh', async () => {
     // Budget of 1 call/window: after one distill the conversation is gated off.
     const { runner, persisted } = harness({ config: { ...config, maxCallsPerWindow: 1 } });

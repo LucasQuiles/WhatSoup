@@ -1,6 +1,8 @@
 # Console Truthful Session, Update, and Send UX Implementation Plan
 
-**Status:** Pending implementation
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Implementation is mixed. `ConsoleLockedError` already exists in `console/src/lib/api.ts`, which alone does not close Task 5. The current `TransportStatus` union in `console/src/hooks/use-transport-status.ts` has connected/reconnecting/offline; the proposed healthy polling state remains a requirement, not implemented behavior. Preserve all draft retention, ambiguous-send, positive restart proof and shared session-owner requirements. Current auth operation is documented in `docs/console-guide.md`.
+
+**Status:** Mixed implementation; see the source reconciliation above. Open acceptance criteria remain pending.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

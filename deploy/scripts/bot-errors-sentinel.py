@@ -34,7 +34,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from lib.bot_errors_roster import RosterError, load_roster, roster_epoch  # noqa: E402
+from lib.bot_errors_roster import RosterError, default_roster_path, load_roster, roster_epoch  # noqa: E402
 from lib.durable_json import (  # noqa: E402
     JsonVersion,
     durable_json_target,
@@ -253,7 +253,8 @@ def finite_float(value: object) -> Optional[float]:
 
 
 def default_hosts_path() -> Path:
-    return Path(os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HOSTS", REPO_ROOT / "deploy" / "bot-errors-expected-fleet.json"))
+    """Roster path from ``lib.fleet_config`` (env, private, tracked); raises RosterError when none exists."""
+    return default_roster_path()
 
 
 def positive_int_env(name: str, default: int, minimum: int = 0) -> int:
@@ -2755,7 +2756,8 @@ def run_once(config: SentinelConfig, deps: Optional[SentinelDeps] = None) -> dic
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate BOT ERRORS Fleet Runtime Sentinel state")
-    parser.add_argument("--hosts", default=str(default_hosts_path()))
+    # None = resolve in main(), where a missing roster fails with one message.
+    parser.add_argument("--hosts", default=None)
     parser.add_argument("--state-dir", default=str(sentinel_state_root()))
     parser.add_argument(
         "--redeem-token",
@@ -2832,6 +2834,15 @@ def run_redeem(config: SentinelConfig, request_id: str, token: str) -> dict:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.hosts is None:
+        try:
+            # Resolve and read once up front so a missing or unreadable roster
+            # fails naming the resolver order, before any lock or state effect.
+            load_roster()
+            args.hosts = str(default_hosts_path())
+        except RosterError as exc:
+            print(f"bot-errors-sentinel: fail-closed: {exc}", file=sys.stderr)
+            return 2
     config = default_config(Path(args.hosts).expanduser(), Path(args.state_dir).expanduser())
     redeem_requested = args.redeem_token is not None or args.redeem_request_id is not None
     if redeem_requested and (args.redeem_token is None or args.redeem_request_id is None):

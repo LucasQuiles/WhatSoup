@@ -1215,9 +1215,11 @@ describe('atomic linked turn recovery jobs', () => {
       completion_kind: 'worker',
       echo_conflict_at: expect.any(String),
     });
+    // The conflict stays as durable evidence on the row, but a completed job
+    // is not live recovery work, so it no longer raises health.
     expect(durability.getTurnRecoverySupervisorCounts()).toMatchObject({
       outstanding: 0,
-      echoConflicts: 1,
+      echoConflicts: 0,
     });
   });
 

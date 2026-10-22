@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   OutboundFloodDetector,
   OUTBOUND_FLOOD_WINDOW_MS,
@@ -165,6 +165,75 @@ describe('OutboundFloodDetector — edge-triggered trip dedup (T3.1)', () => {
     // surfaces, so the seam's guard is load-bearing (see connection.ts
     // countOutboundSend). This pins the contract the seam relies on.
     expect(() => d.record('a@s.whatsapp.net', 0)).toThrow('resolver blew up');
+  });
+});
+
+// Base takes the threshold option as given and decides by `count >= threshold`.
+// A threshold that is not a whole number of at least 1 must keep that verdict
+// and its one trip alert: record() must not throw, because the seam swallows
+// the error and the alert would be lost. The hold runs from the counted send
+// whose rank from the newest is the smallest whole count, at least 1, that
+// meets the threshold. The fake timers move the wall and monotonic clocks
+// together; each hold runs the window plus a 3 s drift extension.
+describe('OutboundFloodDetector — a threshold that is not a whole number of at least 1', () => {
+  const FLOOD_HOLD_WINDOW_MS = OUTBOUND_FLOOD_WINDOW_MS + 3_000;
+  const dest = '15551230000@s.whatsapp.net';
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('a threshold of 2.5 floods and trips at the third send, held from the third-newest', () => {
+    const d = new OutboundFloodDetector({ threshold: 2.5 });
+    const startMs = performance.now();
+    const results: Array<{ flooding: boolean; tripped: boolean }> = [];
+    for (let sent = 0; sent < 4; sent += 1) {
+      if (sent > 0) vi.advanceTimersByTime(1_000);
+      const { flooding, tripped } = d.record(dest);
+      results.push({ flooding, tripped });
+    }
+    expect(results).toEqual([
+      { flooding: false, tripped: false },
+      { flooding: false, tripped: false },
+      { flooding: true, tripped: true },
+      { flooding: true, tripped: false },
+    ]);
+    expect(d.isFlooding(dest)).toBe(true);
+    // The fourth send makes the second send (at 1 s) the third-newest.
+    const heldUntilMs = startMs + 1_000 + FLOOD_HOLD_WINDOW_MS;
+    vi.advanceTimersByTime(heldUntilMs + 1 - performance.now());
+    expect(d.stats().lastFloodingMonotonicMs).toBe(heldUntilMs);
+  });
+
+  it('a threshold of 0 floods and trips at the first send, held from the newest', () => {
+    const d = new OutboundFloodDetector({ threshold: 0 });
+    const startMs = performance.now();
+    expect(d.record(dest)).toMatchObject({ flooding: true, tripped: true, count: 1 });
+    vi.advanceTimersByTime(1_000);
+    expect(d.record(dest)).toMatchObject({ flooding: true, tripped: false, count: 2 });
+    expect(d.stats().threshold).toBe(0);
+    const heldUntilMs = startMs + 1_000 + FLOOD_HOLD_WINDOW_MS;
+    vi.advanceTimersByTime(heldUntilMs + 1 - performance.now());
+    expect(d.stats().lastFloodingMonotonicMs).toBe(heldUntilMs);
+  });
+
+  it('a threshold of -Infinity floods and trips at the first send, held from the newest', () => {
+    const d = new OutboundFloodDetector({ threshold: Number.NEGATIVE_INFINITY });
+    const startMs = performance.now();
+    expect(d.record(dest)).toMatchObject({ flooding: true, tripped: true, count: 1 });
+    vi.advanceTimersByTime(FLOOD_HOLD_WINDOW_MS + 1);
+    expect(d.stats().lastFloodingMonotonicMs).toBe(startMs + FLOOD_HOLD_WINDOW_MS);
+  });
+
+  it('a NaN or +Infinity threshold never floods, as base counts', () => {
+    const nan = new OutboundFloodDetector({ threshold: Number.NaN });
+    const infinite = new OutboundFloodDetector({ threshold: Number.POSITIVE_INFINITY });
+    for (let sent = 0; sent < OUTBOUND_FLOOD_THRESHOLD; sent += 1) {
+      if (sent > 0) vi.advanceTimersByTime(1_000);
+      expect(nan.record(dest)).toMatchObject({ flooding: false, tripped: false, count: sent + 1 });
+      expect(infinite.record(dest)).toMatchObject({ flooding: false, tripped: false, count: sent + 1 });
+    }
+    expect(nan.stats().lastFloodingMonotonicMs).toBeNull();
+    expect(infinite.stats().lastFloodingMonotonicMs).toBeNull();
   });
 });
 

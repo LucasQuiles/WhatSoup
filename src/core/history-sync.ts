@@ -49,8 +49,12 @@ export interface HistorySyncStats {
   upgraded: number;
   /** Envelope-only rows written because Baileys did not deliver a body. */
   placeholders: number;
-  /** Rows not written — missing key fields, null parse, or per-message exceptions. */
+  /** Rows not written because the message itself was unusable — missing key fields or null parse. */
   skipped: number;
+  /** Messages whose row already existed at a real content_type; nothing to write. */
+  noop: number;
+  /** Messages whose store threw. Distinct from `skipped`: these were usable and may be lost. */
+  failed: number;
 }
 
 /**
@@ -242,7 +246,7 @@ export function processHistoryBatch(
   messages: readonly HistoryInput[],
   log?: Logger,
 ): HistorySyncStats {
-  const stats: HistorySyncStats = { inserted: 0, upgraded: 0, placeholders: 0, skipped: 0 };
+  const stats: HistorySyncStats = { inserted: 0, upgraded: 0, placeholders: 0, skipped: 0, noop: 0, failed: 0 };
   // Semantic guardrail: prepareStatements runs BEFORE withTransaction opens
   // BEGIN. A statement-prepare failure (e.g. schema mismatch) therefore
   // propagates without leaving a transaction open — matching the prior
@@ -259,11 +263,11 @@ export function processHistoryBatch(
           case 'placeholder': stats.placeholders++; break;
           case 'skipped_no_key':
           case 'skipped_null_parse': stats.skipped++; break;
-          case 'noop': break;
+          case 'noop': stats.noop++; break;
         }
       } catch (err) {
         log?.error({ err }, 'historyMessages: failed to store message');
-        stats.skipped++;
+        stats.failed++;
       }
     }
   });

@@ -1,11 +1,16 @@
 # WhatSoup Env-Secret Exposure — Implementation Kickoff
 
 **Companion to:** [`2026-05-09-env-secret-exposure.md`](2026-05-09-env-secret-exposure.md) (the finding)
-**Status:** pending — awaiting implementation
+**Status:** implementation and deployment status are maintained in the companion
+finding's [Phase Status table](2026-05-09-env-secret-exposure.md#phase-status).
 **Owner:** WhatSoup application/runtime
 **Discovered:** 2026-05-09
 
-The companion finding doc has the **what** and the **why**. This doc has the **how** — a phased non-destructive migration with constraints, current repo state, anti-patterns, and acceptance criteria. Read this entire doc before starting Phase A.
+The companion finding doc has the **what**, **why**, and current phase status.
+This kickoff retains the **how**: migration constraints, anti-patterns and
+acceptance criteria. Its repository observations, line numbers and changelog are
+dated kickoff evidence, not a current implementation inventory. Check the phase
+table before starting or repeating work; preserve all acceptance constraints.
 
 ---
 

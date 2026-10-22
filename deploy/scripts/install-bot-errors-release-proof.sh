@@ -39,6 +39,12 @@ INSTALL_STATE_DIR="${RELEASE_PROOF_INSTALL_STATE_DIR:-$HOME_DIR/.local/state/wha
 RECEIPT_PARENT="$INSTALL_STATE_DIR/receipts"
 INSTALL_LOCK="$INSTALL_STATE_DIR/install.lock"
 
+# The bundle is a closed file set: verify_materialized_bundle refuses an installed tree
+# whose file list differs from this array at all, and the units run the entry points out
+# of that tree. So this array has to carry the TRANSITIVE closure of the library modules
+# the entry points import, not just the ones they name directly -- a module left out is a
+# producer that dies at import on every timer fire, not a missing feature. The closure is
+# asserted from the sources in tests/scripts/bot-errors-release-proof-installer.test.ts.
 BUNDLE_FILES=(
   "deploy/scripts/bot-errors-release-proof-run.sh"
   "deploy/scripts/bot-errors-tree-provenance.py"
@@ -47,6 +53,10 @@ BUNDLE_FILES=(
   "deploy/scripts/lib/__init__.py"
   "deploy/scripts/lib/bot_errors_envelope.py"
   "deploy/scripts/lib/bot_errors_redaction.py"
+  "deploy/scripts/lib/durable_json.py"
+  "deploy/scripts/lib/producer_cadence_receipt.py"
+  "deploy/scripts/lib/state_files.py"
+  "deploy/scripts/lib/state_root.py"
 )
 UNIT_FILES=(
   "bot-errors-tree-provenance.service"

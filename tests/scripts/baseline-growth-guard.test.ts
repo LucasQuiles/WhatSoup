@@ -11,9 +11,20 @@
  * revision resolution, weighing, and comparison are all the production code path.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
@@ -75,6 +86,31 @@ function runGuard(args: string[]): { status: number | null; out: string } {
     { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 },
   );
   return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+/** Test fixtures must not let PATH lookup or a stalled helper hang the suite. */
+function makeFifo(path: string): void {
+  execFileSync('/usr/bin/mkfifo', [path], { timeout: 1_000 });
+}
+
+/** Inject faults explicitly without relying on production environment inheritance. */
+function withReaderHook(hook: string): string[] {
+  const parent = join(tmp.make('reader-parent-instrumentation'), 'parent.mjs');
+  const reader = resolve(repoRoot, 'scripts/lib/ci-control/working-document-reader.ts');
+  const hookUrl = pathToFileURL(hook).href;
+  writeFileSync(parent, `import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import ${JSON.stringify(hookUrl)};
+const spawn = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  const index = args?.indexOf(${JSON.stringify(reader)}) ?? -1;
+  const instrumented = index < 0 ? args
+    : [...args.slice(0, index), '--import', ${JSON.stringify(hookUrl)}, ...args.slice(index)];
+  return spawn(command, instrumented, options);
+};
+syncBuiltinESMExports();
+`);
+  return ['--import', parent, '--experimental-strip-types', guard];
 }
 
 describe('baseline growth guard — the red proof', () => {
@@ -144,7 +180,7 @@ describe('baseline growth guard — the red proof', () => {
     expect(status, out).toBe(1);
     expect(out).toMatch(/boundary-baseline\.json/);
     expect(out).toMatch(/new|identity|subset/i);
-  });
+  }, 120_000);
 
   it('is INCONCLUSIVE (exit 2), never a pass, when the baseline becomes unparseable', () => {
     // A truncated/corrupt baseline weighs as nothing. Since shrinking is allowed, treating
@@ -217,7 +253,7 @@ describe('baseline growth guard — the red proof', () => {
     expect(status, out).toBe(1);
     expect(out).toMatch(/catch-ratchet-baseline\.json/);
     expect(out).toMatch(/127 -> 128/);
-  });
+  }, 120_000);
 
   it('permits an introduced baseline at or below its audited initial ceiling', () => {
     const dir = makeRepo(2);
@@ -286,7 +322,8 @@ describe('the guard runs clean on this branch', () => {
   });
 });
 
-describe('growth waivers — the reviewed-widening escape valve, fail-closed', () => {
+// Fixture setup and parent startup are outside the separately asserted reader deadline.
+describe('growth waivers — the reviewed-widening escape valve, fail-closed', { timeout: 120_000 }, () => {
   // Waiver fixtures use pinned dates far from the wall clock so expiry logic is
   // deterministic: an "active" waiver expires 2199-01-01, an "expired" one 2020-01-01.
   function writeFitness(dir: string, maxLines: number): void {
@@ -306,7 +343,9 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
   function writeWaivers(dir: string, waiver: Record<string, unknown>): void {
     writeFileSync(
       join(dir, '.claude/fitness/growth-waivers.json'),
-      `${JSON.stringify({ schemaVersion: 1, waivers: [waiver] }, null, 2)}\n`,
+      `${JSON.stringify(waiver.expectedBaselineSha256 === undefined
+        ? { schemaVersion: 1, waivers: [waiver] }
+        : { schemaVersion: 2, grants: [waiver] }, null, 2)}\n`,
     );
   }
 
@@ -317,6 +356,791 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     issue: 'https://example.invalid/issues/1',
     grantedAt: '2020-01-01',
     expiresAt: '2199-01-01',
+  });
+
+  it('rejects an impossible calendar date instead of granting base authority', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const reviewed = readFileSync(join(dir, '.claude/fitness/baseline.json'));
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256, expiresAt: '2199-02-29' });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'invalid calendar authority']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(dir, GROWTH_WAIVERS_PATH), JSON.stringify({ schemaVersion: 2, grants: [] }));
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'), reviewed);
+    const result = runGuard(['--repo', dir, '--base', base]);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toMatch(/expiresAt.*ISO date/);
+    expect(result.out).not.toMatch(/WAIVED/);
+  });
+
+  it('binds a numeric waiver to exact reviewed baseline bytes, including pinned candidates', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const reviewed = readFileSync(join(dir, '.claude/fitness/baseline.json'));
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant exact baseline growth']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'), reviewed);
+    const accepted = runGuard(['--repo', dir, '--base', base]);
+    expect(accepted.status, accepted.out).toBe(0);
+    expect(accepted.out).toMatch(/WAIVED/);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'reviewed growth']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const pinned = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(pinned.status, pinned.out).toBe(0);
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'),
+      reviewed.toString().replace('src/big.ts', 'src/unreviewed.ts'));
+    const substituted = runGuard(['--repo', dir, '--base', base]);
+    expect(substituted.status, substituted.out).toBe(1);
+    expect(substituted.out).not.toMatch(/WAIVED/);
+  });
+
+  it('rejects malformed candidate waiver constraints without granting candidate authority', () => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const reviewed = readFileSync(join(dir, '.claude/fitness/baseline.json'));
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant exact baseline growth']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(dir, '.claude/fitness/baseline.json'), reviewed);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256: 'not-a-sha256' });
+    const working = runGuard(['--repo', dir, '--base', base]);
+    expect(working.status, working.out).toBe(2);
+    expect(working.out).toMatch(/candidate.*waiver|waiver.*candidate/i);
+    expect(working.out).not.toMatch(/WAIVED/);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'malformed candidate authority']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    const pinned = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(pinned.status, pinned.out).toBe(2);
+    expect(pinned.out).not.toMatch(/WAIVED/);
+  });
+
+  it.each(['symlink', 'dangling-symlink', 'directory', 'fifo', 'oversized', 'parent-symlink'])(
+    'refuses an unsafe working-tree waiver (%s) without waiting on its contents', (kind) => {
+      const dir = makeRepo(2);
+      const path = join(dir, GROWTH_WAIVERS_PATH);
+      const outside = tmp.make('waiver-outside');
+      const valid = JSON.stringify({ schemaVersion: 2, grants: [] });
+      if (kind === 'symlink') {
+        writeFileSync(join(outside, 'authority.json'), valid);
+        symlinkSync(join(outside, 'authority.json'), path);
+      } else if (kind === 'dangling-symlink') {
+        symlinkSync(join(outside, 'missing.json'), path);
+      } else if (kind === 'directory') {
+        mkdirSync(path);
+      } else if (kind === 'fifo') {
+        makeFifo(path);
+      } else if (kind === 'oversized') {
+        writeFileSync(path, valid + ' '.repeat(4 * 1024 * 1024));
+      } else {
+        writeFileSync(path, valid);
+        renameSync(join(dir, '.claude/fitness'), join(outside, 'fitness'));
+        symlinkSync(join(outside, 'fitness'), join(dir, '.claude/fitness'));
+      }
+      const result = spawnSync(process.execPath,
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(result.stderr).toMatch(/candidate.*waiver.*invalid/i);
+    },
+  );
+
+  it.each(['after-parent-stat', 'after-read'])(
+    'refuses a working-tree waiver parent replaced %s', (when) => {
+      const dir = makeRepo(2);
+      const parent = join(dir, '.claude/fitness');
+      const outside = tmp.make('waiver-parent-race');
+      const valid = JSON.stringify({ schemaVersion: 2, grants: [] });
+      writeFileSync(join(dir, GROWTH_WAIVERS_PATH), when === 'after-parent-stat' ? '{invalid' : valid);
+      writeFileSync(join(outside, 'growth-waivers.json'), valid);
+      writeFileSync(join(outside, 'boundary-baseline.json'), readFileSync(join(parent, 'boundary-baseline.json')));
+      const hook = join(tmp.make('waiver-race-hook'), 'hook.mjs');
+      writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const leaf = fs.statSync(${JSON.stringify(join(dir, GROWTH_WAIVERS_PATH))});
+let swapped = false;
+const swap = () => {
+  if (swapped) return;
+  swapped = true;
+  fs.renameSync(${JSON.stringify(parent)}, ${JSON.stringify(join(dir, 'original-fitness'))});
+  fs.symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(parent)});
+};
+const stat = fs.lstatSync;
+fs.lstatSync = (path, ...args) => {
+  const observed = stat(path, ...args);
+  if (${JSON.stringify(when)} === 'after-parent-stat' && path === ${JSON.stringify(parent)}) swap();
+  return observed;
+};
+const read = fs.readSync;
+fs.readSync = (...args) => {
+  const count = read(...args);
+  if (${JSON.stringify(when)} === 'after-read' && count > 0 && fs.fstatSync(args[0]).ino === leaf.ino) swap();
+  return count;
+};
+syncBuiltinESMExports();
+`);
+
+      const result = spawnSync(process.execPath,
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(result.stderr).toMatch(/candidate.*waiver.*invalid.*parent/i);
+    },
+  );
+
+  it.each(['symlink', 'dangling-symlink', 'directory', 'fifo', 'oversized', 'executable', 'parent-symlink'])(
+    'refuses an unsafe working-tree baseline (%s) without waiting on its contents', (kind) => {
+      const dir = makeRepo(2);
+      const parent = join(dir, '.claude/test-integrity');
+      const path = join(parent, 'baseline.json');
+      const outside = tmp.make('baseline-outside');
+      const valid = JSON.stringify({ findings: [] });
+      mkdirSync(parent);
+      writeFileSync(path, valid);
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'baseline fixture']);
+      if (kind === 'parent-symlink') {
+        renameSync(parent, join(outside, 'integrity'));
+        symlinkSync(join(outside, 'integrity'), parent);
+      } else {
+        renameSync(path, join(outside, 'original.json'));
+        if (kind === 'symlink') {
+          symlinkSync(join(outside, 'original.json'), path);
+        } else if (kind === 'dangling-symlink') {
+          symlinkSync(join(outside, 'missing.json'), path);
+        } else if (kind === 'directory') {
+          mkdirSync(path);
+        } else if (kind === 'fifo') {
+          makeFifo(path);
+        } else {
+          writeFileSync(path, valid + (kind === 'oversized' ? ' '.repeat(4 * 1024 * 1024) : ''));
+          if (kind === 'executable') chmodSync(path, 0o755);
+        }
+      }
+      const result = spawnSync(process.execPath,
+        ['--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
+    },
+  );
+
+  it('uses one bounded reader helper for the working-document set', () => {
+    const dir = makeRepo(2);
+    const parent = join(dir, '.claude/test-integrity');
+    const path = join(parent, 'baseline.json');
+    const outside = tmp.make('baseline-startup-outside');
+    mkdirSync(parent);
+    writeFileSync(path, JSON.stringify({ findings: [] }));
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'baseline fixture']);
+    renameSync(path, join(outside, 'original.json'));
+    symlinkSync(join(outside, 'original.json'), path);
+    const marker = join(tmp.make('reader-startup-marker'), 'pids');
+    const hook = join(tmp.make('reader-startup-delay-hook'), 'hook.mjs');
+    writeFileSync(hook, `import { appendFileSync } from 'node:fs';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  appendFileSync(${JSON.stringify(marker)}, \`${'${process.pid}'}\\n\`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 180);
+}
+`);
+
+    const result = spawnSync(process.execPath,
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
+    expect(readFileSync(marker, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  it('does not inherit a child loader that substitutes clean working-document frames', () => {
+    const dir = makeRepo(2);
+    const baseline = '.claude/fitness/boundary-baseline.json';
+    const clean = readFileSync(join(dir, baseline), 'utf8');
+    writeBoundary(dir, 3);
+    const fixture = tmp.make('reader-environment');
+    const marker = join(fixture, 'loader-ran');
+    const loader = join(fixture, 'loader.mjs');
+    writeFileSync(loader, `import fs from 'node:fs';
+import { resolve } from 'node:path';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  fs.writeFileSync(${JSON.stringify(marker)}, 'inherited loader');
+  for (const path of process.argv.slice(3)) {
+    let bytes = null;
+    try {
+      bytes = path === ${JSON.stringify(baseline)}
+        ? Buffer.from(${JSON.stringify(clean)})
+        : fs.readFileSync(resolve(process.argv[2], path));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const header = Buffer.alloc(5);
+    header[0] = bytes === null ? 0 : 1;
+    header.writeUInt32BE(bytes?.length ?? 0, 1);
+    fs.writeSync(1, header);
+    if (bytes !== null) fs.writeSync(1, bytes);
+  }
+  process.exit(0);
+}
+`);
+    const setup = join(fixture, 'parent.mjs');
+    // Set the option after parent startup; only an inheriting child loads it.
+    writeFileSync(setup, `process.env.NODE_OPTIONS = ${JSON.stringify(`--import=${loader}`)};\n`);
+    const result = spawnSync(process.execPath,
+      ['--import', setup, '--experimental-strip-types', guard, '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(1);
+    expect(existsSync(marker)).toBe(false);
+    expect(JSON.parse(readFileSync(join(dir, baseline), 'utf8'))).toHaveLength(3);
+  });
+
+  it.each(['before-open', 'after-read'])(
+    'refuses a working-tree baseline parent replaced %s', (when) => {
+      const dir = makeRepo(2);
+      const parent = join(dir, '.claude/test-integrity');
+      const path = join(parent, 'baseline.json');
+      const outside = tmp.make('baseline-parent-race');
+      const valid = JSON.stringify({ findings: [] });
+      mkdirSync(parent);
+      writeFileSync(path, valid);
+      writeFileSync(join(outside, 'baseline.json'), valid);
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'baseline fixture']);
+      const hook = join(tmp.make('baseline-race-hook'), 'hook.mjs');
+      writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const target = ${JSON.stringify(path)};
+const leaf = fs.statSync(target);
+let swapped = false;
+const swap = () => {
+  if (swapped) return;
+  swapped = true;
+  fs.renameSync(${JSON.stringify(parent)}, ${JSON.stringify(join(dir, 'original-integrity'))});
+  fs.symlinkSync(${JSON.stringify(outside)}, ${JSON.stringify(parent)});
+};
+const open = fs.openSync;
+fs.openSync = (path, ...args) => {
+  if (${JSON.stringify(when)} === 'before-open' && path === target) swap();
+  return open(path, ...args);
+};
+const readFile = fs.readFileSync;
+fs.readFileSync = (path, ...args) => {
+  if (${JSON.stringify(when)} === 'before-open' && path === target) swap();
+  const bytes = readFile(path, ...args);
+  if (${JSON.stringify(when)} === 'after-read' && path === target) swap();
+  return bytes;
+};
+const read = fs.readSync;
+fs.readSync = (...args) => {
+  const count = read(...args);
+  if (${JSON.stringify(when)} === 'after-read' && count > 0 && fs.fstatSync(args[0]).ino === leaf.ino) swap();
+  return count;
+};
+syncBuiltinESMExports();
+`);
+
+      const result = spawnSync(process.execPath,
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/baseline/);
+    },
+  );
+
+  it.each(['after-open', 'after-final-stat'].flatMap((when) =>
+    ['regular', 'symlink', 'missing'].map((kind) => [when, kind]),
+  ))('refuses a working-tree baseline leaf replaced %s with %s', (when, kind) => {
+    const dir = makeRepo(2);
+    const path = join(dir, '.claude/fitness/boundary-baseline.json');
+    const original = readFileSync(path, 'utf8');
+    writeBoundary(dir, 3);
+    const replacement = readFileSync(path, 'utf8');
+    writeFileSync(path, original);
+    const hookDir = tmp.make('baseline-leaf-race');
+    const hook = join(hookDir, 'hook.mjs');
+    const marker = join(hookDir, 'mutation');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  const target = ${JSON.stringify(path)};
+  const leaf = fs.statSync(target);
+  let swapped = false;
+  let observations = 0;
+  const swap = () => {
+    if (swapped) return;
+    swapped = true;
+    fs.renameSync(target, ${JSON.stringify(join(hookDir, 'opened-baseline.json'))});
+    if (${JSON.stringify(kind)} === 'regular') fs.writeFileSync(target, ${JSON.stringify(replacement)});
+    if (${JSON.stringify(kind)} === 'symlink') fs.symlinkSync(${JSON.stringify(join(hookDir, 'opened-baseline.json'))}, target);
+    fs.writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(when)});
+  };
+  const open = fs.openSync;
+  fs.openSync = (path, ...args) => {
+    const fd = open(path, ...args);
+    if (${JSON.stringify(when)} === 'after-open' && path === target) swap();
+    return fd;
+  };
+  const stat = fs.fstatSync;
+  fs.fstatSync = (fd, ...args) => {
+    const observed = stat(fd, ...args);
+    if (observed.ino === leaf.ino && observed.dev === leaf.dev && ++observations === 2
+        && ${JSON.stringify(when)} === 'after-final-stat') swap();
+    return observed;
+  };
+  syncBuiltinESMExports();
+}
+`);
+
+    const result = spawnSync(process.execPath,
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(readFileSync(marker, 'utf8')).toBe(when);
+    if (kind === 'regular') {
+      expect(readFileSync(path, 'utf8')).toBe(replacement);
+      expect(runGuard(['--repo', dir, '--base', 'HEAD']).status).toBe(1);
+    }
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/baseline.*invalid/i);
+  });
+
+  it.each(['actual', 'unchanged'])(
+    'refuses a working-tree baseline mode change with %s timestamps', (timestamps) => {
+      const dir = makeRepo(2);
+      const path = join(dir, '.claude/fitness/boundary-baseline.json');
+      const hookDir = tmp.make('baseline-mode-race');
+      const hook = join(hookDir, 'hook.mjs');
+      const marker = join(hookDir, 'mutation');
+      writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  const target = ${JSON.stringify(path)};
+  const stat = fs.fstatSync;
+  const lstat = fs.lstatSync;
+  const leaf = lstat(target);
+  let changed = false;
+  const isTarget = (observed) => observed.ino === leaf.ino && observed.dev === leaf.dev;
+  const observe = (observed) => {
+    // Simulate a filesystem whose timestamp resolution hides this status change.
+    if (changed && isTarget(observed) && ${JSON.stringify(timestamps)} === 'unchanged') {
+      observed.mtimeMs = leaf.mtimeMs;
+      observed.ctimeMs = leaf.ctimeMs;
+    }
+    return observed;
+  };
+  fs.fstatSync = (fd, ...args) => observe(stat(fd, ...args));
+  fs.lstatSync = (path, ...args) => {
+    const observed = lstat(path, ...args);
+    return observed === undefined ? observed : observe(observed);
+  };
+  const read = fs.readSync;
+  fs.readSync = (fd, ...args) => {
+    const count = read(fd, ...args);
+    if (!changed && count > 0 && isTarget(stat(fd))) {
+      fs.fchmodSync(fd, leaf.mode | 0o111);
+      changed = true;
+      fs.writeFileSync(${JSON.stringify(marker)}, String(stat(fd).mode & 0o111));
+    }
+    return count;
+  };
+  syncBuiltinESMExports();
+}
+`);
+
+      const result = spawnSync(process.execPath,
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(readFileSync(marker, 'utf8')).toBe(String(0o111));
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(2);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/baseline.*invalid/i);
+    },
+  );
+
+  it('is INCONCLUSIVE when the repository root is replaced between the Git base and working candidate', () => {
+    const dir = makeRepo(2);
+    const replacement = makeRepo(1);
+    const original = `${dir}-original`;
+    writeBoundary(dir, 3); // A real candidate growth must never be hidden by a new root.
+    const hook = join(tmp.make('root-race-hook'), 'hook.mjs');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const root = ${JSON.stringify(dir)};
+const target = ${JSON.stringify(join(dir, '.claude'))};
+const replacement = ${JSON.stringify(replacement)};
+const original = ${JSON.stringify(original)};
+let swapped = false;
+const lstat = fs.lstatSync;
+fs.lstatSync = (path, ...args) => {
+  if (!swapped && path === target) {
+    swapped = true;
+    fs.renameSync(root, original);
+    fs.symlinkSync(replacement, root);
+  }
+  return lstat(path, ...args);
+};
+syncBuiltinESMExports();
+`);
+
+    const result = spawnSync(process.execPath,
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    rmSync(dir, { recursive: true, force: true });
+    renameSync(original, dir);
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, out).toBe(2);
+    expect(out).toMatch(/repository root.*(changed|must be a directory)|root.*replaced/i);
+  });
+
+  it.each(['removed', 'inaccessible'])(
+    'redacts the root recheck when the repository becomes %s after the helper read', (failure) => {
+      const dir = makeRepo(2);
+      const moved = join(tmp.make('root-recheck-moved'), 'repository');
+      const hook = join(tmp.make('root-recheck-hook'), 'hook.mjs');
+      const marker = join(tmp.make('root-recheck-marker'), 'observed');
+      writeFileSync(hook, `import fs from 'node:fs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/baseline-growth-guard.ts')) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_000);
+}
+const spawn = cp.spawnSync;
+cp.spawnSync = (command, args, options) => {
+  const result = spawn(command, args, options);
+  if (args?.some((arg) => arg.endsWith('/working-document-reader.ts'))) {
+    fs.writeFileSync(${JSON.stringify(marker)}, 'helper completed');
+    if (${JSON.stringify(failure)} === 'removed') {
+      fs.renameSync(${JSON.stringify(dir)}, ${JSON.stringify(moved)});
+    } else {
+      const lstat = fs.lstatSync;
+      fs.lstatSync = (path, ...rest) => {
+        if (path === ${JSON.stringify(dir)}) {
+          throw Object.assign(new Error('EACCES: permission denied, lstat ' + path), { code: 'EACCES' });
+        }
+        return lstat(path, ...rest);
+      };
+      syncBuiltinESMExports();
+    }
+  }
+  return result;
+};
+syncBuiltinESMExports();
+`);
+
+      const result = spawnSync(process.execPath,
+        [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+        { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+      if (existsSync(moved)) renameSync(moved, dir);
+      const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+      expect(readFileSync(marker, 'utf8')).toBe('helper completed');
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status, out).toBe(2);
+      expect(out).toMatch(/FAIL\(inconclusive\).*repository root/i);
+      expect(out).not.toContain(dir);
+    },
+  );
+
+  it('fails closed by its reader deadline and reaps a helper stalled on a regular file', () => {
+    const dir = makeRepo(2);
+    const marker = join(tmp.make('reader-pid'), 'pid');
+    const hook = join(tmp.make('reader-stall-hook'), 'hook.mjs');
+    writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  fs.readSync = () => {
+    fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    while (true) {}
+  };
+  syncBuiltinESMExports();
+}
+`);
+
+    const started = Date.now();
+    const result = spawnSync(process.execPath,
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    const finished = Date.now();
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, out).toBe(2);
+    expect(out).toMatch(/working document.*deadline|reader.*deadline/i);
+    expect(existsSync(marker)).toBe(true);
+    const { pid, startedAt } = JSON.parse(readFileSync(marker, 'utf8')) as { pid: number; startedAt: number };
+    expect(startedAt).toBeGreaterThanOrEqual(started);
+    expect(startedAt).toBeLessThanOrEqual(finished);
+    expect(finished - startedAt).toBeLessThan(2_500);
+    let processAlive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      processAlive = false;
+      expect((error as NodeJS.ErrnoException).code).toBe('ESRCH');
+    }
+    expect(processAlive).toBe(false);
+  });
+
+  it('allows a responsive regular-file reader that finishes within the bounded deadline', () => {
+    const dir = makeRepo(2);
+    const delayedDocument = join(dir, '.claude/fitness/boundary-baseline.json');
+    const hook = join(tmp.make('reader-responsive-delay-hook'), 'hook.mjs');
+    const timing = join(tmp.make('reader-responsive-timing'), 'timing.json');
+    writeFileSync(hook, `import fs from 'node:fs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+if (process.argv[1]?.endsWith('/baseline-growth-guard.ts')) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_000);
+  const spawn = cp.spawnSync;
+  cp.spawnSync = (command, args, options) => {
+    const started = Date.now();
+    const result = spawn(command, args, options);
+    if (args?.some((arg) => arg.endsWith('/working-document-reader.ts'))) {
+      fs.writeFileSync(${JSON.stringify(timing)}, JSON.stringify({
+        elapsed: Date.now() - started, timeout: options.timeout, status: result.status,
+      }));
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+}
+if (process.argv[1]?.endsWith('/working-document-reader.ts')) {
+  const delayedDocument = fs.statSync(${JSON.stringify(delayedDocument)});
+  const read = fs.readSync;
+  let delayed = false;
+  fs.readSync = (...args) => {
+    if (!delayed && fs.fstatSync(args[0]).ino === delayedDocument.ino) {
+      delayed = true;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_250);
+    }
+    return read(...args);
+  };
+  syncBuiltinESMExports();
+}
+`);
+
+    const result = spawnSync(process.execPath,
+      [...withReaderHook(hook), '--repo', dir, '--base', 'HEAD'],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 });
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, out).toBe(0);
+    const observed = JSON.parse(readFileSync(timing, 'utf8')) as { elapsed: number; timeout: number; status: number };
+    expect(observed.timeout).toBe(2_000);
+    expect(observed.status).toBe(0);
+    expect(observed.elapsed).toBeGreaterThanOrEqual(1_200);
+    expect(observed.elapsed).toBeLessThan(2_500);
+  });
+
+  it.each(['working', 'pinned'] as const)('rejects raw-byte BOM substitution in a %s candidate', (mode) => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const path = join(dir, '.claude/fitness/baseline.json');
+    const reviewed = readFileSync(path);
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant original baseline bytes']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), reviewed]));
+    const args = ['--repo', dir, '--base', base];
+    if (mode === 'pinned') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'substitute different baseline bytes']);
+      args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(1);
+    expect(result.out).not.toMatch(/WAIVED/);
+  });
+
+  it.each(['working', 'pinned'] as const)('accepts reviewed raw-byte BOM content in a %s candidate', (mode) => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const path = join(dir, '.claude/fitness/baseline.json');
+    const reviewed = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), readFileSync(path)]);
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    writeFitness(dir, 100);
+    writeWaivers(dir, { ...activeWaiver(501), expectedBaselineSha256 });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant exact BOM-bearing baseline bytes']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, reviewed);
+    const args = ['--repo', dir, '--base', base];
+    if (mode === 'pinned') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'retain exact reviewed bytes']);
+      args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(0);
+    expect(result.out).toMatch(/WAIVED/);
+  });
+
+  it.each(['working', 'pinned', 'base'] as const)('reports invalid UTF-8 baseline bytes as inconclusive in %s mode', (mode) => {
+    const dir = makeRepo(2);
+    const path = join(dir, '.claude/fitness/boundary-baseline.json');
+    const valid = readFileSync(path);
+    const malformed = Buffer.from(valid);
+    const marker = malformed.indexOf('f0.ts');
+    expect(marker).toBeGreaterThan(0);
+    malformed[marker] = 0xff;
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, malformed);
+    const args = ['--repo', dir, '--base', base];
+    if (mode !== 'working') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'invalid baseline encoding']);
+      const invalid = git(dir, ['rev-parse', 'HEAD']).trim();
+      if (mode === 'pinned') args.push('--candidate', invalid);
+      else {
+        args[3] = invalid;
+        writeFileSync(path, valid);
+      }
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toMatch(/FAIL\(inconclusive\)/);
+    expect(result.out).toContain(`boundary-baseline.json (${mode === 'base' ? 'base' : 'candidate'})`);
+    expect(result.out).toMatch(/UTF-8/);
+    expect(result.out).not.toMatch(/WAIVED|PASS/);
+  });
+
+  it.each(['working', 'pinned'] as const)('rejects an invalid UTF-8 candidate waiver in %s mode', (mode) => {
+    const dir = makeRepo(2);
+    writeFitness(dir, 500);
+    const path = join(dir, '.claude/fitness/baseline.json');
+    const reviewed = readFileSync(path);
+    const expectedBaselineSha256 = createHash('sha256').update(reviewed).digest('hex');
+    const waiver = { ...activeWaiver(501), expectedBaselineSha256 };
+    writeFitness(dir, 100);
+    writeWaivers(dir, waiver);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'grant valid baseline authority']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(path, reviewed);
+    const malformed = Buffer.from(JSON.stringify({ schemaVersion: 2,
+      grants: [{ ...waiver, reason: 'invalid-UTF8-here' }] }));
+    const marker = malformed.indexOf('invalid-UTF8-here');
+    expect(marker).toBeGreaterThan(0);
+    malformed[marker] = 0xff;
+    writeFileSync(join(dir, GROWTH_WAIVERS_PATH), malformed);
+    const args = ['--repo', dir, '--base', base];
+    if (mode === 'pinned') {
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'malformed candidate waiver encoding']);
+      args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+    }
+    const result = runGuard(args);
+    expect(result.status, result.out).toBe(2);
+    expect(result.out).toMatch(/candidate.*waiver|waiver.*candidate/i);
+    expect(result.out).not.toMatch(/WAIVED/);
+  });
+
+  it.each(['working', 'pinned'])('requires explicit identity authority for the actual PR3815 fixture (%s)', (mode) => {
+    for (const admitsNewIdentities of [false, true]) {
+      const dir = makeRepo(2);
+      const path = join(dir, '.claude/test-integrity/baseline.json');
+      mkdirSync(dirname(path), { recursive: true });
+      const fixture = (name: string) => readFileSync(join(repoRoot,
+        `tests/fixtures/baseline-growth/${name}.json`));
+      const reviewed = fixture('pr3815-test-integrity');
+      writeFileSync(path, fixture('pr3815-base-test-integrity'));
+      writeWaivers(dir, { ...activeWaiver(93), path: '.claude/test-integrity/baseline.json',
+        admitsNewIdentities, expectedBaselineSha256: createHash('sha256').update(reviewed).digest('hex') });
+      git(dir, ['add', '-A']);
+      git(dir, ['commit', '-qm', 'grant reviewed Test Integrity allowance']);
+      const base = git(dir, ['rev-parse', 'HEAD']).trim();
+      writeFileSync(path, reviewed);
+      const args = ['--repo', dir, '--base', base];
+      if (mode === 'pinned') {
+        git(dir, ['add', '-A']);
+        git(dir, ['commit', '-qm', 'reviewed Test Integrity growth']);
+        args.push('--candidate', git(dir, ['rev-parse', 'HEAD']).trim());
+      }
+      const result = runGuard(args);
+      expect(result.status, result.out).toBe(admitsNewIdentities ? 0 : 1);
+      if (!admitsNewIdentities) expect(result.out).toMatch(/introduced 12 baseline identity/);
+      expect(result.out.includes('WAIVED')).toBe(admitsNewIdentities);
+      if (admitsNewIdentities) {
+        writeFileSync(path, reviewed.toString('utf8').replace('test_bot_errors_human_card.py', 'unreviewed.py'));
+        const substituted = runGuard(['--repo', dir, '--base', base]);
+        expect(substituted.status, substituted.out).toBe(1);
+        expect(substituted.out).not.toMatch(/WAIVED/);
+      }
+    }
+  });
+
+  it('blocks same-count Test Integrity substitution and rejects malformed findings', () => {
+    const dir = makeRepo(2);
+    const path = join(dir, '.claude/test-integrity/baseline.json');
+    mkdirSync(dirname(path), { recursive: true });
+    const baseline = JSON.parse(readFileSync(join(repoRoot,
+      'tests/fixtures/baseline-growth/pr3815-base-test-integrity.json'), 'utf8'));
+    writeFileSync(path, JSON.stringify(baseline));
+    writeWaivers(dir, { ...activeWaiver(93), path: '.claude/test-integrity/baseline.json' });
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'numeric-only Test Integrity allowance']);
+    baseline.findings[0].content_signature = 'f'.repeat(64);
+    writeFileSync(path, JSON.stringify(baseline));
+    const substituted = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(substituted.status, substituted.out).toBe(1);
+    expect(substituted.out).toMatch(/identity/);
+    delete baseline.findings[0].content_signature;
+    writeFileSync(path, JSON.stringify(baseline));
+    const malformed = runGuard(['--repo', dir, '--base', 'HEAD']);
+    expect(malformed.status, malformed.out).toBe(2);
+    expect(malformed.out).toMatch(/inconclusive/i);
+  });
+
+  it('pins the PR3815 waiver to its reviewed 93-entry baseline and approved expiry', () => {
+    const document = JSON.parse(readFileSync(join(repoRoot, GROWTH_WAIVERS_PATH), 'utf8'));
+    expect(document.schemaVersion).toBe(2);
+    expect(document).not.toHaveProperty('waivers');
+    const entries = document.grants.filter((w: { issue: string }) =>
+      w.issue === 'https://github.com/LucasQuiles/WhatSoup/pull/3815');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      path: '.claude/test-integrity/baseline.json',
+      maxWeight: 93,
+      grantedAt: '2026-10-17',
+      expiresAt: '2026-10-27',
+      expectedBaselineSha256: '9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7',
+    });
+    expect(entries[0].admitsNewIdentities).toBe(true);
+    const reviewed = readFileSync(join(repoRoot,
+      'tests/fixtures/baseline-growth/pr3815-test-integrity.json'));
+    expect(createHash('sha256').update(reviewed).digest('hex')).toBe(entries[0].expectedBaselineSha256);
+    expect(JSON.parse(reviewed.toString('utf8')).findings).toHaveLength(93);
   });
 
   it('WAIVES (exit 0) numeric growth within an active waiver present at the base', () => {
@@ -410,6 +1234,35 @@ describe('growth waivers — the reviewed-widening escape valve, fail-closed', (
     expect(GROWTH_WAIVERS_PATH).toBe('.claude/fitness/growth-waivers.json');
     expect(/baseline.*\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
     expect(/-baseline\.json$/.test(GROWTH_WAIVERS_PATH)).toBe(false);
+  });
+
+  it('BLOCKS (exit 1) when the waiver exists only in a replace ref for the base (#3669)', () => {
+    // Waiver authority is read from the base, so a local `refs/replace/<base>` must not be
+    // able to author it. An unhardened guard read the waiver through `git show <base>:...`,
+    // which follows the replacement, and reported the growth as WAIVED (exit 0).
+    const dir = makeRepo(2);
+    writeFitness(dir, 100);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'no waiver at base']);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeWaivers(dir, activeWaiver(501));
+    git(dir, ['add', '-A']);
+    const forgedTree = git(dir, ['write-tree']).trim();
+    const forged = git(
+      dir,
+      ['commit-tree', forgedTree, '-p', `${base}^`, '-m', 'forged waiver'],
+    ).trim();
+    git(dir, ['reset', '-q', '--hard', base]);
+    writeFitness(dir, 500);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'widen']);
+    const candidate = git(dir, ['rev-parse', 'HEAD']).trim();
+    git(dir, ['replace', base, forged]);
+
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/may only shrink/);
+    expect(out).not.toMatch(/WAIVED/);
   });
 });
 
@@ -635,5 +1488,220 @@ describe('CI wiring — the guard must be invoked with pinned revisions', () => 
     expect(invocation).toMatch(/github\.event\.before/);
     expect(invocation).toMatch(/pull_request\.base\.sha/);
     expect(invocation).toMatch(/merge_group\.base_sha/);
+  });
+});
+
+/**
+ * #3669: every Git read goes through the exact-Git helpers. A local replace ref or legacy graft
+ * changed what `git show` and `merge-base` returned while `rev-parse` still printed the real
+ * commit, so a receipt could name one commit while the guard weighed another. Each case pins
+ * the revisions and says what an unhardened guard reported instead.
+ */
+describe('exact Git reads — replace refs, grafts and non-blob baselines (#3669)', () => {
+  const boundaryPath = '.claude/fitness/boundary-baseline.json';
+
+  function commitAll(dir: string, message: string): string {
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', message]);
+    return git(dir, ['rev-parse', 'HEAD']).trim();
+  }
+
+  /** A commit object built from the working tree, without moving HEAD. */
+  function commitTreeFromWorktree(dir: string, parent: string, message: string): string {
+    git(dir, ['add', '-A']);
+    const tree = git(dir, ['write-tree']).trim();
+    return git(dir, ['commit-tree', tree, '-p', parent, '-m', message]).trim();
+  }
+
+  /**
+   * The base holds 2 entries and the candidate grows to 5. origin/main is a sibling commit
+   * with the candidate's tree. A graft that re-parents the candidate onto that sibling moves
+   * the inferred merge base to a commit that already weighs 5, which hides the growth.
+   */
+  function graftableGrowth(dir: string): { candidate: string; sibling: string } {
+    const realBase = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    const candidate = commitAll(dir, 'grow candidate baseline');
+    const candidateTree = git(dir, ['rev-parse', `${candidate}^{tree}`]).trim();
+    const sibling = git(
+      dir,
+      ['commit-tree', candidateTree, '-p', realBase, '-m', 'sibling with the same weight'],
+    ).trim();
+    git(dir, ['update-ref', 'refs/remotes/origin/main', sibling]);
+    return { candidate, sibling };
+  }
+
+  it('BLOCKS committed growth when a replace ref points the candidate at safe bytes', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    const candidate = commitAll(dir, 'grow baseline');
+    writeBoundary(dir, 2);
+    git(dir, ['replace', candidate, commitTreeFromWorktree(dir, base, 'safe replacement')]);
+
+    // Unhardened: `git show <candidate>:<path>` read the replacement and reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('PASSES a committed shrink when a replace ref points the candidate at larger bytes', () => {
+    const dir = makeRepo(5);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 1);
+    const candidate = commitAll(dir, 'shrink baseline');
+    writeBoundary(dir, 9);
+    git(dir, ['replace', candidate, commitTreeFromWorktree(dir, base, 'hostile replacement')]);
+
+    // Unhardened: the replacement weighed 9, so a real shrink was blocked (exit 1).
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(0);
+  });
+
+  it('is INCONCLUSIVE when a registered baseline is committed as a symlink', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    rmSync(join(dir, boundaryPath));
+    symlinkSync('[]', join(dir, boundaryPath)); // mode 120000; the blob text is `[]`
+    const candidate = commitAll(dir, 'baseline becomes a symlink');
+    expect(git(dir, ['ls-tree', candidate, '--', boundaryPath])).toMatch(/^120000 /);
+
+    // Unhardened: the symlink text `[]` weighed as an empty baseline and passed (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', base, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/regular non-executable blob/);
+  });
+
+  it('is INCONCLUSIVE with a typed code when graft metadata exists (non-bare and bare)', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    const bare = join(tmp.make('baseline-growth-bare'), 'repo.git');
+    git(dir, ['clone', '--bare', '--quiet', dir, bare]);
+    git(bare, ['update-ref', 'refs/remotes/origin/main', sibling]);
+
+    // Control: without grafts both layouts see the 2 -> 5 growth.
+    for (const repo of [dir, bare]) {
+      const before = runGuard(['--repo', repo, '--candidate', candidate]);
+      expect(before.status, before.out).toBe(1);
+    }
+
+    const graft = `${candidate} ${sibling}\n`;
+    mkdirSync(join(dir, '.git/info'), { recursive: true });
+    writeFileSync(join(dir, '.git/info/grafts'), graft);
+    mkdirSync(join(bare, 'info'), { recursive: true });
+    writeFileSync(join(bare, 'info/grafts'), graft);
+
+    // Unhardened: the graft moved the inferred base onto the sibling (weight 5) and the
+    // growth reported OK (exit 0) in both layouts.
+    for (const repo of [dir, bare]) {
+      const { status, out } = runGuard(['--repo', repo, '--candidate', candidate]);
+      expect(status, out).toBe(2);
+      expect(out).toContain('ci.input.history-graft-present');
+      expect(out).toMatch(/Remove legacy Git graft metadata/);
+      expect(out).not.toContain(repo);
+      expect(out).not.toContain(realpathSync(repo));
+    }
+  }, 60_000);
+
+  it('is INCONCLUSIVE without leaking paths when the Git control directory is a symlink', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    renameSync(join(dir, '.git'), join(dir, '.git-real'));
+    symlinkSync('.git-real', join(dir, '.git'));
+    mkdirSync(join(dir, '.git-real/info'), { recursive: true });
+    writeFileSync(join(dir, '.git-real/info/grafts'), `${candidate} ${sibling}\n`);
+
+    // Unhardened: Git followed the symlink, honoured the graft and reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toContain('ci.input.git-control-unavailable');
+    expect(out).toMatch(/trustworthy repository control path/);
+    expect(out).not.toContain(dir);
+    expect(out).not.toContain(realpathSync(dir));
+  });
+
+  it('BLOCKS working-tree growth when a replace ref re-parents HEAD onto a heavier sibling', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    git(dir, ['replace', '--graft', candidate, sibling]);
+
+    // Unhardened: plain `merge-base origin/main HEAD` followed the replacement, so the inferred
+    // base was the sibling (weight 5) and the working-tree growth reported OK (exit 0).
+    const { status, out } = runGuard(['--repo', dir]);
+    expect(status, out).toBe(1);
+    expect(out).toMatch(/2 -> 5/);
+  });
+
+  it('is INCONCLUSIVE when a replace ref makes a non-ancestor base look like an ancestor', () => {
+    const dir = makeRepo(2);
+    const { candidate, sibling } = graftableGrowth(dir);
+    git(dir, ['replace', '--graft', candidate, sibling]);
+
+    // Unhardened: plain `merge-base --is-ancestor` followed the replacement, accepted the
+    // sibling as the candidate's parent and weighed 5 against 5 (exit 0).
+    const { status, out } = runGuard(['--repo', dir, '--base', sibling, '--candidate', candidate]);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/not an ancestor/);
+  });
+
+  it('is INCONCLUSIVE with a typed code when no trusted git can run', () => {
+    const dir = makeRepo(2);
+    const base = git(dir, ['rev-parse', 'HEAD']).trim();
+    writeBoundary(dir, 5);
+    const candidate = commitAll(dir, 'grow baseline');
+
+    // The exact-Git layer's test seam (honoured only under VITEST) points it at a git that does
+    // not exist. Unhardened, the guard ran plain `git` and reported the growth (exit 1); a git
+    // failure mid-run was reported as an unfetched revision or a non-ancestor base.
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--experimental-strip-types',
+        resolve(repoRoot, 'scripts/baseline-growth-guard.ts'),
+        '--repo', dir, '--base', base, '--candidate', candidate,
+      ],
+      {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          VITEST: 'true',
+          __CI_CONTROL_TEST_GIT_PATH: join(dir, 'no-such-git'),
+        },
+      },
+    );
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    expect(result.status, out).toBe(2);
+    expect(out).toContain('ci.input.git-control-unavailable');
+    expect(out).toMatch(/trusted git executable could not run/);
+    expect(out).not.toMatch(/could not be resolved|not an ancestor/);
+    expect(out).not.toContain(dir);
+  });
+
+  it('pin: is INCONCLUSIVE, without the path, when --repo is not a directory', () => {
+    // Pin, not a RED: the unhardened guard also exits 2 here (its git calls fail on the missing
+    // cwd). After the change the guard says so directly instead of blaming git or a revision.
+    const missing = join(tmp.make('baseline-growth-missing'), 'no-such-repo');
+    const { status, out } = runGuard(['--repo', missing, '--base', 'HEAD', '--candidate', 'HEAD']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/--repo path is not a directory/);
+    expect(out).not.toContain(missing);
+  });
+
+  it('is INCONCLUSIVE, without the path, when --repo cannot be inspected (a symlink loop)', () => {
+    // `stat` fails with ELOOP here, for root as well, and `throwIfNoEntry: false` hides only a
+    // missing entry. Unguarded, the throw escaped main(): Node exited 1, the growth code, and
+    // its stack trace printed the path.
+    const parent = tmp.make('baseline-growth-loop');
+    const loop = join(parent, 'loop-a');
+    symlinkSync('loop-b', loop);
+    symlinkSync('loop-a', join(parent, 'loop-b'));
+    const { status, out } = runGuard(['--repo', loop, '--base', 'HEAD', '--candidate', 'HEAD']);
+    expect(status, out).toBe(2);
+    expect(out).toMatch(/--repo path is not a directory/);
+    // tmpdir() is not canonical on macOS (/var is a link to /private/var): check both spellings.
+    expect(out).not.toContain(parent);
+    expect(out).not.toContain(realpathSync(parent));
   });
 });

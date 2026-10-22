@@ -164,8 +164,9 @@ Two concerns:
 
 - **Redact** — `redactInternalArtifacts` masks operator-local home paths,
   internal runtime identifiers (sandbox hook/policy filenames, `.claude/`,
-  settings, hook events), tailnet/CGNAT addresses, and provider tokens/emails
-  (the last via the shared `sanitizeProviderPreviewText`).
+  settings, hook events), tailnet/CGNAT addresses, and provider secrets/tokens
+  (the last via the shared `sanitizeProviderPreviewText`). Chat egress preserves
+  email addresses; background previews retain email redaction.
 - **Divert** — `classifyInfraStatusClaim` detects a false self-infra-failure
   claim ("tools are blocked", "failing closed", "sandbox policy missing"). On a
   client-bound divert the user receives only a generic retry message; the
@@ -173,6 +174,19 @@ Two concerns:
   malfunctioned. The classifier is deliberately high-precision (it ignores
   legitimate single-tool/vendor limitations); it is not a general hallucination
   detector.
+
+Client and internal chat use the shared sanitizer's `prose-aware` keyed-secret
+policy. It preserves unquoted colon expressions with the bounded continuations
+`<TitlecasedName> gives you`, `<TitlecasedName> will send you`, `it wants`,
+`then press`, and `[unfortunately] you need`. Code, structured configuration,
+indented assignments, quoted values, and `=` assignments remain strict. Bare
+short passwords remain redacted; unknown sentence forms are conservatively
+redacted too. An unfenced section header such as `[credentials]` or a YAML
+document marker `---` keeps strict masking through the end of the message.
+Unmarked single-line configuration that matches these sentence
+forms is indistinguishable from prose; use code fences for configuration examples.
+Later assignments, Bearer values, and known token prefixes still redact even in
+a message containing exempt prose. Background callers keep the `always` policy.
 
 Audience: a send addressed to the configured `BOT_ERRORS_JID` is `ops`
 (verbatim diagnostics required there); every other send defaults to `client`
@@ -235,9 +249,12 @@ evidence pass over every agent bot:
    evidence.
 6. Fail the pass if any bot reports `model_usable=null` while claiming a recent
    successful turn without turn evidence.
-7. Fail the pass if any bot has `model_usable=false`, a logged-out/401 auth
-   state, fallback credential failure, missing fallback binary, unknown fallback
-   model, or drift-check failure without an assigned operator action.
+7. Fail the pass if any bot has `model_usable=false`, a logged-out auth state
+   (`auth_failure_class` `serverside_logout_irreversible`,
+   `auth_401_ambiguous_parked` or `auth_401_uninspected_exit` — only the first
+   is a confirmed device removal; see runbook §5.3), fallback credential
+   failure, missing fallback binary, unknown fallback model, or drift-check
+   failure without an assigned operator action.
 
 The source-side recurring gate is `npm run guard:fleet-bot-hardening-parity`.
 It validates the redacted parity manifest at

@@ -1171,6 +1171,24 @@ interface ResolvedInspection {
 }
 
 /**
+ * A root can exit while a captured descendant still needs cleanup, so an absent
+ * root does not prevent signalling that descendant. A live root, however, must
+ * still have the parent captured with its authority before any tree member is
+ * signalled. Otherwise a PID-reuse or reparenting race could turn an old census
+ * into authority over a different process tree.
+ */
+function assertLiveRootParentAuthority(
+  rows: readonly ProcessCensusRow[],
+  authority: ProcessTreeRootAuthority,
+): void {
+  const roots = rows.filter((row) => row.pid === authority.pid);
+  if (roots.length > 1) throw rootSnapshotError('ambiguous');
+  if (roots.length === 1 && roots[0].ppid !== authority.parentPid) {
+    throw rootSnapshotError('unverified');
+  }
+}
+
+/**
  * #1755: inspect the owned set and, if any PID is ambiguous, re-census over a
  * bounded window to give a transient ambiguity — a `ps` census race, a mid-exit
  * process, or a same-pid/same-start/different-command reading — a chance to
@@ -1226,6 +1244,7 @@ async function runTermination(
   } catch (error) {
     throw normalizeCensusFailure(error, 'PROCESS_TREE_PRE_SIGNAL_CENSUS_UNAVAILABLE');
   }
+  assertLiveRootParentAuthority(first.rows, lease.rootAuthority);
   if (first.survivors.length > 0) {
     for (const pid of signalOwned(
       target,
@@ -1258,6 +1277,7 @@ async function runTermination(
       } catch (error) {
         throw normalizeCensusFailure(error, 'PROCESS_TREE_ESCALATION_CENSUS_UNAVAILABLE');
       }
+      assertLiveRootParentAuthority(kill.rows, lease.rootAuthority);
       if (kill.survivors.length > 0) {
         escalated = true;
         for (const pid of signalOwned(

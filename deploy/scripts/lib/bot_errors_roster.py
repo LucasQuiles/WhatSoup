@@ -18,9 +18,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
+
+try:  # imported as ``lib.bot_errors_roster`` by the deploy scripts
+    from lib.fleet_config import FleetConfigError, read_json_object, resolve_roster
+except ImportError:  # loaded by file path, without deploy/scripts on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from lib.fleet_config import FleetConfigError, read_json_object, resolve_roster
 
 
 class RosterError(RuntimeError):
@@ -37,17 +43,19 @@ def _repo_root() -> Path:
 
 
 def default_roster_path() -> Path:
-    """Resolve the intended roster path.
+    """Resolve the intended roster path through ``lib.fleet_config``.
 
-    Defaults to the canonical public SSOT committed in the repo. An operator may
-    point both the sentinel and the watchdog at a private roster via
-    ``BOT_ERRORS_FLEET_SENTINEL_HOSTS``; the independence of the check comes from
-    each side re-deriving the digest from disk, not from using different paths.
+    Order: ``BOT_ERRORS_FLEET_SENTINEL_HOSTS``, then the private
+    ``~/.config/whatsoup/bot-errors-expected-fleet.json``, then the tracked
+    repo copy. The sentinel and the watchdog both resolve here; the
+    independence of the check comes from each side re-deriving the digest from
+    disk, not from using different paths. Raises :class:`RosterError` when no
+    source exists.
     """
-    raw = os.environ.get("BOT_ERRORS_FLEET_SENTINEL_HOSTS", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return _repo_root() / "deploy" / "bot-errors-expected-fleet.json"
+    try:
+        return resolve_roster(_repo_root()).path
+    except FleetConfigError as exc:
+        raise RosterError(str(exc)) from exc
 
 
 def _is_runtime_relevant(expected: str) -> bool:
@@ -140,9 +148,16 @@ def load_roster(path: Optional[Path] = None) -> tuple[dict, dict]:
     """Return ``(raw_data, inventory)`` for the roster at ``path``.
 
     Raises :class:`RosterError` on any read/parse/structure fault so callers can
-    fail closed rather than trust an unreadable roster.
+    fail closed rather than trust an unreadable roster. With no ``path`` the
+    error names the resolver order that was tried.
     """
-    resolved = Path(path) if path is not None else default_roster_path()
+    if path is None:
+        try:
+            data = read_json_object(resolve_roster(_repo_root()))
+        except FleetConfigError as exc:
+            raise RosterError(str(exc)) from exc
+        return data, roster_inventory(data)
+    resolved = Path(path)
     try:
         text = resolved.read_text(encoding="utf-8")
     except OSError as exc:
@@ -162,8 +177,8 @@ def roster_epoch(path: Optional[Path] = None) -> Optional[int]:
     Returns ``None`` when the file cannot be stat'd, so a missing epoch is
     explicit rather than silently zero.
     """
-    resolved = Path(path) if path is not None else default_roster_path()
     try:
+        resolved = Path(path) if path is not None else default_roster_path()
         return int(resolved.stat().st_mtime)
-    except OSError:
+    except (OSError, RosterError):
         return None

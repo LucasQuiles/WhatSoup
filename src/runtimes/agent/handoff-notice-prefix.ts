@@ -65,5 +65,5 @@ export function flushPendingHandoffNotice(enabled: boolean, db: Database, queue:
     log.warn({ err, chatJid: queue.targetChatJid }, 'failed to flush pending handoff notice');
     return;
   }
-  if (pending) queue.enqueueText(pending);
+  if (pending) queue.enqueueText(pending, 'lifecycle');
 }

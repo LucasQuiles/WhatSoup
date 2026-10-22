@@ -1,5 +1,6 @@
 import { closeSync, constants, openSync, readSync } from 'node:fs';
 
+import { RECOVERY_BLOCKING_REASONS, RECOVERY_REASON_ORDER } from '../src/core/recovery-debt.ts';
 import { isRecord } from '../src/lib/type-guards.ts';
 import { isFullyConnected } from '../src/transport/runtime-connection.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
@@ -74,6 +75,109 @@ function reject(issues: string[]): StartupNotificationReleaseValidationResult {
   return { exitCode: 1, outcome: 'rejected', issues };
 }
 
+// The reason vocabulary comes from the producer, never a private copy: a
+// reason added there must not make this validator reject healthy bodies.
+const RECOVERY_DEBT_REASON_INDEX = new Map<string, number>(
+  RECOVERY_REASON_ORDER.map((reason, index) => [reason, index]),
+);
+
+function recoveryCount(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : null;
+}
+
+export function recoveryDebtIssue(health: Record<string, unknown>): string | null {
+  if (!Object.hasOwn(health, 'recovery_debt')) return null;
+  const debt = health.recovery_debt;
+  if (!isRecord(debt)) return 'recovery_debt_invalid';
+  const open = debt.open;
+  const serviceBlocking = debt.service_blocking;
+  const attention = debt.attention;
+  if (
+    typeof open !== 'boolean'
+    || typeof serviceBlocking !== 'boolean'
+    || (attention !== 'none' && attention !== 'routine' && attention !== 'urgent')
+  ) return 'recovery_debt_invalid';
+  const reasons = debt.reasons;
+  if (
+    !Array.isArray(reasons)
+    || reasons.length > 32
+    || reasons.some((reason) => typeof reason !== 'string' || !RECOVERY_DEBT_REASON_INDEX.has(reason))
+    || new Set(reasons).size !== reasons.length
+    || reasons.some((reason, index) => (
+      index > 0
+      && RECOVERY_DEBT_REASON_INDEX.get(reason as string)! <= RECOVERY_DEBT_REASON_INDEX.get(reasons[index - 1] as string)!
+    ))
+  ) return 'recovery_debt_invalid';
+  const continuity = debt.continuity;
+  const turnRecovery = debt.turn_recovery;
+  const identity = debt.completed_delivery_identity;
+  const delivery = debt.delivery;
+  if (![continuity, turnRecovery, identity, delivery].every(isRecord)) {
+    return 'recovery_debt_invalid';
+  }
+  const sections = [continuity, turnRecovery, identity, delivery] as Record<string, unknown>[];
+  if (sections.some((section) => typeof section.readable !== 'boolean')) {
+    return 'recovery_debt_invalid';
+  }
+  const countFields: Array<readonly [Record<string, unknown>, string]> = [
+    [continuity as Record<string, unknown>, 'open'],
+    [continuity as Record<string, unknown>, 'unresolved'],
+    [continuity as Record<string, unknown>, 'ambiguous'],
+    [turnRecovery as Record<string, unknown>, 'blocking_outstanding'],
+    [turnRecovery as Record<string, unknown>, 'retained_terminal'],
+    [turnRecovery as Record<string, unknown>, 'open_catchups'],
+    [turnRecovery as Record<string, unknown>, 'corroborated_retained'],
+    [identity as Record<string, unknown>, 'blocking'],
+    [identity as Record<string, unknown>, 'retained'],
+    [delivery as Record<string, unknown>, 'blocking_ambiguous'],
+    [delivery as Record<string, unknown>, 'uncorroborated_ambiguous'],
+    [delivery as Record<string, unknown>, 'corroborated_retained'],
+  ];
+  const counts = countFields.map(([section, field]) => recoveryCount(section[field]));
+  if (counts.some((value) => value === null)) return 'recovery_debt_invalid';
+  const numericCounts = counts as number[];
+  const nextAction = (identity as Record<string, unknown>).next_action;
+  if (nextAction !== null && nextAction !== 'fresh_inbound' && nextAction !== 'operator') {
+    return 'recovery_debt_invalid';
+  }
+  const oldest = (delivery as Record<string, unknown>).oldest_uncorroborated_at;
+  const oldestValid = typeof oldest === 'string' && Number.isFinite(Date.parse(
+    oldest.includes('T') ? oldest : `${oldest.replace(' ', 'T')}Z`,
+  ));
+  if (
+    (numericCounts[10]! > 0 && !oldestValid)
+    || (numericCounts[10] === 0 && oldest !== null)
+    || numericCounts[9]! > numericCounts[10]!
+  ) return 'recovery_debt_invalid';
+  const expectedReason = (continuity as Record<string, unknown>).readable !== true
+    ? 'continuity_gap_unreadable'
+    : numericCounts[0]! > 0
+      ? 'continuity_gap_open'
+      : null;
+  if (debt.reason !== expectedReason) return 'recovery_debt_invalid';
+  const blockingEvidence = sections.some((section) => section.readable !== true)
+    || numericCounts[3]! > 0
+    || numericCounts[7]! > 0
+    || numericCounts[9]! > 0
+    || (reasons as string[]).some((reason) => RECOVERY_BLOCKING_REASONS.has(reason));
+  // Skip continuity unresolved/ambiguous (parts of continuity open) and
+  // delivery blocking_ambiguous (part of uncorroborated): count each once.
+  const gaugeTotal = numericCounts.reduce(
+    (sum, value, index) => (index === 1 || index === 2 || index === 9 ? sum : sum + value),
+    0,
+  );
+  if (!Number.isSafeInteger(gaugeTotal)) return 'recovery_debt_invalid';
+  const expectedOpen = gaugeTotal > 0 || reasons.length > 0 || serviceBlocking;
+  const expectedAttention = serviceBlocking ? 'urgent' : open ? 'routine' : 'none';
+  if (attention !== expectedAttention || open !== expectedOpen || serviceBlocking !== blockingEvidence) {
+    return 'recovery_debt_invalid';
+  }
+  if (health.status === 'healthy' && serviceBlocking) {
+    return 'recovery_debt_status_contradiction';
+  }
+  return null;
+}
+
 /**
  * Pure, one-shot acceptance check for a supplied /health response and the
  * startup-notify v1 journal. It deliberately does not contact a service,
@@ -102,6 +206,8 @@ export function validateStartupNotificationRelease(
   const issues: string[] = [];
   if (probe.outcome === 'failed') issues.push('probe_failed');
   if (input.health.status !== 'healthy') issues.push('service_not_healthy');
+  const debtIssue = recoveryDebtIssue(input.health);
+  if (debtIssue) issues.push(debtIssue);
   if (!hasStrictTransportReadiness(input.health.transport)) issues.push('transport_not_ready');
 
   const startupNotification = input.health.startupNotification;

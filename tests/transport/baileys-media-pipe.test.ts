@@ -5,8 +5,8 @@
 // zero-listener EventEmitter (process-level uncaughtException — the exact
 // incident signature of release bc673), and the same event left the awaiting
 // media handler pending forever. Repo code cannot reach the internal stream,
-// so the fix is a patch-package overlay on the pin
-// (patches/@whiskeysockets+baileys+7.0.0-rc12.patch) forwarding source errors
+// so the fix is a required dependency overlay on the pin
+// (patches/@whiskeysockets+baileys+7.0.0-rc13.patch) forwarding source errors
 // into the returned Transform.
 //
 // This test drives the REAL vendored downloadEncryptedContent at a local HTTP

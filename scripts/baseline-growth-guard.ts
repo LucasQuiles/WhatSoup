@@ -19,17 +19,27 @@
  * candidate is pinned, the base/candidate pair is also checked for relations that cannot
  * express growth at all — see `baseRelationError`.
  *
+ * EXACT GIT READS. Every Git read goes through the ci-control exact-Git helpers (`gitBytes`,
+ * `readExactTreeEntries`, `readExactBlobs`): replace refs are ignored, legacy graft metadata
+ * refuses the run before any Git command can interpret it, and a registered path is weighed
+ * only when it is a regular non-executable blob whose bytes match its OID. A plain
+ * `git show <rev>:<path>` follows `refs/replace/*`, so a local replace ref could make committed
+ * growth weigh as a shrink, and a real shrink as growth (#3669).
+ *
  * EXIT CODES — the repo's three-outcome discipline:
  *   0  every baseline shrank or held
  *   1  at least one baseline grew
  *   2  INCONCLUSIVE — a revision or document could not be read, so growth cannot be ruled
  *      out. Never reported as a pass: "could not look" is not "nothing changed".
  */
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { errorMessage } from '../src/lib/error-message.ts';
+import { SIGNAL } from '../src/lib/signals.ts';
 import {
   BASELINE_REGISTRY,
   type BaselineFinding,
@@ -42,13 +52,115 @@ import {
   parseWaiverDocument,
   weighBaseline,
 } from './lib/baseline-weight.ts';
+import { readExactBlobs } from './lib/ci-control/git-blob-input.ts';
+import {
+  ExactGitInputError,
+  FULL_OID,
+  MAX_EXACT_SINGLE_BLOB_BYTES,
+  UTF8,
+  assertNoLegacyGrafts,
+  gitBytes,
+  readExactTreeEntries,
+  type ExactBlobV1,
+  type ExactTreeEntryV1,
+} from './lib/ci-control/git-input-core.ts';
 import { CliArgError, assertKnownFlag, isHelpFlag, takeValue } from './lib/cli-args.ts';
-import { cleanGitEnv } from './lib/guard-core.ts';
-import { readGitTextAtRevision } from './lib/semantic-quality/git-tree.ts';
 
 const EXIT_PASS = 0;
 const EXIT_BLOCK = 1;
 const EXIT_INCONCLUSIVE = 2;
+
+/** Output cap for one OID-sized Git answer (rev-parse, merge-base). */
+const MAX_GIT_IDENTITY_BYTES = 64 * 1024;
+// Bounds one owned helper's startup and complete working-document set read. This leaves
+// room for a responsive 1.25-second read while still terminating a stalled reader.
+// Parent pathname metadata and an OS-uninterruptible operation can outlive it.
+const WORKING_DOCUMENT_READ_TIMEOUT_MS = 2_000;
+const workingDocumentReader = fileURLToPath(new URL('./lib/ci-control/working-document-reader.ts', import.meta.url));
+
+type RootIdentity = { dev: number; ino: number };
+
+function captureRepoRoot(repoRoot: string): RootIdentity {
+  const root = lstatSync(repoRoot);
+  if (!root.isDirectory()) throw new Error('repository root must be a directory, not a symbolic link');
+  return { dev: root.dev, ino: root.ino };
+}
+
+function assertRepoRootUnchanged(repoRoot: string, expected: RootIdentity): void {
+  let observed: RootIdentity;
+  try {
+    observed = captureRepoRoot(repoRoot);
+  } catch {
+    throw new Error('repository root changed or is inaccessible');
+  }
+  if (observed.dev !== expected.dev || observed.ino !== expected.ino) {
+    throw new Error('repository root changed while reading');
+  }
+}
+
+class WorkingDocumentReadError extends Error {
+  readonly relativePath: string | null;
+
+  constructor(message: string, relativePath: string | null) {
+    super(message);
+    this.name = 'WorkingDocumentReadError';
+    this.relativePath = relativePath;
+  }
+}
+
+function readWorkingDocuments(
+  repoRoot: string,
+  relativePaths: readonly string[],
+  rootIdentity: RootIdentity,
+): ReadonlyMap<string, Buffer | null> {
+  if (relativePaths.length === 0 || new Set(relativePaths).size !== relativePaths.length) {
+    throw new Error('working document paths are invalid');
+  }
+  assertRepoRootUnchanged(repoRoot, rootIdentity);
+  const result = spawnSync(
+    process.execPath,
+    ['--experimental-strip-types', workingDocumentReader, repoRoot, ...relativePaths],
+    {
+      env: {},
+      encoding: 'buffer',
+      timeout: WORKING_DOCUMENT_READ_TIMEOUT_MS,
+      killSignal: SIGNAL.KILL,
+      maxBuffer: relativePaths.length * (MAX_EXACT_SINGLE_BLOB_BYTES + 5),
+    },
+  );
+  assertRepoRootUnchanged(repoRoot, rootIdentity);
+  if (result.error !== undefined && 'code' in result.error && result.error.code === 'ETIMEDOUT') {
+    throw new WorkingDocumentReadError('working document reader deadline elapsed', null);
+  }
+  if (result.signal !== null || result.status !== 0 || result.error !== undefined) {
+    const diagnostic = result.stderr.toString('utf8').trim();
+    const match = /^(\d+):(.+)$/.exec(diagnostic);
+    const index = match === null ? -1 : Number(match[1]);
+    throw new WorkingDocumentReadError(
+      (match?.[2] ?? diagnostic) || 'working document reader could not complete',
+      Number.isSafeInteger(index) && index >= 0 && index < relativePaths.length
+        ? relativePaths[index]!
+        : null,
+    );
+  }
+  const stdout = result.stdout;
+  const documents = new Map<string, Buffer | null>();
+  let offset = 0;
+  for (const relativePath of relativePaths) {
+    if (offset + 5 > stdout.length) throw new Error('working document reader returned an invalid result');
+    const kind = stdout[offset]!;
+    const length = stdout.readUInt32BE(offset + 1);
+    offset += 5;
+    if ((kind !== 0 && kind !== 1) || length > MAX_EXACT_SINGLE_BLOB_BYTES || offset + length > stdout.length) {
+      throw new Error('working document reader returned an invalid result');
+    }
+    if (kind === 0 && length !== 0) throw new Error('working document reader returned an invalid result');
+    documents.set(relativePath, kind === 0 ? null : Buffer.from(stdout.subarray(offset, offset + length)));
+    offset += length;
+  }
+  if (offset !== stdout.length) throw new Error('working document reader returned an invalid result');
+  return documents;
+}
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -122,13 +234,12 @@ function resolveBase(
   if (explicit) return explicit;
   for (const baseRef of ['origin/main', 'main']) {
     try {
-      const out = execFileSync('git', ['merge-base', baseRef, candidateRevision], {
-        cwd: repoRoot,
-        encoding: 'utf8',
-        env: cleanGitEnv(),
-        timeout: 30_000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const out = UTF8.decode(gitBytes(
+        repoRoot,
+        ['merge-base', baseRef, candidateRevision],
+        'ci.classification.merge-base-unavailable',
+        MAX_GIT_IDENTITY_BYTES,
+      ));
       const oid = out.trim();
       if (oid) return oid;
     } catch {
@@ -147,15 +258,14 @@ function resolveBase(
  */
 function resolveCommit(revision: string, repoRoot: string): string | null {
   try {
-    const out = execFileSync('git', ['rev-parse', '--verify', `${revision}^{commit}`], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      env: cleanGitEnv(),
-      timeout: 30_000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const out = UTF8.decode(gitBytes(
+      repoRoot,
+      ['rev-parse', '--verify', `${revision}^{commit}`],
+      'ci.input.revision-unavailable',
+      MAX_GIT_IDENTITY_BYTES,
+    ));
     const oid = out.trim();
-    return oid === '' ? null : oid;
+    return FULL_OID.test(oid) ? oid : null;
   } catch {
     return null;
   }
@@ -180,12 +290,12 @@ function baseRelationError(baseOid: string, candidateOid: string, repoRoot: stri
       + 'itself cannot detect growth';
   }
   try {
-    execFileSync('git', ['merge-base', '--is-ancestor', baseOid, candidateOid], {
-      cwd: repoRoot,
-      env: cleanGitEnv(),
-      timeout: 30_000,
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
+    gitBytes(
+      repoRoot,
+      ['merge-base', '--is-ancestor', baseOid, candidateOid],
+      'ci.classification.merge-base-unavailable',
+      MAX_GIT_IDENTITY_BYTES,
+    );
     return null;
   } catch {
     return `base ${baseOid} is not an ancestor of candidate ${candidateOid}, so their `
@@ -205,30 +315,11 @@ function baseRelationError(baseOid: string, candidateOid: string, repoRoot: stri
  * broken row loud instead of invisible.
  */
 type Weighing =
-  | { kind: 'weight'; value: number; identities?: string[] }
+  | { kind: 'weight'; value: number; identities?: string[]; sha256: string }
   | { kind: 'absent' }
   | { kind: 'error'; message: string };
 
-function weighAt(revision: string | null, path: string, repoRoot: string): Weighing {
-  let text: string;
-  try {
-    if (revision === null) {
-      const abs = resolve(repoRoot, path);
-      if (!existsSync(abs)) return { kind: 'absent' };
-      text = readFileSync(abs, 'utf8');
-    } else {
-      text = readGitTextAtRevision({ cwd: repoRoot, revision, path });
-    }
-  } catch (error) {
-    // A path missing at a revision is genuinely absent there; anything else is a real
-    // read failure and must stay distinguishable from it.
-    const message = error instanceof Error ? error.message : String(error);
-    if (/does not exist|exists on disk, but not in|path .* does not exist/i.test(message)) {
-      return { kind: 'absent' };
-    }
-    return { kind: 'error', message };
-  }
-
+function weighText(path: string, text: string, sha256: string): Weighing {
   const entry = BASELINE_REGISTRY.find((b) => b.path === path);
   if (!entry) return { kind: 'error', message: `${path} is not in BASELINE_REGISTRY` };
   try {
@@ -236,11 +327,113 @@ function weighAt(revision: string | null, path: string, repoRoot: string): Weigh
     return {
       kind: 'weight',
       value: weighBaseline(entry.shape, document),
-      identities: baselineIdentities(entry.shape, document),
+      identities: baselineIdentities(entry.shape, document, entry.id),
+      sha256,
     };
   } catch (error) {
-    return { kind: 'error', message: error instanceof Error ? error.message : String(error) };
+    return { kind: 'error', message: errorMessage(error) };
   }
+}
+
+function weighWorkingDocument(path: string, documents: ReadonlyMap<string, Buffer | null>): Weighing {
+  const bytes = documents.get(path);
+  if (bytes === undefined) return { kind: 'error', message: 'working document result is missing' };
+  if (bytes === null) return { kind: 'absent' };
+  let text: string;
+  try {
+    text = UTF8.decode(bytes);
+  } catch {
+    return { kind: 'error', message: 'baseline is not valid UTF-8' };
+  }
+  return weighText(path, text, createHash('sha256').update(bytes).digest('hex'));
+}
+
+/** What one exact read of a path at a commit produced, before any weighing. */
+type ExactRead =
+  | { kind: 'text'; text: string; sha256: string }
+  | { kind: 'absent' }
+  | { kind: 'error'; message: string };
+
+/**
+ * Read `paths` at one exact commit through the ci-control exact-Git helpers.
+ *
+ * One tree lookup and one blob read per revision, with replace refs disabled and graft
+ * metadata refused. Absence is what the tree says, not an error message matched by regex. A
+ * present path that is not a mode-100644 blob (a symlink whose target text is `[]`, an
+ * executable, a directory, a gitlink) is an error and is never weighed: its bytes are not the
+ * reviewed baseline document. Helper failures carry only their typed code, so no repository
+ * path reaches the output.
+ */
+function readExactFiles(
+  revisionOid: string,
+  paths: readonly string[],
+  repoRoot: string,
+): ReadonlyMap<string, ExactRead> {
+  const sorted = [...new Set(paths)].sort((left, right) =>
+    Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8')),
+  );
+  const results = new Map<string, ExactRead>();
+  const failRemaining = (error: unknown): ReadonlyMap<string, ExactRead> => {
+    const message = errorMessage(error);
+    for (const path of sorted) {
+      if (!results.has(path)) results.set(path, { kind: 'error', message });
+    }
+    return results;
+  };
+
+  let entries: ExactTreeEntryV1[];
+  try {
+    entries = readExactTreeEntries(repoRoot, { candidateOid: revisionOid, paths: sorted }).entries;
+  } catch (error) {
+    return failRemaining(error);
+  }
+
+  const blobOids: string[] = [];
+  for (const entry of entries) {
+    if (entry.presence === 'absent') {
+      results.set(entry.path, { kind: 'absent' });
+    } else if (entry.mode !== '100644' || entry.objectType !== 'blob' || entry.objectOid === null) {
+      results.set(entry.path, {
+        kind: 'error',
+        message: `mode ${entry.mode} is not a regular non-executable blob`,
+      });
+    } else {
+      blobOids.push(entry.objectOid);
+    }
+  }
+
+  let blobsByOid: ReadonlyMap<string, ExactBlobV1>;
+  try {
+    blobsByOid = new Map(
+      readExactBlobs(repoRoot, blobOids).map((blob) => [blob.oid, blob] as const),
+    );
+  } catch (error) {
+    return failRemaining(error);
+  }
+
+  for (const entry of entries) {
+    if (results.has(entry.path)) continue;
+    const blob = entry.objectOid === null ? undefined : blobsByOid.get(entry.objectOid);
+    if (blob === undefined) {
+      results.set(entry.path, { kind: 'error', message: 'no exact blob bytes were read' });
+      continue;
+    }
+    try {
+      results.set(entry.path, {
+        kind: 'text',
+        text: UTF8.decode(blob.bytes),
+        sha256: blob.contentSha256.slice('sha256:'.length),
+      });
+    } catch {
+      results.set(entry.path, { kind: 'error', message: 'blob is not valid UTF-8' });
+    }
+  }
+  return failRemaining('no exact tree entry was returned');
+}
+
+function weighExactRead(path: string, read: ExactRead | undefined): Weighing {
+  if (read === undefined) return { kind: 'error', message: 'no exact read result' };
+  return read.kind === 'text' ? weighText(path, read.text, read.sha256) : read;
 }
 
 function main(): number {
@@ -268,11 +461,77 @@ function main(): number {
 
   const repoRoot = options.repo;
 
+  // Checked first so a mistyped --repo is reported as itself, not as a missing git, an
+  // unreadable control path or an unresolved revision. The path is not printed. Any stat failure
+  // counts as "not a directory" (ENOENT, EACCES, ELOOP, ENAMETOOLONG): uncaught, it exited 1, the
+  // growth code, and printed the path in its stack trace.
+  let repoIsDirectory: boolean;
+  try {
+    repoIsDirectory = statSync(repoRoot).isDirectory();
+  } catch {
+    repoIsDirectory = false;
+  }
+  if (!repoIsDirectory) {
+    console.error(
+      'FAIL(inconclusive): the --repo path is not a directory, so no revision can be read.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+
+  let rootIdentity: RootIdentity;
+  try {
+    rootIdentity = captureRepoRoot(repoRoot);
+  } catch {
+    console.error(
+      'FAIL(inconclusive): the --repo root is not a stable directory, so baseline growth cannot be ruled out.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+
+  // Refuse graft metadata before any Git command runs: grafts rewrite ancestry, so the merge
+  // base and the ancestor check below could otherwise both be answered from a false history.
+  // Only the typed code is printed, never the repository path (#3669).
+  try {
+    assertNoLegacyGrafts(repoRoot);
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch (error) {
+    const code = error instanceof ExactGitInputError
+      ? error.code
+      : 'ci.input.git-control-unavailable';
+    const remediation = code === 'ci.input.history-graft-present'
+      ? 'Remove legacy Git graft metadata before retrying.'
+      : 'Repair or select a trustworthy repository control path before retrying.';
+    console.error(`FAIL(inconclusive): ${code}. ${remediation}`);
+    return EXIT_INCONCLUSIVE;
+  }
+
+  // Run the trusted git once before any revision is resolved. Without it every later read
+  // fails, and those failures would read as an unfetched revision or a non-ancestor base.
+  try {
+    gitBytes(repoRoot, ['--version'], 'ci.input.git-control-unavailable', MAX_GIT_IDENTITY_BYTES);
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch (error) {
+    const code = error instanceof ExactGitInputError
+      ? error.code
+      : 'ci.input.git-control-unavailable';
+    console.error(
+      `FAIL(inconclusive): ${code}. A trusted git executable could not run in the repository ` +
+        '(none on the allowlist, not runnable, or timed out), so no revision can be read.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+
   // Resolve the candidate FIRST: the base is a merge base against it, so an unresolvable
   // candidate must not be reported as a base-resolution failure.
   let candidateOid: string | null = null;
   if (options.candidate !== null) {
     candidateOid = resolveCommit(options.candidate, repoRoot);
+    try {
+      assertRepoRootUnchanged(repoRoot, rootIdentity);
+    } catch {
+      console.error('FAIL(inconclusive): repository root changed while resolving the candidate.');
+      return EXIT_INCONCLUSIVE;
+    }
     if (candidateOid === null) {
       console.error(
         `FAIL(inconclusive): candidate revision ${options.candidate} could not be resolved to a ` +
@@ -284,6 +543,12 @@ function main(): number {
   }
 
   const base = resolveBase(options.base, repoRoot, candidateOid ?? 'HEAD');
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed while resolving the base.');
+    return EXIT_INCONCLUSIVE;
+  }
   if (base === null) {
     console.error(
       'FAIL(inconclusive): could not resolve a merge base against origin/main or main, so ' +
@@ -293,17 +558,32 @@ function main(): number {
     return EXIT_INCONCLUSIVE;
   }
 
+  // Resolved on every run, not only a pinned one: the exact tree reads below take a full
+  // commit OID, never a name that a ref update could move between reads.
+  const baseOid = resolveCommit(base, repoRoot);
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed while resolving the base.');
+    return EXIT_INCONCLUSIVE;
+  }
+  if (baseOid === null) {
+    console.error(
+      `FAIL(inconclusive): base revision ${base} could not be resolved to a commit, so ` +
+        'baseline growth cannot be ruled out.',
+    );
+    return EXIT_INCONCLUSIVE;
+  }
+
   // Only meaningful for an explicit candidate — see baseRelationError.
   if (candidateOid !== null) {
-    const baseOid = resolveCommit(base, repoRoot);
-    if (baseOid === null) {
-      console.error(
-        `FAIL(inconclusive): base revision ${base} could not be resolved to a commit, so ` +
-          'baseline growth cannot be ruled out.',
-      );
+    const relationError = baseRelationError(baseOid, candidateOid, repoRoot);
+    try {
+      assertRepoRootUnchanged(repoRoot, rootIdentity);
+    } catch {
+      console.error('FAIL(inconclusive): repository root changed while checking revision ancestry.');
       return EXIT_INCONCLUSIVE;
     }
-    const relationError = baseRelationError(baseOid, candidateOid, repoRoot);
     if (relationError !== null) {
       console.error(`FAIL(inconclusive): ${relationError}.`);
       return EXIT_INCONCLUSIVE;
@@ -313,9 +593,67 @@ function main(): number {
   const shapeErrors: string[] = [];
   const comparable: WeighedBaseline[] = [];
 
+  // One exact read per revision. The waiver document rides the base read, so it gets the same
+  // replace-ref, graft and blob-mode refusals as the baselines it can authorize.
+  const registryPaths = BASELINE_REGISTRY.map((entry) => entry.path);
+  const baseReads = readExactFiles(baseOid, [...registryPaths, GROWTH_WAIVERS_PATH], repoRoot);
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed after reading the Git base.');
+    return EXIT_INCONCLUSIVE;
+  }
+  const candidateReads = candidateOid === null
+    ? null
+    : readExactFiles(candidateOid, [...registryPaths, GROWTH_WAIVERS_PATH], repoRoot);
+  try {
+    assertRepoRootUnchanged(repoRoot, rootIdentity);
+  } catch {
+    console.error('FAIL(inconclusive): repository root changed while reading the candidate.');
+    return EXIT_INCONCLUSIVE;
+  }
+
+  let workingDocuments: ReadonlyMap<string, Buffer | null> | null = null;
+  if (candidateReads === null) {
+    try {
+      workingDocuments = readWorkingDocuments(
+        repoRoot,
+        [GROWTH_WAIVERS_PATH, ...registryPaths],
+        rootIdentity,
+      );
+    } catch (error) {
+      const path = error instanceof WorkingDocumentReadError ? error.relativePath : null;
+      const subject = path === GROWTH_WAIVERS_PATH
+        ? `candidate ${GROWTH_WAIVERS_PATH}`
+        : path === null
+          ? 'candidate working documents'
+          : `candidate baseline ${path}`;
+      console.error(`FAIL(inconclusive): ${subject} is invalid: ${errorMessage(error)}`);
+      return EXIT_INCONCLUSIVE;
+    }
+  }
+
+  // Validate proposed authority, but only the merge-base document can grant a waiver.
+  try {
+    if (workingDocuments !== null) {
+      const bytes = workingDocuments.get(GROWTH_WAIVERS_PATH);
+      if (bytes === undefined) throw new Error('working document result is missing');
+      if (bytes !== null) parseWaiverDocument(JSON.parse(UTF8.decode(bytes)));
+    } else {
+      const proposed = candidateReads?.get(GROWTH_WAIVERS_PATH);
+      if (proposed?.kind === 'error') throw new Error(proposed.message);
+      if (proposed?.kind === 'text') parseWaiverDocument(JSON.parse(proposed.text));
+    }
+  } catch (error) {
+    console.error(`FAIL(inconclusive): candidate ${GROWTH_WAIVERS_PATH} is invalid: ${errorMessage(error)}`);
+    return EXIT_INCONCLUSIVE;
+  }
+
   for (const entry of BASELINE_REGISTRY) {
-    const atBase = weighAt(base, entry.path, repoRoot);
-    const atHead = weighAt(candidateOid, entry.path, repoRoot);
+    const atBase = weighExactRead(entry.path, baseReads.get(entry.path));
+    const atHead = workingDocuments !== null
+      ? weighWorkingDocument(entry.path, workingDocuments)
+      : weighExactRead(entry.path, candidateReads?.get(entry.path));
     if (
       entry.initialWeight !== undefined
       && (
@@ -358,6 +696,7 @@ function main(): number {
         atBase.kind === 'weight' ? atBase.identities : undefined,
       headIdentities:
         atHead.kind === 'weight' ? atHead.identities : undefined,
+      headSha256: atHead.kind === 'weight' ? atHead.sha256 : undefined,
     });
   }
 
@@ -386,15 +725,16 @@ function main(): number {
   // its own reviewed PR. Absent file = no waivers. Malformed file = INCONCLUSIVE — an
   // unreadable authorization must not fail open in either direction.
   let waivers: GrowthWaiver[] = [];
-  try {
-    const waiverText = readGitTextAtRevision({ cwd: repoRoot, revision: base, path: GROWTH_WAIVERS_PATH });
-    waivers = parseWaiverDocument(JSON.parse(waiverText));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/does not exist|exists on disk, but not in|path .* does not exist/i.test(message)) {
+  const waiverRead = baseReads.get(GROWTH_WAIVERS_PATH)
+    ?? { kind: 'error' as const, message: 'no exact read result' };
+  if (waiverRead.kind !== 'absent') {
+    try {
+      if (waiverRead.kind === 'error') throw new Error(waiverRead.message);
+      waivers = parseWaiverDocument(JSON.parse(waiverRead.text));
+    } catch (error) {
       console.error(
         `FAIL(inconclusive): ${GROWTH_WAIVERS_PATH} at the merge base could not be read or ` +
-          `validated, so waiver authority is unknown: ${message}`,
+          `validated, so waiver authority is unknown: ${errorMessage(error)}`,
       );
       return EXIT_INCONCLUSIVE;
     }

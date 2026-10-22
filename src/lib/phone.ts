@@ -9,8 +9,9 @@
  * may contain "5551230006" while the JID yields "15551230006". A strict
  * Set.has() comparison fails.
  *
- * Solution: normalize to digits-only at ingestion, and use suffix matching
- * for admin checks so "5551230006" matches "15551230006".
+ * Admin matching first accepts an exact configured identity, then permits
+ * digit-normalized equality or an 8–15 digit pair differing by a 1–3 digit
+ * prefix. The prefix is not validated as an assigned country code.
  */
 
 function phoneText(input: string | number | null | undefined): string {
@@ -69,13 +70,10 @@ export function isPhoneLocal(local: string): boolean {
 /**
  * Check if a phone number (from a JID) matches any admin phone.
  *
- * Uses suffix matching: if the extracted phone is "15551230006" and
- * adminPhones contains "5551230006", it matches because the admin
- * entry is a suffix of the full number. This handles the common case
- * where users omit the country code.
- *
- * Also handles the reverse: admin has "15551230006", extracted is
- * "5551230006" (less common but possible with LID JIDs).
+ * Exact configured identities match first. Otherwise alphabetic/email-shaped
+ * input is rejected and both digit forms must be 8–15 digits. Equal digits,
+ * or a longer form with a 1–3 digit prefix before the shorter form, match.
+ * This is country-code-tolerant matching, not strict normalized E.164 equality.
  */
 export function isAdminPhone(phone: string | number | null | undefined, adminPhones: Set<string>): boolean {
   const rawPhone = phoneText(phone);
@@ -99,8 +97,8 @@ export function isAdminPhone(phone: string | number | null | undefined, adminPho
   // Replacement: exact digit match, OR a strictly country-code-tolerant match — the
   // longer form must equal the shorter plus a 1-3 digit prefix (E.164 country codes
   // are 1-3 digits). This still matches "admin configured without the country code"
-  // (e.g. 5551230006 vs 15551230006) but rejects junk-prefix and short-suffix
-  // escalation. The floor is raised to 8 digits so a 7-digit stub cannot suffix-match
+  // (e.g. 5551230006 vs 15551230006). Prefixes longer than three digits are rejected;
+  // shorter numeric prefixes are not validated as country codes. The floor is 8 digits so a 7-digit stub cannot suffix-match
   // a real number; an international admin whose national number is <8 digits must be
   // configured with its full country code.
   const digits = normalizePhone(rawPhone);

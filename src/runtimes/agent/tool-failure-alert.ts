@@ -9,7 +9,7 @@
 // passed in, the provider label is resolved live at call time, and the alert sink
 // is injectable so the emission contract is unit-testable.
 
-import { emitAlertChecked } from '../../lib/emit-alert.ts';
+import { emitAlert, observeAlertEmission } from '../../lib/emit-alert.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 import { createChildLogger } from '../../logger.ts';
 
@@ -25,7 +25,7 @@ import {
 // component binding for operator filters and alert diagnostics.
 const log = createChildLogger('agent-runtime');
 
-/** Dedup window: a fingerprint seen within this window is suppressed as a repeat. */
+/** Dedup window: a durably queued fingerprint is suppressed as a repeat. */
 export const TOOL_FAILURE_ALERT_DEDUP_MS = 60 * 1000;
 
 /** Per-tool-result inputs describing the failure being considered for an alert. */
@@ -56,8 +56,8 @@ export interface ToolFailureAlertDeps {
   recentToolFailureAlerts: Map<string, number>;
   /** Evict-oldest cap for the dedup map (the runtime's shared capDedupeMap). */
   capDedupeMap: (map: Map<string, unknown>) => void;
-  /** Alert sink; defaults to emitAlertChecked. Injected in tests to observe emission. */
-  emitAlert?: typeof emitAlertChecked;
+  /** Structured alert sink; only durable outbox acceptance consumes dedup. */
+  emitAlert?: typeof emitAlert;
   /** Injectable clock; defaults to Date.now. */
   now?: () => number;
 }
@@ -65,7 +65,7 @@ export interface ToolFailureAlertDeps {
 /**
  * Consider a tool_result error for an operator alert. No-op when alerting is
  * disabled, the error is benign (non-actionable), or an identical failure was
- * alerted within {@link TOOL_FAILURE_ALERT_DEDUP_MS}. Otherwise emits one
+ * durably queued within {@link TOOL_FAILURE_ALERT_DEDUP_MS}. Otherwise emits one
  * deduplicated BOT ERRORS alert. Never throws into the caller.
  */
 export function maybeEmitToolFailureAlert(args: ToolFailureAlertArgs, deps: ToolFailureAlertDeps): void {
@@ -105,8 +105,6 @@ export function maybeEmitToolFailureAlert(args: ToolFailureAlertArgs, deps: Tool
   ].join('\n');
 
   if (deps.recentToolFailureAlerts.has(fingerprint)) return;
-  deps.recentToolFailureAlerts.set(fingerprint, now);
-  deps.capDedupeMap(deps.recentToolFailureAlerts);
 
   const evidence = [
     'runtime_source=src/runtimes/agent/runtime.ts:tool_result',
@@ -125,15 +123,21 @@ export function maybeEmitToolFailureAlert(args: ToolFailureAlertArgs, deps: Tool
     alertExcerpt(args.content) || 'unknown',
   ].join('\n');
 
-  const emit = deps.emitAlert ?? emitAlertChecked;
+  const emit = deps.emitAlert ?? emitAlert;
   try {
-    emit(
+    const result = emit(
       deps.instanceName,
       source,
       `Agent tool failure: ${args.toolName}`,
       evidence,
       'warning',
     );
+    observeAlertEmission(result, { instance: deps.instanceName, source, operation: 'alert' }, true);
+    // A rejected, capture-only or unconfirmed legacy write must not mute the
+    // next identical failure for the dedup window.
+    if (result.ok !== true || result.channel !== 'outbox' || result.status !== 'durably_queued') return;
+    deps.recentToolFailureAlerts.set(fingerprint, now);
+    deps.capDedupeMap(deps.recentToolFailureAlerts);
   } catch (err) {
     log.warn({
       instance: deps.instanceName,

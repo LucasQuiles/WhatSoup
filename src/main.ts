@@ -13,6 +13,10 @@ import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { isFullyConnected } from './transport/runtime-connection.ts';
 import { ChatRuntime } from './runtimes/chat/runtime.ts';
 import { AgentRuntime } from './runtimes/agent/runtime.ts';
+import {
+  clearChatAndDeleteHandoffArtifact,
+  deleteMessagesAndHandoffArtifacts,
+} from './runtimes/agent/handoff-artifact.ts';
 import { consumeIntentionalRestartMarker } from './runtimes/agent/self-restart.ts';
 import { emitAlertChecked } from './lib/emit-alert.ts';
 import { extractExpectedAccountDigest } from './lib/service-identity-config.ts';
@@ -486,6 +490,7 @@ if (instanceType === 'agent') {
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
     autoCompactInputTokens?: number;
+    turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
@@ -512,6 +517,7 @@ if (instanceType === 'agent') {
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
+    turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
@@ -618,6 +624,12 @@ if (grantManager) await grantManager.reconcile();
 // 6. Wire durability to runtime and message handler
 runtime.setDurability(durability);
 
+const invalidateAgentHandoffArtifacts = instanceType === 'agent'
+  ? (conversationKeys: readonly string[]) => (
+    (runtime as AgentRuntime).invalidateHandoffArtifacts(conversationKeys)
+  )
+  : undefined;
+
 // Self-restart resume: if a fresh intentional-restart marker is present, the
 // previous shutdown was a deliberate restart (not a crash). Consume the marker,
 // emit an info-severity completion alert with measured downtime, and queue the
@@ -667,22 +679,22 @@ connectionManager.onMessage = createIngestHandler(
 connectionManager.on('chatCleared', (jid: string) => {
   const conversationKey = toConversationKey(jid);
   try {
-    const count = db.clearChat(conversationKey);
-    log.info({ jid, conversationKey, count }, 'chatCleared: soft-deleted messages');
+    const result = clearChatAndDeleteHandoffArtifact(db, conversationKey, invalidateAgentHandoffArtifacts);
+    log.info({ jid, conversationKey, ...result }, 'chatCleared: soft-deleted messages and handoff artifact');
   } catch (err) {
-    log.error({ err, jid, conversationKey }, 'chatCleared: failed to soft-delete messages');
+    log.error({ err, jid, conversationKey }, 'chatCleared: failed to clear messages and handoff artifact');
   }
 });
 
 connectionManager.on('messageDeleted', (messageIds: string[]) => {
   try {
-    const count = db.markMessagesDeleted(messageIds);
+    const result = deleteMessagesAndHandoffArtifacts(db, messageIds, invalidateAgentHandoffArtifacts);
     log.info(
-      { count, requested: messageIds.length },
-      'messageDeleted: soft-deleted revoked messages',
+      { ...result, requested: messageIds.length },
+      'messageDeleted: soft-deleted revoked messages and handoff artifacts',
     );
   } catch (err) {
-    log.error({ err, messageIds }, 'messageDeleted: failed to soft-delete revoked messages');
+    log.error({ err, messageIds }, 'messageDeleted: failed to delete revoked messages and handoff artifacts');
   }
 });
 
@@ -764,11 +776,17 @@ connectionManager.on('historyMessages', (messages) => {
     return;
   }
   const stats = processHistoryBatch(db, messages as HistoryInput[], log);
-  // Deliberately silent for all-noop batches (row already existed at a real
-  // content_type): re-syncs on existing history would otherwise spam logs.
-  // If you need visibility into empty-batch cadence, move to log.debug.
-  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped) {
+  // All-noop batches (every row already existed at a real content_type) stay
+  // out of info: re-syncs of existing history would otherwise spam logs. This
+  // log line alone never proves recovery; see docs/runbook.md "Verify history
+  // backfill after a relink" for the per-message check.
+  if (stats.inserted || stats.upgraded || stats.placeholders || stats.skipped || stats.failed) {
     log.info(stats, 'historyMessages: batch processed');
+  } else {
+    log.debug(stats, 'historyMessages: batch already stored');
+  }
+  if (stats.failed) {
+    log.warn({ failed: stats.failed }, 'historyMessages: some history messages failed to store');
   }
 });
 
@@ -984,7 +1002,7 @@ const healthServer = startHealthServer({
         const stored = getMessagesBySender(db, senderJid);
         const { toReplay, groupSkipped } = selectReplayableDms(stored, config.adminReplayMax);
         if (groupSkipped > 0) {
-          log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped group messages');
+          log.info({ subjectId, senderJid, groupSkipped }, 'access replay: skipped non-direct (group/status) messages');
         }
         for (const msg of toReplay) {
           attempted++;
@@ -1326,6 +1344,11 @@ async function start(): Promise<void> {
       ? runtime.popStartupNotificationEvent?.() ?? null
       : null,
     intentionalRestartReceipt: selfRestartBackOnline,
+    // #3570: each notice goes to its own chat, not the admin, so it is not
+    // gated on an admin phone or the intro.
+    chatNotices: instanceType === 'agent'
+      ? runtime.popStartupChatNotifications?.() ?? []
+      : [],
   });
 }
 

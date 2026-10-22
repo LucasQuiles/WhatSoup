@@ -42,6 +42,7 @@ export function coordinatorPortDouble(
     runtimeTurnSupervisor: {
       canAccept: vi.fn(() => true),
       scopeKey: vi.fn(() => 'per_chat:port-double'),
+      isDegraded: vi.fn(() => false),
     } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
     sessionOwnership: {} as unknown as RuntimeTurnCoordinatorPort['sessionOwnership'],
     recoveryManagerId: 'port-double-manager',

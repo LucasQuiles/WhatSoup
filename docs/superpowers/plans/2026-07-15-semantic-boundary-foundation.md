@@ -1,6 +1,16 @@
 # Semantic Boundary Foundation Implementation Plan
 
-**Status:** Pending — specification and experiment complete; production implementation not started
+**Status:** Pending acceptance reconciliation — implementation exists; the original
+task checklist is not current completion proof.
+
+**Source reconciliation (2026-10-06, `59cc562bc`):**
+`scripts/semantic-quality-check.ts`, the modules under
+`scripts/lib/semantic-quality/`, and the semantic package scripts are present.
+Use their exported contracts and the current `package.json` pins when resuming.
+The interface snippets, create-file instructions, toolchain versions and command
+strings below record the original implementation design. They must be reconciled
+before reuse. Preserve the exact-revision input, shadow-mode, structured override,
+redaction and validation requirements; file presence alone closes none of them.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

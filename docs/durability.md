@@ -28,7 +28,7 @@ Every message that enters the bot's processing pipeline is written to `inbound_e
 
 The `routed_to` column records which runtime handled the message (`agent`, `chat`, `passive`, etc.). If a process crash occurs while a turn is in progress, pre-connect recovery can inspect `routed_to` to understand what context was lost.
 
-An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`; a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
+An inbound event becomes terminal from the outcome selected by the immutable turn finalizer, not from echo alone. An echoed answer produces `finalized_replied`; an explicit suppression policy can produce `finalized_no_reply_policy`, and so does a completed turn whose answers the client output policy withheld (attempt kind `withheld_by_policy`, #3613); a terminal provider/runtime failure produces `failed_terminal`; and unresolved delivery transfers to an exact recovery owner. Legacy `is_terminal` outbound ops still complete their linked inbound when echoed, but that compatibility path is not the complete terminal model.
 
 ### 2.2 Outbound Operations Journal (`outbound_ops`)
 
@@ -110,12 +110,12 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 
 | From | To | Trigger |
 |---|---|---|
-| `pending` | `processing` | Initial insert (journalInbound writes `processing` directly) |
+| — | `processing` | `journalInbound` inserts directly as `processing`; the schema default `pending` is not an initial runtime transition. |
 | `processing` | `turn_done` | `markTurnDone()` — agent/chat runtime signals the LLM turn completed |
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
 | `processing` | `failed` | `markInboundFailed()` — error during processing, or pre-connect recovery |
-| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`) winner |
+| `processing` / `turn_done` | `complete` | `finalizeTurnTerminal()` — one atomic `finalized_replied` (`response_echoed`) or `finalized_no_reply_policy` (`no_reply_policy`, or `client_output_withheld` for a policy-withheld answer) winner |
 | `processing` / `turn_done` | `failed` | `finalizeTurnTerminal()` — one atomic `failed_terminal` winner with its bounded failure class |
 | `processing` / `turn_done` | unchanged (recovery-owned) | `finalizeTurnTerminal()` — no inbound mutation; the linked recovery job and selected unresolved delivery become the durable owner in the same transaction, and later proof settles the source |
 | open | terminal | `sweepStuckInbound()` — live reconciler for stranded rows (see §4.5) |
@@ -380,7 +380,8 @@ missed (the QR-102 ordering strand), or a turn that finished with no reply and n
 finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
-**15 minutes**, and reconciles four buckets in a single transaction:
+**15 minutes**, and reconciles four buckets in a single transaction, plus a fifth that it only
+reports:
 
 | Bucket | Selection | Disposition |
 |---|---|---|
@@ -388,13 +389,30 @@ pre-connect recovery. It is wired in `main.ts` to run once at startup and then e
 | 2. Stranded `turn_done` | `turn_done` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundComplete(seq, 'recovered_turn_done')` |
 | 3. Stale open, no success | `pending`/`processing` older than **24 hours** with no echoed terminal op (and no `turn_terminal_records` row) | `markInboundFailed(seq)` (terminal_reason `error`, failure_class `stale_reclaim`) |
 | 4. Recovery-owner reclaim (#1749) | open with a `transferred_to_recovery_owner` terminal record whose selected op is `failed_permanent`/`quarantined` **or** whose recovery job is `exhausted`, no echoed terminal op, and `received_at` older than **5 minutes** | `markInboundFailed(seq)` (failure_class `recovery_owner_reclaimed`); drive any `pending`/`claimed` owning job to `exhausted` |
+| 5. Open behind a final terminal record (**report-only**) | open with **exactly one** terminal record, whose disposition is `finalized_replied`, `finalized_no_reply_policy` or `failed_terminal`, whose identity matches the inbound and whose delivery proof still holds; no `inbound_disposition_links` row (as `inbound_seq` or `superseded_by_seq`), no `turn_recovery_jobs` row; `received_at` older than **5 minutes** | **nothing is written** (no inbound change, no recovery evidence): the count is returned as `terminalRecordCloseCandidates` and the first 200 seqs are logged (`inboundSeqsTruncated` is true when there are more). Each close is an operator decision taken with `turn-recovery-operator close-inbound` (`docs/runbook.md`), which applies the status the record implies. Read in its own snapshot before the four-bucket transaction, and bounded per sweep (see below) |
 
 Buckets 2 and 3 require `NOT EXISTS turn_terminal_records`, so a `transferred_to_recovery_owner`
 record excludes its inbound from every one of buckets 1–3 — the recovery-owner trap (§4.7).
 Bucket 4 is the exact inverse: it selects **only** inbound rows owning such a terminal record
-whose delivery can never echo-settle, so the four buckets remain mutually exclusive and no row is
-disposed twice (an echoed terminal op still routes to bucket 1). Each SELECT is bounded to 200 rows so a
-large backlog drains over successive sweeps rather than in one long transaction. The
+whose delivery can never echo-settle. Bucket 5 reports only rows whose single terminal record is
+final — live finalization writes that record and the inbound status atomically, so such a row is
+left only by an older release — and never a transferred or `unfinalized_retry_owned` record. The
+buckets remain mutually exclusive and no row is disposed twice (an echoed terminal op without a
+record still routes to bucket 1). The operator close derives the status by the same mapping live
+finalization uses (`deriveTerminalInboundMutation`), validates the record against the finalize
+contract and re-checks its delivery proof: `complete` with `response_echoed` / `no_reply_policy`,
+or `failed` with the record's failure class. Each SELECT of buckets 1–4 is bounded to 200
+rows so a large backlog drains over successive sweeps rather than in one long transaction.
+Bucket 5 writes nothing, so nothing drains: its SQL pre-filters only what SQL can judge
+(disposition, identity, conflicting records, links, recovery jobs, grace window), while delivery
+proof and the record contract are judged per row by the evaluator. A sweep therefore scans the
+pre-filtered rows oldest first in keyset pages of 200, evaluating at most **1000** rows, and
+resumes after the last evaluated seq on the next sweep; each scan cycle covers the seqs that
+existed when it began, then wraps to the oldest row, so refused rows can never hide a later
+eligible one and a row repaired behind the cursor is seen on the next cycle. The resume point is
+held in memory only: a restart begins a new cycle. The log line carries `scanned`, `complete`,
+`cycleUpperSeq` and `refusedByReason` (evaluated rows only; SQL-pre-filtered rows are not
+counted), and a window whose rows were all refused is logged at info level. The
 **5-minute** and **24-hour** grace windows keep the sweep from racing normal in-flight
 delivery. It uses the same primitives as the echo/recovery paths (never `completeTurn`, which
 opens its own `BEGIN IMMEDIATE`) and leaves `continuity_candidate_*` columns untouched. The
@@ -412,10 +430,13 @@ terminal post-effects.
 
 If delivery proof cannot be read or the terminal transaction fails, the runtime emits the
 `agent_turn_finalization_failed` BOT ERRORS alert with bounded, hashed identity evidence and
-retains the exact finalization request. A delivery-proof failure blocks the affected lane; a
-terminal-write failure with already-frozen evidence may let the queue advance while retry
-ownership remains retained. If both terminal persistence and durable alerting fail, the scope is
-sticky-degraded and accepts no more turns until the same request recovers.
+retains the exact finalization request. Both failures block the affected lane until a retry
+succeeds or, once retries are exhausted, until a restart: `emitFailureIncident` in
+`turn-finalizer.ts` never lets the queue advance. The one exception is a terminal write that
+fails after the stuck-inbound sweep has already reclaimed the turn: nothing remains to write,
+so the turn ends as `reclaimed_by_sweep` with no alert and no retention, and the lane advances.
+If both terminal persistence and durable alerting fail, the scope is sticky-degraded and
+accepts no more turns until the same request recovers.
 
 Retries are single-flight, run after **5 seconds**, process at most **16** retained records per
 pass with a rotating cursor, and stop after **5** attempts per record. Exhausted work remains
@@ -424,6 +445,26 @@ retained and its scope remains blocked; it is never discarded. Admission stops a
 return `winnerMatchesRequest=true` before post-effects run and the scope can unblock. The health
 snapshot exposes retained/degraded gauges plus cumulative attempt, recovery, and exhaustion
 counters; any retained finalization degrades runtime health. Shutdown cancels the retry timer.
+
+Each turn's outbound operations carry that turn's attribution. `beginTurnEvidence` takes the
+turn identity's conversation key and chat JID, and the turn's evidence carries them, including
+when it begins on a queue rebuilt for the turn's provider result or created when a provider
+fallback replaces the turn's session. The queue captures the attribution when output is
+enqueued. Output enqueued while that evidence is active carries the turn's key and chat JID,
+and its operations carry them and are sent to that JID even when an operation is created later.
+The exception is crash salvage: when a crash aborts a turn that showed no text, the text of
+every retained batch is joined and passed to `enqueuePreparedText` as status output under the
+attribution of the last retained batch. Output enqueued outside a turn keeps the queue's own
+key, fixed when the queue is created, and the delivery JID the queue had when the output was
+enqueued. An alias migration, a queue created after a LID mapping, or a single-scope queue
+serving another chat therefore cannot make an answered turn fail its delivery proof. A text
+operation the queue sends is first redacted in `enqueuePreparedText`: `redactInternalArtifacts`
+applies the audience that `resolveOutboundAudience` computes for the JID it is sent to. An
+admin's direct chat counts as internal on that ground only while no provider fallback is
+active. Then `admitClientOutput` withholds the text when `enforceClientOutputPolicy` withholds
+it under either the queue's key or the turn's key. The only redaction exception is a fixed
+progress placeholder, which skips redaction but passes the same policy check. A voice reply
+goes to the finalized turn's chat.
 
 Per-chat crash exhaustion follows the same proof boundary. The runtime first marks the current
 manager owner `exhausted` and cancels auto-respawn. When an immutable crash context exists,
@@ -479,7 +520,15 @@ reconciliation and late-echo proof; its claim/reassignment APIs are not an activ
 worker. Treating those rows as proof that Q will retry its own prompt is incorrect.
 
 Every journaled admission rejection emits `agent_turn_admission_rejected` with the inbound
-sequence, scope, exact queue reason, and `automatic_replay=false`. Unjournaled system turns stay
+sequence, scope, exact queue reason, and `automatic_replay=false`. When
+`agentOptions.scopeBlockedAlertToken` is enabled (default off; see
+[configuration](configuration.md)) and the conversation's scope is held by a turn whose terminal
+finalization is unresolved, the evidence also carries `scope_blocked=finalization`, reported at
+the alert boundary as the `scope_blocked` class. The marker reports scope state when the
+rejection is recorded, not the rejection's cause. Shutdown or capacity alone does not cause the
+marker: a rejection during shutdown or at the instance-wide retained-finalization capacity carries
+it only when the scope is also held. A rejection with an earlier cause, such as outstanding
+durable recovery, is marked when the scope is also held. Unjournaled system turns stay
 silent. The safe current remediation is an owner-authorized new inbound that restates or continues
 the lost intent after checking the target worktree and external state for already-applied effects.
 The old inbound remains failed as an immutable audit record; do not relabel it delivered merely
@@ -575,6 +624,18 @@ FROM tool_calls t
 WHERE t.status = 'quarantined'
 ORDER BY t.id DESC;
 ```
+
+#### 5.2.1 Tool-call caller attribution (#3421)
+
+Every tool call records which caller made it in the migration 65 columns (§6, `tool_calls`). No admission or authorization depends on the record directly. One decision does: with capability-obligation replay active, `caller_turn_owned` decides whether the call is correlated to the executing turn (`logical_turn_id`), and so whether an obligation can be created, because an uncorrelated row in the conversation window makes the effect fold enumeration-incomplete. The runtime mints one random token per agent session in memory and passes it to the child only through its environment. The session's MCP proxy and hooks present it as a `notifications/whatsoup/session` line, which gets no reply. A same-user process can read another process's environment, so `match` is attribution evidence and does not authenticate the caller. Calls from other clients, such as the fleet client and the bot-errors provider probe, record as outside callers.
+
+The read-only report answers how often outside callers act while a turn is executing, and whether any outside caller reached a sensitive tool. Its `turnCorrelation` section, one entry per transport, measures how many of the turn's own mid-turn calls carry their `logical_turn_id` (`eligible` against `attributed`), and counts outside mid-turn calls apart (`outsideMidTurn`, with `outsideMidTurnCorrelated` expected to be 0). `eligible` also counts rows that are NULL by design: shared and single scopes, two heads with one conversation key, and a global session with no chat key. So `attributed` below `eligible` is expected outside `per_chat`; on a `per_chat` instance, a gap beyond those cases means missing correlation. The gap cannot show a turn's helper whose socket presented no matching token: its calls record `caller_turn_owned = 0`, so they leave both `eligible` and `attributed` and count in `outsideMidTurn`, where the report cannot tell them from an outside client's. Read `outsideMidTurn` together with the `capability_obligation_events` rows whose action is `obligation.not_created` and whose `reason_code` is `not_created_side_effect_uncertain`. A journaled turn whose decision is recorded (§5.7) and whose inbound matches exactly one contract rule, but whose receipt time is unavailable or invalid, records `not_created_receipt_time_invalid` instead, so it does not add to that count. A lost-decision event whose `detail.derivedReasonCode` is `not_created_side_effect_uncertain` belongs with that count too. Rows written by a release that correlated every mid-turn call whatever its caller can keep `outsideMidTurnCorrelated` above 0 until they leave the window. Run the report with:
+
+```bash
+bash scripts/run-with-pinned-node.sh scripts/caller-attribution-report.ts --db <instance>/bot.db --out-dir <dir> [--window-days 30]
+```
+
+It writes `caller-attribution-<YYYY-MM-DD>.json` and prints its path. Retention deletes terminal rows after 30 days, so the window is capped at 30 days; run it inside that window. For a sensitive outside call, `outcome_code = 'success'` means it was admitted and `failure_code = 'authorization_denied'` means it was refused.
 
 ### 5.3 `recovery_runs` Table — Audit Trail
 
@@ -690,6 +751,50 @@ Off by default; activates only under `agentOptions.capabilityObligations.enabled
 turn cannot fulfil a declared capability (e.g. a `/watch` YouTube or media download that
 needs a child process), the C3 terminal transaction records a `capability_obligations` row
 instead of silently dropping the request, and a supervisor replays it later.
+
+A turn that owes nothing records no event: a turn outside `per_chat`, a minted replay turn, a
+scheduled agent job, a turn served by a provider that has the capability or is unknown, or an
+inbound that matches no contract rule. A decision is derived only when the runtime finalizes a
+dispatched turn, and the
+turn's first attempt writes it atomically with the terminal record. If that attempt does not
+commit, because its terminal write fails or because it stops before that write when the turn's
+delivery evidence cannot be read or does not prove the turn, each supervisor retry carries the
+same decision but does not let it block the terminal. The retry writes the decision if it
+can, and then logs nothing about it. If it cannot, it logs an error line that names the turn,
+the lost decision, and the error's `errorClass` and `errcode`, and records
+`not_created_decision_lost_on_retry`. The line is the only record when that event cannot be
+written either. If the line and the event both fail while the terminal write goes on, that
+retry leaves no record of the lost decision. All of this holds only once a retry's terminal
+write reaches the decision, after the terminal record and its inbound and delivery proofs. A
+retry that stops earlier does not attempt the decision and logs nothing about it, whether it
+stops before the write (the turn's delivery evidence still cannot be read or does not prove the
+turn) or inside it (its inbound or delivery proof is rejected). If no retry gets that far, the
+decision is recorded nowhere, and a restart closes the turn with no event (§4.1, §4.2,
+§4.5). A storage fault that aborts the whole terminal write still fails that write, and the
+turn stays retained, as before. While a turn's terminal write is being retried, and after its
+retries are exhausted until a restart (§4.6), its chat refuses new turns that reach admission
+(arrivals may first wait in the chat's queue); each refusal is recorded as a
+`pre_dispatch_error` failure, with an `agent_turn_admission_rejected` operator warning, and a
+continuity mark and an `agent_reply_guarantee_breach` alert are attempted. With
+`agentOptions.scopeBlockedAlertToken` enabled (§4.8), that warning also carries
+`scope_blocked=finalization` whenever the refused turn's scope is held. A turn closed any
+other way records no event, for example one rejected before dispatch, one reclaimed by the
+stuck-inbound reconciler (§4.5), or one interrupted by a restart and closed by pre-connect
+recovery (§4.1). A turn whose decision is recorded but that does not get an obligation records
+an `obligation.not_created` event in `capability_obligation_events`. Its `reason_code` is one
+of:
+`not_created_contract_conflict` (the inbound matches more than one contract rule);
+`not_created_unjournaled_source` (the inbound has no journal sequence);
+`not_created_receipt_time_invalid` (the turn's receipt time is unavailable or invalid, so neither
+the conversation window nor the write-loss check can be bounded);
+`not_created_side_effect_uncertain` (the turn's effect fold is not conclusively effect-free);
+`not_created_media_unavailable` (the fold is effect-free, but the matched media has no persisted
+media path); `not_created_media_retention_failed` (the fold is effect-free, but staging the
+retained media copy failed); `not_created_decision_producer_error` (deriving the decision
+threw, or the derived decision failed validation; the turn still finalizes); or
+`not_created_decision_lost_on_retry` (a retry could not write the derived decision;
+`detail.derivedAction` and `detail.derivedReasonCode` name it, and `detail.error` gives the
+error's `name` and `errcode`).
 
 **Migration 60 (post-merge-audit hotfix; renumbered from 59 when #2567's fact-export
 rebuild claimed slot 59).** Two schema changes ride migration 60: (a)
@@ -916,7 +1021,9 @@ survive a clean exit — round-18 finding 3). This exists because a synchronous 
 worker for ~72 minutes: vitest's async per-test timeout structurally cannot interrupt a blocking
 synchronous call, so a hung fixture produced no truthful completion signal. Semantics
 (round-18..19): a timeout is **inconclusive** (exit 124), never reportable as a pass OR a code failure;
-a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125); a signalled
+a group kill that fails for a non-`ESRCH` reason (e.g. `EPERM`) is inconclusive (exit 125), except that an
+`EPERM` on a group with no live member (zombies only, or empty, per one `ps` read) counts as reaped
+(issue 3568; a live member or an unreadable `ps` keeps 125); a signalled
 child maps to `128 + signal`. On a bound firing AND on a wrapper `SIGTERM`/`SIGINT`, a terminal grace is
 armed **UNCONDITIONALLY** and is deliberately **NOT `.unref()`'d**, so a `close` that never arrives (an
 escaped descendant holding a stdio pipe after a successful kill) resolves INCONCLUSIVE (125) rather than
@@ -1030,7 +1137,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `error`, `local_command` / `empty_content` (skipped without a turn), `recovered_turn_done` / `recovered_response_sent` (finalized by recovery or the stuck-inbound reconciler §4.5), etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
-| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), `processor_throw`, or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. Exact terminal-attempt classes remain independently preserved on `turn_terminal_records.attempt_failure_class`: for example, `provider_stream_corrupt` projects to the bounded inbound class `provider_failure` rather than expanding this column's vocabulary. |
+| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), `operator_cancelled`, `processor_throw`, or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. Exact terminal-attempt classes remain independently preserved on `turn_terminal_records.attempt_failure_class`: for example, `provider_stream_corrupt` projects to the bounded inbound class `provider_failure` rather than expanding this column's vocabulary. |
 
 ### `outbound_ops`
 
@@ -1100,16 +1207,33 @@ payload substitution.
 
 `markEchoed()` preserves the first echo timestamp and records the selected op as `echoed`. When
 the exact linked job is unsettled and its source is `processing`/`turn_done` (or already completed
-as `response_echoed`), the source inbound and job settle in the same SQLite transaction. Startup
+as `response_echoed`), the source inbound and job settle in the same SQLite transaction.
+When that settlement completes a per-chat `completed` turn, the same transaction also writes the
+turn's completed-identity bundle to the checkpoint. It does so only when all of these hold:
+- the bot's own message is stored for the op's exact conversation and chat;
+- that WhatsApp message is claimed by exactly one outbound op;
+- the checkpoint still ends at that inbound and delivery;
+- the checkpoint's session is live for the conversation;
+- there is no active turn and no newer completed identity.
+
+Otherwise the bundle stays unset. Ingest stores an outgoing message before correlating its echo. Startup
 also scans a bounded set of already-echoed exact links, closing the crash gap between transport
 truth and job settlement. If a late echo contradicts a worker-completed outcome or a pending/
 failed source, delivery truth is not rolled back: the completed job retains its original
 completion proof and records a durable `echo_conflict_at`/reason for operator review.
+The `/health` echo-conflict and corrupt-link counters count only live jobs (`pending`,
+`claimed`, `blocked_unsafe`). The same residue on a `completed` or `exhausted` job stays on
+the row and is reported in the diagnostic-only `turnRecoveryEchoConflictsSettled` and
+`turnRecoveryCorruptLinksSettled` counters, which never degrade health. Orphan transfers,
+which have no job row, always count as corrupt links.
 
 Database triggers keep every linked source inbound and selected outbound proof immutable and
 retained while its job exists, including completed jobs. Retention selects only an old
 `completed` job whose exact source inbound is still terminal (`complete`/`failed`) and whose
-selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). The job deletion
+selected delivery is still terminal (`echoed`/`failed_permanent`/`quarantined`). It also keeps the
+job whenever its terminal record must be kept: while a `turn_delivery_corroboration` row names that
+terminal, or an `inbound_disposition_links` closure supersedes to the terminal's inbound. Deleting
+the job there would leave the transferred terminal as an orphan transfer. The job deletion
 uses `RETURNING terminal_record_id`; only those returned records can drive terminal and then
 unreferenced proof deletion in the same transaction. State or age alone is never sufficient.
 Migration 40 also refuses an upgrade when a legacy completed job lacks terminal source or
@@ -1125,20 +1249,41 @@ work that requires provenance-labeled operator catch-up and emits no identifiers
 After that dry run, `record-continuity-manifest --confirm-record` can persist only the
 `absent`, `observed_not_admitted`, and `ambiguous` classifications in the existing recovery
 ledger. Durable identities and evidence are SHA-256 fingerprints; no raw receipt, destination,
-manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes open/unresolved/ambiguous counts in a `continuity`
-block and a `recovery_debt` field (status stays `"healthy"` when only continuity gaps are present —
-see `docs/runbook.md` §7.6 or issue #2973); `degradation_causes` still includes `continuity_gap_open`
-or `continuity_gap_unreadable` for diagnostic consumers. The recorder does not send,
-replay, admit, or close work. A later proof-bound catch-up lane must close these rows only after an
-exact provenance link and terminal delivery proof exist.
+manifest, or evidence value is written. Repeated recording is idempotent. `/health` exposes
+`total`/`open`/`unresolved`/`ambiguous`/`ambiguous_total`/`closed`/`addressed`/`declined` counts in a
+`continuity` block; the open/unresolved/ambiguous counts of that same reading feed the normalized
+`recovery_debt` projection, whose `continuity` part keeps its four-field shape. Readable retained
+obligations use `open=true`, `service_blocking=false`, and `attention="routine"` without changing an
+otherwise healthy service status. Unreadable or actionable recovery evidence uses
+`service_blocking=true`, `attention="urgent"`, and degrades service health; see `docs/runbook.md` §7.6.
+Compatibility `degradation_causes` may still include continuity reason codes for diagnostic consumers,
+but those codes are not independently an outage verdict. The recorder does not send, replay, admit,
+or close work.
+Closure is a separate, append-only row in `continuity_gap_closures` (migration 66) keyed to the
+recorded plan ID and original receipt fingerprint; the recorded plan and its `started` run are never
+changed. `close-continuity-gap` appends one row per gap: `addressed` needs a later live inbound in the
+same conversation, its terminal delivery proof, an exact selected-context witness, and (for audio) bound
+media and transcript hashes; `declined` needs an owner-approved `continuity-closure-authority.v1`
+policy and a transport-verified decision inbound. Only `open > 0` keeps `continuity_gap_open` and the
+continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
+unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
+`turn_recovery_degraded` is derived independently and is not cleared by a closure.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
-Terminal `blocked_unsafe` and `exhausted` jobs do not block admission;
-an isolated blocked-unsafe receipt is retained but does not make health degraded. Exhausted work,
-an unmatched `recovery_pending_operator_catchup` link, corrupt proof, or a recorded echo conflict
-independently keeps health degraded until operator closure or retention resolution. Appending the
+Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
+and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Only user-facing catch-ups count as historical catch-ups: a link whose source is a synthetic
+scheduled-job (`agentjob-*`) inbound, enrolled before #3754, is reported apart as
+`turnRecoveryOpenRecoveriesSynthetic` (see docs/turn-recovery-continuity-reconciler.md).
+Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
+uncorroborated delivery ambiguity are blocking. An orphan transfer has no job to settle. For one
+admitted shape only (a corroborated `maybe_sent` terminal op with a NULL `wa_message_id`, and a terminal
+source inbound that is not echo-settled and has no open disposition link), `turn-recovery-operator settle-orphan-transfer`
+(`docs/runbook.md`) writes its missing job directly in `exhausted`, with no replayable content, plus an
+append-only operator `recovery_plans` row. The terminal record is kept as evidence. Every other orphan
+is refused with a reason. Appending the
 matching `superseded_by_operator_catchup` closure removes that catch-up from the live gauge without
 rewriting either durable disposition.
 
@@ -1176,6 +1321,15 @@ rewriting either durable disposition.
 | `retry_disposition`, `operator_action` | TEXT NOT NULL | Closed recovery guidance derived from typed facts, never prose. |
 | `evidence_coverage` | TEXT NOT NULL | `complete`, `partial`, or `legacy_unclassified`. |
 | `duration_ms` | INTEGER | Optional bounded execution duration; null for open rows. |
+| `logical_turn_id` | TEXT | Migration 58 (AS-04). The logical turn that owned the call: the head of the runtime's per-chat context list for the call's conversation key at record time. Set only when the caller evidence marks the call as the turn's own: in process, or a socket session that presented a session token this runtime minted (not bound to the executing session: any token the runtime still holds matches, including one minted for a session that has ended). NULL for any other caller, when no head owns the key, when two heads share it, and in shared and single scopes. The capability-obligation effect fold treats a NULL row in the conversation window as enumeration-incomplete. |
+| `source_inbound_seq` | INTEGER | Migration 58. The owning turn's inbound sequence. NULL whenever `logical_turn_id` is, and when the owning turn has no journaled inbound. |
+| `caller_transport` | TEXT | Migration 65 (#3421). `socket` or `in_process` (the provider bridge). NULL for rows written before migration 65 or by a caller outside both. |
+| `caller_connection_id` | TEXT | Per-process random prefix plus the socket connection number. NULL for in-process calls. |
+| `caller_client_name`, `caller_client_version` | TEXT | The client's own `initialize.clientInfo`, printable ASCII only, at most 64 characters, else NULL. A label, never trusted. |
+| `caller_token_result` | TEXT | `match`, `mismatch` or `absent` for a socket caller's per-session token; `not_applicable` in process. |
+| `caller_turn_owned` | INTEGER | 1 when the call is in process, or on a socket session that presented a session token this runtime minted (not bound to the executing session: any token the runtime still holds matches, including one minted for a session that has ended), else 0. |
+| `caller_actor_source` | TEXT | `executing_turn` when the call resolved an actor from the executing turn, else `none`. |
+| `tool_sensitive` | INTEGER | 1 when the tool is marked sensitive (admin-only). |
 
 Migration 50 replaces historical input/result/error content with these markers without interpreting legacy prose. This is a logical live-schema scrub, not proof of physical erasure: old bytes may remain in SQLite free pages, WAL files, backups, or snapshots until separately approved compaction and backup-retirement work occurs.
 
@@ -1187,7 +1341,8 @@ Migration 39 adds the completed-turn identity bundle below. The seven fields are
 all null (legacy or not-yet-completed checkpoints) or all populated; database triggers
 reject partial bundles. Terminal finalization derives the bundle from the same validated
 terminal identity and writes it in the terminal transaction, rejecting caller-supplied
-values that contradict that identity. `last_inbound_seq` remains independent progress state;
+values that contradict that identity. A completed turn transferred to recovery while its answer
+awaited the echo gets the bundle at echo settlement instead (see the `markEchoed()` contract). `last_inbound_seq` remains independent progress state;
 only `completed_inbound_seq` identifies the resumable completed turn.
 
 | Column | Type | Description |
@@ -1223,6 +1378,37 @@ contradictory identity fails closed; the runtime never appends a guessed namespa
 conversation key. When the runtime knows an exact `session_id`, lifecycle status changes
 update every checkpoint row for that ID so all conversations attached to a shared session
 move together.
+
+Non-sandbox `per_chat` lazy adoption (`src/runtimes/agent/checkpoint-adoption.ts`, #3530):
+the first turn of a chat manager that has not yet started reads the chat's checkpoint and
+the `agent_sessions` rows carrying its `session_id`. This applies only when the chat has no
+resident manager: the first manager after a restart, or the one after idle eviction. It
+reads the rows only after the previous provider for the chat has stopped. A manager that
+replaces one this process retired on purpose keeps the fresh spawn: route recycle, `/new`,
+crash cleanup, or a provider-fallback stand-in. Scheduled-job map keys are excluded and
+start fresh.
+- **Own session, resumable:** the manager resumes that exact row.
+- **Foreign checkpoint:** the session has rows only in another namespace, for example a
+  scheduled job's row written before #3570. The runtime never adopts it. It recovers the
+  chat's own newest resumable session and re-points the checkpoint at it, which clears the
+  foreign completed identity. The next completed turn writes the recovered session's full
+  bundle. With no own session, the chat starts fresh with a notice.
+- **Own session, not resumable:** the row is missing, crashed or quarantined, or the session
+  layer refuses the resume at spawn. The chat starts fresh with the notice "_Previous session
+  could not be restored_", and recent chat messages are merged into the turn.
+- **A live owner may exist:** the own row is `active`, the session has duplicate own rows, or
+  it is also `active` in another namespace. The turn fails closed with
+  `CHECKPOINT_ADOPTION_REFUSED` and the chat is told its previous session may still be
+  running. No session is spawned, so the chat never gets a second live session.
+
+Idle eviction suspends a resident manager and holds the chat's actor-socket teardown
+barrier until the provider has stopped; every later manager for the chat waits on that
+barrier before spawning. When the suspend fails only at its durable lifecycle step after
+the provider stopped, the evicted generation is retired (its row ends, so it is never
+resumed) and the barrier settles. The next message then takes the "own session, not
+resumable" or foreign-checkpoint path above and starts fresh with the notice. When the stop
+itself is unproven, the barrier stays rejected and the chat's turns are refused, so no
+second provider can start. Both outcomes are logged with the underlying `errorMessage`.
 
 A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
 transaction before provider initialization. The reset clears stale session, turn, watchdog,
@@ -1521,10 +1707,20 @@ are independently queryable.
 
 `AgentJobContext` carries the durable `occurrenceId` of the dispatching claim, and the agent
 runtime embeds it in the journaled synthetic inbound's messageId
-(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`). The #2144 turn journal and
+(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`, minted by
+`scheduledJobInboundMessageId` in `src/core/synthetic-turn-source.ts`). The #2144 turn journal and
 `trigger_occurrences` are therefore deterministically joinable — an accepted agent-job
 occurrence without a matching journaled owner is auditable incoherence rather than an
 unanswerable question.
+
+The trigger run is recorded `ok` once the turn is queued, so a turn that later dies is not a
+trigger failure. Crash recovery fails its synthetic inbound but does not enroll it as an operator
+catch-up, because it owes no user a reply (#3754). The loss surfaces in `/health` as
+`runtime.agent.turnRecoveryScheduledTurnsLost` and `recovery_debt.turn_recovery.scheduled_turns_lost`:
+synthetic inbounds failed with `crash_recovery`, `stale_reclaim` or `recovery_owner_reclaimed`
+within `SCHEDULED_TURN_LOSS_WINDOW_DAYS` (7). The count is visibility only and pages nothing. The
+first terminal wins for such a row: the seq-keyed inbound writers leave it unchanged
+(`NOT_SCHEDULED_TURN_LOSS_ROW_SQL`), so a late runtime path cannot drop it from the count.
 
 ### 8.6 History lifecycle, gauges, reader, and field audit
 
@@ -1623,7 +1819,8 @@ Consolidation promotes durable knowledge out of episodic memory:
 `MemoryConsolidationScheduler` (`src/memory/consolidation-scheduler.ts`) owns deadlines,
 durable run receipts, cancellation, and the post-stop write fence;
 `runConsolidation` (`src/memory/consolidation-cron.ts`) selects sources (fixed semantic
-query, top-100, unfiltered), scopes them by chat+sender, clusters them
+query, top-100, with a provider-side filter excluding the `consolidated`
+confidence qualifier while retaining records without that field), scopes them by chat+sender, clusters them
 (`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
 upserts promoted claims back to the remote store under
 `durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
@@ -1650,7 +1847,10 @@ duplicate ids, where the text tie-break totalizes the order (records tied on bot
 tokenize identically, so any residual tie is inert). Same set in, same partition out,
 regardless of search ranking drift.
 
-**Recursive-eligibility exclusion.** `runConsolidation` drops records carrying either
+**Recursive-eligibility exclusion.** Before top-K selection, `runConsolidation`
+passes a metadata filter that retains missing qualifiers and qualifiers unequal
+to `consolidated`. The `durable:` id marker has no corresponding metadata field;
+the post-retrieval check still owns that exclusion. After retrieval, it drops records carrying either
 promotion marker — the `durable:` id prefix or the `consolidated` confidence qualifier
 (case-insensitive) — before scoping. Non-string ids pass through untouched;
 `consolidateCluster`'s cluster-id guard owns that failure mode and rejects such

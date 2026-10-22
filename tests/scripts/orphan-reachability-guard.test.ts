@@ -107,7 +107,6 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/lib/inbound-debouncer.ts', issue: '#1822', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/keyed-async-queue.ts', issue: '#1815', reason: 'test-only-wired primitive; no runtime importer' },
   { path: 'src/lib/status-reaction-controller.ts', issue: '#1823', reason: 'test-only-wired primitive; no runtime importer' },
-  { path: 'src/lib/text-chunking.ts', issue: '#1821', reason: 'test-only-wired primitive; no runtime importer' },
   // auth-loss durability signal modules: the store now has a production writer —
   // HealthPoller records the durable row on a confirmed logged_out (#1786) — so it
   // graduated out of this list, and the recovery-owner wiring (#1786) graduated the
@@ -122,12 +121,17 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   { path: 'src/fleet/auth-loss-mode-bucket-producer.ts', issue: '#1786/#1789', reason: 'auth-loss durability module; no runtime importer' },
   // Other unwired modules surfaced by this guard's first run:
   { path: 'src/fleet/provider-parity.ts', issue: '#1867', reason: 'provider-parity report module is test-only-wired; parity guard undeployed (#1867)' },
-  { path: 'src/core/recovery-catchup-closure.ts', issue: '#1871', reason: 'recovery-catchup closure is test-only-wired; not imported by any runtime recovery root — needs wiring or removal (surfaced by this guard)' },
+  // src/core/recovery-catchup-closure.ts graduated out of this registry when
+  // the turn-recovery supervisor wiring imported it (deploy-gated behind the
+  // catchupReconcile dependency, default off) — the guard's staleness check
+  // now enforces its continued production reachability.
   // Durable background work (Work Ledger + Results Outbox). PR1a lands the schema
   // and store DELIBERATELY unwired so it can be reviewed and verified on its own;
   // PR1b adds the registration write-path at the worker spawn sites and the
   // delivery daemon, and graduates this entry in the same PR.
   { path: 'src/core/background-work-store.ts', issue: '#2279', reason: 'PR1a lands schema+store unwired by design; registration write-path and delivery daemon land in PR1b (#2279)' },
+  // src/core/client-output-policy.ts graduated out of this registry when the
+  // agent outbound queue started enforcing it on the send path (#3613).
   // FLOS Stage 1 (docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md §3):
   // the keyed-digest primitive lands DARK by design — plan §1.3 requires every
   // stage's code to ship behind `observability.fleetLifecycle` (off). The
@@ -178,6 +182,21 @@ const TRACKED_UNREACHABLE: readonly TrackedEntry[] = [
   // CONSUMES attestations (findAdmissibleAttestation in the supervisor). No autonomous
   // production path mints one by design, so the producer has no src/ importer.
   { path: 'src/core/capability-attestation-producer.ts', issue: 'cap-obligation-replay/finding-1', reason: 'attestation producer is operator-CLI-only (scripts/capability-obligation-attest.ts); runtime only consumes attestations — no production importer by design' },
+  // The shadow gate is logged-only; its measurement statistics run offline in the
+  // operator report, never in the runtime.
+  { path: 'src/lib/clopper-pearson.ts', issue: 'shadow-gate-20260923/task-4', reason: 'statistics helper is operator-CLI-only (scripts/shadow-gate-report.ts); the logged-only shadow gate computes no rates at runtime — no production importer by design' },
+  // The continuity-gap closure WRITE side is an operator action; its only caller is
+  // scripts/close-continuity-gap.ts. The runtime reads closures through
+  // continuity-gap-closure-schema.ts (health), which IS production-reachable.
+  { path: 'src/core/continuity-gap-closure.ts', issue: 'continuity-gap-closure/stage-2', reason: 'closure writer is operator-CLI-only (scripts/close-continuity-gap.ts); runtime health only reads closures via continuity-gap-closure-schema.ts — no production importer by design' },
+  // Settling an orphan recovery transfer is an operator action; its only caller is
+  // `scripts/turn-recovery-operator.ts settle-orphan-transfer`. The runtime sees the
+  // result only through the generic recovery job and plan rows it already reads.
+  { path: 'src/core/turn-recovery-orphan-settle.ts', issue: 'orphan-transfer-settle/operator-cli', reason: 'settle writer is operator-CLI-only (scripts/turn-recovery-operator.ts settle-orphan-transfer); the runtime reads the settled job through the generic recovery tables — no production importer by design' },
+  // The inbound ownership snapshot is an operator read; its only caller is
+  // scripts/inbound-ownership-snapshot.ts (docs/runbook.md). The runtime never
+  // imports it: it reports on inbound ownership, it does not decide it.
+  { path: 'src/runtimes/agent/inbound-ownership-snapshot.ts', issue: '#3560', reason: 'ownership snapshot reader is operator-CLI-only (scripts/inbound-ownership-snapshot.ts); read-only report, no runtime importer by design' },
 ];
 
 // ---------------------------------------------------------------------------

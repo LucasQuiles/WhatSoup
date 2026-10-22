@@ -21,6 +21,7 @@ export type InboundFailureClass =
   | 'timeout'
   | 'db_error'
   | 'session_crash'
+  | 'operator_cancelled'
   | 'session_spawn_failed'
   | 'crash_recovery'
   | 'stale_reclaim'
@@ -50,6 +51,7 @@ const INBOUND_FAILURE_CLASS_PRESENCE: Readonly<Record<InboundFailureClass, true>
   timeout: true,
   db_error: true,
   session_crash: true,
+  operator_cancelled: true,
   session_spawn_failed: true,
   crash_recovery: true,
   stale_reclaim: true,

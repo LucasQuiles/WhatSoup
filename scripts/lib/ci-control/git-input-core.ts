@@ -6,7 +6,10 @@ import { performance } from "node:perf_hooks";
 import { TextDecoder, types as utilTypes } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
+import { MAX_EXACT_SINGLE_BLOB_BYTES } from "./input-limits.ts";
 import { resolveTrustedGit } from "./trusted-git.ts";
+
+export { MAX_EXACT_SINGLE_BLOB_BYTES } from "./input-limits.ts";
 
 // #2843: path to the git executable, resolved via the static trusted-git allowlist
 // by default. Tests may inject a fake git shim path via __setTestGitPath().
@@ -54,7 +57,6 @@ export const MAX_EXACT_COMMIT_RANGE_BYTES = 1 * 1_024 * 1_024;
 export const MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES = 1 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_BLOB_COUNT = 50_000;
-export const MAX_EXACT_SINGLE_BLOB_BYTES = 4 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_BLOB_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_ADDED_LINE_CHANGE_COUNT = 4_096;
 export const MAX_EXACT_ADDED_LINE_COUNT = 100_000;
@@ -774,7 +776,7 @@ function commitMetadataError(code: CommitMetadataErrorCode): ExactGitInputError 
   return new ExactGitInputError(code, code);
 }
 
-interface EvidenceGitErrorCodes {
+export interface EvidenceGitErrorCodes {
   unavailable: ExactGitInputErrorCode;
   timeout: ExactGitInputErrorCode;
   budget: ExactGitInputErrorCode;
@@ -846,12 +848,93 @@ function boundedEvidenceGitInputBytes(
   }
 }
 
-function metadataAsciiLine(bytes: Buffer): string {
-  try {
-    return canonicalAsciiLine(bytes, "ci.input.commit-metadata-malformed");
-  } catch {
-    throw commitMetadataError("ci.input.commit-metadata-malformed");
+// One `git cat-file --batch-check` or `--batch` process reads many objects. It is
+// spawned like every other exact read here (trusted git, --no-replace-objects,
+// the isolated environment, the graft refusal, SIGKILL on timeout or overflow),
+// so no child outlives the call. A missing object is a row, not an error; a
+// process failure throws the caller's codes. Each caller maps a missing row to
+// the code its per-object read gave.
+export type CatFileBatchRow =
+  | { oid: string; kind: "missing" }
+  | {
+    oid: string;
+    kind: "present";
+    type: "blob" | "tree" | "commit" | "tag";
+    size: number;
+    bytes: Buffer | null;
+  };
+
+const CAT_FILE_BATCH_ARGS: Readonly<Record<"check" | "content", readonly string[]>> = {
+  check: ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+  content: ["cat-file", "--batch"],
+};
+const CAT_FILE_MISSING_ROW = /^([0-9a-f]{40}) missing$/;
+const CAT_FILE_PRESENT_ROW = /^([0-9a-f]{40}) (blob|tree|commit|tag) (0|[1-9][0-9]*)$/;
+
+/** Parse batch output for exactly `oids`, in order; any other byte is `malformedCode`. */
+export function parseCatFileBatch(
+  output: Buffer,
+  oids: readonly string[],
+  mode: "check" | "content",
+  malformedCode: ExactGitInputErrorCode,
+): CatFileBatchRow[] {
+  const malformed = (): ExactGitInputError => new ExactGitInputError(malformedCode, malformedCode);
+  const rows: CatFileBatchRow[] = [];
+  let offset = 0;
+  for (const oid of oids) {
+    const lineEnd = output.indexOf(0x0a, offset);
+    if (lineEnd < 0) throw malformed();
+    const header = output.subarray(offset, lineEnd).toString("latin1");
+    offset = lineEnd + 1;
+    const missing = CAT_FILE_MISSING_ROW.exec(header);
+    const present = missing === null ? CAT_FILE_PRESENT_ROW.exec(header) : null;
+    const echoed = missing?.[1] ?? present?.[1];
+    if (echoed === undefined || echoed !== oid) throw malformed();
+    if (missing !== null) {
+      rows.push({ oid, kind: "missing" });
+      continue;
+    }
+    const type = present![2] as "blob" | "tree" | "commit" | "tag";
+    const size = Number(present![3]);
+    if (!Number.isSafeInteger(size)) throw malformed();
+    if (mode === "check") {
+      rows.push({ oid, kind: "present", type, size, bytes: null });
+      continue;
+    }
+    if (size >= output.byteLength - offset || output[offset + size] !== 0x0a) throw malformed();
+    rows.push({ oid, kind: "present", type, size, bytes: output.subarray(offset, offset + size) });
+    offset += size + 1;
   }
+  if (offset !== output.byteLength) throw malformed();
+  return rows;
+}
+
+/** Read full object ids through one batch process; rows come back in input order. */
+export function readObjectBatch(
+  cwd: string,
+  oids: readonly string[],
+  mode: "check" | "content",
+  codes: EvidenceGitErrorCodes,
+  malformedCode: ExactGitInputErrorCode,
+  maxBuffer: number,
+  timeout: number = GIT_TIMEOUT_MS,
+): CatFileBatchRow[] {
+  for (const oid of oids) {
+    if (typeof oid !== "string" || !FULL_OID.test(oid)) {
+      throw new ExactGitInputError(malformedCode, malformedCode);
+    }
+  }
+  // An empty set reads nothing, as the per-object loops did.
+  if (oids.length === 0) return [];
+  const output = boundedEvidenceGitInputBytes(
+    cwd,
+    CAT_FILE_BATCH_ARGS[mode],
+    Buffer.from(`${oids.join("\n")}\n`, "ascii"),
+    maxBuffer,
+    codes,
+    timeout,
+  );
+  return parseCatFileBatch(output, oids, mode, malformedCode);
 }
 
 function validateCommitMetadataOids(value: unknown): string[] {
@@ -922,39 +1005,29 @@ function preflightCommitMetadata(
   cwd: string,
   oids: readonly string[],
 ): CommitMetadataPreflight[] {
-  for (const oid of oids) {
-    const type = metadataAsciiLine(boundedEvidenceGitBytes(
-      cwd,
-      ["cat-file", "-t", "--", oid],
-      64,
-      COMMIT_METADATA_GIT_CODES,
-    ));
-    if (type !== "commit") {
+  const rows = readObjectBatch(
+    cwd,
+    oids,
+    "check",
+    COMMIT_METADATA_GIT_CODES,
+    "ci.input.commit-metadata-malformed",
+    oids.length * 128 + 1_024,
+  );
+  const sizes: number[] = [];
+  for (const row of rows) {
+    if (row.kind === "missing") {
+      throw commitMetadataError("ci.input.commit-metadata-unavailable");
+    }
+    if (row.type !== "commit") {
       throw commitMetadataError("ci.input.commit-metadata-malformed");
     }
+    sizes.push(row.size);
   }
 
   const preflight: CommitMetadataPreflight[] = [];
   let aggregateBytes = 0;
-  for (const oid of oids) {
-    let byteLength: number;
-    try {
-      byteLength = parseBoundedInteger(
-        boundedEvidenceGitBytes(
-          cwd,
-          ["cat-file", "-s", "--", oid],
-          64,
-          COMMIT_METADATA_GIT_CODES,
-        ),
-        "ci.input.commit-metadata-malformed",
-      );
-    } catch (error) {
-      if (error instanceof ExactGitInputError && error.code === "ci.input.commit-metadata-malformed") {
-        throw error;
-      }
-      if (error instanceof ExactGitInputError) throw error;
-      throw commitMetadataError("ci.input.commit-metadata-malformed");
-    }
+  for (const [index, oid] of oids.entries()) {
+    const byteLength = sizes[index]!;
     if (byteLength > MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES) {
       throw commitMetadataError("ci.input.commit-metadata-budget");
     }
@@ -1067,15 +1140,13 @@ export function readExactCommitMetadata(
   const oids = validateCommitMetadataOids(commitOids);
   requireCommitMetadataSha1(cwd);
   const preflight = preflightCommitMetadata(cwd, oids);
-  const bodies = new Map<string, Buffer>();
+  // Each row is checked, then identity-checked and parsed, before the next row,
+  // in the per-object reads' order. Only a failed batch comes first.
+  const rows = readCommitMetadataBodies(cwd, preflight);
+  const bodies: Buffer[] = [];
   const metadata: ExactCommitMetadataV1[] = [];
-  for (const item of preflight) {
-    const bytes = boundedEvidenceGitBytes(
-      cwd,
-      ["cat-file", "commit", "--", item.oid],
-      item.byteLength + 1,
-      COMMIT_METADATA_GIT_CODES,
-    );
+  for (const [index, item] of preflight.entries()) {
+    const bytes = commitMetadataRowBytes(rows[index]!);
     const identity = createHash("sha1")
       .update(`commit ${item.byteLength}\0`)
       .update(bytes)
@@ -1083,21 +1154,42 @@ export function readExactCommitMetadata(
     if (bytes.byteLength !== item.byteLength || identity !== item.oid) {
       throw commitMetadataError("ci.input.commit-metadata-identity-mismatch");
     }
-    bodies.set(item.oid, bytes);
+    bodies.push(bytes);
     metadata.push(parseCommitMetadataBody(item.oid, bytes));
   }
-  for (const item of preflight) {
-    const reread = boundedEvidenceGitBytes(
-      cwd,
-      ["cat-file", "commit", "--", item.oid],
-      item.byteLength + 1,
-      COMMIT_METADATA_GIT_CODES,
-    );
-    if (!reread.equals(bodies.get(item.oid)!)) {
+  // A second, separate process re-reads every body. The re-read is not hashed
+  // again, so this byte comparison is what rejects a substituted body.
+  const rereads = readCommitMetadataBodies(cwd, preflight);
+  for (const [index, row] of rereads.entries()) {
+    const reread = commitMetadataRowBytes(row);
+    if (!reread.equals(bodies[index]!)) {
       throw commitMetadataError("ci.input.commit-metadata-identity-mismatch");
     }
   }
   return metadata;
+}
+
+/** One content batch for every commit. Rows come back unchecked, in input order. */
+function readCommitMetadataBodies(
+  cwd: string,
+  preflight: readonly CommitMetadataPreflight[],
+): CatFileBatchRow[] {
+  return readObjectBatch(
+    cwd,
+    preflight.map((item) => item.oid),
+    "content",
+    COMMIT_METADATA_GIT_CODES,
+    "ci.input.commit-metadata-malformed",
+    preflight.reduce((total, item) => total + item.byteLength + 128, 1_024),
+  );
+}
+
+function commitMetadataRowBytes(row: CatFileBatchRow): Buffer {
+  // `cat-file commit` failed on a missing object or another type; so does this.
+  if (row.kind === "missing" || row.type !== "commit" || row.bytes === null) {
+    throw commitMetadataError("ci.input.commit-metadata-unavailable");
+  }
+  return row.bytes;
 }
 
 interface ParsedRawTreeEntry {
@@ -1455,24 +1547,20 @@ function createExactTreeReader(cwd: string): ExactTreeReader {
       }
       return cached;
     }
-    const type = treeAsciiLine(treeGitBytes(
-      ["cat-file", "-t", "--", oid],
-      64,
-    ));
-    if (type !== "tree") throw treeEntryError("ci.input.tree-entry-identity-mismatch");
-    let byteLength: number;
-    try {
-      byteLength = parseBoundedInteger(
-        treeGitBytes(
-          ["cat-file", "-s", "--", oid],
-          64,
-        ),
-        "ci.input.tree-entry-malformed",
-      );
-    } catch (error) {
-      if (error instanceof ExactGitInputError) throw error;
-      throw treeEntryError("ci.input.tree-entry-malformed");
-    }
+    const [row] = readObjectBatch(
+      cwd,
+      [oid],
+      "check",
+      TREE_GIT_CODES,
+      "ci.input.tree-entry-malformed",
+      1_024,
+      remainingTimeout(),
+    );
+    if (row!.kind === "missing") throw treeEntryError("ci.input.tree-entry-unavailable");
+    if (row!.type !== "tree") throw treeEntryError("ci.input.tree-entry-identity-mismatch");
+    // Preserve the former size-read charge within the shared deadline.
+    remainingTimeout();
+    const byteLength = row!.size;
     if (
       byteLength > MAX_EXACT_SINGLE_TREE_BYTES
       || byteLength > MAX_EXACT_AGGREGATE_TREE_BYTES - aggregateTreeBytes
@@ -1575,12 +1663,27 @@ function createExactTreeReader(cwd: string): ExactTreeReader {
   };
 
   const rereadTrees = (): void => {
-    for (const tree of trees.values()) {
-      const reread = treeGitBytes(
-        ["cat-file", "tree", "--", tree.oid],
-        Math.max(1_024, tree.byteLength + 1),
-      );
-      if (!reread.equals(tree.bytes)) {
+    const loaded = [...trees.values()];
+    if (loaded.length === 0) return;
+    const rows = readObjectBatch(
+      cwd,
+      loaded.map((tree) => tree.oid).sort(),
+      "content",
+      TREE_GIT_CODES,
+      "ci.input.tree-entry-malformed",
+      loaded.reduce((total, tree) => total + tree.byteLength + 128, 1_024),
+      remainingTimeout(),
+    );
+    const byOid = new Map(rows.map((row) => [row.oid, row]));
+    for (let index = 0; index < loaded.length; index += 1) {
+      // Keep the original charge and comparison order despite the sorted batch.
+      if (index > 0) remainingTimeout();
+      const tree = loaded[index]!;
+      const reread = byOid.get(tree.oid)!;
+      if (reread.kind === "missing" || reread.type === "blob") {
+        throw treeEntryError("ci.input.tree-entry-unavailable");
+      }
+      if (reread.type !== "tree" || !reread.bytes!.equals(tree.bytes)) {
         throw treeEntryError("ci.input.tree-entry-identity-mismatch");
       }
     }

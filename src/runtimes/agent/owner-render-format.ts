@@ -12,6 +12,10 @@
 
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
 import { adviseModel } from '../../lib/model-catalog.ts';
+import type {
+  ModelCatalogueUnavailableReason,
+  ProviderModelsListing,
+} from '../../lib/provider-catalogue-contract.d.ts';
 
 /** WhatsApp bullet prefix for owner-facing enumerations. */
 export const OWNER_BULLET = '• ';
@@ -129,45 +133,11 @@ export const MODEL_CATALOGUE_CAP = 12;
 /** Why a per-harness catalogue could not be listed. Distinct reasons carry
  *  distinct fixes (Q 2b#2/#4) — collapsing them into a single "unavailable" is
  *  the dead-knob defect (the actionable line lies when the real cause differs). */
-export type UnavailableReason =
-  | { kind: 'no-adapter'; harness: string }
-  // 'no-key' = NO anthropic credential at all — neither the claude-cli's OAuth
-  // token nor an ANTHROPIC_API_KEY. This is a STRUCTURAL absence (no source
-  // exists → the caller suppresses the section). Vocabulary is credential-
-  // neutral: the live source is an OAuth Bearer token, not necessarily a key.
-  | { kind: 'no-key' }
-  // 'key-rejected' = a credential WAS presented and the server refused it
-  // (401/403) — a revoked OAuth token or a bad API key. Distinct from
-  // 'credential-expired' (a stale token that self-heals, never "rejected").
-  | { kind: 'key-rejected' }
-  // 'credential-expired' = the claude-cli OAuth token is past its expiry; the
-  // CLI refreshes it on the next agent turn, so this is a benign, self-healing
-  // TRANSIENT state ("try again shortly"), NOT a rejection or a broken key.
-  | { kind: 'credential-expired' }
-  | { kind: 'timeout' }
-  // 'empty' = the harness ran and produced no model lines; the base line-parser
-  // cannot tell a genuinely empty catalogue from an output-shape change (any
-  // non-blank line becomes an id), so its text does NOT assert emptiness (Q 2b).
-  | { kind: 'empty' }
-  // 'unparseable' = the resolver's shape check judged the output present but not
-  // a model list (a format regression). Its fix points at the PARSER, not the
-  // harness — the silent failure mode a bare "empty" would mask (Q 2b).
-  | { kind: 'unparseable' }
-  // 'probe-failed' = the harness catalogue command could not be RUN at all
-  // (spawn error / binary not runnable). Distinct from 'no-adapter' (an adapter
-  // exists; the binary just wouldn't run) and 'empty' (which asserts it ran) —
-  // the fix is the binary/PATH, not the parser or the harness support (Q 2b).
-  | { kind: 'probe-failed' }
-  // 'lookup-failed' = a vendor catalogue call failed transiently (HTTP 500 /
-  // network) — the server "can't answer", NOT "you can't ask" (key present, not
-  // rejected, not timed out). Distinct fix from no-key/key-rejected/timeout (Q 2b).
-  | { kind: 'lookup-failed' };
+export type UnavailableReason = ModelCatalogueUnavailableReason;
 
 /** The resolver-produced catalogue listing the formatter renders. `asOfLabel`
  *  is the CAPTURE stamp (Q 2b#1) — when the source was probed, NOT render time. */
-export type AvailableModelsListing =
-  | { status: 'ok'; ids: readonly string[]; sourceLabel: string; asOfLabel: string }
-  | { status: 'unavailable'; reason: UnavailableReason; asOfLabel: string };
+export type AvailableModelsListing = ProviderModelsListing;
 
 /**
  * STRUCTURAL vs TRANSIENT catalogue absence — a render-policy classifier. A

@@ -1,5 +1,7 @@
 # Phase 5: Analytics & Observability
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The completion header records delivery of the metrics surfaces, not fulfillment of every proposed series. The `METRIC_NAMES` list in `src/core/metrics-collector.ts` includes message, token and session metrics but no response-time metric. The response-time requirement below therefore remains open. The original Current State section and measurements are April observations, not a live inventory.
+
 **Status:** completed - current metrics collector, fleet metrics API, and console metrics surfaces have shipped; use current docs/code instead of this historical proposal.
 **Superseded by:** `README.md`, `docs/public-surface.md`, `src/core/metrics-collector.ts`, `src/fleet/routes/metrics.ts`, `src/fleet/routes/fleet-metrics.ts`, and `console/src/pages/LineDetail.tsx`.
 **Date:** 2026-04-05  

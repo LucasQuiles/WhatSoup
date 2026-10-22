@@ -61,6 +61,8 @@ function recoveryCounts(
     orphanTransfers: 0,
     echoConflicts: 0,
     openRecoveries: 0,
+    blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
+    corruptLinksSettled: 0, echoConflictsSettled: 0,
     ...overrides,
   };
 }
@@ -166,6 +168,8 @@ describe('runtime turn finalization recovery health', () => {
       expect(runtime.getHealthSnapshot()).toMatchObject({
         status: 'healthy',
         details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['turn_recovery_terminal'],
           turnRecoveryOutstanding: 0,
           turnRecoveryBlockedUnsafe: 1,
           turnRecoveryOpenRecoveries: 0,
@@ -176,7 +180,97 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('keeps blocked-unsafe informational while open catch-up independently degrades health', () => {
+  it('projects each blocked-unsafe actionability bucket onto its own health field', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct per-bucket counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({
+          blockedUnsafe: 6,
+          blockedUnsafeSynthetic: 1,
+          blockedUnsafeSuperseded: 2,
+          blockedUnsafeStranded: 3,
+        }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'blocked-split-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          turnRecoveryBlockedUnsafe: 6,
+          turnRecoveryBlockedUnsafeSynthetic: 1,
+          turnRecoveryBlockedUnsafeSuperseded: 2,
+          turnRecoveryBlockedUnsafeStranded: 3,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('projects synthetic catch-up residue and lost scheduled turns as non-debt diagnostics (#3754)', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ openRecoveriesSynthetic: 4, scheduledTurnsLost: 5 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'synthetic-residue-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: [],
+          turnRecoveryOpenRecoveries: 0,
+          turnRecoveryOpenRecoveriesSynthetic: 4,
+          turnRecoveryScheduledTurnsLost: 5,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('projects settled recovery residue as diagnostic-only fields that keep health green', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      // Distinct counts so a swapped mapping cannot pass.
+      vi.spyOn(durability, 'getTurnRecoverySupervisorCounts').mockReturnValue(
+        recoveryCounts({ corruptLinksSettled: 2, echoConflictsSettled: 3 }),
+      );
+      const runtime = new AgentRuntime(db, makeMessenger().messenger, 'settled-residue-health', {
+        sessionScope: 'per_chat',
+      });
+      runtime.setDurability(durability);
+
+      expect(runtime.getHealthSnapshot()).toMatchObject({
+        status: 'healthy',
+        details: {
+          turnRecoveryCorruptLinks: 0,
+          turnRecoveryEchoConflicts: 0,
+          turnRecoveryCorruptLinksSettled: 2,
+          turnRecoveryEchoConflictsSettled: 3,
+        },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps blocked-unsafe and historical catch-up visible without degrading health', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -190,8 +284,10 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
+        status: 'healthy',
         details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['turn_recovery_terminal', 'historical_turn_catchup'],
           turnRecoveryOutstanding: 0,
           turnRecoveryBlockedUnsafe: 3,
           turnRecoveryOpenRecoveries: 11,
@@ -202,7 +298,7 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('degrades for exhausted work without treating it as admission-blocking', () => {
+  it('keeps exhausted terminal work visible without treating it as service-blocking', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -216,8 +312,10 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
+        status: 'healthy',
         details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['turn_recovery_terminal'],
           turnRecoveryOutstanding: 0,
           turnRecoveryExhausted: 1,
           turnRecoveryOpenRecoveries: 0,
@@ -228,7 +326,7 @@ describe('runtime turn finalization recovery health', () => {
     }
   });
 
-  it('degrades while operator catch-up is open and returns healthy after closure', () => {
+  it('reports historical operator catch-up debt and clears it without changing healthy status', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -242,12 +340,20 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({
-        status: 'degraded',
-        details: { turnRecoveryOpenRecoveries: 1 },
+        status: 'healthy',
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: ['historical_turn_catchup'],
+          turnRecoveryOpenRecoveries: 1,
+        },
       });
       expect(runtime.getHealthSnapshot()).toMatchObject({
         status: 'healthy',
-        details: { turnRecoveryOpenRecoveries: 0 },
+        details: {
+          degradedReasons: [],
+          recoveryDebtReasons: [],
+          turnRecoveryOpenRecoveries: 0,
+        },
       });
     } finally {
       db.close();
@@ -312,12 +418,22 @@ describe('runtime turn finalization recovery health', () => {
       runtime.setDurability(durability);
 
       expect(runtime.getHealthSnapshot()).toMatchObject({ status: 'degraded', details });
+      // Granular blocking reasons feed recovery_debt; status_reasons keeps the
+      // registered runtime.turn_finalization_debt twin.
+      expect(runtime.getHealthSnapshot().details.recoveryBlockingReasons).toEqual(
+        expect.arrayContaining([
+          counts.corruptLinks > 0 || counts.orphanTransfers > 0
+            ? 'turn_recovery_integrity'
+            : 'turn_recovery_actionable',
+        ]),
+      );
+      expect(runtime.getHealthSnapshot().details.degradedReasons).toContain('turn_finalization_debt');
     } finally {
       db.close();
     }
   });
 
-  it('reports a completed recovery echo conflict as degraded audit health', () => {
+  it('reports a live recovery echo conflict as degraded audit health', () => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -334,6 +450,8 @@ describe('runtime turn finalization recovery health', () => {
         orphanTransfers: 0,
         echoConflicts: 1,
         openRecoveries: 0,
+        blockedUnsafeSynthetic: 0, blockedUnsafeSuperseded: 0, blockedUnsafeStranded: 0,
+        corruptLinksSettled: 0, echoConflictsSettled: 0,
       });
       const runtime = new AgentRuntime(db, makeMessenger().messenger, 'echo-conflict-health', {
         sessionScope: 'per_chat',

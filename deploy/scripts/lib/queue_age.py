@@ -22,8 +22,11 @@ Acceptance criteria addressed (see #2460):
 from __future__ import annotations
 
 import json
+import errno
+from fnmatch import fnmatchcase
 import math
 import os
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,16 +93,33 @@ def scan_directory(path: Path, pattern: str, now: float) -> tuple[int, int]:
     uses file ``st_mtime``.  Durable internal entries (``.durable-json.lock``)
     are always excluded.
 
-    Returns ``(count, oldest_seconds)``.  Never raises — unreadable files
-    contribute age 0.0 via :func:`event_file_age_seconds`.
+    Returns ``(count, oldest_seconds)``. A genuinely absent optional directory
+    is empty. Directory and entry metadata failures raise ``OSError`` so
+    consumers cannot mistake an incomplete observation for an empty queue.
+    Individual JSON payload age fallback remains unchanged.
     """
-    if not path.exists():
-        return 0, 0
-    files = [
-        item
-        for item in path.glob(pattern)
-        if item.is_file() and not is_durable_internal_entry(item)
-    ]
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        # ENOENT can also mean a dangling ancestor link. Prove the nearest
+        # existing ancestor is a directory before accepting optional absence.
+        for ancestor in path.parents:
+            try:
+                ancestor.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(ancestor.stat().st_mode):
+                raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(ancestor))
+            return 0, 0
+        raise
+    files = []
+    with os.scandir(path) as entries:
+        for entry in entries:
+            item = path / entry.name
+            if not fnmatchcase(entry.name, pattern) or is_durable_internal_entry(item):
+                continue
+            if stat.S_ISREG(entry.stat().st_mode):
+                files.append(item)
     if not files:
         return 0, 0
     is_json_pattern = pattern.endswith(".json") or pattern == "*.json"

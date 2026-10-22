@@ -21,6 +21,8 @@ import type {
   TurnIdentity,
   TurnRecoveryReplayEnvelope,
 } from '../../../src/runtimes/agent/turn-terminal.ts';
+import { shortHash } from '../../../src/lib/short-hash.ts';
+import type { SingletonLoggerMock } from '../../helpers/logger-mock.ts';
 
 const emitAlertMock = vi.hoisted(() => vi.fn());
 
@@ -31,6 +33,18 @@ vi.mock('../../../src/lib/emit-alert.ts', () => ({ emitObservationChecked: vi.fn
     return result.ok;
   },
 }));
+
+// Only the finalizer's logger is captured; every other component keeps the
+// real child logger it gets without this mock.
+const finalizerLogger = vi.hoisted(() => ({ log: undefined as unknown as SingletonLoggerMock }));
+
+vi.mock('../../../src/logger.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/logger.ts')>();
+  const { componentLoggerMock } = await import('../../helpers/logger-mock.ts');
+  const mock = componentLoggerMock('turn-finalizer', actual.createChildLogger);
+  finalizerLogger.log = mock.log;
+  return { ...actual, createChildLogger: mock.createChildLogger };
+});
 
 const IDENTITY: TurnIdentity = {
   scope: 'per_chat',
@@ -151,6 +165,7 @@ function durableAlert(): AlertEmissionResult {
 beforeEach(() => {
   emitAlertMock.mockReset();
   emitAlertMock.mockReturnValue(durableAlert());
+  for (const fn of Object.values(finalizerLogger.log)) fn.mockReset();
 });
 
 describe('runtime turn delivery proof', () => {
@@ -1029,5 +1044,105 @@ describe('reply guarantee breach visibility', () => {
     expect(terminalResult(result).terminal.inboundDisposition).toBe('finalized_replied');
     expect(emitAlertMock).not.toHaveBeenCalled();
     expect(h.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+  });
+});
+
+describe('operator stop cancellation (#3716)', () => {
+  const FAILED_RECEIPT: FinalizeTurnTerminalResult = {
+    ...APPLIED_RECEIPT,
+    replyGuaranteeDisarmed: false,
+    effectiveReplyGuaranteeDisarmed: false,
+  };
+  const OPERATOR_CANCELLED = { kind: 'failed', class: 'operator_cancelled' } as const;
+  const EVENT_KEYS = ['deliveryKind', 'disposition', 'event', 'inboundSeq', 'scope', 'turn'];
+
+  function stopEvents(): Array<Record<string, unknown>> {
+    return finalizerLogger.log.info.mock.calls
+      .map((call) => call[0] as Record<string, unknown> | undefined)
+      .filter((fields): fields is Record<string, unknown> => fields?.['event'] === 'operator_stop_cancelled');
+  }
+
+  it('finalizes a stopped turn with no continuity mark or breach alert and logs one content-free event', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    const result = run(h.durability, { attemptOutcome: OPERATOR_CANCELLED, answerOpIds: [] });
+
+    expect(terminalResult(result).terminal).toMatchObject({
+      attemptOutcome: OPERATOR_CANCELLED,
+      inboundDisposition: 'failed_terminal',
+      deliveryEvidence: { kind: 'none' },
+    });
+    expect(h.finalizeTurnTerminal).toHaveBeenCalledTimes(1);
+    expect(h.markContinuityCandidateIfNoTerminalOutbound).not.toHaveBeenCalled();
+    expect(emitAlertMock).not.toHaveBeenCalled();
+
+    const events = stopEvents();
+    expect(events).toHaveLength(1);
+    expect(Object.keys(events[0]!).sort()).toEqual(EVENT_KEYS);
+    expect(events[0]).toEqual({
+      event: 'operator_stop_cancelled',
+      scope: 'per_chat',
+      inboundSeq: IDENTITY.inboundSeq,
+      turn: shortHash(IDENTITY.logicalTurnId),
+      disposition: 'failed_terminal',
+      deliveryKind: 'none',
+    });
+    const rendered = JSON.stringify(events[0]);
+    for (const identifying of [
+      IDENTITY.conversationKey,
+      IDENTITY.deliveryJid,
+      IDENTITY.logicalTurnId,
+      IDENTITY.managerId,
+    ]) {
+      expect(rendered).not.toContain(identifying);
+    }
+    const eventCall = finalizerLogger.log.info.mock.calls.findIndex((call) => call[0] === events[0]);
+    expect(finalizerLogger.log.info.mock.invocationCallOrder[eventCall]!)
+      .toBeGreaterThan(h.finalizeTurnTerminal.mock.invocationCallOrder[0]!);
+  });
+
+  it('logs the event for a stopped turn whose pending answer transfers it to a recovery owner', () => {
+    const h = harness({ 11: 'pending' });
+    const result = run(h.durability, { attemptOutcome: OPERATOR_CANCELLED, answerOpIds: [11] });
+
+    expect(terminalResult(result).terminal.inboundDisposition).toBe('transferred_to_recovery_owner');
+    expect(stopEvents()).toEqual([expect.objectContaining({
+      disposition: 'transferred_to_recovery_owner',
+      deliveryKind: 'enqueued',
+    })]);
+  });
+
+  it('logs no event when the durable terminal write throws', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    h.finalizeTurnTerminal.mockImplementationOnce(() => {
+      throw new Error('database is locked');
+    });
+    const result = run(h.durability, { attemptOutcome: OPERATOR_CANCELLED, answerOpIds: [] });
+
+    expect(result.kind).not.toBe('terminal');
+    expect(stopEvents()).toEqual([]);
+  });
+
+  it('logs no event when another terminal won the durable race', () => {
+    const h = harness({}, { ...FAILED_RECEIPT, winnerMatchesRequest: false });
+    const result = run(h.durability, { attemptOutcome: OPERATOR_CANCELLED, answerOpIds: [] });
+
+    expect(result.kind).not.toBe('terminal');
+    expect(stopEvents()).toEqual([]);
+  });
+
+  it('keeps the terminal result when the stop event cannot be logged', () => {
+    const h = harness({}, FAILED_RECEIPT);
+    finalizerLogger.log.info.mockImplementation((fields: unknown) => {
+      if ((fields as { event?: unknown } | undefined)?.event === 'operator_stop_cancelled') {
+        throw new Error('log sink unavailable');
+      }
+    });
+    const result = run(h.durability, { attemptOutcome: OPERATOR_CANCELLED, answerOpIds: [] });
+
+    expect(finalizerLogger.log.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'operator_stop_cancelled' }),
+      expect.any(String),
+    );
+    expect(result.kind).toBe('terminal');
   });
 });

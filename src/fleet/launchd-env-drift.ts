@@ -257,6 +257,27 @@ function intersectsInertRegion(
  * the whole point is comparing against plists someone edited by hand.
  */
 function parseEnvironmentVariables(source: string): Map<string, string> | null {
+  return readLaunchdEnvironment(source)?.env ?? null;
+}
+
+/** The EnvironmentVariables dict as this reader sees it, with where its body starts. */
+export interface LaunchdEnvironment {
+  env: Map<string, string>;
+  /**
+   * Offset in the ORIGINAL source just past the opening `<dict>` tag, or null
+   * for a self-closing `<dict/>` (an empty environment with no body to extend).
+   * Masking preserves length, so the offset indexes the caller's string.
+   */
+  bodyStart: number | null;
+}
+
+/**
+ * The same fail-closed reader the drift comparison uses, exposed for renderers
+ * that must read or extend an installed or rendered plist's environment
+ * (scripts/launchd-claude-config-env.ts). Null means refuse: absent, declared
+ * more than once, or present and unparseable — never "no keys".
+ */
+export function readLaunchdEnvironment(source: string): LaunchdEnvironment | null {
   // Masked FIRST, so no search below can match text inside an inert region.
   const maskedPlist = maskInertXmlRegions(source);
   if (maskedPlist === null) return null;
@@ -301,7 +322,7 @@ function parseEnvironmentVariables(source: string): Map<string, string> | null {
   if (open === null) return null;
   // `<dict/>` is a well-formed EMPTY environment, not an unparseable one: every
   // governed key is then genuinely missing, which the drift rows report.
-  if (open[1] === '/') return new Map();
+  if (open[1] === '/') return { env: new Map(), bodyStart: null };
   const bodyStart = open.index + open[0].length;
 
   const closePattern = new RegExp(DICT_CLOSE_SOURCE, 'g');
@@ -347,7 +368,7 @@ function parseEnvironmentVariables(source: string): Map<string, string> | null {
     consumed = start + match[0].length;
   }
   if (!XML_SPACE_ONLY.test(body.slice(consumed))) return null;
-  return env;
+  return { env, bodyStart };
 }
 
 /**

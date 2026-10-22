@@ -4,6 +4,8 @@ import { coordinatorPortDouble } from './lib/runtime-turn-coordinator-port-doubl
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { AttemptOutcome } from '../../../src/runtimes/agent/turn-terminal.ts';
+import { Database } from '../../../src/core/database.ts';
+import { DurabilityEngine } from '../../../src/core/durability.ts';
 
 const emitAlertChecked = vi.hoisted(() => vi.fn(() => true));
 
@@ -47,6 +49,7 @@ function makeCoordinator(): RuntimeTurnCoordinator {
     instanceName: 'bookkeeping-test',
     runtimeTurnSupervisor: {
       scopeKey: vi.fn(() => 'per_chat:15550190099'),
+      isDegraded: vi.fn(() => false),
     } as unknown as RuntimeTurnCoordinatorPort['runtimeTurnSupervisor'],
   });
   return new RuntimeTurnCoordinator(host);
@@ -139,6 +142,8 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
       undefined,
       { conversationKey: '15550190099' },
     );
+    const [, , , evidence] = emitAlertChecked.mock.calls[0] as unknown as [string, string, string, string, ...unknown[]];
+    expect(evidence).not.toContain('scope_blocked');
   });
 
   it('keeps unjournaled system-turn admission rejection out of BOT ERRORS', () => {
@@ -158,6 +163,49 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
     expect(emitAlertChecked).not.toHaveBeenCalled();
   });
 
+  it('#3570: a scheduled-agent-job scope keeps usage but never writes the chat checkpoint, on every finalization path', () => {
+    const coordinator = makeCoordinator();
+    const scheduledScope = '15550190099@s.whatsapp.net::scheduled-agent-job';
+
+    // Dispatched turn: the scope comes from the runtime's own per-turn map.
+    const refs = (coordinator as unknown as {
+      host: { perChatRuntimeTurnScopeRefs: Map<string, { value: string }> };
+    }).host.perChatRuntimeTurnScopeRefs;
+    refs.set(context().identity.logicalTurnId, { value: scheduledScope });
+    const dispatched = coordinator.turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+    );
+    expect(dispatched.checkpoint).toBeUndefined();
+    expect(dispatched.sessionTokens).toEqual({ dbRowId: 7, inputTokens: 500, outputTokens: 40, cacheReadTokens: 0 });
+    refs.clear();
+
+    // Undispatched (or crash) turn: no scope ref, so the caller's scope key decides.
+    const undispatched = coordinator.turnFinalizationBookkeeping(
+      context(),
+      null,
+      undefined,
+      { kind: 'admission_rejected', class: 'queue_closed' },
+      scheduledScope,
+    );
+    expect(undispatched.checkpoint).toBeUndefined();
+
+    // Control: the chat's own scope still writes its checkpoint.
+    const interactive = coordinator.turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+      '15550190099@s.whatsapp.net',
+    );
+    expect(interactive.checkpoint).toEqual({
+      conversationKey: '15550190099',
+      fields: expect.objectContaining({ sessionId: 'sess-1', claudePid: 123, activeTurnId: null, lastInboundSeq: 41 }),
+    });
+  });
+
   it('does NOT alert when there is no db row to attribute the loss to', () => {
     const coordinator = makeCoordinator();
 
@@ -170,5 +218,59 @@ describe('turnFinalizationBookkeeping — token-loss visibility (#1775)', () => 
 
     expect(params.sessionTokens).toBeUndefined();
     expect(emitAlertChecked).not.toHaveBeenCalled();
+  });
+});
+
+describe('turnFinalizationBookkeeping — checkpoint status ownership (#3658)', () => {
+  it('a turn finalized while its session is live reports the checkpoint active', () => {
+    const params = makeCoordinator().turnFinalizationBookkeeping(
+      context(),
+      sessionWithRowId(7),
+      resultEventWithUsage,
+      { kind: 'completed' },
+    );
+    expect(params.checkpoint?.fields).toMatchObject({ sessionStatus: 'active' });
+  });
+
+  it('a turn finalized after its session was torn down keeps an ended checkpoint ended', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const durability = new DurabilityEngine(db);
+      durability.upsertSessionCheckpoint('15550190099', {
+        sessionId: 'ended-provider-session',
+        sessionStatus: 'ended',
+      });
+      // The session's own shutdown already closed its lifecycle as ended.
+      const tornDown = {
+        getDbRowId: vi.fn(() => null),
+        getStatus: vi.fn(() => ({
+          active: false,
+          sessionId: null,
+          pid: null,
+          durableFailureClosed: false,
+          durableFailureInconclusive: false,
+        })),
+      } as unknown as Parameters<RuntimeTurnCoordinator['turnFinalizationBookkeeping']>[1];
+
+      const params = makeCoordinator().turnFinalizationBookkeeping(
+        context(),
+        tornDown,
+        undefined,
+        { kind: 'failed', class: 'unknown_terminal' },
+      );
+      const checkpoint = params.checkpoint;
+      if (checkpoint === undefined) throw new Error('bookkeeping wrote no checkpoint');
+      // The same upsert the terminal transaction applies for this bookkeeping.
+      durability.upsertSessionCheckpoint(checkpoint.conversationKey, checkpoint.fields);
+
+      expect(durability.getSessionCheckpoint('15550190099')).toMatchObject({
+        session_id: 'ended-provider-session',
+        session_status: 'ended',
+        last_inbound_seq: 41,
+      });
+    } finally {
+      db.close();
+    }
   });
 });

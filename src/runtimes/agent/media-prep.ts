@@ -17,6 +17,8 @@ import { createChildLogger } from '../../logger.ts';
 import type { IncomingMessage } from '../../core/types.ts';
 import type { Database } from '../../core/database.ts';
 import { extractRawMime, extractRawFileLength } from '../../core/media-mime.ts';
+import { unwrapMessage } from '../../core/message-parser.ts';
+import { isNonEmptyString } from '../../lib/type-guards.ts';
 import { updateMediaPath, updateTranscription } from '../../core/messages.ts';
 
 const log = createChildLogger('agent-runtime');
@@ -160,7 +162,12 @@ export async function prepareContentForAgent(msg: IncomingMessage, db?: Database
     case 'document': {
       const { extractDocumentText } = await import('../chat/media/documents.ts');
       const text = await extractDocumentText(result.buffer, result.mimeType, content ?? 'document');
-      return `[Document: ${filePath}]\n${text}`;
+      const raw = msg.rawMessage as { message?: unknown } | undefined;
+      const caption: unknown = unwrapMessage(raw?.message)?.documentMessage?.caption;
+      // The parser sanitizes content; raw caption only distinguishes it from metadata.
+      return isNonEmptyString(caption) && content
+        ? `[Document: ${filePath}]\n${content}\n\n${text}`
+        : `[Document: ${filePath}]\n${text}`;
     }
     default:
       return content || `[${contentType}: ${filePath}]`;

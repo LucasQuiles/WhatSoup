@@ -125,6 +125,37 @@ describe('whatsoup-mcp-call', () => {
     expect((server.received[1].params as { arguments?: unknown }).arguments).toEqual({ chatJid: 'chat@g.us', text: 'hi' });
   });
 
+  // #3421 step 1: a hook run by the session presents the session's token first,
+  // so its calls are recorded as the turn's own. Without one, nothing changes.
+  it('presents the session token as its first line when it has one', async () => {
+    const server = await startMockServer(mcpHandler({ content: [{ type: 'text', text: 'sent' }] }));
+    servers.push(server);
+
+    const result = await callTool({
+      socketPath: server.socketPath,
+      name: 'send_message',
+      args: {},
+      timeoutMs: 1_000,
+      sessionToken: 'session-token-hook',
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(server.received.map((request) => [request.method, request.id, request.params])).toEqual([
+      ['notifications/whatsoup/session', undefined, { token: 'session-token-hook' }],
+      ['initialize', expect.any(Number), expect.objectContaining({ protocolVersion: '2024-11-05' })],
+      ['tools/call', expect.any(Number), { name: 'send_message', arguments: {} }],
+    ]);
+  });
+
+  it('sends no token line when it has no token', async () => {
+    const server = await startMockServer(mcpHandler({ content: [{ type: 'text', text: 'sent' }] }));
+    servers.push(server);
+
+    await callTool({ socketPath: server.socketPath, name: 'send_message', args: {}, timeoutMs: 1_000, sessionToken: '' });
+
+    expect(server.received.map((request) => request.method)).toEqual(['initialize', 'tools/call']);
+  });
+
   it('surfaces MCP tool-level isError separately from transport failure', async () => {
     const server = await startMockServer(mcpHandler({ isError: true, content: [{ type: 'text', text: 'invalid params' }] }));
     servers.push(server);

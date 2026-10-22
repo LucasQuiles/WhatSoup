@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
@@ -82,14 +82,20 @@ export function writeSandboxArtifacts(
   return hooks;
 }
 `);
+  // The hook's import closure as a release tree ships it: rgp-state.mjs loads
+  // src/lib helpers, and process-lock.ts resolves zod from node_modules.
   for (const relativePath of [
     'deploy/hooks/poll-interaction-lint.mjs',
     'deploy/hooks/lib/rgp-state.mjs',
+    'src/lib/process-lock.ts',
+    'src/lib/private-fs.ts',
   ]) {
     writeFixtureFile(fixture, relativePath, readFileSync(path.join(repoRoot, relativePath), 'utf8'));
   }
+  symlinkSync(path.join(repoRoot, 'node_modules'), path.join(fixture, 'node_modules'), 'dir');
   writeFixtureFile(fixture, 'docs/runbooks/agent-decision-polls.md', 'AskUserQuestion send_poll multiSelect selectableCount Known Limits\n');
-  writeFixtureFile(fixture, 'CLAUDE.md', 'docs/runbooks/agent-decision-polls.md\n');
+  writeFixtureFile(fixture, 'AGENTS.md', 'docs/runbooks/agent-decision-polls.md\n');
+  writeFixtureFile(fixture, 'CLAUDE.md', 'See [contributor instructions](AGENTS.md) and [decision polls](docs/runbooks/agent-decision-polls.md).\n');
   writeFixtureFile(fixture, 'README.md', 'docs/runbooks/agent-decision-polls.md\n');
   writeFixtureFile(fixture, 'docs/tools.md', 'send_poll AskUserQuestion\n');
   writeFixtureFile(fixture, 'docs/configuration.md', 'poll-interaction-lint.mjs\n');
@@ -226,6 +232,18 @@ describe('agent decision polls guard', () => {
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual(expect.arrayContaining([expect.stringContaining(rule)]));
+  });
+
+  it.each(['AGENTS.md', 'CLAUDE.md'])('requires decision guidance in %s even when the other entry point has it', (file) => {
+    const fixture = makeCompleteFixture();
+    writeFixtureFile(fixture, file, 'Contributor instructions without decision guidance.\n');
+
+    const result = checkAgentDecisionPolls(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual([
+      `decision-polls.docs ${file}: missing documented promise "docs/runbooks/agent-decision-polls.md"`,
+    ]);
   });
 
   it('executes the fail-open hook for accepted and prohibited transcripts', () => {

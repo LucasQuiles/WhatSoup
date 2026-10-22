@@ -267,7 +267,7 @@ def test_unsnapshottable_event_is_quarantined_and_the_next_alert_still_delivers(
 
     sent: list[str] = []
     with patch.object(mod, "json_snapshot", side_effect=failing_snapshot), \
-         patch.object(mod, "send_whatsapp", side_effect=lambda text: sent.append(text)), \
+         patch.object(mod, "send_whatsapp", side_effect=lambda text, *a, **k: sent.append(text)), \
          patch.object(mod, "email_fallback", return_value=True):
         summary = mod.run_once(max_events=10)
 

@@ -14,7 +14,25 @@ function jsonRpcErrorMessage(error) {
   }
 }
 
-export function callTool({ socketPath, name, args, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+// #3421 step 1: a session hook presents its session's token first, as one
+// notification line. It is attribution evidence only and gets no reply.
+function sessionTokenLine(sessionToken) {
+  const token = typeof sessionToken === 'string' ? sessionToken.trim() : '';
+  if (!token) return '';
+  return `${JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'notifications/whatsoup/session',
+    params: { token },
+  })}\n`;
+}
+
+export function callTool({
+  socketPath,
+  name,
+  args,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  sessionToken = process.env.WHATSOUP_MCP_SESSION_TOKEN,
+}) {
   return new Promise((resolve) => {
     if (!socketPath) {
       resolve({ ok: false, error: 'no socketPath provided' });
@@ -61,6 +79,8 @@ export function callTool({ socketPath, name, args, timeoutMs = DEFAULT_TIMEOUT_M
     };
 
     socket.on('connect', () => {
+      const tokenLine = sessionTokenLine(sessionToken);
+      if (tokenLine) socket.write(tokenLine);
       socket.write(`${JSON.stringify({
         jsonrpc: '2.0',
         id: initId,

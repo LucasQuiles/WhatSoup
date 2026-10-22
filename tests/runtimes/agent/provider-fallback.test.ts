@@ -534,6 +534,9 @@ describe('AgentRuntime — provider fallback state machine', () => {
     expect(v.replayTurnOnFallback).toHaveBeenCalledWith({
       chatJid: 'chat@s.whatsapp.net',
       mapKey: 'chat-key',
+      // The replay carries the held turn's registered scope ref so a rekey
+      // before admission is followed, not the key captured here.
+      scopeRef: { value: 'chat-key' },
       replayText: 'please continue the task',
       actorJid: 'sender@s.whatsapp.net',
       oldSession: null,
@@ -1036,8 +1039,9 @@ describe('usage-limit user notice', () => {
     // to try again after the limit resets.
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('add credits or switch my model'),
+      'status',
     );
-    expect(queue.enqueueText).not.toHaveBeenCalledWith(
+    expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContainEqual(
       expect.stringContaining('try again after the limit resets'),
     );
   });
@@ -1061,12 +1065,15 @@ describe('usage-limit user notice', () => {
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Primary model hit a usage/quota limit'),
+      'lifecycle',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Switching to OpenCode / minimax/minimax-m2'),
+      'lifecycle',
     );
     expect(queue.enqueueText).toHaveBeenCalledWith(
       expect.stringContaining('Please resend your last message.'),
+      'lifecycle',
     );
   });
 });

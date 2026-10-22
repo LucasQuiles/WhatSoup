@@ -53,6 +53,7 @@ function startEchoServer(socketPath: string): Promise<Server> {
 function spawnProxy(
   socketPath: string,
   actorSocketPath?: string,
+  sessionToken = '',
 ): ChildProcessWithoutNullStreams {
   return spawn(
     process.execPath,
@@ -61,6 +62,8 @@ function spawnProxy(
       env: {
         ...process.env,
         WHATSOUP_SOCKET: socketPath,
+        // Pinned so a token in the runner's own environment cannot leak in.
+        WHATSOUP_MCP_SESSION_TOKEN: sessionToken,
         ...(actorSocketPath === undefined ? {} : { WHATSOUP_MCP_SOCKET: actorSocketPath }),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -182,6 +185,30 @@ describe('whatsoup-proxy', () => {
 
     // Echo server returns the same object we sent
     expect(response).toEqual(msg);
+  });
+
+  // #3421 step 1: the session's own proxy identifies itself with one
+  // notification before relaying anything, and sends nothing extra otherwise.
+  it('writes the session token line first when the session gave it a token', async () => {
+    server = await startEchoServer(socketPath);
+    proxy = spawnProxy(socketPath, undefined, 'session-token-abc');
+
+    const first = await collectFirstLine(proxy);
+
+    expect(first).toEqual({
+      jsonrpc: '2.0',
+      method: 'notifications/whatsoup/session',
+      params: { token: 'session-token-abc' },
+    });
+  });
+
+  it('relays the client\'s first line unchanged when it has no token', async () => {
+    server = await startEchoServer(socketPath);
+    proxy = spawnProxy(socketPath);
+
+    const msg = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} };
+
+    expect(await sendAndReceive(proxy, msg)).toEqual(msg);
   });
 
   it('relays multiple sequential messages correctly', async () => {

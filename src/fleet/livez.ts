@@ -15,12 +15,15 @@
  * but without the asset dependency.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { systemClock, type Clock } from '../lib/clock.ts';
 
 export interface LivenessOptions {
   /** This instance's fleet name (e.g. the host's self name). */
   selfName: string;
   /** Process start time in epoch ms, used to derive uptime. */
   startedAtMs: number;
+  /** #2200: uptime is measured against this clock; defaults to systemClock. */
+  clock?: Clock;
 }
 
 /** The single path this handler owns. */
@@ -48,7 +51,7 @@ export function createLivenessHandler(
       alive: true,
       instance: opts.selfName,
       pid: process.pid,
-      uptime_seconds: Math.max(0, Math.round((Date.now() - opts.startedAtMs) / 1000)),
+      uptime_seconds: Math.max(0, Math.round(((opts.clock ?? systemClock).now() - opts.startedAtMs) / 1000)),
       started_at: new Date(opts.startedAtMs).toISOString(),
     });
 

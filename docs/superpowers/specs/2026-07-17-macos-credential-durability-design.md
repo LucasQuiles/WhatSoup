@@ -88,10 +88,28 @@ and remains Keychain-first.
 
 ## Warning Control
 
-The resolver records services whose primary Keychain read failure has already
-been logged. It emits at most one `keyring read failed` warning per service per
-process while still performing subsequent lookups and fallbacks. Backend-probe
-downgrade alarms retain their existing behavior.
+The resolver records services whose platform keyring read failure has already
+been logged. On macOS a failure on any candidate — the primary service or a
+migration fallback — counts, and is recorded against the requested service; an
+absent item is not a failure, and only a clean exit 44 (errSecItemNotFound, no
+signal, no error code) is absence. The resolver emits at most one
+`keyring read failed` warning per service per process while still performing
+subsequent lookups and fallbacks. A typed lookup that ends with no value from
+any store (no successful fallback) reports a recorded failure as `unreadable`;
+if a later fallback returns a value, the lookup is `ok` despite the earlier
+failure. Backend-probe downgrade alarms retain their existing behavior.
+
+Accepted gap (owner decision): `security` can itself report errSecItemNotFound
+(exit 44) for some genuine Keychain search failures, because its
+keychain_find.c converts a failed SecKeychainSearchCopyNext into not-found.
+Such a failure reads as absence.
+
+Linux `secret-tool` absence is not classified: `lookup` exits 1 with no output
+both for no match and for a match that stayed locked, and `clear` does the same
+whenever it removed nothing. Any primary-candidate lookup throw is recorded as a
+failure (a genuine miss included), a migration candidate's throw is not
+recorded, and any `clear` throw is `backend_failed`. Classifying Linux absence
+is tracked separately.
 
 This is noise control only: it does not suppress service health alarms,
 restart alarms, or credential lookup attempts.

@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { WsEvent, WsInvalidationEvent, WsTypingEvent } from './websocket-server.ts';
+import { systemClock, type Clock } from '../lib/clock.ts';
 
 export interface FleetRealtimePublisher {
   publish(event: WsEvent): void;
@@ -64,8 +65,9 @@ export function publishTypingUpdate(
   instance: string,
   jid: string,
   composing: boolean,
+  clock: Clock = systemClock,
 ): void {
-  const event: WsTypingEvent = { type: 'typing_update', instance, jid, composing, since: Date.now() };
+  const event: WsTypingEvent = { type: 'typing_update', instance, jid, composing, since: clock.now() };
   rt.publish(event);
 }
 

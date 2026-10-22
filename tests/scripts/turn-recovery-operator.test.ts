@@ -30,6 +30,10 @@ const OWNER: RecoveryOwnerIdentity = {
   generation: 4,
 };
 
+const FIXTURE_SETUP_TIMEOUT_MS = 60_000;
+// Longer than the 10 s default test budget, so seeding inside a test body times out.
+const SLOW_SEED_DELAY_MS = 11_000;
+
 const CONVERSATION_KEY = '15550100001';
 const DELIVERY_JID = '15550100001:7@s.whatsapp.net';
 
@@ -156,20 +160,60 @@ describe('turn-recovery-operator CLI (#2155)', () => {
     }
   });
 
-  it('refuses promotion when the conversation has newer journaled activity', () => {
+  // #3561: seeding opens and migrates a real DB, and the old body spawned two
+  // cold CLI children; at gate load that took 12.6 s against the 10 s budget.
+  // The seed now runs in a hook with its own budget, and the no-mutation check
+  // reads the job in-process, so the body times only the promote CLI under test.
+  function seedNewerActivity(delayMs = 0): number {
+    // Injection hook only: a synchronous stall standing in for slow seeding.
+    if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
     const jobId = seedOne();
     const db = new Database(dbPath);
     db.open();
     new DurabilityEngine(db).journalInbound('wamid-newer', CONVERSATION_KEY, DELIVERY_JID, 'agent');
     db.close();
+    return jobId;
+  }
 
+  function expectNewerActivityRefusal(jobId: number): void {
     const res = run(['promote', '--db', dbPath, '--job', String(jobId), '--evidence-type', 'provider-receipt', '--evidence-ref', 'SM-receipt-99', '--apply', '--audit-file', auditPath]);
-    expect(res.status).toBe(1);
+    expect(res.status, res.stderr).toBe(1);
     expect(res.stderr).toContain('newer journaled activity');
     expect(res.stderr).not.toContain(CONVERSATION_KEY);
 
-    const verify = run(['show', '--db', dbPath, '--job', String(jobId)]);
-    expect(JSON.parse(verify.stdout)).toMatchObject({ job: { state: 'blocked_unsafe' } });
+    const db = new Database(dbPath);
+    db.open();
+    try {
+      const job = new DurabilityEngine(db).getTurnRecoveryJob(jobId);
+      expect(job).toMatchObject({ state: 'blocked_unsafe', replay_safety_proof_id: null });
+    } finally {
+      db.close();
+    }
+  }
+
+  describe('with newer journaled activity seeded outside the test budget', () => {
+    let jobId = 0;
+    beforeEach(() => {
+      jobId = seedNewerActivity();
+    }, FIXTURE_SETUP_TIMEOUT_MS);
+
+    it('refuses promotion when the conversation has newer journaled activity', () => {
+      expectNewerActivityRefusal(jobId);
+    });
+  });
+
+  // #3561 injection: seeding stalls past the default 10 s test budget. Inside the
+  // body that times out; in the hook the body keeps its full budget.
+  // @skip-env #3561 red-proof harness; sleeps 11 s, off in the normal suite
+  describe.runIf(process.env.WHATSOUP_TEST_3561_SLOW_SETUP_INJECTION === '1')('with a slow seed of newer journaled activity', () => {
+    let jobId = 0;
+    beforeEach(() => {
+      jobId = seedNewerActivity(SLOW_SEED_DELAY_MS);
+    }, FIXTURE_SETUP_TIMEOUT_MS);
+
+    it('keeps slow seeding out of the newer-activity refusal budget', () => {
+      expectNewerActivityRefusal(jobId);
+    });
   });
 
   it('rejects unknown evidence types and under-specified references with no mutation', () => {

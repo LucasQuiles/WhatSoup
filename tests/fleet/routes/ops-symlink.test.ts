@@ -157,7 +157,7 @@ describe('handleConfigUpdate symlink-escape defense (regression)', () => {
     expect(res._status).toBe(200);
     expectPersistedConfig(configPath, {
       ...baseAgentConfig,
-      agentOptions: { cwd: workspaceAlias, sessionScope: 'per_chat' },
+      agentOptions: { cwd: workspace, sessionScope: 'per_chat' },
     });
   });
 

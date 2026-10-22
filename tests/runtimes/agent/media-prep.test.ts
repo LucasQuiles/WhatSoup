@@ -11,6 +11,7 @@ import { mkdtempSync, writeFileSync, existsSync, statSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage } from '../../../src/core/types.ts';
+import { parseIncomingMessage } from '../../../src/core/message-parser.ts';
 
 // ─── Hoisted mocks ────────────────────────────────────────────────────────────
 
@@ -50,8 +51,8 @@ vi.mock('../../../src/config.ts', () => ({
 
 // Mock Baileys — downloadMediaMessage is imported dynamically inside the download fn
 vi.mock('@whiskeysockets/baileys', async () => {
-  const { baileysMediaMock } = await import('../../helpers/baileys-mock.ts');
-  const m = baileysMediaMock();
+  const { baileysMock } = await import('../../helpers/baileys-mock.ts');
+  const m = baileysMock();
   m.downloadMediaMessage.mockImplementation(async () => Buffer.from('media-bytes'));
   return m;
 });
@@ -349,6 +350,33 @@ describe('media-prep', () => {
   });
 
   // ── prepareContentForAgent: document ────────────────────────────────────
+
+  it.each(['direct', 'wrapped'])('preserves a %s document caption from canonical parsing', async (wrapper) => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('pdf-bytes'), mimeType: 'application/pdf' });
+    mockWriteTempFile.mockReturnValue('/tmp/report.pdf');
+    const message = { documentMessage: { caption: 'Compare all months.\ud800', fileName: 'report.pdf', mimetype: 'application/pdf' } };
+    const parsed = parseIncomingMessage({
+      key: { id: 'caption-document', remoteJid: '15550001@s.whatsapp.net', fromMe: false },
+      messageTimestamp: 1_780_000_000,
+      message: wrapper === 'direct' ? message : { ephemeralMessage: { message: { documentWithCaptionMessage: { message } } } },
+    });
+    expect(parsed?.content).toBe('Compare all months.\ufffd');
+    expect(await prepareContentForAgent(parsed!)).toBe(
+      '[Document: /tmp/report.pdf]\nCompare all months.\ufffd\n\nExtracted document text.',
+    );
+  });
+
+  it('does not promote document metadata into a caption', async () => {
+    mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('pdf-bytes'), mimeType: 'application/pdf' });
+    mockWriteTempFile.mockReturnValue('/tmp/report.pdf');
+    const parsed = parseIncomingMessage({
+      key: { id: 'uncaptioned-document', remoteJid: '15550001@s.whatsapp.net', fromMe: false },
+      messageTimestamp: 1_780_000_000,
+      message: { documentMessage: { fileName: 'report.pdf', mimetype: 'application/pdf' } },
+    });
+    expect(parsed?.content).toContain('fileName');
+    expect(await prepareContentForAgent(parsed!)).toBe('[Document: /tmp/report.pdf]\nExtracted document text.');
+  });
 
   it('returns document file path and extracted text', async () => {
     mockDownloadMedia.mockResolvedValue({ buffer: Buffer.from('pdf-bytes'), mimeType: 'application/pdf' });

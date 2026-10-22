@@ -96,11 +96,15 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
 vi.mock('../../../src/runtimes/agent/providers/credential-verify.ts', () => ({
   verifyFallbackCredential: vi.fn(() => Promise.resolve('unknown')),
 }));
-vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', () => ({
-  probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
-  probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
-  listModelCatalog: vi.fn(() => Promise.resolve({ status: 'unavailable', reason: 'spawn-error' })),
-}));
+vi.mock('../../../src/runtimes/agent/providers/binary-preflight.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/binary-preflight.ts')>();
+  return {
+    ...actual,
+    probeFallbackBinary: vi.fn(() => Promise.resolve({ status: 'unknown', version: null })),
+    probeModelCatalog: vi.fn(() => Promise.resolve({ status: 'unknown', suggestion: null })),
+    listModelCatalog: vi.fn(() => Promise.resolve({ status: 'unavailable', reason: 'spawn-error' })),
+  };
+});
 
 vi.mock('../../../src/runtimes/agent/providers/chain-entry-canary.ts', () => ({
   probeChainEntryCompletion: canaryProbeMock,
@@ -143,8 +147,20 @@ const CATALOGUE = [
 ];
 
 type CatalogueListing =
-  | { status: 'ok'; ids: string[] }
-  | { status: 'unavailable'; reason: 'spawn-error' | 'timeout' | 'empty' };
+  | {
+      status: 'ok';
+      ids: string[];
+      metadata?: Record<string, {
+        status?: string;
+        releaseDate?: string;
+        textOutput?: boolean;
+        toolCall?: boolean;
+        family?: string;
+      }>;
+      captureMode?: 'refreshed' | 'cached' | 'legacy';
+      refreshFailure?: string;
+    }
+  | { status: 'unavailable'; reason: string };
 
 function makeRuntime(
   discovery: AgentFallbackDiscoveryConfig | null,
@@ -176,14 +192,31 @@ type RuntimeView = {
     runChainCanarySweep(trigger: string): Promise<void>;
     chainCanary: Map<string, { status: string; evidence: string | null; durationMs: number; checkedAt: number }>;
     chainCanaryConfig: { trustMs: number };
-    lastDiscovery: { at: number; catalogueSize: number } | null;
+    lastDiscovery: {
+      at: number;
+      catalogueSize: number;
+      captureMode: string;
+      refreshFailure: string | null;
+    } | null;
   };
   getFallbackState(): {
     fallbackDiscovery: {
       mode: 'auto';
       lastDerivedAt: number | null;
       catalogueSize: number | null;
-      candidates: Array<{ model: string; evidence: string; freeTier: boolean; selected: boolean }>;
+      captureMode: string | null;
+      refreshFailure: string | null;
+      candidates: Array<{
+        model: string;
+        evidence: string;
+        catalogStatus: string | null;
+        releaseDate: string | null;
+        zeroCost: boolean | null;
+        eligibilityBasis: string;
+        family: string | null;
+        freeTier: boolean;
+        selected: boolean;
+      }>;
     } | null;
   };
 };
@@ -222,7 +255,7 @@ afterEach(() => {
 });
 
 describe('boot derivation', () => {
-  it('derives keyed picks (newest per provider) + the reserved free-tier tail into agentFallbacks in place', async () => {
+  it('derives one id-ordered pick per provider plus the reserved free-tier tail in place', async () => {
     const { runtime } = makeRuntime(AUTO, async () => ({ status: 'ok', ids: CATALOGUE }));
     const rv = v(runtime);
     const arrayRef = rv.agentFallbacks;
@@ -231,11 +264,13 @@ describe('boot derivation', () => {
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
 
     // maxEntries default 3, one slot reserved for free tier: 2 keyed picks in
-    // catalogue order (all evidence unknown), newest model per provider.
+    // catalogue provider order (all evidence unknown). Within a provider the
+    // metadata-free tie break is descending model id, so `small-brain` wins
+    // the free tier although the fixture lists it first.
     expect(models(rv.agentFallbacks)).toEqual([
       'deepseek/deepseek-v4-pro',
       'glm/glm-5.2',
-      'opencode/big-pickle',
+      'opencode/small-brain',
     ]);
     expect(rv.agentFallbacks.every((entry) => entry.provider === 'opencode-cli')).toBe(true);
     // In-place mutation: the SAME array object the ports captured.
@@ -255,7 +290,7 @@ describe('boot derivation', () => {
     expect(models(rv.agentFallbacks)).toEqual([
       'deepseek/deepseek-chat',
       'minimax/MiniMax-M3',
-      'opencode/big-pickle',
+      'opencode/small-brain',
     ]);
   });
 
@@ -325,7 +360,7 @@ describe('honest degrade + fallback_discovery_empty', () => {
 });
 
 describe('evidence-consulted derivation', () => {
-  it('excludes canary-dead candidates and ranks canary-ok ahead of unknown', async () => {
+  it('replaces an exact canary-dead model and ranks canary-ok ahead of unknown', async () => {
     const { runtime } = makeRuntime(AUTO, async () => ({ status: 'ok', ids: CATALOGUE }));
     const rv = v(runtime);
     seedCanary(rv, 'deepseek/deepseek-v4-pro', 'failed');
@@ -333,11 +368,12 @@ describe('evidence-consulted derivation', () => {
 
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
 
-    // deepseek dead → excluded; minimax ok → ranked ahead of unknown glm.
+    // The exact deepseek model is dead, so its provider falls through to the
+    // next model; minimax's proven completion still ranks first.
     expect(models(rv.agentFallbacks)).toEqual([
       'minimax/MiniMax-M3',
-      'glm/glm-5.2',
-      'opencode/big-pickle',
+      'deepseek/deepseek-chat',
+      'opencode/small-brain',
     ]);
   });
 
@@ -359,7 +395,7 @@ describe('mid-window re-derivation', () => {
     const rv = v(runtime);
     await rv.fallback.refreshDiscoveredFallbackChain('boot');
     expect(models(rv.agentFallbacks)).toEqual([
-      'deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/big-pickle',
+      'deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/small-brain',
     ]);
 
     rv.activateProviderFallback(null, 'usage-limit');
@@ -441,8 +477,95 @@ describe('/health surface', () => {
     expect(state?.lastDerivedAt).not.toBeNull();
     expect(state?.catalogueSize).toBe(CATALOGUE.length);
     const selected = state?.candidates.filter((c) => c.selected).map((c) => c.model);
-    expect(selected).toEqual(['deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/big-pickle']);
+    expect(selected).toEqual(['deepseek/deepseek-v4-pro', 'glm/glm-5.2', 'opencode/small-brain']);
     const freeTier = state?.candidates.find((c) => c.freeTier);
-    expect(freeTier?.model).toBe('opencode/big-pickle');
+    expect(freeTier?.model).toBe('opencode/small-brain');
+  });
+
+  it('threads catalogue freshness and metadata-based selection into runtime state', async () => {
+    const ids = ['openai/gpt-5.6', 'openai/o3-pro'];
+    const { runtime } = makeRuntime(
+      { mode: 'auto', includeFreeTier: false },
+      async () => ({
+        status: 'ok',
+        ids,
+        metadata: {
+          'openai/gpt-5.6': {
+            status: 'active', releaseDate: '2026-08-15', textOutput: true, toolCall: true,
+          },
+          'openai/o3-pro': {
+            status: 'active', releaseDate: '2025-06-10', textOutput: true, toolCall: true,
+          },
+        },
+        captureMode: 'cached',
+        refreshFailure: 'timeout',
+      }),
+    );
+    const rv = v(runtime);
+
+    await rv.fallback.refreshDiscoveredFallbackChain('boot');
+
+    expect(models(rv.agentFallbacks)).toEqual(['openai/gpt-5.6']);
+    expect(rv.fallback.lastDiscovery).toMatchObject({
+      captureMode: 'cached',
+      refreshFailure: 'timeout',
+    });
+    expect(rv.getFallbackState().fallbackDiscovery).toMatchObject({
+      captureMode: 'cached',
+      refreshFailure: 'timeout',
+      candidates: [{
+        model: 'openai/gpt-5.6',
+        catalogStatus: 'active',
+        releaseDate: '2026-08-15',
+        eligibilityBasis: 'metadata',
+        selected: true,
+      }],
+    });
+  });
+
+  it('installs the canonical DeepSeek alias from live metadata and reports its family', async () => {
+    // The fleet host's DeepSeek listing on 2026-09-22, in OpenCode's own
+    // (ascending) order. Three ids tie on status, capabilities and date.
+    const ids = [
+      'deepseek/deepseek-chat',
+      'deepseek/deepseek-flash',
+      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-v4-flash-vision-exp',
+      'deepseek/deepseek-v4-pro',
+    ];
+    const sameDay = {
+      status: 'active', family: 'deepseek-flash', releaseDate: '2026-09-10', textOutput: true, toolCall: true,
+    };
+    const { runtime } = makeRuntime(
+      { mode: 'auto', includeFreeTier: false },
+      async () => ({
+        status: 'ok',
+        ids,
+        metadata: {
+          'deepseek/deepseek-chat': { status: 'active', textOutput: true, toolCall: true },
+          'deepseek/deepseek-flash': sameDay,
+          'deepseek/deepseek-v4-flash': sameDay,
+          'deepseek/deepseek-v4-flash-vision-exp': sameDay,
+          'deepseek/deepseek-v4-pro': {
+            status: 'active', family: 'deepseek-thinking', releaseDate: '2026-08-12', textOutput: true, toolCall: true,
+          },
+        },
+        captureMode: 'refreshed',
+      }),
+    );
+    const rv = v(runtime);
+
+    await rv.fallback.refreshDiscoveredFallbackChain('boot');
+
+    expect(models(rv.agentFallbacks)).toEqual(['deepseek/deepseek-flash']);
+    expect(rv.getFallbackState().fallbackDiscovery?.candidates).toEqual([
+      expect.objectContaining({
+        model: 'deepseek/deepseek-flash',
+        family: 'deepseek-flash',
+        releaseDate: '2026-09-10',
+        eligibilityBasis: 'metadata',
+        selected: true,
+      }),
+    ]);
   });
 });

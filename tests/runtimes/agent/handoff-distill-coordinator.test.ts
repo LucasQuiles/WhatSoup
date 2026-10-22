@@ -126,6 +126,7 @@ type CoordinatorInternals = {
   runner: {
     tickConversation(conversationKey: string): Promise<void>;
     prune(activeKeys: Set<string>): void;
+    invalidateConversation(conversationKey: string): void;
   } | null;
 };
 
@@ -295,6 +296,18 @@ describe('handoff-distill-coordinator', () => {
         coord.shutdown();
       });
     });
+  });
+
+  it('forwards lifecycle invalidation to an armed runner', () => {
+    const coord = armWithMockRunner();
+    const runner = view(coord).runner;
+    expect(runner).not.toBeNull();
+    const invalidate = vi.spyOn(runner!, 'invalidateConversation');
+
+    coord.invalidateConversation('clear-target');
+
+    expect(invalidate).toHaveBeenCalledWith('clear-target');
+    coord.shutdown();
   });
 
   // ─── shutdown() lifecycle ───────────────────────────────────────────────

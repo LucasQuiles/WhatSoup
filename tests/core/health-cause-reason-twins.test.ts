@@ -281,6 +281,7 @@ describe('AGENT_RUNTIME_CLASSIFIED_CAUSES — derived membership', () => {
       .toEqual([
         ...PRE_REFACTOR_CHAIN,
         'provider_fallback_active',
+        'agent_respawn_failed_clear_pending',
         'per_chat_session_without_owner',
         'per_chat_respawn_abandoned',
       ].sort());

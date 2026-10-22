@@ -25,6 +25,7 @@ const tmp = trackTmpDirs('whatsoup-trust-');
 const TRUST_PATHS = [
   'scripts/source-runtime-drift-check.ts',
   'scripts/lib/guard-core.ts',
+  'scripts/lib/cli-args.ts',
   'src/lib/git-env.ts',
   'src/lib/type-guards.ts',
 ];
@@ -101,10 +102,10 @@ describe('database-bootstrap trust check on non-git release exports', () => {
     expect(r.status).toBe(0);
   });
 
-  it('refuses when a closure file is tampered (hash mismatch)', () => {
+  it.each(TRUST_PATHS)('refuses when closure file %s is tampered (hash mismatch)', (rel) => {
     const root = makeRelease();
     writeManifest(root);
-    fs.appendFileSync(path.join(root, 'scripts/lib/guard-core.ts'), '// tampered\n');
+    fs.appendFileSync(path.join(root, rel), '// tampered\n');
     const r = runTrustBlock(root);
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('FATAL');

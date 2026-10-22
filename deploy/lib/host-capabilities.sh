@@ -23,7 +23,7 @@ whatsoup_native_arch() {
   platform="$1"
   machine="$(uname -m 2>/dev/null)" || return 2
   if [ "$platform" = "darwin" ]; then
-    arm64_capable="$(sysctl -n hw.optional.arm64 2>/dev/null || true)"
+    arm64_capable="$(sysctl -n hw.optional.arm64 2>/dev/null)" || return 2
     if [ "$arm64_capable" = "1" ]; then
       printf '%s\n' arm64
       return 0
@@ -173,12 +173,23 @@ whatsoup_capability_records() {
 }
 
 whatsoup_first_line() {
-  "$@" 2>/dev/null | sed -n '1{s/[[:cntrl:]]/ /g;p;}'
+  local probe_output
+  # Formatting must not replace the originating probe's status.
+  probe_output="$("$@" 2>/dev/null)" || return "$?"
+  probe_output="$(printf '%s\n' "$probe_output" | sed -n '1{s/[[:cntrl:]]/ /g;p;}')" || return "$?"
+  case "$probe_output" in
+    *[![:space:]]*) printf '%s\n' "$probe_output" ;;
+    *) return 2 ;;
+  esac
 }
 
 whatsoup_probe_node() {
   version_rule="$1"
-  raw_version="$(whatsoup_first_line "$CAP_PATH" --version)"
+  raw_version="$(whatsoup_first_line "$CAP_PATH" --version)" || {
+    CAP_STATUS=inconclusive
+    CAP_DETAIL=node-version-probe-failed
+    return 0
+  }
   version="${raw_version#v}"
   CAP_VERSION="$version"
   pinned="$(whatsoup_pinned_node_version)" || {
@@ -212,8 +223,16 @@ whatsoup_probe_node() {
     fi
   fi
 
-  native_arch="$(whatsoup_native_arch "$WHATSOUP_CAPABILITY_PLATFORM" 2>/dev/null || true)"
-  process_arch="$(whatsoup_first_line "$CAP_PATH" -p 'process.arch')"
+  native_arch="$(whatsoup_native_arch "$WHATSOUP_CAPABILITY_PLATFORM" 2>/dev/null)" || {
+    CAP_STATUS=inconclusive
+    CAP_DETAIL=node-architecture-unavailable
+    return 0
+  }
+  process_arch="$(whatsoup_first_line "$CAP_PATH" -p 'process.arch')" || {
+    CAP_STATUS=inconclusive
+    CAP_DETAIL=node-architecture-unavailable
+    return 0
+  }
   process_arch="$(whatsoup_normalize_arch "$process_arch" 2>/dev/null || true)"
   if [ -z "$native_arch" ] || [ -z "$process_arch" ]; then
     CAP_STATUS=inconclusive
@@ -225,7 +244,11 @@ whatsoup_probe_node() {
 }
 
 whatsoup_probe_python() {
-  raw_version="$(whatsoup_first_line "$CAP_PATH" --version)"
+  raw_version="$(whatsoup_first_line "$CAP_PATH" --version)" || {
+    CAP_STATUS=inconclusive
+    CAP_DETAIL=python-version-probe-failed
+    return 0
+  }
   version="${raw_version#Python }"
   CAP_VERSION="$version"
   major="${version%%.*}"
@@ -286,7 +309,10 @@ whatsoup_probe_capability() {
     node) whatsoup_probe_node "$version_rule" ;;
     python) whatsoup_probe_python ;;
     npm|git|rg|zsh|shellcheck|timeout)
-      CAP_VERSION="$(whatsoup_first_line "$CAP_PATH" --version)"
+      CAP_VERSION="$(whatsoup_first_line "$CAP_PATH" --version)" || {
+        CAP_STATUS=inconclusive
+        CAP_DETAIL='version-probe-failed'
+      }
       ;;
   esac
 }

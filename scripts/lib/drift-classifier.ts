@@ -154,10 +154,10 @@ export const DRIFT_MATRIX: Readonly<Record<DriftClass, DriftClassSpec>> = {
  */
 const PATH_RULES: ReadonlyArray<{ test: (p: string) => boolean; drift: DriftClass; label: string }> = [
   {
-    // patch-package overlays rewrite vendored dependency behavior at install
+    // Dependency overlays rewrite vendored dependency behavior at install
     // time (#3315 introduced patches/): a drifted patch changes what runs in
     // production exactly like a source change does.
-    label: 'vendored-dependency overlay (patch-package)',
+    label: 'vendored-dependency overlay',
     drift: 'DEPENDENCY',
     test: (p) => p.startsWith('patches/'),
   },

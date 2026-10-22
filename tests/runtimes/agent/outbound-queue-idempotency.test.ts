@@ -42,7 +42,7 @@ describe('OutboundQueue.sendWithRetry — stable messageId across retries (QR-02
     };
 
     const queue = new OutboundQueue(messenger, CHAT_JID);
-    queue.enqueueText('Reply that may be slow');
+    queue.enqueueText('Reply that may be slow', 'answer');
     await vi.runAllTimersAsync();
     await queue.flush();
 
@@ -65,10 +65,10 @@ describe('OutboundQueue.sendWithRetry — stable messageId across retries (QR-02
     };
 
     const queue = new OutboundQueue(messenger, CHAT_JID);
-    queue.enqueueText('First message');
+    queue.enqueueText('First message', 'answer');
     await vi.runAllTimersAsync();
     await queue.flush();
-    queue.enqueueText('Second message');
+    queue.enqueueText('Second message', 'answer');
     await vi.runAllTimersAsync();
     await queue.flush();
 

@@ -422,6 +422,8 @@ def test_recovery_required_makes_no_forbidden_effects(tmp_state):
             f"{state_dir.name}/.collector-state.json.",
             f"{state_dir.name}/collector-state.json.",
             f"{state_dir.name}/logs/collector.jsonl",
+            # The bounded writer's lock sidecar beside that log (#3700).
+            f"{state_dir.name}/logs/.collector.jsonl.",
             f"{state_dir.name}/controller-log-health/collector.json",
         )
         changed = {

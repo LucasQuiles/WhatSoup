@@ -417,6 +417,7 @@ describe('model-pin — bare keep superseded by a concurrent write (line 202)', 
       expect(port.sendDirect).toHaveBeenCalledWith(
         chatJid,
         expect.stringContaining('nothing was promoted'),
+        'status',
       );
       expect(port.completeLocalInbound).toHaveBeenCalledWith(7);
     } finally {

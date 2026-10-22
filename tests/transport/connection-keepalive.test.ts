@@ -154,6 +154,24 @@ describe('ConnectionManager — keepalive', () => {
     expect(exhausted).toHaveBeenCalled();
   });
 
+  it('#3722: a keepalive graceful reconnect records reconnectReset, and the next open clears it', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    mockSock.query.mockRejectedValue(new Error('ping timeout'));
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+
+    const manager = new ConnectionManager();
+    await manager.connect();
+    emit(openEvent());
+
+    // First keepalive failure triggers gracefulReconnect('keepalive_failed').
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(manager.getHealthConnectionState().reconnectReset?.reason).toBe('graceful_reconnect_keepalive_failed');
+    expect(typeof manager.getHealthConnectionState().reconnectReset?.at).toBe('string');
+
+    emit(openEvent());
+    expect(manager.getHealthConnectionState().reconnectReset).toBeNull();
+  });
+
   it('does not emit exhausted when a successful pong resets the keepalive-failure clock', async () => {
     const { mockSock, emit } = makeMockSocket();
     // Fail, then a healthy pong, then fail again.

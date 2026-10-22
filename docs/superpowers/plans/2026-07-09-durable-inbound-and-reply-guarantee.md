@@ -2,6 +2,29 @@
 
 **Status:** Pending implementation
 
+## Execution reconciliation — 2026-10-06
+
+This remains a requirements and sequencing record. Reconcile the examples below
+against source revision `59cc562bc` before executing them:
+
+- `src/core/database-schema-version.ts` records migration **66**. The proposed
+  37–42 train below is historical and those numbers are already occupied. Derive
+  the next free migration numbers from the then-current registry and update every
+  dependent filename, assertion and operator reference together before implementation.
+- Reuse `withImmediateTransaction` in `src/core/db-tx.ts`; it already exists.
+  Preserve the plan's two-connection contention and rollback acceptance criteria.
+- Reconcile queue changes with `RuntimeAdmissionReceipt` in `src/runtimes/types.ts`
+  and the existing `TurnQueue` admission/rejection contract. Reconcile shutdown
+  ordering with `runShutdownSequence` in `src/main-shutdown-policy.ts`; do not
+  create a second lifecycle owner from the old examples.
+- [Durability](../../durability.md) and [Reply Guarantee](../../reply-guarantee.md)
+  describe the current terminal authority. Typing is liveness only; a field named
+  `terminalReason` in a watchdog result is not proof that its caller terminalizes
+  the inbound. Verify the caller and persisted transaction before making that claim.
+
+These corrections do not close any unverified task or remove any admission,
+replay, delivery-proof, deployment-hold or acceptance requirement below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make accepted inbound messages atomically durable and replayable, ensure queue shedding and shutdown have durable lifecycle outcomes, and make a Reply Guarantee turn terminal only after a tracked visible interruption reaches its configured delivery proof.
@@ -13,7 +36,7 @@
 ## Global Constraints
 
 - Start every implementation branch from the then-current `origin/main` only after a fresh fetch; recheck the next free migration number immediately before implementation and merge.
-- Reserve one contiguous migration train in landing order: WS-A02 migration 37, WS-A01 migration 38, WS-A04 migration 39, WS-A05 migration 40, WS-A07 migration 41, and the metrics collection migration 42. If `main` advances or any predecessor changes, update every downstream plan, filename, function, assertion, and operator reference atomically before implementation.
+- Reserve one contiguous migration train in landing order. The original allocation — WS-A02 migration 37, WS-A01 migration 38, WS-A04 migration 39, WS-A05 migration 40, WS-A07 migration 41, and metrics collection migration 42 — is historical and occupied. Derive current allocations from `src/core/database.ts` and `src/core/database-schema-version.ts`; update every downstream plan, filename, function, assertion, and operator reference atomically before implementation and whenever a predecessor changes.
 - Local branch and commits only; publishing a branch or Draft PR requires explicit user approval.
 - Keep WS-A02, WS-A03, and WS-A01 as three independently reviewable forward PR slices in that dependency order; lower-layer rollback follows the explicit reverse dependency order and they must not be combined into a runtime rewrite.
 - Hold production deployment/activation through both the WS-A02 and WS-A03 merges until the exact WS-A01 head is merged and the integrated train is green. WS-A02 can create due deferred work without its consumer, and WS-A03 intentionally lands claim propagation before the complete terminal-delivery migration. The merge receipts must prove the deploy controller was paused (or that these commits cannot deploy independently); release it only after WS-A01/integrated remote CI, backlog health, and replay/terminal smoke receipts. If a verified deployment hold is impossible, do not merge a lower slice alone—use one coordinated, still separately reviewed merge window.

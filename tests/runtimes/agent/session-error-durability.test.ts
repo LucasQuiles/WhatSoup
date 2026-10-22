@@ -547,6 +547,192 @@ describe('SessionManager durable error lifecycle', () => {
     });
   });
 
+  it('keeps repeated shutdown inconclusive after the root exits before descendant proof', async () => {
+    const child = makeChild(17112);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    const unresolved: KillSessionOutcome = {
+      ...terminatedOutcome(),
+      outcome: 'unresolved_ambiguous',
+      ownedProcessCount: 2,
+      ambiguousProcessCount: 1,
+    };
+    vi.mocked(killSessionTree).mockImplementationOnce(async () => {
+      child.signalCode = 'SIGTERM';
+      child.emit('exit', null, 'SIGTERM');
+      return unresolved;
+    });
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      vi.mocked(retryKillSessionTree).mockResolvedValueOnce(unresolved);
+    }
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    try {
+      await expect(sm.shutdown(true)).rejects.toMatchObject({
+        code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+      });
+      await expect(sm.shutdown(true)).rejects.toMatchObject({
+        code: 'PROCESS_TREE_AMBIGUOUS_IDENTITY_UNRESOLVED',
+      });
+      expect(rowStatus(db, rowId)).toBe('active');
+      expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
+      expect(sm.getStatus().providerTerminated).toBe(false);
+      expect(killSessionTree).toHaveBeenCalledTimes(1);
+      expect(retryKillSessionTree).toHaveBeenCalledTimes(9);
+    } finally {
+      vi.mocked(retryKillSessionTree).mockReset().mockResolvedValue(terminatedOutcome());
+    }
+  });
+
+  it('holds concurrent shutdown and termination status until root-exit tree proof completes', async () => {
+    const child = makeChild(17113);
+    vi.mocked(spawn).mockReturnValue(child as never);
+    let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
+      finishTermination = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    const firstShutdown = sm.shutdown(true);
+    child.signalCode = 'SIGTERM';
+    child.emit('exit', null, 'SIGTERM');
+    const secondShutdown = sm.shutdown(true);
+    let secondSettled = false;
+    void secondShutdown.then(() => { secondSettled = true; }, () => { secondSettled = true; });
+    const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
+    if (release === null) throw new Error('termination was not started');
+
+    try {
+      await Promise.resolve();
+      expect(secondSettled).toBe(false);
+      expect(rowStatus(db, rowId)).toBe('active');
+      expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('active');
+      expect(sm.getStatus().providerTerminated).toBe(false);
+    } finally {
+      release(terminatedOutcome());
+      await Promise.all([firstShutdown, secondShutdown]);
+    }
+
+    expect(rowStatus(db, rowId)).toBe('suspended');
+    expect(durability.getSessionCheckpoint(CONVERSATION_KEY)?.session_status).toBe('suspended');
+    expect(sm.getStatus().providerTerminated).toBe(true);
+    await expect(sm.shutdown(true)).resolves.toBeUndefined();
+    expect(killSessionTree).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['claude-cli', 'codex-cli', 'opencode-cli'] as const)(
+    'blocks %s readmission after root exit until tree cleanup settles', async (provider) => {
+      const child = makeChild(17114);
+      const replacement = makeChild(17115);
+      vi.mocked(spawn).mockReturnValueOnce(child as never).mockReturnValue(replacement as never);
+      let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+      vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
+        finishTermination = resolve;
+      }));
+      const sm = new SessionManager({
+        db,
+        messenger: makeMessenger(),
+        chatJid: CHAT_JID,
+        provider,
+        model: provider === 'opencode-cli' ? 'glm/test-model' : undefined,
+        onEvent: vi.fn(),
+      });
+      sm.setDurability(durability);
+      await sm.spawnSession();
+      if (provider === 'opencode-cli') await sm.sendTurn('initial turn');
+      const rowId = sm.getDbRowId();
+      if (rowId === null) throw new Error('session row was not created');
+      expect(spawn).toHaveBeenCalledTimes(1);
+
+      const shuttingDown = sm.shutdown(true);
+      child.signalCode = 'SIGTERM';
+      child.emit(provider === 'opencode-cli' ? 'close' : 'exit', null, 'SIGTERM');
+      const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
+      if (release === null) throw new Error('termination was not started');
+
+      try {
+        await expect(sm.spawnSession()).rejects.toMatchObject({ code: 'PROCESS_TREE_LEASE_CONFLICT' });
+        expect(spawn).toHaveBeenCalledTimes(1);
+        expect(sm.getDbRowId()).toBe(rowId);
+        expect(rowStatus(db, rowId)).toBe('active');
+        expect(sm.getStatus().providerTerminated).toBe(false);
+      } finally {
+        release(terminatedOutcome());
+        await shuttingDown;
+      }
+
+      await sm.spawnSession();
+      if (provider === 'opencode-cli') await sm.sendTurn('after proved cleanup');
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(sm.getDbRowId()).not.toBe(rowId);
+      expect(sm.getStatus().pid).toBe(17115);
+      expect(killSessionTree).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('blocks readmission after tree proof until the entire shutdown has settled', async () => {
+    const child = makeChild(17116);
+    const replacement = makeChild(17117);
+    vi.mocked(spawn).mockReturnValueOnce(child as never).mockReturnValue(replacement as never);
+    let finishTermination: ((outcome: KillSessionOutcome) => void) | null = null;
+    vi.mocked(killSessionTree).mockImplementationOnce(() => new Promise<KillSessionOutcome>((resolve) => {
+      finishTermination = resolve;
+    }));
+    const sm = new SessionManager({
+      db,
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: vi.fn(),
+    });
+    sm.setDurability(durability);
+    await sm.spawnSession();
+    const rowId = sm.getDbRowId();
+    if (rowId === null) throw new Error('persistent session row was not created');
+
+    let shutdownSettled = false;
+    const shuttingDown = sm.shutdown(true).then(() => { shutdownSettled = true; });
+    child.signalCode = 'SIGTERM';
+    child.emit('exit', null, 'SIGTERM');
+    const release = finishTermination as ((outcome: KillSessionOutcome) => void) | null;
+    if (release === null) throw new Error('termination was not started');
+    release(terminatedOutcome());
+
+    try {
+      for (let step = 0; step < 32 && !sm.getStatus().providerTerminated; step += 1) {
+        await Promise.resolve();
+      }
+      expect(sm.getStatus().providerTerminated).toBe(true);
+      expect(shutdownSettled).toBe(false);
+      expect(rowStatus(db, rowId)).toBe('active');
+      await expect(sm.spawnSession()).rejects.toMatchObject({ code: 'PROCESS_TREE_LEASE_CONFLICT' });
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      await shuttingDown;
+    }
+
+    expect(rowStatus(db, rowId)).toBe('suspended');
+    await sm.spawnSession();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(sm.getDbRowId()).not.toBe(rowId);
+  });
+
   it('rolls back graceful state atomically after termination when checkpoint closure fails', async () => {
     const child = makeChild(17110);
     vi.mocked(spawn).mockReturnValue(child as never);

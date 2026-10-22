@@ -8,6 +8,21 @@ import { privateHostLabels } from '../../scripts/repo-hygiene-guard.ts';
 import { SERVICE_ENV_MAP as RUNTIME_SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 
 let tmpRoot = '';
+
+function canonicalRecoveryDebt(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    open: true,
+    service_blocking: false,
+    attention: 'routine',
+    reason: null,
+    reasons: ['historical_turn_catchup'],
+    continuity: { readable: true, open: 0, unresolved: 0, ambiguous: 0 },
+    turn_recovery: { readable: true, blocking_outstanding: 0, retained_terminal: 0, open_catchups: 1, corroborated_retained: 0 },
+    completed_delivery_identity: { readable: true, blocking: 0, retained: 0, next_action: null },
+    delivery: { readable: true, blocking_ambiguous: 0, uncorroborated_ambiguous: 0, corroborated_retained: 0, oldest_uncorroborated_at: null },
+    ...overrides,
+  };
+}
 const privateHostLabelFixture = ['nuc', 'les'].join('');
 const privateHostDomainFixture = `${privateHostLabelFixture}.${['qui', 'les'].join('')}.${['stu', 'dio'].join('')}`;
 const privateTailnetIpFixture = ['100', '91', '13', '7'].join('.');
@@ -2753,7 +2768,7 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('type=passive healthPort=9100');
   });
 
-  it('fails explicit host profiles that omit active WhatSoup instance services', () => {
+  it('exempts the managed collector while failing undeclared active WhatSoup instance services', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
     const knownDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'known-bot');
     mkdirSync(knownDir, { recursive: true });
@@ -2770,7 +2785,7 @@ print(m.probe_health(9092))
         ...process.env,
         HOME: tmpRoot,
         BOT_ERRORS_STATE_DIR: tmpRoot,
-        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'com.whatsoup.known-bot,com.whatsoup.personal,com.whatsoup.whatsoup-fleet',
+        BOT_ERRORS_DRY_ACTIVE_WHATSOUP_SERVICES: 'com.whatsoup.known-bot,com.whatsoup.personal,com.whatsoup.whatsoup-fleet,com.whatsoup.bot-errors-j1-collector',
         BOT_ERRORS_DRY_CLOCK_STATUS: 'synced',
         BOT_ERRORS_DRY_DISK_FREE_BYTES: String(10 * 1024 * 1024 * 1024),
         BOT_ERRORS_DRY_DISK_TOTAL_BYTES: String(100 * 1024 * 1024 * 1024),
@@ -2802,6 +2817,7 @@ print(m.probe_health(9092))
     expect(event.evidence).toContain('FAIL profile_coverage_service personal: active service not declared in health profile');
     expect(event.evidence).toContain('service=com.whatsoup.personal config_exists=False');
     expect(event.evidence).not.toContain('profile_coverage_service whatsoup-fleet');
+    expect(event.evidence).not.toContain('profile_coverage_service bot-errors-j1-collector');
   });
 
   it('allows explicit host profiles to opt out of unprofiled config coverage during transitions', () => {
@@ -4394,6 +4410,50 @@ print(m.probe_health(9092))
       expect(line).toContain('status=healthy');
       expect(line).toContain('instance_name=primary-bot');
     });
+
+    it('accepts healthy retained recovery debt without a general warning', () => {
+      const line = probeLine(200, healthyBody({
+        recovery_debt: canonicalRecoveryDebt(),
+      }), 'primary-bot', true);
+      expect(line).not.toMatch(/^(FAIL|WARN) /);
+      expect(line).toContain('status=healthy');
+    });
+
+    it.each([
+      [
+        'healthy blocking contradiction',
+        canonicalRecoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+        }),
+        'health_recovery_debt_status_contradiction',
+      ],
+      [
+        'malformed present debt',
+        { open: 'yes', service_blocking: false, attention: 'routine' },
+        'health_recovery_debt_invalid',
+      ],
+    ])('rejects %s', (_label, debt, marker) => {
+      expect(probeLine(200, healthyBody({ recovery_debt: debt }), 'primary-bot', true))
+        .toMatch(new RegExp(`^FAIL 200 .*${marker}`));
+    });
+
+    it('reports degraded blocking recovery debt through status without a contradiction marker', () => {
+      const line = probeLine(200, healthyBody({
+        status: 'degraded',
+        recovery_debt: canonicalRecoveryDebt({
+          service_blocking: true,
+          attention: 'urgent',
+          reasons: ['turn_recovery_actionable'],
+          turn_recovery: { readable: true, blocking_outstanding: 1, retained_terminal: 0, open_catchups: 0, corroborated_retained: 0 },
+        }),
+      }), 'primary-bot', true);
+      expect(line).toMatch(/^WARN 200 .*health_degraded/);
+      expect(line).not.toContain('health_recovery_debt_status_contradiction');
+      expect(line).not.toContain('health_recovery_debt_invalid');
+    });
   });
 
   it('fails daily health when local auth bond permissions are too open', () => {
@@ -5031,6 +5091,11 @@ print(m.probe_health(9092))
         autoCompactConsecutiveRapidRearmsMax: 3,
         autoCompactNextTurnOverThreshold: 7,
         turnRecoveryBlockedUnsafe: 6,
+        turnRecoveryBlockedUnsafeSynthetic: 3,
+        turnRecoveryBlockedUnsafeSuperseded: 2,
+        turnRecoveryBlockedUnsafeStranded: 1,
+        turnRecoveryOpenRecoveriesSynthetic: 9,
+        turnRecoveryScheduledTurnsLost: 7,
         turnRecoveryQuarantinedDelivery: 2,
         turnRecoveryOrphanTransfers: 1,
         turnFinalizationRetryAttempts: 8,
@@ -5043,7 +5108,62 @@ print(m.probe_health(9092))
       expect(line).toContain('runtime_agent_auto_compact_ineffective=5');
       expect(line).toContain('runtime_agent_auto_compact_rapid_rearms_max=3');
       expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe=6');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_synthetic=3');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_superseded=2');
+      expect(line).toContain('runtime_agent_turn_recovery_blocked_unsafe_stranded=1');
+      expect(line).toContain('runtime_agent_turn_recovery_open_recoveries_synthetic=9');
+      expect(line).toContain('runtime_agent_turn_recovery_scheduled_turns_lost=7');
       expect(line).toContain('runtime_agent_turn_finalization_retry_exhaustions=3');
+    });
+
+    it('labels the remaining agent counters as diagnostic evidence without raising risk', () => {
+      // Distinct value per field so a swapped label cannot pass.
+      const line = probeRuntimeAgent({
+        perChatSessionsWithoutOwner: 2,
+        perChatRespawnAbandoned: 3,
+        turnQueueHaltedScopes: 4,
+        proactiveResumeIdentityRejects: 11,
+        unownedProviderEventRejects: 12,
+        suppressedSystemTurnEffectRejects: 13,
+        chronologyDelayedDispatches: 21,
+        chronologyRecoveryReplayDispatches: 22,
+        chronologyMaxQueueAgeSeconds: 23,
+      });
+
+      expect(line).toMatch(/^200 /);
+      expect(line).not.toContain('runtime_agent_at_risk');
+      expect(line).toContain('runtime_agent_per_chat_sessions_without_owner=2');
+      expect(line).toContain('runtime_agent_per_chat_respawn_abandoned=3');
+      expect(line).toContain('runtime_agent_turn_queue_halted_scopes=4');
+      expect(line).toContain('runtime_agent_proactive_resume_identity_rejects=11');
+      expect(line).toContain('runtime_agent_unowned_provider_event_rejects=12');
+      expect(line).toContain('runtime_agent_suppressed_system_turn_effect_rejects=13');
+      expect(line).toContain('runtime_agent_chronology_delayed_dispatches=21');
+      expect(line).toContain('runtime_agent_chronology_recovery_replay_dispatches=22');
+      expect(line).toContain('runtime_agent_chronology_max_queue_age_seconds=23');
+    });
+
+    it('labels the provider-fallback counters as diagnostic evidence without raising risk (#3586)', () => {
+      // Distinct value per field so a swapped label cannot pass.
+      const line = probeRuntimeAgent({
+        fallbackTurnsServed: 31,
+        fallbackTurnsEmpty: 32,
+        fallbackActivations: 33,
+        fallbackReverts: 34,
+        fallbackReplays: 35,
+        probeAttempts: 36,
+        failedEntryCount: 37,
+      });
+
+      expect(line).toMatch(/^200 /);
+      expect(line).not.toContain('runtime_agent_at_risk');
+      expect(line).toContain('runtime_agent_fallback_turns_served=31');
+      expect(line).toContain('runtime_agent_fallback_turns_empty=32');
+      expect(line).toContain('runtime_agent_fallback_activations=33');
+      expect(line).toContain('runtime_agent_fallback_reverts=34');
+      expect(line).toContain('runtime_agent_fallback_replays=35');
+      expect(line).toContain('runtime_agent_fallback_probe_attempts=36');
+      expect(line).toContain('runtime_agent_fallback_failed_entry_count=37');
     });
 
     it('warns for declared current-risk signals and renders bounded backoff state', () => {

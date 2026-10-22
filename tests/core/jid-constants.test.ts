@@ -22,6 +22,7 @@ import {
   isLidJid,
   isPnJid,
   isGroupJid,
+  isStatusBroadcastJid,
   bareNumber,
   normalizeLid,
   DOMAIN_SMS,
@@ -174,6 +175,16 @@ describe('isGroupJid', () => {
     expect(isGroupJid('15551234567@s.whatsapp.net')).toBe(false);
     expect(isGroupJid('12345@lid')).toBe(false);
     expect(isGroupJid('plain-number')).toBe(false);
+  });
+});
+
+describe('isStatusBroadcastJid', () => {
+  it('matches only the WhatsApp status broadcast, which is not a group either', () => {
+    expect(isStatusBroadcastJid('status@broadcast')).toBe(true);
+    expect(isGroupJid('status@broadcast')).toBe(false);
+    expect(isStatusBroadcastJid('15550356601@s.whatsapp.net')).toBe(false);
+    expect(isStatusBroadcastJid('111111100003566@g.us')).toBe(false);
+    expect(isStatusBroadcastJid(null)).toBe(false);
   });
 });
 

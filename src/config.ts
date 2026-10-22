@@ -31,6 +31,8 @@ import { validateModelRoleValue } from './lib/model-resolver.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR } from './lib/time-units.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
 import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
+import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
+import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -460,6 +462,16 @@ let bootstrapConfig: RuntimeBootstrapConfig | null = null;
 if (instanceRaw) {
   bootstrapConfig = parseRuntimeBootstrapConfig(instanceRaw);
   instance = bootstrapConfig.raw;
+}
+
+const clientOutputPolicySource = getLoadedInstanceConfigOrNull() ?? instance;
+const parsedClientOutputPolicies = parseClientOutputPoliciesForInstance(
+  clientOutputPolicySource ?? {},
+);
+if (!parsedClientOutputPolicies.ok) {
+  throw new ConfigValidationError(
+    `${parsedClientOutputPolicies.error.field} ${parsedClientOutputPolicies.error.reason}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +1182,7 @@ const echoGuardSection = configSection(instance?.echoGuard, 'echoGuard');
 const elevenlabsSection = configSection(instance?.elevenlabs, 'elevenlabs');
 const mediaRetentionSection = configSection(instance?.mediaRetention, 'mediaRetention');
 const ingestSection = configSection(instance?.ingest, 'ingest');
+const shadowGateSection = configSection(instance?.shadowGate, 'shadowGate');
 const advancedSection = configSection(instance?.advanced, 'advanced');
 const instancePathsSection = instance ? configSection(instance.paths, 'paths') : undefined;
 
@@ -1210,6 +1223,8 @@ function configCapabilityObligations() {
 }
 
 export const config = {
+  clientOutputPolicies: parsedClientOutputPolicies.registry,
+
   // Capability-obligation replay (all-or-inert; default OFF). `enabled: true`
   // with a malformed body fails startup as EX_CONFIG — never a partial activation.
   capabilityObligations: configCapabilityObligations(),
@@ -1224,6 +1239,15 @@ export const config = {
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —
   // /model,/why,/reset stay forwarded and no preference table is created.
   nlRouting: resolvedAgentOptions['nlRouting'] === true,
+  // #2949 queued receipt: a per_chat message that waits behind a running turn
+  // gets one "queued behind the current task" notice (per-chat cooldown).
+  // Default ON; `agentOptions.queuedTurnReceipt: false` turns it off.
+  queuedTurnReceipt: resolvedAgentOptions['queuedTurnReceipt'] !== false,
+  // Opt-in: append scope_blocked=finalization to agent_turn_admission_rejected
+  // evidence. Default OFF: a BOT ERRORS consumer without the scope_blocked
+  // class quarantines the alert, so the owner enables it per instance only
+  // after every consumer host runs the new vocabulary (docs/configuration.md).
+  scopeBlockedAlertToken: resolvedAgentOptions['scopeBlockedAlertToken'] === true,
   // Intent→provider tier map for NL routing ('strongest'/'fastest'). Unset
   // tiers resolve to the default route honestly — never a hidden opinion.
   nlRoutingTiers: (resolvedAgentOptions['nlRoutingTiers'] ?? null) as { strongest?: string; fastest?: string } | null,
@@ -1455,6 +1479,14 @@ export const config = {
       .map((jid: string) => jid.trim()),
   ),
 
+  // Memory recall scope per direct-chat contact (phone -> 'chat' | 'instance').
+  // A non-admin contact's direct chat recalls only its own memories unless set
+  // to 'instance'. Other values are dropped. See src/core/memory-scope.ts.
+  contactRecallScopes: Object.fromEntries(
+    Object.entries(stringRecordProp(instance, 'contactRecallScopes'))
+      .filter(([, scope]) => scope === 'chat' || scope === 'instance'),
+  ) as Record<string, 'chat' | 'instance'>,
+
   // Control peers — phones trusted to send self-healing control messages.
   // stringRecordProp fails loud on non-string values (and trims), replacing
   // the former unchecked Record cast.
@@ -1507,6 +1539,11 @@ export const config = {
   // access_list as 'allowed' at startup — the durable, source-reproducible
   // equivalent of a hand-inserted access grant. See seedAutoRespondGroups.
   autoRespondGroups: stringArrayProp(instance, 'autoRespondGroups'),
+
+  // Group JIDs run as shared workflows: every member's memory recall in the group
+  // covers all of that group's memories, not only the group's shared records plus
+  // the sender's own. See src/core/memory-scope.ts.
+  sharedWorkflowGroups: stringArrayProp(instance, 'sharedWorkflowGroups'),
 
   // Per-instance send decoration policies.
   profiles: profileRecordProp(instance, 'profiles'),
@@ -1662,6 +1699,14 @@ export const config = {
   ingest: {
     maxConcurrent: optionalFiniteNumber(ingestSection?.maxConcurrent, 'ingest.maxConcurrent') ?? 20,
     maxQueueDepth: optionalFiniteNumber(ingestSection?.maxQueueDepth, 'ingest.maxQueueDepth') ?? 500,
+  },
+
+  // Shadow gate: advisory, logged-only reply-worthiness verdicts (never changes dispatch)
+  shadowGate: {
+    mode: optionalEnum(shadowGateSection?.mode, 'shadowGate.mode', ['off', 'shadow'] as const) ?? 'off',
+    eventsDir: shadowGateSection?.eventsDir === undefined || shadowGateSection?.eventsDir === null
+      ? null
+      : requireAbsolutePathString(shadowGateSection.eventsDir, 'shadowGate.eventsDir'),
   },
 
   // Connection exhaustion (SP2) — exit after N exhaustion cycles so systemd can restart

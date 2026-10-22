@@ -90,6 +90,7 @@ describe('turn-finalization persistence mapping', () => {
     ['rate-limit', 'provider_failure'],
     ['processor_throw', 'processor_throw'],
     ['crash', 'session_crash'],
+    ['operator_cancelled', 'operator_cancelled'],
     ['unknown_terminal', 'unknown'],
     ['provider_stream_corrupt', 'provider_failure'],
   ] as const)(

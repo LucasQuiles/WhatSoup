@@ -697,6 +697,7 @@ describe('api read operations', () => {
       { invoke: () => freshApi.checkDirectory('/tmp/line a'), path: '/api/directories/check?path=%2Ftmp%2Fline%20a' },
       { invoke: () => freshApi.getVersion(), path: '/api/version' },
       { invoke: () => freshApi.getProviders(), path: '/api/providers' },
+      { invoke: () => freshApi.getProviderModels('openai/provider'), path: '/api/providers/openai%2Fprovider/models' },
       { invoke: () => freshApi.getProviderStatus('line a'), path: '/api/lines/line%20a/provider-status' },
       { invoke: () => freshApi.getScheduled('line a', 'pending'), path: '/api/lines/line%20a/scheduled?status=pending' },
       { invoke: () => freshApi.getScheduled('line a'), path: '/api/lines/line%20a/scheduled' },
@@ -887,6 +888,10 @@ describe('api operation request construction', () => {
       {
         run: () => freshApi.getProviders(),
         url: '/api/providers',
+      },
+      {
+        run: () => freshApi.getProviderModels('openai/provider'),
+        url: '/api/providers/openai%2Fprovider/models',
       },
       {
         run: () => freshApi.getProviderStatus('line main'),

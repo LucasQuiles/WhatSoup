@@ -2,7 +2,9 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Database } from '../../core/database.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { createChildLogger } from '../../logger.ts';
+import { COMPLETED_IDENTITY_IS_ADMISSION_REJECTED_SQL } from './admission-rejected-checkpoint.ts';
 
 const log = createChildLogger('agent-session-db');
 
@@ -382,6 +384,30 @@ export function updateSessionStatus(db: Database, rowId: number, status: string)
   }
 }
 
+/**
+ * #3658: end a row whose generation was abandoned after a failed lifecycle
+ * close, but only while it is still that generation's row: active, or
+ * orphaned by the stale-session sweep (startup or interval), which would
+ * otherwise still read as resumable. A row reconciled to any other status, or
+ * one another generation reactivated with a different provider session, is
+ * left alone. The session is always matched with IS, so an unknown (null)
+ * session ends only a still session-less row. Returns the number of rows ended.
+ */
+export function endAbandonedActiveSession(
+  db: Database,
+  rowId: number,
+  providerSessionId: string | null,
+): number {
+  const endedAt = systemClock.nowIso();
+  const result = db.raw.prepare(
+    `UPDATE agent_sessions SET status = 'ended', ended_at = ?
+     WHERE id = ? AND status IN ('active', 'orphaned') AND session_id IS ?`,
+  ).run(endedAt, rowId, providerSessionId);
+  const changes = Number(result.changes);
+  if (changes === 1) log.info({ agentSessionId: rowId, status: 'ended', endedAt }, 'session.ended');
+  return changes;
+}
+
 /** Update a resumed row only while its immutable provider/session identity still matches. */
 export function updateResumedSessionStatus(
   db: Database,
@@ -560,6 +586,13 @@ export function getResumableSessionForChat(
              AND admission.state = 'quarantined'
              AND checkpoint.conversation_key = candidate.workspace_key
              AND checkpoint.session_id = candidate.session_id
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM session_checkpoints AS checkpoint
+           WHERE checkpoint.conversation_key = candidate.workspace_key
+             AND checkpoint.session_id = candidate.session_id
+             AND ${COMPLETED_IDENTITY_IS_ADMISSION_REJECTED_SQL}
          )
          AND NOT EXISTS (
            SELECT 1

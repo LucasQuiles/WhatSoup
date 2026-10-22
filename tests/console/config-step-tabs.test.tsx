@@ -4,7 +4,24 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type ReactElement, useState } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+
+vi.mock('../../console/src/lib/api', () => ({
+  api: {
+    getProviders: vi.fn().mockResolvedValue([
+      { id: 'claude-cli', displayName: 'Claude CLI', type: 'cli', needsApiKey: false, credentialService: null, providerConfig: [] },
+      { id: 'anthropic-api', displayName: 'Anthropic', type: 'api', needsApiKey: true, credentialService: 'anthropic', providerConfig: ['model', 'baseUrl', 'apiKeyService', 'maxTokens'] },
+      { id: 'openai-api', displayName: 'OpenAI', type: 'api', needsApiKey: true, credentialService: 'openai', providerConfig: ['model', 'baseUrl', 'apiKeyService'] },
+    ]),
+    getProviderModels: vi.fn().mockResolvedValue({
+      status: 'unavailable',
+      reason: { kind: 'no-adapter', harness: 'test' },
+      asOfLabel: 'just now',
+    }),
+  },
+}))
+
 import ConfigStep from '../../console/src/components/wizard/ConfigStep'
 
 afterEach(() => cleanup())
@@ -46,7 +63,12 @@ function renderConfigStep(opts: RenderOpts = {}) {
     )
   }
 
-  const utils = render(<Harness />)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const utils = render(
+    <QueryClientProvider client={client}>
+      <Harness />
+    </QueryClientProvider>,
+  )
   return { onChange, onSkip, getData: () => latestData, ...utils }
 }
 
@@ -155,7 +177,7 @@ describe('ConfigStep — access and behavior tabs', () => {
 })
 
 describe('ConfigStep — permissions tab non-provider controls', () => {
-  it('clears fallback model and provider through their visible fields', () => {
+  it('clears fallback model and provider through their visible fields', async () => {
     const { onChange } = renderConfigStep({
       initialData: {
         agentOptions: {
@@ -173,7 +195,8 @@ describe('ConfigStep — permissions tab non-provider controls', () => {
     expect(latestAgentOptions(onChange).fallbackProvider).toBe('openai-api')
 
     onChange.mockClear()
-    fireEvent.change(screen.getByDisplayValue('OpenAI'), { target: { value: 'openai-api' } })
+    const fallbackProvider = await waitFor(() => screen.getByDisplayValue('OpenAI'))
+    fireEvent.change(fallbackProvider, { target: { value: 'openai-api' } })
     expect(onChange).not.toHaveBeenCalled()
 
     onChange.mockClear()
