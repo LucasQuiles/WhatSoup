@@ -727,7 +727,6 @@ describe('AgentRuntime', () => {
     // makes the suite order-dependent and obscures the real terminal owner.
     mockSession.spawnSession.mockReset().mockResolvedValue(undefined);
     mockSession.shutdown.mockReset().mockResolvedValue(undefined);
-    mockKillSessionTree.mockReset().mockResolvedValue(undefined);
     mockSession.waitForProviderTurnToTerminalize.mockReset().mockResolvedValue(undefined);
     mockSession.getStatus.mockReset().mockReturnValue({ active: false, pid: null, sessionId: null, startedAt: null, messageCount: 0, lastMessageAt: null });
     mockSession.captureEvidenceBinding.mockReset().mockImplementation(() => Object.freeze({}));

@@ -821,6 +821,7 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 42, sessionId: 'ses-resident', claudePid: 0,
       chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      provider: 'claude-cli',
       classification: 'stale_dead', reason: 'checkpoint mismatch', startedAt: null, messageCount: 3,
     }]);
 
@@ -858,6 +859,7 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 42, sessionId: 'ses-resident', claudePid: 0,
       chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      provider: 'claude-cli',
       classification: 'stale_dead', reason: 'checkpoint mismatch', startedAt: null, messageCount: 3,
     }]);
 
@@ -889,6 +891,7 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 42, sessionId: 'ses-resident', claudePid: 0,
       chatJid: 'resident@s.whatsapp.net', conversationKey: 'resident', status: 'active',
+      provider: 'claude-cli',
       classification: 'stale_dead', reason: 'checkpoint mismatch', startedAt: null, messageCount: 3,
     }]);
 
@@ -945,6 +948,7 @@ describe('AgentRuntime edge coverage', () => {
       // After F6 the classifier groups by the row's own workspace_key, so a
       // scheduled row's conversation key IS the scheduled scope key.
       chatJid: 'resident@s.whatsapp.net', conversationKey: mapKey, status: 'active',
+      provider: 'claude-cli',
       classification: 'authoritative_live',
       reason: 'matches active checkpoint (pid=123, sessionId=ses-resident)',
       startedAt: null, messageCount: 3,
@@ -986,6 +990,7 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 43, sessionId: 'ses-resident-2', claudePid: 123,
       chatJid: 'resident-2@s.whatsapp.net', conversationKey: mapKey, status: 'active',
+      provider: 'claude-cli',
       classification: 'authoritative_live', reason: 'matches active checkpoint',
       startedAt: null, messageCount: 3,
     }]);
@@ -1030,6 +1035,7 @@ describe('AgentRuntime edge coverage', () => {
     vi.mocked(classifyActiveSessions).mockReturnValueOnce([{
       id: 44, sessionId: 'ses-interactive', claudePid: 123,
       chatJid: 'interactive-chat@s.whatsapp.net', conversationKey: mapKey, status: 'active',
+      provider: 'claude-cli',
       classification: 'authoritative_live', reason: 'matches active checkpoint',
       startedAt: null, messageCount: 3,
     }]);

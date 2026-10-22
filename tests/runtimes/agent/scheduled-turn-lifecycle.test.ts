@@ -348,7 +348,6 @@ import { createBead } from '../../../src/core/substrate/beads.ts';
 import { TriggerPoller } from '../../../src/core/substrate/poller.ts';
 import { createTrigger } from '../../../src/core/substrate/triggers.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
-import type { RuntimeTurnCompletion } from '../../../src/runtimes/agent/runtime-turn-completion.ts';
 import { __setRuntimeLifecycleEmitterForTests, type LifecycleEmitInput } from '../../../src/core/observability/lifecycle-emission.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import { emitAlertChecked, emitObservationChecked } from '../../../src/lib/emit-alert.ts';
