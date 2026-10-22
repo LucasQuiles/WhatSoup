@@ -908,8 +908,9 @@ def test_an_information_notice_whose_packet_stays_pending_is_dead_lettered_with_
     assert mod.queue_dead_letter_meta_alert(paths, int(time.time())) == 1
 
 
-def test_auto_close_summary_waits_for_its_packet(mod):
-    now = int(time.time())
+def test_auto_close_summary_waits_for_its_packet(mod, monkeypatch):
+    now = SLOT - 3600
+    monkeypatch.setattr(mod, "time", _PinnedTime(now))
     key = "hub-1|worker|runtime-tool-error:provider-cli:Bash"
     _write_state(mod, {key: {
         "status": "stale",
@@ -921,16 +922,29 @@ def test_auto_close_summary_waits_for_its_packet(mod):
     _sends(mod)
     packets = _break_packet_store(mod)
 
-    _sent, _failed, err = mod.sweep_stale_incidents(mod.state_paths())
+    first = mod.run_once(max_events=25)
 
-    assert err is not None
+    assert first["staleFailed"] == 1
+    assert first["failed"] == 1
+    assert first["lastError"]
+    health = json.loads(mod.state_paths()["state"].read_text(encoding="utf-8"))
+    assert health["staleFailed"] == 1
+    assert health["failed"] == 1
+    assert health["lastError"] == first["lastError"]
     state = _state(mod)
     assert key not in state["openIncidents"]
     assert state["staleAutocloseDigest"]["pendingCount"] == 1, "the close stays counted for the next try"
     assert not state.get("informationSummary", {}).get("pending")
 
     _mend_packet_store(packets)
-    assert mod.sweep_stale_incidents(mod.state_paths())[2] is None
+    recovered = mod.run_once(max_events=25)
+    assert recovered["staleFailed"] == 0
+    assert recovered["failed"] == 0
+    assert recovered["lastError"] is None
+    health = json.loads(mod.state_paths()["state"].read_text(encoding="utf-8"))
+    assert health["staleFailed"] == 0
+    assert health["failed"] == 0
+    assert health["lastError"] is None
     state = _state(mod)
     assert state["staleAutocloseDigest"]["pendingCount"] == 0
     [entry] = state["informationSummary"]["pending"]

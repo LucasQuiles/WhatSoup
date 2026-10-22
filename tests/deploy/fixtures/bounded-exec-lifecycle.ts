@@ -166,11 +166,27 @@ function observeLifecycleEventOrder(source: string): string {
     `      ${event('AUTHORITY state=$authorization_state')}`,
     '      if [ "$authorization_state" -eq 0 ]; then',
   ].join('\n'));
-  insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', `    wait "$worker_pid" 2>/dev/null || worker_rc=$?\n    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`);
+  insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', [
+    '    wait "$worker_pid" 2>/dev/null || worker_rc=$?',
+    `    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`,
+    // The real kill can wake this parent before the guard logs its receipt.
+    // Hold only the fixture parent until that post-cut observation is committed.
+    '    if [ "$EVENT_ORDER_MODE" = event-order-stopped-worker-hard-cut ]; then',
+    '      event_polls=0',
+    '      while [ ! -e "$EVENT_ORDER_HARD_CUT_COMMITTED" ] && [ "$event_polls" -lt 200 ]; do',
+    '        sleep 0.01; event_polls=$((event_polls + 1))',
+    '      done',
+    '      if [ ! -e "$EVENT_ORDER_HARD_CUT_COMMITTED" ]; then',
+    `        ${event('CONTROL_ERROR hard-cut-commit')}`,
+    '        status_cleanup_failed=1',
+    '      fi',
+    '    fi',
+  ].join('\n'));
   insert('        _bounded_end_worker_groups || guard_status=2', [
     '        _bounded_end_worker_groups || guard_status=2',
     '        if [ "$EVENT_ORDER_MODE" = event-order-stopped-worker-hard-cut ]; then',
     `          ${event('G_HARD_CUT worker=$worker_pid guard_status=$guard_status')}`,
+    '          builtin printf committed > "$EVENT_ORDER_HARD_CUT_COMMITTED"',
     // Give the real parent its reaping/TERM boundary before this call returns.
     '          event_polls=0; while [ "$event_polls" -lt 100 ]; do sleep 0.01; event_polls=$((event_polls + 1)); done',
     `          ${event('CONTROL_ERROR hard-cut-parent-term')}`,
@@ -788,6 +804,7 @@ export function runLifecycleProbe(mode: EventOrderMode | 'guard-job-control-unav
       EVENT_ORDER_MODE: mode,
       EVENT_ORDER_TRACE: eventTrace ? '1' : '0',
       EVENT_ORDER_LOG: path.join(root, 'event-order.log'),
+      EVENT_ORDER_HARD_CUT_COMMITTED: path.join(root, 'event-order-hard-cut-committed'),
       EVENT_ORDER_CLEANUP_RELEASE: path.join(root, 'event-order-cleanup-release'),
       EVENT_ORDER_CHILD_RELEASE: path.join(root, 'event-order-child-release'),
       EVENT_ORDER_INNER_START: path.join(root, 'event-order-inner-start'),

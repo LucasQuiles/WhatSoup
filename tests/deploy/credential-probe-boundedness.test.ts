@@ -675,6 +675,8 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
       .toBe(`P_WORKER_REAPED worker=${result.stopped_worker} worker_rc=137`);
     expect(events.find((event) => event.startsWith('P_GUARD_REAPED ')), evidence)
       .toMatch(/^P_GUARD_REAPED guard=\d+ guard_rc=2$/);
+    expect(events.findIndex((event) => event.startsWith('P_GUARD_REAPED ')), evidence)
+      .toBeGreaterThan(events.indexOf(`G_HARD_CUT worker=${result.stopped_worker} guard_status=2`));
     expectLifecycleIsolation(result);
     expect(result.residual_bounded_files, evidence).toEqual([]);
   });
