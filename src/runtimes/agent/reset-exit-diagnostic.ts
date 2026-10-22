@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { systemClock } from '../../lib/clock.ts';
 import type { KillSessionOutcome } from './process-tree.ts';
 
 /**
@@ -61,7 +62,7 @@ export function observeProcessIdentity(pid: number): string {
 export function describeResetExitTimeout(
   source: KillTreeOutcomeSource,
   observation: string,
-  now: number = Date.now(),
+  now: number = systemClock.now(),
 ): string {
   let outcome: string;
   try {

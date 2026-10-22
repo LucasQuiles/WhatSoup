@@ -19,6 +19,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import { systemClock } from '../../lib/clock.ts';
 import {
   createSession,
   endAbandonedActiveSession,
@@ -1346,7 +1347,7 @@ export class SessionManager {
           ambiguousPids: [...outcome.ambiguousPids],
           durationMs: outcome.durationMs,
           escalated: outcome.escalated,
-          at: Date.now(),
+          at: systemClock.now(),
         };
         const record = {
           chatJid: this.chatJid,
