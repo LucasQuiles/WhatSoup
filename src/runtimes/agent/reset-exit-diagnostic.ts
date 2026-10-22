@@ -24,11 +24,13 @@ export interface KillTreeOutcomeSource {
 
 const MAX_OBSERVATION_CHARS = 160;
 const MAX_LISTED_PIDS = 8;
+// pid, the five lstart tokens and stat, then comm, which can itself contain spaces.
+const PS_IDENTITY_ROW = /^(\d+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(\S+)\s+(.+)$/;
 
 /**
  * One read-only ps observation of `pid`. Never throws: ps exits 1 when the pid
- * is gone, which reads as `not present`; any other failure reads as
- * `observation unavailable`.
+ * is gone, which reads as `not present`; any other failure, or a row that does
+ * not parse, reads as `observation unavailable`.
  */
 export function observeProcessIdentity(pid: number): string {
   try {
@@ -37,9 +39,16 @@ export function observeProcessIdentity(pid: number): string {
       encoding: 'utf8',
       timeout: 1_000,
     });
-    // Collapse lstart's padding and drop directory prefixes so a home path never reaches the text.
-    const line = output.trim().split('\n')[0]?.replace(/\s+/g, ' ').replace(/\S*\//g, '') ?? '';
-    return line === '' ? 'not present' : `ps: ${line.slice(0, MAX_OBSERVATION_CHARS)}`;
+    const [line] = output.trim().split('\n');
+    if (line === '') return 'not present';
+    const row = PS_IDENTITY_ROW.exec(line);
+    if (row === null) return 'observation unavailable';
+    const [, rowPid, lstart, stat, comm] = row;
+    // Keep only what follows comm's last '/', so no directory path reaches the text, even one with spaces.
+    const command = comm.slice(comm.lastIndexOf('/') + 1);
+    if (command === '') return 'observation unavailable';
+    const observed = `${rowPid} ${lstart.replace(/\s+/g, ' ')} ${stat} ${command}`;
+    return `ps: ${observed.slice(0, MAX_OBSERVATION_CHARS)}`;
   } catch (err) {
     return (err as { status?: unknown } | null)?.status === 1 ? 'not present' : 'observation unavailable';
   }

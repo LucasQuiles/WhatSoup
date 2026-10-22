@@ -54,6 +54,26 @@ describe('observeProcessIdentity', () => {
     expect(observeProcessIdentity(41001)).toBe(`ps: 41001 Wed Oct 22 10:30:56 2026 S ${'x'.repeat(127)}`);
   });
 
+  it('keeps only the comm basename when its directory path contains spaces', () => {
+    vi.mocked(execFileSync).mockReturnValueOnce(
+      '41001 Wed Oct 22 10:30:56 2026     S    /Users/Case User/Private Suite/bin/node\n',
+    );
+
+    expect(observeProcessIdentity(41001)).toBe('ps: 41001 Wed Oct 22 10:30:56 2026 S node');
+  });
+
+  it('keeps a comm with no slash as it is', () => {
+    vi.mocked(execFileSync).mockReturnValueOnce('41001 Wed Oct 22 10:30:56 2026 S node\n');
+
+    expect(observeProcessIdentity(41001)).toBe('ps: 41001 Wed Oct 22 10:30:56 2026 S node');
+  });
+
+  it('reads a row that does not parse as observation unavailable, never the raw line', () => {
+    vi.mocked(execFileSync).mockReturnValueOnce('garbage\n');
+
+    expect(observeProcessIdentity(41001)).toBe('observation unavailable');
+  });
+
   it('reads an empty ps result as not present', () => {
     vi.mocked(execFileSync).mockReturnValueOnce('');
 
