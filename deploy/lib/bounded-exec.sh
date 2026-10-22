@@ -761,6 +761,23 @@ whatsoup_run_bounded() {
       fi
       guard_grace_sleep_pid=""
       _bounded_guard_kill_authorized
+      # A stopped worker cannot enter timeout cleanup during a second grace.
+      # End it only when its current state and process group are confirmed.
+      if [ "$authorization_state" -eq 0 ]; then
+        local worker_observed="" worker_state="" worker_observed_group=""
+        if worker_observed="$(/bin/ps -o stat= -o pgid= -p "$worker_pid" 2>/dev/null)"; then
+          IFS=$' \t\n' read -r worker_state worker_observed_group <<< "$worker_observed"
+          case "$worker_state" in
+            *T*)
+              if [ "$worker_observed_group" = "$worker_group" ]; then
+                guard_status=2
+                _bounded_guard_end_worker
+                _bounded_guard_exit
+              fi
+              ;;
+          esac
+        fi
+      fi
       if [ "$authorization_state" -eq 0 ]; then
         sleep "$grace" &
         timer_pid=$!

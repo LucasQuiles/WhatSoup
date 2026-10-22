@@ -180,6 +180,14 @@ function observeLifecycleEventOrder(source: string): string {
   insert('      _bounded_read_deadline_bounded\n      deadline_rc=$?', `      _bounded_read_deadline_bounded\n      deadline_rc=$?\n      ${event('P_DEADLINE_READ deadline_rc=$deadline_rc cleanup_failed=$status_cleanup_failed')}`);
   insert('    _bounded_wait_guard "$guard_term_sent"', `    ${event('G_WAIT worker=$worker_pid guard=$guard_pid worker_rc=$worker_rc deadline_rc=$deadline_rc')}\n    _bounded_wait_guard "$guard_term_sent"\n    ${event('P_GUARD_REAPED guard=$guard_pid guard_rc=$guard_rc')}`);
   insert('    _bounded_outer_cleanup\n    trap - EXIT', `    ${event('A worker=$worker_pid worker_rc=$worker_rc guard=$guard_pid guard_rc=$guard_rc deadline_rc=$deadline_rc rc=$rc')}\n    _bounded_outer_cleanup\n    trap - EXIT`);
+  if (process.env.WHATSOUP_BOUNDED_GUARD_TRACE === '1') {
+    const firstGrace = '      [ "$authorization_state" -eq 0 ] && kill -USR1 "$worker_pid" 2>/dev/null\n      sleep "$grace" &';
+    insert(firstGrace, firstGrace.replace('      sleep', `      ${event('T_FIRST_GRACE_START seconds=$SECONDS grace=$grace')}\n      sleep`));
+    insert('      guard_grace_sleep_pid=""\n      _bounded_guard_kill_authorized', `      guard_grace_sleep_pid=""\n      ${event('T_FIRST_GRACE_END seconds=$SECONDS')}\n      _bounded_guard_kill_authorized`);
+    insert('      if [ "$authorization_state" -eq 0 ]; then\n        sleep "$grace" &', `      if [ "$authorization_state" -eq 0 ]; then\n        ${event('T_SECOND_GRACE_START seconds=$SECONDS grace=$grace')}\n        sleep "$grace" &`);
+    insert('        # Reaping the worker lets its parent TERM this guard immediately.', `        ${event('T_SECOND_GRACE_END seconds=$SECONDS')}\n        # Reaping the worker lets its parent TERM this guard immediately.`);
+    insert('      _bounded_kill_worker_children || children_rc=2', `      ${event('T_CHILD_CENSUS_START seconds=$SECONDS')}\n      _bounded_kill_worker_children || children_rc=2\n      ${event('T_CHILD_CENSUS_END seconds=$SECONDS rc=$children_rc')}`);
+  }
   return source;
 }
 const LIFECYCLE_DRIVER = fs.readFileSync(path.resolve('tests/deploy/fixtures/bounded-exec-lifecycle-driver.py'), 'utf8');
@@ -189,7 +197,21 @@ export function runLifecycleProbe(mode: EventOrderMode | 'guard-job-control-unav
   const stoppedWorkerTrace = (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
   const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
-  const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
+  let eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
+  const workerObservation = process.env.WHATSOUP_BOUNDED_GUARD_OBSERVATION;
+  if (workerObservation) {
+    expect(mode).toBe('event-order-stopped-worker-hard-cut');
+    const probe = 'if worker_observed="$(/bin/ps -o stat= -o pgid= -p "$worker_pid" 2>/dev/null)"; then';
+    const observations: Record<string, string> = {
+      unavailable: 'false',
+      'wrong-group': 'builtin printf "T 0\\n"',
+      running: 'builtin printf "S %s\\n" "$worker_group"',
+    };
+    expect(observations[workerObservation]).toBeDefined();
+    expect(eventOrderSource?.split(probe)).toHaveLength(2);
+    // Alter only this observation; the worker, signals and cleanup stay real.
+    eventOrderSource = eventOrderSource!.replace(probe, () => `if worker_observed="$(${observations[workerObservation]})"; then`);
+  }
   let guardGroupSource: string | undefined;
   if (mode === 'guard-job-control-unavailable') {
     const source = fs.readFileSync(BOUNDED_LIB, 'utf8');
@@ -824,6 +846,9 @@ export function runLifecycleProbe(mode: EventOrderMode | 'guard-job-control-unav
     if (result.error) throw new Error(`${result.error.message}\n${result.stdout}\n${result.stderr}`);
     expect(result.status, result.stderr).toBe(0);
     const record = JSON.parse(result.stdout);
+    if (process.env.WHATSOUP_BOUNDED_GUARD_TRACE === '1' && mode === 'event-order-stopped-worker-hard-cut') {
+      process.stderr.write('BOUNDED_GUARD_TRACE ' + JSON.stringify(record) + '\n');
+    }
     if (outcomeTrace) process.stderr.write('OUTCOME_EVENT_TRACE ' + JSON.stringify(record) + '\n');
     if (stoppedWorkerTrace) process.stderr.write('STOPPED_WORKER_EVENT_TRACE ' + JSON.stringify(record) + '\n');
     if (nearDeadlineTrace) {

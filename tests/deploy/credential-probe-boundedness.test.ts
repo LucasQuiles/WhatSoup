@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { BOUNDED_LIB, expectLifecycleIsolation, resolveBinary, runLifecycleProbe } from './fixtures/bounded-exec-lifecycle';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -611,6 +611,54 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
     expectLifecycleIsolation(result);
   });
+  it('hard cuts a stopped worker after command grace without waiting for worker cleanup', () => {
+    vi.stubEnv('WHATSOUP_BOUNDED_GUARD_TRACE', '1');
+    try {
+      const result = runLifecycleProbe('event-order-stopped-worker-hard-cut');
+      const evidence = JSON.stringify(result);
+      expect(result.error, evidence).toBeUndefined();
+      expect(result.exit, evidence).toBe(0);
+      expect(result.stopped_worker, evidence).toBeGreaterThan(1);
+      expect(result.stdout, evidence).toContain('rc=2 output=');
+      const events: string[] = result.events;
+      expect(events.filter((event) => event.startsWith('T_FIRST_GRACE_END ')), evidence)
+        .toHaveLength(1);
+      expect(events.filter((event) => event.startsWith('T_SECOND_GRACE_START ')), evidence)
+        .toEqual([]);
+      expect(events.filter((event) => event.startsWith('G_HARD_CUT ')), evidence)
+        .toEqual([`G_HARD_CUT worker=${result.stopped_worker} guard_status=2`]);
+      expectLifecycleIsolation(result);
+      expect(result.residual_bounded_files, evidence).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it.each(['unavailable', 'wrong-group', 'running'])(
+    'retains worker cleanup grace when the stopped-state observation is %s',
+    (observation) => {
+      vi.stubEnv('WHATSOUP_BOUNDED_GUARD_TRACE', '1');
+      vi.stubEnv('WHATSOUP_BOUNDED_GUARD_OBSERVATION', observation);
+      try {
+        const result = runLifecycleProbe('event-order-stopped-worker-hard-cut');
+        const evidence = JSON.stringify(result);
+        expect(result.error, evidence).toBeUndefined();
+        expect(result.exit, evidence).toBe(0);
+        expect(result.stopped_worker, evidence).toBeGreaterThan(1);
+        expect(result.stdout, evidence).toContain('rc=2 output=');
+        const events: string[] = result.events;
+        const graceStart = events.findIndex((event) => event.startsWith('T_SECOND_GRACE_START '));
+        const graceEnd = events.findIndex((event) => event.startsWith('T_SECOND_GRACE_END '));
+        const hardCut = events.indexOf(`G_HARD_CUT worker=${result.stopped_worker} guard_status=2`);
+        expect(graceStart, evidence).toBeGreaterThan(-1);
+        expect(graceEnd, evidence).toBeGreaterThan(graceStart);
+        expect(hardCut, evidence).toBeGreaterThan(graceEnd);
+        expectLifecycleIsolation(result);
+        expect(result.residual_bounded_files, evidence).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
   it('commits refusal before the parent interrupts the guard after a worker hard cut', () => {
     const result = runLifecycleProbe('event-order-stopped-worker-hard-cut');
     const evidence = JSON.stringify(result);
