@@ -7845,6 +7845,71 @@ describe('session.ts uncovered-branch coverage', () => {
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
+  it('retains the latest kill-tree outcome for the reset exit-timeout diagnostic', async () => {
+    const firstChild = makeMockChild(12031);
+    const secondChild = makeMockChild(12032);
+    vi.mocked(spawn)
+      .mockReturnValueOnce(firstChild as never)
+      .mockReturnValueOnce(secondChild as never);
+    const gate = new ProviderExecutionGate();
+    const session = new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger().messenger,
+      chatJid: 'kill-outcome@s.whatsapp.net',
+      onEvent: vi.fn(),
+      provider: 'opencode-cli',
+      model: 'glm/test-model',
+      providerExecutionGate: gate,
+    });
+    await session.spawnSession();
+    expect(session.getLastKillTreeOutcome()).toBeNull();
+
+    await session.sendTurn('first');
+    session.completeProviderTurn();
+    const secondTurn = session.sendTurn('second');
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(
+        firstChild,
+        'SIGTERM',
+        expect.objectContaining({ onOutcome: expect.any(Function) }),
+      );
+    });
+    await secondTurn;
+
+    const [, , options] = vi.mocked(killSessionTree).mock.calls[0];
+    const onOutcome = (options as { onOutcome?: (outcome: unknown) => void }).onOutcome;
+    expect(onOutcome).toBeInstanceOf(Function);
+    const ambiguousPids = [12031, 12040];
+    vi.spyOn(Date, 'now').mockReturnValue(1_792_663_378_803);
+    onOutcome?.({
+      outcome: 'unresolved_ambiguous',
+      generationMarker: 'kill-outcome-marker',
+      durationMs: 183,
+      escalated: false,
+      ambiguousPids,
+    });
+
+    // The existing warning is unchanged by retaining the outcome.
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'unresolved_ambiguous', ambiguousPids: [12031, 12040], signal: 'SIGTERM' }),
+      'kill-tree outcome: unresolved ambiguous identity',
+    );
+    // A later change to the sink's array cannot rewrite the retained record.
+    ambiguousPids.push(12041);
+    expect(session.getLastKillTreeOutcome()).toEqual({
+      rootPid: 12031,
+      signal: 'SIGTERM',
+      outcome: 'unresolved_ambiguous',
+      ambiguousPids: [12031, 12040],
+      durationMs: 183,
+      escalated: false,
+      at: 1_792_663_378_803,
+    });
+
+    secondChild._closeCb?.(0, null);
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
   it('cycles repeated same-session OpenCode turns without self-queuing behind stale leases', async () => {
     const children = Array.from({ length: 25 }, (_, index) => makeMockChild(12100 + index));
     for (const child of children) vi.mocked(spawn).mockReturnValueOnce(child as never);

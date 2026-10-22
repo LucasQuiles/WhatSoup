@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import { SIGNAL } from '../../../src/lib/signals.ts';
+import type { LastKillTreeOutcome } from '../../../src/runtimes/agent/reset-exit-diagnostic.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import type { IOutboundQueue, OutboundMessageRole } from '../../../src/runtimes/agent/outbound-queue.ts';
@@ -491,6 +495,8 @@ type RuntimeView = {
   setOwnedPerChatSession(mapKey: string, session: unknown): void;
   deleteOwnedPerChatSession(mapKey: string, expected?: unknown): boolean;
   managerIdFor(session: object): string;
+  resetOwnedPerChatSession(mapKey: string, chatJid: string, session: unknown): Promise<void>;
+  sessionOwnership: { get(mapKey: string): { generation: number; state: string } | undefined };
 };
 
 function makeSession() {
@@ -523,6 +529,7 @@ function makeSession() {
     resolveGenerationOwnership: () => resolveGenerationOwnership?.() ?? null,
     recoverStalledOperation: vi.fn(),
     probeLiveness: vi.fn(),
+    getLastKillTreeOutcome: vi.fn((): LastKillTreeOutcome | null => null),
   };
 }
 
@@ -2302,6 +2309,129 @@ describe('AgentRuntime edge coverage', () => {
       'Auto-compact convergence limit reached',
       expect.stringContaining('SUCCEEDED'),
     );
+  });
+
+  describe('per-chat reset exit-timeout diagnostic', () => {
+    // A real child owned by this test stands in for the old provider pid, so the
+    // real liveness probe sees it alive and nothing outside the test can be signalled.
+    // It exits on its own after 30 s in case the worker dies before cleanup runs.
+    let sleeper: ChildProcess | null = null;
+
+    function startSleeper(): number {
+      sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' });
+      if (sleeper.pid === undefined) throw new Error('sleeper child did not start');
+      return sleeper.pid;
+    }
+
+    async function stopSleeper(): Promise<void> {
+      const child = sleeper;
+      sleeper = null;
+      if (child === null || child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, 'exit');
+      child.kill(SIGNAL.KILL);
+      await exited;
+    }
+
+    afterEach(stopSleeper);
+
+    // Owned at generation 1. Like SessionManager, the manager drops its child
+    // handle once shutdown resolves, so the reset's catch path holds no live pid.
+    function ownedResetFixture(mapKey: string, oldPid: number, stopOldChild?: () => Promise<void>) {
+      const runtime = makeRuntime({ sessionScope: 'per_chat' });
+      const state = view(runtime);
+      const session = makeSession();
+      let shutDown = false;
+      session.getStatus.mockImplementation(() => ({
+        active: !shutDown,
+        pid: shutDown ? null : oldPid,
+        sessionId: 'reset-diagnostic-session',
+        startedAt: null,
+        messageCount: 1,
+        lastMessageAt: null,
+      }) as never);
+      session.shutdown.mockImplementation(async () => {
+        await stopOldChild?.();
+        shutDown = true;
+      });
+      state.setOwnedPerChatSession(mapKey, session);
+      return { state, session };
+    }
+
+    async function resetUntilSettled(state: RuntimeView, mapKey: string, session: unknown): Promise<unknown> {
+      const settled = state.resetOwnedPerChatSession(mapKey, mapKey, session).then(() => null, (err: unknown) => err);
+      // The reset polls the old pid every 25 ms for 6 s before it gives up.
+      await vi.advanceTimersByTimeAsync(6_100);
+      return settled;
+    }
+
+    it('names an unresolved ambiguous kill outcome and one ps observation when the old pid outlives reset shutdown', async () => {
+      const oldPid = startSleeper();
+      const mapKey = 'reset-diagnostic-ambiguous@s.whatsapp.net';
+      const { state, session } = ownedResetFixture(mapKey, oldPid);
+      session.getLastKillTreeOutcome.mockReturnValue({
+        rootPid: oldPid,
+        signal: 'SIGTERM',
+        outcome: 'unresolved_ambiguous',
+        ambiguousPids: [oldPid],
+        durationMs: 183,
+        escalated: false,
+        at: Date.now(),
+      });
+
+      const err = await resetUntilSettled(state, mapKey, session);
+
+      expect(err).toBeInstanceOf(Error);
+      const message = (err as Error).message;
+      expect(message).toMatch(new RegExp(
+        `^Timed out waiting for prior session process ${oldPid} to exit; `
+          + `last kill-tree outcome: unresolved_ambiguous rootPid=${oldPid} signal=SIGTERM ambiguousPids=\\[${oldPid}\\] `
+          + `durationMs=183 escalated=false ageMs=\\d+; pid observation: ps: ${oldPid} \\S.*$`,
+      ));
+      // comm only, with directory prefixes dropped: no path reaches the error text.
+      expect(message).not.toContain('/');
+      expect(session.getLastKillTreeOutcome).toHaveBeenCalledTimes(1);
+      // Control flow is unchanged: same terminal state, no replacement, and the old pid was never signalled.
+      expect(state.sessionOwnership.get(mapKey)).toMatchObject({ generation: 2, state: 'recoverable_dead' });
+      expect(session.spawnSession).not.toHaveBeenCalled();
+      expect(() => process.kill(oldPid, 0)).not.toThrow();
+    });
+
+    it('says none when no kill outcome was recorded before the old pid outlived reset shutdown', async () => {
+      const oldPid = startSleeper();
+      const mapKey = 'reset-diagnostic-none@s.whatsapp.net';
+      const { state, session } = ownedResetFixture(mapKey, oldPid);
+
+      const err = await resetUntilSettled(state, mapKey, session);
+
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(new RegExp(
+        `^Timed out waiting for prior session process ${oldPid} to exit; `
+          + `last kill-tree outcome: none; pid observation: ps: ${oldPid} \\S.*$`,
+      ));
+      expect(state.sessionOwnership.get(mapKey)).toMatchObject({ generation: 2, state: 'recoverable_dead' });
+    });
+
+    it('leaves a reset whose old pid exits during shutdown unchanged and never reads the diagnostic', async () => {
+      const oldPid = startSleeper();
+      const mapKey = 'reset-diagnostic-terminated@s.whatsapp.net';
+      const { state, session } = ownedResetFixture(mapKey, oldPid, stopSleeper);
+      session.getLastKillTreeOutcome.mockReturnValue({
+        rootPid: oldPid,
+        signal: 'SIGTERM',
+        outcome: 'terminated',
+        ambiguousPids: [],
+        durationMs: 40,
+        escalated: false,
+        at: Date.now(),
+      });
+
+      await expect(state.resetOwnedPerChatSession(mapKey, mapKey, session)).resolves.toBeUndefined();
+
+      expect(state.sessionOwnership.get(mapKey)).toMatchObject({ generation: 2, state: 'active' });
+      expect(session.shutdown).toHaveBeenCalledExactlyOnceWith(false);
+      expect(session.spawnSession).toHaveBeenCalledTimes(1);
+      expect(session.getLastKillTreeOutcome).not.toHaveBeenCalled();
+    });
   });
 
   it('escalates a 30-minute-cadence livelock the rapid-rearm counter can never see (#3527 F2)', async () => {

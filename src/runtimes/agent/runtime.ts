@@ -363,6 +363,7 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
+import { describeResetExitTimeout, observeProcessIdentity, type KillTreeOutcomeSource } from './reset-exit-diagnostic.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
 import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
@@ -9035,12 +9036,20 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async awaitProcessExit(pid: number | null, timeoutMs = 6_000): Promise<void> {
+  private async awaitProcessExit(
+    pid: number | null,
+    // Diagnostic only: read after the deadline passes, never on the exit path.
+    killTreeSource?: KillTreeOutcomeSource,
+    timeoutMs = 6_000,
+  ): Promise<void> {
     if (pid === null) return;
     const deadline = Date.now() + timeoutMs;
     while (isProcessAlive(pid)) {
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for prior session process ${pid} to exit`);
+        const message = `Timed out waiting for prior session process ${pid} to exit`;
+        throw new Error(killTreeSource === undefined
+          ? message
+          : `${message}; ${describeResetExitTimeout(killTreeSource, observeProcessIdentity(pid))}`);
       }
       await sleep(25);
     }
@@ -9093,7 +9102,7 @@ export class AgentRuntime implements Runtime {
       await session.shutdown(false);
       this.rejectedTerminalTeardowns.delete(session);
       oldTreeProvedEmpty = true;
-      await this.awaitProcessExit(oldPid);
+      await this.awaitProcessExit(oldPid, session);
 
       if (
         this.chatSessions.get(mapKey) !== session ||
