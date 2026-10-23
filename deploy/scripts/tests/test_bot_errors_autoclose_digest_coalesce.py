@@ -220,7 +220,7 @@ def test_quiet_pending_digest_failure_stays_pending_for_retry(tmp_path):
     _fail_digest(mod)
     sent, failed, err = mod.sweep_stale_incidents(mod.state_paths())
 
-    assert sent == 0 and failed == 0 and err is not None
+    assert sent == 0 and failed == 1 and err is not None
     persisted = _read_state(mod)["staleAutocloseDigest"]
     assert persisted["pendingCount"] == 1
     assert persisted["lastDigestAt"] == now - 4000

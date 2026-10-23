@@ -46,6 +46,8 @@ from lib.bounded_jsonl import (
 )
 from lib.bot_errors_envelope import SEVERITIES, EnvelopeError, classify_event, event_machine, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
+    AUTHORIZATION_KEYED_RE,
+    KEYED_SECRET_RE,
     LEGACY_FAILURE_CLASSES,
     alert_text,
     alert_text_for_fingerprint,
@@ -5277,7 +5279,11 @@ def redacted_notice_value(value: Any) -> Any:
                 printable = f"{base} [{suffix}]"
                 suffix += 1
             next_suffix[base] = suffix
-            result[printable] = redacted_notice_value(item)
+            sensitive_key = (
+                KEYED_SECRET_RE.search(f"{key}=0")
+                or AUTHORIZATION_KEYED_RE.search(f"{key}=0")
+            )
+            result[printable] = "[REDACTED]" if sensitive_key else redacted_notice_value(item)
         return result
     if isinstance(value, list):
         return [redacted_notice_value(item) for item in value]

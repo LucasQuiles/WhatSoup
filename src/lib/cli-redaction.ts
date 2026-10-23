@@ -9,7 +9,7 @@ import { jidPattern } from './redaction-patterns.ts';
 const SECRETISH_ASSIGNMENT = /\b((?:[A-Za-z0-9]+_)*(?:client[_-]?secret|private[_-]?key|signing[_-]?key|secret[_-]?access[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passwd|passphrase|session|pat|[A-Za-z0-9]{1,40}(?:token|secret|password|passphrase|api[_-]?key)))(\s*[:=]\s*|["']?\s*:\s*["']?)([^\s"',}]+)/gi;
 const AUTHORIZATION_BEARER = /\bAuthorization:\s*Bearer\s+[^\s"',}]+/gi;
 const BEARER_VALUE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
-const URL_USERINFO = /\b(https?:\/\/)[^\s/@]+@/gi;
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/@]+@/gi;
 // The optional leading path prefix uses a single flat character-class star anchored at a
 // path boundary (`~` or `/`) rather than a nested `(?:~|/[^...]+)*` quantifier. The old form
 // backtracked exponentially on `/!/!/...`-style input (CodeQL js/redos); this form is linear
