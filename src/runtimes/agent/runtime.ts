@@ -129,6 +129,7 @@ import {
   formatAge,
   getProviderBinary,
   type SessionCrashInfo,
+  type SessionProcessTreeTerminationLease,
 } from './session.ts';
 import { createProviderExecutionGate, ProviderExecutionGate } from './provider-execution-gate.ts';
 import { dispatchProviderTurn, withProviderApplicationContext } from './provider-boundary-dispatch.ts';
@@ -398,6 +399,7 @@ import {
   type FallbackRecoveryReceipt,
 } from './fallback-recovery-transaction.ts';
 import { jitteredDelay, sleep } from '../../core/retry.ts';
+import { probeProcessBirthToken } from '../../lib/process-identity.ts';
 import { synthesizeSpeech } from '../chat/providers/elevenlabs.ts';
 import { writeTempFile } from '../../core/media-download.ts';
 import { OperationTracker } from './operation-tracker.ts';
@@ -8944,10 +8946,28 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  private async awaitProcessExit(pid: number | null, timeoutMs = 6_000): Promise<void> {
-    if (pid === null) return;
+  private capturedProcessHasExited(
+    pid: number | null,
+    lease: SessionProcessTreeTerminationLease | null,
+  ): boolean {
+    if (pid === null) return true;
+    const matchingLease = lease !== null && lease.rootAuthority.pid === pid && lease.target.pid === pid
+      ? lease
+      : null;
+    if (matchingLease !== null && (matchingLease.target.exitCode != null || matchingLease.target.signalCode != null)) return true;
+    if (!isProcessAlive(pid)) return true;
+    if (matchingLease === null) return false;
+    const currentBirth = probeProcessBirthToken(pid);
+    return currentBirth !== null && currentBirth !== matchingLease.rootAuthority.birthToken;
+  }
+
+  private async awaitProcessExit(
+    pid: number | null,
+    lease: SessionProcessTreeTerminationLease | null,
+    timeoutMs = 6_000,
+  ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (isProcessAlive(pid)) {
+    while (!this.capturedProcessHasExited(pid, lease)) {
       if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for prior session process ${pid} to exit`);
       }
@@ -9007,10 +9027,11 @@ export class AgentRuntime implements Runtime {
     this.sessionOwnership.transition(mapKey, managerId, 'resetting');
     this.getQueueForChat(chatJid, mapKey)?.abortTurn();
     const oldPid = session.getStatus().pid;
+    const oldLease = session.getProcessTreeTerminationLease();
     const generation = this.sessionOwnership.advanceGeneration(mapKey, managerId);
     this.heldCloseFailedNotices.delete(session);
     let replacementPid: number | null = null;
-    let oldTreeProvedEmpty = false;
+    let replacementLease: SessionProcessTreeTerminationLease | null = null;
     let cleanupReentryAllowed = false;
 
     try {
@@ -9018,8 +9039,7 @@ export class AgentRuntime implements Runtime {
       cleanupReentryAllowed = true;
       await session.shutdown(false);
       this.rejectedTerminalTeardowns.delete(session);
-      oldTreeProvedEmpty = true;
-      await this.awaitProcessExit(oldPid);
+      await this.awaitProcessExit(oldPid, oldLease);
 
       if (
         this.chatSessions.get(mapKey) !== session ||
@@ -9036,6 +9056,7 @@ export class AgentRuntime implements Runtime {
 
       await session.spawnSession();
       replacementPid = session.getStatus().pid;
+      replacementLease = session.getProcessTreeTerminationLease();
       if (
         this.chatSessions.get(mapKey) !== session ||
         !this.sessionOwnership.isCurrent(mapKey, managerId, generation)
@@ -9044,10 +9065,10 @@ export class AgentRuntime implements Runtime {
       }
       this.sessionOwnership.transition(mapKey, managerId, 'active');
     } catch (err) {
-      const knownPids = [
-        ...(oldTreeProvedEmpty ? [] : [oldPid]),
-        replacementPid,
-        session.getStatus().pid,
+      const knownProcesses = [
+        { pid: oldPid, lease: oldLease },
+        { pid: replacementPid, lease: replacementLease },
+        { pid: session.getStatus().pid, lease: session.getProcessTreeTerminationLease() },
       ];
       let cleanupError: unknown = null;
       if (cleanupReentryAllowed) {
@@ -9068,7 +9089,7 @@ export class AgentRuntime implements Runtime {
       let allKnownProcessesDead = cleanupError === null;
       if (allKnownProcessesDead) {
         try {
-          allKnownProcessesDead = knownPids.every((pid) => pid === null || !isProcessAlive(pid));
+          allKnownProcessesDead = knownProcesses.every(({ pid, lease }) => this.capturedProcessHasExited(pid, lease));
         } catch (probeErr) {
           cleanupError = probeErr;
           allKnownProcessesDead = false;

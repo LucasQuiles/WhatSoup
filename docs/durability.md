@@ -1477,6 +1477,13 @@ executable path no longer has the provider's canonical basename. That lookup req
 same durable row, provider, PID, retained live handle, and current birth token; it neither
 broadens command-name matching nor replaces cleanup's independent authority validation.
 
+Per-chat reset retains the old and replacement child leases before shutdown can clear them.
+Its exit wait and failure classification compare the captured PID and birth identity, or the
+captured handle's terminal state. PID reuse cannot keep an exited generation waiting, and a
+live process with unavailable or mismatched capture remains fenced in `closing`. A resolved
+shutdown alone does not discard the prior identity. These observations grant no new signal
+authority; cleanup still uses the captured process-tree capability.
+
 Adoption checks protect three distinct boundaries. `guard:process-tree-diagnostics`
 inventories canonical calls and required option shapes, including complete readable source
 inventory; it does not prove capability provenance or correct consumption of typed results.
