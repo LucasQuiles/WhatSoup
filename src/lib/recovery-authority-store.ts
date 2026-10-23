@@ -40,6 +40,7 @@ import { createChildLogger } from '../logger.ts';
 import { systemClock } from './clock.ts';
 import {
   forceEnsurePrivateDirectorySync,
+  readPrivateFileSync,
   writePrivateJsonMarkerSync,
 } from './private-fs.ts';
 import {
@@ -80,6 +81,7 @@ function state_root(): string {
 const LEGACY_MARKER_FILE = 'recovery-authority.json';
 const MARKER_DIR = 'recovery-authority.d';
 const MARKER_SUFFIX = '.json';
+const MAX_MARKER_PAYLOAD_BYTES = 1024 * 1024;
 /** Only used while a legacy aggregate file still exists (see module header). */
 const RECOVERY_AUTHORITY_LOCK_WAIT_MS = 500;
 const RECOVERY_AUTHORITY_LOCK_POLL_MS = 10;
@@ -332,7 +334,17 @@ export type RecoveryMarkerRead =
 export function readRecoveryMarkerState(source: string): RecoveryMarkerRead {
   let raw: string;
   try {
-    raw = fs.readFileSync(markerFilePath(source), 'utf-8');
+    const filePath = markerFilePath(source);
+    const observedSize = fs.lstatSync(filePath).size;
+    const read = readPrivateFileSync(filePath, {
+      // Preserve valid writer payloads within the reader budget while still letting
+      // the private-file helper enforce no-follow, ownership, and bounded-read
+      // checks.
+      maxBytes: Math.min(MAX_MARKER_PAYLOAD_BYTES, Math.max(1, observedSize)),
+      label: 'recovery authority marker',
+    });
+    if (read === null) return { state: 'missing' };
+    raw = read;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
       ? { state: 'missing' }

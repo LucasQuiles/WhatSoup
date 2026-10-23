@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -99,10 +100,53 @@ def empty_state() -> dict:
     return {"version": 1, "openIncidents": {}, "lastSentAt": {}}
 
 
+_NOTICE_REF_LINE = re.compile(r"\nRef: (?P<ref>[0-9a-f]{8})$")
+
+
+def expand_notice(paths: dict[str, Path], text: str) -> str:
+    """A sent notice as a machine reader sees it: the card, then its packet's full body.
+
+    Since relay 16 the group line carries a short card whose last line names a
+    Ref; the full body (every "  > field: value" line the message used to carry)
+    is in the packet that Ref names, written before the send. Assertions about
+    body fields read them through the Ref exactly as an agent would. A text with
+    no Ref (a notice whose packet could not be written goes out as the full body)
+    is returned unchanged; a Ref with no packet is an error, never a silent pass.
+    """
+    match = _NOTICE_REF_LINE.search(text)
+    if not match:
+        return text
+    packet_path = paths["packets"] / f"{match.group('ref')}.json"
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    return f"{text}\n{packet['body']}"
+
+
+def deferred_notice_bodies(mod, notice_kind: str) -> list[str]:
+    """Bodies of the notices of `notice_kind` folded into the daily information summary.
+
+    Relay 16 C1/C3: an auto-close digest and an information-only notice send no
+    WhatsApp message of their own. Each writes its packet and queues one entry
+    in incident state's informationSummary; its full body is in that packet.
+    """
+    state = mod.load_incident_state(mod.state_paths())
+    pending = (state.get("informationSummary") or {}).get("pending") or []
+    bodies = []
+    for entry in pending:
+        if entry.get("noticeKind") != notice_kind:
+            continue
+        packet = mod.read_notice_packet(mod.state_paths(), entry["ref"])
+        assert packet is not None, entry
+        bodies.append(packet["body"])
+    return bodies
+
+
 def capture_sends(mod) -> list[str]:
-    """Replace `mod.send_whatsapp` with a recorder and return the list it appends to."""
+    """Replace `mod.send_whatsapp` with a recorder and return the list it appends to.
+
+    Each recorded text is the card expanded with its packet body (expand_notice).
+    """
     sends: list[str] = []
-    mod.send_whatsapp = lambda text, *a, **k: sends.append(text)  # type: ignore[assignment]
+    mod.send_whatsapp = lambda text, *a, **k: sends.append(expand_notice(mod.state_paths(), text))  # type: ignore[assignment]
     return sends
 
 

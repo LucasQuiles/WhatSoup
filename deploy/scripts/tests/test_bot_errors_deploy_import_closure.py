@@ -17,9 +17,14 @@ dependency that does not provide the name. See the deployer-scope note on
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +51,120 @@ def _deployer_allowlist() -> list[str]:
     ]
     assert entries, "deployer allowlist parsed as empty — the parser is stale"
     return entries
+
+
+def _seed_deployed_tree_without_fleet_lines(root: Path) -> None:
+    for relative_path in _deployer_allowlist():
+        source = _REPO / relative_path
+        destination = root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    (root / "deploy/scripts/lib/fleet_lines.py").unlink()
+
+
+def _write_current_sources_manifest(tmp_path: Path) -> Path:
+    manifest = tmp_path / "runtime-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "files": [
+                    {
+                        "path": relative_path,
+                        "sha256": hashlib.sha256(
+                            (_REPO / relative_path).read_bytes()
+                        ).hexdigest(),
+                    }
+                    for relative_path in _deployer_allowlist()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _write_import_observing_cp(tmp_path: Path) -> Path:
+    observer = tmp_path / "observe_import.py"
+    observer.write_text(
+        """\
+import importlib.util
+import sys
+from pathlib import Path
+
+entry = Path(sys.argv[1])
+scripts_root = sys.argv[2]
+sys.path.insert(0, scripts_root)
+module_name = f"deploy_copy_{entry.stem.replace('-', '_')}"
+spec = importlib.util.spec_from_file_location(module_name, entry)
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+sys.modules[module_name] = module
+spec.loader.exec_module(module)
+""",
+        encoding="utf-8",
+    )
+    cp_dir = tmp_path / "bin"
+    cp_dir.mkdir()
+    cp_path = cp_dir / "cp"
+    real_cp = shutil.which("cp")
+    assert real_cp
+    cp_path.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+{shlex.quote(real_cp)} "$@"
+destination="${{!#}}"
+if [[ "$destination" == "$DEPLOY_IMPORT_ROOT/deploy/scripts/bot-errors-dispatcher.py" || \\
+      "$destination" == "$DEPLOY_IMPORT_ROOT/deploy/scripts/bot-errors-health-check.py" ]]; then
+    if "$DEPLOY_IMPORT_PYTHON" "$DEPLOY_IMPORT_OBSERVER" "$destination" \\
+        "$DEPLOY_IMPORT_ROOT/deploy/scripts"; then
+        result=ok
+    else
+        result=failed
+    fi
+    printf '%s\\t%s\\n' "$(basename "$destination")" "$result" >> "$DEPLOY_IMPORT_LOG"
+fi
+""",
+        encoding="utf-8",
+    )
+    cp_path.chmod(0o755)
+    return cp_dir
+
+
+def test_deploy_materializes_fleet_lines_before_consumers_can_import(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    _seed_deployed_tree_without_fleet_lines(target)
+    cp_dir = _write_import_observing_cp(tmp_path)
+    manifest = _write_current_sources_manifest(tmp_path)
+    observations = tmp_path / "imports.tsv"
+    environment = os.environ | {
+        "PATH": f"{cp_dir}{os.pathsep}{os.environ['PATH']}",
+        "DEPLOY_IMPORT_ROOT": str(target),
+        "DEPLOY_IMPORT_LOG": str(observations),
+        "DEPLOY_IMPORT_OBSERVER": str(tmp_path / "observe_import.py"),
+        "DEPLOY_IMPORT_PYTHON": sys.executable,
+        "BOT_ERRORS_RUNTIME_MANIFEST_PATH": str(manifest),
+    }
+
+    completed = subprocess.run(
+        [str(_DEPLOYER), "deploy", str(target), str(_REPO)],
+        cwd=_REPO,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    copied_imports = dict(
+        line.split("\t", 1)
+        for line in observations.read_text(encoding="utf-8").splitlines()
+    )
+    assert copied_imports == {
+        "bot-errors-dispatcher.py": "ok",
+        "bot-errors-health-check.py": "ok",
+    }, completed.stdout + completed.stderr
 
 
 def _manifest_paths() -> set[str]:

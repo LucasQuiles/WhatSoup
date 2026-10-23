@@ -1,0 +1,30 @@
+{
+  "family": "flap_storm_closed",
+  "description": "Reconstructed from one delivered BOT INFO message (2026-10-14/15); host names, private bot names and state paths neutralised. format_event renders this event to exactly legacy_body.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "observation",
+    "eventType": "observation",
+    "severity": "info",
+    "id": "flap-resolved-unknown_q_handoff-distill:q-1792030778",
+    "createdAt": "2026-10-15T02:19:38Z",
+    "machine": "unknown",
+    "instance": "q",
+    "source": "flap_storm_resolved",
+    "alertSource": "handoff-distill:q",
+    "summary": "Flap storm closed: handoff-distill:q re-emit churn ended after 15 trips over 68m — underlying incident STILL OPEN (persistent condition; tracked by still-open digests)",
+    "evidence": "flap_storm_resolved=true\nincident_key=unknown|q|handoff-distill:q\nunderlying_source=handoff-distill:q\nflap_total_count=15\nflap_duration_minutes=68\nflap_first_seen=2026-10-14T18:04:31Z\npersistent_overdue=true\nunderlying_incident_open=true",
+    "diagnostics": {
+      "dispatchLog": "/srv/bot-errors-fixture/logs/dispatch.jsonl",
+      "queue": "/srv/bot-errors-fixture"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "flap-resolved",
+      "nextAttemptAtEpoch": 0,
+      "lastError": null
+    }
+  },
+  "legacy_body": "BOT INFO - Flap storm closed: handoff-distill:q re-emit churn ended after 15 trips over 68m — underlying incident STILL OPEN (persistent condition; tracked by still-open digests)\n  > severity: info\n  > machine: unknown\n  > instance: q\n  > source: flap_storm_resolved\n  > alert_source: handoff-distill:q\n  > incident_key: unknown|q|flap_storm_resolved\n  > event: flap-resolved-unknown_q_handoff-distill:q-1792030778\n  > created: 2026-10-15T02:19:38Z\n  > dispatcher_attempts: 1\n  > queue: /srv/bot-errors-fixture\n  > dispatch_log: /srv/bot-errors-fixture/logs/dispatch.jsonl\n  > evidence: flap_storm_resolved=true\nincident_key=unknown|q|handoff-distill:q\nunderlying_source=handoff-distill:q\nflap_total_count=15\nflap_duration_minutes=68\nflap_first_seen=2026-10-14T18:04:31Z\npersistent_overdue=true\nunderlying_incident_open=true\n  > requested_action: none — informational event; no Q remediation required.",
+  "card": "ℹ️ *Repeated handoff distill q alerts stopped; the problem behind them is still open*\nWhere: q\nYou: No action needed\nRef: 188c1be3"
+}

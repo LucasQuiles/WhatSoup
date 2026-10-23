@@ -6,7 +6,7 @@ root = pathlib.Path(root)
 # so a release sent before the probe shell reaches its read would be lost as a
 # harness error. Hold each release FIFO open read-write for the whole run; a
 # release then waits in the pipe until the shell reads it.
-release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release', 'event-order-poll-release')) if fifo.is_fifo()]
+release_holders = [os.open(fifo, os.O_RDWR | os.O_NONBLOCK) for fifo in (root / name for name in ('event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'authorization-rm-release', 'event-order-poll-release', 'status-helper-ready', 'status-helper-injected')) if fifo.is_fifo()]
 def interrupted(signum, frame):
     raise TimeoutError('outer lifecycle watchdog interrupted the fixture')
 signal.signal(signal.SIGTERM, interrupted)
@@ -49,13 +49,23 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         record['sentinel'] = members(os.getsid(sentinel.pid))
         record['sentinel_group'] = os.getpgid(sentinel.pid)
         record['caller_group'] = os.getpgid(child.pid)
+        # Preparation is outside the helper's budget. Hold the prepared probe
+        # until its driver releases it, then start each existing lifecycle bound.
+        preparation_deadline = time.monotonic() + 6
+        while not (root / 'probe-prepared').exists() and child.poll() is None and time.monotonic() < preparation_deadline:
+            time.sleep(0.01)
+        if not (root / 'probe-prepared').exists(): raise RuntimeError('probe preparation unavailable')
+        record['prepared_at_ms'] = int((time.monotonic() - started) * 1000)
         if master is not None:
             record['terminal_foreground_group'] = os.tcgetpgrp(master)
             os.write(master, b'go\n')
+            record['release_written_at_ms'] = int((time.monotonic() - started) * 1000)
             # Darwin's terminal close can wait for undrained echo after the
             # command has already exited. The fixture owns the master reader.
             if select.select([master], [], [], 2)[0]: record['terminal_echo'] = os.read(master, 4096).decode()
-        else: child.stdin.write('go\n'); child.stdin.close()
+        else:
+            child.stdin.write('go\n'); child.stdin.close()
+            record['release_written_at_ms'] = int((time.monotonic() - started) * 1000)
         if mode == 'job-control-unavailable':
             record['caller_group_stopped'] = False
             record['caller_group_stop_members'] = []
@@ -74,7 +84,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 time.sleep(0.01)
             if 'caller_group_observation' not in record:
                 record['caller_group_observation'] = members(session)
-        if mode.startswith('event-order-'):
+        if mode.startswith('event-order-') and mode != 'event-order-stopped-worker-hard-cut':
             events = root / 'event-order.log'
             record['event_observations'] = []
             observed_count = 0
@@ -262,6 +272,10 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     break
                 time.sleep(0.01)
             if control is None: raise RuntimeError('timeout control record unavailable')
+            blocked = root / 'timeout-ps-blocked'
+            while not blocked.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not blocked.exists(): raise RuntimeError('timeout ps barrier unavailable')
             timeout_path = root / ('whatsoup-bounded-timeout.%s.%s' % (child.pid, control.name.rsplit('.', 1)[1]))
             victim = root / 'timeout-victim'
             victim.write_text('unchanged')
@@ -306,7 +320,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             staged.write_text('\n'.join(replacement) + '\n')
             staged.replace(control)
             record['control_corrupted'] = mode
-        if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group', 'control-tokenless-worker-stopped'):
+        if mode in ('worker-stopped-after-authorization', 'event-order-stopped-worker-hard-cut', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group', 'control-tokenless-worker-stopped'):
             if mode in GROUP_MODES: wait_ready()
             deadline = time.monotonic() + 3
             authorization = None
@@ -330,7 +344,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
-        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
+        if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup', 'authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
             deadline = time.monotonic() + 3
             authorization = None
             while time.monotonic() < deadline:
@@ -342,7 +356,19 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if authorization is None: raise RuntimeError('outer authorization unavailable')
             fields = dict(line.split('=', 1) for line in authorization.read_text().splitlines() if '=' in line)
             command_pid = int(fields['command_pid'])
-            worker = next((item['ppid'] for item in members(session) if item['pid'] == command_pid), None)
+            process_members = members(session)
+            if mode in ('authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
+                custody_deadline = time.monotonic() + 3
+                command_held = root / 'authorized-guard-stuck-command-held'
+                while time.monotonic() < custody_deadline:
+                    process_members = members(session)
+                    if command_held.exists() and any(item['pid'] == command_pid for item in process_members):
+                        break
+                    time.sleep(0.01)
+                if not command_held.exists() or not any(item['pid'] == command_pid for item in process_members):
+                    raise RuntimeError('authorized command custody unavailable')
+                record['command_custody_established'] = True
+            worker = next((item['ppid'] for item in process_members if item['pid'] == command_pid), None)
             worker_record = next((item for item in members(session) if item['pid'] == worker), None)
             if worker is None or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
@@ -355,6 +381,9 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
+            if mode in ('authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
+                (root / 'authorized-guard-stuck-command-release').write_text('release')
+                record['command_released_after_guard_stop'] = True
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
                 time.sleep(0.01)
             if not (root / 'authorization-rm-ready').exists(): raise RuntimeError('worker cleanup did not retain authorization')
@@ -394,10 +423,17 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                     time.sleep(0.01)
                 record['deadline_replaced_with_fifo'] = (root / 'deadline-race-substituted').exists()
                 if not record['deadline_replaced_with_fifo']: raise RuntimeError('deadline stat/open substitution was not reached')
-            if mode in ('dead-leader-clean-cleanup', 'authorization-unreadable-after-cleanup'):
-                if mode == 'authorization-unreadable-after-cleanup':
+            if mode in ('dead-leader-clean-cleanup', 'authorization-unreadable-after-cleanup', 'authorization-unreadable-guard-stuck', 'authorized-guard-stuck'):
+                if mode in ('authorization-unreadable-after-cleanup', 'authorization-unreadable-guard-stuck'):
                     authorization.chmod(0)
                     record['authorization_unreadable'] = not os.access(authorization, os.R_OK)
+                    if mode == 'authorization-unreadable-guard-stuck':
+                        deadline_marker = root / ('whatsoup-bounded-deadline.%s.%s' % (child.pid, fields['token']))
+                        try:
+                            deadline_marker.write_text(fields['token'], encoding='utf-8', errors='strict')
+                        except FileExistsError:
+                            pass
+                        record['deadline_forced'] = deadline_marker.is_file()
                 release = os.open(root / 'authorization-rm-release', os.O_WRONLY | os.O_NONBLOCK)
                 try: os.write(release, b'release\n')
                 finally: os.close(release)
@@ -515,10 +551,9 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'event-order-stopped-worker-hard-cut', 'forged-completion-worker-stopped') else 8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
-        record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         record['survivors_before_cleanup'] = members(session)
         record['pre_cleanup_inventory_ms'] = int((time.monotonic() - started) * 1000)
     except Exception as error:
@@ -527,6 +562,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
         record['stdout_at_error'] = (root / 'stdout').read_text()
         record['stderr_at_error'] = (root / 'stderr').read_text()
     finally:
+        record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
         # Finish bounded cleanup if the Node-side watchdog requested shutdown.
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -554,6 +590,11 @@ record['job_control_monitor_refused'] = (root / 'job-control-monitor-refused').e
 record['job_control_recovered'] = (root / 'job-control-recovered').exists()
 record['job_control_stop_witness'] = (root / 'job-control-stop-witness').read_text().strip() if (root / 'job-control-stop-witness').exists() else None
 record['continued_after_stop'] = (root / 'handshake-cont-after-stop').exists()
+record['guard_term_held'] = (root / 'guard-term-held').exists()
+record['guard_sleep_held'] = (root / 'guard-sleep-held').exists()
+record['guard_grace_entered'] = (root / 'guard-grace-entered').exists()
+guard_grace = (root / 'guard-grace-entered').read_text().strip() if record['guard_grace_entered'] else ''
+record['guard_grace_seconds'] = int(guard_grace) if guard_grace.isdecimal() else None
 record['verified_reader_killed'] = (root / 'reader-killed').exists()
 record['command_partial_signal'] = (root / 'command-partial-signal').read_text() if (root / 'command-partial-signal').exists() else None
 record['umask_groups'] = [int(value) for value in (root / 'umask-groups').read_text().split()] if (root / 'umask-groups').exists() else []

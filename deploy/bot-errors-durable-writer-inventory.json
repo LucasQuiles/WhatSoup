@@ -359,13 +359,24 @@
     {
       "site_id": "dispatcher-dead-letter-record",
       "script": "deploy/scripts/bot-errors-dispatcher.py",
-      "function": "move_to_dead_letter",
+      "function": "write_dead_letter_record",
       "logical_publication": "dispatcher.dead_letter_record",
       "kind": "event_create_once",
       "operation_identity_source": "durable_json.operation_id.v1",
       "result_policy": "aggregate_all",
-      "result_consumer": "move_to_dead_letter",
+      "result_consumer": "write_dead_letter_record",
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-information-pending-requeue",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "requeue_pending_information_notice",
+      "logical_publication": "dispatcher.process_information_pending_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "aggregate_all",
+      "result_consumer": "requeue_pending_information_notice",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
       "site_id": "dispatcher-dead-letter-source-retire",
@@ -454,6 +465,17 @@
       "result_policy": "require_advance",
       "result_consumer": "publish_storm_receipt_orphan_alert",
       "fault_test_ids": ["event.serialization", "event.identity-reconcile", "event.no-advance-unproven"]
+    },
+    {
+      "site_id": "dispatcher-notice-packet-write",
+      "script": "deploy/scripts/bot-errors-dispatcher.py",
+      "function": "publish_notice_packet",
+      "logical_publication": "dispatcher.notice_packet",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "propagate_result",
+      "result_consumer": "write_notice_packet",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {
       "site_id": "dispatcher-storm-member-state",

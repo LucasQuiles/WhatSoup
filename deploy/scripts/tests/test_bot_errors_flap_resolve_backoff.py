@@ -8,6 +8,11 @@ per cycle (~12.5k failed sends on one host). A failed resolve send now records
 resolveAttempts / lastResolveErrorAt / nextResolveAt, skips the entry until
 nextResolveAt, and after FLAP_RESOLVE_MAX_ATTEMPTS drops the entry with one
 flap_resolve_abandoned record.
+
+Relay 16 C3: the resolve notice is no longer a WhatsApp message of its own. It
+is published by defer_information_notice (packet + one line of the daily
+information summary), so these tests drive that publication step where they
+used to drive the send; the backoff contract is unchanged.
 """
 from __future__ import annotations
 
@@ -123,12 +128,22 @@ def _failing_sender(sent: list):
     return _send
 
 
+def _publish_via(mod, monkeypatch, sender) -> None:
+    """Route the resolve publication through `sender(text)` (raise = publication failed)."""
+
+    def _publish(_paths, _state, event, **_kwargs):
+        sender(mod.format_event(event))
+        return None
+
+    monkeypatch.setattr(mod, "defer_information_notice", _publish)
+
+
 def test_failed_resolve_records_backoff_and_skips_until_due(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "skip", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     sent: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender(sent))
+    _publish_via(mod, monkeypatch, _failing_sender(sent))
 
     assert mod.sweep_flap_storms(paths) == (0, 1)
     assert len(sent) == 1
@@ -155,7 +170,7 @@ def test_backoff_doubles_and_caps(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "cap", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
 
     delays: list = []
     for _ in range(9):
@@ -172,7 +187,7 @@ def test_entry_is_abandoned_after_max_attempts(tmp_path, monkeypatch):
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     sent: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender(sent))
+    _publish_via(mod, monkeypatch, _failing_sender(sent))
 
     total_errors = 0
     for attempt in range(1, 11):
@@ -207,13 +222,13 @@ def test_success_after_failures_pops_the_entry(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "recover", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
     for _ in range(3):
         mod.sweep_flap_storms(paths)
         clock.now = _entry(mod, paths).get("nextResolveAt", clock.now)
 
     delivered: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1
     assert _entry(mod, paths) is None
@@ -228,7 +243,7 @@ def test_entry_without_backoff_fields_resolves_on_first_sweep(tmp_path, monkeypa
     _seed_resolvable_storm(mod, paths)
     assert not {"resolveAttempts", "nextResolveAt", "lastResolveErrorAt"} & set(_entry(mod, paths))
     delivered: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
 
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1
@@ -241,7 +256,7 @@ def test_log_growth_is_bounded_by_attempts_not_cycles(tmp_path, monkeypatch):
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     sent: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender(sent))
+    _publish_via(mod, monkeypatch, _failing_sender(sent))
 
     cycles = 1000  # ~8.3 h of 30 s dispatcher cycles
     for i in range(cycles):
@@ -278,7 +293,7 @@ def test_non_finite_resolve_attempts_is_a_first_attempt(tmp_path, monkeypatch, v
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
     _inject_on_next_load(mod, monkeypatch, resolveAttempts=value)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
 
     assert mod.sweep_flap_storms(paths) == (0, 1)
     entry = _entry(mod, paths)
@@ -293,7 +308,7 @@ def test_infinite_next_resolve_at_does_not_skip(tmp_path, monkeypatch):
     _seed_resolvable_storm(mod, paths)
     _inject_on_next_load(mod, monkeypatch, nextResolveAt=float("inf"))
     delivered: list = []
-    monkeypatch.setattr(mod, "send_whatsapp", lambda text, *_a, **_k: delivered.append(text))
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
 
     assert mod.sweep_flap_storms(paths) == (1, 0)
     assert len(delivered) == 1
@@ -304,7 +319,7 @@ def test_backoff_resets_when_the_storm_retrips(tmp_path, monkeypatch):
     mod, clock = _load(tmp_path / "retrip", monkeypatch)
     paths = mod.setup_dirs()
     _seed_resolvable_storm(mod, paths)
-    monkeypatch.setattr(mod, "send_whatsapp", _failing_sender([]))
+    _publish_via(mod, monkeypatch, _failing_sender([]))
     for _ in range(3):
         mod.sweep_flap_storms(paths)
         clock.now = _entry(mod, paths).get("nextResolveAt", clock.now)
@@ -329,3 +344,103 @@ def test_backoff_resets_when_the_storm_retrips(tmp_path, monkeypatch):
     entry = _entry(mod, paths)
     assert entry.get("resolveAttempts") == 1, entry
     assert entry.get("nextResolveAt") == clock.now + 30, entry
+
+
+def test_a_pending_packet_never_spends_the_flap_budget(tmp_path, monkeypatch):
+    # Relay 20 S-a: a resolve whose packet could not be written is not a failed
+    # resolve. It keeps the entry and retries later; it never counts toward
+    # FLAP_RESOLVE_MAX_ATTEMPTS, so the storm is never dropped with no packet.
+    mod, clock = _load(tmp_path / "packet-pending", monkeypatch)
+    # Relay 21 S4 caps the pending tries; above the resolve budget here, so the
+    # loop still shows that a pending packet never spends that budget.
+    monkeypatch.setattr(mod, "BOT_ERRORS_DELIVERY_MAX_ATTEMPTS", mod.FLAP_RESOLVE_MAX_ATTEMPTS + 5)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+
+    def _pending(*_a, **_k):
+        raise mod.NoticePacketPending("no packet for deferred flap-resolved notice")
+
+    monkeypatch.setattr(mod, "defer_information_notice", _pending)
+    for _ in range(mod.FLAP_RESOLVE_MAX_ATTEMPTS + 2):
+        assert mod.sweep_flap_storms(paths) == (0, 1)
+        entry = _entry(mod, paths)
+        assert entry is not None, "a pending packet keeps the storm"
+        assert not entry.get("resolveAttempts"), entry
+        assert entry["nextResolveAt"] == clock.now + mod.DAILY_CARD_RETRY_SECONDS, entry
+        clock.now = entry["nextResolveAt"]
+    kinds = _kinds(paths)
+    assert "flap_resolve_abandoned" not in kinds
+    assert kinds.count("flap_resolve_packet_pending") == mod.FLAP_RESOLVE_MAX_ATTEMPTS + 2
+
+    delivered: list = []
+    _publish_via(mod, monkeypatch, lambda text, *_a, **_k: delivered.append(text))
+    assert mod.sweep_flap_storms(paths) == (1, 0)
+    assert len(delivered) == 1 and _entry(mod, paths) is None
+
+
+def test_a_flap_resolve_whose_packet_stays_pending_is_dead_lettered_with_a_page(tmp_path, monkeypatch):
+    # Relay 21 S4: the pending retry ran every 900 s forever and paged no one.
+    # After BOT_ERRORS_DELIVERY_MAX_ATTEMPTS tries the resolve is dead-lettered
+    # and the storm entry goes; the dead-letter meta-alert pages.
+    mod, clock = _load(tmp_path / "packet-pending-cap", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+
+    def _pending(*_a, **_k):
+        raise mod.NoticePacketPending("no packet for deferred flap-resolved notice")
+
+    monkeypatch.setattr(mod, "defer_information_notice", _pending)
+    for _ in range(mod.BOT_ERRORS_DELIVERY_MAX_ATTEMPTS - 1):
+        assert mod.sweep_flap_storms(paths) == (0, 1)
+        entry = _entry(mod, paths)
+        assert entry is not None
+        clock.now = entry["nextResolveAt"]
+    assert not list(paths["dead_letter"].glob("*.json"))
+
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+
+    assert _entry(mod, paths) is None
+    [dead] = list(paths["dead_letter"].glob("*.json"))
+    record = json.loads(dead.read_text(encoding="utf-8"))
+    assert record["event"]["source"] == "flap_storm_resolved"
+    assert record["delivery"]["status"] == "dead_letter"
+    assert "flap_resolve_dead_lettered" in _kinds(paths)
+    assert mod.queue_dead_letter_meta_alert(paths, clock.now) == 1
+
+
+def test_a_failed_dead_letter_write_keeps_the_storm_and_waits_for_the_retry(tmp_path, monkeypatch):
+    # Relay 23 W4: on the S4 cap path a dead-letter write that raised went to the
+    # outer catch, which skips nextResolveAt, so the storm retried every cycle
+    # and counted an error each time. The entry stays and waits 900 s.
+    mod, clock = _load(tmp_path / "dead-letter-fails", monkeypatch)
+    paths = mod.setup_dirs()
+    _seed_resolvable_storm(mod, paths)
+
+    def _pending(*_a, **_k):
+        raise mod.NoticePacketPending("no packet for deferred flap-resolved notice")
+
+    monkeypatch.setattr(mod, "defer_information_notice", _pending)
+    for _ in range(mod.BOT_ERRORS_DELIVERY_MAX_ATTEMPTS - 1):
+        assert mod.sweep_flap_storms(paths) == (0, 1)
+        clock.now = _entry(mod, paths)["nextResolveAt"]
+
+    real_dead_letter = mod.write_dead_letter_record
+
+    def _dead_letter_fails(*_a, **_k):
+        raise OSError("dead-letter store not writable")
+
+    monkeypatch.setattr(mod, "write_dead_letter_record", _dead_letter_fails)
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+    entry = _entry(mod, paths)
+    assert entry is not None, "a failed dead-letter write keeps the storm"
+    assert entry["nextResolveAt"] == clock.now + mod.DAILY_CARD_RETRY_SECONDS, entry
+    assert "flap_resolve_dead_letter_failed" in _kinds(paths)
+
+    clock.now += CYCLE
+    assert mod.sweep_flap_storms(paths) == (0, 0), "the next cycle does not retry"
+
+    monkeypatch.setattr(mod, "write_dead_letter_record", real_dead_letter)
+    clock.now = entry["nextResolveAt"]
+    assert mod.sweep_flap_storms(paths) == (0, 1)
+    assert _entry(mod, paths) is None
+    assert len(list(paths["dead_letter"].glob("*.json"))) == 1

@@ -57,7 +57,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-dispatcher.py",
-      "sha256": "b81b5fc962b249573e87bbc7ecf59b8b302f8685359103bc6ff7ac7a9eb8e2f0",
+      "sha256": "ea0836125d8af84bf9d979ad55fe40e36b5148fce26ac277fa65077ce9a8cc88",
       "mustContain": [
         "require_acceptance=True",
         "drain_owner_route_queue(paths)",
@@ -167,7 +167,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "862b64da7a85345a9b2de491d6a89715c7159701924190e96afe9dd51f7112e2",
+      "sha256": "4f00096fcd3c43426200eab48b2e6498fdafe49c155be7f16f4c93ea7c796612",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -518,7 +518,7 @@
     },
     {
       "path": "deploy/scripts/lib/bot_errors_redaction.py",
-      "sha256": "49820d24b454f565c172d1ceac867baf679fa4eff569e4fbdc312a50a62ee16b",
+      "sha256": "41816624ee8d18cee346fbcf495de10553b8d69a5e27d0617f6905f396435641",
       "mustContain": [
         "redact_bot_errors_text",
         "CREDENTIAL_PATH_RE",
@@ -569,7 +569,7 @@
     },
     {
       "path": "deploy/scripts/lib/controller_log.py",
-      "sha256": "23d82d31afdc80730033e2cc3bf9aac409c9f7b01f8ae543fe8a3c2b6d7acc9d",
+      "sha256": "26a25e6acac541f6be298884f773d5af8f8f44b8bc49950d34344bd4f5d1ab35",
       "mustContain": [
         "ControllerLogContext",
         "diagnostic_best_effort",
@@ -638,6 +638,17 @@
         "resolve_roster",
         "FleetConfigError",
         "resolver order"
+      ]
+    },
+    {
+      "path": "deploy/scripts/lib/fleet_lines.py",
+      "sha256": "127f5131a2d90c0f2ad07c7a07e8794eb0c835091229de97019b2471cc52df6e",
+      "mustContain": [
+        "def read_fleet_lines(",
+        "def line_verdict(",
+        "def parse_fleet_token(",
+        "def read_fleet_token_text(",
+        "O_NOFOLLOW"
       ]
     },
     {
@@ -839,7 +850,7 @@
     },
     {
       "path": "src/lib/redaction-text.ts",
-      "sha256": "db4747ab3584281cfdc2d895861f867c8e4ddc00b5baf83bb74e9e487418e6b3",
+      "sha256": "c2418e513a4243a38ece628b72e7516820fdc168f555d248ebab87127ade9317",
       "mustContain": [
         "AUTHORIZATION_BEARER",
         "WHATSAPP_SERVICE_UNIT",

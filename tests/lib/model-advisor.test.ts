@@ -21,12 +21,13 @@ vi.mock('../../src/lib/emit-alert.ts', () => ({
   clearAlertSourceChecked: alertFns.clearAlertSource,
 }));
 
-import { emitAlert, emitAlertChecked, clearAlertSource } from '../../src/lib/emit-alert.ts';
+import { emitAlert, emitAlertChecked, clearAlertSource, clearAlertSourceChecked } from '../../src/lib/emit-alert.ts';
+import { usePerTestBotErrorsMarkerIsolation } from '../../tests/setup/bot-errors-vitest-isolation.ts';
 import {
   loadRecoveryMarkers,
   setRecoveryMarker,
 } from '../../src/lib/recovery-authority-store.ts';
-import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -47,6 +48,10 @@ import {
 
 const emitAlertMock = vi.mocked(emitAlert);
 const clearAlertSourceMock = vi.mocked(clearAlertSource);
+
+// The notified-set dedupe key now persists with the recovery marker, so a marker
+// one test leaves must not decide whether a later test's alert is emitted.
+usePerTestBotErrorsMarkerIsolation();
 
 beforeEach(() => {
   __resetModelAdvisorForTest();
@@ -848,5 +853,188 @@ describe('#2394 recovery-authority-store wiring (model-currency + live-scan)', (
     expect(clears).toHaveLength(1);
     expect(readMarkers().has('model-currency:test-bot')).toBe(false);
     setIntervalSpy.mockRestore();
+  });
+});
+
+describe('restart does not re-send an unchanged model-currency set', () => {
+  const advisory = {
+    model: 'claude-opus-4-6',
+    role: 'conversation',
+    level: 'upgrade-available' as const,
+    recommended: 'claude-opus-4-8',
+    message: 'upgrade available',
+  };
+  const degradedScan = {
+    mode: 'degraded' as const,
+    attemptedVendors: ['anthropic'],
+    degradedVendors: [{ vendor: 'anthropic', status: 401, reason: 'HTTP 401' }],
+    fetchedCount: 0,
+  };
+  const emitsFor = (source: string) => emitAlertMock.mock.calls.filter((c) => c[1] === source);
+  const clearsFor = (source: string) => clearAlertSourceMock.mock.calls.filter((c) => c[1] === source);
+
+  it('a restart with the same advisory set emits nothing', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+
+    __resetModelAdvisorForTest(); // restart: in-memory dedupe key is gone
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(true);
+  });
+
+  it('a restart with a changed advisory set emits it', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [{ ...advisory, recommended: 'claude-opus-4-9' }]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+
+    // ...and the changed set is the one now remembered across the next restart.
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [{ ...advisory, recommended: 'claude-opus-4-9' }]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+  });
+
+  it('the persisted set is per instance', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-S', [advisory]);
+    expect(emitsFor('model-currency').map((c) => c[0])).toEqual(['instance-R', 'instance-S']);
+  });
+
+  it('keeps same-process advisory acceptance and clearing per instance', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    notifyModelAdvisories('instance-S', [advisory]);
+    expect(emitsFor('model-currency').map((c) => c[0])).toEqual(['instance-R', 'instance-S']);
+    notifyModelAdvisories('instance-R', []);
+    notifyModelAdvisories('instance-S', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+    notifyModelAdvisories('instance-S', []);
+    expect(clearsFor('model-currency').map((c) => c[0])).toEqual(['instance-R', 'instance-S']);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(false);
+    expect(loadRecoveryMarkers().has('model-currency:instance-S')).toBe(false);
+  });
+
+  it('keeps same-process live-scan acceptance and clearing per instance', () => {
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    notifyModelLiveScanStatus('instance-S', degradedScan);
+    expect(emitsFor('model-currency-live-scan').map((c) => c[0])).toEqual(['instance-R', 'instance-S']);
+    const recovered = { ...degradedScan, mode: 'live' as const, degradedVendors: [], fetchedCount: 1 };
+    notifyModelLiveScanStatus('instance-R', recovered);
+    notifyModelLiveScanStatus('instance-S', degradedScan);
+    expect(emitsFor('model-currency-live-scan')).toHaveLength(2);
+    notifyModelLiveScanStatus('instance-S', recovered);
+    expect(clearsFor('model-currency-live-scan').map((c) => c[0])).toEqual(['instance-R', 'instance-S']);
+    expect(loadRecoveryMarkers().has('model-currency-live-scan:instance-R')).toBe(false);
+    expect(loadRecoveryMarkers().has('model-currency-live-scan:instance-S')).toBe(false);
+  });
+
+  it('a clean check after an adopted restart still clears the source', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [advisory]); // adopted, not re-sent
+    notifyModelAdvisories('instance-R', []);
+    expect(clearsFor('model-currency')).toEqual([['instance-R', 'model-currency']]);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(false);
+  });
+
+  it('a marker written before the key was persisted still lets the set emit', () => {
+    setRecoveryMarker('model-currency:instance-R');
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+  });
+
+  it('re-emits when the persisted marker is a symlink to an injected notified key', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(1);
+    __resetModelAdvisorForTest();
+
+    const stateDir = process.env['BOT_ERRORS_STATE_DIR'];
+    if (!stateDir) throw new Error('BOT_ERRORS_STATE_DIR is required for marker isolation');
+    const markerDir = join(stateDir, 'recovery-authority.d');
+    const markerName = readdirSync(markerDir).find((entry) => entry.endsWith('.json'));
+    if (!markerName) throw new Error('model-currency marker was not written');
+    const markerPath = join(markerDir, markerName);
+    const targetRoot = mkdtempSync(join(tmpdir(), 'ws-marker-target-'));
+    const targetPath = join(targetRoot, 'marker.json');
+    writeFileSync(targetPath, readFileSync(markerPath), { mode: 0o600 });
+    rmSync(markerPath);
+    symlinkSync(targetPath, markerPath);
+
+    try {
+      notifyModelAdvisories('instance-R', [advisory]);
+      expect(emitsFor('model-currency')).toHaveLength(2);
+    } finally {
+      rmSync(targetRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('a rejected emit persists no key, so the next restart emits again', () => {
+    vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
+    notifyModelAdvisories('instance-R', [advisory]);
+    __resetModelAdvisorForTest();
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+  });
+
+  it('retries a rejected advisory in the same process and dedupes only after acceptance', () => {
+    vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(false);
+    notifyModelAdvisories('instance-R', [advisory]);
+    notifyModelAdvisories('instance-R', [advisory]);
+    expect(emitsFor('model-currency')).toHaveLength(2);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(true);
+  });
+
+  it('retries a rejected live-scan alert in the same process and dedupes only after acceptance', () => {
+    vi.mocked(emitAlertChecked).mockReturnValueOnce(false);
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    expect(loadRecoveryMarkers().has('model-currency-live-scan:instance-R')).toBe(false);
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    expect(emitsFor('model-currency-live-scan')).toHaveLength(2);
+    expect(loadRecoveryMarkers().has('model-currency-live-scan:instance-R')).toBe(true);
+  });
+
+  it('retries a rejected advisory clear in the same process', () => {
+    notifyModelAdvisories('instance-R', [advisory]);
+    vi.mocked(clearAlertSourceChecked).mockReturnValueOnce(false);
+    notifyModelAdvisories('instance-R', []);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(true);
+    notifyModelAdvisories('instance-R', []);
+    notifyModelAdvisories('instance-R', []);
+    expect(clearsFor('model-currency')).toHaveLength(2);
+    expect(loadRecoveryMarkers().has('model-currency:instance-R')).toBe(false);
+  });
+
+  it('retries a rejected live-scan clear in the same process', () => {
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    const recovered = { ...degradedScan, mode: 'live' as const, degradedVendors: [], fetchedCount: 1 };
+    vi.mocked(clearAlertSourceChecked).mockReturnValueOnce(false);
+    notifyModelLiveScanStatus('instance-R', recovered);
+    expect(loadRecoveryMarkers().has('model-currency-live-scan:instance-R')).toBe(true);
+    notifyModelLiveScanStatus('instance-R', recovered);
+    notifyModelLiveScanStatus('instance-R', recovered);
+    expect(clearsFor('model-currency-live-scan')).toHaveLength(2);
+    expect(loadRecoveryMarkers().has('model-currency-live-scan:instance-R')).toBe(false);
+  });
+
+  it('the live-scan degradation is not re-sent after a restart, and its recovery still clears', () => {
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    __resetModelAdvisorForTest();
+    notifyModelLiveScanStatus('instance-R', degradedScan);
+    expect(emitsFor('model-currency-live-scan')).toHaveLength(1);
+
+    notifyModelLiveScanStatus('instance-R', {
+      mode: 'degraded',
+      attemptedVendors: ['anthropic'],
+      degradedVendors: [{ vendor: 'anthropic', status: 500, reason: 'HTTP 500' }],
+      fetchedCount: 0,
+    });
+    expect(emitsFor('model-currency-live-scan')).toHaveLength(2);
+
+    notifyModelLiveScanStatus('instance-R', { ...degradedScan, mode: 'live', degradedVendors: [], fetchedCount: 1 });
+    expect(clearsFor('model-currency-live-scan')).toEqual([['instance-R', 'model-currency-live-scan']]);
   });
 });

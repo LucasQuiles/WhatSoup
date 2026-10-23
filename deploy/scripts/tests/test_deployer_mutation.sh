@@ -4,6 +4,8 @@ set -euo pipefail
 D=deploy/scripts/whatsoup-bot-errors-deploy.sh
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+export BOT_ERRORS_STATE_DIR="$tmp/incident-state"
+mkdir -m 700 "$BOT_ERRORS_STATE_DIR"
 
 fail() {
   echo "DEPLOYER_MUTATION_FAIL: $*"
@@ -52,6 +54,12 @@ copy_manifest_files() {
 
 prepare_current_root() {
   copy_manifest_files "$PWD" "$1"
+}
+
+prepare_current_root_without_fleet_lines() {
+  local root="$1"
+  copy_manifest_files "$PWD" "$root"
+  rm -f "$root/deploy/scripts/lib/fleet_lines.py"
 }
 
 prepare_staging() {
@@ -112,6 +120,127 @@ grep -q "LAST_KNOWN_GOOD_SKIPPED=backup_not_clean" "$tmp/deploy.log" || { cat "$
 [ ! -e "$tmp/.bot-errors-last-known-good-runtime" ] || fail "unclean backup created last_known_good pointer"
 assert_backup_metadata "$backup/.bot-errors-backup.json" false null
 bash "$D" verify "$root" > "$tmp/verify.log" 2>&1 || { cat "$tmp/verify.log"; fail "deployed root did not verify"; }
+
+# A directory at a managed file path must be refused before backup or mutation.
+directory_root="$tmp/directory-runtime"
+prepare_current_root "$directory_root"
+rm -f "$directory_root/deploy/scripts/lib/fleet_lines.py"
+mkdir "$directory_root/deploy/scripts/lib/fleet_lines.py"
+printf 'preserved-directory-content\n' > "$directory_root/deploy/scripts/lib/fleet_lines.py/keep"
+cp -R "$directory_root" "$tmp/directory-before"
+if bash "$D" deploy "$directory_root" "$PWD" > "$tmp/directory-deploy.log" 2>&1; then
+  fail "deploy accepted a directory at a managed file path"
+fi
+grep -q "NOTFILE.*fleet_lines.py" "$tmp/directory-deploy.log" || { cat "$tmp/directory-deploy.log"; fail "managed directory was not reported"; }
+diff -r "$tmp/directory-before" "$directory_root" || fail "rejected directory deploy mutated target"
+[ ! -e "$tmp/.bot-errors-last-known-good-directory-runtime" ] || fail "rejected directory deploy created LKG"
+directory_backup="$tmp/directory-rollback-backup"
+copy_manifest_files "$PWD" "$directory_backup"
+: > "$directory_backup/.was-absent"
+if bash "$D" rollback "$directory_root" "$directory_backup" > "$tmp/directory-rollback.log" 2>&1; then
+  fail "rollback accepted a directory at a managed file path"
+fi
+grep -q "NOTFILE.*fleet_lines.py" "$tmp/directory-rollback.log" || { cat "$tmp/directory-rollback.log"; fail "rollback managed directory was not reported"; }
+diff -r "$tmp/directory-before" "$directory_root" || fail "rejected directory rollback mutated target"
+
+# The root itself must be refused, including trailing directory syntax.
+symlink_target="$tmp/symlink-target"
+prepare_current_root "$symlink_target"
+cp -R "$symlink_target" "$tmp/symlink-before"
+ln -s "$symlink_target" "$tmp/symlink-root"
+for root_suffix in '' '/' '/.'; do
+  for mode in deploy verify rollback; do
+    input_root="$tmp/symlink-root$root_suffix"
+    source_dir="$PWD"
+    [ "$mode" != rollback ] || source_dir="$directory_backup"
+    if bash "$D" "$mode" "$input_root" "$source_dir" > "$tmp/symlink-root.log" 2>&1; then
+      fail "$mode accepted a symlinked root: $input_root"
+    fi
+    grep -q "SYMLINK.*root" "$tmp/symlink-root.log" || { cat "$tmp/symlink-root.log"; fail "root symlink was not reported"; }
+    diff -r "$tmp/symlink-before" "$symlink_target" || fail "rejected $mode mutated symlink target"
+  done
+done
+[ ! -e "$tmp/.bot-errors-last-known-good-symlink-root" ] || fail "rejected root created LKG"
+symlink_backup_count=$(find "$tmp" -maxdepth 1 -name '.bot-errors-deploy-backup-symlink-root-*' -print | wc -l | tr -d ' ')
+[ "$symlink_backup_count" = 0 ] || fail "rejected root created a backup"
+
+mkdir -p "$tmp/ancestor-target"
+prepare_current_root "$tmp/ancestor-target/runtime"
+cp -R "$tmp/ancestor-target" "$tmp/ancestor-before"
+ln -s "$tmp/ancestor-target" "$tmp/ancestor-link"
+for root_suffix in '' '/' '/.'; do
+  for mode in deploy verify rollback; do
+    input_root="$tmp/ancestor-link/runtime$root_suffix"
+    source_dir="$PWD"
+    [ "$mode" != rollback ] || source_dir="$directory_backup"
+    if bash "$D" "$mode" "$input_root" "$source_dir" > "$tmp/ancestor-root.log" 2>&1; then
+      fail "$mode accepted a symlinked ancestor: $input_root"
+    fi
+    grep -q "SYMLINK.*root" "$tmp/ancestor-root.log" || { cat "$tmp/ancestor-root.log"; fail "ancestor symlink was not reported"; }
+    diff -r "$tmp/ancestor-before" "$tmp/ancestor-target" || fail "rejected $mode mutated ancestor target"
+  done
+done
+
+# A first release that newly manages fleet_lines.py must treat its legitimate
+# prior absence as a verified backup, create LKG, and delete the new file when
+# rolling back. Existing bytes remain hash-checked; this is not a drift waiver.
+bootstrap_root="$tmp/bootstrap-runtime"
+prepare_current_root_without_fleet_lines "$bootstrap_root"
+bootstrap_stage="$tmp/bootstrap-stage"
+prepare_staging "$bootstrap_stage"
+bash "$D" deploy "$bootstrap_root" "$bootstrap_stage" > "$tmp/bootstrap-deploy.log" 2>&1
+grep -q "DEPLOY_OK" "$tmp/bootstrap-deploy.log" || { cat "$tmp/bootstrap-deploy.log"; fail "first fleet_lines deploy did not report DEPLOY_OK"; }
+grep -q "BACKUP_VERIFIED=1" "$tmp/bootstrap-deploy.log" || { cat "$tmp/bootstrap-deploy.log"; fail "ledger-aware absent backup was not verified"; }
+bootstrap_backup=$(backup_from_log "$tmp/bootstrap-deploy.log")
+bootstrap_pointer=$(pointer_from_log "$tmp/bootstrap-deploy.log")
+[ -f "$bootstrap_pointer" ] || fail "first fleet_lines deploy did not create last_known_good pointer"
+IFS= read -r pointed_bootstrap_backup < "$bootstrap_pointer"
+[ "$pointed_bootstrap_backup" = "$bootstrap_backup" ] || fail "first fleet_lines LKG pointer did not target verified backup"
+assert_backup_metadata "$bootstrap_backup/.bot-errors-backup.json" true null
+grep -qx 'deploy/scripts/lib/fleet_lines.py' "$bootstrap_backup/.was-absent" || fail "fleet_lines absence was not ledgered"
+[ ! -e "$bootstrap_backup/deploy/scripts/lib/fleet_lines.py" ] || fail "fleet_lines backup unexpectedly contains a file"
+[ -f "$bootstrap_root/deploy/scripts/lib/fleet_lines.py" ] || fail "deploy did not materialize fleet_lines.py"
+printf 'damaged\n' > "$bootstrap_root/deploy/scripts/bot-errors-emit.py"
+bash "$D" rollback-lkg "$bootstrap_root" > "$tmp/bootstrap-rollback-lkg.log" 2>&1
+grep -q "ROLLBACK_LKG_OK" "$tmp/bootstrap-rollback-lkg.log" || { cat "$tmp/bootstrap-rollback-lkg.log"; fail "ledger-aware rollback-lkg did not report success"; }
+[ ! -e "$bootstrap_root/deploy/scripts/lib/fleet_lines.py" ] || fail "rollback-lkg did not delete newly managed fleet_lines.py"
+diff "$bootstrap_root/deploy/scripts/bot-errors-emit.py" "$PWD/deploy/scripts/bot-errors-emit.py" > /dev/null \
+  || fail "rollback-lkg did not restore prior bytes"
+
+# A missing managed backup path without a ledger entry must fail before target
+# mutation, while a ledger/file conflict must also fail before mutation.
+unledgered_backup="$tmp/unledgered-missing-backup"
+copy_manifest_files "$PWD" "$unledgered_backup"
+: > "$unledgered_backup/.was-absent"
+rm -f "$unledgered_backup/deploy/scripts/bot-errors-emit.py"
+unledgered_root="$tmp/unledgered-missing-runtime"
+prepare_current_root "$unledgered_root"
+printf 'unledgered-sentinel\n' > "$unledgered_root/deploy/scripts/bot-errors-emit.py"
+if bash "$D" rollback "$unledgered_root" "$unledgered_backup" > "$tmp/unledgered-missing.log" 2>&1; then
+  cat "$tmp/unledgered-missing.log"
+  fail "rollback accepted an unledgered missing backup path"
+fi
+grep -q "MISSING.*bot-errors-emit.py" "$tmp/unledgered-missing.log" || {
+  cat "$tmp/unledgered-missing.log"
+  fail "unledgered missing backup path was not reported"
+}
+grep -q "unledgered-sentinel" "$unledgered_root/deploy/scripts/bot-errors-emit.py" || fail "unledgered missing backup mutated the target"
+
+conflict_backup="$tmp/conflicting-ledger-backup"
+copy_manifest_files "$PWD" "$conflict_backup"
+printf 'deploy/scripts/bot-errors-emit.py\n' > "$conflict_backup/.was-absent"
+conflict_root="$tmp/conflicting-ledger-runtime"
+prepare_current_root "$conflict_root"
+printf 'conflict-sentinel\n' > "$conflict_root/deploy/scripts/bot-errors-emit.py"
+if bash "$D" rollback "$conflict_root" "$conflict_backup" > "$tmp/conflicting-ledger.log" 2>&1; then
+  cat "$tmp/conflicting-ledger.log"
+  fail "rollback accepted a ledger/file conflict"
+fi
+grep -q "conflicts with present path" "$tmp/conflicting-ledger.log" || {
+  cat "$tmp/conflicting-ledger.log"
+  fail "ledger/file conflict was not reported"
+}
+grep -q "conflict-sentinel" "$conflict_root/deploy/scripts/bot-errors-emit.py" || fail "ledger/file conflict mutated the target"
 
 bash "$D" rollback "$root" "$backup" > "$tmp/rollback.log" 2>&1
 grep -q "ROLLBACK_OK" "$tmp/rollback.log" || { cat "$tmp/rollback.log"; fail "rollback did not report ROLLBACK_OK"; }
@@ -222,15 +351,11 @@ fakebin="$tmp/fakebin"
 mkdir -p "$fakebin"
 real_python3="$(command -v python3)"
 # Only fail smoke_redaction's invocation (python3 - <root-dir> <<PY ... PY).
-# resolve_managed_files() also calls python3 now (python3 - <manifest.json>
-# <paths...> <<PY ... PY>) to resolve MANAGED_FILES from the runtime
-# manifest -- that call must still succeed so deploy mode reaches its own
-# smoke_redaction step and the auto-rollback path this test exercises,
-# rather than failing earlier for an unrelated reason. Distinguished by the
-# script's second argument: a manifest path (.json) vs. a root directory.
+# Manifest resolution and rollback compatibility pass additional arguments;
+# allow those real checks to run so the injected fault reaches the smoke step.
 cat > "$fakebin/python3" <<SH
 #!/usr/bin/env bash
-if [[ "\$2" == *.json ]]; then
+if [[ "\$#" -ne 2 ]]; then
   exec "$real_python3" "\$@"
 fi
 echo "fake python smoke failure" >&2

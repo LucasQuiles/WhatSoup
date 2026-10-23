@@ -37,11 +37,13 @@ import sys
 import tempfile
 import time as real_time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
@@ -515,6 +517,8 @@ class Rig:
     # -- stubs: they record, the test body asserts ---------------------------
 
     def _group_send(self, text, socket_path="", *, require_acceptance=False, deadline=None):
+        # The group line carries a card; its body fields are in the packet its Ref names.
+        text = dispatcher_fixtures.expand_notice(self.d.state_paths(), text)
         self.group_attempts.append({"text": text, "at": int(self.clock.now), "monotonic": self.clock.monotonic(),
                                     "deadline": deadline, "position": len(self.timeline)})
         verdict = self.group_rule(text)
@@ -801,8 +805,8 @@ def leak_drop_faults(rigs: list[Rig]) -> list[str]:
     return faults
 
 
-@pytest.fixture()
-def make_rig(monkeypatch):
+@contextmanager
+def rig_scope(monkeypatch):
     """Build rigs in one directory per test under /tmp, removed when the test ends."""
     base = Path(tempfile.mkdtemp(prefix="repage-", dir="/tmp"))
     rigs: list[Rig] = []
@@ -811,15 +815,23 @@ def make_rig(monkeypatch):
         rigs.append(Rig(base, monkeypatch, **options))
         return rigs[-1]
 
-    yield build
     try:
-        faults = leak_drop_faults(rigs)
+        yield build
     finally:
-        shutil.rmtree(base, ignore_errors=True)
+        try:
+            faults = leak_drop_faults(rigs)
+        finally:
+            shutil.rmtree(base)
     if faults:
         # put() refuses a fixture event the leak check would drop, but the dispatcher also makes
         # events itself. One of those dropped is a fault of the fixture, never the class's behaviour.
         raise AssertionError(f"{FIXTURE_DROPPED}: {'; '.join(faults)}")
+
+
+@pytest.fixture()
+def make_rig(monkeypatch):
+    with rig_scope(monkeypatch) as build:
+        yield build
 
 
 def open_now(rig: Rig, at: float, *, host: str = "hosta", bot: str = "bot-one", source: str = MANUAL) -> str:
@@ -3338,28 +3350,38 @@ def test_t94_two_future_dated_copies_of_one_death_stay_cleared_when_read_again(m
     assert rig.logged("passFault") == []
 
 
-def test_t94_a_requeued_future_dated_clear_read_after_a_new_death_does_not_remove_it(make_rig):
-    rig = make_rig()
-    clock_runs_on(rig)
-    rig.clock.set(T0)
-    rig.put(watchdog_event(DEAD, "hosta", "bot-one", T0 + SKEW))
-    assert rig.cycle() is None
-    assert rig.page_times() == [T0]
-    # The clear removes the member; its own group send fails, so it is read again in later cycles.
-    rig.clock.set(T0 + 60)
-    clear = rig.put(watchdog_event(DEAD, "hosta", "bot-one", T0 + SKEW + 30, clear=True))
-    fail_group_sends_of(rig, clear)
-    assert rig.cycle() is None
-    assert rig.disposition(clear) == ["outbox"]
-    assert rig.members("hosta|bot-one") == []
-    # A new death, created after the clear on the same clock; the scan reads it, then the clear again.
-    rig.clock.set(T0 + 120)
-    rig.put(watchdog_event(DEAD, "hosta", "bot-one", T0 + SKEW + 90))
-    assert rig.cycle() is None
-    assert rig.members("hosta|bot-one") == [DEAD]
-    assert rig.cycle_at(T0 + INTERVAL) is None
-    assert rig.page_times() == [T0, T0 + INTERVAL]
-    assert rig.logged("passFault") == []
+@given(clear_ahead=st.integers(min_value=1, max_value=60))
+@example(clear_ahead=1)
+@example(clear_ahead=30)
+@example(clear_ahead=60)
+@settings(max_examples=60, deadline=None, database=None)
+def test_t94_a_requeued_future_dated_clear_read_after_a_new_death_does_not_remove_it(clear_ahead):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        with rig_scope(monkeypatch) as make_rig:
+            rig = make_rig()
+            clock_runs_on(rig)
+            rig.clock.set(T0)
+            producer_skew = clear_ahead + 30
+            rig.put(watchdog_event(DEAD, "hosta", "bot-one", T0 + producer_skew))
+            assert rig.cycle() is None
+            assert rig.page_times() == [T0]
+            # The clear removes the member; its own group send fails, so it is read again in later cycles.
+            rig.clock.set(T0 + 60)
+            clear_event = watchdog_event(DEAD, "hosta", "bot-one", T0 + producer_skew + 30, clear=True)
+            assert T0 + 60 < rig.d.bounded_observation_epoch(clear_event) <= T0 + 120
+            clear = rig.put(clear_event)
+            fail_group_sends_of(rig, clear)
+            assert rig.cycle() is None
+            assert rig.disposition(clear) == ["outbox"]
+            assert rig.members("hosta|bot-one") == []
+            # A new death, created after the clear on the same clock; the scan reads it, then the clear again.
+            rig.clock.set(T0 + 120)
+            rig.put(watchdog_event(DEAD, "hosta", "bot-one", T0 + producer_skew + 90))
+            assert rig.cycle() is None
+            assert rig.members("hosta|bot-one") == [DEAD]
+            assert rig.cycle_at(T0 + INTERVAL) is None
+            assert rig.page_times() == [T0, T0 + INTERVAL]
+            assert rig.logged("passFault") == []
 
 
 def test_t94_a_new_death_after_a_future_dated_clear_still_opens_and_pages(make_rig):

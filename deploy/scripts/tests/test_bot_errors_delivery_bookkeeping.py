@@ -161,7 +161,8 @@ class _Bench:
         def send(text: str, *args: Any, **kwargs: Any) -> None:
             self.attempts.append(outcome)
             if outcome == "ok":
-                self.delivered.append(text)
+                # The group line carries a card; its body is in the packet its Ref names.
+                self.delivered.append(dispatcher_fixtures.expand_notice(self.paths, text))
                 return None
             if outcome == "transient":
                 raise RuntimeError("WhatsApp is temporarily disconnected")
@@ -997,12 +998,15 @@ def test_a_stale_digest_does_not_acknowledge_a_pending_announcement(tmp_path):
                           awaitingPhysicalAnnouncedFor=0, physicalCandidateCount=2)
     bench.seed(_state({key: record}))
     bench.sweep()
-    assert len(bench.delivered) == 1, "the stale digest must be sent"
+    # Relay 16 C2: an old logged-out line is rechecked and handed to the daily
+    # line card rather than re-announced on its own; that is no announcement.
+    assert len(bench.delivered) == 0, "the stale digest goes to the daily line card"
+    assert bench.record(key).get("lastLineRecheckVerdict") == "could_not_check"
     assert bench.record(key).get("awaitingPhysicalAnnouncedFor") == 0
     bench.clock.now = T0 + 60
     _deliver(bench, event)
     record = bench.record(key)
-    assert len(bench.delivered) == 2, "the next same-key event must carry the owed announcement"
+    assert len(bench.delivered) == 1, "the next same-key event must carry the owed announcement"
     assert record.get("awaitingPhysicalAnnouncedFor") == record.get("awaitingPhysicalAt")
 
 

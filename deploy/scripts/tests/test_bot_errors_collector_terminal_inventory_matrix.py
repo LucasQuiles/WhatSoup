@@ -64,6 +64,10 @@ EXPECTED_DISPOSITIONS = {
     # owed-page breadcrumbs written before a quarantine move: {"signal", "breadcrumb"}
     # only (a digest id, the canonical signal), never an event record or an event id
     "unrenderable_signals": EXEMPT_NON_RECORD,
+    # relay 16 notice packets, named by the card's Ref: a copy of the notice for
+    # machine readers. The event's own lifecycle record stays in sent/ or
+    # suppressed/ (both scanned); a packet is never a queue or terminal record.
+    "packets": EXEMPT_NON_RECORD,
     "suppressed": SCANNED,
     "quarantine": SCANNED,
     "testleak": SCANNED,

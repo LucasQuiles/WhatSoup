@@ -120,6 +120,25 @@ def _iso(epoch: int) -> str:
 _write_event = dispatcher_fixtures.write_outbox_event
 
 
+def test_future_clear_does_not_retire_a_queued_alert(tmp_path, monkeypatch):
+    mod = _load_module(tmp_path / "state")
+    paths = mod.setup_dirs()
+    now = 1784719200
+    monkeypatch.setattr(mod.time, "time", lambda: now)
+    alert_path = _write_event(paths, "alert.json", _daily_health_event(
+        event_id="pending-alert", event_type="alert", created_at_epoch=now - 60,
+        next_attempt_at_epoch=now + 3600,
+    ))
+    clear_path = _write_event(paths, "future-clear.json", _daily_health_event(
+        event_id="future-clear", event_type="clear", severity="info",
+        created_at_epoch=now + 61, next_attempt_at_epoch=0,
+    ))
+
+    assert mod.suppress_alerts_recovered_before_delivery(paths) == 0
+    assert alert_path.exists() and clear_path.exists()
+    assert not mod.load_incident_state(paths).get("dailyHealthFreshness")
+
+
 def test_no_open_incident_pair_persists_freshness_before_terminal_move(tmp_path):
     """RED-on-main: both files retire only after durable state records the clear.
 

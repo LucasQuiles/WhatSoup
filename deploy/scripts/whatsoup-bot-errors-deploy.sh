@@ -53,6 +53,10 @@ ROOT="${2:?missing <root>}"
 # enforces the closure so a future import cannot reopen this silently.
 FILES=(
   "deploy/lib/runtime-path.sh"
+  # fleet_lines.py: the health check and the dispatcher read the local fleet
+  # API's line list through it (relay 16 line recheck). It precedes its
+  # importers so a service invocation between copies can load either script.
+  "deploy/scripts/lib/fleet_lines.py"
   "deploy/scripts/bot-errors-dispatcher.py"
   "deploy/scripts/bot-errors-health-check.py"
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
@@ -194,24 +198,72 @@ PY
 }
 
 assert_no_symlink_path() {
-  local root="$1" rel="$2" cur i
-  cur="$root"
+  local root="$1" rel="$2" cur i part alias_target
+  local root_parts=()
+  case "$root" in
+    /*) cur=/ ;;
+    *) cur="$(pwd -P)" || return 1 ;;
+  esac
+  IFS='/' read -r -a root_parts <<< "$root"
+  for part in "${root_parts[@]}"; do
+    case "$part" in
+      ''|.) continue ;;
+      ..) cur="${cur%/*}"; [[ -n "$cur" ]] || cur=/ ;;
+      *) cur="${cur%/}/$part" ;;
+    esac
+    if [[ -L "$cur" ]]; then
+      # Preserve stock Darwin aliases, but never arbitrary ancestor links.
+      alias_target=""
+      case "$cur" in
+        /var|/tmp)
+          if [[ "$(uname -s)" == Darwin ]]; then
+            alias_target="$(readlink "$cur")" || return 1
+          fi ;;
+      esac
+      if [[ ( "$alias_target" == "private$cur" || "$alias_target" == "/private$cur" ) \
+            && ! -L /private && ! -L "/private$cur" && -d "/private$cur" ]]; then
+        cur="/private$cur"
+      else
+        echo "  SYMLINK  root via $cur"; return 1
+      fi
+    fi
+    if [[ -e "$cur" && ! -d "$cur" ]]; then echo "  NOTDIR   root via $cur"; return 1; fi
+  done
   local parts=()
   IFS='/' read -r -a parts <<< "$rel"
   for ((i=0; i<${#parts[@]}; i++)); do
     cur="$cur/${parts[$i]}"
     if [[ -L "$cur" ]]; then echo "  SYMLINK  $rel via $cur"; return 1; fi
+    if (( i == ${#parts[@]} - 1 )) && [[ -e "$cur" && ! -f "$cur" ]]; then
+      echo "  NOTFILE  $rel via $cur"; return 1
+    fi
     if (( i < ${#parts[@]} - 1 )) && [[ -e "$cur" && ! -d "$cur" ]]; then
       echo "  NOTDIR   $rel via $cur"; return 1
     fi
   done
 }
 
+path_is_listed_absent() {
+  local ledger="$1" wanted="$2" listed
+  while IFS= read -r listed || [[ -n "$listed" ]]; do
+    [[ "$listed" == "$wanted" ]] && return 0
+  done < "$ledger"
+  return 1
+}
+
 do_verify() {
-  local fail=0 r="$1"
+  local fail=0 r="$1" allow_ledger_absent="${2:-0}"
   for entry in "${MANAGED_FILES[@]}"; do
     local path="${entry%%:*}" want="${entry##*:}" f="$r/${entry%%:*}"
     if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
+    if [[ "$allow_ledger_absent" == "1" ]] && path_is_listed_absent "$r/.was-absent" "$path"; then
+      if [[ -e "$f" || -L "$f" ]]; then
+        echo "  ABSENT_CONFLICT $path"; fail=1
+      else
+        echo "  ABSENT    $path"
+      fi
+      continue
+    fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
     local got got_rc
     got="$(sha "$f")"; got_rc=$?
@@ -227,8 +279,8 @@ do_verify() {
 }
 
 verify_paths_present() {
-  # Manifest-independent structural check: every managed path exists at the
-  # given root and is not reached through a symlink -- the same path set
+  # Manifest-independent structural check: every managed path is present or
+  # recorded absent, with no symlink traversal -- the same path set
   # do_verify() checks, but with no byte/hash comparison and therefore no
   # dependency on MANAGED_FILES (which requires a readable runtime
   # manifest). Used by rollback/rollback-lkg, which must keep working even
@@ -236,10 +288,18 @@ verify_paths_present() {
   # ground truth for an emergency restore, not the manifest, and a 3am
   # operator should never be blocked from rolling back by an unrelated
   # manifest problem.
-  local fail=0 r="$1"
+  local fail=0 r="$1" absent_ledger="${2:-}"
   for path in "${FILES[@]}"; do
     local f="$r/$path"
     if ! assert_no_symlink_path "$r" "$path"; then fail=1; continue; fi
+    if [[ -n "$absent_ledger" ]] && path_is_listed_absent "$absent_ledger" "$path"; then
+      if [[ -e "$f" || -L "$f" ]]; then
+        echo "  ABSENT_CONFLICT $path"; fail=1
+      else
+        echo "  ABSENT    $path"
+      fi
+      continue
+    fi
     if [[ ! -f "$f" ]]; then echo "  MISSING  $path"; fail=1; continue; fi
     echo "  PRESENT  $path"
   done
@@ -259,6 +319,118 @@ out = redact_bot_errors_text(probe, credential_path_marker="[REDACTED PATH]")
 assert "super-secret-token-XYZ123" not in out, f"LEAK: secret survived redaction -> {out!r}"
 assert "REDACTED" in out.upper() or out != probe, f"no redaction applied -> {out!r}"
 print("  SMOKE    redaction ok (secret removed)")
+PY
+}
+
+require_side_notice_compatibility() {
+  local candidate="$1" scripts_dir
+  scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 3
+  python3 - "$scripts_dir" "$candidate" <<'PY'
+import ast
+import importlib.util
+import os
+from pathlib import Path
+import stat
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from lib.controller_state import read_controller_state
+from lib.state_files import INCIDENT_STATE
+from lib.state_root import state_root
+
+
+def unavailable():
+    print("ROLLBACK_STATE_UNAVAILABLE: preserve runtime; verify the service user's state root and reconcile incident state", file=sys.stderr)
+    raise SystemExit(3)
+
+
+def supports_uncertain_notices(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            unavailable()
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            source = handle.read(2 * 1024 * 1024 + 1)
+        if len(source) > 2 * 1024 * 1024:
+            unavailable()
+    finally:
+        os.close(fd)
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, UnicodeDecodeError):
+        return False
+    declarations = [node.value for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "SIDE_NOTICE_STATE_VERSION"
+                            for target in node.targets)]
+    return (len(declarations) == 1 and isinstance(declarations[0], ast.Constant)
+            and type(declarations[0].value) is int and declarations[0].value == 1)
+
+
+def validate(payload):
+    spec = importlib.util.spec_from_file_location(
+        "rollback_dispatcher", Path(sys.argv[1]) / "bot-errors-dispatcher.py")
+    dispatcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dispatcher)
+    payload = dispatcher.validate_dispatcher_state(payload)
+    for value in payload["lastSentAt"].values():
+        try:
+            int(value or 0)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("invalid incident timestamp") from error
+    for key in ("openIncidents", "flapState"):
+        section = payload.get(key, {})
+        if not isinstance(section, dict) or any(not isinstance(row, dict) for row in section.values()):
+            raise ValueError("invalid incident section")
+    return dict(payload)
+
+
+try:
+    candidate = Path(sys.argv[2]) / "deploy/scripts/bot-errors-dispatcher.py"
+    if supports_uncertain_notices(candidate):
+        raise SystemExit(0)
+    explicit_root = os.environ.get("BOT_ERRORS_STATE_DIR")
+    if explicit_root and explicit_root.strip() and not Path(explicit_root).is_absolute():
+        unavailable()
+    root = state_root(resolve_anchor=True)
+    if root.is_symlink():
+        unavailable()
+    if not root.exists():
+        raise SystemExit(0)
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+        unavailable()
+    authority_present = False
+    with os.scandir(root) as entries:
+        for count, entry in enumerate(entries):
+            if count >= 4096:
+                unavailable()
+            if entry.name == INCIDENT_STATE + ".lock":
+                continue
+            if (entry.name == INCIDENT_STATE
+                    or entry.name.startswith((INCIDENT_STATE + ".", "." + INCIDENT_STATE + "."))
+                    or entry.name.endswith(".controller-state-evidence")):
+                authority_present = True
+                break
+    if not authority_present:
+        raise SystemExit(0)
+    result = read_controller_state(root / INCIDENT_STATE, component="dispatcher-incident",
+                                   validate_payload=validate, lock_timeout_seconds=2.0)
+    if result.mode not in {"valid", "legacy_valid"} or result.payload is None:
+        unavailable()
+    payload = result.payload
+    stale_fields = ("lastStaleRenotifyUnconfirmedAt", "lastStaleRenotifyUnconfirmedEventId",
+                    "lastStaleRenotifyUnconfirmedRef")
+    stale = any(any(field in row for field in stale_fields)
+                for row in payload.get("openIncidents", {}).values())
+    flap = any("unconfirmedStorm" in row for row in payload.get("flapState", {}).values())
+    if stale or flap:
+        print("ROLLBACK_INCOMPATIBLE: uncertain side notices require a compatible dispatcher; preserve incident state and use a compatible backup", file=sys.stderr)
+        raise SystemExit(3)
+except (OSError, ValueError, RecursionError):
+    unavailable()
 PY
 }
 
@@ -345,10 +517,14 @@ require_backup_dir() {
   while IFS= read -r absent_path || [[ -n "$absent_path" ]]; do
     [[ -z "$absent_path" ]] && continue
     is_managed_path "$absent_path" || { echo "FATAL: backup .was-absent contains unmanaged path: $absent_path"; return 3; }
+    [[ ! -e "$bkdir/$absent_path" && ! -L "$bkdir/$absent_path" ]] || {
+      echo "FATAL: backup .was-absent conflicts with present path: $absent_path"; return 3;
+    }
   done < "$bkdir/.was-absent"
   for local_path in "${FILES[@]}"; do
     assert_no_symlink_path "$bkdir" "$local_path" || { echo "FATAL: backup path is unsafe"; return 3; }
   done
+  verify_paths_present "$bkdir" "$bkdir/.was-absent" || { echo "FATAL: backup structurally incomplete"; return 3; }
 }
 
 prune_backup_dir() {
@@ -428,6 +604,7 @@ case "$MODE" in
       local_path="${entry%%:*}"
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
+    require_side_notice_compatibility "$STAGING" || exit 3
     # 1) backup EVERY target path that exists (record absentees for rollback-delete)
     mkdir -p "$BKDIR"; : > "$BKDIR/.was-absent"
     for entry in "${MANAGED_FILES[@]}"; do
@@ -435,7 +612,7 @@ case "$MODE" in
       if [[ -f "$src" ]]; then mkdir -p "$BKDIR/$(dirname "$local_path")"; cp -p "$src" "$BKDIR/$local_path";
       else echo "$local_path" >> "$BKDIR/.was-absent"; fi
     done
-    if do_verify "$BKDIR" > "$BKDIR/.bot-errors-backup-verify.log" 2>&1 && smoke_redaction "$BKDIR" >> "$BKDIR/.bot-errors-backup-verify.log" 2>&1; then
+    if do_verify "$BKDIR" 1 > "$BKDIR/.bot-errors-backup-verify.log" 2>&1 && smoke_redaction "$BKDIR" >> "$BKDIR/.bot-errors-backup-verify.log" 2>&1; then
       BACKUP_VERIFIED=1
     else
       BACKUP_VERIFIED=0
@@ -475,6 +652,7 @@ case "$MODE" in
     for local_path in "${FILES[@]}"; do
       assert_no_symlink_path "$ROOT" "$local_path" || { echo "FATAL: target path is unsafe"; exit 3; }
     done
+    require_side_notice_compatibility "$BKDIR" || exit 3
     for local_path in "${FILES[@]}"; do
       if [[ -f "$BKDIR/$local_path" ]]; then mkdir -p "$(dirname "$ROOT/$local_path")"; cp -p "$BKDIR/$local_path" "$ROOT/$local_path"; fi
     done
@@ -491,9 +669,9 @@ case "$MODE" in
     require_backup_dir "$ROOT" "$BKDIR" || exit 3
     echo "== rollback last_known_good $ROOT from $BKDIR =="
     echo "LAST_KNOWN_GOOD_POINTER=$LKG_POINTER"
-    if verify_paths_present "$BKDIR" && smoke_redaction "$BKDIR"; then
+    if verify_paths_present "$BKDIR" "$BKDIR/.was-absent" && smoke_redaction "$BKDIR"; then
       bash "$0" rollback "$ROOT" "$BKDIR"
-      verify_paths_present "$ROOT" && smoke_redaction "$ROOT" && echo "ROLLBACK_LKG_OK backup=$BKDIR" || { echo "ROLLBACK_LKG_VERIFY_FAIL"; exit 4; }
+      verify_paths_present "$ROOT" "$BKDIR/.was-absent" && smoke_redaction "$ROOT" && echo "ROLLBACK_LKG_OK backup=$BKDIR" || { echo "ROLLBACK_LKG_VERIFY_FAIL"; exit 4; }
     else
       echo "FATAL: last_known_good backup does not verify clean: $BKDIR"
       exit 3

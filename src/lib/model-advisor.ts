@@ -20,6 +20,7 @@ import { clearAlertSourceChecked, emitAlertChecked } from './emit-alert.ts';
 import {
   clearRecoveryMarker,
   loadRecoveryMarkers,
+  readRecoveryMarkerState,
   setRecoveryMarker,
 } from './recovery-authority-store.ts';
 import { adviseModel, type ModelAdvisory } from './model-catalog.ts';
@@ -58,10 +59,12 @@ function sleep(ms: number): Promise<void> {
 let cachedAdvisories: ModelAdvisory[] = [];
 let cachedLiveScan: LiveModelScanStatus | null = null;
 let lastCheckedAt: string | null = null;
-// Dedupe key of the last advisory set we alerted on — re-alert only when the
-// set changes (and once per process start), not on every daily re-check.
-let lastNotifiedKey: string | null = null;
-let lastLiveScanFailureKey: string | null = null;
+// Dedupe key per instance of the last advisory set we alerted on — re-alert only when the
+// set changes, not on every daily re-check. A fresh process starts at null and
+// falls back to the key persisted with the source's recovery marker, so a
+// restart does not re-send an unchanged set (see persistedNotifiedKey).
+const notifiedKeys = new Map<string, string>();
+const liveScanFailureKeys = new Map<string, string>();
 // #2394: tracks whether the cold-start recovery-marker reconcile has fired in
 // this process. The reconcile runs ONCE after the first startup check result,
 // never on daily interval ticks (trap 7).
@@ -113,8 +116,8 @@ export function __resetModelAdvisorForTest(): void {
   cachedAdvisories = [];
   cachedLiveScan = null;
   lastCheckedAt = null;
-  lastNotifiedKey = null;
-  lastLiveScanFailureKey = null;
+  notifiedKeys.clear();
+  liveScanFailureKeys.clear();
   startupReconciled = false;
   liveIdsCache = null;
 }
@@ -561,6 +564,27 @@ export async function checkModelCurrencyStatus(
   return { advisories, liveScan };
 }
 
+/** Marker detail field holding the dedupe key of the set the marker was written for. */
+const NOTIFIED_KEY_FIELD = 'notifiedKey';
+
+/**
+ * The dedupe key last ALERTED for `source` on `instance`, as persisted in that
+ * source's recovery marker by the emit that wrote it, or null when there is none.
+ *
+ * The in-memory keys reset on every restart, so without this each restart
+ * re-emitted the same advisory set. The marker already marks "an alert for this
+ * source is active" and is written only after a durably accepted emit and removed
+ * on clear, so the key stored beside it names exactly the set operators last saw.
+ * Any doubt (missing, unreadable, invalid, a marker from before the field
+ * existed) reads as null and the set is emitted as before.
+ */
+function persistedNotifiedKey(source: string, instance: string): string | null {
+  const read = readRecoveryMarkerState(`${source}:${instance}`);
+  if (read.state !== 'ok') return null;
+  const value = read.payload[NOTIFIED_KEY_FIELD];
+  return typeof value === 'string' ? value : null;
+}
+
 /**
  * Record advisories (for /health) and notify operators through the
  * BOT_ERRORS pipeline. Deprecated/retired models alert at 'warning';
@@ -574,6 +598,7 @@ export function notifyModelAdvisories(
 ): void {
   cachedAdvisories = advisories;
   lastCheckedAt = new Date().toISOString();
+  const lastNotifiedKey = notifiedKeys.get(instance) ?? null;
 
   const key = advisories
     .map((a) => `${a.role}:${a.model}:${a.level}:${a.recommended ?? ''}`)
@@ -589,9 +614,11 @@ export function notifyModelAdvisories(
           // intentional: marker removal is best-effort — a stale marker only
           // causes a redundant idempotent clear on the next cold-start scan.
         }
+      } else {
+        return;
       }
     }
-    lastNotifiedKey = '';
+    notifiedKeys.set(instance, '');
     if (options.logAllCurrent !== false) {
       log.info({}, 'model currency check: all configured models current');
     }
@@ -605,15 +632,19 @@ export function notifyModelAdvisories(
   }
 
   if (key === lastNotifiedKey) return; // already alerted on this exact set
-  lastNotifiedKey = key;
-
+  if (lastNotifiedKey === null && persistedNotifiedKey(ALERT_SOURCE, instance) === key) {
+    // Restarted with the set a prior process already alerted on: adopt it.
+    notifiedKeys.set(instance, key);
+    return;
+  }
   const severity = advisories.some((a) => a.level !== 'upgrade-available') ? 'warning' : 'info';
   const summary = `[${severity}] model updates available (${advisories.length}): ` + advisories
     .map((a) => `${a.role}=${a.model} → ${a.recommended ?? '?'} [${a.level}]`)
     .join('; ');
   if (emitAlertChecked(instance, ALERT_SOURCE, summary, JSON.stringify(advisories), severity)) {
+    notifiedKeys.set(instance, key);
     try {
-      setRecoveryMarker(`${ALERT_SOURCE}:${instance}`);
+      setRecoveryMarker(`${ALERT_SOURCE}:${instance}`, { [NOTIFIED_KEY_FIELD]: key });
     } catch {
       // intentional: marker write is best-effort — the alert itself was
       // already durably queued above; a missing marker only means the next
@@ -624,6 +655,7 @@ export function notifyModelAdvisories(
 
 export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelScanStatus): void {
   cachedLiveScan = liveScan;
+  const lastLiveScanFailureKey = liveScanFailureKeys.get(instance) ?? null;
 
   if (liveScan.degradedVendors.length === 0) {
     if (lastLiveScanFailureKey !== null && lastLiveScanFailureKey !== '') {
@@ -634,9 +666,11 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
           // intentional: marker removal is best-effort — a stale marker only
           // causes a redundant idempotent clear on the next cold-start scan.
         }
+      } else {
+        return;
       }
     }
-    lastLiveScanFailureKey = '';
+    liveScanFailureKeys.set(instance, '');
     return;
   }
 
@@ -645,15 +679,19 @@ export function notifyModelLiveScanStatus(instance: string, liveScan: LiveModelS
     .sort()
     .join('|');
   if (key === lastLiveScanFailureKey) return;
-  lastLiveScanFailureKey = key;
-
+  if (lastLiveScanFailureKey === null && persistedNotifiedKey(LIVE_SCAN_ALERT_SOURCE, instance) === key) {
+    // Restarted with the degradation a prior process already alerted on: adopt it.
+    liveScanFailureKeys.set(instance, key);
+    return;
+  }
   const summary = '[warning] model currency live scan degraded: ' + liveScan.degradedVendors
     .map((failure) => `${failure.vendor}=${failure.reason}`)
     .join('; ') + '; static catalog fallback in use';
   log.warn({ liveScan }, 'model currency live scan degraded');
   if (emitAlertChecked(instance, LIVE_SCAN_ALERT_SOURCE, summary, JSON.stringify(liveScan), 'warning')) {
+    liveScanFailureKeys.set(instance, key);
     try {
-      setRecoveryMarker(`${LIVE_SCAN_ALERT_SOURCE}:${instance}`);
+      setRecoveryMarker(`${LIVE_SCAN_ALERT_SOURCE}:${instance}`, { [NOTIFIED_KEY_FIELD]: key });
     } catch {
       // intentional: marker write is best-effort — the alert itself was
       // already durably queued above; a missing marker only means the next

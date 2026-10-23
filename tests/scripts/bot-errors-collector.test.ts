@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readCapture } from '../helpers/bot-errors-notice.ts';
 import { afterEach, describe, expect, it } from 'vitest';
 
 let tmpRoot = '';
@@ -962,8 +963,8 @@ print(Path(found).name if found else "NONE")
     });
 
     expect(dispatcher.status).toBe(0);
-    expect(readFileSync(capturePath, 'utf8')).toContain('remote harvested critical alert');
-    expect(readFileSync(capturePath, 'utf8')).toContain('writefail_recovered: origin=mini5-hostname harvested_from=mini5');
+    expect(readCapture(capturePath)).toContain('remote harvested critical alert');
+    expect(readCapture(capturePath)).toContain('writefail_recovered: origin=mini5-hostname harvested_from=mini5');
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
   });
 
@@ -993,7 +994,7 @@ print(Path(found).name if found else "NONE")
       encoding: 'utf8',
     }).status).toBe(0);
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(1);
-    expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+    expect((readCapture(capturePath).match(/remote writefail critical/g) ?? [])).toHaveLength(1);
   });
 
   it('dedupes a stale remote writefail claim left behind by ack archive failure', () => {
@@ -1051,9 +1052,17 @@ print(Path(found).name if found else "NONE")
       env: collectorEnv({ BOT_ERRORS_STATE_DIR: tmpRoot, BOT_ERRORS_DRY_SEND_CAPTURE: capturePath }),
       encoding: 'utf8',
     }).status).toBe(0);
-    // One extra sent event: the writefail ack recovery observation (#2405).
+    // The writefail ack recovery observation (#2405) follows the critical
+    // ack-failure card the group already saw, so it is a state change: its
+    // own resolved card at once, not a line in the daily summary.
     expect(readdirSync(join(tmpRoot, 'sent')).filter((file) => file.endsWith('.sent'))).toHaveLength(3);
-    expect((readFileSync(capturePath, 'utf8').match(/remote writefail critical/g) ?? [])).toHaveLength(1);
+    expect((readCapture(capturePath).match(/remote writefail ack recovered/g) ?? [])).toHaveLength(1);
+    const recovered = readdirSync(join(tmpRoot, 'suppressed'))
+      .filter((file) => file !== '.durable-json.lock')
+      .map((file) => JSON.parse(readFileSync(join(tmpRoot, 'suppressed', file), 'utf8')) as { summary?: string })
+      .filter((event) => String(event.summary).startsWith('remote writefail ack recovered'));
+    expect(recovered).toHaveLength(0);
+    expect((readCapture(capturePath).match(/remote writefail critical/g) ?? [])).toHaveLength(1);
   });
 
   it('alerts distinct remote writefail ack failures independently by payload hash', () => {

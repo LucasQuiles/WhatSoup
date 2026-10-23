@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -247,6 +248,7 @@ def _recovered_clear(remote: str = "peer-a", *, machine: str = _MACHINE) -> dict
     return {
         "schemaVersion": 1,
         "id": f"evt-clear-{remote}",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
         "eventType": "clear",
         "severity": "info",
         "machine": machine,

@@ -20,6 +20,7 @@ import importlib.util
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,7 @@ def _alert(
 def _clear(source: str = "health_body_degraded", **kw) -> dict:
     evt = _alert(source, **kw)
     evt["eventType"] = "clear"
+    evt["createdAt"] = datetime.now(timezone.utc).isoformat()
     evt["severity"] = "info"
     return evt
 

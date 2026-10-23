@@ -31,8 +31,8 @@ whatsoup_run_bounded() {
     set -m
     case "$-" in *m*) ;; *) return 2 ;; esac
     local worker_pid="" worker_candidate="" worker_group="" guard_pid="" guard_candidate="" guard_group=""
-    local worker_rc=0 worker_reaped=0 guard_reaped=0 guard_rc=0 rc=0 deadline_rc=0
-    local status_reader_pid="" status_timer_pid=""
+    local worker_rc=0 worker_reaped=0 guard_reaped=0 guard_rc=0 rc=0 deadline_rc=0 guard_term_sent=0
+    local status_reader_pid="" status_timer_pid="" guard_wait_timer_pid=""
     local status_cleanup_failed=0
     local control_token="${RANDOM}${RANDOM}${RANDOM}"
     local control_file="${TMPDIR:-/tmp}/whatsoup-bounded-control.$$.$control_token"
@@ -233,6 +233,51 @@ whatsoup_run_bounded() {
       done
     }
 
+    _bounded_guard_group_is_owned() {
+      local observed observed_group
+      [[ "$guard_pid" =~ ^[0-9]+$ ]] && [[ "$guard_group" =~ ^[0-9]+$ ]] || return 2
+      [ "$guard_pid" -gt 1 ] && [ "$guard_group" -gt 1 ] && [ "$guard_pid" = "$guard_group" ] || return 2
+      [ "$guard_group" != "$worker_group" ] || return 2
+      kill -0 "$guard_pid" 2>/dev/null || return 1
+      observed="$(/bin/ps -o pgid= -p "$guard_pid" 2>/dev/null)" || return 2
+      observed_group="${observed//[[:space:]]/}"
+      [ "$observed_group" = "$guard_group" ] || return 2
+    }
+
+    _bounded_wait_guard() {
+      local force_after_grace="$1" guard_wait_rc=0
+      if [ "$force_after_grace" -eq 1 ]; then
+        (
+          set +m
+          local guard_sleep_pid=""
+          _bounded_guard_wait_cleanup() {
+            [ -z "$guard_sleep_pid" ] || { kill -9 "$guard_sleep_pid" 2>/dev/null; wait "$guard_sleep_pid" 2>/dev/null; }
+          }
+          trap '_bounded_guard_wait_cleanup' EXIT
+          sleep "$grace" >/dev/null 2>&1 &
+          guard_sleep_pid=$!
+          wait "$guard_sleep_pid" 2>/dev/null
+          guard_sleep_pid=""
+          if kill -0 "$guard_pid" 2>/dev/null; then
+            if _bounded_guard_group_is_owned; then
+              kill -9 -- "-$guard_group" 2>/dev/null
+            else
+              # The guard is still our direct child even if a later identity
+              # probe cannot confirm its recorded group. Kill only that child;
+              # the caller's cleanup then handles the recorded group separately.
+              kill -9 "$guard_pid" 2>/dev/null
+            fi
+          fi
+        ) >/dev/null 2>&1 &
+        guard_wait_timer_pid=$!
+      fi
+      wait "$guard_pid" 2>/dev/null || guard_wait_rc=$?
+      [ -z "$guard_wait_timer_pid" ] || { _bounded_reap_status_helper "$guard_wait_timer_pid" || status_cleanup_failed=1; }
+      guard_wait_timer_pid=""
+      case "$guard_wait_rc" in 137|9) guard_rc=2 ;; *) guard_rc="$guard_wait_rc" ;; esac
+      return "$guard_wait_rc"
+    }
+
     _bounded_read_deadline_bounded() {
       local reader_rc=0
       (
@@ -290,6 +335,7 @@ whatsoup_run_bounded() {
     _bounded_outer_cleanup() {
       if _bounded_reap_status_helper "$status_timer_pid"; then status_timer_pid=""; else status_cleanup_failed=1; fi
       if _bounded_reap_status_helper "$status_reader_pid"; then status_reader_pid=""; else status_cleanup_failed=1; fi
+      if _bounded_reap_status_helper "$guard_wait_timer_pid"; then guard_wait_timer_pid=""; else status_cleanup_failed=1; fi
       # After the reap only the guard can still check the recorded groups, so
       # let its trap end them before its group is killed. The reaped worker's
       # group goes first, in case a second signal cuts the wait short.
@@ -297,7 +343,8 @@ whatsoup_run_bounded() {
         [ "$worker_reaped" -eq 1 ] && [ -n "$worker_group" ] && kill -9 -- "-$worker_group" 2>/dev/null
         kill -CONT "$guard_pid" 2>/dev/null
         kill -TERM "$guard_pid" 2>/dev/null
-        wait "$guard_pid" 2>/dev/null
+        _bounded_wait_guard 1
+        guard_reaped=1
       fi
       [ -n "$guard_group" ] && kill -9 -- "-$guard_group" 2>/dev/null
       # Only a signal or a setup failure leaves the outer before it reaps the
@@ -568,7 +615,18 @@ whatsoup_run_bounded() {
 
     (
       set +m
-      local timer_pid="" monitor_pid="" guard_status=0 command_authorized=0 watchdog_authorized=0
+      local guard_self_pid="" guard_self_group=""
+      if ! guard_self_pid="$(exec /bin/sh -c 'printf %s "$PPID"')" ||
+         [[ ! "$guard_self_pid" =~ ^[0-9]+$ ]] || [ "$guard_self_pid" -le 1 ] ||
+         ! guard_self_group="$(/bin/ps -o pgid= -p "$guard_self_pid" 2>/dev/null)" ||
+         [ "${guard_self_group//[[:space:]]/}" != "$guard_self_pid" ]; then
+        # The worker is our recorded child and has not been released. A failed
+        # guard group must never fork timers or resume it into unguarded work.
+        kill -TERM "$worker_pid" 2>/dev/null
+        kill -CONT "$worker_pid" 2>/dev/null
+        return 2
+      fi
+      local timer_pid="" monitor_pid="" guard_grace_sleep_pid="" guard_status=0 command_authorized=0 watchdog_authorized=0
       _bounded_wait_for_budget() {
         local remaining="$budget" chunk
         while [ "$remaining" -gt 0 ]; do
@@ -580,8 +638,11 @@ whatsoup_run_bounded() {
       _bounded_guard_cleanup() {
         [ -z "$timer_pid" ] || kill -9 "$timer_pid" 2>/dev/null
         [ -z "$monitor_pid" ] || kill -9 "$monitor_pid" 2>/dev/null
+        [ -z "$guard_grace_sleep_pid" ] || kill -9 "$guard_grace_sleep_pid" 2>/dev/null
         [ -z "$timer_pid" ] || wait "$timer_pid" 2>/dev/null
         [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null
+        [ -z "$guard_grace_sleep_pid" ] || wait "$guard_grace_sleep_pid" 2>/dev/null
+        guard_grace_sleep_pid=""
       }
       _bounded_guard_exit() {
         # Derive the report from the durable claim, not the status set after
@@ -685,23 +746,46 @@ whatsoup_run_bounded() {
         _bounded_kill_worker_children || guard_status=2
         kill -TERM -- "-$worker_group" 2>/dev/null
         kill -CONT -- "-$worker_group" 2>/dev/null
+        # Its created groups are ended; allow one second for worker cleanup.
+        grace=1
       fi
       # Only an authenticated record needs the worker's timeout-entry path.
       [ "$authorization_state" -eq 0 ] && kill -USR1 "$worker_pid" 2>/dev/null
-      if ! sleep "$grace"; then
+      sleep "$grace" &
+      guard_grace_sleep_pid=$!
+      if ! wait "$guard_grace_sleep_pid"; then
+        guard_status=2
         _bounded_guard_kill_authorized
         _bounded_guard_end_worker
-        guard_status=2
         _bounded_guard_exit
       fi
+      guard_grace_sleep_pid=""
       _bounded_guard_kill_authorized
+      # A stopped worker cannot enter timeout cleanup during a second grace.
+      # End it only when its current state and process group are confirmed.
+      if [ "$authorization_state" -eq 0 ]; then
+        local worker_observed="" worker_state="" worker_observed_group=""
+        if worker_observed="$(/bin/ps -o stat= -o pgid= -p "$worker_pid" 2>/dev/null)"; then
+          IFS=$' \t\n' read -r worker_state worker_observed_group <<< "$worker_observed"
+          case "$worker_state" in
+            *T*)
+              if [ "$worker_observed_group" = "$worker_group" ]; then
+                guard_status=2
+                _bounded_guard_end_worker
+                _bounded_guard_exit
+              fi
+              ;;
+          esac
+        fi
+      fi
       if [ "$authorization_state" -eq 0 ]; then
         sleep "$grace" &
         timer_pid=$!
         wait "$timer_pid" 2>/dev/null
-        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }
-        _bounded_guard_end_worker
+        [ "$?" -eq 0 ] || { guard_status=2; _bounded_guard_end_worker; _bounded_guard_exit; }
+        # Reaping the worker lets its parent TERM this guard immediately.
         guard_status=2
+        _bounded_guard_end_worker
         _bounded_guard_exit
       else
         if kill -0 "$worker_pid" 2>/dev/null; then guard_status=2; fi
@@ -726,9 +810,10 @@ whatsoup_run_bounded() {
       # deadline fired without an authenticated outcome, let the guard decide.
       if [ "$worker_rc" -ne 2 ] || [ "$deadline_rc" -ne 124 ] || _bounded_read_outcome; then
         kill -TERM "$guard_pid" 2>/dev/null
+        guard_term_sent=1
       fi
     fi
-    wait "$guard_pid" 2>/dev/null || guard_rc=$?
+    _bounded_wait_guard "$guard_term_sent"
     guard_reaped=1
     if [ "$deadline_rc" -eq 2 ] || [ -e "$cleanup_file" ] || [ -L "$cleanup_file" ]; then
       rc=2

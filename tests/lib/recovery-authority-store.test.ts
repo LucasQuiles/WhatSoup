@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
-  mkdtempSync, mkdirSync, chmodSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync,
+  mkdtempSync, mkdirSync, chmodSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -473,6 +473,59 @@ describe('readRecoveryMarkerState', () => {
     } finally {
       chmodSync(markerFile('read:denied'), 0o600);
     }
+  });
+
+  it('reports unreadable for a marker symlink without following its target', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:symlink', { scheduledId: 7 });
+    const targetRoot = mkdtempSync(join(tmpRoot, 'outside-'));
+    const target = join(targetRoot, 'marker.json');
+    writeFileSync(target, JSON.stringify({ scheduledId: 99 }), { mode: 0o600 });
+    rmSync(markerFile('read:symlink'));
+    symlinkSync(target, markerFile('read:symlink'));
+
+    try {
+      expect(readRecoveryMarkerState('read:symlink')).toEqual({ state: 'unreadable' });
+    } finally {
+      rmSync(targetRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('reads valid marker payloads larger than the old reader-only cap', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    const detail = 'x'.repeat(70 * 1024);
+    setRecoveryMarker('read:large', { detail });
+
+    const result = readRecoveryMarkerState('read:large');
+
+    expect(result.state).toBe('ok');
+    expect(result.state === 'ok' && result.payload['detail']).toBe(detail);
+  });
+
+  it('reads a marker payload exactly at the reader limit', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    const maxBytes = 1024 * 1024;
+    const prefix = '{"detail":"';
+    const suffix = '"}\n';
+    const detail = 'x'.repeat(maxBytes - Buffer.byteLength(prefix) - Buffer.byteLength(suffix));
+    setRecoveryMarker('read:limit');
+    writeFileSync(markerFile('read:limit'), prefix + detail + suffix, 'utf-8');
+
+    const result = readRecoveryMarkerState('read:limit');
+
+    expect(result.state).toBe('ok');
+    expect(result.state === 'ok' && result.payload['detail']).toBe(detail);
+  });
+
+  it('reports unreadable for an oversized marker without changing its evidence', async () => {
+    const { setRecoveryMarker, readRecoveryMarkerState } = await store();
+    setRecoveryMarker('read:oversized', { detail: 'x'.repeat(1024 * 1024) });
+    const before = readFileSync(markerFile('read:oversized'));
+
+    const result = readRecoveryMarkerState('read:oversized');
+
+    expect(result).toEqual({ state: 'unreadable' });
+    expect(readFileSync(markerFile('read:oversized')).equals(before)).toBe(true);
   });
 
   it('reports a state rather than throwing for a key too long to encode', async () => {

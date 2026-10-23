@@ -28,6 +28,18 @@ describe('auth CLI redaction', () => {
     expect(redacted).not.toContain('user:pass');
   });
 
+  it.each(
+    ['http', 'https', 'redis', 'wss', 'git+ssh', 'custom.scheme-1'].flatMap((scheme) =>
+      ['example-credential', ':example-credential', 'example-user:'].map((userinfo) =>
+        [scheme, userinfo] as const)),
+  )(
+    'redacts %s URL userinfo without requiring both username and password: %s',
+    (scheme, userinfo) => {
+      expect(redactAuthCliText(`${scheme}://${userinfo}@fixture.invalid/repo`))
+        .toBe(`${scheme}://[REDACTED]@fixture.invalid/repo`);
+    },
+  );
+
   it('normalizes nullish values to an empty redacted string', () => {
     expect(redactAuthCliText(null)).toBe('');
     expect(redactAuthCliText(undefined)).toBe('');

@@ -1,0 +1,37 @@
+{
+  "family": "dispatcher_recovery",
+  "description": "Synthetic dispatcher event; legacy_body is the pre-change format_event rendering.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "incident_recovery",
+    "eventType": "clear",
+    "severity": "info",
+    "id": "2c3d4e5f-6a7b-4c8d-9e0f-a1b2c3d4e5f6",
+    "createdAt": "2026-10-15T09:40:00.000Z",
+    "machine": "mac-host-2.local",
+    "instance": "fixture-bot",
+    "source": "primary_model_unusable",
+    "summary": {
+      "failureClass": "unknown",
+      "length": 44,
+      "correlationDigest": "1a2b3c4d00000000000000000000000000000000000000000000000000000000"
+    },
+    "evidence": {
+      "failureClass": "none",
+      "length": 0,
+      "correlationDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "process": {
+      "pid": 4242
+    },
+    "diagnostics": {
+      "queue": "/srv/bot-errors-fixture/outbox"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "queued"
+    }
+  },
+  "legacy_body": "BOT RECOVERY - fixture-bot: primary model unusable [digest 1a2b3c4d]\n  > summary_confined: unknown - 44 chars - digest 1a2b3c4d\n  > severity: info\n  > machine: mac-host-2.local\n  > instance: fixture-bot\n  > source: primary_model_unusable\n  > incident_key: mac-host-2.local|fixture-bot|primary_model_unusable\n  > event: 2c3d4e5f-6a7b-4c8d-9e0f-a1b2c3d4e5f6\n  > created: 2026-10-15T09:40:00.000Z\n  > dispatcher_attempts: 1\n  > pid: 4242\n  > queue: /srv/bot-errors-fixture/outbox\n  > evidence: none - 0 chars - digest 00000000\n  > requested_action: none — informational event; no Q remediation required.",
+  "card": "✅ *Recovered: fixture-bot: primary model unusable*\nWhere: mac-host-2.local - fixture-bot\nHandling: recovered\nYou: No action needed\nRef: 0c3f461c"
+}

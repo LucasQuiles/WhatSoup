@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -89,6 +89,21 @@ from lib.fleet_config import (
     utc_day,
 )
 from lib.queue_age import scan_directory
+from lib.fleet_lines import (
+    fleet_api_default_url,
+    fleet_api_opener,
+    fleet_api_profile_value,
+    fleet_api_token_target_refused,
+    fleet_api_url,
+    fleet_lines_from_data,
+    host_profile_name,
+    parse_fleet_token,
+    read_fleet_token_text as _read_fleet_token_text,
+)
+
+# Relay 23 W2: both HTTP calls here carry a token to a local port, so the
+# opener uses no environment proxy and follows no redirect (relay 22 A2).
+urlopen = fleet_api_opener()
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -612,15 +627,6 @@ def socket_rpc_lock(timeout: float):
         if locked:
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-
-
-def host_profile_name() -> str:
-    """Host token used to name per-host profiles.
-
-    Mirrors the install scripts (``hostname -s | tr '[:upper:]' '[:lower:]'``):
-    first DNS label of the hostname, lowercased.
-    """
-    return socket.gethostname().split(".")[0].strip().lower()
 
 
 def script_relative_profile_path() -> Path:
@@ -3956,7 +3962,8 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
     except URLError as exc:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:
-        return f"FAIL {url} {exc}"
+        # Relay 25 Y3: the text of a header error holds the "Bearer <token>" bytes; name the type only.
+        return f"FAIL {url} {type(exc).__name__}"
 
 
 def provider_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -6955,113 +6962,9 @@ def provider_probe_target_inventory(
     return [line + resolution_note]
 
 
-def fleet_api_endpoint(raw_url: str) -> str:
-    url = raw_url.rstrip("/")
-    if url.endswith("/api/lines") or url.endswith("/api/instances"):
-        return url
-    return f"{url}/api/lines"
-
-
-def fleet_api_profile_value(profile: dict[str, Any], key: str) -> str | None:
-    value = profile.get(key)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    fleet_api = profile.get("fleetApi") if isinstance(profile.get("fleetApi"), dict) else {}
-    nested = fleet_api.get(key)
-    if isinstance(nested, str) and nested.strip():
-        return nested.strip()
-    return None
-
-
-def fleet_api_profile_port(profile: dict[str, Any]) -> str | None:
-    fleet_api = profile.get("fleetApi") if isinstance(profile.get("fleetApi"), dict) else {}
-    for source in (profile, fleet_api):
-        for key in ("fleetApiPort", "port"):
-            value = source.get(key)
-            if isinstance(value, int):
-                return str(value)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
-
-
-def fleet_api_default_url(profile: dict[str, Any]) -> str:
-    raw_bind = (
-        os.environ.get("FLEET_BIND_ADDRESS")
-        or fleet_api_profile_value(profile, "fleetBindAddress")
-        or fleet_api_profile_value(profile, "bindAddress")
-        or "127.0.0.1"
-    )
-    bind = raw_bind.strip()
-    if bind in {"", "0.0.0.0", "::", "[::]"}:
-        bind = "127.0.0.1"
-    elif ":" in bind and not bind.startswith("["):
-        bind = f"[{bind}]"
-    port = (
-        os.environ.get("BOT_ERRORS_FLEET_API_PORT")
-        or fleet_api_profile_port(profile)
-        or "9099"
-    ).strip()
-    return f"http://{bind}:{port}"
-
-
 def read_fleet_token_text(path: Path) -> tuple[str | None, str | None]:
-    absolute = Path(os.path.abspath(os.fspath(path)))
-    if len(absolute.parts) >= 2:
-        platform_root = Path(absolute.parts[0]) / absolute.parts[1]
-        if platform_root in {Path("/tmp"), Path("/var")} and platform_root.is_symlink():
-            absolute = Path(os.path.realpath(platform_root)).joinpath(*absolute.parts[2:])
-    parts = absolute.parts
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    directory_flag = getattr(os, "O_DIRECTORY", None)
-    if no_follow is None or directory_flag is None or len(parts) < 2:
-        return None, "token_secure_open_unavailable"
-
-    common_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    parent_fd = os.open(parts[0], common_flags | directory_flag)
-    try:
-        for depth, part in enumerate(parts[1:-1], start=1):
-            try:
-                next_fd = os.open(part, common_flags | directory_flag | no_follow, dir_fd=parent_fd)
-            except OSError as exc:
-                error_name = errno.errorcode.get(exc.errno, "UNKNOWN")
-                return None, f"token_parent_refused errno={error_name} depth={depth}"
-            os.close(parent_fd)
-            parent_fd = next_fd
-
-        leaf = parts[-1]
-        try:
-            file_fd = os.open(
-                leaf,
-                common_flags | no_follow | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=parent_fd,
-            )
-        except OSError as exc:
-            try:
-                leaf_stat = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-            except OSError:
-                leaf_stat = None
-            if leaf_stat is not None and stat.S_ISLNK(leaf_stat.st_mode):
-                return None, "token_symlink_refused"
-            return None, f"token_unreadable error={redact_evidence_string(str(exc), 160)}"
-
-        try:
-            st = os.fstat(file_fd)
-            mode = stat.S_IMODE(st.st_mode)
-            if not stat.S_ISREG(st.st_mode):
-                return None, "token_non_regular_refused"
-            if mode & 0o077:
-                return None, f"token_mode_too_open mode={mode:o}"
-            if not mode & 0o400:
-                return None, f"token_owner_read_required mode={mode:o}"
-            with os.fdopen(file_fd, "r", encoding="utf-8") as handle:
-                file_fd = -1
-                return handle.read(), None
-        finally:
-            if file_fd >= 0:
-                os.close(file_fd)
-    finally:
-        os.close(parent_fd)
+    """The shared token reader (lib.fleet_lines), with this script's evidence redactor."""
+    return _read_fleet_token_text(path, describe_error=lambda text: redact_evidence_string(text, 160))
 
 
 def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int, str | None]:
@@ -7084,14 +6987,10 @@ def load_fleet_api_token(profile: dict[str, Any]) -> tuple[str | None, str, int,
         loaded = json.loads(raw)
     except Exception as exc:  # noqa: BLE001 - health evidence should include token-source failures.
         return None, source, 0, f"token_unreadable error={redact_evidence_string(str(exc), 160)}"
-    if not isinstance(loaded, dict):
-        return None, source, 0, "token_json_root_not_object"
-    active = loaded.get("active")
-    accept = loaded.get("accept")
-    accept_count = len(accept) if isinstance(accept, list) else 0
-    if not isinstance(active, str) or not active.strip():
-        return None, source, accept_count, "active_token_missing"
-    return active.strip(), source, accept_count, None
+    active, accept_count, token_error = parse_fleet_token(loaded)
+    if token_error is not None:
+        return None, source, accept_count, token_error
+    return active, source, accept_count, None
 
 
 def format_fleet_api_response(endpoint: str, status: int, body: str, token_source: str, active_token_present: bool, accept_count: int) -> str:
@@ -7107,13 +7006,8 @@ def format_fleet_api_response(endpoint: str, status: int, body: str, token_sourc
         data = json.loads(body)
     except Exception as exc:  # noqa: BLE001
         return f"FAIL fleet_api: invalid_json {common} error={str(exc)[:160]}"
-    if isinstance(data, list):
-        instances = data
-    elif isinstance(data, dict) and isinstance(data.get("instances"), list):
-        instances = data["instances"]
-    elif isinstance(data, dict) and isinstance(data.get("lines"), list):
-        instances = data["lines"]
-    else:
+    instances = fleet_lines_from_data(data)
+    if instances is None:
         return f"FAIL fleet_api: invalid_response {common}"
     names = sorted(
         item.get("name")
@@ -7127,12 +7021,11 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
     if not profile_bool(profile, "expectFleetApi", False):
         return ["fleet_api: skipped by health profile"]
 
-    raw_url = (
-        os.environ.get("BOT_ERRORS_FLEET_API_URL")
-        or fleet_api_profile_value(profile, "fleetApiUrl")
-        or fleet_api_default_url(profile)
-    )
-    endpoint = fleet_api_endpoint(raw_url)
+    endpoint = fleet_api_url(profile)
+    # Relay 23 W2: the token goes only to the local fleet API; another host is
+    # refused before the token is read.
+    if fleet_api_token_target_refused(endpoint, profile):
+        return ["FAIL fleet_api: fleet_api_host_refused"]
     token, token_source, accept_count, token_error = load_fleet_api_token(profile)
     if token_error:
         return [f"FAIL fleet_api: {token_error} token_source={token_source} active_token_present=false accept_count={accept_count}"]
@@ -7151,12 +7044,15 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
             body = response.read(256 * 1024).decode("utf-8", errors="replace")
             return [format_fleet_api_response(endpoint, response.status, body, token_source, True, accept_count)]
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            return [f"FAIL fleet_api: fleet_api_redirect_refused endpoint={endpoint} token_source={token_source} status={exc.code}"]
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return [format_fleet_api_response(endpoint, exc.code, body, token_source, True, accept_count)]
     except URLError as exc:
         return [f"FAIL fleet_api: fleet_api_unreachable endpoint={endpoint} token_source={token_source} error={exc.reason}"]
     except Exception as exc:  # noqa: BLE001
-        return [f"FAIL fleet_api: fleet_api_probe_failed endpoint={endpoint} token_source={token_source} error={str(exc)[:160]}"]
+        return [f"FAIL fleet_api: fleet_api_probe_failed endpoint={endpoint} token_source={token_source} error={type(exc).__name__}"]
 
 
 def read_instance_config(cfg: Path) -> tuple[dict[str, Any] | None, str | None]:

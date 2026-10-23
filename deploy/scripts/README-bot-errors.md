@@ -794,7 +794,20 @@ and falsifier traffic from a genuine incident. `is_test_provenance_event` in
 `bot-errors-dispatcher.py` screens on `runtime.provenance.test` being exactly
 `true`; a matching event is refused before ordinary incident processing, the
 original is retained in suppressed audit state, and one bounded meta-alert is
-emitted. This is a backstop, not the producer-authority boundary #2391 asks for.
+emitted. This test-traffic backstop does not authenticate a producer.
+
+Health freshness and incident recovery trust writers admitted to the private,
+host-owned queue. Producer names and relay diagnostics do not authenticate a
+distinct writer. The line recheck requires a confirmed local fleet API reading
+plus the incident's stored health proof; that proof inherits the queue's trust.
+An alias shared by multiple roster hosts cannot select a host or retire a line,
+even when only one roster row uses that bot name.
+
+Health observations, outbound-send proof and clear events require explicit
+timezones and cannot exceed the dispatcher's clock by more than 60 seconds.
+An invalid or future clear cannot close an incident or retire its queued alert.
+The daily-health display override does not bypass this time check. These checks
+bound observation time; they do not establish producer identity.
 
 `test` is derived from **strong runner signals only** — `VITEST`,
 `VITEST_WORKER_ID`, `JEST_WORKER_ID`, `PYTEST_CURRENT_TEST`, plus
@@ -1283,6 +1296,83 @@ command resolves the same state directory as the dispatcher's unit. Do not
 change the roster rows of a duplicated name while that name has an open
 condition.
 
+## Side-notice delivery acceptance
+
+Flap-storm alerts, stale-incident reminders and dispatcher meta-alerts validate
+that the transport accepted the message for the requested group. A non-error
+JSON-RPC response alone is insufficient. Explicit rejection retains the existing
+retry or email fallback route.
+
+Before a flap or stale reminder leaves the process, its uncertainty is committed
+to incident state. A crash or response without acceptance proof consumes that
+scheduled attempt without recording a confirmed notification. Flap state keeps
+`unconfirmedStorm` separately from the confirmed lifecycle, so an unconfirmed
+opening does not suppress member alerts. Stale reminders retain
+`lastStaleRenotifyUnconfirmedAt` and the packet reference without advancing
+`lastNotifiedAt` or the confirmed reminder count. The ordinary next reminder or
+storm escalation remains eligible on its existing cadence. A quiet interval
+ends an unconfirmed storm before a later occurrence starts a new one.
+
+Older dispatchers ignore these uncertainty fields and can resend a possibly
+accepted notice. The deployer checks the target dispatcher's
+`SIDE_NOTICE_STATE_VERSION` before deployment or rollback. A target without
+version 1 is refused while stale or flap uncertainty remains, or when incident
+state cannot be verified. Use a compatible backup; do not clear uncertainty or
+advance confirmed-delivery fields to permit a downgrade. Compatible rollback
+remains independent of the runtime manifest and can restore damaged runtime code.
+Stop the dispatcher and prevent its scheduled restarts before changing runtime
+files. Run the deployer as the service user with an absolute
+`BOT_ERRORS_STATE_DIR` pointing to the service's state, then verify the restored
+files before restarting. Keep the reviewed staging or backup files unchanged
+throughout the operation. The version marker declares compatibility; it does
+not authenticate a backup, and must not be added to an older dispatcher to
+bypass this check. The deployer does not stop services or grant deployment
+authority.
+
+Daily information summaries and grouped line cards commit their packet reference
+and an unconfirmed daily hold before sending. A process interruption or failed
+state publication after acceptance therefore cannot resend the same daily card.
+The next card of that kind names the uncertain card and its retained packet.
+This can also hold a card when the process stops before the network request; it
+is not proof of delivery. A known rejection restores the prior pending notices
+and retry cadence. If the initial hold cannot be persisted, no send is attempted.
+If the daily packet cannot be stored, its pending notices remain eligible and
+the card retries on the existing cadence without sending a packetless fallback.
+Known daily-card rejection or packet-storage failure remains visible in dispatcher
+health while its retry is pending, including cycles throttled by the retry delay.
+A daily helper exception also records a failure without preventing the sibling card.
+Packet reads canonicalize the configured state root, then use the durable JSON
+reader's private-directory checks and inclusive 8 MiB limit, rejecting symlinked
+packet directories and leaves. A grouped line-card packet larger than 6 MiB is
+stored as a small index and SHA-256-addressed 512 KiB parts, each published through
+the same durable writer. The Ref still resolves to the complete packet, including
+every member's record and reconstructed notice. Reads verify the part count,
+byte lengths, hashes and notice identity before returning any evidence; missing
+or changed parts make the packet unavailable. The decoded aggregate is limited
+to 64 MiB. A packet above that budget stays pending and does not send a card.
+Parts are published and verified before the index; they retain an extra day
+beyond the configured packet retention period and share the bounded pruning
+scan. Reusing a part durably refreshes its last-reference timestamp so a newer
+index cannot outlive its evidence. Printable packet fields and
+keys are redacted; a separate SHA-256 notice identity keeps retries and distinct
+notices separate when their printable identifiers redact to the same text.
+An outbox packet's archive path is corrected to the actual collision-safe destination
+before the terminal event moves to `sent/`, for both WhatsApp and email fallback.
+If that packet update fails after delivery, the persisted terminal send state lets
+reclaim repair the packet and archive without sending the notice again.
+Packet pruning examines at most 500 entries per cycle and resumes its directory
+iterator on the next daemon cycle. It retains packets for at least 30 days and
+verifies that the newly opened directory matches its observed device and inode
+before scanning. It holds that descriptor through enumeration, deletion and syncing, so
+replacement of the packet directory cannot redirect deletion. The iterator closes
+on exhaustion, error or directory change; process restart begins a new scan.
+This bounds per-cycle entry work, not individual filesystem-call duration or total
+retained bytes; repeated process restarts can delay reaching later entries.
+
+Generic meta-alerts report an uncertain group result as `sent_unconfirmed` and
+still try email. Credential meta-alerts preserve their existing once-per-day
+uncertain-take behavior and its documented next-cycle commit limitation.
+
 ## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
 
 The dispatcher sends to the chat transport before it can record that the send
@@ -1446,6 +1536,14 @@ Import history (sha256 matrix, deviation notes, RESUME NOTE) lives in
 
 ## NORMATIVE — Deploy method (stream + hash-verify)
 
+Fleet API reads by the dispatcher and health check require a literal loopback
+address, such as `http://127.0.0.1:9099` or `http://[::1]:9099`. Named aliases,
+including `localhost`, and URLs with queries or fragments are refused before the
+token is read. Proxies and redirects are disabled. The request budget covers
+connection, headers and the complete response body, including HTTP error bodies;
+expiry terminates and reaps the
+request worker. Responses larger than 256 KiB fail closed.
+
 Fleet minis have **no GitHub access**. Deploys are content-pushed from an operator machine:
 stream each script over ssh to the host's running location, then hash-verify on the host.
 This section describes the mechanics only; fleet mutation still requires a separately named
@@ -1469,10 +1567,16 @@ write/hash failure, raw secret output, or authorization ambiguity remains a hard
 The deploy contract is:
 
 1. Take a per-host backup before mutation; abort if the backup path or restore proof cannot
-   be recorded.
+   be recorded. A managed file missing before deployment is recorded in the backup's
+   `.was-absent` ledger; rollback removes that newly introduced file. Before changing the
+   runtime, rollback rejects any unrecorded missing file or any ledger entry that conflicts
+   with a present backup file. Structural rollback remains available for a drifted backup;
+   promotion to last-known-good additionally requires matching hashes for present files
+   and a successful redaction smoke check.
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
    `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
-   on any copy error or missing payload hash.
+   on any copy error or missing payload hash. Copy the new `lib/fleet_lines.py` dependency
+   before the dispatcher and health check, because timer jobs can start between copies.
 3. Write a host-local runtime manifest at
    `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
    `BOT_ERRORS_RUNTIME_MANIFEST`; abort if the written manifest hash cannot be verified.

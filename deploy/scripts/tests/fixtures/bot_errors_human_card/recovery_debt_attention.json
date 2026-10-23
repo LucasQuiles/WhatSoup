@@ -1,0 +1,37 @@
+{
+  "family": "recovery_debt_attention",
+  "description": "Reconstructed from one delivered BOT INFO message (2026-10-14/15); host names, private bot names and state paths neutralised. format_event renders this event to exactly legacy_body.",
+  "event": {
+    "schemaVersion": 2,
+    "eventKind": "observation",
+    "eventType": "observation",
+    "severity": "info",
+    "id": "15a4d97c-774e-4a9e-99b6-760b7c3dd4ab",
+    "createdAt": "2026-10-15T18:44:19.920Z",
+    "instance": "q",
+    "source": "recovery_debt_attention",
+    "summary": {
+      "failureClass": "unknown",
+      "length": 37,
+      "correlationDigest": "aa4ae19e00000000000000000000000000000000000000000000000000000000"
+    },
+    "evidence": {
+      "failureClass": "unknown",
+      "length": 219,
+      "correlationDigest": "3cc508f200000000000000000000000000000000000000000000000000000000"
+    },
+    "process": {
+      "pid": 1177016
+    },
+    "diagnostics": {
+      "queue": "/srv/bot-errors-fixture/outbox",
+      "dispatchLog": "/srv/bot-errors-fixture/logs/dispatch.jsonl"
+    },
+    "delivery": {
+      "attempts": 1,
+      "status": "queued"
+    }
+  },
+  "legacy_body": "BOT INFO - q: recovery debt attention [digest aa4ae19e]\n  > summary_confined: unknown - 37 chars - digest aa4ae19e\n  > severity: info\n  > instance: q\n  > source: recovery_debt_attention\n  > incident_key: unknown|q|recovery_debt_attention\n  > event: 15a4d97c-774e-4a9e-99b6-760b7c3dd4ab\n  > created: 2026-10-15T18:44:19.920Z\n  > dispatcher_attempts: 1\n  > pid: 1177016\n  > queue: /srv/bot-errors-fixture/outbox\n  > dispatch_log: /srv/bot-errors-fixture/logs/dispatch.jsonl\n  > evidence: unknown - 219 chars - digest 3cc508f2\n  > requested_action: none — informational event; no Q remediation required.",
+  "card": "ℹ️ *Q has unfinished recovery work*\nWhere: q\nYou: No action needed\nRef: 1bc7889c"
+}

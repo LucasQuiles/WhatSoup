@@ -107,6 +107,7 @@ _SAFE_DETAIL_STRING_VALUES = frozenset(
         "root",
         "schema",
         "sent",
+        "sent_unconfirmed",
         "session_limit",
         "started",
         "suppressed",
