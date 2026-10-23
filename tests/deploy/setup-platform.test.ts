@@ -121,25 +121,25 @@ function runLinuxSetupReplay(
 }
 
 /**
- * Strips any real PATH directory that actually resolves an ffmpeg binary
- * (bare or arch-suffixed). Without this, "ffmpeg absent" test cases are not
- * hermetic — a dev machine or CI image with ffmpeg genuinely installed (e.g.
- * Homebrew's /opt/homebrew/bin) leaks through the inherited PATH that
- * runLinuxSetupReplay appends after the shim dir, and `command -v ffmpeg`
- * finds the real binary regardless of what the test intends to simulate.
+ * Hide only ffmpeg names, retaining the other utilities in those PATH directories.
+ * Linux commonly installs ffmpeg and required setup commands together in /usr/bin.
  */
 function realPathWithoutFfmpeg(): string {
-  const dirs = (process.env.PATH ?? '').split(path.delimiter);
-  return dirs
-    .filter((dir) => {
-      if (!dir) return false;
-      try {
-        return !['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64'].some((name) =>
-          fs.existsSync(path.join(dir, name)),
-        );
-      } catch {
-        return true;
+  const excluded = new Set(['ffmpeg', 'ffmpeg-arm64', 'ffmpeg-x64']);
+  const mirrors = new Map<string, string>();
+  return (process.env.PATH ?? '').split(path.delimiter)
+    .filter(Boolean)
+    .map((dir) => {
+      if (![...excluded].some((name) => fs.existsSync(path.join(dir, name)))) return dir;
+      const original = fs.realpathSync(dir);
+      const previous = mirrors.get(original);
+      if (previous) return previous;
+      const mirror = makeTempRoot('whatsoup-setup-path-');
+      for (const name of fs.readdirSync(original)) {
+        if (!excluded.has(name)) fs.symlinkSync(path.join(original, name), path.join(mirror, name));
       }
+      mirrors.set(original, mirror);
+      return mirror;
     })
     .join(path.delimiter);
 }

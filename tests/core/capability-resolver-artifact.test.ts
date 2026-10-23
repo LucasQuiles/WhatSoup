@@ -197,6 +197,7 @@ describe('round-20: interpreter identity, direct-mode arg constraint, and envelo
     const binDir = tmp.make('interp-swap-bin');
     const fakeInterp = join(binDir, 'fake-interp');
     writeFileSync(fakeInterp, '#!/bin/sh\nexec node "$@"\n');
+    chmodSync(fakeInterp, 0o700);
     const execution = { command: [fakeInterp, path, '{source}'], resolverArtifactPath: path, interpreted: true };
     const c1 = verifyResolverArtifact(execution).compositeDigest;
     writeFileSync(fakeInterp, '#!/bin/sh\nexec node --EVIL-FLAG "$@"\n'); // swap ONLY the interpreter content
