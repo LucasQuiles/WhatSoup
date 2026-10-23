@@ -236,9 +236,62 @@ When a change would push a grandfathered file past its ceiling:
    the guard reads them from the **merge base only** (a PR can never author its own
    authorization), `maxWeight` is an **absolute cap** (self-spending — once the widening
    lands, the cap equals the base and authorizes nothing further), they **expire**
-   (`expiresAt`), only numeric weight growth is waivable (identity introductions never
-   are), and a malformed waiver document is INCONCLUSIVE, not ignored. A widening remains
+   (`expiresAt`). Entry-array baselines compare complete entry identities; Test Integrity
+   compares `(file, rule_id, content_signature)` identities, preserving duplicate counts
+   and ignoring line-position changes. Other shapes retain numeric weight comparison.
+   Identity introductions require the separately reviewed
+   `admitsNewIdentities: true` authority. An optional `expectedBaselineSha256` binds the
+   waiver to the exact reviewed candidate baseline bytes in addition to the cap and date
+   window; different contents do not spend that waiver. The digest covers original bytes,
+   before UTF-8 decoding, including any byte-order mark. Candidate waiver documents are
+   validated but cannot grant authority. Working-tree baseline and waiver validation share
+   one reader that refuses symbolic links (including parent directories), executable files,
+   devices and other non-regular files, and uses the
+   same 4 MiB byte limit as exact Git blob reads. Parent identities are rechecked after
+   opening and reading the file. After reading, the leaf pathname must still identify the
+   opened regular file with matching mode, size, modification time and change time.
+   This detects replacements still present at the corresponding check;
+   Node's pathname APIs cannot exclude a directory swapped away and restored between checks.
+   One owned helper reads the candidate waiver and all registered working-tree baselines
+   within a shared two-second deadline, including helper startup. It starts with an empty
+   environment, so inherited Node loader options cannot modify its reads or output.
+   This does not isolate it from a compromised parent interpreter. Each document retains
+   its own 4 MiB limit. A timed-out
+   user-space document read terminates and reaps that direct helper, then reports
+   INCONCLUSIVE. The deadline does not bound parent pathname metadata calls or a filesystem
+   operation that the operating system cannot interrupt, and working-tree mode remains a
+   diagnostic rather than an atomic snapshot. CI uses exact immutable Git objects instead.
+   A malformed waiver document is INCONCLUSIVE,
+   not ignored. A widening remains
    an exceptional, standalone act — never a side effect of a feature branch.
+
+Hash-bound authority uses `{ "schemaVersion": 2, "grants": [...] }` without a legacy
+`waivers` property. Version 1 documents remain readable for existing grants but cannot
+contain hash constraints. Mixed envelopes and unknown versions are rejected. Older guard
+code rejects the version 2 document because it has no `waivers` array; it cannot silently
+ignore the digest and grant a generic numeric allowance. Deploy the guard and authority
+from the same revision through the [release snapshot workflow](../runbooks/release-deployment.md).
+The exporter stages tracked code and configuration from one exact commit, checks their
+manifest, and publishes the complete directory with a rename. Do not copy the version 2
+authority document into an older checkout. Rollback must select a complete compatible
+snapshot or restore both the guard and its authority document together; reverting only
+the guard makes growth that needs this authority INCONCLUSIVE. Unchanged or shrinking
+baselines need no waiver.
+
+The PR #3815 allowance is bound to the complete proposed baseline in
+[`tests/fixtures/baseline-growth/pr3815-test-integrity.json`](../../tests/fixtures/baseline-growth/pr3815-test-integrity.json).
+Its SHA-256 is `9e866bc2152a7ea0c729541dc3b1ce966cda1d4a16156fc125a79821811296a7`.
+Compared with `.claude/test-integrity/baseline.json` at
+`90d7124de79be303e361d89acb4d1db99bd06fb9`, it retains all 81 findings by file, rule,
+and content signature, including their multiplicities. Six line-sensitive signatures
+change with recorded line positions. The twelve additional findings are all
+`py-property-test-suggestion` advisories: eight in `test_bot_errors_human_card.py`,
+three in `test_bot_errors_info_volume.py`, and one in
+`test_bot_errors_health_check_fleet_token_target.py`. The fixture supplies review evidence;
+it is not active baseline authority. The historical 81-finding fixture is retained beside
+it so regression tests verify the preserved multiset and the twelve additions. The waiver
+explicitly grants `admitsNewIdentities: true` for this exact payload; its existing cap and
+expiry still apply.
 
 Shrinking below a ceiling never auto-lowers it (only a WARN suggests it). Lowering the ceiling
 to match a shrink is itself a conscious act: it permanently donates the freed headroom, so time

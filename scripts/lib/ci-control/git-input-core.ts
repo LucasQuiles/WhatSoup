@@ -6,7 +6,10 @@ import { performance } from "node:perf_hooks";
 import { TextDecoder, types as utilTypes } from "node:util";
 
 import { cleanGitEnv } from "../../../src/lib/git-env.ts";
+import { MAX_EXACT_SINGLE_BLOB_BYTES } from "./input-limits.ts";
 import { resolveTrustedGit } from "./trusted-git.ts";
+
+export { MAX_EXACT_SINGLE_BLOB_BYTES } from "./input-limits.ts";
 
 // #2843: path to the git executable, resolved via the static trusted-git allowlist
 // by default. Tests may inject a fake git shim path via __setTestGitPath().
@@ -54,7 +57,6 @@ export const MAX_EXACT_COMMIT_RANGE_BYTES = 1 * 1_024 * 1_024;
 export const MAX_EXACT_SINGLE_COMMIT_METADATA_BYTES = 1 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_COMMIT_METADATA_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_BLOB_COUNT = 50_000;
-export const MAX_EXACT_SINGLE_BLOB_BYTES = 4 * 1_024 * 1_024;
 export const MAX_EXACT_AGGREGATE_BLOB_BYTES = 16 * 1_024 * 1_024;
 export const MAX_EXACT_ADDED_LINE_CHANGE_COUNT = 4_096;
 export const MAX_EXACT_ADDED_LINE_COUNT = 100_000;
