@@ -1418,8 +1418,9 @@ describe('exact added lines', () => {
   });
 
   it('enforces each narrowed materialization pool at its real boundary', () => {
+    const realFixture = fixture();
     const addedCase = (content: string, overrides: Partial<ExactAddedLineBudgetV1>) => {
-      const { root, baseOid } = fixture();
+      const { root, baseOid } = realFixture;
       write(root, 'added.txt', content);
       const candidateOid = commit(root, 'added budget fixture');
       return () => readExactAddedLinesWithinBudget(root, {

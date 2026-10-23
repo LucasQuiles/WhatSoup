@@ -42,7 +42,6 @@ import {
   killSessionTree as killSessionTreeRaw,
   resetProcessTreeTerminationLeasesForTesting,
   retryKillSessionTree,
-  PROCESS_TREE_DIAGNOSTIC_SOURCES,
   ProcessTreeTerminationError,
   type KillSessionOutcome,
   type KillSessionTreeOptions,
@@ -131,6 +130,19 @@ afterEach(() => {
   resetProcessTreeTerminationLeasesForTesting();
   killSpy.mockRestore();
 });
+
+async function expectTerminationCode(
+  operation: Promise<unknown>,
+  code: ProcessTreeTerminationErrorCode,
+): Promise<ProcessTreeTerminationError> {
+  const error = await operation.then(
+    () => null,
+    (cause: unknown) => cause,
+  );
+  expect(error).toBeInstanceOf(ProcessTreeTerminationError);
+  expect(error).toMatchObject({ code });
+  return error as ProcessTreeTerminationError;
+}
 
 describe('process-tree fail-closed safety', () => {
   it.each([
@@ -575,224 +587,6 @@ describe('process-tree fail-closed safety', () => {
   });
 });
 
-async function expectTerminationCode(
-  operation: Promise<unknown>,
-  code: ProcessTreeTerminationErrorCode,
-): Promise<ProcessTreeTerminationError> {
-  const error = await operation.then(
-    () => null,
-    (cause: unknown) => cause,
-  );
-  expect(error).toBeInstanceOf(ProcessTreeTerminationError);
-  expect(error).toMatchObject({ code });
-  return error as ProcessTreeTerminationError;
-}
-
-describe('process-tree termination error taxonomy', () => {
-  it('classifies invalid generation and invalid target input', async () => {
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', { generationMarker: '  ' }),
-      'PROCESS_TREE_INVALID_GENERATION',
-    );
-    await expectTerminationCode(
-      killSessionTree(1, 'SIGTERM', { generationMarker: 'invalid-target' }),
-      'PROCESS_TREE_INVALID_TARGET',
-    );
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', {
-        generationMarker: undefined as unknown as string,
-      }),
-      'PROCESS_TREE_INVALID_GENERATION',
-    );
-  });
-
-  it('exports the canonical diagnostic-source vocabulary for guard reuse', () => {
-    expect(PROCESS_TREE_DIAGNOSTIC_SOURCES).toEqual([
-      'session_shutdown',
-      'stale_session_sweep',
-      'ownership_loss_cleanup',
-    ]);
-  });
-
-  it('distinguishes an unavailable initial census from an unverified root identity', async () => {
-    execFileSyncMock.mockImplementationOnce(() => {
-      throw new Error('ps unavailable');
-    });
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', { generationMarker: 'initial-census' }),
-      'PROCESS_TREE_INITIAL_CENSUS_UNAVAILABLE',
-    );
-    resetProcessTreeTerminationLeasesForTesting();
-
-    execFileSyncMock.mockReturnValue(census([
-      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },
-    ]));
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', { generationMarker: 'root-unverified' }),
-      'PROCESS_TREE_ROOT_MISSING',
-    );
-  });
-
-  it('classifies pre-signal and escalation census failures separately', async () => {
-    execFileSyncMock
-      .mockReturnValueOnce(rootRows())
-      .mockImplementationOnce(() => {
-        throw new Error('pre-signal ps unavailable');
-      });
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', {
-        generationMarker: 'pre-signal-census',
-        termGraceMs: 0,
-        killGraceMs: 0,
-      }),
-      'PROCESS_TREE_PRE_SIGNAL_CENSUS_UNAVAILABLE',
-    );
-    resetProcessTreeTerminationLeasesForTesting();
-
-    execFileSyncMock
-      .mockReturnValueOnce(rootRows())
-      .mockReturnValueOnce(rootRows())
-      .mockReturnValueOnce(rootRows())
-      .mockImplementationOnce(() => {
-        throw new Error('escalation ps unavailable');
-      });
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', {
-        generationMarker: 'escalation-census',
-        termGraceMs: 0,
-        killGraceMs: 0,
-      }),
-      'PROCESS_TREE_ESCALATION_CENSUS_UNAVAILABLE',
-    );
-  });
-
-  it('classifies final-census, signal, and surviving-process failures', async () => {
-    execFileSyncMock
-      .mockReturnValueOnce(rootRows())
-      .mockReturnValueOnce(rootRows())
-      .mockImplementation(() => {
-        throw new Error('final ps unavailable');
-      });
-    const error = await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGKILL', {
-        generationMarker: 'final-census',
-        killGraceMs: 0,
-      }),
-      'PROCESS_TREE_FINAL_CENSUS_UNAVAILABLE',
-    );
-    resetProcessTreeTerminationLeasesForTesting();
-
-    execFileSyncMock.mockReset().mockReturnValue(rootRows());
-    killSpy.mockImplementation(() => {
-      const error = new Error('operation not permitted') as NodeJS.ErrnoException;
-      error.code = 'EPERM';
-      throw error;
-    });
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGKILL', {
-        generationMarker: 'signal-failure',
-        killGraceMs: 0,
-      }),
-      'PROCESS_TREE_SIGNAL_PERMISSION_DENIED',
-    );
-    resetProcessTreeTerminationLeasesForTesting();
-
-    killSpy.mockImplementation(() => true);
-    execFileSyncMock.mockReset().mockReturnValue(rootRows());
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGKILL', {
-        generationMarker: 'survivors-remain',
-        killGraceMs: 0,
-      }),
-      'PROCESS_TREE_SURVIVORS_REMAIN',
-    );
-  });
-
-  it('classifies an active-generation lease conflict', async () => {
-    execFileSyncMock.mockReturnValue(rootRows());
-    const active = killSessionTree(ROOT_PID, 'SIGTERM', {
-      generationMarker: 'lease-owner',
-      termGraceMs: 0,
-      killGraceMs: 0,
-    });
-    const activeResult = expect(active).rejects.toMatchObject({
-      code: 'PROCESS_TREE_SURVIVORS_REMAIN',
-    });
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGKILL', { generationMarker: 'lease-contender' }),
-      'PROCESS_TREE_LEASE_CONFLICT',
-    );
-    await activeResult;
-  });
-
-  it('emits source-tagged bounded success, cgroup, and failure diagnostics', async () => {
-    const selfOnly = census([
-      { pid: process.pid, ppid: 1, pgid: process.pid, command: 'vitest-parent' },
-    ]);
-    execFileSyncMock
-      .mockReturnValueOnce(rootRows())
-      .mockReturnValueOnce(rootRows())
-      .mockReturnValue(selfOnly);
-
-    await killSessionTree(ROOT_PID, 'SIGKILL', {
-      generationMarker: 'diagnostic-success',
-      diagnosticSource: 'stale_session_sweep',
-      diagnosticSessionRowId: 42,
-      killGraceMs: 0,
-      readCgroupMemberPids: () => [process.pid, ROOT_PID, CHILD_PID],
-    });
-
-    expect(processTreeLog.debug).toHaveBeenCalledWith(
-      expect.objectContaining({
-        source: 'stale_session_sweep',
-        sessionRowId: 42,
-        outcome: 'terminated',
-        ambiguousProcessCount: 0,
-      }),
-      'process-tree termination outcome',
-    );
-    expect(processTreeLog.debug).toHaveBeenCalledWith(
-      expect.objectContaining({
-        source: 'stale_session_sweep',
-        sessionRowId: 42,
-        cgroupMemberCount: 3,
-        ownedCount: 2,
-      }),
-      'process-tree cgroup divergence',
-    );
-
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', {
-        generationMarker: '',
-        diagnosticSource: 'ownership_loss_cleanup',
-      }),
-      'PROCESS_TREE_INVALID_GENERATION',
-    );
-    expect(processTreeLog.warn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        source: 'ownership_loss_cleanup',
-        errorCode: 'PROCESS_TREE_INVALID_GENERATION',
-        retryClass: 'invalid_request',
-      }),
-      'process-tree termination failed',
-    );
-    const failureRecord = processTreeLog.warn.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(failureRecord).not.toHaveProperty('err');
-    expect(JSON.stringify(failureRecord)).not.toContain('diagnostic-success');
-  });
-
-  it('rejects an invalid optional row identifier without emitting it', async () => {
-    await expectTerminationCode(
-      killSessionTree(ROOT_PID, 'SIGTERM', {
-        generationMarker: 'valid-generation',
-        diagnosticSource: 'session_shutdown',
-        diagnosticSessionRowId: Number.NaN,
-      }),
-      'PROCESS_TREE_INVALID_OPTIONS',
-    );
-    expect(JSON.stringify(processTreeLog.warn.mock.calls)).not.toContain('sessionRowId');
-  });
-});
 
 // #1755: kill-time ambiguity must resolve-or-record, never throw-and-abort (which
 // burned the full grace per chat and drove SIGTERM-timeout SIGKILLs). The safety

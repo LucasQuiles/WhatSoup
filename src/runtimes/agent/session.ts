@@ -4735,13 +4735,6 @@ export class SessionManager {
       this.durableFailureInconclusive = false;
       this.durableFailureIdentity = null;
       this.durableFailureError = null;
-    } catch (err) {
-      if (!this.durableFailureClosed) {
-        this.durableFailureInconclusive = true;
-        this.durableFailureIdentity = null;
-        this.durableFailureError = err;
-      }
-      throw err;
     } finally {
       this.shutdownsInFlight -= 1;
     }

@@ -3773,6 +3773,27 @@ describe('Event-driven provider ready signal', () => {
     });
     sm.bindGenerationOwnership(() => generation);
 
+    const terminatedOutcome: KillSessionOutcome = {
+      outcome: 'terminated',
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    };
+    let finishQuarantineCleanup: (outcome: KillSessionOutcome) => void = () => {};
+    let quarantineCleanup!: Promise<KillSessionOutcome>;
+    (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) => {
+        target.kill(signal);
+        quarantineCleanup = new Promise<KillSessionOutcome>((resolve) => {
+          finishQuarantineCleanup = resolve;
+        });
+        return quarantineCleanup;
+      },
+    );
+
     await sm.spawnSession();
     childA.stdout.emit('data', Buffer.from(JSON.stringify({
       jsonrpc: '2.0',
@@ -3795,6 +3816,18 @@ describe('Event-driven provider ready signal', () => {
       active: false,
       pid: null,
       turnInFlight: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(killSessionTree).toHaveBeenCalledWith(childA, 'SIGKILL', expect.anything());
+    });
+    expect(childA.kill).toHaveBeenCalledWith('SIGKILL');
+    await expect(sm.spawnSession()).rejects.toThrow(
+      'Session admission blocked until prior shutdown and process-tree cleanup are complete',
+    );
+    finishQuarantineCleanup(terminatedOutcome);
+    await vi.waitFor(() => {
+      expect(sm.getStatus()).toMatchObject({ providerTerminated: true });
     });
 
     generation = { managerId: 'codex-child-replacement', generation: 2 };
@@ -7703,9 +7736,22 @@ describe('session.ts uncovered-branch coverage', () => {
     const firstChild = makeMockChild(12021);
     const secondChild = makeMockChild(12022);
     vi.mocked(spawn).mockReturnValueOnce(firstChild as never).mockReturnValueOnce(secondChild as never);
-    let finishKill: () => void = () => {};
+    const terminatedOutcome: KillSessionOutcome = {
+      outcome: 'terminated',
+      durationMs: 0,
+      ownedProcessCount: 1,
+      signaledProcessCount: 1,
+      ambiguousProcessCount: 0,
+      diagnosticState: 'complete',
+      diagnosticCodes: [],
+    };
+    let finishKill: (outcome: KillSessionOutcome) => void = () => {};
     (killSessionTree as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
-      () => new Promise<void>((resolve) => { finishKill = resolve; }),
+      (target: { kill(signal: NodeJS.Signals): boolean }, signal: NodeJS.Signals) =>
+        new Promise<KillSessionOutcome>((resolve) => {
+          target.kill(signal);
+          finishKill = resolve;
+        }),
     );
     try {
       const gate = new ProviderExecutionGate({ now: () => now });
@@ -7751,7 +7797,7 @@ describe('session.ts uncovered-branch coverage', () => {
         progressAgeMs: 0,
       });
 
-      finishKill();
+      finishKill(terminatedOutcome);
       await secondTurn;
       expect(gate.snapshot()).toMatchObject({ active: true, activePhase: 'executing', progressAgeMs: 0 });
 
