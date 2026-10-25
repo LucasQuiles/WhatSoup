@@ -27,11 +27,11 @@ const CSS_DEF = /(^|[\s{;])(--[a-zA-Z0-9_-]+)\s*:/g
 // A runtime var SET via a JS/TSX style object: `'--name':` or `"--name":`.
 const TSX_SET = /['"](--[a-zA-Z0-9_-]+)['"]\s*:/g
 
-function walk(dir: string, test: (f: string) => boolean): string[] {
+function walk(dir: string, predicate: (f: string) => boolean): string[] {
   return readdirSync(resolve(repoRoot, dir)).flatMap((entry) => {
     const rel = `${dir}/${entry}`
-    if (statSync(resolve(repoRoot, rel)).isDirectory()) return walk(rel, test)
-    return test(entry) ? [rel] : []
+    if (statSync(resolve(repoRoot, rel)).isDirectory()) return walk(rel, predicate)
+    return predicate(entry) ? [rel] : []
   })
 }
 
