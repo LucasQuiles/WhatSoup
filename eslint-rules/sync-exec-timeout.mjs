@@ -27,6 +27,12 @@ function unwrapExpression(node) {
   return node;
 }
 
+function staticPropertyName(key, computed) {
+  if (!computed && key.type === 'Identifier') return key.name;
+  if (key.type === 'Literal' && typeof key.value === 'string') return key.value;
+  return null;
+}
+
 /** @type {import('eslint').Rule.RuleModule} */
 export default {
   meta: {
@@ -56,12 +62,9 @@ export default {
         }
 
         // Member call: child_process.execSync(...) or cp.execFileSync(...)
-        if (
-          node.callee.type === 'MemberExpression' &&
-          node.callee.property.type === 'Identifier' &&
-          SYNC_FUNCS.has(node.callee.property.name)
-        ) {
-          funcName = node.callee.property.name;
+        if (node.callee.type === 'MemberExpression') {
+          const memberName = staticPropertyName(node.callee.property, node.callee.computed);
+          if (SYNC_FUNCS.has(memberName)) funcName = memberName;
         }
 
         if (!funcName) return;
@@ -101,8 +104,7 @@ export default {
           const hasTimeout = optsArg.properties.some(
             (prop) =>
               prop.type === 'Property' &&
-              prop.key.type === 'Identifier' &&
-              prop.key.name === 'timeout',
+              staticPropertyName(prop.key, prop.computed) === 'timeout',
           );
           if (!hasTimeout) {
             context.report({ node, data: { name: funcName }, messageId: 'missingTimeout' });

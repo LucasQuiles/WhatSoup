@@ -186,6 +186,15 @@ describe('eslint fitness rule — sync exec option overloads', () => {
     { call: "execFileSync('node', ['--version'] as string[], { timeout: 1000 })", severities: [] },
     { call: "execSync('node --version', <object>{ timeout: 1000 })", severities: [] },
     { call: "spawnSync('node', ['--version'], { timeout: 1000 } satisfies object)", severities: [] },
+    { call: "cp['execSync']('node --version')", severities: [1] },
+    { call: "cp['execFileSync']('node', ['--version'])", severities: [1] },
+    { call: "cp['spawnSync']('node', ['--version'])", severities: [1] },
+    { call: "execSync('node --version', { 'timeout': 1000 })", severities: [] },
+    { call: "execFileSync('node', ['--version'], { 'timeout': 1000 })", severities: [] },
+    { call: "spawnSync('node', ['--version'], { 'timeout': 1000 })", severities: [] },
+    { call: "execSync('node --version', { ['timeout']: 1000 })", severities: [] },
+    { call: "cp[execSync]('node --version')", severities: [] },
+    { call: "execSync('node --version', { [timeout]: 1000 })", severities: [1] },
   ])('enforces timeout options for $call', async ({ call, severities }) => {
     const { ESLint } = await import('eslint');
     const eslint = new ESLint({
@@ -193,7 +202,7 @@ describe('eslint fitness rule — sync exec option overloads', () => {
       overrideConfigFile: join(repoRoot, 'eslint.config.fitness.mjs'),
     });
     const results = await eslint.lintText(
-      `import { execFileSync, execSync, spawnSync } from 'node:child_process';\n${call};\n`,
+      `import * as cp from 'node:child_process';\nimport { execFileSync, execSync, spawnSync } from 'node:child_process';\n${call};\n`,
       { filePath: join(repoRoot, 'scripts', '__virtual_sync_exec.ts') },
     );
 
