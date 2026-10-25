@@ -60,6 +60,7 @@ const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
 const M365_CREDENTIAL_PROJECTION = join(REPO_ROOT, 'deploy/m365-bridge-credential-projection.ts');
 const M365_BRIDGE_POLICY = join(REPO_ROOT, 'src/core/m365-bridge-policy.ts');
+const INSTANCE_NAME = join(REPO_ROOT, 'src/fleet/instance-name.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 const PROTECTED_ENV_NAMES = [...new Set([
@@ -170,6 +171,7 @@ function makeFixtureTree(
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
     'deploy/m365-bridge-credential-projection.ts': readFileSync(M365_CREDENTIAL_PROJECTION, 'utf8'),
     'src/core/m365-bridge-policy.ts': readFileSync(M365_BRIDGE_POLICY, 'utf8'),
+    'src/fleet/instance-name.ts': readFileSync(INSTANCE_NAME, 'utf8'),
   };
   for (const [rel, contents] of Object.entries(integrityFiles)) {
     const abs = join(root, rel);
@@ -323,6 +325,8 @@ function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   copyFileSync(M365_CREDENTIAL_PROJECTION, join(deploy, 'm365-bridge-credential-projection.ts'));
   mkdirSync(join(src, 'core'), { recursive: true });
   copyFileSync(M365_BRIDGE_POLICY, join(src, 'core', 'm365-bridge-policy.ts'));
+  mkdirSync(join(src, 'fleet'), { recursive: true });
+  copyFileSync(INSTANCE_NAME, join(src, 'fleet', 'instance-name.ts'));
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),
