@@ -475,7 +475,7 @@ describe('workspace.ts uncovered-branch coverage', () => {
       const settingsPath = join(claudeDir, 'settings.json');
       const policyPath = join(claudeDir, 'sandbox-policy.json');
       const originalPolicy = JSON.stringify({ allowedTools: ['Read'] });
-      writeFileSync(settingsPath, contents);
+      writeFileSync(settingsPath, contents, { mode: 0o600 });
       writeFileSync(policyPath, originalPolicy);
       expect(() => writeSandboxArtifacts(claudeDir, {}, '/hooks/agent-sandbox.sh')).toThrow();
       expect(readFileSync(settingsPath, 'utf8')).toBe(contents);
@@ -750,7 +750,7 @@ describe('workspace.ts uncovered-branch coverage', () => {
     writeFileSync(join(claudeDir, 'settings.json'), JSON.stringify({
       permissions: { allow: ['Read'], deny: [explicit], defaultMode: 'bypassPermissions' },
       enabledPlugins: { custom: true },
-    }));
+    }), { mode: 0o600 });
     writeSandboxArtifacts(claudeDir, {}, '/managed/agent-sandbox.sh');
     ensurePermissionsSettings(claudeDir, 'agent', undefined, {
       hasSandbox: true, m365MutationPolicy: approvedM365Policy,

@@ -7,7 +7,7 @@ import {
   symlinkSync,
   unlinkSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   applyRequiredDeny,
   defaultSettingsJson,
@@ -27,6 +27,7 @@ import { isRecord } from '../lib/type-guards.ts';
 import {
   assertPrivateDirectorySync,
   ensurePrivateDirectorySync,
+  readPrivateFileSync,
   writePrivateFileSync,
   writePrivateJsonMarkerSync,
 } from '../lib/private-fs.ts';
@@ -148,12 +149,16 @@ export function writeSandboxArtifacts(
   postToolUseLogHookPath?: string,
 ): void {
   try {
-    const settingsPath = join(claudeDir, 'settings.json');
-    const existing = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
+    const root = resolve(claudeDir);
+    const settingsPath = join(root, 'settings.json');
+    const observed = readPrivateFileSync(settingsPath, {
+      label: 'settings.json', maxBytes: 1024 * 1024, observation: { root },
+    });
+    const existing = observed === null ? {} : JSON.parse(observed.bytes.toString('utf8'));
     if (!isRecord(existing)) {
       throw new Error('settings.json must be an object to preserve existing restrictions');
     }
-    const policyPath = join(claudeDir, 'sandbox-policy.json');
+    const policyPath = join(root, 'sandbox-policy.json');
     writePrivateFileSync(policyPath, JSON.stringify(policy, null, 2));
 
     const hooks: Record<string, unknown> = {
