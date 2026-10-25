@@ -1058,7 +1058,7 @@ def runtime_package_source_line(
     files_clean: bool,
     package_pin_path: Path | None = None,
 ) -> str | None:
-    """Verify the installer's explicit export pin when Git metadata is unavailable.
+    """Verify the installer's explicit export pin for every recognized package root.
 
     The pin is produced after the installer has verified the immutable archive and its
     member hashes.  It is deliberately outside the archive: putting its archive
@@ -1277,13 +1277,15 @@ def runtime_manifest_inventory(profile: dict[str, Any], package_pin_path: Path |
                 f"FAIL runtime_manifest {raw_path}: missing_marker={redact_evidence_string(marker, 120)} path={path}"
             )
     git_line = git_head_sha_line(manifest)
-    if git_line == "WARN git_head_sha: not_a_git_repository":
-        package_line = runtime_package_source_line(manifest, profile, manifest_entries, files_clean, package_pin_path)
-        lines.append(package_line or git_line)
-    elif is_runtime_package_root() and git_line.startswith("WARN "):
+    if is_runtime_package_root():
+        # Git searches ancestor directories; a matching parent HEAD cannot replace
+        # the package's external source pin.
         package_line = runtime_package_source_line(manifest, profile, manifest_entries, files_clean, package_pin_path)
         lines.append(package_line or "FAIL runtime_manifest package_source: package_validation_unavailable")
-        lines.append("FAIL runtime_manifest package_source: git_provenance_unavailable")
+        if git_line != "WARN git_head_sha: not_a_git_repository":
+            lines.append(git_line)
+            if git_line.startswith("WARN "):
+                lines.append("FAIL runtime_manifest package_source: git_provenance_unavailable")
     else:
         lines.append(git_line)
     return lines

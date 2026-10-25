@@ -72,7 +72,12 @@ describe('defaultSettingsJson', () => {
 });
 
 describe('M365 bridge policy exception', () => {
-  it('removes only the static M365 mutation deny inventory for an approved bridge', () => {
+  it('preserves an explicit M365 restriction when the bridge is approved', () => {
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
+    expect(applyRequiredDeny([explicit], approvedM365Policy)).toContain(explicit);
+  });
+
+  it('omits the generated M365 floor for an approved bridge', () => {
     const deny = applyRequiredDeny([
       'mcp__claude_ai_Gmail__create_draft',
       'mcp__operator_owned__keep',
@@ -81,6 +86,10 @@ describe('M365 bridge policy exception', () => {
     expect(deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
     expect(deny).toContain('mcp__claude_ai_Gmail__create_draft');
     expect(deny).toContain('mcp__operator_owned__keep');
+  });
+
+  it('preserves a legacy full deny list because its authorship is unknown', () => {
+    expect(applyRequiredDeny(REQUIRED_DENY, approvedM365Policy)).toEqual([...REQUIRED_DENY]);
   });
 
   it('keeps the full deny floor for a rejected bridge policy', () => {

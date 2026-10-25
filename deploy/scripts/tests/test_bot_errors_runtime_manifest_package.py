@@ -76,8 +76,8 @@ def _write_package_pin(pin_path: Path, root: Path, manifest_path: Path) -> None:
     pin_path.chmod(0o600)
 
 
-def _declared_package(tmp_path: Path, monkeypatch):
-    root = tmp_path / f"WhatSoup-health-{_SOURCE_SHA[:12]}"
+def _declared_package(tmp_path: Path, monkeypatch, root_name: str | None = None):
+    root = tmp_path / (root_name or f"WhatSoup-health-{_SOURCE_SHA[:12]}")
     checker = root / "deploy" / "scripts" / "bot-errors-health-check.py"
     checker.parent.mkdir(parents=True)
     checker.write_bytes(_SCRIPT.read_bytes())
@@ -107,6 +107,44 @@ def test_declared_package_reports_source_sha_without_a_git_checkout(tmp_path, mo
     assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} source=package match" in lines
     assert "WARN git_head_sha: not_a_git_repository" not in lines
     assert not [line for line in lines if line.startswith("FAIL runtime_manifest")]
+
+
+@properties
+@given(pin_state=st.sampled_from(["missing", "wrong_digest", "valid"]))
+@example(pin_state="missing")
+@example(pin_state="wrong_digest")
+@example(pin_state="valid")
+def test_package_under_matching_parent_repository_still_requires_external_pin(pin_state):
+    with private_case() as (tmp_path, monkeypatch):
+        def git(*args: str, input_text: str | None = None) -> str:
+            return subprocess.run(
+                ["git", "-C", str(tmp_path), *args], input=input_text,
+                text=True, capture_output=True, check=True, timeout=10,
+            ).stdout.strip()
+
+        git("init", "--quiet")
+        tree = git("mktree", input_text="")
+        head = git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                   "commit-tree", tree, input_text="fixture\n")
+        git("update-ref", "HEAD", head)
+        monkeypatch.setattr(sys.modules[__name__], "_SOURCE_SHA", head)
+        module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker), expected=head)
+        if pin_state != "missing":
+            _write_package_pin(pin_path, root, manifest_path)
+            if pin_state == "wrong_digest":
+                pin = json.loads(pin_path.read_text())
+                pin["runtimeManifestSha256"] = "0" * 64
+                pin_path.write_text(json.dumps(pin))
+        assert module._run_git_rev_parse(root)[0].strip() == head
+
+        lines = _inventory(module)
+        if pin_state == "valid":
+            assert f"git_head_sha: {head} expected={head} source=package match" in lines
+            assert not [line for line in lines if line.startswith("FAIL ")]
+        else:
+            reason = "pin_missing" if pin_state == "missing" else "manifest_digest_mismatch"
+            assert f"FAIL runtime_manifest package_source: {reason}" in lines
 
 
 def test_declared_package_without_running_checker_binding_fails(tmp_path, monkeypatch):
@@ -289,7 +327,7 @@ def test_declared_package_rejects_malformed_external_pin_identity(tmp_path, monk
 
 
 def test_checkout_mode_keeps_git_head_semantics_even_when_a_package_pin_exists(tmp_path, monkeypatch):
-    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch, root_name="checkout")
     manifest_path = _write_manifest(root, _entries(checker))
     _write_package_pin(pin_path, root, manifest_path)
 
@@ -315,7 +353,7 @@ def test_runtime_manifest_cli_prints_the_read_only_package_inventory(tmp_path, m
 
 
 def test_runtime_manifest_cli_fails_for_a_checkout_head_mismatch(tmp_path, monkeypatch, capsys):
-    module, root, checker, _pin_path = _declared_package(tmp_path, monkeypatch)
+    module, root, checker, _pin_path = _declared_package(tmp_path, monkeypatch, root_name="checkout")
     _write_manifest(root, _entries(checker))
     monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
     monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: ("c" * 40 + "\n", "", 0))

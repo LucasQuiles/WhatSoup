@@ -2258,7 +2258,7 @@ A repo-owned readonly list of deny patterns that `mergeSettingsJson` always unio
 
 The floor is populated with full permission strings for the mutation-capable connector tools approved in the #411 inventory and subsequent additions. It covers Gmail and Google Calendar mutation tools and Google Drive `create_file` / `copy_file` exposed through the `mcp__claude_ai_*` namespace, Microsoft 365 mail, calendar, file, list, contact, group, task, chat, channel, Dataverse, Booking, OneNote, meeting, workbook, attachment, dynamic execution, batch, and subscription mutation tools. The read-only `mcp__google-workspace__*` namespace is intentionally not denied.
 
-The source of truth is `REQUIRED_DENY`; this document describes categories only. New defaults, merged settings, and repaired settings receive the floor. Existing `.claude/settings.json` files that are not rewritten keep their current contents.
+The source of truth is `REQUIRED_DENY`; this document describes categories only. New defaults, merged settings, and repaired settings receive the effective floor, subject to the admitted bridge exception below. Existing `.claude/settings.json` files that are not rewritten keep their current contents.
 
 **2. Account-bound Microsoft 365 bridge exception (`src/core/m365-bridge-policy.ts`).**
 
@@ -2274,7 +2274,10 @@ At startup, WhatSoup compares that binding with its own service environment:
 one matching account selector, non-empty Agent365 API key, and matching loopback
 Agent365 and hub origins, plus the current launcher's process-bound credential
 admission. Only a complete match generates the child M365
-environment and removes the Microsoft 365 entries from the static deny floor.
+environment and omits Microsoft 365 entries from the generated deny floor.
+Approval preserves caller-supplied denies and startup preserves valid stored denies,
+including exact M365 entries. Explicit settings replacement still replaces the
+permissions block; approval itself never removes entries from that input.
 The bridge variables are not an environment-only authorization path. A missing or
 mismatched binding retains the full deny floor and exports no M365 bridge values.
 Other instances retain their existing child-environment behavior.
@@ -2303,11 +2306,24 @@ startup restores persisted fallback state, and while a fallback window is active
 they retain the full M365 deny floor. Startup settings repair uses the same policy.
 Grant groups cannot authorize M365 mutations themselves.
 
+Settings do not record deny authorship. Approval therefore never removes existing
+entries, even if they match a previously generated floor. Legacy settings and a
+floor persisted before startup, during fallback or by fleet writes remain denied
+after approval returns. An operator must review those restrictions and explicitly
+remove only the M365 denies they intend to permit once the primary bridge is
+admitted. Restart alone does not remove them. Sandbox hook refresh and capability
+grant writes preserve the remaining restrictions; a later rejected policy restores
+the full floor. Fresh approved settings omit the M365 floor without this migration.
+Repairing corrupt settings or a malformed permissions block restores the full floor
+even for an admitted bridge and retains readable deny entries. Sandbox refresh
+rejects corrupt/non-object settings before changing either sandbox artifact.
+
 Fleet create, settings PATCH and plugin PATCH retain the full deny floor: the fleet
 process cannot verify the target runtime's process-bound admission. These writes
 do not reload or restart an active runtime; its cached binding remains unchanged.
 Apply binding or plugin changes through the normal instance restart procedure.
-An admitted primary startup then reconciles its settings with the verified binding.
+An admitted primary startup reconciles the generated floor while preserving all
+existing restrictions; use the explicit review above for previously written denies.
 
 ```json
 {

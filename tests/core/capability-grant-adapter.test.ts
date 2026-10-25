@@ -28,16 +28,17 @@ function readSettings(): { allow: string[]; deny: string[] } {
 }
 
 describe('createSettingsPolicyAdapter', () => {
-  it('preserves an approved bridge on grant writes and restores the floor when approval is lost', async () => {
+  it('preserves explicit denies through approved grants, fallback and renewed approval', async () => {
     let policy: M365MutationPolicy = { status: 'approved', childEnv: {} };
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
     writePermissionsSettings(dir, {
-      permissions: { allow: [], deny: [], defaultMode: 'bypassPermissions' },
+      permissions: { allow: [], deny: [explicit], defaultMode: 'bypassPermissions' },
     }, policy);
     const adapter = createSettingsPolicyAdapter(dir, () => policy);
 
     await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
     expect(readSettings().allow).toContain('camera.snap');
-    expect(readSettings().deny.filter((entry) => M365_MUTATION_DENY.includes(entry))).toEqual([]);
+    expect(readSettings().deny.filter((entry) => M365_MUTATION_DENY.includes(entry))).toEqual([explicit]);
     expect(readSettings().deny).toContain(REQUIRED_DENY[0]);
 
     policy = { status: 'rejected' };
@@ -47,7 +48,8 @@ describe('createSettingsPolicyAdapter', () => {
 
     policy = { status: 'approved', childEnv: {} };
     await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
-    expect(readSettings().deny.filter((entry) => M365_MUTATION_DENY.includes(entry))).toEqual([]);
+    // Stored entries have no authorship provenance; renewed approval cannot erase them.
+    expect(readSettings().deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
   });
 
   it('reads empty sets when settings.json is absent', async () => {

@@ -201,12 +201,13 @@ export function applyRequiredDeny(
 ): string[] {
   const m365Exception = m365MutationExceptionAllowed(m365MutationPolicy);
   const m365Deny = new Set(M365_MUTATION_DENY);
-  const source = m365Exception ? deny.filter((entry) => !m365Deny.has(entry)) : deny;
   const required = m365Exception
     ? REQUIRED_DENY.filter((entry) => !m365Deny.has(entry))
     : REQUIRED_DENY;
-  const seen = new Set<string>(source);
-  const out: string[] = [...source];
+  // Stored entries have no authorship provenance. Approval can omit a generated
+  // floor, but cannot silently erase an operator's restriction or a legacy entry.
+  const seen = new Set<string>(deny);
+  const out: string[] = [...deny];
   for (const entry of required) {
     if (!seen.has(entry)) {
       out.push(entry);
@@ -314,6 +315,6 @@ export function mergeSettingsJson(
  * `mergeSettingsJson` can union the floor into otherwise-valid payloads
  * without rejecting them outright.
  */
-function isValidPermissionsShape(v: unknown): v is PermissionsSettings {
+export function isValidPermissionsShape(v: unknown): v is PermissionsSettings {
   return PermissionsSettingsShapeSchema.safeParse(v).success;
 }

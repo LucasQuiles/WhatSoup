@@ -1655,7 +1655,8 @@ private pin for this read-only check; it cannot redirect daily-health validation
 
 A recognized `WhatSoup-health-<source12>` export requires an external
 `health-package-pin.json` owned by `health_reporter`. Supported pin modes are
-`no-bot` and `bot-host`; the health profile's `role` must equal the pin's `mode`.
+`no-bot` and `bot-host`. The pin remains required when a matching Git repository
+contains the package directory. The health profile's `role` must equal the pin's `mode`.
 An unknown or mismatched role produces `pin_mode_mismatch` and exit 2. Do not
 change a pin to make an incompatible package pass.
 
