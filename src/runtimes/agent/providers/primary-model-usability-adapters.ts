@@ -1,4 +1,5 @@
 import { buildChildEnv, getProviderBinary } from '../session.ts';
+import { scrubbedAuthStatusEnv } from './account-auth-status.ts';
 import { buildOpenCodeRunArgs } from './opencode-execution-profile.ts';
 import { classifyProviderFailure } from '../failure-taxonomy.ts';
 import {
@@ -293,20 +294,8 @@ function modelProbeEnv(
   }
   const proxyUrl = baseOpts ? `http://127.0.0.1:${baseOpts.egressProxyPort}` : undefined;
   return {
-    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-    HOME: process.env.HOME,
-    // env-allowed: ambient OS PATH contract for executable resolution
-    PATH: process.env.PATH,
-    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-    USER: process.env.USER,
-    NO_COLOR: '1',
-    // Keep both credential selectors aligned with real turns. A defined-empty
-    // secure-storage override selects the CLI default and must be preserved.
-    // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-    ...(process.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR } : {}),
-    // env-allowed: external-tool interop; preserves the CLI credential-store selection
-    ...(process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined
-      ? { CLAUDE_SECURESTORAGE_CONFIG_DIR: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR } : {}),
+    // env-allowed: shared auth-status allowlist keeps model and identity probes on the same credential store
+    ...scrubbedAuthStatusEnv(process.env),
     // Egress proxy (#1607, F6): UPPER + lower case (curl reads lowercase for
     // plain HTTP; see child-env.ts / F4). Only present when opted in.
     ...(proxyUrl

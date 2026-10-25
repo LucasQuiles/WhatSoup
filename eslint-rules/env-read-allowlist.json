@@ -183,18 +183,13 @@
     },
     {
       "file": "src/runtimes/agent/providers/child-env.ts",
-      "allowedUnmarkedSites": 35,
-      "reason": "child-env builder: explicit allow-list, not passthrough \u2014 highest-leak-risk seam."
+      "allowedUnmarkedSites": 36,
+      "reason": "Child-env builder uses an explicit allowlist, including the secure-storage override so serving and diagnostic probes select the same credential store."
     },
     {
       "file": "src/runtimes/agent/providers/claude-account-identity.ts",
       "allowedUnmarkedSites": 1,
-      "reason": "`deps.env ?? process.env` DI seam for the read-only identity probe (task-21); scrubbed to the auth-status allow-list (HOME/PATH/USER/NO_COLOR/CLAUDE_CONFIG_DIR) before spawn, never forwarded whole — same seam shape as claude-filestore-heal.ts."
-    },
-    {
-      "file": "src/runtimes/agent/providers/claude-filestore-heal-identity.ts",
-      "allowedUnmarkedSites": 1,
-      "reason": "Call-time native credential-store verification boundary; injectable environment must reflect the current store before repair."
+      "reason": "`deps.env ?? process.env` DI seam for the read-only identity probe; the shared auth-status allowlist preserves both credential selectors before spawn, never forwarding the environment whole."
     },
     {
       "file": "src/runtimes/agent/providers/claude-filestore-heal.ts",
@@ -203,8 +198,8 @@
     },
     {
       "file": "src/runtimes/agent/providers/primary-model-usability-adapters.ts",
-      "allowedUnmarkedSites": 4,
-      "reason": "child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for usability adapters."
+      "allowedUnmarkedSites": 1,
+      "reason": "Model probes use the shared auth-status allowlist to preserve the same credential selectors as identity and diagnostic probes."
     },
     {
       "file": "src/runtimes/agent/runtime-tunables.ts",
@@ -218,8 +213,8 @@
     },
     {
       "file": "src/runtimes/agent/runtime.ts",
-      "allowedUnmarkedSites": 4,
-      "reason": "child-env forward (HOME/PATH/USER/CLAUDE_CONFIG_DIR) for the auth-status probe."
+      "allowedUnmarkedSites": 1,
+      "reason": "Diagnostic probes pass the environment through the shared auth-status allowlist; the environment is never forwarded whole."
     },
     {
       "file": "src/runtimes/agent/session.ts",
