@@ -8,6 +8,17 @@ change the configured account. Follow the existing
 [service-context identity procedure](macos-launchd-deployment.md#ratified-account-identity-in-the-service-context)
 when an owner needs to correct the account.
 
+Startup and model-recovery checks inspect credential stores without copying or
+deleting credentials. A matching account digest does not authorize a credential
+copy. The detector reads only the selected keychain service and reports a second
+plaintext store without changing it; the CLI probe separately establishes usability.
+
+Serving turns, identity checks and diagnostic/model probes preserve both
+`CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`. A defined secure-storage
+setting takes precedence, including an empty value that selects the CLI default.
+Keep these settings consistent in the instance's service environment. A duplicate
+store warning requires an operator decision; it does not perform account repair.
+
 A new matching verification attempts a durable BOT ERRORS clear for each pending
 identity source. Each process starts with both sources pending so incidents from
 a prior process can recover. A successful outbox write retires only that source;

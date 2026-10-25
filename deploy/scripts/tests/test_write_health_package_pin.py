@@ -72,6 +72,25 @@ def run(arguments, *, verify_only=False):
     return result
 
 
+def assert_consumer_accepts(args):
+    directory = args["profile"].parent
+    state = directory / "state"
+    result = subprocess.run(
+        [sys.executable, "-B", str(args["runtime-root"] / CHECKER_MEMBER),
+         "--runtime-manifest", "--runtime-package-pin", str(args["pin-output"])],
+        capture_output=True, text=True, timeout=15,
+        env={"PATH": os.defpath, "HOME": str(directory),
+             "BOT_ERRORS_HEALTH_PROFILE": str(args["profile"]),
+             "BOT_ERRORS_STATE_DIR": str(state), "BOT_ERRORS_OUTBOX_DIR": str(state / "outbox")},
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    lines = result.stdout.splitlines()
+    assert f"git_head_sha: {SOURCE} expected={SOURCE} source=package match" in lines
+    assert not [line for line in lines if line.startswith(("FAIL ", "WARN "))]
+    assert not state.exists()
+    assert not (directory / ".local" / "state" / "bot-errors").exists()
+
+
 @pytest.mark.parametrize("role", ["no-bot", "bot-host"])
 def test_produced_pin_is_private_and_accepted_by_consumer(tmp_path, role):
     args = package(tmp_path, role)
@@ -86,21 +105,41 @@ def test_produced_pin_is_private_and_accepted_by_consumer(tmp_path, role):
         "runtimeRootName": args["runtime-root"].name,
     }
     assert pin.stat().st_mode & 0o777 == 0o600
-    state = tmp_path / "state"
-    result = subprocess.run(
-        [sys.executable, "-B", str(args["runtime-root"] / CHECKER_MEMBER),
-         "--runtime-manifest", "--runtime-package-pin", str(pin)],
-        capture_output=True, text=True, timeout=15,
-        env={"PATH": os.defpath, "HOME": str(tmp_path),
-             "BOT_ERRORS_HEALTH_PROFILE": str(args["profile"]),
-             "BOT_ERRORS_STATE_DIR": str(state), "BOT_ERRORS_OUTBOX_DIR": str(state / "outbox")},
-    )
-    assert result.returncode == 0, result.stderr + result.stdout
-    lines = result.stdout.splitlines()
-    assert f"git_head_sha: {SOURCE} expected={SOURCE} source=package match" in lines
-    assert not [line for line in lines if line.startswith(("FAIL ", "WARN "))]
-    assert not state.exists()
-    assert not (tmp_path / ".local" / "state" / "bot-errors").exists()
+    assert_consumer_accepts(args)
+
+
+def test_failed_candidate_preserves_current_package_and_accepts_restored_tree(tmp_path):
+    current_directory = tmp_path / "current"
+    candidate_directory = tmp_path / "candidate"
+    current_directory.mkdir(mode=0o700)
+    candidate_directory.mkdir(mode=0o700)
+    current = package(current_directory)
+    candidate = package(candidate_directory, "bot-host")
+    result = run(current)
+    assert result.returncode == 0, result.stderr
+    assert_consumer_accepts(current)
+    retained = [current["profile"], current["pin-output"],
+                *(path for path in current["runtime-root"].rglob("*") if path.is_file())]
+    before = {path: (path.read_bytes(), path.stat().st_mode) for path in retained}
+    checker = candidate["runtime-root"] / CHECKER_MEMBER
+    original_checker = checker.read_bytes()
+    original_profile = candidate["profile"].read_bytes()
+    checker.write_bytes(b"corrupt staged checker\n")
+
+    result = run(candidate)
+
+    assert result.returncode == 2
+    assert "staged member digest differs" in result.stderr
+    assert not candidate["pin-output"].exists()
+    assert candidate["profile"].read_bytes() == original_profile
+    assert {path: (path.read_bytes(), path.stat().st_mode) for path in retained} == before
+    assert_consumer_accepts(current)
+
+    checker.write_bytes(original_checker)
+    result = run(candidate)
+    assert result.returncode == 0, result.stderr
+    assert_consumer_accepts(candidate)
+    assert {path: (path.read_bytes(), path.stat().st_mode) for path in retained} == before
 
 
 def test_repeat_and_verify_only_preserve_existing_pin(tmp_path):

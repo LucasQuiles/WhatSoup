@@ -381,7 +381,8 @@ import {
   MessageHandlerDrainTimeoutError,
   drainMessageHandlersForShutdown,
 } from './shutdown-message-handler-drain.ts';
-import { ensureClaudeFileStoreCredentialForExpectedAccount } from './providers/claude-filestore-heal-identity.ts';
+import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import { scrubbedAuthStatusEnv } from './providers/account-auth-status.ts';
 import {
   AccountIdentityVerifier,
   type AccountIdentityProbeTrigger,
@@ -4605,18 +4606,13 @@ export class AgentRuntime implements Runtime {
       } : null,
     });
 
-    // Heal the claude file-store credential from the keychain BEFORE the first
-    // turn can run, so a keychain-only refresh (native login) can't false-arm
-    // the provider fallback on turn 1 (the recovery probe path heals for the
-    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
-    // the file store is already current. Fail-open by contract.
+    // Detect duplicate credential stores before serving; copying refresh tokens
+    // would leave a stale second copy available to the CLI.
     if (this.agentProvider === 'claude-cli') {
       try {
-        await ensureClaudeFileStoreCredentialForExpectedAccount({
-          expectedAccountDigest: this.expectedAccountDigest,
-        });
+        ensureClaudeFileStoreCredential();
       } catch (error) {
-        log.warn({ error }, 'could not prepare Claude file-store credential at runtime startup');
+        log.warn({ error }, 'could not check Claude credential stores at runtime startup');
       }
     }
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
@@ -9782,7 +9778,7 @@ export class AgentRuntime implements Runtime {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, this.expectedAccountDigest));
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
     const result = signal
       ? await probePrimaryModelUsability(target, adapters, { signal })
       : await probePrimaryModelUsability(target, adapters);
@@ -9830,7 +9826,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, this.expectedAccountDigest)),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
@@ -9840,20 +9836,8 @@ export class AgentRuntime implements Runtime {
           getProviderBinary,
           probeBinaryAuthStatus,
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
-          // Explicit allowlist — never hand the CLI probe the full process env.
-          // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads
-          // creds from the same place as the model probe + turns (launchd keychain
-          // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
-          env: {
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            HOME: process.env['HOME'],
-            // env-allowed: ambient OS PATH contract for executable resolution
-            PATH: process.env['PATH'],
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            USER: process.env['USER'],
-            // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-            ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
-          },
+          // env-allowed: shared explicit allow-list preserves the serving credential selectors
+          env: scrubbedAuthStatusEnv(process.env),
         },
       });
       void runDiagnosticBundle({ workflow: wf, probes, now })

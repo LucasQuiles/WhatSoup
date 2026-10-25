@@ -2204,7 +2204,7 @@ export class RuntimeFallbackCoordinator {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.host.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.host.agentProvider, this.host.model, this.host.cwd, this.host.egressProxy?.port, this.host.providerExecutionGate, this.host.expectedAccountDigest));
+    const adapters = createPrimaryModelProbeAdapters(this.host.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.host.agentProvider, this.host.model, this.host.cwd, this.host.egressProxy?.port, this.host.providerExecutionGate));
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))

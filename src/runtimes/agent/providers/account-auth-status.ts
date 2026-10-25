@@ -57,12 +57,11 @@ function scrubbedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     PATH: env['PATH'],
     USER: env['USER'],
     NO_COLOR: '1',
-    // Forward CLAUDE_CONFIG_DIR (if set) so the auth-status probe resolves creds
-    // from the same place as the model probe + real turns. On launchd-managed
-    // macOS hosts the keychain cred item is unreadable in the non-GUI context;
-    // CLAUDE_CONFIG_DIR=$HOME/.claude routes the cli to the readable file store.
-    // No-op where unset → no change on hosts that omit it. See RCA 2026-06-24.
+    // Preserve the same credential selection as serving turns, including the
+    // defined-empty secure-storage override that selects the CLI default.
     ...(env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: env['CLAUDE_CONFIG_DIR'] } : {}),
+    ...(env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] !== undefined
+      ? { CLAUDE_SECURESTORAGE_CONFIG_DIR: env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] } : {}),
   };
 }
 
