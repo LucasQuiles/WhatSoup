@@ -3,6 +3,7 @@
 
 import type { AgentEvent } from '../stream-parser.ts';
 import type { ProviderRoutePolicy } from '../../../core/provider-data-policy.ts';
+import type { M365MutationPolicy } from '../../../core/m365-bridge-policy.ts';
 
 // ---------------------------------------------------------------------------
 // Enums / union types
@@ -163,8 +164,10 @@ export interface ProviderSessionOptions {
   routePolicy?: ProviderRoutePolicy;
   /** Plugin directories to load (CLI providers). */
   pluginDirs?: string[];
-  /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
+  /** Legacy child-env input; a configured M365 bridge is governed by m365MutationPolicy. */
   allowM365Mutations?: boolean;
+  /** Resolved once by AgentRuntime; child providers only consume this decision. */
+  m365MutationPolicy?: M365MutationPolicy;
   /** Instance name for logging / identification. */
   instanceName: string;
   /** Callback invoked for every event emitted by the provider. */

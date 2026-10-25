@@ -125,6 +125,7 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -293,6 +294,7 @@ import {
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
@@ -379,7 +381,7 @@ import {
   MessageHandlerDrainTimeoutError,
   drainMessageHandlersForShutdown,
 } from './shutdown-message-handler-drain.ts';
-import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import { ensureClaudeFileStoreCredentialForExpectedAccount } from './providers/claude-filestore-heal-identity.ts';
 import {
   AccountIdentityVerifier,
   type AccountIdentityProbeTrigger,
@@ -705,6 +707,7 @@ export class AgentRuntime implements Runtime {
   private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
@@ -795,6 +798,7 @@ export class AgentRuntime implements Runtime {
   // to resolve. Initialized in the constructor (needs db + instanceName + the
   // config readers, which stay on AgentRuntime for the health/context callers).
   private readonly handoffDistill: HandoffDistillCoordinator;
+  private readonly typedHandoffDistill: TypedHandoffDistillConfig | undefined;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   // Provider-fallback window lifecycle scalars (active-until / activated-at /
   // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
@@ -2700,11 +2704,14 @@ export class AgentRuntime implements Runtime {
       emitAlert: emitAlertChecked,
       clearAlert: clearAlertSourceChecked,
     });
+    const typedHandoffDistill = options?.handoffDistill;
+    this.typedHandoffDistill = typedHandoffDistill;
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
-      isEnabled: () => handoffDistillerEnabled(),
-      getModel: () => handoffDistillModel(),
+      isEnabled: () => typedHandoffDistill?.enabled ?? handoffDistillerEnabled(),
+      getModel: () => typedHandoffDistill?.model ?? handoffDistillModel(),
+      getConfig: typedHandoffDistill ? () => typedHandoffDistill.config : undefined,
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
@@ -2742,6 +2749,12 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.m365MutationPolicy = resolveM365MutationPolicy({
+      provider: this.agentProvider,
+      allowM365Mutations: this.allowM365Mutations,
+      enabledPlugins: this.enabledPlugins,
+      binding: options?.m365Bridge,
+    });
     this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
     this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
@@ -3009,9 +3022,12 @@ export class AgentRuntime implements Runtime {
       get agentFallbackDiscovery() { return runtime.agentFallbackDiscovery; },
       get modelCatalogueListFn() { return runtime.modelCatalogueListFn; },
       get allowM365Mutations() { return runtime.allowM365Mutations; },
+      get m365MutationPolicy() { return runtime.m365MutationPolicy; },
+      get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
       get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
       get egressProxy() { return runtime.egressProxy; },
+      get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
@@ -4072,7 +4088,10 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
+          hasSandbox: !!this.sandbox,
+          m365MutationPolicy: this.m365MutationPolicy,
+        });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
         // global hooks, permissions, or plugins.
@@ -4592,7 +4611,13 @@ export class AgentRuntime implements Runtime {
     // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
     // the file store is already current. Fail-open by contract.
     if (this.agentProvider === 'claude-cli') {
-      ensureClaudeFileStoreCredential();
+      try {
+        await ensureClaudeFileStoreCredentialForExpectedAccount({
+          expectedAccountDigest: this.expectedAccountDigest,
+        });
+      } catch (error) {
+        log.warn({ error }, 'could not prepare Claude file-store credential at runtime startup');
+      }
     }
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
@@ -9608,34 +9633,42 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  private isPeriodicUsabilityProbeExpected(): boolean {
+    return this.periodicUsabilityProbeTimer !== null
+      || (this.periodicUsabilityProbeDueAt !== null && this.primaryModelUsability?.probeInFlight === true);
+  }
+
   /** The freshness window the live verdict is judged against: scheduler-derived
-   *  while the periodic probe is armed, the flat 30min otherwise. */
-  private modelUsabilityFreshnessMs(): number {
+   *  while the periodic probe is armed or in flight, the flat 30min otherwise. `checkedAt`
+   *  is the evidence's own receipt time (model usability by default). */
+  private modelUsabilityFreshnessMs(checkedAt: number | null = this.primaryModelUsability?.checkedAt ?? null): number {
     return resolveModelUsabilityFreshnessMs(
-      this.periodicUsabilityProbeTimer !== null,
+      this.isPeriodicUsabilityProbeExpected(),
       periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
-      {
-        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
-        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
-      },
+      { nextProbeDueAt: this.periodicUsabilityProbeDueAt, checkedAt },
     );
   }
 
-  /** Freshness-honest identity verdict for /health, judged against the same
-   *  window as model usability (the identity check rides the same probe). */
+  /** Freshness-honest identity verdict for /health. The deadline is the same
+   *  next probe as model usability (the identity check rides it), but the
+   *  window starts at the identity receipt: a turn success refreshes the
+   *  usability checkedAt only, and must not age the identity receipt early. */
   private accountIdentityHealth(): AccountIdentityHealth {
+    const receipt = this.accountIdentity;
     return deriveAccountIdentityHealth({
       expectedConfigured: this.expectedAccountDigest !== null,
-      verification: this.accountIdentity,
+      verification: receipt,
       armedAtMs: this.accountIdentityArmedAt,
       nowMs: systemClock.now(),
-      freshnessMs: this.modelUsabilityFreshnessMs(),
+      freshnessMs: receipt !== null && receipt.status !== 'disabled'
+        ? this.modelUsabilityFreshnessMs(receipt.checkedAt)
+        : this.modelUsabilityFreshnessMs(),
     });
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const periodicProbeExpected = this.isPeriodicUsabilityProbeExpected();
     const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
     const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
@@ -9749,7 +9782,7 @@ export class AgentRuntime implements Runtime {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
+    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, this.expectedAccountDigest));
     const result = signal
       ? await probePrimaryModelUsability(target, adapters, { signal })
       : await probePrimaryModelUsability(target, adapters);
@@ -9797,7 +9830,7 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
+          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, this.expectedAccountDigest)),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
@@ -10417,7 +10450,7 @@ export class AgentRuntime implements Runtime {
     conversationKey: string,
     provider: string,
   ): (() => string | null) | undefined {
-    if (!handoffContextEnabled()) return undefined;
+    if (!(this.typedHandoffDistill?.contextInjection ?? handoffContextEnabled())) return undefined;
     if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
     return () => {
       // Seed the distilled handoff context only into a STAND-IN session spawned
@@ -10562,6 +10595,7 @@ export class AgentRuntime implements Runtime {
       model: route.model,
       pluginDirs: this.pluginDirs,
       allowM365Mutations: this.allowM365Mutations,
+      m365MutationPolicy: this.m365MutationPolicy,
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }

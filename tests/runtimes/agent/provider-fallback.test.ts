@@ -126,6 +126,7 @@ import { Database } from '../../../src/core/database.ts';
 import { ensureStandbyNoticeSchema } from '../../../src/runtimes/agent/standby-notice.ts';
 import { ensureHandoffArtifactSchema, upsertHandoffArtifact } from '../../../src/runtimes/agent/handoff-artifact.ts';
 import type { Messenger } from '../../../src/core/types.ts';
+import type { AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime-options.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 import { createRuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 
@@ -1537,7 +1538,28 @@ describe('handoff context injection (real db)', () => {
   // Header emitted by buildHandoffPrelude's system block (handoff-prelude.ts).
   const SUMMARY_HEADER = '[Handoff context — prior conversation summary]';
 
-  function makeRealDbRuntime(): { runtime: AgentRuntime; db: Database } {
+  function typedHandoff(contextInjection: boolean): NonNullable<AgentRuntimeOptions['handoffDistill']> {
+    return {
+      enabled: true,
+      contextInjection,
+      model: 'deepseek-flash',
+      config: {
+        sweepMs: 10_000,
+        growthThreshold: 500,
+        verbatimN: 1,
+        budget: {
+          maxTokensPerWindow: 1_000,
+          maxCallsPerWindow: 1,
+          windowMs: 60_000,
+          failureThreshold: 1,
+          breakerCooldownMs: 10_000,
+          globalConcurrency: 1,
+        },
+      },
+    };
+  }
+
+  function makeRealDbRuntime(handoffDistill?: AgentRuntimeOptions['handoffDistill']): { runtime: AgentRuntime; db: Database } {
     const config = mockConfigRef();
     config['agentProvider'] = 'claude-cli';
     config['agentProviderConfig'] = undefined;
@@ -1548,7 +1570,7 @@ describe('handoff context injection (real db)', () => {
     // start() ensures this schema in production; mirror it here without the rest
     // of start()'s heavy setup.
     ensureHandoffArtifactSchema(db);
-    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]', handoffDistill });
     return { runtime, db };
   }
 
@@ -1605,6 +1627,21 @@ describe('handoff context injection (real db)', () => {
     db.close();
   });
 
+  it('typed context policy injects only into an active fallback without the legacy flag', () => {
+    const { runtime, db } = makeRealDbRuntime(typedHandoff(true));
+    const v = view(runtime);
+    const chat = 'ctx-typed@s.whatsapp.net';
+    seedArtifact(db, chat, 'Typed policy provides this summary.');
+    v.activateProviderFallback(new Date(Date.now() + 600_000), 'usage-limit');
+
+    withFlag(undefined, () => {
+      const cb = v.buildHandoffSystemBlock(chat, 'claude-cli');
+      expect(cb).toBeTypeOf('function');
+      expect(cb!()).toContain('Typed policy provides this summary.');
+    });
+    db.close();
+  });
+
   it('flag on + fresh artifact but NO fallback window (primary session) → callback yields null', () => {
     const { runtime, db } = makeRealDbRuntime();
     const v = view(runtime);
@@ -1638,7 +1675,7 @@ describe('AgentRuntime — background handoff distiller arming (flag-gated)', ()
   const DISTILLER_FLAG = 'WHATSOUP_HANDOFF_DISTILLER';
   const MODEL_FLAG = 'WHATSOUP_HANDOFF_DISTILL_MODEL';
 
-  function makeDistillRuntime(): { runtime: AgentRuntime; db: Database } {
+  function makeDistillRuntime(handoffDistill?: AgentRuntimeOptions['handoffDistill']): { runtime: AgentRuntime; db: Database } {
     const config = mockConfigRef();
     config['agentProvider'] = 'claude-cli';
     config['agentProviderConfig'] = undefined;
@@ -1647,7 +1684,7 @@ describe('AgentRuntime — background handoff distiller arming (flag-gated)', ()
     const db = new Database(':memory:');
     db.open();
     ensureHandoffArtifactSchema(db);
-    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]' });
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { model: 'claude-opus-4-8[1m]', handoffDistill });
     return { runtime, db };
   }
 
@@ -1704,6 +1741,37 @@ describe('AgentRuntime — background handoff distiller arming (flag-gated)', ()
       v.handoffDistill.start();
       expect(v.handoffDistill.timer).toBe(timer);
       // Clean up the armed interval deterministically (it is unref'd anyway).
+      if (v.handoffDistill.timer) clearInterval(v.handoffDistill.timer);
+      v.handoffDistill.timer = null;
+    });
+    db.close();
+  });
+
+  it('typed DeepSeek policy arms the real coordinator without legacy feature flags', () => {
+    const typed: NonNullable<AgentRuntimeOptions['handoffDistill']> = {
+      enabled: true,
+      contextInjection: false,
+      model: 'deepseek-flash',
+      config: {
+        sweepMs: 10_000,
+        growthThreshold: 500,
+        verbatimN: 1,
+        budget: {
+          maxTokensPerWindow: 1_000,
+          maxCallsPerWindow: 1,
+          windowMs: 60_000,
+          failureThreshold: 1,
+          breakerCooldownMs: 10_000,
+          globalConcurrency: 1,
+        },
+      },
+    };
+    const { runtime, db } = makeDistillRuntime(typed);
+    const v = view(runtime);
+    withEnv({ [DISTILLER_FLAG]: undefined, [MODEL_FLAG]: undefined, DEEPSEEK_API_KEY: 'sk-deep' }, () => {
+      v.handoffDistill.start();
+      expect(v.handoffDistill.timer).not.toBeNull();
+      expect(v.handoffDistill.runner).not.toBeNull();
       if (v.handoffDistill.timer) clearInterval(v.handoffDistill.timer);
       v.handoffDistill.timer = null;
     });

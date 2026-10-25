@@ -111,6 +111,9 @@ Export properties (all fail closed):
 - the release is assembled in a staging directory and self-checked with the
   SAME drift checker the fleet runs (`--check-release` semantics) BEFORE it is
   atomically renamed into place — a failed export leaves no release;
+- when `deploy/source-runtime-manifest.json` is present, its pinned entrypoint
+  graph is also checked against the staged release and its release manifest;
+  a stale source hash refuses publication before restart preflight;
 - secret- and state-shaped paths (`tokens.env`, `*.db`, `auth/**`, ...) are
   excluded even when git-tracked;
 - an existing release is never clobbered: without `--replace` the export

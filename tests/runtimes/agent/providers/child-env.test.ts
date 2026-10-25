@@ -25,6 +25,14 @@ const MANAGED_ENV_KEYS = [
   'CUSTOM_SECRET',
   'TOKENOMICS_SECRET',
   'ALLOW_M365_MUTATIONS',
+  'MS365_AGENT365_BRIDGE',
+  'MS365_AGENT365_BASE_URL',
+  'MS365_AGENT365_API_KEY',
+  'MS365_AGENT365_ACCOUNT_ID',
+  'MS365_AGENT365_ACCOUNT_EMAIL',
+  'MS365_TENANT_ID',
+  'MS365_PROFILE',
+  'MS365_HUB_URL',
   'WHATSOUP_CONNECTOR_FAILCLOSED',
   'WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION',
   'WHATSOUP_INSTANCE',
@@ -378,5 +386,55 @@ describe('buildBaseChildEnv (#411 WHATSOUP_CONNECTOR_FAILCLOSED gate)', () => {
     const env = buildBaseChildEnv();
 
     expect(env).toHaveProperty('ALLOW_M365_MUTATIONS', '1');
+  });
+});
+
+describe('buildBaseChildEnv (account-bound M365 policy)', () => {
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(MANAGED_ENV_KEYS.map((key) => [key, process.env[key]]));
+    resetManagedEnv();
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('uses the common approved policy to populate only the configured bridge values', () => {
+    resetManagedEnv({ PATH: '/usr/bin', HOME: '/tmp/child-home', ALLOW_M365_MUTATIONS: 'parent-value' });
+    const env = buildBaseChildEnv({
+      m365MutationPolicy: {
+        status: 'approved',
+        childEnv: {
+          ALLOW_M365_MUTATIONS: '1',
+          MS365_AGENT365_BRIDGE: 'true',
+          MS365_AGENT365_BASE_URL: 'http://127.0.0.1:10000',
+          MS365_AGENT365_API_KEY: 'test-key',
+          MS365_AGENT365_ACCOUNT_EMAIL: 'user@example.test',
+          MS365_TENANT_ID: 'tenant-1',
+          MS365_PROFILE: 'user-full-v1',
+          MS365_HUB_URL: 'http://127.0.0.1:10000',
+        },
+      },
+    });
+
+    expect(env).toMatchObject({
+      ALLOW_M365_MUTATIONS: '1',
+      MS365_AGENT365_BRIDGE: 'true',
+      MS365_AGENT365_ACCOUNT_EMAIL: 'user@example.test',
+      MS365_PROFILE: 'user-full-v1',
+    });
+    expect(env).not.toHaveProperty('MS365_AGENT365_ACCOUNT_ID');
+  });
+
+  it('drops ambient mutation authority when a configured bridge policy is rejected', () => {
+    resetManagedEnv({ PATH: '/usr/bin', HOME: '/tmp/child-home', ALLOW_M365_MUTATIONS: '1' });
+
+    const env = buildBaseChildEnv({ m365MutationPolicy: { status: 'rejected' } });
+
+    expect(env).not.toHaveProperty('ALLOW_M365_MUTATIONS');
+    expect(env).not.toHaveProperty('MS365_AGENT365_API_KEY');
   });
 });

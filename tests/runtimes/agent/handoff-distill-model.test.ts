@@ -12,6 +12,15 @@ describe('resolveDistillModel', () => {
     });
   });
 
+  it('resolves the allowlisted DeepSeek Flash model to the DeepSeek endpoint', () => {
+    const res = resolveDistillModel('deepseek-flash', { DEEPSEEK_API_KEY: 'sk-deep' });
+    expect(res).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+      endpoint: 'https://api.deepseek.com/chat/completions',
+    });
+  });
+
   it('resolves a minimax model to the minimax chat-completions endpoint', () => {
     const res = resolveDistillModel('MiniMax-M2.7', { MINIMAX_API_KEY: 'mm-key' });
     expect(res?.provider).toBe('minimax');

@@ -25,8 +25,8 @@ import type { HandoffArtifact } from './handoff-prelude.ts';
 import { HandoffDistillRunner } from './handoff-distill-runner.ts';
 import { buildHandoffDistill } from './handoff-summarizer.ts';
 import { resolveDistillModel, type ResolvedDistillModel } from './handoff-distill-model.ts';
-import { type DistillBudgetConfig } from './handoff-distill-gate.ts';
 import { resolveHandoffDistillConfig } from './handoff-distill-config.ts';
+import type { HandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import { getSessionTokenSnapshot, listActiveSessionRows } from './session-db.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
@@ -38,10 +38,6 @@ const log = createChildLogger('agent-runtime');
 // Cluster-local — only the sweep coordinator reads these.
 // env-allowed: passes env into the pure resolver at the call boundary
 const HANDOFF_DISTILL_RESOLVED = resolveHandoffDistillConfig(process.env);
-const HANDOFF_DISTILL_SWEEP_MS = HANDOFF_DISTILL_RESOLVED.sweepMs;
-const HANDOFF_DISTILL_GROWTH_THRESHOLD = HANDOFF_DISTILL_RESOLVED.growthThreshold;
-const HANDOFF_DISTILL_VERBATIM_N = HANDOFF_DISTILL_RESOLVED.verbatimN;
-const HANDOFF_DISTILL_BUDGET: DistillBudgetConfig = HANDOFF_DISTILL_RESOLVED.budget;
 
 export interface HandoffDistillCoordinatorDeps {
   db: Database;
@@ -50,6 +46,8 @@ export interface HandoffDistillCoordinatorDeps {
   isEnabled: () => boolean;
   /** Configured distill model id, or null (env-backed in AgentRuntime). */
   getModel: () => string | null;
+  /** Typed instance config. Absent retains legacy environment defaults. */
+  getConfig?: () => HandoffDistillConfig;
 }
 
 export class HandoffDistillCoordinator {
@@ -62,6 +60,7 @@ export class HandoffDistillCoordinator {
   private readonly instanceName: string;
   private readonly isEnabled: () => boolean;
   private readonly getModel: () => string | null;
+  private readonly getConfig: (() => HandoffDistillConfig) | undefined;
   /** Degraded conversations remain until distillation and persistence succeed. */
   private degradedConversations = new Set<string>();
   private hadDegradedConversations = false;
@@ -71,6 +70,7 @@ export class HandoffDistillCoordinator {
     this.instanceName = deps.instanceName;
     this.isEnabled = deps.isEnabled;
     this.getModel = deps.getModel;
+    this.getConfig = deps.getConfig;
   }
 
   /**
@@ -94,11 +94,12 @@ export class HandoffDistillCoordinator {
       return;
     }
 
-    this.runner = this.buildRunner(resolved);
-    this.timer = setInterval(() => void this.sweep(), HANDOFF_DISTILL_SWEEP_MS);
+    const handoffConfig = this.getConfig?.() ?? HANDOFF_DISTILL_RESOLVED;
+    this.runner = this.buildRunner(resolved, handoffConfig);
+    this.timer = setInterval(() => void this.sweep(), handoffConfig.sweepMs);
     this.timer.unref?.();
     log.info(
-      { instance: this.instanceName, provider: resolved.provider, model: resolved.model, sweepMs: HANDOFF_DISTILL_SWEEP_MS },
+      { instance: this.instanceName, provider: resolved.provider, model: resolved.model, sweepMs: handoffConfig.sweepMs },
       'handoff distiller armed',
     );
   }
@@ -118,7 +119,7 @@ export class HandoffDistillCoordinator {
   }
 
   /** Construct the production runner. `resolved` is captured for distillFor. */
-  private buildRunner(resolved: ResolvedDistillModel): HandoffDistillRunner {
+  private buildRunner(resolved: ResolvedDistillModel, handoffConfig: HandoffDistillConfig): HandoffDistillRunner {
     // Per-conversation token baseline: total input+output since the row's last
     // compact. The runner compares this against the growth threshold; the gate
     // bills spend separately, so this only decides eligibility.
@@ -150,17 +151,17 @@ export class HandoffDistillCoordinator {
         apiKey: resolved.apiKey,
         endpoint: resolved.endpoint,
         conversationKey,
-        loadMessages: () => getRecentMessages(this.db, conversationKey, HANDOFF_DISTILL_VERBATIM_N),
+        loadMessages: () => getRecentMessages(this.db, conversationKey, handoffConfig.verbatimN),
         redact: (t) => redactHandoffPii(t),
-        verbatimN: HANDOFF_DISTILL_VERBATIM_N,
+        verbatimN: handoffConfig.verbatimN,
       });
       return run().then((o) => ({ summary: o.summary, seededArtifacts: o.seededArtifacts ?? null, tokensUsed: o.tokensUsed }));
     };
 
     return new HandoffDistillRunner({
-      config: HANDOFF_DISTILL_BUDGET,
+      config: handoffConfig.budget,
       now: () => Date.now(),
-      growthThreshold: HANDOFF_DISTILL_GROWTH_THRESHOLD,
+      growthThreshold: handoffConfig.growthThreshold,
       tokenGrowth,
       distillFor,
       persist: (artifact: HandoffArtifact) => upsertHandoffArtifact(this.db, artifact),

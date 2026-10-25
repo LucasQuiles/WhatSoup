@@ -8,10 +8,8 @@ import {
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from '../../../lib/api-key-resolver.ts';
-import {
-  ensureClaudeFileStoreCredential,
-  type ClaudeFileStoreHealResult,
-} from './claude-filestore-heal.ts';
+import type { ClaudeFileStoreHealResult } from './claude-filestore-heal.ts';
+import { ensureClaudeFileStoreCredentialForExpectedAccount } from './claude-filestore-heal-identity.ts';
 import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
@@ -46,7 +44,9 @@ export interface PrimaryModelProbeAdapterDeps {
    * Self-heal the claude file-store credential from the keychain before a
    * claude-cli probe (see claude-filestore-heal.ts). Injectable for tests.
    */
-  ensureClaudeFileStoreCredential?: () => ClaudeFileStoreHealResult;
+  ensureClaudeFileStoreCredential?: (expectedAccountDigest: string | null) => ClaudeFileStoreHealResult | Promise<ClaudeFileStoreHealResult>;
+  /** Ratified `service.expectedAccountDigest`; no value keeps credential copying refused. */
+  expectedAccountDigest?: string | null;
   /**
    * Egress proxy port (#1607, F6). When the runtime has an active egress
    * allowlist proxy, its port is threaded here so the model/recovery probe's
@@ -186,7 +186,9 @@ async function probeCliModel(
     // so no future/injected heal fault can ever break the probe (a broken probe
     // would strand the fallback — the exact failure mode this change fixes).
     try {
-      (deps.ensureClaudeFileStoreCredential ?? ensureClaudeFileStoreCredential)();
+      const heal = deps.ensureClaudeFileStoreCredential
+        ?? ((expectedAccountDigest: string | null) => ensureClaudeFileStoreCredentialForExpectedAccount({ expectedAccountDigest }));
+      await heal(deps.expectedAccountDigest ?? null);
     } catch {
       // swallow — proceed to probe exactly as before
     }

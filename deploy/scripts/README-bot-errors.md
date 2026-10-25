@@ -1643,6 +1643,25 @@ The expected successful shape is:
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
 
+### Read-only exported health-package validation
+
+Run `python3 -B deploy/scripts/bot-errors-health-check.py --runtime-manifest`
+from the installed package to inspect its source binding without publishing an
+event. For a staged package, `--runtime-package-pin <path>` selects an explicit
+private pin for this read-only check; it cannot redirect daily-health validation.
+
+A recognized `WhatSoup-health-<source12>` export requires an external
+`health-package-pin.json` owned by `health_reporter`. Supported pin modes are
+`no-bot` and `bot-host`; the health profile's `role` must equal the pin's `mode`.
+An unknown or mismatched role produces `pin_mode_mismatch` and exit 2. Do not
+change a pin to make an incompatible package pass.
+
+The installer must verify the archive and every member before writing the pin.
+The checker validates the pin identity, manifest digest, full source commit,
+runtime root, listed file hashes and executing-checker binding. Successful
+validation includes `source=package match`. Qualifying the checker does not
+qualify a package builder, activation rollback, scheduled jobs or alert delivery.
+
 ## OPERATIONAL — No-post runtime-skew simulation
 
 Use this when validating #809/C4a without posting to the production outbox. It exercises

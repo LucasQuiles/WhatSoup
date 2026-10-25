@@ -31,8 +31,8 @@
 //   - Never performs OAuth, never contacts an auth server, never changes which
 //     account is used. It is a purely local store-to-store coherence sync of an
 //     already-present, already-valid credential.
-//   - Fail-open: any error is logged and swallowed; the caller's probe / turn
-//     proceeds exactly as before.
+//   - Operational errors are logged and swallowed; an identity-guard failure
+//     refuses copying, then the caller's probe / turn proceeds as before.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, renameSync, chmodSync, mkdirSync } from 'node:fs';
@@ -95,6 +95,13 @@ export interface ClaudeFileStoreHealDeps {
    *  unverifiable. When expectedAccountId is set, the heal requires this to
    *  return true before copying. A mismatch triggers rollback. */
   verifyAccountId?: (keychainStore: Record<string, unknown>) => boolean | null;
+  /**
+   * SHA-256 receipt for the account expected by the service. This is distinct
+   * from expectedAccountId: callers with a digest must not relabel it as an ID.
+   */
+  expectedAccountDigest?: string | null;
+  /** Verifies the expectedAccountDigest receipt without disclosing an identity. */
+  verifyAccountDigest?: (keychainStore: Record<string, unknown>) => boolean | null;
   /** Backup the prior file store before mutation (returns the backup path or
    *  null on failure). Used for rollback-safe recovery when a post-heal canary
    *  mismatch or write failure is detected. */
@@ -312,10 +319,20 @@ export function ensureClaudeFileStoreCredential(
     // it only returns when exactly one suffixed item exists, which is
     // unambiguous by construction). The #2784 shadow-detection above is also
     // preserved (it returns before reaching this guard).
-    const hasExpectedIdentity = deps.expectedAccountId !== undefined && deps.expectedAccountId !== null;
-    const hasVerifyFn = typeof deps.verifyAccountId === 'function';
-    if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null) {
-      const verified = deps.verifyAccountId!(keychainStore);
+    const hasAccountId = deps.expectedAccountId !== undefined && deps.expectedAccountId !== null;
+    const hasAccountIdVerifier = typeof deps.verifyAccountId === 'function';
+    const hasAccountDigest = deps.expectedAccountDigest !== undefined && deps.expectedAccountDigest !== null;
+    const hasAccountDigestVerifier = typeof deps.verifyAccountDigest === 'function';
+    const hasAccountIdReceipt = hasAccountId && hasAccountIdVerifier;
+    const hasAccountDigestReceipt = hasAccountDigest && hasAccountDigestVerifier;
+    const hasExpectedIdentity = hasAccountIdReceipt || hasAccountDigestReceipt;
+    const verifyIdentity = hasAccountIdReceipt
+      ? deps.verifyAccountId!
+      : hasAccountDigestReceipt
+        ? deps.verifyAccountDigest!
+        : null;
+    if (hasExpectedIdentity && verifyIdentity !== null && keychainStore !== null) {
+      const verified = verifyIdentity(keychainStore);
       if (verified === false) {
         log.warn(
           { expectedAccountIdPresent: true },
@@ -331,7 +348,7 @@ export function ensureClaudeFileStoreCredential(
         return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
       }
       // verified === true → same account, proceed to heal.
-    } else if (!hasExpectedIdentity && !hasVerifyFn) {
+    } else if (!hasAccountId && !hasAccountIdVerifier && !hasAccountDigest && !hasAccountDigestVerifier) {
       // No receipt at all — a bare item's account identity is unknowable, so
       // refuse. This is the core fix: without this guard, a bare item from a
       // different account silently switches the bot.
@@ -345,7 +362,13 @@ export function ensureClaudeFileStoreCredential(
       // complete receipt with an unreadable keychain store — either way,
       // same-account identity cannot be proven.
       log.warn(
-        { hasExpectedIdentity, hasVerifyFn, keychainStoreReadable: keychainStore !== null },
+        {
+          hasAccountId,
+          hasAccountIdVerifier,
+          hasAccountDigest,
+          hasAccountDigestVerifier,
+          keychainStoreReadable: keychainStore !== null,
+        },
         '#3020: account-identity receipt incomplete or keychain store unreadable — refusing heal (fail closed, degraded readiness)',
       );
       return { outcome: 'refused-identity-unverifiable', keychainExpiresAt };
@@ -392,8 +415,8 @@ export function ensureClaudeFileStoreCredential(
     // state internally can use this hook to catch such races; a mismatch
     // triggers rollback to the prior store. Canary only runs when rollback is
     // possible (backup taken + restore fn provided).
-    if (hasExpectedIdentity && hasVerifyFn && keychainStore !== null && typeof deps.restoreFileStore === 'function' && backupPath !== null) {
-      const postCanary = deps.verifyAccountId!(keychainStore);
+    if (hasExpectedIdentity && verifyIdentity !== null && keychainStore !== null && typeof deps.restoreFileStore === 'function' && backupPath !== null) {
+      const postCanary = verifyIdentity(keychainStore);
       if (postCanary !== true) {
         log.warn(
           { expectedAccountIdPresent: true, postCanary },

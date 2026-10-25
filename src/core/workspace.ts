@@ -13,6 +13,7 @@ import {
   defaultSettingsJson,
   type PermissionsSettings,
 } from './settings-template.ts';
+import type { M365MutationPolicy } from './m365-bridge-policy.ts';
 import { toConversationKey } from './conversation-key.ts';
 import { JID_PERSONAL, JID_LID, JID_GROUP } from './jid-constants.ts';
 import {
@@ -184,6 +185,7 @@ export function writeSandboxArtifacts(
 export function writePermissionsSettings(
   claudeDir: string,
   settings: PermissionsSettings,
+  m365MutationPolicy?: M365MutationPolicy,
 ): void {
   try {
     ensurePrivateDirectorySync(claudeDir);
@@ -201,7 +203,7 @@ export function writePermissionsSettings(
 
     const mergedPermissions = {
       ...settings.permissions,
-      deny: applyRequiredDeny(settings.permissions.deny),
+      deny: applyRequiredDeny(settings.permissions.deny, m365MutationPolicy),
     };
     const merged: Record<string, unknown> = { ...existing, permissions: mergedPermissions };
     if (settings.enabledPlugins !== undefined) {
@@ -260,12 +262,12 @@ export function ensurePermissionsSettings(
   claudeDir: string,
   type: string,
   enabledPlugins?: Record<string, boolean>,
-  opts?: { hasSandbox?: boolean },
+  opts?: { hasSandbox?: boolean; m365MutationPolicy?: M365MutationPolicy },
 ): void {
   try {
     if (type !== 'agent') return;
 
-    const defaults = defaultSettingsJson(type);
+    const defaults = defaultSettingsJson(type, opts?.m365MutationPolicy);
     if (!defaults) return;
 
     ensurePrivateDirectorySync(claudeDir);
@@ -297,8 +299,8 @@ export function ensurePermissionsSettings(
             && permissions.defaultMode === 'bypassPermissions';
           if (validPermissions) {
             const currentDeny = permissions.deny as string[];
-            const repairedDeny = applyRequiredDeny(currentDeny);
-            if (repairedDeny.length !== currentDeny.length) {
+            const repairedDeny = applyRequiredDeny(currentDeny, opts?.m365MutationPolicy);
+            if (repairedDeny.length !== currentDeny.length || repairedDeny.some((entry, index) => entry !== currentDeny[index])) {
               existing.permissions = {
                 ...permissions,
                 deny: repairedDeny,

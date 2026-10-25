@@ -584,6 +584,26 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(ensureClaudeFileStoreCredential).toHaveBeenCalledTimes(1); // unchanged — not called for opencode
   });
 
+  it('passes the ratified account digest to the credential heal before probing', async () => {
+    const digest = `sha256:${'c'.repeat(64)}`;
+    const order: string[] = [];
+    const ensureClaudeFileStoreCredential = vi.fn(async (_expected: string | null) => {
+      order.push('heal');
+      return { outcome: 'healed' as const };
+    });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      expectedAccountDigest: digest,
+      getProviderBinary: vi.fn(() => 'claude'),
+      ensureClaudeFileStoreCredential,
+      probeBinaryCommand: vi.fn(async () => { order.push('probe'); return { status: 'ok' as const, output: 'OK' }; }),
+    });
+
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'claude-opus-4-8' });
+
+    expect(ensureClaudeFileStoreCredential).toHaveBeenCalledWith(digest);
+    expect(order).toEqual(['heal', 'probe']);
+  });
+
   it('restoration cycle: probe recovers to ok after the heal populates the file store', async () => {
     // Model the fleet failure→recovery: probe #1 sees an unauthenticated CLI
     // (fallback would arm), then the heal populates the file store and probe #2

@@ -1,0 +1,498 @@
+"""Regression coverage for declared export-only health runtimes.
+
+The production change that makes these tests fail is accepting a no-Git runtime
+without both the installer's source identity convention and a clean hash-bound
+manifest that covers the running health checker.
+"""
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+
+_SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
+_SOURCE_SHA = "a" * 40
+_ARCHIVE_SHA = "b" * 64
+_PIN_OWNER = "health_reporter"
+_PIN_MODE = "no-bot"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("bot_errors_health_package", _SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_manifest(root: Path, files: list[dict[str, object]], expected: str = _SOURCE_SHA) -> Path:
+    manifest_path = root / "deploy" / "bot-errors-runtime-manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "expected_head_sha": expected,
+                "files": files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def _write_package_pin(pin_path: Path, root: Path, manifest_path: Path) -> None:
+    pin_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "owner": _PIN_OWNER,
+                "mode": _PIN_MODE,
+                "sourceCommit": _SOURCE_SHA,
+                "archiveSha256": _ARCHIVE_SHA,
+                "runtimeManifestSha256": _sha256(manifest_path),
+                "runtimeRootName": root.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pin_path.chmod(0o600)
+
+
+def _declared_package(tmp_path: Path, monkeypatch):
+    root = tmp_path / f"WhatSoup-health-{_SOURCE_SHA[:12]}"
+    checker = root / "deploy" / "scripts" / "bot-errors-health-check.py"
+    checker.parent.mkdir(parents=True)
+    checker.write_bytes(_SCRIPT.read_bytes())
+    pin_path = tmp_path / "health-package-pin.json"
+    module = _load_module()
+    monkeypatch.setattr(module, "REPO_ROOT", root)
+    monkeypatch.setattr(module, "__file__", str(checker))
+    monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", pin_path, raising=False)
+    return module, root, checker, pin_path
+
+
+def _entries(checker: Path) -> list[dict[str, object]]:
+    return [{"path": "deploy/scripts/bot-errors-health-check.py", "sha256": _sha256(checker)}]
+
+
+def _inventory(module) -> list[str]:
+    return module.runtime_manifest_inventory({"expectRuntimeManifest": True, "role": _PIN_MODE})
+
+
+def test_declared_package_reports_source_sha_without_a_git_checkout(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+
+    lines = _inventory(module)
+
+    assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} source=package match" in lines
+    assert "WARN git_head_sha: not_a_git_repository" not in lines
+    assert not [line for line in lines if line.startswith("FAIL runtime_manifest")]
+
+
+def test_declared_package_without_running_checker_binding_fails(tmp_path, monkeypatch):
+    module, root, _checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    payload = root / "deploy" / "payload.txt"
+    payload.write_text("package payload\n", encoding="utf-8")
+    manifest_path = _write_manifest(root, [{"path": "deploy/payload.txt", "sha256": _sha256(payload)}])
+    _write_package_pin(pin_path, root, manifest_path)
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest package_source: running_checker_not_manifested" in lines
+
+
+def test_declared_package_with_corrupt_required_file_fails(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    payload = root / "deploy" / "payload.txt"
+    payload.write_text("corrupt payload\n", encoding="utf-8")
+    _write_manifest(
+        root,
+        [
+            *_entries(checker),
+            {"path": "deploy/payload.txt", "sha256": "0" * 64},
+        ],
+    )
+
+    manifest_path = root / "deploy" / "bot-errors-runtime-manifest.json"
+    _write_package_pin(pin_path, root, manifest_path)
+    lines = _inventory(module)
+
+    assert any(line.startswith("FAIL runtime_manifest deploy/payload.txt: sha256=") for line in lines)
+    assert "FAIL runtime_manifest package_source: required_file_hash_failure" in lines
+
+
+def test_declared_package_rejects_manifest_path_that_escapes_runtime_root(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside root\n", encoding="utf-8")
+    _write_manifest(
+        root,
+        [
+            *_entries(checker),
+            {"path": "../outside.txt", "sha256": _sha256(outside)},
+        ],
+    )
+
+    manifest_path = root / "deploy" / "bot-errors-runtime-manifest.json"
+    _write_package_pin(pin_path, root, manifest_path)
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest ../outside.txt: path_escapes_runtime_root" in lines
+    assert "FAIL runtime_manifest package_source: required_file_hash_failure" in lines
+
+
+def test_declared_package_rejects_manifest_path_reached_through_symlink(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside root\n", encoding="utf-8")
+    escaped = root / "deploy" / "escaped.txt"
+    escaped.symlink_to(outside)
+    _write_manifest(
+        root,
+        [
+            *_entries(checker),
+            {"path": "deploy/escaped.txt", "sha256": _sha256(outside)},
+        ],
+    )
+
+    manifest_path = root / "deploy" / "bot-errors-runtime-manifest.json"
+    _write_package_pin(pin_path, root, manifest_path)
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest deploy/escaped.txt: symlinked_path" in lines
+    assert "FAIL runtime_manifest package_source: required_file_hash_failure" in lines
+
+
+def test_pin_for_another_runtime_does_not_reclassify_a_legacy_export(tmp_path, monkeypatch):
+    root = tmp_path / "unrelated-runtime"
+    checker = root / "deploy" / "scripts" / "bot-errors-health-check.py"
+    checker.parent.mkdir(parents=True)
+    checker.write_bytes(_SCRIPT.read_bytes())
+    pin_path = tmp_path / "health-package-pin.json"
+    module = _load_module()
+    monkeypatch.setattr(module, "REPO_ROOT", root)
+    monkeypatch.setattr(module, "__file__", str(checker))
+    monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", pin_path, raising=False)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+
+    lines = _inventory(module)
+
+    assert "WARN git_head_sha: not_a_git_repository" in lines
+    assert not [line for line in lines if "package_source:" in line]
+
+
+def test_health_prefix_without_an_exact_source_root_remains_a_legacy_export(tmp_path, monkeypatch):
+    root = tmp_path / "WhatSoup-health-not-a-source-identity"
+    checker = root / "deploy" / "scripts" / "bot-errors-health-check.py"
+    checker.parent.mkdir(parents=True)
+    checker.write_bytes(_SCRIPT.read_bytes())
+    pin_path = tmp_path / "health-package-pin.json"
+    module = _load_module()
+    monkeypatch.setattr(module, "REPO_ROOT", root)
+    monkeypatch.setattr(module, "__file__", str(checker))
+    monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", pin_path, raising=False)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+
+    lines = _inventory(module)
+
+    assert "WARN git_head_sha: not_a_git_repository" in lines
+    assert not [line for line in lines if "package_source:" in line]
+
+
+def test_recognized_package_rejects_pin_with_wrong_root_binding(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin["runtimeRootName"] = "WhatSoup-health-cccccccccccc"
+    pin_path.write_text(json.dumps(pin), encoding="utf-8")
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest package_source: root_does_not_bind_expected_head" in lines
+
+
+def test_declared_package_without_external_pin_fails(tmp_path, monkeypatch):
+    module, root, checker, _pin_path = _declared_package(tmp_path, monkeypatch)
+    _write_manifest(root, _entries(checker))
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest package_source: pin_missing" in lines
+
+
+def test_declared_package_rejects_manifest_changed_after_external_pin(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    _write_manifest(root, _entries(checker), expected="c" * 40)
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest package_source: manifest_digest_mismatch" in lines
+
+
+def test_declared_package_rejects_duplicate_manifest_entries(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, [*_entries(checker), *_entries(checker)])
+    _write_package_pin(pin_path, root, manifest_path)
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest deploy/scripts/bot-errors-health-check.py: duplicate path" in lines
+    assert "FAIL runtime_manifest package_source: required_file_hash_failure" in lines
+
+
+def test_declared_package_rejects_source_commit_that_disagrees_with_manifest(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker), expected="c" * 40)
+    _write_package_pin(pin_path, root, manifest_path)
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest package_source: manifest_expected_head_mismatch" in lines
+
+
+def test_declared_package_rejects_malformed_external_pin_identity(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin["archiveSha256"] = "not-a-sha"
+    pin_path.write_text(json.dumps(pin), encoding="utf-8")
+
+    lines = _inventory(module)
+
+    assert "FAIL runtime_manifest package_source: pin_identity_invalid" in lines
+
+
+def test_checkout_mode_keeps_git_head_semantics_even_when_a_package_pin_exists(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+
+    monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: (_SOURCE_SHA + "\n", "", 0))
+    lines = _inventory(module)
+
+    assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} match" in lines
+    assert not [line for line in lines if "source=package" in line]
+
+
+def test_runtime_manifest_cli_prints_the_read_only_package_inventory(tmp_path, monkeypatch, capsys):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+
+    exit_code = module.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} source=package match" in captured.out
+
+
+def test_runtime_manifest_cli_fails_for_a_checkout_head_mismatch(tmp_path, monkeypatch, capsys):
+    module, root, checker, _pin_path = _declared_package(tmp_path, monkeypatch)
+    _write_manifest(root, _entries(checker))
+    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+    monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: ("c" * 40 + "\n", "", 0))
+    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+
+    exit_code = module.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert f"FAIL git_head_sha: {'c' * 40} expected={_SOURCE_SHA} git_head_sha_mismatch" in captured.out
+
+
+@pytest.mark.parametrize("git_failure", ["malformed_head", "git_unavailable", "git_timeout", "git_failed"])
+def test_runtime_manifest_cli_rejects_package_when_git_provenance_is_malformed_or_unavailable(
+    tmp_path, monkeypatch, capsys, git_failure
+):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+    if git_failure == "malformed_head":
+        _write_manifest(root, _entries(checker), expected="not-a-sha!")
+    elif git_failure == "git_unavailable":
+        monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: (_ for _ in ()).throw(FileNotFoundError()))
+    elif git_failure == "git_timeout":
+        monkeypatch.setattr(
+            module,
+            "_run_git_rev_parse",
+            lambda _root: (_ for _ in ()).throw(subprocess.TimeoutExpired(["git"], 10)),
+        )
+    else:
+        monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: ("", "transport failed", 3))
+    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+
+    exit_code = module.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "FAIL runtime_manifest package_source:" in captured.out
+
+
+@pytest.mark.parametrize("fault", ["missing_pin", "malformed_pin", "corrupt_file", "changed_manifest"])
+def test_runtime_manifest_cli_rejects_package_binding_faults(tmp_path, monkeypatch, capsys, fault):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    if fault == "missing_pin":
+        pin_path.unlink()
+    elif fault == "malformed_pin":
+        pin_path.write_text("[]", encoding="utf-8")
+    elif fault == "corrupt_file":
+        checker.write_text("corrupt\n", encoding="utf-8")
+    else:
+        _write_manifest(root, _entries(checker), expected="c" * 40)
+    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+
+    exit_code = module.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "FAIL runtime_manifest" in captured.out
+
+
+def test_runtime_manifest_cli_ignores_environment_pin_override(tmp_path, monkeypatch, capsys):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    fixed_pin = tmp_path / "fixed-health-package-pin.json"
+    monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", fixed_pin)
+    monkeypatch.setenv("BOT_ERRORS_RUNTIME_PACKAGE_PIN", str(pin_path))
+    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+
+    exit_code = module.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "FAIL runtime_manifest package_source: pin_missing" in captured.out
+
+
+def test_runtime_manifest_cli_allows_an_explicit_staged_pin_only_for_the_read_only_check(tmp_path, monkeypatch, capsys):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", tmp_path / "fixed-health-package-pin.json")
+    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [str(_SCRIPT), "--runtime-manifest", "--runtime-package-pin", str(pin_path)],
+    )
+
+    exit_code = module.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "source=package match" in captured.out
+
+
+@pytest.mark.parametrize(
+    ("pin_role", "profile_role", "accepted"),
+    [
+        ("no-bot", "no-bot", True),
+        ("bot-host", "bot-host", True),
+        ("no-bot", "bot-host", False),
+        ("bot-host", "no-bot", False),
+        ("unknown", "unknown", False),
+        (None, "bot-host", False),
+        ("bot-host", None, False),
+        (["bot-host"], "bot-host", False),
+        ("bot-host", {"role": "bot-host"}, False),
+    ],
+)
+def test_runtime_package_role_contract(tmp_path, monkeypatch, capsys, pin_role, profile_role, accepted):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin["mode"] = pin_role
+    pin_path.write_text(json.dumps(pin), encoding="utf-8")
+    profile = {"expectRuntimeManifest": True, "role": profile_role}
+
+    lines = module.runtime_manifest_inventory(profile)
+
+    if accepted:
+        assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} source=package match" in lines
+        assert not [line for line in lines if line.startswith(("FAIL ", "WARN "))]
+    else:
+        assert "FAIL runtime_manifest package_source: pin_mode_mismatch" in lines
+        assert not [line for line in lines if "source=package match" in line]
+    monkeypatch.setattr(module, "load_health_profile", lambda: profile)
+    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+    assert module.main() == (0 if accepted else 2)
+    output = capsys.readouterr().out
+    assert ("source=package match" in output) is accepted
+
+
+@pytest.mark.parametrize(
+    ("pin_role", "profile_role", "corrupt", "expected_exit"),
+    [
+        ("no-bot", "no-bot", False, 0),
+        ("bot-host", "bot-host", False, 0),
+        ("no-bot", "bot-host", False, 2),
+        ("bot-host", "bot-host", True, 2),
+    ],
+)
+def test_exported_checker_cli_preserves_role_and_hash_binding(
+    tmp_path, monkeypatch, pin_role, profile_role, corrupt, expected_exit
+):
+    _module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    shutil.copytree(_SCRIPT.parent / "lib", checker.parent / "lib", ignore=shutil.ignore_patterns("__pycache__"))
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin["mode"] = pin_role
+    pin_path.write_text(json.dumps(pin), encoding="utf-8")
+    if corrupt:
+        checker.write_text(checker.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    state = tmp_path / "state"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("BOT_ERRORS_")}
+    env.update(
+        HOME=str(tmp_path),
+        PYTHONDONTWRITEBYTECODE="1",
+        BOT_ERRORS_STATE_DIR=str(state),
+        BOT_ERRORS_OUTBOX_DIR=str(state / "outbox"),
+        BOT_ERRORS_HEALTH_PROFILE_JSON=json.dumps({"role": profile_role, "expectRuntimeManifest": True}),
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-B", str(checker), "--runtime-manifest", "--runtime-package-pin", str(pin_path)],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == expected_exit, result.stderr + result.stdout
+    assert ("source=package match" in result.stdout) is (expected_exit == 0)
+    if corrupt:
+        assert "FAIL runtime_manifest package_source: required_file_hash_failure" in result.stdout
+    elif expected_exit == 2:
+        assert "FAIL runtime_manifest package_source: pin_mode_mismatch" in result.stdout
+    assert not state.exists()

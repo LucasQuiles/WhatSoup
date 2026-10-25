@@ -2,9 +2,10 @@
 // Shared base environment builder for provider child processes.
 
 import { join } from 'node:path';
+import type { M365MutationPolicy } from '../../../core/m365-bridge-policy.ts';
 
 /**
- * Opt-in env flag (#411). When set to `"1"`, `buildBaseChildEnv` drops
+ * Legacy opt-in env flag (#411). When set to `"1"`, `buildBaseChildEnv` drops
  * `ALLOW_M365_MUTATIONS` from the child env unless the per-instance
  * agentOptions explicitly opts in via `allowM365Mutations: true`.
  *
@@ -24,8 +25,12 @@ export const CONFIG_ROOT_ISOLATION_FLAG = 'WHATSOUP_AGENT_CONFIG_ROOT_ISOLATION'
 
 /** Per-call options for `buildBaseChildEnv`. Optional for back-compat. */
 export interface BuildBaseChildEnvOptions {
+  /** A common decision binding M365 mutation authority to one Agent365 bridge. */
+  m365MutationPolicy?: M365MutationPolicy;
+  /** Suppresses a configured M365 bridge for child providers other than Claude. */
+  includeMicrosoft365Bridge?: boolean;
   /**
-   * Per-instance opt-in for `ALLOW_M365_MUTATIONS` propagation. Only
+   * Legacy per-instance opt-in for `ALLOW_M365_MUTATIONS` propagation. Only
    * consulted when the `WHATSOUP_CONNECTOR_FAILCLOSED=1` env flag is
    * set; otherwise the existing unconditional propagation path runs and
    * this field is ignored. See `docs/configuration.md` (#411).
@@ -88,20 +93,25 @@ function childConfigRoots(opts?: BuildBaseChildEnvOptions): {
  *
  * Undefined values are stripped so callers don't need to repeat that logic.
  *
- * When `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set in the parent env, the
+ * Without an M365 bridge policy, when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set in the parent env, the
  * `ALLOW_M365_MUTATIONS` variable is only propagated when the per-instance
  * `opts.allowM365Mutations === true`. The flag defaults to unset and the
  * propagation behavior is unchanged for current fleets.
  */
 export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.ProcessEnv {
-  const failClosed = isFailClosedEnabled();
-  const allowM365 = failClosed
-    ? opts?.allowM365Mutations === true
+  const m365Policy = opts?.m365MutationPolicy;
+  const m365ChildEnv = opts?.includeMicrosoft365Bridge !== false && m365Policy?.status === 'approved'
+    ? m365Policy.childEnv
+    : undefined;
+  const allowM365 = m365Policy !== undefined || opts?.includeMicrosoft365Bridge === false
+    ? m365ChildEnv?.ALLOW_M365_MUTATIONS
+    : isFailClosedEnabled()
+      ? opts?.allowM365Mutations === true
+        // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
+        ? process.env.ALLOW_M365_MUTATIONS
+        : undefined
       // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-      ? process.env.ALLOW_M365_MUTATIONS
-      : undefined
-    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-    : process.env.ALLOW_M365_MUTATIONS;
+      : process.env.ALLOW_M365_MUTATIONS;
   const configRoots = childConfigRoots(opts);
   const egressProxyPort =
     typeof opts?.egressProxyPort === 'number' && opts.egressProxyPort > 0
@@ -147,13 +157,10 @@ export function buildBaseChildEnv(opts?: BuildBaseChildEnvOptions): NodeJS.Proce
       // builder is an explicit allow-list, not a process.env passthrough).
       // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
       CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
-      // Per-instance overrides can set ALLOW_M365_MUTATIONS=1 to bypass
-      // external M365 read-only hooks; most instances do not set it and
-      // remain read-only.
-      //
-      // When WHATSOUP_CONNECTOR_FAILCLOSED=1 (opt-in, #411) the value is
-      // suppressed unless agentOptions.allowM365Mutations === true.
+      // A configured bridge uses the common m365MutationPolicy above. This
+      // legacy input remains only for instances without a bridge binding.
       ALLOW_M365_MUTATIONS: allowM365,
+      ...m365ChildEnv,
       // Sudo support
       // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
       SUDO_ASKPASS: process.env.SUDO_ASKPASS,

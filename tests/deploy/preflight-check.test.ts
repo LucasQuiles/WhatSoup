@@ -51,12 +51,15 @@ const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
 const RUNTIME_PATH_LIB = join(REPO_ROOT, 'deploy/lib/runtime-path.sh');
 const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
 const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-private-health-token.mjs');
+const READ_PRIVATE_CREDENTIAL_READER = join(REPO_ROOT, 'deploy/lib/read-private-credential.mjs');
 const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const CLI_ARGS = join(REPO_ROOT, 'scripts/lib/cli-args.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
+const M365_CREDENTIAL_PROJECTION = join(REPO_ROOT, 'deploy/m365-bridge-credential-projection.ts');
+const M365_BRIDGE_POLICY = join(REPO_ROOT, 'src/core/m365-bridge-policy.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 const PROTECTED_ENV_NAMES = [...new Set([
@@ -165,6 +168,8 @@ function makeFixtureTree(
     'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+    'deploy/m365-bridge-credential-projection.ts': readFileSync(M365_CREDENTIAL_PROJECTION, 'utf8'),
+    'src/core/m365-bridge-policy.ts': readFileSync(M365_BRIDGE_POLICY, 'utf8'),
   };
   for (const [rel, contents] of Object.entries(integrityFiles)) {
     const abs = join(root, rel);
@@ -308,12 +313,16 @@ function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   copyFileSync(RUNTIME_PATH_LIB, join(lib, 'runtime-path.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_READER, join(lib, 'read-private-health-token.mjs'));
+  copyFileSync(READ_PRIVATE_CREDENTIAL_READER, join(lib, 'read-private-credential.mjs'));
   copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
   copyFileSync(CLI_ARGS, join(scriptsLib, 'cli-args.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
   copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
+  copyFileSync(M365_CREDENTIAL_PROJECTION, join(deploy, 'm365-bridge-credential-projection.ts'));
+  mkdirSync(join(src, 'core'), { recursive: true });
+  copyFileSync(M365_BRIDGE_POLICY, join(src, 'core', 'm365-bridge-policy.ts'));
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),

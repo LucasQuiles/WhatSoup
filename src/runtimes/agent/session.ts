@@ -15,6 +15,7 @@ import {
   type ProviderCheckpointRoutePolicy,
   type ProviderRoutePolicy,
 } from '../../core/provider-data-policy.ts';
+import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -287,6 +288,7 @@ export interface SessionManagerOptions {
   routePolicy?: ProviderRoutePolicy;
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
+  m365MutationPolicy?: M365MutationPolicy;
   provider?: string;
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
@@ -342,9 +344,12 @@ export function buildChildEnv(
     );
   }
 
+  const providerBaseOpts = provider !== 'claude-cli' && baseOpts?.m365MutationPolicy !== undefined
+    ? { ...baseOpts, includeMicrosoft365Bridge: false }
+    : baseOpts;
   const env = provider === 'opencode-cli'
-    ? buildOpenCodeBaseChildEnv(baseOpts)
-    : buildBaseChildEnv(baseOpts);
+    ? buildOpenCodeBaseChildEnv(providerBaseOpts)
+    : buildBaseChildEnv(providerBaseOpts);
 
   if (baseOpts?.providerCredentials === 'omit') return env;
 
@@ -699,6 +704,7 @@ export class SessionManager {
   private readonly routePolicy: ProviderRoutePolicy | undefined;
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
@@ -902,6 +908,7 @@ export class SessionManager {
     this.routePolicy = opts.routePolicy;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
+    this.m365MutationPolicy = opts.m365MutationPolicy;
     this.provider = opts.provider ?? 'claude-cli';
     // Fail-fast on unknown provider IDs (#447). The shared validator blocks
     // these at config-load time, but direct instantiation (tests, programmatic
@@ -1396,6 +1403,7 @@ export class SessionManager {
       this.provider,
       {
         allowM365Mutations: this.allowM365Mutations,
+        m365MutationPolicy: this.m365MutationPolicy,
         whatsoupInstance: this.whatsoupInstance,
         whatsoupMcpSocket: this.whatsoupMcpSocket,
         whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
@@ -2677,6 +2685,7 @@ export class SessionManager {
           routePolicy: this.routePolicy,
           pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
+          m365MutationPolicy: this.m365MutationPolicy,
           instanceName: this.instanceName,
           onEvent: (event) => {
             if (!this.isCurrentManagedProviderSession(providerSession, managedGeneration)) return;

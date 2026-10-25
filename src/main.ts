@@ -489,6 +489,13 @@ if (instanceType === 'agent') {
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
+    m365Bridge?: {
+      tenantId: string;
+      accountId?: string;
+      accountEmail?: string;
+      origin: string;
+      profile: 'user-full-v1';
+    };
     autoCompactInputTokens?: number;
     turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };
   } | undefined;
@@ -516,8 +523,10 @@ if (instanceType === 'agent') {
     }),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
+    m365Bridge: agentOpts?.m365Bridge,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
     turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
+    handoffDistill: config.handoffDistill,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),

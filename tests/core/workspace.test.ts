@@ -11,10 +11,15 @@ import {
 } from '../../src/core/workspace.ts';
 import { toConversationKey } from '../../src/core/conversation-key.ts';
 import type { ProvisionOptions } from '../../src/core/workspace.ts';
+import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const CWD = '/instances/test-bot';
 const tmp = trackTmpDirs('');
+const approvedM365Policy: M365MutationPolicy = {
+  status: 'approved',
+  childEnv: { ALLOW_M365_MUTATIONS: '1' },
+};
 
 describe('chatJidToWorkspace', () => {
   it('DM @s.whatsapp.net: kind=dm, key=phone, path ends with users/<phone>', () => {
@@ -676,6 +681,21 @@ describe('workspace.ts uncovered-branch coverage', () => {
     const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
     expect(out.enabledPlugins).toEqual({ newPlugin: true });
     expect(out.permissions.defaultMode).toBe('bypassPermissions');
+  });
+
+  it('ensurePermissionsSettings applies the approved bridge exception while retaining other denies', () => {
+    const claudeDir = makeTmp();
+
+    ensurePermissionsSettings(
+      claudeDir,
+      'agent',
+      { 'microsoft_365@microsoft-365-dev': true },
+      { m365MutationPolicy: approvedM365Policy },
+    );
+
+    const out = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf8'));
+    expect(out.permissions.deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__send-mail');
+    expect(out.permissions.deny).toContain('mcp__claude_ai_Gmail__create_draft');
   });
 
   it('ensurePermissionsSettings overwrites a corrupt existing settings.json with defaults', () => {

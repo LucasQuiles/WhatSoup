@@ -38,3 +38,9 @@ The retry schedule is the existing startup, manual, and periodic identity probe
 seam. This recovery bookkeeping adds no timer, no credential mutation, and no
 new account-selection authority. It does not change the existing identity
 receipt freshness policy.
+
+Identity freshness uses the scheduled probe deadline and its bounded execution
+grace, including while the fired periodic usability probe is still pending.
+Clearing the timer when it fires must not shorten that deadline to the idle
+30-minute limit. A probe that exceeds the deadline and grace still makes the
+old identity receipt stale; a returned mismatch is reported immediately.

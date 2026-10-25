@@ -194,11 +194,13 @@ export function buildPrimaryProbeAdapterDeps(
   cwd: string | null | undefined,
   egressProxyPort: number | undefined,
   providerExecutionGate: PrimaryModelProbeAdapterDeps['providerExecutionGate'],
+  expectedAccountDigest: string | null = null,
 ): PrimaryModelProbeAdapterDeps {
   return {
     cwd: cwd ?? homedir(),
     egressProxyPort,
     providerExecutionGate,
+    ...(expectedAccountDigest === null ? {} : { expectedAccountDigest }),
     servingContext: buildServingContextReceipt(agentProvider, model, cwd),
   };
 }

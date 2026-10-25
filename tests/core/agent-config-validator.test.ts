@@ -868,6 +868,70 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     expect(result?.message).toContain('must be a boolean when provided');
   });
 
+  it('rejects an M365 bridge with multiple account selectors', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '6aacfc3b-718b-4208-9b90-e2096f0bda81',
+          accountId: 'account-1',
+          accountEmail: 'user@custom-domain.example',
+          origin: 'http://127.0.0.1:10000',
+          profile: 'user-full-v1',
+        },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('create'))).toMatchObject({
+      field: 'agentOptions.m365Bridge',
+      status: 400,
+    });
+  });
+
+  it('accepts a structurally complete M365 bridge binding with a dynamic account domain', () => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '6aacfc3b-718b-4208-9b90-e2096f0bda81',
+          accountEmail: 'user@custom-domain.example',
+          origin: 'http://127.0.0.1:10000',
+          profile: 'user-full-v1',
+        },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('create'))).toBeNull();
+  });
+
+  it.each(['COMMON', 'CONSUMERS', 'organizations'])('rejects an M365 directory-wide tenant alias: %s', (tenantId) => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        provider: 'claude-cli',
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId,
+          accountEmail: 'user@custom-domain.example',
+          origin: 'http://127.0.0.1:10000',
+          profile: 'user-full-v1',
+        },
+      },
+    });
+
+    expect(validateInstanceConfig(raw, ctx('create'))).toMatchObject({
+      field: 'agentOptions.m365Bridge.tenantId',
+      status: 400,
+    });
+  });
+
   // ---- agentOptions.fallbacks[] (lines 484-537) ----
   it('rejects fallbacks combined with fallbackProvider', () => {
     const raw = baseAgent({
