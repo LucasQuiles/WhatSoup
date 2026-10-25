@@ -190,7 +190,7 @@ async function probeCliModel(
         ?? ((expectedAccountDigest: string | null) => ensureClaudeFileStoreCredentialForExpectedAccount({ expectedAccountDigest }));
       await heal(deps.expectedAccountDigest ?? null);
     } catch {
-      // swallow — proceed to probe exactly as before
+      // Intentional: credential repair is optional; the probe still verifies whether the provider can run.
     }
     onStage?.('prepare');
   }

@@ -3,11 +3,12 @@ import {
   M365_PLUGIN_KEY,
   M365_USER_FULL_PROFILE,
   resolveM365MutationPolicy,
+  m365BridgeCredentialProjectionAllowed,
   type M365BridgeBinding,
 } from '../../src/core/m365-bridge-policy.ts';
 
 const binding: M365BridgeBinding = {
-  tenantId: '6aacfc3b-718b-4208-9b90-e2096f0bda81',
+  tenantId: '11111111-2222-3333-4444-555555555555',
   accountEmail: 'user@example.test',
   origin: 'http://127.0.0.1:10000',
   profile: M365_USER_FULL_PROFILE,
@@ -78,5 +79,21 @@ describe('resolveM365MutationPolicy', () => {
     expect(policy({ binding: { ...binding, accountId: 'account-1' } })).toMatchObject({ status: 'rejected' });
     expect(policy({ binding: { ...binding, accountEmail: undefined } })).toMatchObject({ status: 'rejected' });
     expect(policy()).toMatchObject({ status: 'approved' });
+  });
+});
+
+
+describe('m365BridgeCredentialProjectionAllowed', () => {
+  it('permits a qualified credential lookup while runtime mutation still requires the key', () => {
+    const options = {
+      provider: 'claude-cli',
+      allowM365Mutations: true,
+      enabledPlugins: { [M365_PLUGIN_KEY]: true },
+      binding,
+      env: serviceEnv({ MS365_AGENT365_API_KEY: undefined }),
+    };
+    expect(m365BridgeCredentialProjectionAllowed(options)).toBe(true);
+    expect(m365BridgeCredentialProjectionAllowed({ ...options, provider: 'codex-cli' })).toBe(false);
+    expect(resolveM365MutationPolicy(options)).toEqual({ status: 'rejected' });
   });
 });

@@ -2266,7 +2266,7 @@ The M365 mutation deny entries remain in the floor unless one instance supplies 
 complete `agentOptions.m365Bridge` binding. The binding requires the fixed
 `"user-full-v1"` profile, one concrete Azure tenant GUID, exactly one account selector,
 and one exact `http://` loopback origin. It also requires
-`agentOptions.allowM365Mutations: true`, primary provider `claude-cli`, and the
+`agentOptions.allowM365Mutations: true`, an explicit `agentOptions.provider: "claude-cli"`, and the
 exact enabled plugin key `"microsoft_365@microsoft-365-dev": true`.
 
 At startup, WhatSoup compares that binding with its own service environment:

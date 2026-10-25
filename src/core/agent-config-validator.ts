@@ -57,12 +57,8 @@ import {
 } from '../lib/opencode-execution-profile-contract.ts';
 import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
 import { parseClientOutputPoliciesForInstance } from './client-output-policy-config.ts';
-import { HANDOFF_DISTILL_NUMERIC_LIMITS, resolveTypedHandoffDistillConfig } from '../lib/handoff-distill-config.ts';
-import {
-  M365_PLUGIN_KEY,
-  M365_USER_FULL_PROFILE,
-  validateM365BridgeBinding as validateM365BridgeBindingShape,
-} from './m365-bridge-policy.ts';
+import { validateHandoffDistillConfig } from '../lib/handoff-distill-config.ts';
+import { validateM365BridgeAgentOptions } from './m365-bridge-policy.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -779,32 +775,6 @@ function opencodeModelPrefixResolvesToService(model: unknown): boolean {
   return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
 }
 
-function validateM365BridgeBinding(opts: Record<string, unknown>): ValidationError | null {
-  const rawBinding = opts['m365Bridge'];
-  if (rawBinding === undefined) return null;
-  const validation = validateM365BridgeBindingShape(rawBinding);
-  if (validation?.kind === 'not-object') return err('agentOptions.m365Bridge', 'agentOptions.m365Bridge must be an object when provided');
-  if (validation?.kind === 'unknown-keys') {
-    return err('agentOptions.m365Bridge', `agentOptions.m365Bridge has unknown key(s): ${validation.keys.join(', ')}`);
-  }
-  if (validation?.kind === 'tenant') return err('agentOptions.m365Bridge.tenantId', 'agentOptions.m365Bridge.tenantId must be a concrete tenant GUID');
-  if (validation?.kind === 'profile') return err('agentOptions.m365Bridge.profile', `agentOptions.m365Bridge.profile must be ${JSON.stringify(M365_USER_FULL_PROFILE)}`);
-  if (validation?.kind === 'origin') return err('agentOptions.m365Bridge.origin', 'agentOptions.m365Bridge.origin must be an exact http loopback origin');
-  if (validation?.kind === 'selector-count') return err('agentOptions.m365Bridge', 'agentOptions.m365Bridge requires exactly one of accountId or accountEmail');
-  if (validation?.kind === 'account-id') return err('agentOptions.m365Bridge.accountId', 'agentOptions.m365Bridge.accountId must be a non-empty string');
-  if (validation?.kind === 'account-email') return err('agentOptions.m365Bridge.accountEmail', 'agentOptions.m365Bridge.accountEmail must be a non-empty string');
-  if (opts['provider'] !== undefined && opts['provider'] !== 'claude-cli') {
-    return err('agentOptions.m365Bridge', 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli');
-  }
-  if (opts['allowM365Mutations'] !== true) {
-    return err('agentOptions.m365Bridge', 'agentOptions.m365Bridge requires agentOptions.allowM365Mutations to be true');
-  }
-  const enabledPlugins = opts['enabledPlugins'];
-  if (!isRecord(enabledPlugins) || enabledPlugins[M365_PLUGIN_KEY] !== true) {
-    return err('agentOptions.m365Bridge', `agentOptions.m365Bridge requires enabledPlugins.${M365_PLUGIN_KEY} to be true`);
-  }
-  return null;
-}
 
 function validateAgentOptions(
   raw: Record<string, unknown>,
@@ -929,19 +899,8 @@ function validateAgentOptions(
     }
   }
 
-  // This flag is part of the account-bound M365 bridge admission. Its legacy
-  // child-env meaning remains only for instances without a bridge binding.
-  if (
-    opts['allowM365Mutations'] !== undefined &&
-    typeof opts['allowM365Mutations'] !== 'boolean'
-  ) {
-    return err(
-      'agentOptions.allowM365Mutations',
-      'agentOptions.allowM365Mutations must be a boolean when provided',
-    );
-  }
-  const m365BridgeErr = validateM365BridgeBinding(opts);
-  if (m365BridgeErr) return m365BridgeErr;
+  const m365BridgeErr = validateM365BridgeAgentOptions(opts);
+  if (m365BridgeErr) return err(m365BridgeErr.field, m365BridgeErr.message);
 
   // nlRouting: flag-gated NL-first routing aliases + per-sender preference
   // store. Strictly boolean — config.ts arms it with `=== true`, so a
@@ -1024,42 +983,8 @@ function validateAgentOptions(
     }
   }
 
-  const handoffDistill = opts['handoffDistill'];
-  if (handoffDistill !== undefined) {
-    const field = 'agentOptions.handoffDistill';
-    if (!isRecord(handoffDistill)) return err(field, `${field} must be an object`);
-    const allowed = new Set([
-      'enabled', 'contextInjection', 'provider', 'model', 'sweepMs', 'growthThreshold', 'verbatimN',
-      'maxTokensPerWindow', 'maxCallsPerWindow', 'windowMs', 'failureThreshold',
-      'breakerCooldownMs', 'globalConcurrency',
-    ]);
-    const unknown = Object.keys(handoffDistill).find((key) => !allowed.has(key));
-    if (unknown) return err(field, `${field} has unknown key "${unknown}"`);
-    if (typeof handoffDistill['enabled'] !== 'boolean') {
-      return err(`${field}.enabled`, `${field}.enabled must be a boolean`);
-    }
-    if (handoffDistill['enabled'] === true) {
-      if (handoffDistill['provider'] !== 'deepseek') {
-        return err(`${field}.provider`, `${field}.provider must be "deepseek" when enabled`);
-      }
-      if (handoffDistill['model'] !== 'deepseek-flash') {
-        return err(`${field}.model`, `${field}.model must be "deepseek-flash" when enabled`);
-      }
-      if (handoffDistill['contextInjection'] !== undefined && typeof handoffDistill['contextInjection'] !== 'boolean') {
-        return err(`${field}.contextInjection`, `${field}.contextInjection must be a boolean when provided`);
-      }
-      for (const [key, { min, max, integer }] of Object.entries(HANDOFF_DISTILL_NUMERIC_LIMITS)) {
-        const value = handoffDistill[key];
-        if (value === undefined) continue;
-        if (typeof value !== 'number' || !Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < min || value > max) {
-          return err(`${field}.${key}`, `${field}.${key} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`);
-        }
-      }
-    }
-    // Exercise the single defaulting path here so a future shape change cannot
-    // let validation and runtime normalization silently diverge.
-    resolveTypedHandoffDistillConfig(handoffDistill as unknown as Parameters<typeof resolveTypedHandoffDistillConfig>[0]);
-  }
+  const handoffDistillErr = validateHandoffDistillConfig(opts['handoffDistill']);
+  if (handoffDistillErr) return err(handoffDistillErr.field, handoffDistillErr.message);
 
   const catchupErr = validateTurnRecoveryCatchupReconcileConfig(opts['turnRecoveryCatchupReconcile']);
   if (catchupErr) return err(catchupErr.field, catchupErr.message);

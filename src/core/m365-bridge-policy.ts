@@ -1,3 +1,5 @@
+import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
+
 export const M365_PLUGIN_KEY = 'microsoft_365@microsoft-365-dev';
 export const M365_USER_FULL_PROFILE = 'user-full-v1';
 const M365_TENANT_GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,11 +41,7 @@ interface M365MutationPrerequisites {
 }
 
 function nonBlank(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.trim() === value;
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return isNonEmptyString(value) && value.trim() === value;
 }
 
 /** A bridge binding must name one directory, never an Azure directory-wide alias. */
@@ -76,7 +74,7 @@ export function exactLoopbackOrigin(value: unknown): string | null {
 export function validateM365BridgeBinding(
   value: unknown,
 ): M365BridgeBindingValidationError | null {
-  if (!record(value)) return { kind: 'not-object' };
+  if (!isRecord(value)) return { kind: 'not-object' };
   const allowedKeys = new Set(['tenantId', 'accountId', 'accountEmail', 'origin', 'profile']);
   const unknownKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
   if (unknownKeys.length > 0) return { kind: 'unknown-keys', keys: unknownKeys };
@@ -113,6 +111,7 @@ function m365MutationPrerequisites(
   if (!binding) return null;
   if (validateM365BridgeBinding(binding) !== null) return null;
 
+  // env-allowed: bridge admission compares injected service credentials at the call boundary.
   const env = options.env ?? process.env;
   const origin = exactLoopbackOrigin(binding.origin);
   const serviceBaseOrigin = exactLoopbackOrigin(env.MS365_AGENT365_BASE_URL);
@@ -175,4 +174,34 @@ export function resolveM365MutationPolicy(
 
 export function m365MutationExceptionAllowed(policy: M365MutationPolicy | undefined): boolean {
   return policy?.status === 'approved';
+}
+
+export function validateM365BridgeAgentOptions(opts: Record<string, unknown>): { field: string; message: string } | null {
+  if (opts['allowM365Mutations'] !== undefined && typeof opts['allowM365Mutations'] !== 'boolean') {
+    return { field: 'agentOptions.allowM365Mutations', message: 'agentOptions.allowM365Mutations must be a boolean when provided' };
+  }
+  const rawBinding = opts['m365Bridge'];
+  if (rawBinding === undefined) return null;
+  const validation = validateM365BridgeBinding(rawBinding);
+  if (validation?.kind === 'not-object') return { field: 'agentOptions.m365Bridge', message: 'agentOptions.m365Bridge must be an object when provided' };
+  if (validation?.kind === 'unknown-keys') {
+    return { field: 'agentOptions.m365Bridge', message: `agentOptions.m365Bridge has unknown key(s): ${validation.keys.join(', ')}` };
+  }
+  if (validation?.kind === 'tenant') return { field: 'agentOptions.m365Bridge.tenantId', message: 'agentOptions.m365Bridge.tenantId must be a concrete tenant GUID' };
+  if (validation?.kind === 'profile') return { field: 'agentOptions.m365Bridge.profile', message: `agentOptions.m365Bridge.profile must be ${JSON.stringify(M365_USER_FULL_PROFILE)}` };
+  if (validation?.kind === 'origin') return { field: 'agentOptions.m365Bridge.origin', message: 'agentOptions.m365Bridge.origin must be an exact http loopback origin' };
+  if (validation?.kind === 'selector-count') return { field: 'agentOptions.m365Bridge', message: 'agentOptions.m365Bridge requires exactly one of accountId or accountEmail' };
+  if (validation?.kind === 'account-id') return { field: 'agentOptions.m365Bridge.accountId', message: 'agentOptions.m365Bridge.accountId must be a non-empty string' };
+  if (validation?.kind === 'account-email') return { field: 'agentOptions.m365Bridge.accountEmail', message: 'agentOptions.m365Bridge.accountEmail must be a non-empty string' };
+  if (opts['provider'] !== 'claude-cli') {
+    return { field: 'agentOptions.m365Bridge', message: 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli' };
+  }
+  if (opts['allowM365Mutations'] !== true) {
+    return { field: 'agentOptions.m365Bridge', message: 'agentOptions.m365Bridge requires agentOptions.allowM365Mutations to be true' };
+  }
+  const enabledPlugins = opts['enabledPlugins'];
+  if (!isRecord(enabledPlugins) || enabledPlugins[M365_PLUGIN_KEY] !== true) {
+    return { field: 'agentOptions.m365Bridge', message: `agentOptions.m365Bridge requires enabledPlugins.${M365_PLUGIN_KEY} to be true` };
+  }
+  return null;
 }

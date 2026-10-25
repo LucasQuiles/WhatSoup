@@ -45,6 +45,7 @@ export async function ensureClaudeFileStoreCredentialForExpectedAccount(
 ): Promise<ClaudeFileStoreHealResult> {
   const log = options.healDeps?.log ?? createChildLogger('claude-filestore-heal');
   const heal = options.heal ?? ensureClaudeFileStoreCredential;
+  // env-allowed: native credential verification observes the current credential-store environment.
   const env = options.env ?? options.healDeps?.env ?? process.env;
   const base: ClaudeFileStoreHealDeps = { ...options.healDeps, env };
   if (options.expectedAccountDigest === null) return heal(base);

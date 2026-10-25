@@ -1,3 +1,4 @@
+import { isRecord } from './type-guards.ts';
 import { MS_PER_HOUR } from './time-units.ts';
 
 /** Budget and concurrency limits consumed by the handoff distill runner. */
@@ -95,4 +96,43 @@ export function resolveTypedHandoffDistillConfig(input: TypedHandoffDistillInput
       },
     },
   };
+}
+
+export function validateHandoffDistillConfig(handoffDistill: unknown): { field: string; message: string } | null {
+  if (handoffDistill !== undefined) {
+    const field = 'agentOptions.handoffDistill';
+    if (!isRecord(handoffDistill)) return { field, message: `${field} must be an object` };
+    const allowed = new Set([
+      'enabled', 'contextInjection', 'provider', 'model', 'sweepMs', 'growthThreshold', 'verbatimN',
+      'maxTokensPerWindow', 'maxCallsPerWindow', 'windowMs', 'failureThreshold',
+      'breakerCooldownMs', 'globalConcurrency',
+    ]);
+    const unknown = Object.keys(handoffDistill).find((key) => !allowed.has(key));
+    if (unknown) return { field, message: `${field} has unknown key "${unknown}"` };
+    if (typeof handoffDistill['enabled'] !== 'boolean') {
+      return { field: `${field}.enabled`, message: `${field}.enabled must be a boolean` };
+    }
+    if (handoffDistill['enabled'] === true) {
+      if (handoffDistill['provider'] !== 'deepseek') {
+        return { field: `${field}.provider`, message: `${field}.provider must be "deepseek" when enabled` };
+      }
+      if (handoffDistill['model'] !== 'deepseek-flash') {
+        return { field: `${field}.model`, message: `${field}.model must be "deepseek-flash" when enabled` };
+      }
+      if (handoffDistill['contextInjection'] !== undefined && typeof handoffDistill['contextInjection'] !== 'boolean') {
+        return { field: `${field}.contextInjection`, message: `${field}.contextInjection must be a boolean when provided` };
+      }
+      for (const [key, { min, max, integer }] of Object.entries(HANDOFF_DISTILL_NUMERIC_LIMITS)) {
+        const value = handoffDistill[key];
+        if (value === undefined) continue;
+        if (typeof value !== 'number' || !Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < min || value > max) {
+          return { field: `${field}.${key}`, message: `${field}.${key} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}` };
+        }
+      }
+    }
+    // Exercise the single defaulting path here so a future shape change cannot
+    // let validation and runtime normalization silently diverge.
+    resolveTypedHandoffDistillConfig(handoffDistill as unknown as Parameters<typeof resolveTypedHandoffDistillConfig>[0]);
+  }
+  return null;
 }

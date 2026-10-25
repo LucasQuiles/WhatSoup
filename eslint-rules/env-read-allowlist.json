@@ -27,6 +27,11 @@
       "reason": "guard `env: \u2026 = process.env` DI seam \u2014 keeps the guard unit-testable."
     },
     {
+      "file": "src/core/m365-bridge-policy.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "Call-time service credential admission boundary; injectable environment is compared against the instance binding before credential projection."
+    },
+    {
       "file": "src/core/mcp-launcher.ts",
       "allowedUnmarkedSites": 1,
       "reason": "bounded MCP key-list passthrough (.map over an explicit key list)."
@@ -185,6 +190,11 @@
       "file": "src/runtimes/agent/providers/claude-account-identity.ts",
       "allowedUnmarkedSites": 1,
       "reason": "`deps.env ?? process.env` DI seam for the read-only identity probe (task-21); scrubbed to the auth-status allow-list (HOME/PATH/USER/NO_COLOR/CLAUDE_CONFIG_DIR) before spawn, never forwarded whole — same seam shape as claude-filestore-heal.ts."
+    },
+    {
+      "file": "src/runtimes/agent/providers/claude-filestore-heal-identity.ts",
+      "allowedUnmarkedSites": 1,
+      "reason": "Call-time native credential-store verification boundary; injectable environment must reflect the current store before repair."
     },
     {
       "file": "src/runtimes/agent/providers/claude-filestore-heal.ts",

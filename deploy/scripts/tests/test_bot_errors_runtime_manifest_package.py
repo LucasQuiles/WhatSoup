@@ -6,6 +6,8 @@ manifest that covers the running health checker.
 """
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 import hashlib
 import importlib.util
 import json
@@ -16,6 +18,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, strategies as st
+
+from bot_errors_property_support import private_case, properties
 
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "bot-errors-health-check.py"
@@ -323,57 +328,66 @@ def test_runtime_manifest_cli_fails_for_a_checkout_head_mismatch(tmp_path, monke
     assert f"FAIL git_head_sha: {'c' * 40} expected={_SOURCE_SHA} git_head_sha_mismatch" in captured.out
 
 
-@pytest.mark.parametrize("git_failure", ["malformed_head", "git_unavailable", "git_timeout", "git_failed"])
-def test_runtime_manifest_cli_rejects_package_when_git_provenance_is_malformed_or_unavailable(
-    tmp_path, monkeypatch, capsys, git_failure
-):
-    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
-    manifest_path = _write_manifest(root, _entries(checker))
-    _write_package_pin(pin_path, root, manifest_path)
-    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
-    if git_failure == "malformed_head":
-        _write_manifest(root, _entries(checker), expected="not-a-sha!")
-    elif git_failure == "git_unavailable":
-        monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: (_ for _ in ()).throw(FileNotFoundError()))
-    elif git_failure == "git_timeout":
-        monkeypatch.setattr(
-            module,
-            "_run_git_rev_parse",
-            lambda _root: (_ for _ in ()).throw(subprocess.TimeoutExpired(["git"], 10)),
-        )
-    else:
-        monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: ("", "transport failed", 3))
-    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+@properties
+@given(git_failure=st.sampled_from(['malformed_head', 'git_unavailable', 'git_timeout', 'git_failed']))
+@example(git_failure='malformed_head')
+@example(git_failure='git_unavailable')
+@example(git_failure='git_timeout')
+@example(git_failure='git_failed')
+def test_runtime_manifest_cli_rejects_package_when_git_provenance_is_malformed_or_unavailable(git_failure):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        _write_package_pin(pin_path, root, manifest_path)
+        monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+        if git_failure == "malformed_head":
+            _write_manifest(root, _entries(checker), expected="not-a-sha!")
+        elif git_failure == "git_unavailable":
+            monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: (_ for _ in ()).throw(FileNotFoundError()))
+        elif git_failure == "git_timeout":
+            monkeypatch.setattr(
+                module,
+                "_run_git_rev_parse",
+                lambda _root: (_ for _ in ()).throw(subprocess.TimeoutExpired(["git"], 10)),
+            )
+        else:
+            monkeypatch.setattr(module, "_run_git_rev_parse", lambda _root: ("", "transport failed", 3))
+        monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
 
-    exit_code = module.main()
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = module.main()
+        assert exit_code == 2
+        assert "FAIL runtime_manifest package_source:" in output.getvalue()
 
-    captured = capsys.readouterr()
-    assert exit_code == 2
-    assert "FAIL runtime_manifest package_source:" in captured.out
 
+@properties
+@given(fault=st.sampled_from(['missing_pin', 'malformed_pin', 'corrupt_file', 'changed_manifest']))
+@example(fault='missing_pin')
+@example(fault='malformed_pin')
+@example(fault='corrupt_file')
+@example(fault='changed_manifest')
+def test_runtime_manifest_cli_rejects_package_binding_faults(fault):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        _write_package_pin(pin_path, root, manifest_path)
+        if fault == "missing_pin":
+            pin_path.unlink()
+        elif fault == "malformed_pin":
+            pin_path.write_text("[]", encoding="utf-8")
+        elif fault == "corrupt_file":
+            checker.write_text("corrupt\n", encoding="utf-8")
+        else:
+            _write_manifest(root, _entries(checker), expected="c" * 40)
+        monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
+        monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
 
-@pytest.mark.parametrize("fault", ["missing_pin", "malformed_pin", "corrupt_file", "changed_manifest"])
-def test_runtime_manifest_cli_rejects_package_binding_faults(tmp_path, monkeypatch, capsys, fault):
-    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
-    manifest_path = _write_manifest(root, _entries(checker))
-    _write_package_pin(pin_path, root, manifest_path)
-    if fault == "missing_pin":
-        pin_path.unlink()
-    elif fault == "malformed_pin":
-        pin_path.write_text("[]", encoding="utf-8")
-    elif fault == "corrupt_file":
-        checker.write_text("corrupt\n", encoding="utf-8")
-    else:
-        _write_manifest(root, _entries(checker), expected="c" * 40)
-    monkeypatch.setattr(module, "load_health_profile", lambda: {"expectRuntimeManifest": True, "role": _PIN_MODE})
-    monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
-
-    exit_code = module.main()
-
-    captured = capsys.readouterr()
-    assert exit_code == 2
-    assert "FAIL runtime_manifest" in captured.out
-
+        output = StringIO()
+        with redirect_stdout(output):
+            exit_code = module.main()
+        assert exit_code == 2
+        assert "FAIL runtime_manifest" in output.getvalue()
 
 def test_runtime_manifest_cli_ignores_environment_pin_override(tmp_path, monkeypatch, capsys):
     module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
@@ -449,50 +463,52 @@ def test_runtime_package_role_contract(tmp_path, monkeypatch, capsys, pin_role, 
     assert ("source=package match" in output) is accepted
 
 
-@pytest.mark.parametrize(
-    ("pin_role", "profile_role", "corrupt", "expected_exit"),
-    [
-        ("no-bot", "no-bot", False, 0),
-        ("bot-host", "bot-host", False, 0),
-        ("no-bot", "bot-host", False, 2),
-        ("bot-host", "bot-host", True, 2),
-    ],
+@properties
+@given(
+    pin_role=st.sampled_from(["no-bot", "bot-host"]),
+    profile_role=st.sampled_from(["no-bot", "bot-host"]),
+    corrupt=st.booleans(),
 )
-def test_exported_checker_cli_preserves_role_and_hash_binding(
-    tmp_path, monkeypatch, pin_role, profile_role, corrupt, expected_exit
-):
-    _module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
-    shutil.copytree(_SCRIPT.parent / "lib", checker.parent / "lib", ignore=shutil.ignore_patterns("__pycache__"))
-    manifest_path = _write_manifest(root, _entries(checker))
-    _write_package_pin(pin_path, root, manifest_path)
-    pin = json.loads(pin_path.read_text(encoding="utf-8"))
-    pin["mode"] = pin_role
-    pin_path.write_text(json.dumps(pin), encoding="utf-8")
-    if corrupt:
-        checker.write_text(checker.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    state = tmp_path / "state"
-    env = {key: value for key, value in os.environ.items() if not key.startswith("BOT_ERRORS_")}
-    env.update(
-        HOME=str(tmp_path),
-        PYTHONDONTWRITEBYTECODE="1",
-        BOT_ERRORS_STATE_DIR=str(state),
-        BOT_ERRORS_OUTBOX_DIR=str(state / "outbox"),
-        BOT_ERRORS_HEALTH_PROFILE_JSON=json.dumps({"role": profile_role, "expectRuntimeManifest": True}),
-    )
+@example(pin_role='no-bot', profile_role='no-bot', corrupt=False)
+@example(pin_role='bot-host', profile_role='bot-host', corrupt=False)
+@example(pin_role='no-bot', profile_role='bot-host', corrupt=False)
+@example(pin_role='bot-host', profile_role='bot-host', corrupt=True)
+@example(pin_role='no-bot', profile_role='bot-host', corrupt=True)
+def test_exported_checker_cli_preserves_role_and_hash_binding(pin_role, profile_role, corrupt):
+    expected_exit = 0 if pin_role == profile_role and not corrupt else 2
+    with private_case() as (tmp_path, monkeypatch):
+        _module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+        shutil.copytree(_SCRIPT.parent / "lib", checker.parent / "lib", ignore=shutil.ignore_patterns("__pycache__"))
+        manifest_path = _write_manifest(root, _entries(checker))
+        _write_package_pin(pin_path, root, manifest_path)
+        pin = json.loads(pin_path.read_text(encoding="utf-8"))
+        pin["mode"] = pin_role
+        pin_path.write_text(json.dumps(pin), encoding="utf-8")
+        if corrupt:
+            checker.write_text(checker.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        state = tmp_path / "state"
+        env = {key: value for key, value in os.environ.items() if not key.startswith("BOT_ERRORS_")}
+        env.update(
+            HOME=str(tmp_path),
+            PYTHONDONTWRITEBYTECODE="1",
+            BOT_ERRORS_STATE_DIR=str(state),
+            BOT_ERRORS_OUTBOX_DIR=str(state / "outbox"),
+            BOT_ERRORS_HEALTH_PROFILE_JSON=json.dumps({"role": profile_role, "expectRuntimeManifest": True}),
+        )
 
-    result = subprocess.run(
-        [sys.executable, "-B", str(checker), "--runtime-manifest", "--runtime-package-pin", str(pin_path)],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+        result = subprocess.run(
+            [sys.executable, "-B", str(checker), "--runtime-manifest", "--runtime-package-pin", str(pin_path)],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
 
-    assert result.returncode == expected_exit, result.stderr + result.stdout
-    assert ("source=package match" in result.stdout) is (expected_exit == 0)
-    if corrupt:
-        assert "FAIL runtime_manifest package_source: required_file_hash_failure" in result.stdout
-    elif expected_exit == 2:
-        assert "FAIL runtime_manifest package_source: pin_mode_mismatch" in result.stdout
-    assert not state.exists()
+        assert result.returncode == expected_exit, result.stderr + result.stdout
+        assert ("source=package match" in result.stdout) is (expected_exit == 0)
+        if pin_role != profile_role:
+            assert "FAIL runtime_manifest package_source: pin_mode_mismatch" in result.stdout
+        elif corrupt:
+            assert "FAIL runtime_manifest package_source: required_file_hash_failure" in result.stdout
+        assert not state.exists()

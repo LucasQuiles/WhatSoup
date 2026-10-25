@@ -28,6 +28,9 @@ const TRUST_PATHS = [
   'scripts/lib/cli-args.ts',
   'src/lib/git-env.ts',
   'src/lib/type-guards.ts',
+  'deploy/m365-bridge-credential-projection.ts',
+  'src/core/m365-bridge-policy.ts',
+  'src/fleet/instance-name.ts',
 ];
 
 /** Extract the trust-check block: from the checker-var declaration up to (not including) the checker invocation. */

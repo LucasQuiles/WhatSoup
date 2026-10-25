@@ -10,7 +10,7 @@ const projectionPath = join(repoRoot, 'deploy/m365-bridge-credential-projection.
 const wrapperPath = join(repoRoot, 'deploy/whatsoup');
 const tmp = trackTmpDirs('m365-bridge-projection');
 
-const tenantId = '6aacfc3b-718b-4208-9b90-e2096f0bda81';
+const tenantId = '11111111-2222-3333-4444-555555555555';
 const accountEmail = 'user@example.test';
 const origin = 'http://127.0.0.1:10000';
 
@@ -95,7 +95,7 @@ describe('deploy/m365-bridge-credential-projection.ts', () => {
     ['a non-agent config', 'bridge-agent', { ...qualifiedConfig(), type: 'passive' }, qualifiedBridgeEnv()],
     ['a config without an agent binding envelope', 'bridge-agent', { name: 'bridge-agent', type: 'agent' }, qualifiedBridgeEnv()],
     ['wrong selector', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_AGENT365_ACCOUNT_EMAIL: 'other@custom-domain.example' })],
-    ['wrong tenant', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555' })],
+    ['wrong tenant', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_TENANT_ID: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })],
     ['wrong origin', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_HUB_URL: 'http://127.0.0.1:10001' })],
     ['wrong profile', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_PROFILE: 'diagnostic-read' })],
   ])('rejects %s before credential lookup', (_case, instance, config, env) => {
@@ -233,6 +233,7 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
     expect(result.status).toBe(1);
     expect(result.lookupLog).not.toContain('agent365-second-agent');
     expect(result.parent).toBeUndefined();
+    expect(result.stderr).toContain('FATAL: Agent365 bridge credential is empty or unavailable');
   });
 
   it.each(['../other', 'nested/agent', 'white space', 'Uppercase', 'a'.repeat(31)])('rejects %s before startup or credential access', (instance) => {
@@ -261,7 +262,7 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
     ['a mismatched config name', 'other-bot', namedConfig('bridge-agent'), qualifiedBridgeEnv()],
     ['a non-agent config', 'bridge-agent', { ...qualifiedConfig(), type: 'passive' }, qualifiedBridgeEnv()],
     ['selector mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_AGENT365_ACCOUNT_EMAIL: 'other@custom-domain.example' })],
-    ['tenant mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_TENANT_ID: '11111111-2222-3333-4444-555555555555' })],
+    ['tenant mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_TENANT_ID: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })],
     ['origin mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_HUB_URL: 'http://127.0.0.1:10001' })],
     ['profile mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_PROFILE: 'diagnostic-read' })],
   ])('does not read the instance credential for %s', (_case, instance, config, env) => {

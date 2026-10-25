@@ -876,7 +876,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
         allowM365Mutations: true,
         enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
         m365Bridge: {
-          tenantId: '6aacfc3b-718b-4208-9b90-e2096f0bda81',
+          tenantId: '11111111-2222-3333-4444-555555555555',
           accountId: 'account-1',
           accountEmail: 'user@custom-domain.example',
           origin: 'http://127.0.0.1:10000',
@@ -891,6 +891,27 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
     });
   });
 
+  it.each(['create', 'patch', 'load', 'discovery'] as const)('rejects an M365 bridge without an explicit provider in %s mode', (mode) => {
+    const raw = baseAgent({
+      agentOptions: {
+        sessionScope: 'single',
+        allowM365Mutations: true,
+        enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+        m365Bridge: {
+          tenantId: '11111111-2222-3333-4444-555555555555',
+          accountEmail: 'user@example.test',
+          origin: 'http://127.0.0.1:10000',
+          profile: 'user-full-v1',
+        },
+      },
+    });
+    expect(validateInstanceConfig(raw, ctx(mode))).toMatchObject({
+      field: 'agentOptions.m365Bridge',
+      status: 400,
+      message: 'agentOptions.m365Bridge requires agentOptions.provider to be claude-cli',
+    });
+  });
+
   it('accepts a structurally complete M365 bridge binding with a dynamic account domain', () => {
     const raw = baseAgent({
       agentOptions: {
@@ -899,7 +920,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
         allowM365Mutations: true,
         enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
         m365Bridge: {
-          tenantId: '6aacfc3b-718b-4208-9b90-e2096f0bda81',
+          tenantId: '11111111-2222-3333-4444-555555555555',
           accountEmail: 'user@custom-domain.example',
           origin: 'http://127.0.0.1:10000',
           profile: 'user-full-v1',
