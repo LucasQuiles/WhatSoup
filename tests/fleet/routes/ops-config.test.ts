@@ -114,6 +114,36 @@ describe('ops-config handleConfigUpdate', () => {
     expect(deps.realtime.publish).toHaveBeenCalled();
   });
 
+  it.each(['settings', 'plugins'])('retains M365 denies on fleet %s updates without restarting the target', async (surface) => {
+    const { REQUIRED_DENY } = await import('../../../src/core/settings-template.ts');
+    const { writePermissionsSettings } = await import('../../../src/core/workspace.ts');
+    const cwd = path.join(tmpDir, 'agent');
+    fs.mkdirSync(path.join(cwd, '.claude'), { recursive: true, mode: 0o700 });
+    const enabledPlugins = { 'microsoft_365@microsoft-365-dev': true };
+    const agentOptions = {
+      cwd, provider: 'claude-cli', allowM365Mutations: true, enabledPlugins,
+      m365Bridge: {
+        tenantId: '11111111-2222-3333-4444-555555555555',
+        accountEmail: 'user@example.test', origin: 'http://127.0.0.1:10000', profile: 'user-full-v1',
+      },
+    };
+    const configPath = writeConfig({ type: 'agent', agentOptions });
+    writePermissionsSettings(path.join(cwd, '.claude'), {
+      permissions: { allow: ['Read'], deny: [], defaultMode: 'bypassPermissions' }, enabledPlugins,
+    }, { status: 'approved', childEnv: {} });
+    const deps = depsFor({ ...fakeInstance(configPath), type: 'agent' });
+    const res = mockRes();
+    const patch = surface === 'settings'
+      ? { settingsJson: { permissions: { allow: ['Read'], deny: [], defaultMode: 'bypassPermissions' } } }
+      : { agentOptions: { enabledPlugins } };
+    await handleConfigUpdate(mockReq({ method: 'PATCH', body: JSON.stringify(patch) }), res, deps, { name: 'test-line' });
+    expect(res._status).toBe(200);
+    const settings = JSON.parse(fs.readFileSync(path.join(cwd, '.claude/settings.json'), 'utf8'));
+    expect(settings.permissions.deny).toEqual(expect.arrayContaining([...REQUIRED_DENY]));
+    expect(settings.enabledPlugins).toEqual(enabledPlugins);
+    expect(deps.serviceManager.restart).not.toHaveBeenCalled();
+  });
+
   it('keeps direct file writes off bare utf-8 string encoding (mirrors ops-private-writes)', () => {
     const source = fs.readFileSync('src/fleet/routes/ops-config.ts', 'utf-8');
     const unsafeWrites = source

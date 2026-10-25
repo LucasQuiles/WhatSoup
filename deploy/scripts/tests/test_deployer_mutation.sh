@@ -37,7 +37,7 @@ prepare_old_root() {
     mkdir -p "$root/$(dirname "$rel")"
     printf 'old:%s\n' "$rel" > "$root/$rel"
   done < "$files_list"
-  rm -f "$root/deploy/scripts/bot-errors-runner.py"
+  rm -f "$root/deploy/scripts/bot-errors-runner.py" "$root/deploy/scripts/write-health-package-pin.py"
 }
 
 copy_manifest_files() {
@@ -113,10 +113,26 @@ grep -q "LAST_KNOWN_GOOD_SKIPPED=backup_not_clean" "$tmp/deploy.log" || { cat "$
 assert_backup_metadata "$backup/.bot-errors-backup.json" false null
 bash "$D" verify "$root" > "$tmp/verify.log" 2>&1 || { cat "$tmp/verify.log"; fail "deployed root did not verify"; }
 
+python3 - "$root" <<'PY' || fail "deployer omitted or changed the manifest-pinned package writer"
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+writer = "deploy/scripts/write-health-package-pin.py"
+manifest = json.loads(Path("deploy/bot-errors-runtime-manifest.json").read_text())
+expected = next(entry["sha256"] for entry in manifest["files"] if entry["path"] == writer)
+assert hashlib.sha256((root / writer).read_bytes()).hexdigest() == expected
+PY
+python3 -B "$root/deploy/scripts/write-health-package-pin.py" --help > "$tmp/package-writer-help.log" 2>&1 \
+  || { cat "$tmp/package-writer-help.log"; fail "deployed package writer cannot load its dependencies"; }
+
 bash "$D" rollback "$root" "$backup" > "$tmp/rollback.log" 2>&1
 grep -q "ROLLBACK_OK" "$tmp/rollback.log" || { cat "$tmp/rollback.log"; fail "rollback did not report ROLLBACK_OK"; }
 grep -q "old:deploy/scripts/bot-errors-emit.py" "$root/deploy/scripts/bot-errors-emit.py" || fail "rollback did not restore old bytes"
 [ ! -e "$root/deploy/scripts/bot-errors-runner.py" ] || fail "rollback did not delete pre-deploy absent file"
+[ ! -e "$root/deploy/scripts/write-health-package-pin.py" ] || fail "rollback retained a pre-deploy absent package writer"
 
 stage_sha=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 staging="$tmp/$stage_sha"
@@ -139,9 +155,12 @@ IFS= read -r pointed_backup < "$clean_pointer"
 [ "$pointed_backup" = "$clean_backup" ] || fail "last_known_good pointer did not target verified backup"
 assert_backup_metadata "$clean_backup/.bot-errors-backup.json" true "$stage_sha"
 printf 'damaged\n' > "$clean_root/deploy/scripts/bot-errors-emit.py"
+printf 'damaged\n' > "$clean_root/deploy/scripts/write-health-package-pin.py"
 bash "$D" rollback-lkg "$clean_root" > "$tmp/rollback-lkg.log" 2>&1
 grep -q "ROLLBACK_LKG_OK" "$tmp/rollback-lkg.log" || { cat "$tmp/rollback-lkg.log"; fail "rollback-lkg did not report ROLLBACK_LKG_OK"; }
 bash "$D" verify "$clean_root" > "$tmp/verify-lkg.log" 2>&1 || { cat "$tmp/verify-lkg.log"; fail "rollback-lkg root did not verify"; }
+cmp "$PWD/deploy/scripts/write-health-package-pin.py" "$clean_root/deploy/scripts/write-health-package-pin.py" \
+  || fail "rollback-lkg did not restore the package writer bytes"
 
 retention_root="$tmp/retention-runtime"
 prepare_current_root "$retention_root"

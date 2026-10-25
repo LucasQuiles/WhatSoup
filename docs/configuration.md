@@ -2298,6 +2298,17 @@ or direct Node start cannot grant the exception from an ambient key. This preven
 accidental credential reuse across launch paths; it does not isolate a malicious
 process already controlling the same user's credentials and environment.
 
+Capability-grant writes use that runtime's verified policy on every write. Before
+startup restores persisted fallback state, and while a fallback window is active,
+they retain the full M365 deny floor. Startup settings repair uses the same policy.
+Grant groups cannot authorize M365 mutations themselves.
+
+Fleet create, settings PATCH and plugin PATCH retain the full deny floor: the fleet
+process cannot verify the target runtime's process-bound admission. These writes
+do not reload or restart an active runtime; its cached binding remains unchanged.
+Apply binding or plugin changes through the normal instance restart procedure.
+An admitted primary startup then reconciles its settings with the verified binding.
+
 ```json
 {
   "name": "mutation-enabled-agent",

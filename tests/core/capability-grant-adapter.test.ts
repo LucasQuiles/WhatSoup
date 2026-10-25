@@ -9,7 +9,9 @@ import {
   createFileGrantStore,
   assertGroupsRespectDenyFloor,
 } from '../../src/core/capability-grant-adapter.ts';
-import { REQUIRED_DENY } from '../../src/core/settings-template.ts';
+import { M365_MUTATION_DENY, REQUIRED_DENY } from '../../src/core/settings-template.ts';
+import { writePermissionsSettings } from '../../src/core/workspace.ts';
+import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
 import type { GrantRecord } from '../../src/lib/capability-grant.ts';
 
 let dir: string;
@@ -26,6 +28,28 @@ function readSettings(): { allow: string[]; deny: string[] } {
 }
 
 describe('createSettingsPolicyAdapter', () => {
+  it('preserves an approved bridge on grant writes and restores the floor when approval is lost', async () => {
+    let policy: M365MutationPolicy = { status: 'approved', childEnv: {} };
+    writePermissionsSettings(dir, {
+      permissions: { allow: [], deny: [], defaultMode: 'bypassPermissions' },
+    }, policy);
+    const adapter = createSettingsPolicyAdapter(dir, () => policy);
+
+    await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
+    expect(readSettings().allow).toContain('camera.snap');
+    expect(readSettings().deny.filter((entry) => M365_MUTATION_DENY.includes(entry))).toEqual([]);
+    expect(readSettings().deny).toContain(REQUIRED_DENY[0]);
+
+    policy = { status: 'rejected' };
+    await adapter.apply({ addAllow: [], removeAllow: ['camera.snap'], addDeny: [], removeDeny: [] });
+    expect(readSettings().allow).not.toContain('camera.snap');
+    expect(readSettings().deny).toEqual(expect.arrayContaining([...M365_MUTATION_DENY]));
+
+    policy = { status: 'approved', childEnv: {} };
+    await adapter.apply({ addAllow: ['camera.snap'], removeAllow: [], addDeny: [], removeDeny: [] });
+    expect(readSettings().deny.filter((entry) => M365_MUTATION_DENY.includes(entry))).toEqual([]);
+  });
+
   it('reads empty sets when settings.json is absent', async () => {
     const adapter = createSettingsPolicyAdapter(dir);
     const snap = await adapter.read();

@@ -1473,6 +1473,8 @@ The deploy contract is:
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
    `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
    on any copy error or missing payload hash.
+   The script deployer's managed set includes `write-health-package-pin.py`; its
+   normal hash verification, backup and rollback cover this operator tool too.
 3. Write a host-local runtime manifest at
    `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
    `BOT_ERRORS_RUNTIME_MANIFEST`; abort if the written manifest hash cannot be verified.

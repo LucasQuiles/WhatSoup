@@ -55,6 +55,7 @@ FILES=(
   "deploy/lib/runtime-path.sh"
   "deploy/scripts/bot-errors-dispatcher.py"
   "deploy/scripts/bot-errors-health-check.py"
+  "deploy/scripts/write-health-package-pin.py"
   "deploy/scripts/bot-errors-heartbeat-watchdog.py"
   "deploy/scripts/bot-errors-q-loop.py"
   "src/lib/bot-errors-outbox.ts"

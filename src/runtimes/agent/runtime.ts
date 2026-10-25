@@ -709,6 +709,7 @@ export class AgentRuntime implements Runtime {
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
@@ -3978,6 +3979,13 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  getM365SettingsPolicy(): M365MutationPolicy | undefined {
+    if (this.m365MutationPolicy === undefined) return undefined;
+    // Grant reconciliation runs before startup restores a persisted fallback.
+    return this.m365SettingsPolicyReady && !this.isFallbackWindowActive
+      ? this.m365MutationPolicy : { status: 'rejected' };
+  }
+
   async start(): Promise<void> {
     // Refuse configured paths before startup writes or provider setup.
     const home = homedir();
@@ -4003,6 +4011,7 @@ export class AgentRuntime implements Runtime {
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
     this.fallback.restorePersistedFallbackWindow();
+    this.m365SettingsPolicyReady = true;
     // Periodic real-completion canary over the chain (no-op unless
     // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
     this.fallback.startChainCanary();
@@ -4092,7 +4101,7 @@ export class AgentRuntime implements Runtime {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
         ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
           hasSandbox: !!this.sandbox,
-          m365MutationPolicy: this.m365MutationPolicy,
+          m365MutationPolicy: this.getM365SettingsPolicy(),
         });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
