@@ -10578,6 +10578,14 @@ export class AgentRuntime implements Runtime {
       this.singletonProviderToolSession = providerToolSession;
     }
 
+    // Provider identity alone cannot distinguish a same-provider fallback.
+    const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
+      && route.provider === this.agentProvider && route.model === this.model
+      && opts.providerConfigOverride === undefined;
+    const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
+      ? undefined
+      : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+
     const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
@@ -10594,8 +10602,8 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: route.model,
       pluginDirs: this.pluginDirs,
-      allowM365Mutations: this.allowM365Mutations,
-      m365MutationPolicy: this.m365MutationPolicy,
+      allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
+      m365MutationPolicy: sessionM365Policy,
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }

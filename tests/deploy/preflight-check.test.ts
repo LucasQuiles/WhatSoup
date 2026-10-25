@@ -172,6 +172,9 @@ function makeFixtureTree(
     'deploy/m365-bridge-credential-projection.ts': readFileSync(M365_CREDENTIAL_PROJECTION, 'utf8'),
     'src/core/m365-bridge-policy.ts': readFileSync(M365_BRIDGE_POLICY, 'utf8'),
     'src/fleet/instance-name.ts': readFileSync(INSTANCE_NAME, 'utf8'),
+    'src/core/private-config-file.ts': readFileSync(join(REPO_ROOT, 'src/core/private-config-file.ts'), 'utf8'),
+    'src/lib/process-lock.ts': readFileSync(join(REPO_ROOT, 'src/lib/process-lock.ts'), 'utf8'),
+    'src/lib/private-fs.ts': readFileSync(join(REPO_ROOT, 'src/lib/private-fs.ts'), 'utf8'),
   };
   for (const [rel, contents] of Object.entries(integrityFiles)) {
     const abs = join(root, rel);
@@ -327,6 +330,10 @@ function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   copyFileSync(M365_BRIDGE_POLICY, join(src, 'core', 'm365-bridge-policy.ts'));
   mkdirSync(join(src, 'fleet'), { recursive: true });
   copyFileSync(INSTANCE_NAME, join(src, 'fleet', 'instance-name.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/core/private-config-file.ts'), join(root, 'src/core/private-config-file.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/process-lock.ts'), join(root, 'src/lib/process-lock.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/private-fs.ts'), join(root, 'src/lib/private-fs.ts'));
+
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),

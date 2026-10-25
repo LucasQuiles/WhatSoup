@@ -1,5 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -129,6 +129,7 @@ function runLauncher(
   bridgeEnv: NodeJS.ProcessEnv,
   credential: 'file' | 'missing' | 'unsafe' = 'file',
   credentialOwner: string = instance,
+  configShape: 'regular' | 'symlink' | 'parent-symlink' | 'directory' = 'regular',
 ): LauncherResult {
   const root = tmp.make('launcher-probe');
   const bin = join(root, 'bin');
@@ -140,6 +141,18 @@ function runLauncher(
   mkdirSync(bin, { mode: 0o700 });
   mkdirSync(instanceDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(instanceDir, 'config.json'), JSON.stringify(config), { mode: 0o600 });
+  if (configShape === 'symlink') {
+    const target = join(root, 'redirected-config.json');
+    renameSync(join(instanceDir, 'config.json'), target);
+    symlinkSync(target, join(instanceDir, 'config.json'));
+  } else if (configShape === 'parent-symlink') {
+    const target = join(root, 'redirected-instance');
+    renameSync(instanceDir, target);
+    symlinkSync(target, instanceDir);
+  } else if (configShape === 'directory') {
+    renameSync(join(instanceDir, 'config.json'), join(root, 'saved-config.json'));
+    mkdirSync(join(instanceDir, 'config.json'));
+  }
   if (credential !== 'missing') {
     mkdirSync(credentials, { recursive: true, mode: 0o700 });
     const credentialPath = join(credentials, `agent365-${credentialOwner}.key`);
@@ -228,6 +241,21 @@ exit 44
 }
 
 describe('deploy/whatsoup instance bridge credential projection', () => {
+  it('does not admit a non-regular configuration', () => {
+    const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'missing', 'bridge-agent', 'directory');
+    expect(result.lookupLog).not.toContain('agent365-bridge-agent');
+    expect(result.parent).toBeUndefined();
+    expect(result.status).toBe(1);
+  });
+
+  it.each(['symlink', 'parent-symlink'] as const)('rejects %s configuration before any bridge credential lookup', (shape) => {
+    const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'missing', 'bridge-agent', shape);
+    expect(result.lookupLog).not.toContain('agent365-bridge-agent');
+    expect(result.parent).toBeNull();
+    expect(result.primary).toBeNull();
+    expect(result.policy).toBe('rejected');
+  });
+
   it('cannot resolve another configured instance credential', () => {
     const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'file', 'second-agent');
     expect(result.status).toBe(1);

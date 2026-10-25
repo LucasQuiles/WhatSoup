@@ -1282,7 +1282,7 @@ export class RuntimeFallbackCoordinator {
             entry.provider,
             {
               allowM365Mutations: this.host.allowM365Mutations,
-              m365MutationPolicy: this.host.m365MutationPolicy,
+              m365MutationPolicy: this.host.m365MutationPolicy === undefined ? undefined : { status: 'rejected' },
               whatsoupInstance: this.host.instanceName,
               whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
             },
@@ -1731,7 +1731,7 @@ export class RuntimeFallbackCoordinator {
           fallbackEntry.provider,
           {
             allowM365Mutations: this.host.allowM365Mutations,
-            m365MutationPolicy: this.host.m365MutationPolicy,
+            m365MutationPolicy: this.host.m365MutationPolicy === undefined ? undefined : { status: 'rejected' },
             whatsoupInstance: this.host.instanceName,
             whatsoupMcpSocket: this.host.globalMcpSocketPath ?? undefined,
           },

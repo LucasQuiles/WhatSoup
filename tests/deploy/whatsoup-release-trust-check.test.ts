@@ -31,6 +31,9 @@ const TRUST_PATHS = [
   'deploy/m365-bridge-credential-projection.ts',
   'src/core/m365-bridge-policy.ts',
   'src/fleet/instance-name.ts',
+  'src/core/private-config-file.ts',
+  'src/lib/process-lock.ts',
+  'src/lib/private-fs.ts',
 ];
 
 /** Extract the trust-check block: from the checker-var declaration up to (not including) the checker invocation. */

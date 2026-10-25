@@ -1,3 +1,4 @@
+import { M365_MUTATION_DENY } from '../../core/settings-template.ts';
 import { admitHomeConfinedPath } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/session.ts
 // SessionManager owns the Claude Code child process lifecycle.
@@ -1172,7 +1173,7 @@ export class SessionManager {
 
   private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
-    return resolveProviderArgs(
+    const args = resolveProviderArgs(
       provider,
       systemPrompt,
       cwd,
@@ -1182,6 +1183,11 @@ export class SessionManager {
       this.providerConfig,
       this.providerMcpConfigArgs,
     );
+    // A shared workspace may retain the primary route's M365 exception.
+    if (provider === 'claude-cli' && this.m365MutationPolicy?.status === 'rejected') {
+      args.push('--disallowedTools', ...M365_MUTATION_DENY);
+    }
+    return args;
   }
 
   buildSystemPrompt(): string {

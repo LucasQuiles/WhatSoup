@@ -168,6 +168,9 @@ DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "deploy/m365-bridge-credential-projection.ts"
   "src/core/m365-bridge-policy.ts"
   "src/fleet/instance-name.ts"
+  "src/core/private-config-file.ts"
+  "src/lib/process-lock.ts"
+  "src/lib/private-fs.ts"
 )
 # Git probes that decide git mode vs release mode stop upward discovery at the
 # physical parent of REPO_ROOT, so an unrelated ancestor .git cannot turn a
