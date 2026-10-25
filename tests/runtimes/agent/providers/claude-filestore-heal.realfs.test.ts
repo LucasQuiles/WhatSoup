@@ -80,14 +80,18 @@ describe('ensureClaudeFileStoreCredential - real filesystem', () => {
     execFileSync('mkfifo', [path], { timeout: 2000 });
     const moduleUrl = pathToFileURL(resolve('src/runtimes/agent/providers/claude-filestore-heal.ts')).href;
     const code = [
-      `import { ensureClaudeFileStoreCredential } from ${JSON.stringify(moduleUrl)};`,
+      'const [moduleUrl, configDir, now, keychain] = process.argv.slice(1);',
+      'const { ensureClaudeFileStoreCredential } = await import(moduleUrl);',
       'console.log(JSON.stringify(ensureClaudeFileStoreCredential({',
-      `platform: 'darwin', env: { CLAUDE_CONFIG_DIR: ${JSON.stringify(dir)} },`,
-      `now: () => ${NOW}, readKeychain: () => ${JSON.stringify(kc(NOW + 60_000))},`,
+      "platform: 'darwin', env: { CLAUDE_CONFIG_DIR: configDir },",
+      'now: () => Number(now), readKeychain: () => keychain,',
       'log: { info() {}, warn() {} },',
       '})));',
     ].join('\n');
-    const result = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', code], {
+    const result = spawnSync(process.execPath, [
+      '--experimental-strip-types', '--input-type=module', '-e', code,
+      moduleUrl, dir, String(NOW), kc(NOW + 60_000),
+    ], {
       env: { ...process.env, VITEST: '1' }, encoding: 'utf8', timeout: 5000,
     });
     expect(result.error).toBeUndefined();
