@@ -400,4 +400,4 @@ Rollout order:
 - **C3:** Page samples and cursor metadata derive from one immutable ring copy.
 - **C4:** The physical ring spans about 180 seconds, but the supported gap-free interval ceiling is 150 seconds. Larger configured intervals are documented as gap-guaranteed by the operating contract because the final margin belongs to jitter, request latency, and page draining.
 - **C5:** The raw-sampling producer commit must not merge or deploy with `raw_recent` still embedded in `/health`; endpoint extraction and aggregate-only health land in the same PR.
-- **C6:** Rollout verification names all six file-scope ratchets explicitly: `clock-budget`, `env-read-allowlist`, `secret-env-read-guard`, `fitness-file-size-warning-budget`, `fitness-sync-exec-timeout-budget`, and `public-surface-drift-check`.
+- **C6:** Rollout verification names all six file-scope ratchets explicitly: `clock-budget`, `env-read-allowlist`, `secret-env-read-guard`, `fitness-file-size-warning-budget`, `eslint-fitness-check` (including the sync-exec timeout warning budget), and `public-surface-drift-check`.

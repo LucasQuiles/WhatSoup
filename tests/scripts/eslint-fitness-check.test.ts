@@ -86,7 +86,7 @@ describe('eslint fitness wrapper — full repository scan', () => {
   beforeAll(async () => {
     // Both assertions need the same real repository scan. Keep it in this
     // suite so Vitest's isolated file workers do not repeat the expensive pass.
-    result = await runEslintFitness(process.cwd());
+    result = await runEslintFitness(repoRoot);
     // Coverage instrumentation and CPU contention make this scan much slower
     // in CI. Preserve the existing 420s scan budget without loosening failures.
   }, 420_000);
