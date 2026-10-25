@@ -8,7 +8,10 @@ import subprocess
 import sys
 import tarfile
 
+from hypothesis import example, given, strategies as st
 import pytest
+
+from bot_errors_property_support import private_case, properties
 
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -254,8 +257,7 @@ def replace_archive(args, entries):
     args["package-manifest"].write_text(json.dumps(descriptor))
 
 
-@pytest.mark.parametrize("kind", ["duplicate", "traversal", "symlink", "fifo", "oversized"])
-def test_invalid_archive_members_never_publish_pin(tmp_path, kind):
+def assert_invalid_archive_member_refused(tmp_path, kind, member_index, excess_bytes):
     args = package(tmp_path)
     entries = []
     descriptor = json.loads(args["package-manifest"].read_text())
@@ -264,10 +266,11 @@ def test_invalid_archive_members_never_publish_pin(tmp_path, kind):
         member = tarfile.TarInfo(name)
         member.size = len(raw)
         entries.append((member, raw))
+    index = member_index % len(entries)
     if kind == "duplicate":
-        entries.append(entries[0])
+        entries.append(entries[index])
     else:
-        member = tarfile.TarInfo("../outside" if kind == "traversal" else CHECKER_MEMBER)
+        member = tarfile.TarInfo("../outside" if kind == "traversal" else entries[index][0].name)
         raw = None
         if kind == "symlink":
             member.type = tarfile.SYMTYPE
@@ -275,9 +278,9 @@ def test_invalid_archive_members_never_publish_pin(tmp_path, kind):
         elif kind == "fifo":
             member.type = tarfile.FIFOTYPE
         elif kind == "oversized":
-            raw = b"x" * (16 * 1024 * 1024 + 1)
+            raw = b"x" * (16 * 1024 * 1024 + excess_bytes)
             member.size = len(raw)
-        entries[0] = (member, raw)
+        entries[index] = (member, raw)
     replace_archive(args, entries)
     result = run(args)
     assert result.returncode == 2
@@ -286,6 +289,20 @@ def test_invalid_archive_members_never_publish_pin(tmp_path, kind):
     assert expected_error in result.stderr
     assert not args["pin-output"].exists()
     assert not (tmp_path / "outside").exists()
+
+
+@properties
+@given(kind=st.sampled_from(("duplicate", "traversal", "symlink", "fifo", "oversized")),
+       member_index=st.integers(min_value=0, max_value=1023),
+       excess_bytes=st.integers(min_value=1, max_value=2048))
+@example(kind="duplicate", member_index=0, excess_bytes=1)
+@example(kind="traversal", member_index=0, excess_bytes=1)
+@example(kind="symlink", member_index=0, excess_bytes=1)
+@example(kind="fifo", member_index=0, excess_bytes=1)
+@example(kind="oversized", member_index=0, excess_bytes=1)
+def test_invalid_archive_members_never_publish_pin(kind, member_index, excess_bytes):
+    with private_case() as (directory, _):
+        assert_invalid_archive_member_refused(directory, kind, member_index, excess_bytes)
 
 
 def test_consistently_packaged_wrong_manifest_source_is_refused(tmp_path):
