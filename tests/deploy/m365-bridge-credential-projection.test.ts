@@ -251,9 +251,10 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
   it.each(['symlink', 'parent-symlink'] as const)('rejects %s configuration before any bridge credential lookup', (shape) => {
     const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'missing', 'bridge-agent', shape);
     expect(result.lookupLog).not.toContain('agent365-bridge-agent');
-    expect(result.parent).toBeNull();
-    expect(result.primary).toBeNull();
-    expect(result.policy).toBe('rejected');
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: instance config admission refused');
+    expect(result.parent).toBeUndefined();
+    expect(result.primary).toBeUndefined();
   });
 
   it('cannot resolve another configured instance credential', () => {
@@ -296,9 +297,15 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
   ])('does not read the instance credential for %s', (_case, instance, config, env) => {
     const result = runLauncher(instance, config, env);
 
-    expect(result.status, result.stderr).toBe(0);
     expect(result.lookupLog).not.toContain('agent365-bridge-agent');
-    expect(result).toMatchObject({ parent: null, policy: 'rejected', primary: null, fallback: null });
+    if (instance !== config.name) {
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('FATAL: instance config admission refused');
+      expect(result.parent).toBeUndefined();
+    } else {
+      expect(result.status, result.stderr).toBe(0);
+      expect(result).toMatchObject({ parent: null, policy: 'rejected', primary: null, fallback: null });
+    }
   });
 
   it.each(['missing', 'unsafe'] as const)('fails closed for a qualified instance bridge with a %s credential', (credential) => {

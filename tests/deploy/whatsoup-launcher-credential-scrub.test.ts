@@ -123,7 +123,7 @@ function runManagedCodingPlanBoundary(
   mkdirSync(join(configHome, 'whatsoup', 'instances', 'fixture-agent'), { recursive: true, mode: 0o700 });
   writeFileSync(
     join(configHome, 'whatsoup', 'instances', 'fixture-agent', 'config.json'),
-    JSON.stringify({ type: 'agent' }),
+    JSON.stringify({ name: 'fixture-agent', type: 'agent' }),
     { mode: 0o600 },
   );
   if (route === 'private-file') {

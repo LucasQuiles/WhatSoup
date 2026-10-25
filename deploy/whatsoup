@@ -166,6 +166,8 @@ DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "src/lib/git-env.ts"
   "src/lib/type-guards.ts"
   "deploy/m365-bridge-credential-projection.ts"
+  "deploy/lib/read-private-credential.mjs"
+  "deploy/lib/read-agent-handoff-distill-config.mjs"
   "src/core/m365-bridge-policy.ts"
   "src/fleet/instance-name.ts"
   "src/core/private-config-file.ts"
@@ -393,8 +395,11 @@ export TMPDIR
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 INSTANCE_JSON="$XDG_CONFIG/whatsoup/instances/$INSTANCE/config.json"
 INSTANCE_TYPE="chat"
-if [ -f "$INSTANCE_JSON" ]; then
-  INSTANCE_TYPE="$($NODE -e "process.stdout.write(JSON.parse(require('fs').readFileSync('$INSTANCE_JSON','utf8')).type ?? 'chat')")"
+if [ -e "$INSTANCE_JSON" ] || [ -L "$INSTANCE_JSON" ]; then
+  if ! INSTANCE_TYPE="$("$NODE" "$SCRIPT_DIR/lib/read-agent-handoff-distill-config.mjs" "$INSTANCE_JSON" "$INSTANCE" --type)"; then
+    echo "FATAL: instance config admission refused" >&2
+    exit 1
+  fi
 fi
 
 # A typed handoff object owns agent distillation when present. Read only its
@@ -402,7 +407,7 @@ fi
 # complete bounded object. An absent object preserves legacy environment behavior.
 HANDOFF_TYPED_PROJECTION="legacy"
 if [ "$INSTANCE_TYPE" = "agent" ]; then
-  if ! HANDOFF_TYPED_PROJECTION="$("$NODE" "$SCRIPT_DIR/lib/read-agent-handoff-distill-config.mjs" "$INSTANCE_JSON")"; then
+  if ! HANDOFF_TYPED_PROJECTION="$("$NODE" "$SCRIPT_DIR/lib/read-agent-handoff-distill-config.mjs" "$INSTANCE_JSON" "$INSTANCE")"; then
     echo "FATAL: handoff-distill credential projection refused" >&2
     exit 1
   fi

@@ -1,17 +1,32 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { readPrivateFileSync } from '../../src/lib/private-fs.ts';
+import { isValidInstanceName } from '../../src/fleet/instance-name.ts';
 
-const path = process.argv[2];
-if (!path) {
-  process.stderr.write('usage: read-agent-handoff-distill-config.mjs <instance-config>\n');
+const [path, instance, mode] = process.argv.slice(2);
+if (!path || !instance || !isValidInstanceName(instance)) {
+  process.stderr.write('usage: read-agent-handoff-distill-config.mjs <instance-config> <instance-name> [--type]\n');
   process.exit(64);
 }
 
 let parsed;
 try {
-  parsed = JSON.parse(readFileSync(path, 'utf8'));
+  const raw = readPrivateFileSync(path, { label: 'instance config', maxBytes: 1024 * 1024 });
+  if (raw === null) throw new Error('missing config');
+  parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.name !== instance || typeof parsed.type !== 'string') {
+    throw new Error('instance envelope mismatch');
+  }
 } catch {
   process.stderr.write('FATAL: could not read instance config for handoff-distill projection\n');
+  process.exit(1);
+}
+
+if (mode === '--type') {
+  process.stdout.write(parsed.type);
+  process.exit(0);
+}
+if (parsed.type !== 'agent') {
+  process.stderr.write('FATAL: handoff-distill projection requires an agent instance\n');
   process.exit(1);
 }
 

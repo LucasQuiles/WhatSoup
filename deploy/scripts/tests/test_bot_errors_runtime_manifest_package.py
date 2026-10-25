@@ -512,3 +512,12 @@ def test_exported_checker_cli_preserves_role_and_hash_binding(pin_role, profile_
         elif corrupt:
             assert "FAIL runtime_manifest package_source: required_file_hash_failure" in result.stdout
         assert not state.exists()
+
+
+def test_declared_package_rejects_oversized_private_pin(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    manifest_path = _write_manifest(root, _entries(checker))
+    _write_package_pin(pin_path, root, manifest_path)
+    with pin_path.open("a", encoding="utf-8") as stream:
+        stream.write(" " * (64 * 1024))
+    assert "FAIL runtime_manifest package_source: pin_missing" in _inventory(module)

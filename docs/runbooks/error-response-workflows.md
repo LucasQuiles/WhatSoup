@@ -183,10 +183,21 @@ known-bad primary. The counter resets on any non-empty fallback turn. A
 successful advance emits `fallback_provider_failed` (for the dead entry) plus a
 structured `advanced fallback chain past structurally-empty entry` log.
 
-## Warm handoff distiller (flag-gated)
+## Warm handoff distiller
 
-The cross-harness context handoff is now fully wired behind three opt-in flags
-(default-off — byte-identical when unset):
+An explicit per-instance `agentOptions.handoffDistill` object takes precedence
+over the legacy environment controls below. `{ "enabled": false }` is the kill
+switch: it disables distillation and ignores legacy `WHATSOUP_HANDOFF_*` settings.
+An enabled object requires `provider: "deepseek"` and `model: "deepseek-flash"`;
+it can set context injection, cadence, budgets, and concurrency within the bounds
+in the [configuration reference](../configuration.md#agentoptions).
+The launcher admits the private config and matching instance identity before
+projecting only the existing `deepseek` credential for this exact enabled route.
+It refuses unsafe or mismatched config inputs before credential lookup. Credentials
+and instance policy remain local; the shared defaults do not enable the feature.
+
+When the typed object is absent, the legacy opt-in controls remain in effect
+(default-off when unset):
 
 - **`WHATSOUP_HANDOFF_DISTILLER`** (`1` to enable) — arms the background
   production sweep that periodically asks the `HandoffDistillRunner` to distill
@@ -194,13 +205,14 @@ The cross-harness context handoff is now fully wired behind three opt-in flags
   budget and the global concurrency + circuit-breaker gate; the timer only sets
   the sweep cadence. Inert (sweep not armed, one warn log) when set but no model
   key resolves.
-- **`WHATSOUP_HANDOFF_CONTEXT`** (`1` to enable) — when a fresh or stand-in
-  session is spawned, injects the most recent distilled summary into the session
-  system prompt (`system` seam for all providers per the 2026-06-16 experiment).
+- **`WHATSOUP_HANDOFF_CONTEXT`** (`1` to enable) — when a fresh fallback session
+  is spawned, injects the most recent distilled summary for the same conversation
+  into the session system prompt.
   The callback yields `null` (SessionManager omits it) when no fresh artifact
   exists, so there is no behaviour change when the distiller has not yet run.
 - **`WHATSOUP_HANDOFF_DISTILL_MODEL`** — the cheap summarizer model id used for
-  distillation. Accepted values: `deepseek-chat`, `MiniMax-M2.7`, `glm-5.2`.
+  distillation. DeepSeek-prefixed ids (including `deepseek-flash`),
+  `MiniMax-M2.7`, and `glm-5.2` resolve through their provider adapters.
   When unset (or set to an unrecognised id with no matching API key) the
   distiller is inert and the sweep is not armed.
 
@@ -208,7 +220,7 @@ The implementation is best-effort and fail-safe: every error at tick or sweep
 level is caught and logged at warn, never propagated to the turn path or the
 process. A structured info-level log (`handoff distill sweep complete` with
 `ticked` count) is emitted on each successful sweep. The `handoffDistiller`
-block in `GET /health` (`instance.handoffDistiller`) reports the live flag+config
+block in `GET /health` (`instance.handoffDistiller`) reports the resolved
 state as read-only telemetry:
 
 ```json

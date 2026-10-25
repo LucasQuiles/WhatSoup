@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,13 +11,14 @@ function config(value: Record<string, unknown>): string {
   const root = mkdtempSync(join(tmpdir(), 'whatsoup-handoff-config-'));
   roots.push(root);
   const path = join(root, 'config.json');
-  writeFileSync(path, JSON.stringify(value), 'utf8');
+  writeFileSync(path, JSON.stringify({ name: 'fixture-agent', type: 'agent', ...value }), { mode: 0o600 });
   return path;
 }
 
 function read(path: string): string {
-  return execFileSync(process.execPath, [reader, path], {
+  return execFileSync(process.execPath, [reader, path, 'fixture-agent'], {
     encoding: 'utf8',
+    timeout: 5_000,
     stdio: ['ignore', 'pipe', 'ignore'],
   }).trim();
 }
@@ -30,7 +31,7 @@ function between(source: string, startMarker: string, endMarker: string): string
   return source.slice(start, end);
 }
 
-function runLauncherProjection(handoff: unknown, legacyModel?: string): {
+function runLauncherProjection(handoff: unknown, legacyModel?: string, shape?: string): {
   status: number | null;
   stdout: string;
   stderr: string;
@@ -45,8 +46,26 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string): {
   mkdirSync(bin, { recursive: true, mode: 0o700 });
   mkdirSync(instanceDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(instanceDir, 'config.json'), JSON.stringify({
-    type: 'agent', agentOptions: handoff === undefined ? {} : { handoffDistill: handoff },
+    name: shape === 'mismatch' ? 'other-agent' : 'fixture-agent', type: 'agent', agentOptions: handoff === undefined ? {} : { handoffDistill: handoff },
   }), { mode: 0o600 });
+  const instanceConfig = join(instanceDir, 'config.json');
+  if (shape === 'symlink') {
+    const target = join(root, 'target.json');
+    renameSync(instanceConfig, target);
+    symlinkSync(target, instanceConfig);
+  } else if (shape === 'directory') {
+    renameSync(instanceConfig, join(root, 'saved.json'));
+    mkdirSync(instanceConfig);
+  } else if (shape === 'fifo') {
+    renameSync(instanceConfig, join(root, 'saved.json'));
+    execFileSync('mkfifo', [instanceConfig], { timeout: 5_000 });
+  } else if (shape === 'parent-symlink') {
+    const target = instanceDir + '.original';
+    renameSync(instanceDir, target);
+    symlinkSync(target, instanceDir);
+  } else if (shape === 'non-private') {
+    chmodSync(instanceConfig, 0o644);
+  }
   writeFileSync(join(bin, 'uname'), '#!/usr/bin/env bash\nprintf "Darwin\\n"\n', { mode: 0o700 });
   writeFileSync(join(bin, 'security'), [
     '#!/usr/bin/env bash',
@@ -69,7 +88,12 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string): {
     `SCRIPT_DIR=${JSON.stringify(join(process.cwd(), 'deploy'))}`,
     `. ${JSON.stringify(join(process.cwd(), 'deploy/lib/bounded-exec.sh'))}`,
     between(source, 'macos_keychain_lookup() {', '\n# Pinned Node path'),
-    between(source, '# Detect instance type', '\n# Health server auth token'),
+    between(source, '# Detect instance type', '\n# Health server auth token').replace(
+      'HANDOFF_TYPED_PROJECTION="legacy"',
+      shape === 'replacement'
+        ? 'mv "$INSTANCE_JSON" "$INSTANCE_JSON.original"; ln -s "$INSTANCE_JSON.original" "$INSTANCE_JSON"\nHANDOFF_TYPED_PROJECTION="legacy"'
+        : 'HANDOFF_TYPED_PROJECTION="legacy"',
+    ),
     'printf "deepseek=%s minimax=%s zai=%s\\n" "${DEEPSEEK_API_KEY:+set}" "${MINIMAX_API_KEY:+set}" "${ZAI_API_KEY:+set}"',
     '',
   ].join('\n'), { mode: 0o700 });
@@ -105,6 +129,24 @@ afterEach(() => {
 });
 
 describe('read-agent-handoff-distill-config', () => {
+  it.each(['symlink', 'parent-symlink', 'directory', 'fifo', 'replacement', 'non-private', 'mismatch'])(
+    'refuses %s config before handoff credential lookup', (shape) => {
+      const result = runLauncherProjection({ enabled: true, provider: 'deepseek', model: 'deepseek-flash' }, undefined, shape);
+      expect(result.status).not.toBe(0);
+      expect(result.lookupLog).not.toContain('find-generic-password -s deepseek');
+      expect(result.stdout).not.toContain('deepseek=set');
+    },
+  );
+
+  it('rechecks a config replaced by a symlink after an admitted read', () => {
+    const path = config({ agentOptions: { handoffDistill: { enabled: true, provider: 'deepseek', model: 'deepseek-flash' } } });
+    expect(read(path)).toBe('deepseek-flash');
+    const target = path + '.original';
+    renameSync(path, target);
+    symlinkSync(target, path);
+    expect(() => read(path)).toThrow();
+  });
+
   it('preserves legacy launcher behavior when the typed object is absent', () => {
     expect(read(config({ agentOptions: {} }))).toBe('legacy');
   });

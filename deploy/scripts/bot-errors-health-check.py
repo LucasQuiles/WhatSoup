@@ -1067,7 +1067,7 @@ def runtime_package_source_line(
     if not is_runtime_package_root():
         return None
 
-    pin, pin_error = read_private_json_record(package_pin_path or RUNTIME_PACKAGE_PIN_PATH)
+    pin, pin_error = read_private_json_record(package_pin_path or RUNTIME_PACKAGE_PIN_PATH, max_bytes=64 * 1024)
     if pin_error is not None or pin is None:
         return "FAIL runtime_manifest package_source: pin_missing"
     if pin.get("schemaVersion") != 1:
@@ -8451,11 +8451,24 @@ def critical_file_problem(path: Path) -> str | None:
     return None
 
 
-def read_private_json_record(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+def read_private_json_record(
+    path: Path, max_bytes: int | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     problem = critical_file_problem(path)
     if problem is not None:
         return None, problem
-    return read_json_record(path)
+    if max_bytes is None:
+        return read_json_record(path)
+    raw = read_private_credential_file(path, max_bytes=max_bytes)
+    if raw is None:
+        return None, "private JSON unavailable or exceeds size bound"
+    try:
+        loaded = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        return None, str(exc)
+    if not isinstance(loaded, dict):
+        return None, "JSON root is not an object"
+    return loaded, None
 
 
 def bool_map(value: Any) -> dict[str, bool]:

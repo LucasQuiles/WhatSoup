@@ -29,6 +29,8 @@ const TRUST_PATHS = [
   'src/lib/git-env.ts',
   'src/lib/type-guards.ts',
   'deploy/m365-bridge-credential-projection.ts',
+  'deploy/lib/read-private-credential.mjs',
+  'deploy/lib/read-agent-handoff-distill-config.mjs',
   'src/core/m365-bridge-policy.ts',
   'src/fleet/instance-name.ts',
   'src/core/private-config-file.ts',

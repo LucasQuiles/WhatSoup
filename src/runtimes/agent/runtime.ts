@@ -10586,6 +10586,15 @@ export class AgentRuntime implements Runtime {
       ? undefined
       : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
 
+    // Each sandbox cwd owns its settings; route changes must restore the deny
+    // floor before a fallback can reuse a workspace approved for the primary.
+    if (this.sandboxPerChat && opts.cwd) {
+      ensurePermissionsSettings(join(opts.cwd, '.claude'), 'agent', this.enabledPlugins, {
+        hasSandbox: true,
+        m365MutationPolicy: sessionM365Policy,
+      });
+    }
+
     const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
