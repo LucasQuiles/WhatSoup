@@ -230,11 +230,11 @@ describe('failure-taxonomy structural policy', () => {
     // substrings must also update this mirror — pin both the single
     // definition and the caveat comment that carries the warning.
     const definitions = source.match(/function bareUsageLimitEvidence\([^)]*\)/g) ?? [];
-    const mirrorCaveat = source.match(
-      /CAUTION: because this duplicates rather than reuses[\s\S]*?update the mirrored candidate here/,
-    );
+    const mirrorCaveats = source.match(
+      /CAUTION: because this duplicates rather than reuses[\s\S]*?update the mirrored candidate here/g,
+    ) ?? [];
 
     expect(definitions).toHaveLength(1);
-    expect(mirrorCaveat).toBeTruthy();
+    expect(mirrorCaveats).toHaveLength(1);
   });
 });

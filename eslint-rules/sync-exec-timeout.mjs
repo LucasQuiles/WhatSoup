@@ -72,7 +72,8 @@ export default {
         } else if (funcName === 'execFileSync') {
           if (args.length >= 3) {
             optsArg = args[2]; // execFileSync(bin, args, opts)
-          } else if (args.length === 2) {
+          } else if (args.length === 2 && args[1].type !== 'ArrayExpression') {
+            // An argument array cannot supply timeout options.
             optsArg = args[1]; // execFileSync(bin, opts)
           }
         }

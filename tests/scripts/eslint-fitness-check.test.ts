@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { runEslintFitness } from '../../scripts/eslint-fitness-check.ts';
 import { fitnessRules } from '../../scripts/lib/fitness/registry.ts';
 // @ts-expect-error -- flat config is a .mjs module with no type declarations; expires 2026-12-31
 import fitnessConfigRaw, { eslintRingRuleIds as eslintRingRuleIdsRaw, enabledFitnessRuleNames as enabledFitnessRuleNamesRaw, eslintRingRuleNames as eslintRingRuleNamesRaw } from '../../eslint.config.fitness.mjs';
@@ -17,6 +18,7 @@ const fitnessConfig = fitnessConfigRaw as Array<{
   files?: string[];
   rules?: Record<string, unknown>;
 }>;
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 describe('eslint fitness config — registry drift', () => {
   it('enforces exactly the registry rules whose rings include eslint', () => {
@@ -78,10 +80,18 @@ describe('eslint fitness config — registry drift', () => {
   });
 });
 
-describe('eslint fitness wrapper — exit semantics', () => {
-  it('treats warning-only results as non-blocking and reports errors as blocking', async () => {
-    const { runEslintFitness } = await import('../../scripts/eslint-fitness-check.ts');
-    const result = await runEslintFitness();
+describe('eslint fitness wrapper — full repository scan', () => {
+  let result: Awaited<ReturnType<typeof runEslintFitness>>;
+
+  beforeAll(async () => {
+    // Both assertions need the same real repository scan. Keep it in this
+    // suite so Vitest's isolated file workers do not repeat the expensive pass.
+    result = await runEslintFitness(process.cwd());
+    // Coverage instrumentation and CPU contention make this scan much slower
+    // in CI. Preserve the existing 420s scan budget without loosening failures.
+  }, 420_000);
+
+  it('treats warning-only results as non-blocking and reports errors as blocking', () => {
 
     // The repo currently has known fitness warnings (AgentRuntime god-class,
     // oversized files, uncategorized skips, fail-open catches) and NO configured
@@ -98,17 +108,29 @@ describe('eslint fitness wrapper — exit semantics', () => {
 
     // Non-vacuity: the real ring lints hundreds of files, so a pass is not a pass-over-nothing.
     expect(result.filesLinted).toBeGreaterThan(100);
-    // This spawns a real ESLint pass over the entire source tree. Under the
-    // coverage-instrumented CI step (slower than the plain suite) with the
-    // parallel vitest pool contending for CPU, the 60s budget was marginal and
-    // flaked intermittently (observed on main too); 180s restored headroom at
-    // the time, but the tree has since grown into it — a green 24.x run on
-    // 2026-08-15 measured this file at 174s of the 180s budget, and two
-    // consecutive CI rolls then timed out on a docs-only diff. 420s restores
-    // the same ~2.4x margin over the observed worst case without masking a
-    // genuine hang (a real wedge still fails the suite well inside its step
-    // timeout).
-  }, 420_000);
+  });
+
+  it('no sync exec call in the linted tree lacks a timeout (spread-carried sites pinned)', () => {
+    // The fitness ring is warn-only, so this assertion enforces zero new bare
+    // execSync / execFileSync / spawnSync calls. Fix new offenders by adding
+    // timeout options; do not grow the grandfather set.
+    // These four rule false positives spread keyringExecOptions, which carries
+    // KEYRING_COMMAND_TIMEOUT_MS. Re-verify that timeout before moving a pin.
+    const spreadCarriedTimeoutSites = [
+      'src/lib/keyring.ts:514',
+      'src/lib/keyring.ts:542',
+      'src/lib/keyring.ts:802',
+      'src/lib/keyring.ts:843',
+    ];
+    expect(result.filesLinted).toBeGreaterThan(0);
+    const offenders = result.issues
+      .filter((issue) => issue.code === 'fitness/sync-exec-timeout')
+      .map((issue) => `${issue.filePath}:${issue.line}`)
+      .sort();
+
+    expect(offenders, `Sync exec timeout findings:\n${offenders.join('\n')}`)
+      .toEqual(spreadCarriedTimeoutSites);
+  });
 });
 
 describe('eslint fitness wrapper — refuses a scan of zero files', () => {
@@ -145,7 +167,30 @@ describe('eslint fitness wrapper — refuses a scan of zero files', () => {
   }, 60_000);
 });
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+describe('eslint fitness rule — sync exec option overloads', () => {
+  it.each([
+    { call: "execFileSync('node', ['--version'])", severities: [1] },
+    { call: "execFileSync('node', ['--version'], {})", severities: [1] },
+    { call: "execFileSync('node', ['--version'], { timeout: 1000 })", severities: [] },
+    { call: "execFileSync('node', { timeout: 1000 })", severities: [] },
+  ])('enforces timeout options for $call', async ({ call, severities }) => {
+    const { ESLint } = await import('eslint');
+    const eslint = new ESLint({
+      cwd: repoRoot,
+      overrideConfigFile: join(repoRoot, 'eslint.config.fitness.mjs'),
+    });
+    const results = await eslint.lintText(
+      `import { execFileSync } from 'node:child_process';\n${call};\n`,
+      { filePath: join(repoRoot, 'scripts', '__virtual_sync_exec.ts') },
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].fatalErrorCount).toBe(0);
+    expect(results[0].messages
+      .filter((message) => message.ruleId === 'fitness/sync-exec-timeout')
+      .map((message) => message.severity)).toEqual(severities);
+  });
+});
 
 describe('eslint fitness rule — db-read-prefix', () => {
   // --stdin --stdin-filename matches the fitness config's src/** glob without
