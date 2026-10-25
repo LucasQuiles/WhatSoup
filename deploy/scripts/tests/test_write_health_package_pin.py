@@ -193,6 +193,28 @@ def test_extra_staged_member_never_publishes_pin(tmp_path):
     assert not args["pin-output"].exists()
 
 
+def test_consistently_packaged_unmanifested_member_never_publishes_pin(tmp_path):
+    args = package(tmp_path)
+    extra = "deploy/scripts/unmanifested.py"
+    (args["runtime-root"] / extra).write_bytes(b"unmanifested code\n")
+    descriptor = json.loads(args["package-manifest"].read_text())
+    descriptor["files"][extra] = digest((args["runtime-root"] / extra).read_bytes())
+    args["package-manifest"].write_text(json.dumps(descriptor))
+    entries = []
+    for name in descriptor["files"]:
+        raw = (args["runtime-root"] / name).read_bytes()
+        member = tarfile.TarInfo(name)
+        member.size = len(raw)
+        entries.append((member, raw))
+    replace_archive(args, entries)
+
+    result = run(args)
+
+    assert result.returncode == 2
+    assert "manifest membership" in result.stderr
+    assert not args["pin-output"].exists()
+
+
 @pytest.mark.parametrize("field", ["archive", "runtime-root"])
 def test_symlinked_input_is_refused(tmp_path, field):
     args = package(tmp_path)

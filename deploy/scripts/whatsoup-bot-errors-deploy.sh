@@ -397,6 +397,15 @@ prune_verified_backups() {
 # paths, verified structurally via verify_paths_present()), not the
 # manifest's expected hashes -- a corrupt/missing manifest must never block
 # a 3am rollback.
+if [[ "$MODE" == "deploy" || "$MODE" == "verify" ]]; then
+  PACKAGE_ROOT_NAME="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().name)' "$ROOT")" \
+    || { echo "FATAL: cannot resolve runtime root" >&2; exit 3; }
+  if [[ "$PACKAGE_ROOT_NAME" =~ ^WhatSoup-health-[0-9a-f]{12}$ ]]; then
+    echo "FATAL: health exports require the staged package pin procedure in README-bot-errors.md; deploy/verify cannot qualify an export" >&2
+    exit 3
+  fi
+fi
+
 if [[ "$MODE" != "pin" && "$MODE" != "rollback" && "$MODE" != "rollback-lkg" ]]; then
   if [[ -n "${BOT_ERRORS_RUNTIME_MANIFEST_PATH:-}" ]]; then
     # Test/operator override -- lets a caller point at an alternate manifest

@@ -5,9 +5,11 @@
 // readKeychain is injected (never the real keychain); the file store is a
 // throwaway temp CLAUDE_CONFIG_DIR.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, linkSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   ensureClaudeFileStoreCredential,
   type ClaudeFileStoreHealDeps,
@@ -25,7 +27,7 @@ describe('ensureClaudeFileStoreCredential - real filesystem', () => {
   let path: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'wsheal-'));
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'wsheal-')));
     path = join(dir, '.credentials.json');
   });
   afterEach(() => {
@@ -46,6 +48,53 @@ describe('ensureClaudeFileStoreCredential - real filesystem', () => {
       ...over,
     } as ClaudeFileStoreHealDeps);
   }
+
+  it.each(['oversize', 'file-mode', 'parent-mode', 'symlink', 'hard-link'])(
+    'reports an unreadable %s store without accepting or changing it', (kind) => {
+      const content = kind === 'oversize'
+        ? JSON.stringify({ ...JSON.parse(kc(NOW + 60_000)), padding: 'x'.repeat(1024 * 1024) })
+        : kc(NOW + 60_000);
+      writeFileSync(path, content, { mode: 0o600 });
+      if (kind === 'file-mode') chmodSync(path, 0o644);
+      else if (kind === 'parent-mode') chmodSync(dir, 0o755);
+      else if (kind === 'hard-link') linkSync(path, join(dir, 'second-link'));
+      else if (kind === 'symlink') {
+        const target = join(dir, 'target');
+        renameSync(path, target);
+        symlinkSync(target, path);
+      }
+      expect(run().outcome).toBe('skipped-error');
+      expect(readFileSync(path, 'utf8')).toBe(content);
+    },
+  );
+
+  it('refuses a symlink ancestor of the selected store', () => {
+    writeFileSync(path, kc(NOW + 60_000), { mode: 0o600 });
+    const alias = join(dir, 'alias');
+    symlinkSync(dir, alias, 'dir');
+    expect(run({ env: { CLAUDE_CONFIG_DIR: alias } }).outcome).toBe('skipped-error');
+    expect(readFileSync(path, 'utf8')).toBe(kc(NOW + 60_000));
+  });
+
+  it('refuses a FIFO without waiting for a writer', () => {
+    execFileSync('mkfifo', [path], { timeout: 2000 });
+    const moduleUrl = pathToFileURL(resolve('src/runtimes/agent/providers/claude-filestore-heal.ts')).href;
+    const code = [
+      `import { ensureClaudeFileStoreCredential } from ${JSON.stringify(moduleUrl)};`,
+      'console.log(JSON.stringify(ensureClaudeFileStoreCredential({',
+      `platform: 'darwin', env: { CLAUDE_CONFIG_DIR: ${JSON.stringify(dir)} },`,
+      `now: () => ${NOW}, readKeychain: () => ${JSON.stringify(kc(NOW + 60_000))},`,
+      'log: { info() {}, warn() {} },',
+      '})));',
+    ].join('\n');
+    const result = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', code], {
+      env: { ...process.env, VITEST: '1' }, encoding: 'utf8', timeout: 5000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ outcome: 'skipped-error' });
+    expect(statSync(path).isFIFO()).toBe(true);
+  });
 
   it('never creates a file store beside a usable own item', () => {
     expect(run().outcome).toBe('skipped-cli-reads-own-item');

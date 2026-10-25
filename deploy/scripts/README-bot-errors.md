@@ -1466,6 +1466,12 @@ write/hash failure, raw secret output, or authorization ambiguity remains a hard
   the hub's deploy path; restart collector, dispatcher, and q-loop after
   deploying long-running code.
 
+The generic script deployer refuses `deploy` and `verify` for a resolved
+`WhatSoup-health-<source12>` export root, including path aliases, before copying
+files or creating a backup. It does not establish package-pin qualification.
+Use the staged package procedure below for those roots. Emergency `rollback`
+and `rollback-lkg` remain available with their existing backup checks.
+
 The deploy contract is:
 
 1. Take a per-host backup before mutation; abort if the backup path or restore proof cannot
@@ -1669,6 +1675,11 @@ to produce the pin for an already staged export. Its package descriptor has
 an independently trusted build or review channel: matching an untrusted archive
 to its own descriptor does not authenticate the source.
 
+Existing unpinned exports require the same staged procedure before enabling the
+new checker. Do not overwrite an active export with the generic deployer or run
+the new consumer before its external pin is qualified. Preserve the prior tree
+for rollback; this procedure does not authorize activation.
+
 For a package transition, keep the currently installed tree and pin intact while
 qualifying the candidate. In order:
 
@@ -1693,8 +1704,11 @@ qualifying the candidate. In order:
 
    Replace the placeholders before running. The producer verifies the archive's
    digest, exact regular-file membership, each member hash, and the staged tree
-   against the descriptor. It also checks the runtime manifest's source and member
-   hashes. Symlinks, duplicate members, special files, traversal and mismatches are
+   against the descriptor. Descriptor membership must equal the runtime manifest's
+   entries plus the manifest itself; the manifest excludes its own digest to avoid
+   a self-hash cycle. There are no other unlisted package members. The producer
+   also checks the runtime manifest's source and member hashes.
+   Symlinks, duplicate members, special files, traversal and mismatches are
    refused. Tar and gzip-compressed tar are supported, bounded to 64 MiB of archive
    and expanded tar data, 16 MiB per member, 1,024 files and 1 MiB per JSON input.
 4. Run the staged checker with the same profile and candidate pin:
@@ -1716,6 +1730,8 @@ is verified without rewriting it; a conflicting pin is preserved and rejected.
 Add `--verify-only` to verify an existing pin without publishing one. A transition
 uses a separate candidate pin; never relabel a role or replace the old pin just to
 make verification pass.
+Requalify any earlier staged package with the current producer before transition;
+an earlier pin alone does not prove the stricter manifest-membership contract.
 
 The checker validates the pin identity, manifest digest, full source commit,
 runtime root, listed file hashes and executing-checker binding. Package validation

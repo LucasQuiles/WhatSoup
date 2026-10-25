@@ -14,6 +14,14 @@ copy. For a non-default credential store, the detector reads the selected keycha
 service and reports a second plaintext store without changing it. The CLI probe
 separately establishes usability.
 
+The default plaintext-store reader accepts at most 1 MiB through the shared
+private-file observation. It requires current-user ownership and private file
+and parent permissions, rejects symlink ancestors, hard links and nonregular
+files, and checks file identity through the read. Unsafe or changed files return
+`skipped-error`; this is inconclusive detection, not proof that the second store
+is absent. A missing file remains an ordinary absent-store result. The detector
+does not repair permissions, rewrite credentials or change the CLI's own reader.
+
 Serving turns, identity checks and diagnostic/model probes preserve both
 `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`. A defined secure-storage
 setting takes precedence, including an empty value that selects the CLI default.

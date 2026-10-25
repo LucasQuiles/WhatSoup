@@ -942,7 +942,7 @@
     },
     {
       "path": "deploy/scripts/write-health-package-pin.py",
-      "sha256": "cf00c78456599cd7386f00633f1adc512ad529f13b9b0e0d6bb429cac90e4cf4"
+      "sha256": "f9e7eaa04c95fb6b72653d2f4aab42086911874525d96a1682dbc84d4cb8a039"
     }
   ]
 }

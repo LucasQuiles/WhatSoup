@@ -37,11 +37,11 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { isNonEmptyString } from '../../../lib/type-guards.ts';
+import { readPrivateFileSync } from '../../../lib/private-fs.ts';
 
 // The macOS login-keychain item name the claude CLI stores its OAuth credential
 // under. Assembled from parts so the two words are never adjacent in source:
@@ -180,11 +180,12 @@ function defaultReadKeychain(service: string): string | null {
 }
 
 function defaultReadFileStore(path: string): string | null {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
+  const canonicalPath = resolve(path);
+  const observed = readPrivateFileSync(canonicalPath, {
+    label: 'credential file store', maxBytes: 1024 * 1024,
+    observation: { root: dirname(canonicalPath) },
+  });
+  return observed?.bytes.toString('utf8') ?? null;
 }
 
 function parseJsonObject(raw: string | null): Record<string, unknown> | null {
@@ -229,8 +230,8 @@ export function resetClaudeCredentialStoreStateForTests(): void {
  * export keeps its historical name for its two callers (startup and the
  * claude-cli usability probe); every outcome is a non-failure for them.
  *
- * Synchronous (one keychain read + one small file read), bounded by
- * KEYCHAIN_READ_TIMEOUT_MS.
+ * The keychain command has a timeout. The private observed file read is
+ * limited to 1 MiB and rejects nonregular files before opening them.
  */
 export function ensureClaudeFileStoreCredential(
   deps: ClaudeFileStoreHealDeps = {},

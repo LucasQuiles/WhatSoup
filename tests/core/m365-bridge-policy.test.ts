@@ -50,6 +50,34 @@ function policy(overrides: Parameters<typeof resolveM365MutationPolicy>[0] = {})
 }
 
 describe('resolveM365MutationPolicy', () => {
+  it.each(['http://localhost:10000', 'http://localhost'])(
+    'rejects a hostname-based bridge origin before credential projection: %s', (origin) => {
+      const options = {
+        ...configured,
+        binding: { ...binding, origin },
+        env: serviceEnv({ MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin }),
+      };
+      expect(m365BridgeCredentialProjectionAllowed(options)).toBe(false);
+      expect(m365BridgeCredentialAdmission(options, process.pid)).toBeNull();
+      expect(resolveM365MutationPolicy(options)).toEqual({ status: 'rejected' });
+    },
+  );
+
+  it.each(['http://127.0.0.1:10000', 'http://[::1]:10000'])(
+    'admits an exact numeric loopback bridge: %s', (origin) => {
+      const options = {
+        ...configured,
+        binding: { ...binding, origin },
+        env: serviceEnv({ MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin }),
+      };
+      options.env.WHATSOUP_M365_LAUNCH_ADMISSION = m365BridgeCredentialAdmission(options, process.pid) ?? undefined;
+      expect(m365BridgeCredentialProjectionAllowed(options)).toBe(true);
+      expect(resolveM365MutationPolicy(options)).toMatchObject({
+        status: 'approved', childEnv: { MS365_AGENT365_BASE_URL: origin, MS365_HUB_URL: origin },
+      });
+    },
+  );
+
   it('rejects an ambient key without launcher admission', () => {
     expect(policy({ env: serviceEnv({ WHATSOUP_M365_LAUNCH_ADMISSION: undefined }) })).toEqual({ status: 'rejected' });
   });

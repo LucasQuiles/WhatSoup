@@ -134,6 +134,52 @@ grep -q "old:deploy/scripts/bot-errors-emit.py" "$root/deploy/scripts/bot-errors
 [ ! -e "$root/deploy/scripts/bot-errors-runner.py" ] || fail "rollback did not delete pre-deploy absent file"
 [ ! -e "$root/deploy/scripts/write-health-package-pin.py" ] || fail "rollback retained a pre-deploy absent package writer"
 
+package_root="$tmp/WhatSoup-health-aaaaaaaaaaaa"
+prepare_current_root "$package_root"
+package_alias="$tmp/package-alias"
+ln -s "$package_root" "$package_alias"
+python3 - "$package_root" "$tmp/package-before.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+snapshot = {str(path.relative_to(root)): [hashlib.sha256(path.read_bytes()).hexdigest(),
+            path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode]
+            for path in root.rglob("*") if path.is_file()}
+Path(sys.argv[2]).write_text(json.dumps(snapshot))
+PY
+for package_target in "$package_root" "$package_root/" "$package_root/." "$package_alias"; do
+  for package_mode in deploy verify; do
+    rc=0
+    bash "$D" "$package_mode" "$package_target" "$PWD" > "$tmp/package-refusal.log" 2>&1 || rc=$?
+    [ "$rc" = "3" ] || { cat "$tmp/package-refusal.log"; fail "package $package_mode was not refused"; }
+    grep -q 'health exports require the staged package pin procedure' "$tmp/package-refusal.log" \
+      || { cat "$tmp/package-refusal.log"; fail "package refusal lacks migration guidance"; }
+    if grep -Eq 'DEPLOY_OK|VERIFY_OK|BACKUP=' "$tmp/package-refusal.log"; then
+      fail "package refusal reached deployment or verification"
+    fi
+  done
+done
+python3 - "$package_root" "$tmp/package-before.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+snapshot = {str(path.relative_to(root)): [hashlib.sha256(path.read_bytes()).hexdigest(),
+            path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_mode]
+            for path in root.rglob("*") if path.is_file()}
+assert snapshot == json.loads(Path(sys.argv[2]).read_text())
+assert not list(root.parent.glob(".bot-errors-deploy-backup-WhatSoup-health-*"))
+PY
+bash "$D" rollback "$package_root" "$backup" > "$tmp/package-rollback.log" 2>&1
+grep -q 'ROLLBACK_OK' "$tmp/package-rollback.log" || fail "package rollback became unavailable"
+grep -q 'old:deploy/scripts/bot-errors-emit.py' "$package_root/deploy/scripts/bot-errors-emit.py" \
+  || fail "package rollback did not restore retained bytes"
+
 stage_sha=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 staging="$tmp/$stage_sha"
 prepare_staging "$staging"
@@ -240,16 +286,11 @@ prepare_old_root "$fail_root"
 fakebin="$tmp/fakebin"
 mkdir -p "$fakebin"
 real_python3="$(command -v python3)"
-# Only fail smoke_redaction's invocation (python3 - <root-dir> <<PY ... PY).
-# resolve_managed_files() also calls python3 now (python3 - <manifest.json>
-# <paths...> <<PY ... PY>) to resolve MANAGED_FILES from the runtime
-# manifest -- that call must still succeed so deploy mode reaches its own
-# smoke_redaction step and the auto-rollback path this test exercises,
-# rather than failing earlier for an unrelated reason. Distinguished by the
-# script's second argument: a manifest path (.json) vs. a root directory.
+# Inject failure only into smoke_redaction's two-argument stdin script.
+# Root resolution and manifest lookup must run normally to reach rollback.
 cat > "$fakebin/python3" <<SH
 #!/usr/bin/env bash
-if [[ "\$2" == *.json ]]; then
+if [[ "\$1" != "-" || "\$#" != "2" || "\$2" == *.json ]]; then
   exec "$real_python3" "\$@"
 fi
 echo "fake python smoke failure" >&2

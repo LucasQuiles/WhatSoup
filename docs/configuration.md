@@ -2265,7 +2265,10 @@ The source of truth is `REQUIRED_DENY`; this document describes categories only.
 The M365 mutation deny entries remain in the floor unless one instance supplies a
 complete `agentOptions.m365Bridge` binding. The binding requires the fixed
 `"user-full-v1"` profile, one concrete Azure tenant GUID, exactly one account selector,
-and one exact `http://` loopback origin. It also requires
+and one exact numeric `http://` loopback origin (`127.0.0.1` or `[::1]`).
+Hostnames, including `localhost`, cannot authorize credential projection because
+their resolution is not part of admission. Configure the same numeric origin in
+the binding and both service origin variables before launching. It also requires
 `agentOptions.allowM365Mutations: true`, an explicit `agentOptions.provider: "claude-cli"`, and the
 exact enabled plugin key `"microsoft_365@microsoft-365-dev": true`.
 

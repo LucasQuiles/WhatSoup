@@ -215,11 +215,15 @@ def pin_payload(args):
         if not isinstance(entry, dict):
             raise Refused("invalid runtime manifest entry")
         name = member_name(entry.get("path"))
+        if name == MANIFEST:
+            raise Refused("runtime manifest must exclude its own digest")
         if name in seen or name not in files or entry.get("sha256") != files[name]:
             raise Refused("runtime manifest member digest differs")
         seen.add(name)
     if CHECKER not in seen:
         raise Refused("running checker not manifested")
+    if set(files) != seen | {MANIFEST}:
+        raise Refused("runtime manifest membership differs from package descriptor")
     return {
         "schemaVersion": 1, "owner": "health_reporter", "mode": profile["role"],
         "sourceCommit": source, "archiveSha256": archive_hash,
