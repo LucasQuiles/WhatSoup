@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetLoggerMock } from '../../helpers/logger-mock.ts';
 import { ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,12 +27,20 @@ import {
   waitUntil,
 } from './lib/session-harness.ts';
 
+// The 'agent-runtime' logger is one shared instance so a failed /new reset,
+// logged as 'local command handler failed', can be quoted when an ownership
+// assertion below fails. Every other component keeps a fresh throwaway logger.
+const runtimeLogger = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
+
 vi.mock('../../../src/logger.ts', async () => {
-  const { loggerMock } = await import('../../helpers/logger-mock.ts');
+  const { componentLoggerMock, loggerMock } = await import('../../helpers/logger-mock.ts');
   const mock = loggerMock();
   const logger = mock.createChildLogger();
+  const { log, createChildLogger } = componentLoggerMock('agent-runtime', mock.createChildLogger);
+  Object.assign(runtimeLogger, log);
   return {
     ...mock,
+    createChildLogger,
     default: { ...logger, child: () => logger },
     flushLogger: vi.fn(),
   };
@@ -104,7 +113,29 @@ const originalArgs = (SessionManager.prototype as any).getProviderArgs;
 afterEach(() => {
   (SessionManager.prototype as any).getProviderBinary = originalBinary;
   (SessionManager.prototype as any).getProviderArgs = originalArgs;
+  resetLoggerMock(runtimeLogger);
 });
+
+const LOGGED_RESET_FAILURE_LIMIT = 2_000;
+
+function describeLoggedError(err: unknown): string {
+  if (err instanceof AggregateError) {
+    return `${err.message} [${err.errors.map(describeLoggedError).join(' | ')}]`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Failure text for the ownership assertions: what the runtime logged when the
+// /new reset threw. The predicates are unchanged; this only names the cause.
+function loggedResetFailure(): string {
+  const errors = (runtimeLogger.error?.mock.calls ?? [])
+    .filter(([, message]) => message === 'local command handler failed')
+    .map(([fields]) => describeLoggedError((fields as { err?: unknown } | undefined)?.err));
+  const text = errors.length === 0 ? 'no local command handler failure was logged' : errors.join(' | ');
+  return text.length > LOGGED_RESET_FAILURE_LIMIT
+    ? `${text.slice(0, LOGGED_RESET_FAILURE_LIMIT)} [truncated]`
+    : text;
+}
 
 function makeMessage(chatJid: string, content: string): IncomingMessage {
   return {
@@ -208,17 +239,18 @@ describe('per-chat /new ownership transition', () => {
 
       await state._handleMessageInner(makeNewMessage(chatJid));
       replacementPid = currentManager.getStatus().pid;
+      const resetFailure = loggedResetFailure();
 
       expect(sessions.missingDuringDelete).toEqual([]);
       expect(sessions.get(mapKey)).toBe(currentManager);
-      expect(ownership.get(mapKey)).toMatchObject({
+      expect(ownership.get(mapKey), resetFailure).toMatchObject({
         managerId: initialOwner?.managerId,
         generation: 2,
         state: 'active',
       });
-      expect(ownership.transitions.map(({ state }) => state)).toEqual(['active', 'resetting', 'active']);
-      expect(ownership.transitions[1]).toMatchObject({ generation: 1, mapped: true });
-      expect(ownership.transitions[2]).toMatchObject({ generation: 2, mapped: true, oldChildAlive: false });
+      expect(ownership.transitions.map(({ state }) => state), resetFailure).toEqual(['active', 'resetting', 'active']);
+      expect(ownership.transitions[1], resetFailure).toMatchObject({ generation: 1, mapped: true });
+      expect(ownership.transitions[2], resetFailure).toMatchObject({ generation: 2, mapped: true, oldChildAlive: false });
       expect(queues.get(mapKey)).not.toBe(originalQueue);
       expect(trackers.get(mapKey)).not.toBe(originalTracker);
       expect(queues.sets.at(-1)).toMatchObject({ key: mapKey, ownerState: 'resetting', generation: 2 });
@@ -276,9 +308,10 @@ describe('per-chat /new ownership transition', () => {
       ).toBe(true);
       expect(state.deleteOwnedPerChatSession(mapKey, currentManager)).toBe(true);
       await reset;
+      const resetFailure = loggedResetFailure();
 
       expect(sessions.has(mapKey)).toBe(false);
-      expect(ownership.get(mapKey)).toBeUndefined();
+      expect(ownership.get(mapKey), resetFailure).toBeUndefined();
       expect(queues.get(mapKey)).toBe(originalQueue);
       expect(trackers.get(mapKey)).toBe(originalTracker);
       expect(generationCount()).toBe(1);
@@ -497,13 +530,14 @@ describe('per-chat /new ownership transition', () => {
       `);
 
       await state._handleMessageInner(makeNewMessage(chatJid));
+      const resetFailure = loggedResetFailure();
       expect(replacementPidReadyBeforeFailure).toBe(true);
       const replacementRecord = JSON.parse(readFileSync(replacementPidFile, 'utf8')) as { provider: number };
       replacementPid = replacementRecord.provider;
 
       expect(sessions.missingDuringDelete).toEqual([]);
       expect(sessions.get(mapKey)).toBe(currentManager);
-      expect(ownership.get(mapKey)).toMatchObject({ generation: 2, state: 'recoverable_dead' });
+      expect(ownership.get(mapKey), resetFailure).toMatchObject({ generation: 2, state: 'recoverable_dead' });
       expect(currentManager.getStatus()).toMatchObject({ active: false, pid: null });
       expect(isAlive(oldPid)).toBe(false);
       expect(isAlive(replacementPid)).toBe(false);
@@ -553,10 +587,11 @@ describe('per-chat /new ownership transition', () => {
       `);
 
       await state._handleMessageInner(makeNewMessage(chatJid));
-      expect(await waitUntil(() => ownership.get(mapKey)?.state === 'recoverable_dead', 2_000)).toBe(true);
+      const resetFailure = loggedResetFailure();
+      expect(await waitUntil(() => ownership.get(mapKey)?.state === 'recoverable_dead', 2_000), resetFailure).toBe(true);
 
       expect(sessions.get(mapKey)).toBe(currentManager);
-      expect(ownership.get(mapKey)).toMatchObject({ generation: 2, state: 'recoverable_dead' });
+      expect(ownership.get(mapKey), resetFailure).toMatchObject({ generation: 2, state: 'recoverable_dead' });
       expect(isAlive(oldPid)).toBe(false);
       expect(generationCount()).toBe(1);
     } finally {

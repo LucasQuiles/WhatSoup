@@ -19,6 +19,7 @@ import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
 import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import { systemClock } from '../../lib/clock.ts';
 import {
   createSession,
   endAbandonedActiveSession,
@@ -65,6 +66,7 @@ import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '..
 import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
+import type { LastKillTreeOutcome } from './reset-exit-diagnostic.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
 import {
   isHostWorkAdmissionEnabled,
@@ -841,6 +843,8 @@ export class SessionManager {
     SessionGenerationIdentity | null
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  /** Diagnostic only: the runtime's reset exit timeout reports it; nothing decides on it. */
+  private lastKillTreeOutcome: LastKillTreeOutcome | null = null;
   private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
   private providerExecutionWaitAbort: AbortController | null = null;
   /** Queued host wrapper, before it has admitted its scoped provider child. */
@@ -1334,6 +1338,17 @@ export class SessionManager {
       // reading) is attributable on the shutdown path instead of silently
       // invisible. Warn on unresolved ambiguity; debug on clean/escalated.
       onOutcome: (outcome) => {
+        // Retained for the reset exit-timeout diagnostic. killSessionTree already
+        // swallows sink errors, so this cannot break the kill path.
+        this.lastKillTreeOutcome = {
+          rootPid: child.pid ?? null,
+          signal,
+          outcome: outcome.outcome,
+          ambiguousPids: [...outcome.ambiguousPids],
+          durationMs: outcome.durationMs,
+          escalated: outcome.escalated,
+          at: systemClock.now(),
+        };
         const record = {
           chatJid: this.chatJid,
           sessionId: this.sessionId,
@@ -4536,6 +4551,11 @@ export class SessionManager {
       durableFailureInconclusive: this.durableFailureInconclusive,
       turnInFlight: this.providerTurnInFlight,
     };
+  }
+
+  /** Latest kill-tree outcome for this manager's children; null until a kill completes. */
+  getLastKillTreeOutcome(): LastKillTreeOutcome | null {
+    return this.lastKillTreeOutcome;
   }
 
   getProviderId(): string {
