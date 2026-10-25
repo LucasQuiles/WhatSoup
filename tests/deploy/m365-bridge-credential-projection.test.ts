@@ -1,5 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
@@ -67,20 +67,83 @@ function runProjection(
 ): SpawnSyncReturns<string> {
   const root = tmp.make('projection-probe');
   const configPath = writeConfig(root, config);
+  return runProjectionFile(instance, configPath, env, args);
+}
+
+function runProjectionFile(
+  instance: string,
+  configPath: string,
+  env: NodeJS.ProcessEnv,
+  args: string[] = [],
+  preload?: string,
+): SpawnSyncReturns<string> {
   return spawnSync(node, [
     '--disable-warning=ExperimentalWarning',
     '--experimental-strip-types',
+    ...(preload ? ['--import', preload] : []),
     projectionPath,
     instance,
     configPath,
     ...args,
   ], {
     encoding: 'utf8',
+    timeout: 10_000,
     env: { ...process.env, ...env },
   });
 }
 
 describe('deploy/m365-bridge-credential-projection.ts', () => {
+  it.each(['file-mode', 'parent-mode', 'oversize', 'ancestor-symlink', 'hard-link'])(
+    'refuses unsafe config %s before authorizing credential lookup', (kind) => {
+      const root = tmp.make('projection-boundary');
+      const ancestor = join(root, 'inputs');
+      const dir = join(ancestor, 'instance');
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const path = writeConfig(dir, qualifiedConfig());
+      if (kind === 'file-mode') chmodSync(path, 0o644);
+      else if (kind === 'parent-mode') chmodSync(dir, 0o755);
+      else if (kind === 'oversize') writeFileSync(path, JSON.stringify({ ...qualifiedConfig(), padding: 'x'.repeat(1024 * 1024) }));
+      else if (kind === 'hard-link') linkSync(path, join(root, 'linked-config.json'));
+      else {
+        renameSync(ancestor, join(root, 'original-inputs'));
+        symlinkSync(join(root, 'original-inputs'), ancestor);
+      }
+      const result = runProjectionFile('bridge-agent', path, qualifiedBridgeEnv());
+      expect(result.status, result.stderr).toBe(3);
+      expect(result.stdout).toBe('');
+    },
+  );
+
+  it('refuses admission if config is replaced after the descriptor opens', () => {
+    const root = tmp.make('projection-race');
+    const path = writeConfig(root, qualifiedConfig());
+    const marker = join(root, 'replaced');
+    const preload = join(root, 'replace-config.mjs');
+    writeFileSync(preload, [
+      "import fs from 'node:fs';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      'const originalOpen = fs.openSync;',
+      'let changed = false;',
+      'fs.openSync = (path, ...args) => {',
+      '  const fd = originalOpen(path, ...args);',
+      `  if (path === ${JSON.stringify(path)} && !changed) {`,
+      '    changed = true;',
+      `    fs.renameSync(path, ${JSON.stringify(join(root, 'original.json'))});`,
+      `    fs.writeFileSync(path, fs.readFileSync(${JSON.stringify(join(root, 'original.json'))}), { mode: 0o600 });`,
+      `    fs.writeFileSync(${JSON.stringify(marker)}, 'replaced');`,
+      '  }',
+      '  return fd;',
+      '};',
+      'syncBuiltinESMExports();',
+    ].join('\n'));
+    const result = runProjectionFile('bridge-agent', path, qualifiedBridgeEnv({
+      MS365_AGENT365_API_KEY: 'synthetic-bridge-key',
+    }), ['--credential-admission', String(process.pid)], preload);
+    expect(readFileSync(marker, 'utf8')).toBe('replaced');
+    expect(result.status, result.stderr).toBe(3);
+    expect(result.stdout).toBe('');
+  });
+
   it('emits only a digest after credential lookup for the supplied exec process', () => {
     const result = runProjection('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({
       MS365_AGENT365_API_KEY: 'synthetic-bridge-key',

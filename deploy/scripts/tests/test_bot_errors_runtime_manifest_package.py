@@ -110,6 +110,32 @@ def test_declared_package_reports_source_sha_without_a_git_checkout(tmp_path, mo
 
 
 @properties
+@given(explicit=st.booleans(), nested=st.booleans())
+@example(explicit=True, nested=False)
+@example(explicit=True, nested=True)
+@example(explicit=False, nested=False)
+@example(explicit=False, nested=True)
+def test_package_consumer_rejects_a_pin_inside_the_runtime(explicit, nested):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, external_pin = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        _write_package_pin(external_pin, root, manifest_path)
+        assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} source=package match" in _inventory(module)
+        pin = root / "private" / "pin.json" if nested else root / "pin.json"
+        pin.parent.mkdir(exist_ok=True, mode=0o700)
+        pin.parent.chmod(0o700)
+        _write_package_pin(pin, root, manifest_path)
+        if not explicit:
+            monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", pin)
+        lines = module.runtime_manifest_inventory(
+            {"expectRuntimeManifest": True, "role": _PIN_MODE},
+            package_pin_path=pin if explicit else None,
+        )
+        assert "FAIL runtime_manifest package_source: pin_inside_runtime_root" in lines
+        assert not [line for line in lines if "source=package match" in line]
+
+
+@properties
 @given(pin_state=st.sampled_from(["missing", "wrong_digest", "valid"]))
 @example(pin_state="missing")
 @example(pin_state="wrong_digest")

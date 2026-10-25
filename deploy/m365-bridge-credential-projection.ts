@@ -2,7 +2,8 @@
 // credential into its parent process. It reads the agent envelope and shared
 // bridge-policy inputs only; credential lookup remains in deploy/whatsoup.
 
-import { readPrivateConfigFileSync } from '../src/core/private-config-file.ts';
+import { dirname, resolve } from 'node:path';
+import { readPrivateFileSync } from '../src/lib/private-fs.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
 import {
   m365BridgeCredentialProjectionAllowed,
@@ -22,7 +23,13 @@ if (!isValidInstanceName(instance)) process.exit(3);
 
 let config: Record<string, unknown>;
 try {
-  const parsed: unknown = JSON.parse(readPrivateConfigFileSync(configPath));
+  const path = resolve(configPath);
+  const observed = readPrivateFileSync(path, {
+    label: 'bridge instance config', maxBytes: 1024 * 1024,
+    observation: { root: dirname(path) },
+  });
+  if (observed === null) process.exit(3);
+  const parsed: unknown = JSON.parse(observed.bytes.toString('utf8'));
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) process.exit(3);
   config = parsed;
 } catch {

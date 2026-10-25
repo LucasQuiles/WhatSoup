@@ -1067,7 +1067,13 @@ def runtime_package_source_line(
     if not is_runtime_package_root():
         return None
 
-    pin, pin_error = read_private_json_record(package_pin_path or RUNTIME_PACKAGE_PIN_PATH, max_bytes=64 * 1024)
+    pin_path = package_pin_path or RUNTIME_PACKAGE_PIN_PATH
+    try:
+        if pin_path.resolve(strict=False).is_relative_to(REPO_ROOT.resolve(strict=False)):
+            return "FAIL runtime_manifest package_source: pin_inside_runtime_root"
+    except (OSError, RuntimeError):
+        return "FAIL runtime_manifest package_source: pin_path_invalid"
+    pin, pin_error = read_private_json_record(pin_path, max_bytes=64 * 1024)
     if pin_error is not None or pin is None:
         return "FAIL runtime_manifest package_source: pin_missing"
     if pin.get("schemaVersion") != 1:

@@ -1652,6 +1652,8 @@ Run `python3 -B deploy/scripts/bot-errors-health-check.py --runtime-manifest`
 from the installed package to inspect its source binding without publishing an
 event. For a staged package, `--runtime-package-pin <path>` selects an explicit
 private pin for this read-only check; it cannot redirect daily-health validation.
+The consumer rejects any default or explicit pin whose resolved path lies inside
+the runtime package, with `pin_inside_runtime_root` and exit 2.
 
 A recognized `WhatSoup-health-<source12>` export requires an external
 `health-package-pin.json` owned by `health_reporter`. Supported pin modes are

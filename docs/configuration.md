@@ -2289,6 +2289,11 @@ on-disk agent configuration. A missing or unsafe credential stops a qualified
 bridge startup; an unconfigured bridge does not attempt a lookup. Credential
 service names are derived from validated instance names, never supplied as an
 arbitrary configuration path. Each instance must provision its own credential.
+The projection helper observes at most 1 MiB of configuration through the shared
+private-file reader. The file and its containing directory must be owned by the
+invoking user with no group/other access. Symlink ancestors, hard-linked files,
+and file or ancestor changes during the read are rejected before lookup or
+admission. This stricter authorization read does not change legacy config loading.
 
 After lookup, the launcher creates `WHATSOUP_M365_LAUNCH_ADMISSION`, an HMAC bound
 to its process ID, instance name, complete binding and resolved key. Its final
