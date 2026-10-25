@@ -22,4 +22,13 @@ describe('Baileys audio duration with the installed parser', () => {
   it('rejects empty audio when its format cannot be identified', async () => {
     await expect(getAudioDuration(Buffer.alloc(0))).rejects.toThrow('Failed to determine audio format');
   });
+
+  it('rejects an ID3v2 tag whose declared size exceeds the remaining audio', async () => {
+    // Keep the declared allocation small even if the upstream size guard regresses.
+    const truncatedTag = Buffer.from('49443304000000002000', 'hex');
+
+    await expect(getAudioDuration(truncatedTag)).rejects.toThrow(
+      'ID3v2 tag size 4096 exceeds remaining file size 0',
+    );
+  });
 });
