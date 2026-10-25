@@ -14,6 +14,19 @@
 
 const SYNC_FUNCS = new Set(['execSync', 'execFileSync', 'spawnSync']);
 
+function unwrapExpression(node) {
+  if (
+    node.type === 'TSAsExpression'
+    || node.type === 'TSTypeAssertion'
+    || node.type === 'TSNonNullExpression'
+    || node.type === 'TSSatisfiesExpression'
+    || node.type === 'ChainExpression'
+  ) {
+    return unwrapExpression(node.expression);
+  }
+  return node;
+}
+
 /** @type {import('eslint').Rule.RuleModule} */
 export default {
   meta: {
@@ -54,7 +67,7 @@ export default {
         if (!funcName) return;
 
         // Check the last argument for timeout
-        const args = node.arguments;
+        const args = node.arguments.map(unwrapExpression);
         if (args.length < 2) {
           // execSync(cmd) — definitely missing timeout
           context.report({ node, data: { name: funcName }, messageId: 'missingTimeout' });

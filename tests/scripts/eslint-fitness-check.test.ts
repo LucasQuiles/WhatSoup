@@ -173,6 +173,19 @@ describe('eslint fitness rule — sync exec option overloads', () => {
     { call: "execFileSync('node', ['--version'], {})", severities: [1] },
     { call: "execFileSync('node', ['--version'], { timeout: 1000 })", severities: [] },
     { call: "execFileSync('node', { timeout: 1000 })", severities: [] },
+    { call: "execFileSync('node', ['--version'] as string[])", severities: [1] },
+    { call: "execFileSync('node', <string[]>['--version'])", severities: [1] },
+    { call: "execFileSync('node', ['--version']!)", severities: [1] },
+    { call: "execFileSync('node', ['--version'] satisfies string[])", severities: [1] },
+    { call: "execFileSync('node', (['--version'] as string[])!)", severities: [1] },
+    { call: "execFileSync('node', {} as object)", severities: [1] },
+    { call: "execFileSync('node', ['--version'], {} satisfies object)", severities: [1] },
+    { call: "execSync('node --version', <object>{})", severities: [1] },
+    { call: "spawnSync('node', ['--version'], {}!)", severities: [1] },
+    { call: "execFileSync('node', { timeout: 1000 } as object)", severities: [] },
+    { call: "execFileSync('node', ['--version'] as string[], { timeout: 1000 })", severities: [] },
+    { call: "execSync('node --version', <object>{ timeout: 1000 })", severities: [] },
+    { call: "spawnSync('node', ['--version'], { timeout: 1000 } satisfies object)", severities: [] },
   ])('enforces timeout options for $call', async ({ call, severities }) => {
     const { ESLint } = await import('eslint');
     const eslint = new ESLint({
@@ -180,7 +193,7 @@ describe('eslint fitness rule — sync exec option overloads', () => {
       overrideConfigFile: join(repoRoot, 'eslint.config.fitness.mjs'),
     });
     const results = await eslint.lintText(
-      `import { execFileSync } from 'node:child_process';\n${call};\n`,
+      `import { execFileSync, execSync, spawnSync } from 'node:child_process';\n${call};\n`,
       { filePath: join(repoRoot, 'scripts', '__virtual_sync_exec.ts') },
     );
 
