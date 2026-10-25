@@ -25,6 +25,30 @@ describe('credential-store detection never copies credentials', () => {
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
+  it.each([false, true])('refuses default-store inspection with an empty secure override (config=%s)', (withConfig) => {
+    const defaultDir = join(root, '.claude');
+    mkdirSync(defaultDir, { mode: 0o700 });
+    const fileStore = join(defaultDir, '.credentials.json');
+    writeFileSync(fileStore, expiredFile, { mode: 0o600 });
+    const before = { bytes: readFileSync(fileStore), mode: statSync(fileStore).mode };
+    const readKeychain = vi.fn(() => keychain);
+    const readFileStore = vi.fn(() => expiredFile);
+
+    const result = ensureClaudeFileStoreCredential({
+      platform: 'darwin',
+      env: { HOME: root, CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+        ...(withConfig ? { CLAUDE_CONFIG_DIR: configDir } : {}) },
+      now: () => NOW, readKeychain, readFileStore,
+      log: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(result).toEqual({ outcome: 'skipped-no-config-dir' });
+    expect(readKeychain).not.toHaveBeenCalled();
+    expect(readFileStore).not.toHaveBeenCalled();
+    expect(readFileSync(fileStore)).toEqual(before.bytes);
+    expect(statSync(fileStore).mode).toBe(before.mode);
+  });
+
   for (const selector of ['config', 'secure', 'both'] as const) {
     it.each([false, true])(`${selector} selector preserves the file stores (existing=%s)`, (existing) => {
       const env = {

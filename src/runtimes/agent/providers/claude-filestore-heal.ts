@@ -23,9 +23,9 @@
 //
 // Contract:
 //   - macOS only; no-op on other platforms.
-//   - No-op unless CLAUDE_CONFIG_DIR or CLAUDE_SECURESTORAGE_CONFIG_DIR is
-//     set (neither set: the CLI uses the bare default item, which is not the
-//     bot's to inspect).
+//   - No-op when the selected store is the CLI default, including a defined-empty
+//     CLAUDE_SECURESTORAGE_CONFIG_DIR. The default login is not the bot's to inspect;
+//     skipped-no-config-dir supplies no duplicate-store evidence.
 //   - Reads only the bot's own keychain item (claudeCredentialServiceForEnv)
 //     and the file store in the CLI's storage dir; never the bare default
 //     item, never another config dir's item, never a keychain listing.

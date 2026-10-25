@@ -10,14 +10,23 @@ when an owner needs to correct the account.
 
 Startup and model-recovery checks inspect credential stores without copying or
 deleting credentials. A matching account digest does not authorize a credential
-copy. The detector reads only the selected keychain service and reports a second
-plaintext store without changing it; the CLI probe separately establishes usability.
+copy. For a non-default credential store, the detector reads the selected keychain
+service and reports a second plaintext store without changing it. The CLI probe
+separately establishes usability.
 
 Serving turns, identity checks and diagnostic/model probes preserve both
 `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`. A defined secure-storage
 setting takes precedence, including an empty value that selects the CLI default.
 Keep these settings consistent in the instance's service environment. A duplicate
 store warning requires an operator decision; it does not perform account repair.
+
+The detector refuses to inspect the default credential store, which can belong to
+the operator or another job. It returns `skipped-no-config-dir` without reading
+either store when neither selector is set or the secure-storage override is empty,
+even if `CLAUDE_CONFIG_DIR` names an instance directory. This result supplies no
+duplicate-store evidence. Identity and usability probes still use the configured
+CLI default. Duplicate-store detection requires a nonempty instance-specific
+credential-store selector in the service environment.
 
 A new matching verification attempts a durable BOT ERRORS clear for each pending
 identity source. Each process starts with both sources pending so incidents from
