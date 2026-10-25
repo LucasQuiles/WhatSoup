@@ -16,6 +16,11 @@ every push to `main`, with two explicit required-context jobs:
   production build. It intentionally does not duplicate version-invariant
   guards, coverage, Python, lint/design, or browser work.
 
+PR title and body edits also trigger Quality so metadata remains checked.
+An edit can cancel the active run for that PR and start the full workflow again.
+Finalize PR metadata before publishing a candidate, and defer cosmetic edits
+while its required checks are running.
+
 This split preserves both required context names while removing roughly
 6.7 duplicated runner-minutes per workflow run across five recent successful
 main runs. It primarily frees runner capacity; Node 24 remains the critical
