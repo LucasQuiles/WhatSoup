@@ -35,6 +35,13 @@ export const PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE = 4;
 export const PERIODIC_PROBE_BACKOFF_BASE = 2;
 
 /**
+ * A timed-out probe (slow provider, not a refusal) re-probes once after this
+ * delay instead of entering backoff, so one slow probe cannot hold the model
+ * unusable for a full backed-off interval. Equal to the rate-limit floor.
+ */
+export const PERIODIC_PROBE_TIMEOUT_RETRY_MS = PERIODIC_PROBE_RATE_LIMIT_MS;
+
+/**
  * Grace added on top of the latest legitimate scheduler fire before evidence
  * is judged stale: covers the probe's own execution (15s default timeout) and
  * event-loop latency between the timer firing and `checkedAt` being stamped.
