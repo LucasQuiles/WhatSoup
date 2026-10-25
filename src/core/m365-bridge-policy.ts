@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
 
 export const M365_PLUGIN_KEY = 'microsoft_365@microsoft-365-dev';
@@ -17,6 +18,7 @@ export type M365MutationPolicy =
   | { status: 'rejected' };
 
 export interface ResolveM365MutationPolicyOptions {
+  instanceName?: string;
   provider?: string;
   allowM365Mutations?: boolean;
   enabledPlugins?: Record<string, boolean>;
@@ -102,7 +104,7 @@ function hasBoundSelector(binding: M365BridgeBinding, env: NodeJS.ProcessEnv): b
 /**
  * Resolves the common, non-secret part of M365 mutation admission. The deploy
  * wrapper uses this same decision before it projects the instance-bound credential;
- * runtime admission then adds the nonblank projected-key requirement below.
+ * runtime admission then requires the process-bound credential admission below.
  */
 function m365MutationPrerequisites(
   options: ResolveM365MutationPolicyOptions,
@@ -144,6 +146,29 @@ export function m365BridgeCredentialProjectionAllowed(
   return m365MutationPrerequisites(options) !== null;
 }
 
+function credentialAdmission(
+  prerequisites: M365MutationPrerequisites,
+  instanceName: string | undefined,
+  processId: number,
+): string | null {
+  const { binding, env, origin } = prerequisites;
+  const key = env.MS365_AGENT365_API_KEY;
+  if (!nonBlank(instanceName) || !Number.isSafeInteger(processId) || processId <= 0 || !nonBlank(key)) return null;
+  return createHmac('sha256', key).update(JSON.stringify([
+    'whatsoup-m365-launch-v1', processId, instanceName, binding.tenantId,
+    binding.accountId ?? null, binding.accountEmail ?? null, origin, binding.profile,
+  ])).digest('hex');
+}
+
+/** Bind a resolved credential to the wrapper process that will exec the runtime. */
+export function m365BridgeCredentialAdmission(
+  options: ResolveM365MutationPolicyOptions,
+  processId: number,
+): string | null {
+  const prerequisites = m365MutationPrerequisites(options);
+  return prerequisites ? credentialAdmission(prerequisites, options.instanceName, processId) : null;
+}
+
 /**
  * Decides whether the static M365 deny exception and the bridge-only child
  * environment may be used. Undefined means no bridge was configured, so
@@ -154,7 +179,13 @@ export function resolveM365MutationPolicy(
 ): M365MutationPolicy | undefined {
   if (!options.binding) return undefined;
   const prerequisites = m365MutationPrerequisites(options);
-  if (!prerequisites || !nonBlank(prerequisites.env.MS365_AGENT365_API_KEY)) return { status: 'rejected' };
+  if (!prerequisites) return { status: 'rejected' };
+  const admission = credentialAdmission(prerequisites, options.instanceName, process.pid);
+  const supplied = prerequisites.env.WHATSOUP_M365_LAUNCH_ADMISSION;
+  // An old/direct launcher cannot authorize ambient credentials; an inherited
+  // admission from another process or a changed binding/key cannot be replayed.
+  if (admission === null || !nonBlank(supplied) || !/^[0-9a-f]{64}$/.test(supplied) ||
+      !timingSafeEqual(Buffer.from(supplied, 'hex'), Buffer.from(admission, 'hex'))) return { status: 'rejected' };
   const { binding, env, origin } = prerequisites;
 
   const childEnv = Object.fromEntries([

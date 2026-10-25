@@ -2751,6 +2751,7 @@ export class AgentRuntime implements Runtime {
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
     this.m365MutationPolicy = resolveM365MutationPolicy({
+      instanceName: this.instanceName,
       provider: this.agentProvider,
       allowM365Mutations: this.allowM365Mutations,
       enabledPlugins: this.enabledPlugins,

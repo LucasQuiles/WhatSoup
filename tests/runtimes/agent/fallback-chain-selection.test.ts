@@ -81,7 +81,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import { emitAlert } from '../../../src/lib/emit-alert.ts';
 import { ProviderDataPolicyError } from '../../../src/core/provider-data-policy.ts';
 import type { AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime-options.ts';
-import type { M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
+import { m365BridgeCredentialAdmission, type M365MutationPolicy } from '../../../src/core/m365-bridge-policy.ts';
 import { probeFallbackBinary } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { buildChildEnv } from '../../../src/runtimes/agent/session.ts';
 import { applyRequiredDeny, M365_MUTATION_DENY, REQUIRED_DENY } from '../../../src/core/settings-template.ts';
@@ -340,6 +340,12 @@ describe('fallback chain selection', () => {
       MS365_AGENT365_ACCOUNT_EMAIL: accountEmail, MS365_AGENT365_API_KEY: 'synthetic-key',
     })) vi.stubEnv(key, value);
     vi.stubEnv('MS365_AGENT365_ACCOUNT_ID', undefined);
+    vi.stubEnv('WHATSOUP_M365_LAUNCH_ADMISSION', m365BridgeCredentialAdmission({
+      instanceName: 'test', provider: 'claude-cli', allowM365Mutations: true,
+      enabledPlugins: { 'microsoft_365@microsoft-365-dev': true },
+      binding: { tenantId, accountEmail, origin, profile: 'user-full-v1' },
+      env: process.env,
+    }, process.pid) ?? undefined);
     try {
       const workspacePath = sandboxPerChat ? sandboxTmp.make('chat') : undefined;
       if (workspacePath) provisionWorkspace({

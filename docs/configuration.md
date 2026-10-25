@@ -2272,7 +2272,8 @@ exact enabled plugin key `"microsoft_365@microsoft-365-dev": true`.
 At startup, WhatSoup compares that binding with its own service environment:
 `ALLOW_M365_MUTATIONS=1`, `MS365_AGENT365_BRIDGE=true`, tenant, profile, exactly
 one matching account selector, non-empty Agent365 API key, and matching loopback
-Agent365 and hub origins. Only a complete match generates the child M365
+Agent365 and hub origins, plus the current launcher's process-bound credential
+admission. Only a complete match generates the child M365
 environment and removes the Microsoft 365 entries from the static deny floor.
 The bridge variables are not an environment-only authorization path. A missing or
 mismatched binding retains the full deny floor and exports no M365 bridge values.
@@ -2285,6 +2286,17 @@ on-disk agent configuration. A missing or unsafe credential stops a qualified
 bridge startup; an unconfigured bridge does not attempt a lookup. Credential
 service names are derived from validated instance names, never supplied as an
 arbitrary configuration path. Each instance must provision its own credential.
+
+After lookup, the launcher creates `WHATSOUP_M365_LAUNCH_ADMISSION`, an HMAC bound
+to its process ID, instance name, complete binding and resolved key. Its final
+`exec` preserves that process ID for runtime verification. The launcher clears
+inherited admissions, and the runtime never forwards an admission to agent
+children. Missing, malformed or reused admissions retain the M365 deny floor;
+changing the key or binding after admission also rejects the exception.
+Install the matching launcher before enabling a bridge binding: an older wrapper
+or direct Node start cannot grant the exception from an ambient key. This prevents
+accidental credential reuse across launch paths; it does not isolate a malicious
+process already controlling the same user's credentials and environment.
 
 ```json
 {

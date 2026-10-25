@@ -63,6 +63,7 @@ function runProjection(
   instance: string,
   config: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
+  args: string[] = [],
 ): SpawnSyncReturns<string> {
   const root = tmp.make('projection-probe');
   const configPath = writeConfig(root, config);
@@ -72,6 +73,7 @@ function runProjection(
     projectionPath,
     instance,
     configPath,
+    ...args,
   ], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
@@ -79,6 +81,32 @@ function runProjection(
 }
 
 describe('deploy/m365-bridge-credential-projection.ts', () => {
+  it('emits only a digest after credential lookup for the supplied exec process', () => {
+    const result = runProjection('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({
+      MS365_AGENT365_API_KEY: 'synthetic-bridge-key',
+    }), ['--credential-admission', String(process.pid)]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).not.toContain('synthetic-bridge-key');
+  });
+
+  it.each(['0', '-1', '1.5', '01', '9007199254740992'])('refuses an invalid exec process %s', (pid) => {
+    const result = runProjection('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({
+      MS365_AGENT365_API_KEY: 'synthetic-bridge-key',
+    }), ['--credential-admission', pid]);
+    expect(result.status, result.stderr).toBe(3);
+    expect(result.stdout).toBe('');
+  });
+
+  it('does not issue an admission when the credential is unavailable', () => {
+    const result = runProjection('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({
+      MS365_AGENT365_API_KEY: undefined,
+    }), ['--credential-admission', String(process.pid)]);
+    expect(result.status, result.stderr).toBe(3);
+    expect(result.stdout).toBe('');
+  });
+
   it.each(['../other', 'nested/agent', 'white space', 'Uppercase', 'a'.repeat(31)])('rejects unsafe instance name %s', (instance) => {
     const result = runProjection(instance, namedConfig(instance), qualifiedBridgeEnv());
     expect(result.status, result.stderr).toBe(3);
@@ -121,6 +149,9 @@ interface LauncherResult {
   policy?: string | null;
   primary?: string | null;
   fallback?: string | null;
+  m365Denied?: boolean;
+  admissionParent?: string | null;
+  admissionForwarded?: string | null;
 }
 
 function runLauncher(
@@ -130,6 +161,7 @@ function runLauncher(
   credential: 'file' | 'missing' | 'unsafe' = 'file',
   credentialOwner: string = instance,
   configShape: 'regular' | 'symlink' | 'parent-symlink' | 'directory' = 'regular',
+  launcherMode: 'current' | 'legacy' | 'direct' | 'forked' | 'replaced-key' = 'current',
 ): LauncherResult {
   const root = tmp.make('launcher-probe');
   const bin = join(root, 'bin');
@@ -176,9 +208,11 @@ exit 44
     "import { writeFileSync } from 'node:fs';",
     `import { resolveM365MutationPolicy } from ${JSON.stringify(resolve('src/core/m365-bridge-policy.ts'))};`,
     `import { buildChildEnv } from ${JSON.stringify(resolve('src/runtimes/agent/session.ts'))};`,
+    `import { applyRequiredDeny, M365_MUTATION_DENY } from ${JSON.stringify(resolve('src/core/settings-template.ts'))};`,
     `const config = JSON.parse(process.env.FIXTURE_CONFIG ?? '{}');`,
     'const options = config.agentOptions ?? {};',
     'const policy = resolveM365MutationPolicy({',
+    '  instanceName: config.name,',
     '  provider: options.provider,',
     '  allowM365Mutations: options.allowM365Mutations,',
     '  enabledPlugins: options.enabledPlugins,',
@@ -188,9 +222,12 @@ exit 44
     "const fallback = buildChildEnv('opencode-cli', { m365MutationPolicy: policy }, 'opencode/synthetic');",
     `writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({`,
     '  parent: process.env.MS365_AGENT365_API_KEY ?? null,',
+    '  admissionParent: process.env.WHATSOUP_M365_LAUNCH_ADMISSION ?? null,',
     '  policy: policy?.status ?? null,',
     '  primary: primary.MS365_AGENT365_API_KEY ?? null,',
     '  fallback: fallback.MS365_AGENT365_API_KEY ?? null,',
+    '  admissionForwarded: primary.WHATSOUP_M365_LAUNCH_ADMISSION ?? fallback.WHATSOUP_M365_LAUNCH_ADMISSION ?? null,',
+    '  m365Denied: M365_MUTATION_DENY.every((entry) => applyRequiredDeny([], policy).includes(entry)),',
     '}), { mode: 0o600 });',
     '',
   ].join('\n'), { mode: 0o600 });
@@ -200,19 +237,25 @@ exit 44
   writeFileSync(script, [
     '#!/usr/bin/env bash',
     'set -euo pipefail',
-    `INSTANCE=${JSON.stringify(instance)}`,
-    sliceBetween(source, '_DISTILL_CAPTURE_DEEPSEEK=', '\n# Pinned Node path'),
-    `NODE=${JSON.stringify(node)}`,
-    `SCRIPT_DIR=${JSON.stringify(resolve('deploy'))}`,
-    `REPO_ROOT=${JSON.stringify(repoRoot)}`,
-    `. ${JSON.stringify(resolve('deploy/lib/bounded-exec.sh'))}`,
-    sliceBetween(source, '# Detect instance type', '\n# Health server auth token'),
-    `exec "$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types ${JSON.stringify(probe)}`,
+    ...(!['legacy', 'direct'].includes(launcherMode) ? [
+      `INSTANCE=${JSON.stringify(instance)}`,
+      sliceBetween(source, '_DISTILL_CAPTURE_DEEPSEEK=', '\n# Pinned Node path'),
+      `NODE=${JSON.stringify(node)}`,
+      `SCRIPT_DIR=${JSON.stringify(resolve('deploy'))}`,
+      `REPO_ROOT=${JSON.stringify(repoRoot)}`,
+      `. ${JSON.stringify(resolve('deploy/lib/bounded-exec.sh'))}`,
+      sliceBetween(source, '# Detect instance type', '\n# Health server auth token'),
+    ] : [`NODE=${JSON.stringify(node)}`]),
+    ...(launcherMode === 'replaced-key' ? ['export MS365_AGENT365_API_KEY=replaced-after-admission'] : []),
+    `${launcherMode === 'forked' ? '' : 'exec '}"$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types ${JSON.stringify(probe)}`,
     '',
   ].join('\n'), { mode: 0o700 });
   chmodSync(script, 0o700);
 
-  const result = spawnSync('/bin/bash', [script], {
+  const result = spawnSync(launcherMode === 'direct' ? node : '/bin/bash',
+    launcherMode === 'direct'
+      ? ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', probe]
+      : [script], {
     encoding: 'utf8',
     timeout: 20_000,
     env: {
@@ -226,6 +269,7 @@ exit 44
       LOOKUP_LOG: lookupLog,
       FIXTURE_CONFIG: JSON.stringify(config),
       MS365_AGENT365_API_KEY: 'ambient-key-must-be-scrubbed',
+      WHATSOUP_M365_LAUNCH_ADMISSION: 'ambient-admission-must-be-scrubbed',
       ...bridgeEnv,
     },
   });
@@ -241,6 +285,28 @@ exit 44
 }
 
 describe('deploy/whatsoup instance bridge credential projection', () => {
+  it.each(['legacy', 'direct'] as const)('keeps the deny floor when a %s start inherits a bridge key without launcher admission', (mode) => {
+    const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'missing', 'bridge-agent', 'regular', mode);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.parent).toBe('ambient-key-must-be-scrubbed');
+    expect(result.policy).toBe('rejected');
+    expect(result.primary).toBeNull();
+    expect(result.fallback).toBeNull();
+    expect(result.m365Denied).toBe(true);
+    expect(result.lookupLog).not.toContain('agent365-');
+  });
+
+  it.each(['forked', 'replaced-key'] as const)('rejects a %s launch after credential admission', (mode) => {
+    const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'file', 'bridge-agent', 'regular', mode);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.policy).toBe('rejected');
+    expect(result.primary).toBeNull();
+    expect(result.fallback).toBeNull();
+    expect(result.m365Denied).toBe(true);
+  });
+
   it('does not admit a non-regular configuration', () => {
     const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'missing', 'bridge-agent', 'directory');
     expect(result.lookupLog).not.toContain('agent365-bridge-agent');
@@ -284,6 +350,8 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
       policy: 'approved',
       primary: 'synthetic-bridge-key',
       fallback: null,
+      m365Denied: false,
+      admissionForwarded: null,
     });
   });
 
@@ -324,6 +392,6 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.lookupLog).not.toContain('agent365-bridge-agent');
-    expect(result).toMatchObject({ parent: null, policy: null, primary: null, fallback: null });
+    expect(result).toMatchObject({ parent: null, policy: null, primary: null, fallback: null, admissionParent: null, admissionForwarded: null });
   });
 });
