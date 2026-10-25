@@ -165,6 +165,8 @@ DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "scripts/lib/cli-args.ts"
   "src/lib/git-env.ts"
   "src/lib/type-guards.ts"
+  "src/lib/handoff-distill-config.ts"
+  "src/lib/time-units.ts"
   "deploy/m365-bridge-credential-projection.ts"
   "deploy/lib/read-private-credential.mjs"
   "deploy/lib/read-agent-handoff-distill-config.mjs"

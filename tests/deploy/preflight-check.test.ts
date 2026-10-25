@@ -170,6 +170,8 @@ function makeFixtureTree(
     'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+    'src/lib/handoff-distill-config.ts': readFileSync(join(REPO_ROOT, 'src/lib/handoff-distill-config.ts'), 'utf8'),
+    'src/lib/time-units.ts': readFileSync(join(REPO_ROOT, 'src/lib/time-units.ts'), 'utf8'),
     'deploy/m365-bridge-credential-projection.ts': readFileSync(M365_CREDENTIAL_PROJECTION, 'utf8'),
     'deploy/lib/read-private-credential.mjs': readFileSync(READ_PRIVATE_CREDENTIAL_READER, 'utf8'),
     'deploy/lib/read-agent-handoff-distill-config.mjs': readFileSync(READ_HANDOFF_CONFIG, 'utf8'),
@@ -329,6 +331,8 @@ function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   copyFileSync(CLI_ARGS, join(scriptsLib, 'cli-args.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
   copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/handoff-distill-config.ts'), join(srcLib, 'handoff-distill-config.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/time-units.ts'), join(srcLib, 'time-units.ts'));
   copyFileSync(M365_CREDENTIAL_PROJECTION, join(deploy, 'm365-bridge-credential-projection.ts'));
   mkdirSync(join(src, 'core'), { recursive: true });
   copyFileSync(M365_BRIDGE_POLICY, join(src, 'core', 'm365-bridge-policy.ts'));

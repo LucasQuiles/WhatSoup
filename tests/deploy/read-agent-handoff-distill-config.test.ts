@@ -129,6 +129,23 @@ afterEach(() => {
 });
 
 describe('read-agent-handoff-distill-config', () => {
+  it.each([
+    { globalConcurrency: 0 },
+    { globalConcurrency: 1.5 },
+    { contextInjection: 'true' },
+    { unknownOption: true },
+    { sweepMs: 9_999 },
+    { maxCallsPerWindow: 1_001 },
+  ])('rejects invalid typed settings %j before credential lookup', (invalid) => {
+    const result = runLauncherProjection({
+      enabled: true, provider: 'deepseek', model: 'deepseek-flash', ...invalid,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('FATAL: malformed agentOptions.handoffDistill credential projection');
+    expect(result.lookupLog).toBe('');
+    expect(result.stdout).not.toContain('deepseek=set');
+  });
+
   it.each(['symlink', 'parent-symlink', 'directory', 'fifo', 'replacement', 'non-private', 'mismatch'])(
     'refuses %s config before handoff credential lookup', (shape) => {
       const result = runLauncherProjection({ enabled: true, provider: 'deepseek', model: 'deepseek-flash' }, undefined, shape);

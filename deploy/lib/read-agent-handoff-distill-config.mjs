@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readPrivateFileSync } from '../../src/lib/private-fs.ts';
 import { isValidInstanceName } from '../../src/fleet/instance-name.ts';
+import { validateHandoffDistillConfig } from '../../src/lib/handoff-distill-config.ts';
 
 const [path, instance, mode] = process.argv.slice(2);
 if (!path || !instance || !isValidInstanceName(instance)) {
@@ -35,7 +36,7 @@ if (handoff === undefined) {
   process.stdout.write('legacy');
   process.exit(0);
 }
-if (!handoff || typeof handoff !== 'object' || Array.isArray(handoff) || typeof handoff.enabled !== 'boolean') {
+if (validateHandoffDistillConfig(handoff) !== null) {
   process.stderr.write('FATAL: malformed agentOptions.handoffDistill credential projection\n');
   process.exit(1);
 }
