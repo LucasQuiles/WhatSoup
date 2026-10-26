@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -1305,6 +1305,8 @@ def _runtime_manifest_inventory(
     profile: dict[str, Any], package_pin_path: Path | None, budget: RuntimeManifestBudget,
 ) -> list[str]:
     if not profile_bool(profile, "expectRuntimeManifest", False):
+        if is_runtime_package_root():
+            return ["FAIL runtime_manifest package_source: profile_manifest_required"]
         return ["runtime_manifest: skipped by health profile"]
 
     manifest, error, manifest_sha256 = load_runtime_manifest()
@@ -4188,6 +4190,15 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
     return f"{prefix}{status} {url}{suffix}"
 
 
+class _NoHealthRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Both probes carry bearer credentials that belong only to the configured endpoint.
+urlopen = build_opener(_NoHealthRedirect()).open
+
+
 def probe_health(port: int, expected_name: str | None = None) -> str:
     url = f"http://127.0.0.1:{port}/health"
     dry_body = os.environ.get("BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON")
@@ -4215,6 +4226,9 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
             body = response.read(64 * 1024).decode("utf-8", errors="replace")
             return format_health_probe(url, response.status, body, expected_name, token_sent, token_missing)
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            return f"FAIL {url} status={exc.code} redirect_refused"
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return format_health_probe(url, exc.code, body, expected_name, token_sent, token_missing)
     except URLError as exc:
@@ -7415,6 +7429,9 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
             body = response.read(256 * 1024).decode("utf-8", errors="replace")
             return [format_fleet_api_response(endpoint, response.status, body, token_source, True, accept_count)]
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            return [f"FAIL fleet_api: redirect_refused status={exc.code} endpoint={endpoint}"]
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return [format_fleet_api_response(endpoint, exc.code, body, token_source, True, accept_count)]
     except URLError as exc:

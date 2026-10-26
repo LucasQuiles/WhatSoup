@@ -110,6 +110,40 @@ def test_declared_package_reports_source_sha_without_a_git_checkout(tmp_path, mo
 
 
 @properties
+@given(flag=st.sampled_from([False, None, 0, "false", "off", ""]), pin_present=st.booleans())
+@example(flag=False, pin_present=False)
+@example(flag=None, pin_present=True)
+def test_package_cannot_disable_manifest_validation_in_profile(flag, pin_present):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        if pin_present:
+            _write_package_pin(pin_path, root, manifest_path)
+        profile = {"role": _PIN_MODE}
+        if flag is not None:
+            profile["expectRuntimeManifest"] = flag
+        monkeypatch.setattr(module, "load_health_profile", lambda: profile)
+        monkeypatch.setattr(module.sys, "argv", [str(_SCRIPT), "--runtime-manifest"])
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = module.main()
+
+        assert exit_code == 2
+        assert "FAIL runtime_manifest package_source: profile_manifest_required" in output.getvalue()
+        assert "skipped by health profile" not in output.getvalue()
+
+
+def test_nonpackage_profile_can_still_disable_manifest_validation(tmp_path, monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(module, "REPO_ROOT", tmp_path / "ordinary-checkout")
+
+    assert module.runtime_manifest_inventory({"expectRuntimeManifest": False}) == [
+        "runtime_manifest: skipped by health profile",
+    ]
+
+
+@properties
 @given(parent=st.booleans(), during_hash=st.booleans())
 @example(parent=False, during_hash=False)
 @example(parent=True, during_hash=False)

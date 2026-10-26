@@ -104,7 +104,25 @@ npm --silent run release:export -- \
   --json
 ```
 
-Export properties (all fail closed):
+The exporter is an operator tool for a trusted checkout and toolchain. Its `git`
+and `tar` executables are selected through `PATH`; use an operator-controlled
+`PATH` and trusted executables. `cleanGitEnv` removes Git configuration overrides
+but does not authenticate those executables. The exact-commit checks below assume
+that toolchain is trusted.
+
+The operator also controls `--release-root` and `--rollback-root`, including every
+ancestor directory. Use non-symlinked directories and keep them free of concurrent
+writers for the whole export. Absolute-path validation is lexical; it does not
+confine writes against another writer replacing an ancestor. A rollback root may
+be separate from the release root by design and must satisfy the same precondition.
+
+Provision memory and disk for the selected commit before export. The archive is
+buffered with a 1 GiB subprocess output limit, the full tree is extracted, and
+each selected file is read into memory for hashing. There is no aggregate staging
+quota or file-count limit. A process crash can leave staging for later inspection;
+it is not evidence of a published or qualified release.
+
+Export properties under those preconditions (all fail closed):
 
 - source bytes come from `git archive <commit>`, so working-tree drift can
   never leak into a release;

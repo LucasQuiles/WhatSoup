@@ -1652,6 +1652,12 @@ The expected successful shape is:
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
 
+The daily health check's `/health` and fleet API probes refuse HTTP redirects
+with `redirect_refused`. They send no second request and do not report the
+redirect target or response body. Configure the final endpoint directly so a
+redirect cannot forward its bearer credential or turn another endpoint's response
+into health evidence.
+
 ### Read-only exported health-package validation
 
 Run `python3 -B deploy/scripts/bot-errors-health-check.py --runtime-manifest`
@@ -1665,6 +1671,9 @@ A recognized `WhatSoup-health-<source12>` export requires an external
 `health-package-pin.json` owned by `health_reporter`. Supported pin modes are
 `no-bot` and `bot-host`. The pin remains required when a matching Git repository
 contains the package directory. The health profile's `role` must equal the pin's `mode`.
+Package profiles must enable `expectRuntimeManifest`; a missing or disabled value
+fails with `profile_manifest_required` and exit 2, even when a valid pin exists.
+Ordinary non-package checkouts can still disable manifest inventory in their profile.
 An unknown or mismatched role produces `pin_mode_mismatch` and exit 2. Do not
 change a pin to make an incompatible package pass.
 
