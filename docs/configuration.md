@@ -274,6 +274,11 @@ each regular, non-symlinked `.key` file must be owned by that user with mode
 consult this unscoped file store: they use the account-specific Keychain or
 `secret-tool` entry before any allowed environment or OpenCode fallback.
 
+The managed launcher additionally observes the credential file and every ancestor
+through the read. It rejects hard links, symlink ancestors, and file or ancestor
+replacement before exporting a value. An unsafe file aborts lookup; only an absent
+file proceeds to the keyring. The credential file is limited to 4 KiB.
+
 Default OpenAI, Anthropic, and Pinecone runtime lookups deliberately bypass the
 unscoped helper's environment-first step. They check the canonical secure
 credential sources first, then use the conventional environment variable only

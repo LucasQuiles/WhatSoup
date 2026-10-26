@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 
 const MAX_PATH_BYTES = 4096;
 const MAX_CREDENTIAL_BYTES = 4096;
@@ -21,13 +22,14 @@ function readNulTerminatedPath() {
 }
 
 try {
-  const credentialFile = readNulTerminatedPath();
+  const credentialFile = resolve(readNulTerminatedPath());
   const { readPrivateFileSync } = await import('../../src/lib/private-fs.ts');
   const credential = readPrivateFileSync(credentialFile, {
     label: 'credential',
     maxBytes: MAX_CREDENTIAL_BYTES,
+    observation: { root: dirname(credentialFile) },
   });
-  if (credential !== null) process.stdout.write(credential.trim());
+  if (credential !== null) process.stdout.write(credential.bytes.toString('utf8').trim());
 } catch {
   process.stderr.write('FATAL: private credential file could not be read safely\n');
   process.exitCode = 1;

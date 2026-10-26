@@ -983,8 +983,36 @@ def alert_target_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
+RUNTIME_MANIFEST_MAX_MEMBERS = 1024
+RUNTIME_MANIFEST_MAX_READ_BYTES = 64 * 1024 * 1024
+RUNTIME_MANIFEST_MAX_EVIDENCE_BYTES = 64 * 1024
+
+
+class RuntimeManifestLimit(ValueError):
+    """A manifest exhausted an inventory-wide resource allowance."""
+
+
+class RuntimeManifestBudget:
+    def __init__(self) -> None:
+        self.read_remaining = RUNTIME_MANIFEST_MAX_READ_BYTES
+        self.evidence_remaining = RUNTIME_MANIFEST_MAX_EVIDENCE_BYTES
+        self.lines: list[str] = []
+
+    def append(self, line: str) -> None:
+        size = len(line.encode("utf-8")) + 1
+        if size > self.evidence_remaining:
+            raise RuntimeManifestLimit("evidence_output_limit")
+        self.evidence_remaining -= size
+        self.lines.append(line)
+
+    def require_read_capacity(self, size: int) -> None:
+        if size > self.read_remaining:
+            raise RuntimeManifestLimit("aggregate_read_limit")
+
+
 def runtime_file_bytes_and_sha256(
     path: Path, max_bytes: int = 16 * 1024 * 1024, *, private_input: bool = False,
+    read_budget: RuntimeManifestBudget | None = None,
 ) -> tuple[bytes, str]:
     """Bind content and hashes to one bounded read through stable no-follow paths."""
     absolute = path.absolute()
@@ -1014,6 +1042,8 @@ def runtime_file_bytes_and_sha256(
         before = os.fstat(file_fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
             raise OSError("runtime input must be a bounded regular file")
+        if read_budget is not None:
+            read_budget.require_read_capacity(before.st_size)
         if private_input and (
             before.st_uid != os.getuid()
             or stat.S_IMODE(before.st_mode) & 0o077
@@ -1024,9 +1054,18 @@ def runtime_file_bytes_and_sha256(
         digest = hashlib.sha256()
         remaining = max_bytes + 1
         while remaining:
-            chunk = os.read(file_fd, min(64 * 1024, remaining))
+            count = min(64 * 1024, remaining)
+            if read_budget is not None:
+                count = min(count, read_budget.read_remaining)
+            if not count:
+                break
+            chunk = os.read(file_fd, count)
             if not chunk:
                 break
+            if read_budget is not None:
+                # Failed identity validation still consumed these bytes.
+                read_budget.require_read_capacity(len(chunk))
+                read_budget.read_remaining -= len(chunk)
             chunks.append(chunk)
             digest.update(chunk)
             remaining -= len(chunk)
@@ -1252,6 +1291,19 @@ def git_head_sha_line(manifest: dict[str, Any]) -> str:
 
 
 def runtime_manifest_inventory(profile: dict[str, Any], package_pin_path: Path | None = None) -> list[str]:
+    budget = RuntimeManifestBudget()
+    try:
+        lines = _runtime_manifest_inventory(profile, package_pin_path, budget)
+        if sum(len(line.encode("utf-8")) + 1 for line in lines) > RUNTIME_MANIFEST_MAX_EVIDENCE_BYTES:
+            raise RuntimeManifestLimit("evidence_output_limit")
+        return lines
+    except RuntimeManifestLimit as exc:
+        return [f"FAIL runtime_manifest: {exc}"]
+
+
+def _runtime_manifest_inventory(
+    profile: dict[str, Any], package_pin_path: Path | None, budget: RuntimeManifestBudget,
+) -> list[str]:
     if not profile_bool(profile, "expectRuntimeManifest", False):
         return ["runtime_manifest: skipped by health profile"]
 
@@ -1266,8 +1318,11 @@ def runtime_manifest_inventory(profile: dict[str, Any], package_pin_path: Path |
     files = manifest.get("files")
     if not isinstance(files, list):
         return ["FAIL runtime_manifest: files must be a list"]
+    if len(files) > RUNTIME_MANIFEST_MAX_MEMBERS:
+        raise RuntimeManifestLimit("member_count_limit")
 
-    lines = [f"runtime_manifest: files={len(files)} root={REPO_ROOT}"]
+    lines = budget
+    lines.append(f"runtime_manifest: files={len(files)} root={REPO_ROOT}")
     seen: set[str] = set()
     manifest_entries: dict[str, Path] = {}
     files_clean = True
@@ -1319,7 +1374,7 @@ def runtime_manifest_inventory(profile: dict[str, Any], package_pin_path: Path |
             files_clean = False
             continue
         try:
-            content, actual = runtime_file_bytes_and_sha256(path)
+            content, actual = runtime_file_bytes_and_sha256(path, read_budget=budget)
         except OSError as exc:
             lines.append(f"FAIL runtime_manifest {raw_path}: cannot hash path={path} error={exc}")
             files_clean = False
@@ -1357,7 +1412,7 @@ def runtime_manifest_inventory(profile: dict[str, Any], package_pin_path: Path |
                 lines.append("FAIL runtime_manifest package_source: git_provenance_unavailable")
     else:
         lines.append(git_line)
-    return lines
+    return lines.lines
 
 
 def classify_source_update_failure(output: str, rc: int, timed_out: bool) -> str | None:

@@ -1736,7 +1736,11 @@ an earlier pin alone does not prove the stricter manifest-membership contract.
 The checker validates the pin identity, manifest digest, full source commit,
 runtime root, listed file hashes and executing-checker binding. Package validation
 uses bounded, no-follow descriptor reads: 64 KiB for the external pin, 1 MiB for
-the manifest and 16 MiB for each listed file. The pin and its immediate parent
+the manifest and 16 MiB for each listed file. Each inventory accepts at most
+1,024 listed files, reads at most 64 MiB across those files (including reads later
+rejected by identity checks), and emits at most 64 KiB of UTF-8 evidence including
+newlines. Exceeding a limit stops inventory and returns a single `FAIL` line;
+partial evidence cannot establish a package match. The pin and its immediate parent
 must be private and owned by the invoking user. Hard-linked pins and symlinked
 ancestors are refused, except for the trusted macOS `/tmp` and `/var` aliases
 that are canonicalized before traversal. Hashes and required markers use the same bytes; file or

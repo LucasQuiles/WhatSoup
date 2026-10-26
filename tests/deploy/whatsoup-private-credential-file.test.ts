@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const repoRoot = path.resolve('.');
@@ -84,10 +85,45 @@ describe('deploy private credential reader', () => {
     expect(publicResult.status).toBe(1);
     expect(publicResult.stderr).toContain('FATAL: private credential file could not be read safely');
   });
+
+  it('refuses a credential replaced between path validation and descriptor open', () => {
+    const root = makeRoot();
+    const credentials = path.join(root, 'credentials');
+    const credential = path.join(credentials, 'pinecone.key');
+    const replacement = path.join(credentials, 'replacement.key');
+    fs.mkdirSync(credentials, { mode: 0o700 });
+    fs.writeFileSync(credential, 'original-value', { mode: 0o600 });
+    fs.writeFileSync(replacement, 'replacement-value', { mode: 0o600 });
+    const preload = path.join(root, 'replace-on-open.mjs');
+    fs.writeFileSync(preload, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const original = fs.openSync;
+fs.openSync = (file, ...args) => {
+  if (file === process.env.CREDENTIAL_TEST_TARGET) {
+    fs.renameSync(process.env.CREDENTIAL_TEST_REPLACEMENT, file);
+  }
+  return original(file, ...args);
+};
+syncBuiltinESMExports();
+`);
+
+    const result = spawnSync(node, [
+      '--disable-warning=ExperimentalWarning', '--experimental-strip-types',
+      '--import', pathToFileURL(preload).href, readerPath,
+    ], {
+      input: `${credential}\0`, encoding: 'utf8',
+      env: { ...process.env, CREDENTIAL_TEST_TARGET: credential, CREDENTIAL_TEST_REPLACEMENT: replacement },
+    });
+
+    expect(fs.existsSync(replacement)).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('FATAL: private credential file could not be read safely');
+  });
 });
 
 describe('deploy/whatsoup unscoped credential precedence', () => {
-  function runLookup(scenario: 'file' | 'missing' | 'unsafe', scoped: boolean): { status: number; stdout: string; stderr: string; log: string } {
+  function runLookup(scenario: 'file' | 'missing' | 'unsafe' | 'hard-link' | 'ancestor-symlink', scoped: boolean): { status: number; stdout: string; stderr: string; log: string } {
     const root = makeRoot();
     const bin = path.join(root, 'bin');
     const config = path.join(root, 'config');
@@ -97,7 +133,15 @@ describe('deploy/whatsoup unscoped credential precedence', () => {
     const logPath = path.join(root, 'security.log');
     fs.mkdirSync(bin);
     fs.mkdirSync(credentials, { recursive: true, mode: 0o700 });
-    if (scenario === 'file') fs.writeFileSync(credential, 'private-file-value\n', { mode: 0o600 });
+    if (scenario === 'file' || scenario === 'hard-link' || scenario === 'ancestor-symlink') {
+      fs.writeFileSync(credential, 'private-file-value\n', { mode: 0o600 });
+    }
+    if (scenario === 'hard-link') fs.linkSync(credential, target);
+    if (scenario === 'ancestor-symlink') {
+      const moved = path.join(root, 'moved-config');
+      fs.renameSync(config, moved);
+      fs.symlinkSync(moved, config);
+    }
     if (scenario === 'unsafe') {
       fs.writeFileSync(target, 'private-file-value\n', { mode: 0o600 });
       fs.symlinkSync(target, credential);
@@ -157,5 +201,13 @@ fi
     expect(unsafe.status).toBe(47);
     expect(unsafe.stderr).toContain('FATAL: private credential file could not be read safely');
     expect(unsafe.log).toBe('');
+  });
+
+  it.each(['hard-link', 'ancestor-symlink'] as const)('refuses a %s credential without falling back to Keychain', (shape) => {
+    const result = runLookup(shape, false);
+    expect(result.status).toBe(47);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('FATAL: private credential file could not be read safely');
+    expect(result.log).toBe('');
   });
 });
