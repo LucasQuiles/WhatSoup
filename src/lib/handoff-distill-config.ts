@@ -1,6 +1,8 @@
 import { isRecord } from './type-guards.ts';
 import { MS_PER_HOUR } from './time-units.ts';
 
+export const HANDOFF_DISTILL_INPUT_MAX_BYTES = 64 * 1024;
+
 /** Budget and concurrency limits consumed by the handoff distill runner. */
 export interface HandoffDistillBudgetConfig {
   maxTokensPerWindow: number;

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { DistillOutcome } from './handoff-distiller.ts';
 import type { HandoffMessage } from './handoff-prelude.ts';
+import { HANDOFF_DISTILL_INPUT_MAX_BYTES } from '../../lib/handoff-distill-config.ts';
 
 export class HandoffSummarizerInertError extends Error {}
 
@@ -16,7 +17,7 @@ export interface HandoffDistillConfig {
   timeoutMs?: number;
 }
 
-const MAX_REQUEST_BYTES = 64 * 1024;
+const MAX_REQUEST_BYTES = HANDOFF_DISTILL_INPUT_MAX_BYTES;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_SUMMARY_BYTES = 4096;
 const MAX_SUMMARY_WORDS = 120;

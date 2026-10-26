@@ -227,12 +227,18 @@ A summary must fit both 4,096 UTF-8 bytes and 120 whitespace-separated words.
 Missing or invalid token usage fails before persistence, while valid zero usage
 is accepted. These refusals use the existing failure counter and circuit breaker;
 they do not replace the previous artifact. A storage-write failure retains
-validated provider spend and counts one failed call. The input check occurs after loading
-stored messages and does not bound the database read itself.
+validated provider spend and counts one failed call. The production database read
+projects only content, sender name and direction from the configured recent window
+(at most 200 messages). One SQLite statement checks the combined UTF-8 text size
+before returning any text to JavaScript; oversized windows fail without returning
+their text. Raw message payloads are excluded. This bounds the application result,
+not SQLite's internal storage reads or working memory.
 
 The implementation is best-effort and fail-safe: every error at tick or sweep
 level is caught and logged at warn, never propagated to the turn path or the
-process. A structured info-level log (`handoff distill sweep complete` with
+process. Only one sweep runs at a time; timer ticks during an active sweep are
+ignored so an older conversation set cannot prune newer call or token budgets.
+A structured info-level log (`handoff distill sweep complete` with
 `ticked` count) is emitted on each successful sweep. The `handoffDistiller`
 block in `GET /health` (`instance.handoffDistiller`) reports the resolved
 state as read-only telemetry:
@@ -243,6 +249,14 @@ state as read-only telemetry:
 
 The verbatim half (last N messages as `[Recent chat context]` on every fresh
 session) ships unconditionally and is unaffected by these flags.
+
+Distilled context injection is off by default. When enabled, it places untrusted
+summary text in the stand-in's system prompt during an active fallback window.
+Random delimiters, marker neutralization and instructions to ignore embedded
+commands are prompt hardening; they do not enforce isolation or prevent the model
+from following malicious text. Injection does not reduce the provider's tool
+permissions or sandbox scope. Keep it disabled where that residual risk is
+unacceptable; sentinel-recall tests do not establish prompt-injection resistance.
 
 ## Deterministic message templates (wired)
 

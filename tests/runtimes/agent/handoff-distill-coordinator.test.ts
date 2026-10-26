@@ -59,7 +59,7 @@ vi.mock('../../../src/logger.ts', async () => {
 });
 
 vi.mock('../../../src/core/messages.ts', () => ({
-  getRecentMessages: mockGetRecentMessages,
+  getRecentMessageText: mockGetRecentMessages,
 }));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({

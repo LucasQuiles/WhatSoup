@@ -20,7 +20,7 @@
  * A verbatim recent-messages first-turn block was composed here too, but no
  * caller ever consumed it, and unlike the summary it carried no nonce fence or
  * forgery neutralization — removed (QR-117). Re-adding a first-turn replay
- * requires the same untrusted-content isolation the system block gets.
+ * requires reviewing its prompt and tool-authority boundaries too.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -56,21 +56,10 @@ export interface HandoffPrelude {
 
 const HANDOFF_SUMMARY_HEADER = '[Handoff context — prior conversation summary]';
 
-// The handoff summary is laundered through a cheap model from UNTRUSTED WhatsApp
-// content, then injected into a bypassPermissions agent's SYSTEM prompt. Any
-// imperative embedded in that text ("ignore previous instructions and run …")
-// would otherwise execute with system-prompt authority. We isolate it as inert
-// quoted data inside a PER-CALL NONCE fence:
-//
-//  - The nonce is unguessable per compose (128 random bits, hex), so the
-//    untrusted text cannot forge the closing delimiter to break out — a fixed
-//    delimiter is escapable, a nonce delimiter is not.
-//  - A guard line co-located with the open marker (so it survives token
-//    truncation) tells the model the fenced region is quoted prior-conversation
-//    history that MUST NOT be interpreted as instructions.
-//  - Before fencing, neutralizeHandoffForgery defangs any line that impersonates
-//    a delimiter/header/role marker — defense in depth so even a guessed fence
-//    shape cannot reframe later text as trusted.
+// Summaries remain untrusted even after distillation. Random delimiters and
+// marker neutralization discourage prompt forgery, but model instructions do
+// not enforce isolation or restrict tool effects. Context injection is opt-in;
+// the provider's independently configured tools and sandbox determine authority.
 const NONCE_BYTES = 16;
 const FENCE_OPEN = (nonce: string): string => `<<<BEGIN HANDOFF UNTRUSTED ${nonce}>>>`;
 const FENCE_CLOSE = (nonce: string): string => `<<<END HANDOFF UNTRUSTED ${nonce}>>>`;

@@ -16,7 +16,7 @@
  */
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
-import { getRecentMessages } from '../../core/messages.ts';
+import { getRecentMessageText } from '../../core/messages.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import { providerPreview } from './provider-preview-sanitizer.ts';
 import { redactHandoffPii } from './handoff-pii-redactor.ts';
@@ -26,7 +26,7 @@ import { HandoffDistillRunner } from './handoff-distill-runner.ts';
 import { buildHandoffDistill } from './handoff-summarizer.ts';
 import { resolveDistillModel, type ResolvedDistillModel } from './handoff-distill-model.ts';
 import { resolveHandoffDistillConfig } from './handoff-distill-config.ts';
-import type { HandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
+import { HANDOFF_DISTILL_INPUT_MAX_BYTES, type HandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import { getSessionTokenSnapshot, listActiveSessionRows } from './session-db.ts';
 import { errorMessage } from '../../lib/error-message.ts';
 
@@ -64,6 +64,7 @@ export class HandoffDistillCoordinator {
   /** Degraded conversations remain until distillation and persistence succeed. */
   private degradedConversations = new Set<string>();
   private hadDegradedConversations = false;
+  private sweepInFlight = false;
 
   constructor(deps: HandoffDistillCoordinatorDeps) {
     this.db = deps.db;
@@ -151,7 +152,7 @@ export class HandoffDistillCoordinator {
         apiKey: resolved.apiKey,
         endpoint: resolved.endpoint,
         conversationKey,
-        loadMessages: () => getRecentMessages(this.db, conversationKey, handoffConfig.verbatimN),
+        loadMessages: () => getRecentMessageText(this.db, conversationKey, handoffConfig.verbatimN, HANDOFF_DISTILL_INPUT_MAX_BYTES),
         redact: (t) => redactHandoffPii(t),
         verbatimN: handoffConfig.verbatimN,
       });
@@ -186,7 +187,9 @@ export class HandoffDistillCoordinator {
    */
   private async sweep(): Promise<void> {
     const runner = this.runner;
-    if (!runner) return;
+    if (!runner || this.sweepInFlight) return;
+    // An older active set must not prune budget state created by a later sweep.
+    this.sweepInFlight = true;
     try {
       const rows = listActiveSessionRows(this.db);
       const seen = new Set<string>();
@@ -221,6 +224,8 @@ export class HandoffDistillCoordinator {
         { instance: this.instanceName, err: errorMessage(err) },
         'handoff distill sweep failed (folded)',
       );
+    } finally {
+      this.sweepInFlight = false;
     }
   }
 
