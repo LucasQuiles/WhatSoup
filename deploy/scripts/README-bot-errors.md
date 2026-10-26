@@ -1735,6 +1735,11 @@ an earlier pin alone does not prove the stricter manifest-membership contract.
 
 The checker validates the pin identity, manifest digest, full source commit,
 runtime root, listed file hashes and executing-checker binding. Package validation
+uses bounded, no-follow descriptor reads: 1 MiB for the manifest and 16 MiB for
+each listed file. Hashes and required markers use the same bytes; file or parent
+replacement during that read is refused. The pin binds the manifest bytes used
+for inventory. This does not freeze the package across separate file observations.
+Package validation
 does not activate the candidate or qualify activation rollback, scheduled jobs or
 alert delivery. Activation follows the separately authorized deploy contract.
 

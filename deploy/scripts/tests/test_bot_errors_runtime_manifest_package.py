@@ -110,6 +110,99 @@ def test_declared_package_reports_source_sha_without_a_git_checkout(tmp_path, mo
 
 
 @properties
+@given(parent=st.booleans(), during_hash=st.booleans())
+@example(parent=False, during_hash=False)
+@example(parent=True, during_hash=False)
+@example(parent=False, during_hash=True)
+@example(parent=True, during_hash=True)
+def test_package_rejects_file_or_parent_replacement_during_verification(parent, during_hash):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+        payload = root / "assets" / "payload.txt"
+        payload.parent.mkdir()
+        content = b"package race regression payload\n"
+        payload.write_bytes(content)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / payload.name).write_bytes(content)
+        manifest_path = _write_manifest(root, [*_entries(checker), {
+            "path": "assets/payload.txt", "sha256": _sha256(payload),
+            "mustContain": ["race regression"],
+        }])
+        _write_package_pin(pin_path, root, manifest_path)
+        changed = False
+
+        def replace_path():
+            nonlocal changed
+            if changed:
+                return
+            changed = True
+            target = payload.parent if parent else payload
+            target.rename(target.with_name(target.name + ".retained"))
+            target.symlink_to(outside if parent else outside / payload.name)
+
+        original_path = module.runtime_manifest_entry_path
+
+        def entry_path(raw_path):
+            result = original_path(raw_path)
+            if raw_path == "assets/payload.txt" and not during_hash:
+                replace_path()
+            return result
+
+        monkeypatch.setattr(module, "runtime_manifest_entry_path", entry_path)
+        original_sha256 = module.hashlib.sha256
+
+        class ReplacingDigest:
+            def __init__(self, data=b""):
+                self.digest = original_sha256(data)
+
+            def update(self, data):
+                self.digest.update(data)
+                if during_hash and data == content:
+                    replace_path()
+
+            def hexdigest(self):
+                return self.digest.hexdigest()
+
+        monkeypatch.setattr(module.hashlib, "sha256", ReplacingDigest)
+        lines = _inventory(module)
+
+        assert changed
+        assert any(line.startswith("FAIL runtime_manifest") for line in lines)
+        assert not any("source=package match" in line for line in lines)
+        assert (outside / payload.name).read_bytes() == content
+
+
+def test_package_pin_binds_the_manifest_bytes_used_for_inventory(tmp_path, monkeypatch):
+    module, root, checker, pin_path = _declared_package(tmp_path, monkeypatch)
+    payload = root / "deploy" / "payload.txt"
+    payload.write_bytes(b"original package content\n")
+    manifest_path = _write_manifest(root, [*_entries(checker), {
+        "path": "deploy/payload.txt", "sha256": _sha256(payload),
+    }])
+    pinned_manifest = manifest_path.read_bytes()
+    _write_package_pin(pin_path, root, manifest_path)
+    payload.write_bytes(b"changed package content\n")
+    _write_manifest(root, [*_entries(checker), {
+        "path": "deploy/payload.txt", "sha256": _sha256(payload),
+    }])
+    original_path = module.runtime_manifest_entry_path
+
+    def restore_pinned_manifest(raw_path):
+        result = original_path(raw_path)
+        if raw_path == "deploy/bot-errors-runtime-manifest.json":
+            manifest_path.write_bytes(pinned_manifest)
+        return result
+
+    monkeypatch.setattr(module, "runtime_manifest_entry_path", restore_pinned_manifest)
+    lines = _inventory(module)
+
+    assert any(line.startswith("FAIL runtime_manifest") for line in lines)
+    assert not any("source=package match" in line for line in lines)
+    assert payload.read_bytes() == b"changed package content\n"
+
+
+@properties
 @given(explicit=st.booleans(), nested=st.booleans())
 @example(explicit=True, nested=False)
 @example(explicit=True, nested=True)
