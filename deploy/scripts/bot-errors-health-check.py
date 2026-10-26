@@ -983,7 +983,9 @@ def alert_target_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def runtime_file_bytes_and_sha256(path: Path, max_bytes: int = 16 * 1024 * 1024) -> tuple[bytes, str]:
+def runtime_file_bytes_and_sha256(
+    path: Path, max_bytes: int = 16 * 1024 * 1024, *, private_input: bool = False,
+) -> tuple[bytes, str]:
     """Bind content and hashes to one bounded read through stable no-follow paths."""
     absolute = path.absolute()
     if ".." in absolute.parts:
@@ -1005,10 +1007,19 @@ def runtime_file_bytes_and_sha256(path: Path, max_bytes: int = 16 * 1024 * 1024)
             directories.append(child_fd)
             bindings.append((parent_fd, part, os.fstat(child_fd)))
         parent_fd = directories[-1]
+        parent = os.fstat(parent_fd)
+        if private_input and (parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & 0o077):
+            raise OSError("runtime input requires a private current-user parent")
         file_fd = os.open(absolute.name, flags | os.O_NONBLOCK, dir_fd=parent_fd)
         before = os.fstat(file_fd)
         if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
             raise OSError("runtime input must be a bounded regular file")
+        if private_input and (
+            before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) & 0o077
+            or before.st_nlink != 1
+        ):
+            raise OSError("runtime input requires a private current-user single-link file")
         chunks: list[bytes] = []
         digest = hashlib.sha256()
         remaining = max_bytes + 1
@@ -1023,13 +1034,15 @@ def runtime_file_bytes_and_sha256(path: Path, max_bytes: int = 16 * 1024 * 1024)
             raise OSError("runtime input exceeds size bound")
         after = os.fstat(file_fd)
         current = os.stat(absolute.name, dir_fd=parent_fd, follow_symlinks=False)
-        fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
         identity = tuple(getattr(before, field) for field in fields)
         if any(tuple(getattr(observed, field) for field in fields) != identity for observed in (after, current)):
             raise OSError("runtime file changed during verification")
         for directory_fd, name, opened in reversed(bindings):
             current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if (opened.st_dev, opened.st_ino, opened.st_mode) != (current.st_dev, current.st_ino, current.st_mode):
+            if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid) != (
+                current.st_dev, current.st_ino, current.st_mode, current.st_uid
+            ):
                 raise OSError("runtime directory changed during verification")
         return b"".join(chunks), digest.hexdigest()
     finally:
@@ -8512,13 +8525,14 @@ def critical_file_problem(path: Path) -> str | None:
 def read_private_json_record(
     path: Path, max_bytes: int | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    problem = critical_file_problem(path)
-    if problem is not None:
-        return None, problem
     if max_bytes is None:
+        problem = critical_file_problem(path)
+        if problem is not None:
+            return None, problem
         return read_json_record(path)
-    raw = read_private_credential_file(path, max_bytes=max_bytes)
-    if raw is None:
+    try:
+        raw, _ = runtime_file_bytes_and_sha256(path, max_bytes=max_bytes, private_input=True)
+    except OSError:
         return None, "private JSON unavailable or exceeds size bound"
     try:
         loaded = json.loads(raw)

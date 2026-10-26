@@ -678,3 +678,108 @@ def test_declared_package_rejects_oversized_private_pin(tmp_path, monkeypatch):
     with pin_path.open("a", encoding="utf-8") as stream:
         stream.write(" " * (64 * 1024))
     assert "FAIL runtime_manifest package_source: pin_missing" in _inventory(module)
+
+
+@properties
+@given(hardlink=st.booleans())
+@example(hardlink=False)
+@example(hardlink=True)
+def test_package_pin_rejects_hardlinks_and_symlinked_ancestors(hardlink):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, _ = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        store = tmp_path / "pin-store"
+        store.mkdir(mode=0o700)
+        records = store / "records"
+        records.mkdir(mode=0o700)
+        pin_path = records / "pin.json"
+        _write_package_pin(pin_path, root, manifest_path)
+        if hardlink:
+            os.link(pin_path, tmp_path / "linked-pin.json")
+            selected = pin_path
+        else:
+            alias = tmp_path / "pin-alias"
+            alias.symlink_to(store, target_is_directory=True)
+            selected = alias / "records" / "pin.json"
+        monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", selected)
+
+        lines = _inventory(module)
+
+        assert "FAIL runtime_manifest package_source: pin_missing" in lines
+        assert not any("source=package match" in line for line in lines)
+
+
+@properties
+@given(target=st.sampled_from(["leaf", "ancestor", "hardlink"]))
+@example(target="leaf")
+@example(target="ancestor")
+@example(target="hardlink")
+def test_package_pin_rejects_identity_changes_during_read(target):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, _ = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        store = tmp_path / "pin-store"
+        store.mkdir(mode=0o700)
+        records = store / "records"
+        records.mkdir(mode=0o700)
+        pin_path = records / "pin.json"
+        _write_package_pin(pin_path, root, manifest_path)
+        monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", pin_path)
+        original_bytes = pin_path.read_bytes()
+        initial = pin_path.stat()
+        original_read = os.read
+        changed = False
+
+        def replace_during_read(fd, count):
+            nonlocal changed
+            opened = os.fstat(fd)
+            if not changed and (opened.st_dev, opened.st_ino) == (initial.st_dev, initial.st_ino):
+                changed = True
+                if target == "hardlink":
+                    os.link(pin_path, tmp_path / "linked-pin.json")
+                else:
+                    if target == "ancestor":
+                        store.rename(tmp_path / "retained-pin-store")
+                        store.mkdir(mode=0o700)
+                        records.mkdir(mode=0o700)
+                    else:
+                        pin_path.rename(records / "retained-pin.json")
+                    pin_path.write_bytes(original_bytes)
+                    pin_path.chmod(0o600)
+            return original_read(fd, count)
+
+        monkeypatch.setattr(module.os, "read", replace_during_read)
+
+        lines = _inventory(module)
+
+        assert changed
+        assert "FAIL runtime_manifest package_source: pin_missing" in lines
+        assert not any("source=package match" in line for line in lines)
+
+
+@properties
+@given(parent_public=st.booleans(), leaf_public=st.booleans())
+@example(parent_public=False, leaf_public=False)
+@example(parent_public=True, leaf_public=False)
+@example(parent_public=False, leaf_public=True)
+@example(parent_public=True, leaf_public=True)
+def test_package_pin_requires_private_parent_and_leaf(parent_public, leaf_public):
+    with private_case() as (tmp_path, monkeypatch):
+        module, root, checker, _ = _declared_package(tmp_path, monkeypatch)
+        manifest_path = _write_manifest(root, _entries(checker))
+        store = tmp_path / "pin-store"
+        store.mkdir(mode=0o700)
+        pin_path = store / "pin.json"
+        _write_package_pin(pin_path, root, manifest_path)
+        store.chmod(0o755 if parent_public else 0o700)
+        pin_path.chmod(0o644 if leaf_public else 0o600)
+        monkeypatch.setattr(module, "RUNTIME_PACKAGE_PIN_PATH", pin_path)
+
+        lines = _inventory(module)
+
+        if parent_public or leaf_public:
+            assert "FAIL runtime_manifest package_source: pin_missing" in lines
+            assert not any("source=package match" in line for line in lines)
+        else:
+            assert f"git_head_sha: {_SOURCE_SHA} expected={_SOURCE_SHA} source=package match" in lines
+            assert not any(line.startswith("FAIL ") for line in lines)

@@ -1735,10 +1735,13 @@ an earlier pin alone does not prove the stricter manifest-membership contract.
 
 The checker validates the pin identity, manifest digest, full source commit,
 runtime root, listed file hashes and executing-checker binding. Package validation
-uses bounded, no-follow descriptor reads: 1 MiB for the manifest and 16 MiB for
-each listed file. Hashes and required markers use the same bytes; file or parent
-replacement during that read is refused. The pin binds the manifest bytes used
-for inventory. This does not freeze the package across separate file observations.
+uses bounded, no-follow descriptor reads: 64 KiB for the external pin, 1 MiB for
+the manifest and 16 MiB for each listed file. The pin and its immediate parent
+must be private and owned by the invoking user. Hard-linked pins and symlinked
+ancestors are refused, except for the trusted macOS `/tmp` and `/var` aliases
+that are canonicalized before traversal. Hashes and required markers use the same bytes; file or
+parent identity changes during that read are refused. The pin binds the manifest
+bytes used for inventory. This does not freeze the package across separate file observations.
 Package validation
 does not activate the candidate or qualify activation rollback, scheduled jobs or
 alert delivery. Activation follows the separately authorized deploy contract.
