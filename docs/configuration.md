@@ -2272,12 +2272,24 @@ The source of truth is `REQUIRED_DENY`; this document describes categories only.
 The M365 mutation deny entries remain in the floor unless one instance supplies a
 complete `agentOptions.m365Bridge` binding. The binding requires the fixed
 `"user-full-v1"` profile, one concrete Azure tenant GUID, exactly one account selector,
-and one exact numeric `http://` loopback origin (`127.0.0.1` or `[::1]`).
+and one exact numeric `https://` loopback origin (`127.0.0.1` or `[::1]`).
 Hostnames, including `localhost`, cannot authorize credential projection because
 their resolution is not part of admission. Configure the same numeric origin in
 the binding and both service origin variables before launching. It also requires
 `agentOptions.allowM365Mutations: true`, an explicit `agentOptions.provider: "claude-cli"`, and the
 exact enabled plugin key `"microsoft_365@microsoft-365-dev": true`.
+
+HTTPS authenticates the receiving endpoint before the plugin sends its bearer
+credential. The certificate must cover the configured numeric IP address and be
+trusted by the actual plugin Node process. A loopback address alone does not prove
+which local process owns the listener. Plain HTTP bindings are invalid and stop
+configuration admission before credential lookup; changing the URL alone does not
+provision TLS. Qualify the endpoint certificate, trust configuration and both bridge
+clients before enabling the binding. Do not disable certificate verification.
+The child environment does not forward inherited `NODE_TLS_REJECT_UNAUTHORIZED`,
+`NODE_OPTIONS` or `NODE_EXTRA_CA_CERTS`; parent-only trust settings are not proof of
+plugin trust. This source contract does not install a certificate or activate an
+endpoint.
 
 At startup, WhatSoup compares that binding with its own service environment:
 `ALLOW_M365_MUTATIONS=1`, `MS365_AGENT365_BRIDGE=true`, tenant, profile, exactly
@@ -2314,7 +2326,9 @@ changing the key or binding after admission also rejects the exception.
 Install the matching launcher before enabling a bridge binding: an older wrapper
 or direct Node start cannot grant the exception from an ambient key. This prevents
 accidental credential reuse across launch paths; it does not isolate a malicious
-process already controlling the same user's credentials and environment.
+process already controlling the same user's credentials and environment. The HMAC
+authenticates launcher inputs, while HTTPS authenticates the bridge peer; neither
+replaces the other.
 
 Capability-grant writes use that runtime's verified policy on every write. Before
 startup restores persisted fallback state, and while a fallback window is active,
@@ -2353,7 +2367,7 @@ existing restrictions; use the explicit review above for previously written deni
     "m365Bridge": {
       "tenantId": "11111111-2222-3333-4444-555555555555",
       "accountEmail": "user@custom-domain.example",
-      "origin": "http://127.0.0.1:10000",
+      "origin": "https://127.0.0.1:10000",
       "profile": "user-full-v1"
     }
   }

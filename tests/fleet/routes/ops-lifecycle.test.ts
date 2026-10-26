@@ -138,7 +138,7 @@ describe('ops-lifecycle handlers', () => {
         cwd, provider: 'claude-cli', allowM365Mutations: true, enabledPlugins,
         m365Bridge: {
           tenantId: '11111111-2222-3333-4444-555555555555',
-          accountEmail: 'user@example.test', origin: 'http://127.0.0.1:10000', profile: 'user-full-v1',
+          accountEmail: 'user@example.test', origin: 'https://127.0.0.1:10000', profile: 'user-full-v1',
         },
       },
     }) }), res, deps);

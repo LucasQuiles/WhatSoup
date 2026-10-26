@@ -36,7 +36,7 @@ export function registerRuntimeSettingsPolicyTests(
     cfg.agentFallbacks = [{ provider: 'claude-cli', model: 'fallback-model' }];
     const binding = {
       tenantId: '11111111-2222-3333-4444-555555555555',
-      accountEmail: 'user@example.test', origin: 'http://127.0.0.1:10000',
+      accountEmail: 'user@example.test', origin: 'https://127.0.0.1:10000',
       profile: 'user-full-v1' as const,
     };
     const enabledPlugins = { 'microsoft_365@microsoft-365-dev': true };

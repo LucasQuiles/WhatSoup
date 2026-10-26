@@ -57,7 +57,7 @@ export function exactLoopbackOrigin(value: unknown): string | null {
     const url = new URL(value);
     const loopback = url.hostname === '127.0.0.1' || url.hostname === '[::1]';
     if (
-      url.protocol !== 'http:' ||
+      url.protocol !== 'https:' ||
       !loopback ||
       url.username !== '' ||
       url.password !== '' ||
@@ -220,7 +220,7 @@ export function validateM365BridgeAgentOptions(opts: Record<string, unknown>): {
   }
   if (validation?.kind === 'tenant') return { field: 'agentOptions.m365Bridge.tenantId', message: 'agentOptions.m365Bridge.tenantId must be a concrete tenant GUID' };
   if (validation?.kind === 'profile') return { field: 'agentOptions.m365Bridge.profile', message: `agentOptions.m365Bridge.profile must be ${JSON.stringify(M365_USER_FULL_PROFILE)}` };
-  if (validation?.kind === 'origin') return { field: 'agentOptions.m365Bridge.origin', message: 'agentOptions.m365Bridge.origin must be an exact http numeric loopback origin' };
+  if (validation?.kind === 'origin') return { field: 'agentOptions.m365Bridge.origin', message: 'agentOptions.m365Bridge.origin must be an exact https numeric loopback origin' };
   if (validation?.kind === 'selector-count') return { field: 'agentOptions.m365Bridge', message: 'agentOptions.m365Bridge requires exactly one of accountId or accountEmail' };
   if (validation?.kind === 'account-id') return { field: 'agentOptions.m365Bridge.accountId', message: 'agentOptions.m365Bridge.accountId must be a non-empty string' };
   if (validation?.kind === 'account-email') return { field: 'agentOptions.m365Bridge.accountEmail', message: 'agentOptions.m365Bridge.accountEmail must be a non-empty string' };

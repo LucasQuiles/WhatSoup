@@ -2,6 +2,7 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { validateInstanceConfig } from '../../src/core/agent-config-validator.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const repoRoot = resolve('.');
@@ -12,7 +13,7 @@ const tmp = trackTmpDirs('m365-bridge-projection');
 
 const tenantId = '11111111-2222-3333-4444-555555555555';
 const accountEmail = 'user@example.test';
-const origin = 'http://127.0.0.1:10000';
+const origin = 'https://127.0.0.1:10000';
 
 function qualifiedConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -187,7 +188,7 @@ describe('deploy/m365-bridge-credential-projection.ts', () => {
     ['a config without an agent binding envelope', 'bridge-agent', { name: 'bridge-agent', type: 'agent' }, qualifiedBridgeEnv()],
     ['wrong selector', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_AGENT365_ACCOUNT_EMAIL: 'other@custom-domain.example' })],
     ['wrong tenant', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_TENANT_ID: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })],
-    ['wrong origin', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_HUB_URL: 'http://127.0.0.1:10001' })],
+    ['wrong origin', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_HUB_URL: 'https://127.0.0.1:10001' })],
     ['wrong profile', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_PROFILE: 'diagnostic-read' })],
   ])('rejects %s before credential lookup', (_case, instance, config, env) => {
     const result = runProjection(instance, config, env);
@@ -348,6 +349,26 @@ exit 44
 }
 
 describe('deploy/whatsoup instance bridge credential projection', () => {
+  it.each(['http://127.0.0.1:10000', 'http://[::1]:10000'])(
+    'rejects an HTTP binding before looking up a credential: %s', (insecureOrigin) => {
+      const config = qualifiedConfig({
+        m365Bridge: { tenantId, accountEmail, origin: insecureOrigin, profile: 'user-full-v1' },
+      });
+      const result = runLauncher('bridge-agent', config, qualifiedBridgeEnv({
+        MS365_AGENT365_BASE_URL: insecureOrigin, MS365_HUB_URL: insecureOrigin,
+      }));
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.lookupLog).not.toContain('agent365-bridge-agent');
+      expect(result).toMatchObject({
+        parent: null, policy: 'rejected', primary: null, fallback: null,
+        admissionParent: null, admissionForwarded: null, m365Denied: true,
+      });
+      expect(validateInstanceConfig(config, { name: 'bridge-agent', mode: 'load' })).toMatchObject({
+        field: 'agentOptions.m365Bridge.origin', status: 400,
+      });
+    },
+  );
+
   it.each(['legacy', 'direct'] as const)('keeps the deny floor when a %s start inherits a bridge key without launcher admission', (mode) => {
     const result = runLauncher('bridge-agent', qualifiedConfig(), qualifiedBridgeEnv(), 'missing', 'bridge-agent', 'regular', mode);
 
@@ -423,7 +444,7 @@ describe('deploy/whatsoup instance bridge credential projection', () => {
     ['a non-agent config', 'bridge-agent', { ...qualifiedConfig(), type: 'passive' }, qualifiedBridgeEnv()],
     ['selector mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_AGENT365_ACCOUNT_EMAIL: 'other@custom-domain.example' })],
     ['tenant mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_TENANT_ID: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' })],
-    ['origin mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_HUB_URL: 'http://127.0.0.1:10001' })],
+    ['origin mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_HUB_URL: 'https://127.0.0.1:10001' })],
     ['profile mismatch', 'bridge-agent', qualifiedConfig(), qualifiedBridgeEnv({ MS365_PROFILE: 'diagnostic-read' })],
   ])('does not read the instance credential for %s', (_case, instance, config, env) => {
     const result = runLauncher(instance, config, env);

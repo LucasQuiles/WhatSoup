@@ -879,7 +879,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
           tenantId: '11111111-2222-3333-4444-555555555555',
           accountId: 'account-1',
           accountEmail: 'user@custom-domain.example',
-          origin: 'http://127.0.0.1:10000',
+          origin: 'https://127.0.0.1:10000',
           profile: 'user-full-v1',
         },
       },
@@ -900,7 +900,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
         m365Bridge: {
           tenantId: '11111111-2222-3333-4444-555555555555',
           accountEmail: 'user@example.test',
-          origin: 'http://127.0.0.1:10000',
+          origin: 'https://127.0.0.1:10000',
           profile: 'user-full-v1',
         },
       },
@@ -922,7 +922,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
         m365Bridge: {
           tenantId: '11111111-2222-3333-4444-555555555555',
           accountEmail: 'user@custom-domain.example',
-          origin: 'http://127.0.0.1:10000',
+          origin: 'https://127.0.0.1:10000',
           profile: 'user-full-v1',
         },
       },
@@ -941,7 +941,7 @@ describe('agent-config-validator.ts uncovered-branch coverage', () => {
         m365Bridge: {
           tenantId,
           accountEmail: 'user@custom-domain.example',
-          origin: 'http://127.0.0.1:10000',
+          origin: 'https://127.0.0.1:10000',
           profile: 'user-full-v1',
         },
       },

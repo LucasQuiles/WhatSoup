@@ -14,6 +14,9 @@ const MANAGED_ENV_KEYS = [
   'LANG',
   'TERM',
   'NODE_PATH',
+  'NODE_OPTIONS',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'NODE_EXTRA_CA_CERTS',
   'XDG_RUNTIME_DIR',
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
@@ -403,19 +406,23 @@ describe('buildBaseChildEnv (account-bound M365 policy)', () => {
   });
 
   it('uses the common approved policy to populate only the configured bridge values', () => {
-    resetManagedEnv({ PATH: '/usr/bin', HOME: '/tmp/child-home', ALLOW_M365_MUTATIONS: 'parent-value' });
+    resetManagedEnv({
+      PATH: '/usr/bin', HOME: '/tmp/child-home', ALLOW_M365_MUTATIONS: 'parent-value',
+      NODE_OPTIONS: '--require /tmp/replace-tls.cjs', NODE_TLS_REJECT_UNAUTHORIZED: '0',
+      NODE_EXTRA_CA_CERTS: '/tmp/unapproved-ca.pem',
+    });
     const env = buildBaseChildEnv({
       m365MutationPolicy: {
         status: 'approved',
         childEnv: {
           ALLOW_M365_MUTATIONS: '1',
           MS365_AGENT365_BRIDGE: 'true',
-          MS365_AGENT365_BASE_URL: 'http://127.0.0.1:10000',
+          MS365_AGENT365_BASE_URL: 'https://127.0.0.1:10000',
           MS365_AGENT365_API_KEY: 'test-key',
           MS365_AGENT365_ACCOUNT_EMAIL: 'user@example.test',
           MS365_TENANT_ID: 'tenant-1',
           MS365_PROFILE: 'user-full-v1',
-          MS365_HUB_URL: 'http://127.0.0.1:10000',
+          MS365_HUB_URL: 'https://127.0.0.1:10000',
         },
       },
     });
@@ -427,6 +434,9 @@ describe('buildBaseChildEnv (account-bound M365 policy)', () => {
       MS365_PROFILE: 'user-full-v1',
     });
     expect(env).not.toHaveProperty('MS365_AGENT365_ACCOUNT_ID');
+    expect(env).not.toHaveProperty('NODE_OPTIONS');
+    expect(env).not.toHaveProperty('NODE_TLS_REJECT_UNAUTHORIZED');
+    expect(env).not.toHaveProperty('NODE_EXTRA_CA_CERTS');
   });
 
   it('drops ambient mutation authority when a configured bridge policy is rejected', () => {

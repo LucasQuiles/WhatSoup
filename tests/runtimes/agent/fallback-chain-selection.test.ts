@@ -331,7 +331,7 @@ describe('fallback chain selection', () => {
 
   it.each([false, true])('withholds bridge credentials and restores mutation denies on same-provider fallback (sandbox=%s)', (sandboxPerChat) => {
     const tenantId = '11111111-2222-3333-4444-555555555555';
-    const origin = 'http://127.0.0.1:10000';
+    const origin = 'https://127.0.0.1:10000';
     const accountEmail = 'user@example.test';
     for (const [key, value] of Object.entries({
       ALLOW_M365_MUTATIONS: '1', MS365_AGENT365_BRIDGE: 'true',
