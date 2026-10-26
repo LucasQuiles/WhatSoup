@@ -1,19 +1,24 @@
 #!/usr/bin/env node
+import { dirname, resolve } from 'node:path';
 import { readPrivateFileSync } from '../../src/lib/private-fs.ts';
 import { isValidInstanceName } from '../../src/fleet/instance-name.ts';
 import { validateHandoffDistillConfig } from '../../src/lib/handoff-distill-config.ts';
 
-const [path, instance, mode] = process.argv.slice(2);
-if (!path || !instance || !isValidInstanceName(instance)) {
+const [configPath, instance, mode] = process.argv.slice(2);
+if (!configPath || !instance || !isValidInstanceName(instance)) {
   process.stderr.write('usage: read-agent-handoff-distill-config.mjs <instance-config> <instance-name> [--type]\n');
   process.exit(64);
 }
 
 let parsed;
 try {
-  const raw = readPrivateFileSync(path, { label: 'instance config', maxBytes: 1024 * 1024 });
-  if (raw === null) throw new Error('missing config');
-  parsed = JSON.parse(raw);
+  const path = resolve(configPath);
+  const observed = readPrivateFileSync(path, {
+    label: 'instance config', maxBytes: 1024 * 1024,
+    observation: { root: dirname(path) },
+  });
+  if (observed === null) throw new Error('missing config');
+  parsed = JSON.parse(observed.bytes.toString('utf8'));
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.name !== instance || typeof parsed.type !== 'string') {
     throw new Error('instance envelope mismatch');
   }

@@ -193,8 +193,11 @@ it can set context injection, cadence, budgets, and concurrency within the bound
 in the [configuration reference](../configuration.md#agentoptions).
 The launcher admits the private config and matching instance identity before
 projecting only the existing `deepseek` credential for this exact enabled route.
-It refuses unsafe or mismatched config inputs before credential lookup. Credentials
-and instance policy remain local; the shared defaults do not enable the feature.
+It refuses unsafe or mismatched config inputs before credential lookup. Each config
+read rejects symlinked ancestors, hard links, and file identity changes during the
+read. The separate type and projection reads are not one atomic snapshot.
+Credentials and instance policy remain local; the shared defaults do not enable
+the feature.
 
 When the typed object is absent, the legacy opt-in controls remain in effect
 (default-off when unset):

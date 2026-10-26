@@ -1,14 +1,14 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const roots: string[] = [];
 const reader = join(process.cwd(), 'deploy/lib/read-agent-handoff-distill-config.mjs');
 
 function config(value: Record<string, unknown>): string {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-handoff-config-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'whatsoup-handoff-config-')));
   roots.push(root);
   const path = join(root, 'config.json');
   writeFileSync(path, JSON.stringify({ name: 'fixture-agent', type: 'agent', ...value }), { mode: 0o600 });
@@ -37,7 +37,7 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string, shape?: s
   stderr: string;
   lookupLog: string;
 } {
-  const root = mkdtempSync(join(tmpdir(), 'whatsoup-handoff-launcher-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'whatsoup-handoff-launcher-')));
   roots.push(root);
   const bin = join(root, 'bin');
   const configHome = join(root, 'config');
@@ -63,6 +63,13 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string, shape?: s
     const target = instanceDir + '.original';
     renameSync(instanceDir, target);
     symlinkSync(target, instanceDir);
+  } else if (shape === 'ancestor-symlink') {
+    const ancestor = join(configHome, 'whatsoup');
+    const target = join(configHome, 'original-whatsoup');
+    renameSync(ancestor, target);
+    symlinkSync(target, ancestor);
+  } else if (shape === 'hard-link') {
+    linkSync(instanceConfig, join(root, 'linked-config.json'));
   } else if (shape === 'non-private') {
     chmodSync(instanceConfig, 0o644);
   }
@@ -146,7 +153,7 @@ describe('read-agent-handoff-distill-config', () => {
     expect(result.stdout).not.toContain('deepseek=set');
   });
 
-  it.each(['symlink', 'parent-symlink', 'directory', 'fifo', 'replacement', 'non-private', 'mismatch'])(
+  it.each(['symlink', 'parent-symlink', 'ancestor-symlink', 'hard-link', 'directory', 'fifo', 'replacement', 'non-private', 'mismatch'])(
     'refuses %s config before handoff credential lookup', (shape) => {
       const result = runLauncherProjection({ enabled: true, provider: 'deepseek', model: 'deepseek-flash' }, undefined, shape);
       expect(result.status).not.toBe(0);
@@ -154,6 +161,47 @@ describe('read-agent-handoff-distill-config', () => {
       expect(result.stdout).not.toContain('deepseek=set');
     },
   );
+
+  it.each(['before-open', 'after-open'])('refuses config replacement %s during projection', (phase) => {
+    const path = config({ agentOptions: { handoffDistill: { enabled: true, provider: 'deepseek', model: 'deepseek-flash' } } });
+    const preload = join(dirname(path), 'replace-config.mjs');
+    writeFileSync(preload, [
+      "import fs from 'node:fs';",
+      "import { syncBuiltinESMExports } from 'node:module';",
+      'const candidate = process.argv[2];',
+      'const originalOpen = fs.openSync;',
+      'let replaced = false;',
+      'function replaceOnce(path) {',
+      '  if (path !== candidate || replaced) return;',
+      '  replaced = true;',
+      "  fs.renameSync(path, path + '.original');",
+      "  fs.writeFileSync(path, fs.readFileSync(path + '.original'), { mode: 0o600 });",
+      "  fs.writeFileSync(path + '.replaced', 'replaced');",
+      '}',
+      'fs.openSync = (path, ...args) => {',
+      "  if (process.env.HANDOFF_READ_RACE === 'before-open') replaceOnce(path);",
+      '  const fd = originalOpen(path, ...args);',
+      "  if (process.env.HANDOFF_READ_RACE === 'after-open') replaceOnce(path);",
+      '  return fd;',
+      '};',
+      'syncBuiltinESMExports();',
+    ].join('\n'), { mode: 0o600 });
+    const result = spawnSync(process.execPath, ['--import', preload, reader, path, 'fixture-agent'], {
+      encoding: 'utf8', timeout: 5_000,
+      env: { ...process.env, HANDOFF_READ_RACE: phase },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(readFileSync(path + '.replaced', 'utf8')).toBe('replaced');
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('FATAL: could not read instance config for handoff-distill projection');
+  });
+
+  it('admits a normal config through a lexical dot path', () => {
+    const path = config({ agentOptions: { handoffDistill: { enabled: true, provider: 'deepseek', model: 'deepseek-flash' } } });
+    expect(read(`${dirname(path)}/./config.json`)).toBe('deepseek-flash');
+  });
 
   it('rechecks a config replaced by a symlink after an admitted read', () => {
     const path = config({ agentOptions: { handoffDistill: { enabled: true, provider: 'deepseek', model: 'deepseek-flash' } } });
