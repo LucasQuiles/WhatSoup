@@ -219,6 +219,17 @@ When the typed object is absent, the legacy opt-in controls remain in effect
   When unset (or set to an unrecognised id with no matching API key) the
   distiller is inert and the sweep is not armed.
 
+The summarizer refuses more than 64 KiB of loaded message/name input or encoded
+request data, and stops reading a successful response above 64 KiB. Error bodies
+are cancelled without reading or logging their contents. Redirects are refused.
+Only assistant `content` can become an artifact; reasoning-only responses fail.
+A summary must fit both 4,096 UTF-8 bytes and 120 whitespace-separated words.
+Missing or invalid token usage fails before persistence, while valid zero usage
+is accepted. These refusals use the existing failure counter and circuit breaker;
+they do not replace the previous artifact. A storage-write failure retains
+validated provider spend and counts one failed call. The input check occurs after loading
+stored messages and does not bound the database read itself.
+
 The implementation is best-effort and fail-safe: every error at tick or sweep
 level is caught and logged at warn, never propagated to the turn path or the
 process. A structured info-level log (`handoff distill sweep complete` with

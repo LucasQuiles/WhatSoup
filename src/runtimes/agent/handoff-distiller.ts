@@ -73,8 +73,11 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
     return { ran: false, denied: decision.reason as DistillDenyReason, failed: false, nextState: decision.nextState };
   }
 
+  let chargedTokens: number | undefined;
   try {
     const outcome = await deps.distill();
+    const nextState = recordDistillSuccess(decision.nextState, outcome.tokensUsed, deps.now, deps.config);
+    chargedTokens = nextState.tokensThisWindow;
     deps.persist({
       conversationKey: deps.conversationKey,
       summary: outcome.summary,
@@ -84,10 +87,12 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
       sourceModel: deps.sourceModel,
       tokenBaseline: deps.tokenBaseline,
     });
-    const nextState = recordDistillSuccess(decision.nextState, outcome.tokensUsed, deps.now, deps.config);
     return { ran: true, denied: null, failed: false, nextState };
   } catch (err) {
-    const nextState = recordDistillFailure(decision.nextState, deps.now, deps.config);
+    // A failed write does not refund the provider call or its validated spend.
+    const failureState = { ...decision.nextState,
+      tokensThisWindow: chargedTokens ?? decision.nextState.tokensThisWindow };
+    const nextState = recordDistillFailure(failureState, deps.now, deps.config);
     const reason = errorMessage(err);
     deps.onDegraded?.(`handoff distill failed: ${reason.slice(0, 160)}`);
     return { ran: false, denied: null, failed: true, nextState };
