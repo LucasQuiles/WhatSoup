@@ -63,6 +63,8 @@ const FAILURE_EXITS: Record<
     code: 4,
     message: 'a claude login refresh for this config root is still running; no digest captured — re-run once it has finished',
   },
+  'refresh-owner-unavailable': { code: 4, message: 'claude refresh ownership unavailable; no digest captured' },
+  'refresh-failed': { code: 4, message: 'claude login refresh failed; no digest captured' },
   'not-logged-in': {
     code: 2,
     message: 'claude CLI reports not logged in for this config root — log in interactively first, then re-run',
