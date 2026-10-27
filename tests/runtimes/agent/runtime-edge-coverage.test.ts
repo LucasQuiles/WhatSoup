@@ -4,6 +4,7 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { IOutboundQueue, OutboundMessageRole } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
+import type { emitAlertChecked } from '../../../src/lib/emit-alert.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type {
   MarkSystemTurnInput,
@@ -79,7 +80,7 @@ const {
   const createdControlQueues: unknown[] = [];
   // TYPE NOTE: assertions use mockRuntimeLogger.warn/error/info + dynamic index; typed for property access.
   const mockRuntimeLogger = {} as Record<string, ReturnType<typeof vi.fn>>;
-  const mockEmitAlert = vi.fn(() => true);
+  const mockEmitAlert = vi.fn<typeof emitAlertChecked>(() => true);
   const mockRunDiagnosticBundle = vi.fn(async () => ({
     errorClass: 'provider_usage_limit',
     providerKind: 'usage-limit',

@@ -762,6 +762,75 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
         .toEqual({ attempt_kind: 'completed' });
     });
 
+    it('fails a queued scheduled successor before provider dispatch when compaction reset closure is unproven', async () => {
+      const state = runtime as unknown as {
+        autoCompactInputTokens: number;
+        autoCompact: AutoCompactController;
+        sessionOwnership: { get(key: string): { generation: number; state: string } | undefined };
+        runtimeTurnSupervisor: { health(): { retainedRetries: number; degradedScopes: number } };
+        terminateKnownProcesses(pids: Array<number | null>): Promise<void>;
+      };
+      state.autoCompactInputTokens = 50;
+      const first = dispatchScheduled('Reset with unproven closure', 61);
+      const queued = dispatchScheduled('Must fail before provider dispatch', 62);
+      const session = await waitForInFlightTurn((text) => text.includes('Reset with unproven closure'));
+      const generation = state.sessionOwnership.get(scheduledMapKey)!.generation;
+      const sentCount = session.turnsSent.length;
+      const spawnCount = session.spawnSession.mock.calls.length;
+      const getStatus = session.getStatus.getMockImplementation()!;
+      const shutdown = session.shutdown.getMockImplementation()!;
+      let resetShutdownAttempted = false;
+      session.getStatus.mockImplementation(() => ({
+        ...getStatus(),
+        active: !resetShutdownAttempted,
+        pid: null,
+        providerTerminated: false,
+        durableFailureClosed: false,
+        durableFailureInconclusive: false,
+      }));
+      session.shutdown.mockImplementation(async () => {
+        resetShutdownAttempted = true;
+        throw new Error('compaction reset shutdown remains unproven');
+      });
+      const terminateKnownProcesses = vi.spyOn(state, 'terminateKnownProcesses')
+        .mockRejectedValueOnce(new Error('compaction reset process closure remains unproven'));
+      state.autoCompact.consecutiveNonConvergentCompactions.set(scheduledMapKey, 3);
+      vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+        totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+        lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+      });
+
+      try {
+        emitTerminal(session);
+        await vi.waitFor(() => expect(status(queued)).toBe('failed'));
+
+        expect(status(first)).toBe('complete');
+        expect(resetShutdownAttempted).toBe(true);
+        expect(terminateKnownProcesses).toHaveBeenCalledOnce();
+        expect(state.sessionOwnership.get(scheduledMapKey)).toMatchObject({
+          generation: generation + 1,
+          state: 'closing',
+        });
+        expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scheduledMapKey)).toBe(3);
+        expect(session.shutdown).toHaveBeenCalledTimes(2);
+        expect(session.spawnSession).toHaveBeenCalledTimes(spawnCount);
+        expect(session.turnsSent).toHaveLength(sentCount);
+
+        const human = await driveInteractiveToComplete({ messageId: 'human-after-unproven-scheduled-reset' });
+        expect(status(human)).toBe('complete');
+        expect(session.turnsSent).toHaveLength(sentCount);
+        expect(state.runtimeTurnSupervisor.health()).toMatchObject({ retainedRetries: 0, degradedScopes: 0 });
+        for (const seq of [first, queued, human]) {
+          expect(db.raw.prepare('SELECT COUNT(*) AS count FROM turn_terminal_records WHERE inbound_seq = ?').get(seq))
+            .toEqual({ count: 1 });
+        }
+      } finally {
+        terminateKnownProcesses.mockRestore();
+        session.shutdown.mockImplementation(shutdown);
+        session.getStatus.mockImplementation(getStatus);
+      }
+    });
+
     it('cell 7 (CRITICAL negative): withheld provider terminal wedges ONLY the scheduled lane; the interactive lane still completes and the stuck turn stays observable', async () => {
       const seq = dispatchScheduled();
       const scheduledSession = await waitForInFlightTurn((t) => t.includes(SCHEDULED_PROMPT_MARK));
