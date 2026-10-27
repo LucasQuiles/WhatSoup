@@ -119,6 +119,7 @@ const FAKE_SYSTEMCTL = [
   '[ "$1" = "--user" ] && shift',
   'case "$1" in',
   '  list-units) cat "$d/units" 2>/dev/null; exit "$(cat "$d/list.rc" 2>/dev/null || echo 0)" ;;',
+  '  list-unit-files) cat "$d/unit-files" 2>/dev/null; exit "$(cat "$d/unit-files.rc" 2>/dev/null || echo 0)" ;;',
   '  show-environment) cat "$d/manager.env" 2>/dev/null; exit 0 ;;',
   '  show) for last; do :; done; cat "$d/$last.show" 2>/dev/null; exit 0 ;;',
   '  is-active) echo inactive; exit 3 ;;',
@@ -401,6 +402,14 @@ export function systemdUnit(h: Harness, name: string, show: string[]): void {
   const units = path.join(h.systemdDir, 'units');
   const prior = existsSync(units) ? readFileSync(units, 'utf8') : '';
   writeFileSync(units, `${prior}whatsoup@${name}.service loaded active running WhatSoup ${name}\n`);
+  writeFileSync(path.join(h.systemdDir, `whatsoup@${name}.service.show`), `${show.join('\n')}\n`);
+}
+
+/** An installed unit file that is disabled and has never entered systemd's loaded-unit set. */
+export function systemdUnitFile(h: Harness, name: string, show: string[]): void {
+  const files = path.join(h.systemdDir, 'unit-files');
+  const prior = existsSync(files) ? readFileSync(files, 'utf8') : '';
+  writeFileSync(files, `${prior}whatsoup@${name}.service disabled\n`);
   writeFileSync(path.join(h.systemdDir, `whatsoup@${name}.service.show`), `${show.join('\n')}\n`);
 }
 

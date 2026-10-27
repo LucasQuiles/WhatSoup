@@ -14,6 +14,7 @@ import {
   onDarwin,
   run,
   systemdUnit,
+  systemdUnitFile,
   type Harness,
   type RunResult,
   writePlist,
@@ -108,6 +109,31 @@ describe('agent CLI login isolation of the maintenance job', () => {
     const h = makeHarness();
     withInstance(h, h.env.CLAUDE_CONFIG_DIR);
     expectRefused(h, run(h), "equals alpha's");
+  }, T);
+
+  it('refuses every agent CLI step when a disabled never-loaded systemd unit shares the job store', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    systemdUnitFile(h, 'beta', [
+      `Environment=WHATSOUP_NODE=${process.execPath} CLAUDE_CONFIG_DIR=${h.env.CLAUDE_CONFIG_DIR}`,
+    ]);
+    expectRefused(h, run(h), "equals beta's");
+  }, T);
+
+  it('refuses every agent CLI step when a disabled never-loaded unit selector is unreadable', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    systemdUnitFile(h, 'beta', [
+      `Environment=WHATSOUP_NODE=${process.execPath} CLAUDE_CONFIG_DIR=$HOME/not-statically-readable`,
+    ]);
+    expectRefused(h, run(h), "beta's CLAUDE_CONFIG_DIR is not readable");
+  }, T);
+
+  it('refuses every agent CLI step when installed systemd unit-file inventory cannot be read', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    writeFileSync(path.join(h.systemdDir, 'unit-files.rc'), '1\n');
+    expectRefused(h, run(h), 'service definitions were not read');
   }, T);
 
   it('refuses when the job config dir resolves to an instance config dir through a symlink', () => {
