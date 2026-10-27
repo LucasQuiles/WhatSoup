@@ -84,6 +84,22 @@ function harnessInstalled(f: { repo: string; home: string }): string {
   return renderClaudeConfigEnv(['--home', f.home], subst(HARNESS_TEMPLATE, f.repo, f.home), {}).output;
 }
 
+function releaseDriftPlist(f: { repo: string }, instance: string): string {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<plist version="1.0"><dict>',
+    '  <key>Label</key><string>com.whatsoup.release-drift-check</string>',
+    '  <key>ProgramArguments</key><array>',
+    '    <string>/bin/bash</string>',
+    `    <string>${f.repo}/deploy/scripts/run-release-drift-schedule.sh</string>`,
+    '    <string>--instance</string>',
+    `    <string>${instance}</string>`,
+    '  </array>',
+    '</dict></plist>',
+    '',
+  ].join('\n');
+}
+
 const REPLY_TEMPLATE = HARNESS_TEMPLATE
   .replace('harness-maintenance', 'reply-guarantee')
   .replace('harness.sh', 'reply-guarantee-drain.sh');
@@ -160,7 +176,9 @@ function makeFixture(): { repo: string; launchd: string; bin: string; home: stri
     '  --output) out="$2"; shift 2 ;;',
     '  *) shift ;;',
     'esac; done',
-    'printf "RENDERED release-drift for %s\\n" "$inst" > "$out"',
+    'cat > "$out" <<EOF',
+    releaseDriftPlist({ repo }, '$inst').trimEnd(),
+    'EOF',
     '',
   ].join('\n'));
   chmodSync(renderRd, 0o755);
@@ -188,7 +206,7 @@ function installAllOk(f: { repo: string; launchd: string; bin: string; home: str
   writeFileSync(join(f.launchd, 'com.whatsoup.tbot-watchdog.plist'), subst(WATCHDOG_TEMPLATE, f.repo, f.home, 'tbot'));
   writeFileSync(join(f.bin, 'tbot-watchdog'), '#!/usr/bin/env bash\necho ok\n');
   chmodSync(join(f.bin, 'tbot-watchdog'), 0o755);
-  writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for tbot\n');
+  writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), releaseDriftPlist(f, 'tbot'));
 }
 
 // Install the optional bot-errors-j1-collector surface correctly: rendered plist, template-identical wrapper,
@@ -702,7 +720,7 @@ describe('per-instance surfaces', () => {
   it('fails when release-drift-check matches no instance render', () => {
     const f = makeFixture();
     installAllOk(f);
-    writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for someone-else\n');
+    writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), releaseDriftPlist(f, 'someone-else'));
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('release-drift-check matches no discovered instance render');
@@ -897,7 +915,7 @@ describe('host-scope checks under explicit --instance subset', () => {
     const f = makeFixture();
     writeFileSync(join(f.launchd, 'com.whatsoup.harness-maintenance.plist'), harnessInstalled(f));
     writeFileSync(join(f.launchd, 'com.whatsoup.reply-guarantee.plist'), subst(REPLY_TEMPLATE, f.repo, f.home));
-    writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), 'RENDERED release-drift for tbot\n');
+    writeFileSync(join(f.launchd, 'com.whatsoup.release-drift-check.plist'), releaseDriftPlist(f, 'tbot'));
     const result = run(f);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('release-drift-check matches no discovered instance render');
