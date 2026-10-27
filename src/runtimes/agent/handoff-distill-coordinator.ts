@@ -24,6 +24,7 @@ import { upsertHandoffArtifact } from './handoff-artifact.ts';
 import type { HandoffArtifact } from './handoff-prelude.ts';
 import { HandoffDistillRunner } from './handoff-distill-runner.ts';
 import { buildHandoffDistill } from './handoff-summarizer.ts';
+import type { ReserveDistillTokens } from './handoff-distiller.ts';
 import { resolveDistillModel, type ResolvedDistillModel } from './handoff-distill-model.ts';
 import { resolveHandoffDistillConfig } from './handoff-distill-config.ts';
 import { HANDOFF_DISTILL_INPUT_MAX_BYTES, type HandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
@@ -143,7 +144,7 @@ export class HandoffDistillCoordinator {
       return Math.max(0, sinceCompact);
     };
 
-    const distillFor = (conversationKey: string): Promise<{ summary: string; seededArtifacts: string | null; tokensUsed: number }> => {
+    const distillFor = (conversationKey: string, reserveTokens: ReserveDistillTokens): Promise<{ summary: string; seededArtifacts: string | null; tokensUsed: number }> => {
       // Build a fresh distill closure per call so loadMessages reads current
       // history. buildHandoffDistill throws HandoffSummarizerInertError if the
       // key vanished; the runner folds any throw as a failure (fail-safe).
@@ -156,7 +157,7 @@ export class HandoffDistillCoordinator {
         redact: (t) => redactHandoffPii(t),
         verbatimN: handoffConfig.verbatimN,
       });
-      return run().then((o) => ({ summary: o.summary, seededArtifacts: o.seededArtifacts ?? null, tokensUsed: o.tokensUsed }));
+      return run(reserveTokens).then((o) => ({ summary: o.summary, seededArtifacts: o.seededArtifacts ?? null, tokensUsed: o.tokensUsed }));
     };
 
     return new HandoffDistillRunner({

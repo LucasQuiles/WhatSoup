@@ -27,12 +27,15 @@ function deps(over: Partial<RunHandoffDistillDeps> = {}): RunHandoffDistillDeps 
     sourceProvider: 'claude-cli',
     sourceModel: 'claude-opus-4-8',
     tokenBaseline: 1000,
-    distill: async () => ({ summary: 'a summary', tokensUsed: 500 }),
     persist: (a) => { persisted.push(a); },
     onDegraded: (r) => { degraded.push(r); },
     persisted,
     degraded,
     ...over,
+    distill: async (reserve) => {
+      reserve(1_000);
+      return over.distill ? over.distill(reserve) : { summary: 'a summary', tokensUsed: 500 };
+    },
   };
 }
 
@@ -103,7 +106,7 @@ describe('runHandoffDistill', () => {
     const result = await runHandoffDistill(d);
     expect(result).toMatchObject({ ran: false, failed: true });
     expect(d.persisted).toHaveLength(0);
-    expect(result.nextState.tokensThisWindow).toBe(0);
+    expect(result.nextState.tokensThisWindow).toBe(1_000);
     expect(result.nextState.callsThisWindow).toBe(1);
     expect(d.degraded[0]).toMatch(/token usage/);
   });

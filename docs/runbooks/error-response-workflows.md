@@ -234,6 +234,16 @@ before returning any text to JavaScript; oversized windows fail without returnin
 their text. Raw message payloads are excluded. This bounds the application result,
 not SQLite's internal storage reads or working memory.
 
+Before provider egress, the runner reserves the serialized request's UTF-8 byte
+count plus 256 tokens for framing and the 512-token completion cap. A request that
+does not fit the remaining window is denied without a provider call or failure
+charge. This is conservative admission accounting, not a provider-guaranteed
+billing ceiling. Validated usage replaces the reservation, including when the
+summary or storage write is rejected. Unknown usage after egress retains the
+reservation; reported usage above it exhausts the window and raises degradation.
+Artifact invalidation suppresses stale persistence but preserves spend. Budgets
+are in-memory for active conversations and reset on runner restart or pruning.
+
 The implementation is best-effort and fail-safe: every error at tick or sweep
 level is caught and logged at warn, never propagated to the turn path or the
 process. Only one sweep runs at a time; timer ticks during an active sweep are

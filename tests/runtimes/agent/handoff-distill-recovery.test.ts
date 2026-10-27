@@ -16,7 +16,10 @@ vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   getSessionTokenSnapshot: tokens,
 }));
 vi.mock('../../../src/runtimes/agent/handoff-summarizer.ts', () => ({
-  buildHandoffDistill: ({ conversationKey }: { conversationKey: string }) => () => distill(conversationKey),
+  buildHandoffDistill: ({ conversationKey }: { conversationKey: string }) => (reserve: (tokens: number) => void) => {
+    reserve(1_000);
+    return distill(conversationKey);
+  },
 }));
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
   emitAlertChecked: alert,

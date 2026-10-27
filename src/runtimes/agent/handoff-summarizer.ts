@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import type { DistillOutcome } from './handoff-distiller.ts';
+import type { DistillOutcome, ReserveDistillTokens } from './handoff-distiller.ts';
+import { HandoffDistillUsageError } from './handoff-distiller.ts';
 import type { HandoffMessage } from './handoff-prelude.ts';
 import { HANDOFF_DISTILL_INPUT_MAX_BYTES } from '../../lib/handoff-distill-config.ts';
 
@@ -21,6 +22,8 @@ const MAX_REQUEST_BYTES = HANDOFF_DISTILL_INPUT_MAX_BYTES;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_SUMMARY_BYTES = 4096;
 const MAX_SUMMARY_WORDS = 120;
+const MAX_COMPLETION_TOKENS = 512;
+const MESSAGE_FRAMING_RESERVE = 256;
 const SUMMARY_SYSTEM = 'Summarize the conversation below into <=120 words of durable context for an assistant resuming this chat. State facts, open tasks, and the user goal. No preamble.';
 const summaryResponse = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string().nullish() }) })).min(1),
@@ -52,12 +55,12 @@ async function readSummaryResponse(response: Response): Promise<unknown> {
   }
 }
 
-export function buildHandoffDistill(cfg: HandoffDistillConfig): () => Promise<DistillOutcome> {
+export function buildHandoffDistill(cfg: HandoffDistillConfig): (reserveTokens: ReserveDistillTokens) => Promise<DistillOutcome> {
   if (!cfg.apiKey) throw new HandoffSummarizerInertError(`handoff summarizer inert: no key for model ${cfg.model}`);
   const doFetch = cfg.fetchImpl ?? fetch;
   const timeoutMs = cfg.timeoutMs ?? 20_000;
 
-  return async (): Promise<DistillOutcome> => {
+  return async (reserveTokens): Promise<DistillOutcome> => {
     const msgs = cfg.loadMessages().slice(-cfg.verbatimN);
     // Refuse oversized stored input before trimming, redaction or JSON expansion.
     let inputBytes = 0;
@@ -77,9 +80,13 @@ export function buildHandoffDistill(cfg: HandoffDistillConfig): () => Promise<Di
       if (corpusBytes > MAX_REQUEST_BYTES) throw new Error('handoff summarizer request exceeds byte limit');
       lines.push(line);
     }
-    const body = JSON.stringify({ model: cfg.model, temperature: 0, max_tokens: 512, stream: false,
+    const body = JSON.stringify({ model: cfg.model, temperature: 0, max_tokens: MAX_COMPLETION_TOKENS, stream: false,
       messages: [{ role: 'system', content: SUMMARY_SYSTEM }, { role: 'user', content: lines.join('\n') }] });
     if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error('handoff summarizer request exceeds byte limit');
+
+    // Reserve one token per serialized UTF-8 byte, plus framing and the output cap.
+    // This is conservative admission accounting, not a provider billing guarantee.
+    reserveTokens(Buffer.byteLength(body) + MESSAGE_FRAMING_RESERVE + MAX_COMPLETION_TOKENS);
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -100,9 +107,9 @@ export function buildHandoffDistill(cfg: HandoffDistillConfig): () => Promise<Di
       if (!parsed.success) throw new Error('handoff summarizer returned invalid response or token usage');
       // Provider reasoning is not user-facing content and must never be persisted.
       const summary = parsed.data.choices[0]?.message.content?.trim() ?? '';
-      if (!summary) throw new Error('handoff summarizer returned empty summary');
+      if (!summary) throw new HandoffDistillUsageError('handoff summarizer returned empty summary', parsed.data.usage.total_tokens);
       if (Buffer.byteLength(summary) > MAX_SUMMARY_BYTES || summary.split(/\s+/u).length > MAX_SUMMARY_WORDS) {
-        throw new Error('handoff summarizer summary exceeds output limit');
+        throw new HandoffDistillUsageError('handoff summarizer summary exceeds output limit', parsed.data.usage.total_tokens);
       }
       return { summary, seededArtifacts: null, tokensUsed: parsed.data.usage.total_tokens };
     } finally {

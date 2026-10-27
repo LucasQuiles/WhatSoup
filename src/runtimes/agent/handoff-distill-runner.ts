@@ -1,6 +1,6 @@
 import { runHandoffDistill } from './handoff-distiller.ts';
 import { initialDistillState, type DistillBudgetConfig, type DistillState } from './handoff-distill-gate.ts';
-import type { DistillOutcome } from './handoff-distiller.ts';
+import type { DistillOutcome, ReserveDistillTokens } from './handoff-distiller.ts';
 import type { HandoffArtifact } from './handoff-prelude.ts';
 
 export interface HandoffDistillRunnerDeps {
@@ -8,7 +8,7 @@ export interface HandoffDistillRunnerDeps {
   now: () => number;
   growthThreshold: number;
   tokenGrowth: (conversationKey: string) => number;
-  distillFor: (conversationKey: string) => Promise<DistillOutcome>;
+  distillFor: (conversationKey: string, reserveTokens: ReserveDistillTokens) => Promise<DistillOutcome>;
   persist: (artifact: HandoffArtifact) => void;
   onDegraded: (conversationKey: string, reason: string) => void;
   onSucceeded?: (conversationKey: string) => void;
@@ -38,7 +38,7 @@ export class HandoffDistillRunner {
     if (conversationKey.length === 0) return;
     const generation = this.invalidationGenerations.get(conversationKey) ?? 0;
     this.invalidationGenerations.set(conversationKey, generation + 1);
-    this.states.delete(conversationKey);
+    // Artifact invalidation cannot refund a provider request or reset its budget.
   }
 
   private generationFor(conversationKey: string): number {
@@ -79,7 +79,7 @@ export class HandoffDistillRunner {
         globalInFlight: this.globalInFlight - 1, // exclude self
         conversationKey, sourceProvider: source.provider, sourceModel: source.model,
         tokenBaseline: this.deps.tokenGrowth(conversationKey),
-        distill: () => this.deps.distillFor(conversationKey),
+        distill: (reserveTokens) => this.deps.distillFor(conversationKey, reserveTokens),
         persist: (artifact) => {
           if (this.generationFor(conversationKey) === generation) {
             this.deps.persist(artifact);
@@ -91,8 +91,8 @@ export class HandoffDistillRunner {
           }
         },
       });
-      if (this.generationFor(conversationKey) !== generation) return;
       this.states.set(conversationKey, result.nextState);
+      if (this.generationFor(conversationKey) !== generation) return;
       if (result.ran) this.deps.onSucceeded?.(conversationKey);
     } finally {
       this.globalInFlight -= 1;
