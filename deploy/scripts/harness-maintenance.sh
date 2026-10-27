@@ -64,8 +64,8 @@ USAGE
 # Permitted inspection artifacts: the state directory with its state.json and
 # run.log, and this run's temporary directory (removed on exit; npm's cache is
 # pointed into it). Permitted commands: the pinned node running this repo's own
-# scripts, plutil and read-only systemctl verbs (list-units, show-environment,
-# show, is-active), read-only verbs of the pinned npm only (--version, config
+# scripts, plutil and read-only systemctl verbs (list-units, list-unit-files,
+# show-environment, show, is-active), read-only verbs of the pinned npm only (--version, config
 # get, view, ls), apt list, ps (uid, elapsed time and executable name only),
 # scripts/check-unit-drift.sh (file comparison only), and system helpers (awk,
 # grep, mktemp, ...). Every command is taken from the job's own PATH with
@@ -722,16 +722,26 @@ systemd_environment_file() {
 }
 
 claude_inventory_systemd() {
-  local units unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
+  local loaded unit_files units unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
   SYSTEMCTL_BIN="$(job_tool systemctl)" || {
     echo "systemctl not found on the job PATH"
     return 1
   }
-  units="$("$SYSTEMCTL_BIN" --user list-units --all --type=service --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
+  loaded="$("$SYSTEMCTL_BIN" --user list-units --all --type=service --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "systemctl list-units failed rc=$rc"
     return 1
   fi
+  rc=0
+  unit_files="$("$SYSTEMCTL_BIN" --user list-unit-files --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "systemctl list-unit-files failed rc=$rc"
+    return 1
+  fi
+  units="$(printf '%s\n%s\n' "$loaded" "$unit_files" | awk '$1 ~ /^whatsoup@.+\.service$/ && !seen[$1]++ { print $1 }')" || {
+    echo "systemctl unit inventory could not be normalized"
+    return 1
+  }
   # The instance template starts every unit through the installed wrapper (deploy/whatsoup@.service).
   wrapper_ok=1
   wrapper_reason="$(instance_wrapper_mismatch "$INSTALLED_WRAPPER")" || wrapper_ok=0

@@ -152,6 +152,7 @@ describe('deploy/whatsoup unscoped credential precedence', () => {
     const script = path.join(root, 'lookup.sh');
     fs.writeFileSync(script, `#!/usr/bin/env bash
 set -u
+unset USER
 PATH=${JSON.stringify(bin)}:"$PATH"
 export LOOKUP_LOG=${JSON.stringify(logPath)}
 unset PINECONE_API_KEY

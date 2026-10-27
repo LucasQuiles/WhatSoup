@@ -236,6 +236,7 @@ esac
     scriptPath,
     `#!/usr/bin/env bash
 set -euo pipefail
+unset USER
 PATH="${binDir}:$PATH"
 HOME="${homeDir}"
 XDG_CONFIG_HOME="$HOME/.config"
