@@ -356,7 +356,7 @@ describe('agent CLI update policy surfaces', () => {
     expect(instance('gamma').message).toContain('settings env DISABLE_UPDATES=set');
 
     expect(policy.find((e) => e.status === 'job-env')!.message)
-      .toBe('this job: DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set CLAUDE_CONFIG_DIR=set');
+      .toBe('this job: DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set CLAUDE_CONFIG_DIR=set CLAUDE_SECURESTORAGE_CONFIG_DIR=unset');
     // alpha (unit) and gamma (settings) have DISABLE_UPDATES; beta's DISABLE_AUTOUPDATER is not counted.
     const summary = policy.at(-1)!;
     expect(summary.status).toBe('advisory');
