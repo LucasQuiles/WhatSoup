@@ -84,7 +84,12 @@ is rejected by the wrappers.
 Operator maintenance is packaged for launchd: `deploy/setup.sh` installs the
 `whatsoup-harness-maintenance` wrapper symlink (step 3) and renders the
 `com.whatsoup.harness-maintenance` / `com.whatsoup.reply-guarantee` timer
-plists into `~/Library/LaunchAgents` (step 4). Setup never loads the jobs —
+plists into `~/Library/LaunchAgents` (step 4). Harness maintenance fixes both
+`CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to its own
+`$HOME/.claude-maint` store, independently of instance selectors.
+The drift checker requires the rendered maintenance `ProgramArguments`;
+an added login-guard wrapper is drift, even at a previously used location.
+Setup never loads the jobs —
 load them as a deployment step and verify with `launchctl print`; see the
 "macOS (launchd) Maintenance Timers" section of
 [docs/runbook.md](../runbook.md#2-service-management) for the load, verify,

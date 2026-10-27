@@ -3,6 +3,47 @@ import { buildBaseChildEnv } from '../../../../src/runtimes/agent/providers/chil
 import { makeAccountAuthStatusProbe } from '../../../../src/runtimes/agent/providers/account-auth-status.ts';
 import { observeClaudeAccountIdentity } from '../../../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { createPrimaryModelProbeAdapters } from '../../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
+import type { ClaudeRefreshAheadResult } from '../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts';
+
+describe('Claude probes require a completed successful refresh before proceeding', () => {
+  const results: Array<{ name: string; result: ClaudeRefreshAheadResult; defer: boolean }> = [
+    { name: 'nonzero exit', result: { outcome: 'ran', reason: 'expired', exitCode: 1, signal: null }, defer: true },
+    { name: 'signal exit', result: { outcome: 'ran', reason: 'expired', exitCode: null, signal: 'SIGTERM' }, defer: true },
+    { name: 'spawn failure', result: { outcome: 'spawn-failed', reason: 'expired' }, defer: true },
+    { name: 'live refresh', result: { outcome: 'still-running' }, defer: true },
+    { name: 'successful close', result: { outcome: 'ran', reason: 'expired', exitCode: 0, signal: null }, defer: false },
+  ];
+  for (const surface of ['diagnostic', 'identity', 'model'] as const) {
+    it.each(results)(`${surface}: $name`, async ({ result, defer }) => {
+      const refresh = async () => result;
+      const probe = vi.fn(async () => ({ status: 'ok' as const, output: '{"loggedIn":false}' }));
+      if (surface === 'model') {
+        const adapters = createPrimaryModelProbeAdapters(undefined, {
+          getProviderBinary: () => '/fixture/claude', refreshClaudeLoginAhead: refresh,
+        });
+        await expect(adapters.prepareBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' }))
+          .resolves.toEqual(defer ? { defer: 'deferred-refresh-in-flight' } : undefined);
+      } else {
+        const deps = {
+          getProviderBinary: () => '/fixture/claude',
+          env: { HOME: '/fixture/home', PATH: '/usr/bin', USER: 'fixture' },
+          probeBinaryCommand: probe, probeBinaryAuthStatus: probe,
+          resolveKeyService: () => null, lookupCredential: () => null,
+          isAuthRequiredMessage: () => false,
+          refreshAhead: refresh, refreshClaudeLoginAhead: refresh,
+        };
+        if (surface === 'diagnostic') {
+          const observed = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
+          if (defer) expect(observed.summary).toContain('deferred');
+        } else {
+          const observed = await observeClaudeAccountIdentity(deps);
+          if (defer) expect(observed).toEqual({ kind: 'failed', reason: 'deferred-refresh-in-flight' });
+        }
+        expect(probe).toHaveBeenCalledTimes(defer ? 0 : 1);
+      }
+    });
+  }
+});
 
 describe('Claude probes defer when refresh ownership cannot be established', () => {
   const env = { HOME: '/fixture/home', PATH: '/usr/bin', USER: 'fixture' };
