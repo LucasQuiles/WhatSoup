@@ -689,6 +689,10 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
         expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scheduledMapKey)).toBe(3);
       } finally {
         releaseShutdown();
+        await vi.waitFor(() => {
+          expect(session.spawnSession).toHaveBeenCalledTimes(spawnCount + 1);
+          expect(state.sessionOwnership.get(scheduledMapKey)?.generation).toBe(generation + 1);
+        });
       }
 
       for (const [index, prompt] of ['Second scheduled check', 'Third scheduled check'].entries()) {
@@ -733,10 +737,13 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       emitTerminal(session);
       await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledWith(false));
       const stopping = runtime.shutdown();
+      let stoppingSettled = false;
+      void stopping.then(() => { stoppingSettled = true; }, () => { stoppingSettled = true; });
       try {
         await vi.waitFor(() => expect(status(queued)).toBe('failed'));
         expect(status(first)).toBe('complete');
         expect(session.turnsSent).toHaveLength(1);
+        expect(stoppingSettled).toBe(false);
       } finally {
         releaseShutdown();
         await stopping;
