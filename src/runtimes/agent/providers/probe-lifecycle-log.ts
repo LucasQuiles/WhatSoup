@@ -48,9 +48,11 @@ export function probeLifecycleObservers(
   signal?: AbortSignal,
 ): Required<Pick<BinaryCommandProbeOptions, 'onSpawned' | 'onExited'>> {
   let startedAtMs: number | null = null;
+  let startedMonotonicMs: number | null = null;
   return {
     onSpawned: (pid) => {
       startedAtMs = systemClock.now();
+      startedMonotonicMs = performance.now();
       log.info(
         { event: events.spawnEvent, ...base, pid: pid ?? null, startedAt: new Date(startedAtMs).toISOString() },
         events.spawnMessage,
@@ -58,6 +60,7 @@ export function probeLifecycleObservers(
     },
     onExited: (exit: BinaryCommandProbeExit) => {
       const endedAtMs = systemClock.now();
+      const endedMonotonicMs = performance.now();
       const start = startedAtMs ?? endedAtMs;
       const termination = exit.killedByTimeout
         ? 'cli-timeout'
@@ -71,7 +74,7 @@ export function probeLifecycleObservers(
           pid: exit.pid ?? null,
           startedAt: new Date(start).toISOString(),
           endedAt: new Date(endedAtMs).toISOString(),
-          durationMs: endedAtMs - start,
+          durationMs: endedMonotonicMs - (startedMonotonicMs ?? endedMonotonicMs),
           exitCode: exit.exitCode,
           signal: exit.signal,
           killedByProbeTimeout: termination === 'cli-timeout' || termination === 'deadline',

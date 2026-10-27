@@ -196,19 +196,20 @@ function acquireOwnerClaim(location: RefreshOwnerLocation, fence: string): boole
  * The close observer removes only the fence it created. This is cooperative
  * same-user protection, not isolation against a malicious same-UID replacer.
  */
-function releaseOwnerClaim(location: RefreshOwnerLocation, fence: string): void {
+function releaseOwnerClaim(location: RefreshOwnerLocation, fence: string): boolean {
   try {
     const observed = readPrivateFileSync(location.path, {
       label: OWNER_LABEL,
       maxBytes: OWNER_MAX_BYTES,
       observation: { root: location.store },
     });
-    if (observed === null) return;
+    if (observed === null) return false;
     const parsed = JSON.parse(observed.bytes.toString('utf8')) as { fence?: unknown };
-    if (parsed.fence !== fence) return;
-    deletePrivateFileSync(location.path, OWNER_LABEL);
+    if (parsed.fence !== fence) return false;
+    return deletePrivateFileSync(location.path, OWNER_LABEL);
   } catch {
     // Unknown, malformed, and unsafe ownership state remains held.
+    return false;
   }
 }
 
@@ -313,7 +314,7 @@ async function runRefreshAhead(
     } catch {
       quietly(() => observers.onSpawned(undefined));
       quietly(() => observers.onExited(exitOf(undefined, null, null, true)));
-      resolve({ outcome: 'spawn-failed', reason });
+      resolve({ outcome: 'still-running' });
       return;
     }
     const pid = child.pid;
@@ -341,20 +342,21 @@ async function runRefreshAhead(
     }, REFRESH_AHEAD_HARD_CAP_MS);
     hardCap.unref?.();
     let finished = false;
-    const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean): void => {
+    const finish = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean, claimReleased = false): void => {
       if (finished) return;
       finished = true;
       clearInterval(stillRunning);
       clearTimeout(hardCap);
       trackLive(key, -1);
       quietly(() => observers.onExited(exitOf(pid, exitCode, signal, spawnFailed)));
-      resolve(spawnFailed ? { outcome: 'spawn-failed', reason } : { outcome: 'ran', reason, exitCode, signal });
+      resolve(claimReleased ? { outcome: 'ran', reason, exitCode, signal } : { outcome: 'still-running' });
     };
-    // An error from a spawned child does not end it; only close does.
-    child.on('error', () => { if (child.pid === undefined) finish(null, null, true); });
+    // Even a pidless error is not proof that the child has closed.
+    let spawnFailed = false;
+    child.on('error', () => { if (child.pid === undefined) spawnFailed = true; });
     child.on('close', (code, signal) => {
-      releaseOwnerClaim(location, fence);
-      finish(code, signal, false);
+      const claimReleased = releaseOwnerClaim(location, fence);
+      finish(code, signal, spawnFailed, claimReleased);
     });
   });
 }
