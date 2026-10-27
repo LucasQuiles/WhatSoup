@@ -167,7 +167,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "862b64da7a85345a9b2de491d6a89715c7159701924190e96afe9dd51f7112e2",
+      "sha256": "faa0ee99d90b1cf28210371393aad3718d06ee56d44aa2719da825cc3f2498b9",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -939,6 +939,10 @@
         "no open condition for",
         "require_advance(publication)"
       ]
+    },
+    {
+      "path": "deploy/scripts/write-health-package-pin.py",
+      "sha256": "f9e7eaa04c95fb6b72653d2f4aab42086911874525d96a1682dbc84d4cb8a039"
     }
   ]
 }

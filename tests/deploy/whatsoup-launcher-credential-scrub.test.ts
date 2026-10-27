@@ -27,6 +27,7 @@ const PROTECTED_ENV_NAMES = [
   'PINECONE_API_KEY',
   'ELEVENLABS_API_KEY',
   'WHATSOUP_HEALTH_TOKEN',
+  'MS365_AGENT365_API_KEY',
 ] as const;
 
 // Ported from the credential-hardening series (2bde84ace) and ADAPTED:
@@ -55,6 +56,7 @@ describe('deploy/whatsoup credential environment boundary', () => {
       ...Object.values(SERVICE_ENV_MAP),
       'GOOGLE_GENERATIVE_AI_API_KEY',
       'GEMINI_API_KEY',
+      'MS365_AGENT365_API_KEY',
     ]);
 
     expect(new Set(PROTECTED_ENV_NAMES)).toEqual(expected);
@@ -121,7 +123,7 @@ function runManagedCodingPlanBoundary(
   mkdirSync(join(configHome, 'whatsoup', 'instances', 'fixture-agent'), { recursive: true, mode: 0o700 });
   writeFileSync(
     join(configHome, 'whatsoup', 'instances', 'fixture-agent', 'config.json'),
-    JSON.stringify({ type: 'agent' }),
+    JSON.stringify({ name: 'fixture-agent', type: 'agent' }),
     { mode: 0o600 },
   );
   if (route === 'private-file') {

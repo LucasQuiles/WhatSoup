@@ -9,6 +9,7 @@ import {
   REQUIRED_DENY,
   applyRequiredDeny,
 } from '../../src/core/settings-template.ts';
+import type { M365MutationPolicy } from '../../src/core/m365-bridge-policy.ts';
 import {
   CONNECTOR_MUTATION_DENY_FIXTURE,
 } from './fixtures/connector-mutation-deny-fixture.ts';
@@ -17,6 +18,14 @@ const APPROVED_CONNECTOR_MUTATION_INVENTORY_SHA256 = readFileSync(
   new URL('./fixtures/connector-mutation-deny-fixture.sha256', import.meta.url),
   'utf8',
 ).trim().split(/\s+/)[0];
+
+const approvedM365Policy: M365MutationPolicy = {
+  status: 'approved',
+  childEnv: {
+    ALLOW_M365_MUTATIONS: '1',
+    MS365_AGENT365_BRIDGE: 'true',
+  },
+};
 
 describe('defaultSettingsJson', () => {
   it('returns bypassPermissions settings for agent type', () => {
@@ -59,6 +68,41 @@ describe('defaultSettingsJson', () => {
 
   it('AGENT_DEFAULT_ALLOW is a frozen array', () => {
     expect(Object.isFrozen(AGENT_DEFAULT_ALLOW)).toBe(true);
+  });
+});
+
+describe('M365 bridge policy exception', () => {
+  it('preserves an explicit M365 restriction when the bridge is approved', () => {
+    const explicit = 'mcp__plugin_microsoft_365_microsoft_365__send-mail';
+    expect(applyRequiredDeny([explicit], approvedM365Policy)).toContain(explicit);
+  });
+
+  it('omits the generated M365 floor for an approved bridge', () => {
+    const deny = applyRequiredDeny([
+      'mcp__claude_ai_Gmail__create_draft',
+      'mcp__operator_owned__keep',
+    ], approvedM365Policy);
+
+    expect(deny).not.toContain('mcp__plugin_microsoft_365_microsoft_365__create-event');
+    expect(deny).toContain('mcp__claude_ai_Gmail__create_draft');
+    expect(deny).toContain('mcp__operator_owned__keep');
+  });
+
+  it('preserves a legacy full deny list because its authorship is unknown', () => {
+    expect(applyRequiredDeny(REQUIRED_DENY, approvedM365Policy)).toEqual([...REQUIRED_DENY]);
+  });
+
+  it('keeps the full deny floor for a rejected bridge policy', () => {
+    const deny = applyRequiredDeny([], { status: 'rejected' });
+
+    expect(deny).toEqual([...REQUIRED_DENY]);
+  });
+
+  it('validates the reduced floor only for the same approved policy', () => {
+    const settings = defaultSettingsJson('agent', approvedM365Policy)!;
+
+    expect(isValidPermissionsSettings(settings, approvedM365Policy)).toBe(true);
+    expect(isValidPermissionsSettings(settings)).toBe(false);
   });
 });
 

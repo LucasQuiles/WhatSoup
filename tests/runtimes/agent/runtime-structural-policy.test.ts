@@ -236,5 +236,6 @@ describe('failure-taxonomy structural policy', () => {
 
     expect(definitions).toHaveLength(1);
     expect(mirrorCaveats).toHaveLength(1);
+    expect(mirrorCaveats[0]).toContain('update the mirrored candidate here');
   });
 });

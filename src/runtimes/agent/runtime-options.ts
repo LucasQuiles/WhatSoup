@@ -4,6 +4,8 @@ import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.t
 import type { AccountIdentityVerifyFn } from './account-identity-verifier.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import type { ServiceRestarter } from './self-restart.ts';
+import type { M365BridgeBinding } from '../../core/m365-bridge-policy.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 
 export interface SandboxPolicy {
   allowedPaths: string[];
@@ -45,10 +47,14 @@ export interface AgentRuntimeOptions {
   pluginDirs?: string[];
   /** Per-instance plugin enablement. Written to project settings.json to override global. */
   enabledPlugins?: Record<string, boolean>;
-  /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
+  /** Required alongside m365Bridge before the runtime can grant M365 mutation access. */
   allowM365Mutations?: boolean;
+  /** Account-bound Agent365 bridge required for the M365 mutation exception. */
+  m365Bridge?: M365BridgeBinding;
   /** Automatically run a silent /compact after this many input tokens since the last compact. */
   autoCompactInputTokens?: number;
+  /** Typed per-instance handoff policy. Absent preserves legacy environment behavior. */
+  handoffDistill?: TypedHandoffDistillConfig;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
   /**

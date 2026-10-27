@@ -33,6 +33,20 @@ export interface DistillOutcome {
   tokensUsed: number;
 }
 
+/** Must succeed synchronously immediately before the provider request is sent. */
+export type ReserveDistillTokens = (tokens: number) => void;
+
+class DistillTokenBudgetExceeded extends Error {}
+
+/** A rejected artifact can still carry validated provider spend. */
+export class HandoffDistillUsageError extends Error {
+  readonly tokensUsed: number;
+  constructor(message: string, tokensUsed: number) {
+    super(message);
+    this.tokensUsed = tokensUsed;
+  }
+}
+
 export interface RunHandoffDistillDeps {
   state: DistillState;
   config: DistillBudgetConfig;
@@ -43,7 +57,7 @@ export interface RunHandoffDistillDeps {
   sourceModel: string | null;
   tokenBaseline: number;
   /** The LLM distill call. May reject; rejection is folded as a failure. */
-  distill: () => Promise<DistillOutcome>;
+  distill: (reserveTokens: ReserveDistillTokens) => Promise<DistillOutcome>;
   /** Persist the produced artifact (store upsert). */
   persist: (artifact: HandoffArtifact) => void;
   /** Optional degradation signal (alert outbox) on distill failure. */
@@ -73,8 +87,27 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
     return { ran: false, denied: decision.reason as DistillDenyReason, failed: false, nextState: decision.nextState };
   }
 
+  let reservedTokens: number | undefined;
+  let chargedTokens: number | undefined;
+  const reserveTokens: ReserveDistillTokens = (tokens) => {
+    if (reservedTokens !== undefined) throw new Error('handoff token reservation already made');
+    if (!Number.isSafeInteger(tokens) || tokens <= 0) throw new Error('invalid handoff token reservation');
+    if (tokens > deps.config.maxTokensPerWindow - decision.nextState.tokensThisWindow) {
+      throw new DistillTokenBudgetExceeded('handoff token budget exhausted');
+    }
+    reservedTokens = tokens;
+    chargedTokens = decision.nextState.tokensThisWindow + tokens;
+  };
   try {
-    const outcome = await deps.distill();
+    const outcome = await deps.distill(reserveTokens);
+    if (reservedTokens === undefined) throw new Error('handoff token reservation missing');
+    const nextState = recordDistillSuccess(decision.nextState, outcome.tokensUsed, deps.now, deps.config);
+    chargedTokens = nextState.tokensThisWindow;
+    if (outcome.tokensUsed > reservedTokens) {
+      // A provider billing surprise must stop further egress for this window.
+      chargedTokens = Math.max(chargedTokens, deps.config.maxTokensPerWindow);
+      throw new Error('handoff reported token usage exceeds reservation');
+    }
     deps.persist({
       conversationKey: deps.conversationKey,
       summary: outcome.summary,
@@ -84,10 +117,21 @@ export async function runHandoffDistill(deps: RunHandoffDistillDeps): Promise<Ru
       sourceModel: deps.sourceModel,
       tokenBaseline: deps.tokenBaseline,
     });
-    const nextState = recordDistillSuccess(decision.nextState, outcome.tokensUsed, deps.now, deps.config);
     return { ran: true, denied: null, failed: false, nextState };
   } catch (err) {
-    const nextState = recordDistillFailure(decision.nextState, deps.now, deps.config);
+    if (err instanceof DistillTokenBudgetExceeded && reservedTokens === undefined) {
+      return { ran: false, denied: 'budget-tokens', failed: false, nextState: decision.nextState };
+    }
+    if (err instanceof HandoffDistillUsageError && Number.isSafeInteger(err.tokensUsed) && err.tokensUsed >= 0) {
+      chargedTokens = Math.min(Number.MAX_SAFE_INTEGER, decision.nextState.tokensThisWindow + err.tokensUsed);
+      if (reservedTokens === undefined || err.tokensUsed > reservedTokens) {
+        chargedTokens = Math.max(chargedTokens, deps.config.maxTokensPerWindow);
+      }
+    }
+    // Uncertain provider outcomes retain the reservation; failed writes retain actual spend.
+    const failureState = { ...decision.nextState,
+      tokensThisWindow: chargedTokens ?? decision.nextState.tokensThisWindow };
+    const nextState = recordDistillFailure(failureState, deps.now, deps.config);
     const reason = errorMessage(err);
     deps.onDegraded?.(`handoff distill failed: ${reason.slice(0, 160)}`);
     return { ran: false, denied: null, failed: true, nextState };

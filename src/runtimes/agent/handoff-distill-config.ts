@@ -11,15 +11,18 @@
 // value is truncated to an integer (where integral) and clamped to [min, max].
 // With no env set the result is byte-identical to the prior hardcoded values.
 
-import { type DistillBudgetConfig } from './handoff-distill-gate.ts';
-import { MS_PER_HOUR } from '../../lib/time-units.ts';
+import {
+  defaultHandoffDistillConfig,
+  HANDOFF_DISTILL_NUMERIC_LIMITS,
+  type HandoffDistillConfig,
+} from '../../lib/handoff-distill-config.ts';
 
-export interface HandoffDistillConfig {
-  sweepMs: number;
-  growthThreshold: number;
-  verbatimN: number;
-  budget: DistillBudgetConfig;
-}
+export {
+  resolveTypedHandoffDistillConfig,
+  type HandoffDistillConfig,
+  type TypedHandoffDistillConfig,
+  type TypedHandoffDistillInput,
+} from '../../lib/handoff-distill-config.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -45,66 +48,66 @@ function resolveNumber(
 export function resolveHandoffDistillConfig(env: Env): HandoffDistillConfig {
   const sweepMs = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_SWEEP_MS'],
-    60_000,
-    10_000, // 10s floor — sub-10s sweeps would hammer the runner machinery.
-    MS_PER_HOUR, // 1h ceiling.
-    false,
+    defaultHandoffDistillConfig().sweepMs,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.sweepMs.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.sweepMs.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.sweepMs.integer,
   );
   const growthThreshold = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_GROWTH_THRESHOLD'],
-    4_000,
-    500,
-    1_000_000,
-    true,
+    defaultHandoffDistillConfig().growthThreshold,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.growthThreshold.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.growthThreshold.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.growthThreshold.integer,
   );
   const verbatimN = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_VERBATIM_N'],
-    40,
-    1,
-    200,
-    true,
+    defaultHandoffDistillConfig().verbatimN,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.verbatimN.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.verbatimN.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.verbatimN.integer,
   );
   const maxTokensPerWindow = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_MAX_TOKENS'],
-    50_000,
-    1_000,
-    5_000_000,
-    true,
+    defaultHandoffDistillConfig().budget.maxTokensPerWindow,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.maxTokensPerWindow.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.maxTokensPerWindow.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.maxTokensPerWindow.integer,
   );
   const maxCallsPerWindow = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_MAX_CALLS'],
-    6,
-    1,
-    1_000,
-    true,
+    defaultHandoffDistillConfig().budget.maxCallsPerWindow,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.maxCallsPerWindow.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.maxCallsPerWindow.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.maxCallsPerWindow.integer,
   );
   const windowMs = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_WINDOW_MS'],
-    MS_PER_HOUR,
-    60_000,
-    86_400_000,
-    false,
+    defaultHandoffDistillConfig().budget.windowMs,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.windowMs.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.windowMs.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.windowMs.integer,
   );
   const failureThreshold = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_FAILURE_THRESHOLD'],
-    3,
-    1,
-    100,
-    true,
+    defaultHandoffDistillConfig().budget.failureThreshold,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.failureThreshold.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.failureThreshold.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.failureThreshold.integer,
   );
   const breakerCooldownMs = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_BREAKER_COOLDOWN_MS'],
-    300_000,
-    10_000,
-    86_400_000,
-    false,
+    defaultHandoffDistillConfig().budget.breakerCooldownMs,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.breakerCooldownMs.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.breakerCooldownMs.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.breakerCooldownMs.integer,
   );
   const globalConcurrency = resolveNumber(
     env['WHATSOUP_HANDOFF_DISTILL_GLOBAL_CONCURRENCY'],
-    2,
-    1,
-    32,
-    true,
+    defaultHandoffDistillConfig().budget.globalConcurrency,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.globalConcurrency.min,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.globalConcurrency.max,
+    HANDOFF_DISTILL_NUMERIC_LIMITS.globalConcurrency.integer,
   );
 
   return {

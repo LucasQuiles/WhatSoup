@@ -56,8 +56,13 @@ const USABLE: PrimaryModelUsabilityResult = { status: 'usable', provider: 'claud
 
 type ProbeTrigger = 'startup' | 'manual' | 'periodic';
 type IdentityState = RuntimeState & {
+  recordTurnCapabilitySuccess(isUserTurnResult: boolean): void;
+  periodicUsabilityProbeTimer: ReturnType<typeof setTimeout> | null;
+  periodicUsabilityProbeBackoff: number;
+  periodicUsabilityProbeDueAt: number | null;
   fallback: {
     schedulePrimaryModelUsabilityProbe(trigger: ProbeTrigger): void;
+    scheduleNextPeriodicUsabilityProbe(): void;
   };
 };
 
@@ -185,9 +190,73 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
     await runProbe(state, 'startup');
     expect(identity()).toMatchObject({ status: 'match' });
+    state.periodicUsabilityProbeBackoff = 2;
+    expect(state.periodicUsabilityProbeTimer).toBeNull();
     vi.advanceTimersByTime(31 * MINUTE);
     expect(identity()).toMatchObject({ status: 'unverifiable', reason: 'stale-receipt', stale: true });
     expect(reasons()).toContain('credential_identity_unverifiable');
+  });
+
+  it('a turn success before the scheduled next probe does not age the identity receipt early', async () => {
+    const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
+    const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
+    await runProbe(state, 'startup');
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    state.fallback.scheduleNextPeriodicUsabilityProbe();
+    expect(state.periodicUsabilityProbeDueAt).toBe(START + 33 * MINUTE);
+    vi.advanceTimersByTime(20 * MINUTE);
+    state.recordTurnCapabilitySuccess(true);
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    expect(reasons()).not.toContain('credential_identity_unverifiable');
+  });
+
+  it('a late turn cannot clear an identity receipt after the scheduled deadline', async () => {
+    const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
+    const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
+    await runProbe(state, 'startup');
+    state.periodicUsabilityProbeTimer = {} as ReturnType<typeof setTimeout>;
+    state.periodicUsabilityProbeDueAt = START + 33 * MINUTE;
+    vi.advanceTimersByTime(35 * MINUTE + 1);
+    expect(identity()).toMatchObject({ status: 'unverifiable', reason: 'stale-receipt', stale: true });
+    state.recordTurnCapabilitySuccess(true);
+    expect(identity()).toMatchObject({ status: 'unverifiable', reason: 'stale-receipt', stale: true });
+    expect(reasons()).toContain('credential_identity_unverifiable');
+  });
+
+  it('keeps the scheduled identity grace while a periodic probe is pending, then expires', async () => {
+    const verify = vi.fn(async (_expected: string | null) => verification({ checkedAt: Date.now() }));
+    const { state, identity, reasons, snapshot } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
+    await runProbe(state, 'startup');
+    state.fallback.scheduleNextPeriodicUsabilityProbe();
+    await vi.advanceTimersByTimeAsync(33 * MINUTE);
+    expect(probeControl.resolvers).toHaveLength(1);
+    expect(state.periodicUsabilityProbeTimer).toBeNull();
+    expect((snapshot().details as Record<string, unknown>).turnCapability).toMatchObject({ periodicProbeExpected: true });
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    expect(reasons()).not.toContain('credential_identity_unverifiable');
+
+    await vi.advanceTimersByTimeAsync(2 * MINUTE + 1);
+    expect(identity()).toMatchObject({ status: 'unverifiable', reason: 'stale-receipt', stale: true });
+    expect(reasons()).toContain('credential_identity_unverifiable');
+  });
+
+  it('keeps cached identity only until the scheduled in-flight periodic probe publishes its mismatch', async () => {
+    const results = [
+      verification({}),
+      verification({ status: 'mismatch', observedDigestPrefix: 'bbbbbbbbbbbb' }),
+    ];
+    const verify = vi.fn(async (_expected: string | null) => results.shift()!);
+    const { state, identity, reasons } = build({ expectedAccountDigest: EXPECTED, accountIdentityVerify: verify });
+    await runProbe(state, 'startup');
+    state.fallback.scheduleNextPeriodicUsabilityProbe();
+    await vi.advanceTimersByTimeAsync(33 * MINUTE);
+    expect(identity()).toMatchObject({ status: 'match', stale: false });
+    expect(reasons()).not.toContain('credential_identity_mismatch');
+    expect(probeControl.resolvers).toHaveLength(1);
+    probeControl.resolvers.pop()!(USABLE);
+    await settle();
+    expect(identity()).toMatchObject({ status: 'mismatch', stale: false });
+    expect(reasons()).toContain('credential_identity_mismatch');
   });
 
   it('req-03: the identity path never reaches the credential heal seam, on any outcome', async () => {

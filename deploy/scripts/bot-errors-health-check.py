@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -149,6 +149,11 @@ PRIMARY_PHONE_SIGNAL_RE = re.compile(
     r"(?m)^(?:FAIL|WARN|OK)\s+primary_phone(?:_state)?\s+([^:\s]+):"
 )
 RUNTIME_MANIFEST_FAILURE_RE = re.compile(r"^FAIL runtime_manifest(?:\s+([^:\s]+))?:")
+RUNTIME_MANIFEST_CHECKER_PATH = "deploy/scripts/bot-errors-health-check.py"
+RUNTIME_PACKAGE_ROOT_PREFIX = "WhatSoup-health-"
+RUNTIME_PACKAGE_OWNER = "health_reporter"
+RUNTIME_PACKAGE_MODES = ("no-bot", "bot-host")
+RUNTIME_PACKAGE_PIN_PATH = Path.home() / ".config" / "whatsoup" / "health-package-pin.json"
 SOURCE_UPDATE_ENFORCED_OK_RE = re.compile(
     r"(?m)^source_update:\s+git_remote reachable\b.*\bmode=enforce\b"
 )
@@ -978,33 +983,247 @@ def alert_target_inventory(profile: dict[str, Any]) -> list[str]:
     return lines
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+RUNTIME_MANIFEST_MAX_MEMBERS = 1024
+RUNTIME_MANIFEST_MAX_READ_BYTES = 64 * 1024 * 1024
+RUNTIME_MANIFEST_MAX_EVIDENCE_BYTES = 64 * 1024
+
+
+class RuntimeManifestLimit(ValueError):
+    """A manifest exhausted an inventory-wide resource allowance."""
+
+
+class RuntimeManifestBudget:
+    def __init__(self) -> None:
+        self.read_remaining = RUNTIME_MANIFEST_MAX_READ_BYTES
+        self.evidence_remaining = RUNTIME_MANIFEST_MAX_EVIDENCE_BYTES
+        self.lines: list[str] = []
+
+    def append(self, line: str) -> None:
+        size = len(line.encode("utf-8")) + 1
+        if size > self.evidence_remaining:
+            raise RuntimeManifestLimit("evidence_output_limit")
+        self.evidence_remaining -= size
+        self.lines.append(line)
+
+    def require_read_capacity(self, size: int) -> None:
+        if size > self.read_remaining:
+            raise RuntimeManifestLimit("aggregate_read_limit")
+
+
+def runtime_file_bytes_and_sha256(
+    path: Path, max_bytes: int = 16 * 1024 * 1024, *, private_input: bool = False,
+    read_budget: RuntimeManifestBudget | None = None,
+) -> tuple[bytes, str]:
+    """Bind content and hashes to one bounded read through stable no-follow paths."""
+    absolute = path.absolute()
+    if ".." in absolute.parts:
+        raise OSError("parent traversal in runtime path")
+    if len(absolute.parts) >= 2:
+        platform_root = Path(absolute.parts[0]) / absolute.parts[1]
+        if platform_root in {Path("/tmp"), Path("/var")} and platform_root.is_symlink():
+            absolute = Path(os.path.realpath(platform_root)).joinpath(*absolute.parts[2:])
+    if not getattr(os, "O_NOFOLLOW", 0) or os.open not in os.supports_dir_fd:
+        raise OSError("secure runtime reads unavailable")
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    directories = [os.open(absolute.anchor, flags | os.O_DIRECTORY)]
+    bindings: list[tuple[int, str, os.stat_result]] = []
+    file_fd: int | None = None
+    try:
+        for part in absolute.parts[1:-1]:
+            parent_fd = directories[-1]
+            child_fd = os.open(part, flags | os.O_DIRECTORY, dir_fd=parent_fd)
+            directories.append(child_fd)
+            bindings.append((parent_fd, part, os.fstat(child_fd)))
+        parent_fd = directories[-1]
+        parent = os.fstat(parent_fd)
+        if private_input and (parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & 0o077):
+            raise OSError("runtime input requires a private current-user parent")
+        file_fd = os.open(absolute.name, flags | os.O_NONBLOCK, dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+            raise OSError("runtime input must be a bounded regular file")
+        if read_budget is not None:
+            read_budget.require_read_capacity(before.st_size)
+        if private_input and (
+            before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) & 0o077
+            or before.st_nlink != 1
+        ):
+            raise OSError("runtime input requires a private current-user single-link file")
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        remaining = max_bytes + 1
+        while remaining:
+            count = min(64 * 1024, remaining)
+            if read_budget is not None:
+                count = min(count, read_budget.read_remaining)
+            if not count:
+                break
+            chunk = os.read(file_fd, count)
+            if not chunk:
+                break
+            if read_budget is not None:
+                # Failed identity validation still consumed these bytes.
+                read_budget.require_read_capacity(len(chunk))
+                read_budget.read_remaining -= len(chunk)
+            chunks.append(chunk)
             digest.update(chunk)
-    return digest.hexdigest()
+            remaining -= len(chunk)
+        if not remaining:
+            raise OSError("runtime input exceeds size bound")
+        after = os.fstat(file_fd)
+        current = os.stat(absolute.name, dir_fd=parent_fd, follow_symlinks=False)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        identity = tuple(getattr(before, field) for field in fields)
+        if any(tuple(getattr(observed, field) for field in fields) != identity for observed in (after, current)):
+            raise OSError("runtime file changed during verification")
+        for directory_fd, name, opened in reversed(bindings):
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid) != (
+                current.st_dev, current.st_ino, current.st_mode, current.st_uid
+            ):
+                raise OSError("runtime directory changed during verification")
+        return b"".join(chunks), digest.hexdigest()
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for directory_fd in reversed(directories):
+            os.close(directory_fd)
 
 
-def load_runtime_manifest() -> tuple[dict[str, Any] | None, str | None]:
+def runtime_manifest_file_path() -> Path:
+    return Path(os.environ.get("BOT_ERRORS_RUNTIME_MANIFEST", REPO_ROOT / "deploy/bot-errors-runtime-manifest.json"))
+
+
+
+def load_runtime_manifest() -> tuple[dict[str, Any] | None, str | None, str | None]:
     raw = os.environ.get("BOT_ERRORS_RUNTIME_MANIFEST_JSON")
     if raw:
         try:
             loaded = json.loads(raw)
         except json.JSONDecodeError as exc:
-            return None, f"invalid BOT_ERRORS_RUNTIME_MANIFEST_JSON: {exc}"
+            return None, f"invalid BOT_ERRORS_RUNTIME_MANIFEST_JSON: {exc}", None
         if not isinstance(loaded, dict):
-            return None, "BOT_ERRORS_RUNTIME_MANIFEST_JSON must be an object"
-        return loaded, None
+            return None, "BOT_ERRORS_RUNTIME_MANIFEST_JSON must be an object", None
+        return loaded, None, None
 
-    path = Path(os.environ.get("BOT_ERRORS_RUNTIME_MANIFEST", REPO_ROOT / "deploy/bot-errors-runtime-manifest.json"))
+    path = runtime_manifest_file_path()
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        data, digest = runtime_file_bytes_and_sha256(path, max_bytes=1024 * 1024)
+        loaded = json.loads(data.decode("utf-8"))
     except Exception as exc:  # noqa: BLE001 - daily health should report manifest failure.
-        return None, f"cannot read runtime manifest {path}: {exc}"
+        return None, f"cannot read runtime manifest {path}: {exc}", None
     if not isinstance(loaded, dict):
-        return None, f"runtime manifest {path} must be an object"
-    return loaded, None
+        return None, f"runtime manifest {path} must be an object", None
+    return loaded, None, digest
+
+
+def runtime_manifest_entry_path(raw_path: str) -> tuple[Path | None, str | None]:
+    """Return a safe runtime-root-relative manifest path, or its failure code."""
+    relative = Path(raw_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None, "path_escapes_runtime_root"
+    if REPO_ROOT.is_symlink():
+        return None, "symlinked_runtime_root"
+    candidate = REPO_ROOT / relative
+    current = REPO_ROOT
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return None, "symlinked_path"
+    try:
+        candidate.resolve(strict=False).relative_to(REPO_ROOT.resolve(strict=False))
+    except ValueError:
+        return None, "path_escapes_runtime_root"
+    return candidate, None
+
+
+
+def _package_pin_value(pin: dict[str, Any], key: str, length: int) -> str | None:
+    value = pin.get(key)
+    if not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
+        return None
+    return value
+
+
+
+def is_runtime_package_root() -> bool:
+    return re.fullmatch(rf"{re.escape(RUNTIME_PACKAGE_ROOT_PREFIX)}[0-9a-f]{{12}}", REPO_ROOT.name) is not None
+
+
+
+def runtime_package_source_line(
+    manifest: dict[str, Any],
+    profile: dict[str, Any],
+    manifest_entries: dict[str, Path],
+    files_clean: bool,
+    loaded_manifest_sha256: str | None,
+    package_pin_path: Path | None = None,
+) -> str | None:
+    """Verify the installer's explicit export pin for every recognized package root.
+
+    The pin is produced after the installer has verified the immutable archive and its
+    member hashes.  It is deliberately outside the archive: putting its archive
+    or manifest digest inside a hashed package member creates a self-hash cycle.
+    """
+    if not is_runtime_package_root():
+        return None
+
+    pin_path = package_pin_path or RUNTIME_PACKAGE_PIN_PATH
+    try:
+        if pin_path.resolve(strict=False).is_relative_to(REPO_ROOT.resolve(strict=False)):
+            return "FAIL runtime_manifest package_source: pin_inside_runtime_root"
+    except (OSError, RuntimeError):
+        return "FAIL runtime_manifest package_source: pin_path_invalid"
+    pin, pin_error = read_private_json_record(pin_path, max_bytes=64 * 1024)
+    if pin_error is not None or pin is None:
+        return "FAIL runtime_manifest package_source: pin_missing"
+    if pin.get("schemaVersion") != 1:
+        return "FAIL runtime_manifest package_source: pin_schema_invalid"
+    if pin.get("owner") != RUNTIME_PACKAGE_OWNER:
+        return "FAIL runtime_manifest package_source: pin_owner_mismatch"
+    if pin.get("mode") not in RUNTIME_PACKAGE_MODES or profile.get("role") != pin.get("mode"):
+        return "FAIL runtime_manifest package_source: pin_mode_mismatch"
+
+    source_commit = _package_pin_value(pin, "sourceCommit", 40)
+    archive_sha256 = _package_pin_value(pin, "archiveSha256", 64)
+    manifest_sha256 = _package_pin_value(pin, "runtimeManifestSha256", 64)
+    root_name = pin.get("runtimeRootName")
+    if source_commit is None or archive_sha256 is None or manifest_sha256 is None or not isinstance(root_name, str):
+        return "FAIL runtime_manifest package_source: pin_identity_invalid"
+    expected_root_name = f"{RUNTIME_PACKAGE_ROOT_PREFIX}{source_commit[:12]}"
+    if root_name != expected_root_name or REPO_ROOT.name != expected_root_name:
+        return "FAIL runtime_manifest package_source: root_does_not_bind_expected_head"
+    if os.environ.get("BOT_ERRORS_RUNTIME_MANIFEST_JSON"):
+        return "FAIL runtime_manifest package_source: manifest_not_file_backed"
+
+    manifest_path = runtime_manifest_file_path()
+    expected_manifest_path = REPO_ROOT / "deploy" / "bot-errors-runtime-manifest.json"
+    if manifest_path != expected_manifest_path:
+        return "FAIL runtime_manifest package_source: manifest_not_bound_to_runtime_root"
+    safe_manifest_path, manifest_path_error = runtime_manifest_entry_path("deploy/bot-errors-runtime-manifest.json")
+    if manifest_path_error is not None or safe_manifest_path != manifest_path or not manifest_path.is_file():
+        return "FAIL runtime_manifest package_source: manifest_path_invalid"
+    try:
+        _, current_manifest_sha256 = runtime_file_bytes_and_sha256(manifest_path, max_bytes=1024 * 1024)
+        if current_manifest_sha256 != loaded_manifest_sha256:
+            return "FAIL runtime_manifest package_source: manifest_changed_during_verification"
+        if loaded_manifest_sha256 != manifest_sha256:
+            return "FAIL runtime_manifest package_source: manifest_digest_mismatch"
+    except OSError:
+        return "FAIL runtime_manifest package_source: manifest_digest_unreadable"
+    if manifest.get("expected_head_sha") != source_commit:
+        return "FAIL runtime_manifest package_source: manifest_expected_head_mismatch"
+
+    if not files_clean:
+        return "FAIL runtime_manifest package_source: required_file_hash_failure"
+    checker_path = manifest_entries.get(RUNTIME_MANIFEST_CHECKER_PATH)
+    if checker_path is None:
+        return "FAIL runtime_manifest package_source: running_checker_not_manifested"
+    if checker_path.resolve() != Path(__file__).resolve():
+        return "FAIL runtime_manifest package_source: running_checker_not_bound"
+    return f"git_head_sha: {source_commit} expected={source_commit} source=package match"
+
 
 
 def _run_git_rev_parse(repo_root: Path) -> tuple[str, str, int]:
@@ -1071,11 +1290,26 @@ def git_head_sha_line(manifest: dict[str, Any]) -> str:
     return f"FAIL git_head_sha: {actual_sha} expected={expected_sha} git_head_sha_mismatch"
 
 
-def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
+def runtime_manifest_inventory(profile: dict[str, Any], package_pin_path: Path | None = None) -> list[str]:
+    budget = RuntimeManifestBudget()
+    try:
+        lines = _runtime_manifest_inventory(profile, package_pin_path, budget)
+        if sum(len(line.encode("utf-8")) + 1 for line in lines) > RUNTIME_MANIFEST_MAX_EVIDENCE_BYTES:
+            raise RuntimeManifestLimit("evidence_output_limit")
+        return lines
+    except RuntimeManifestLimit as exc:
+        return [f"FAIL runtime_manifest: {exc}"]
+
+
+def _runtime_manifest_inventory(
+    profile: dict[str, Any], package_pin_path: Path | None, budget: RuntimeManifestBudget,
+) -> list[str]:
     if not profile_bool(profile, "expectRuntimeManifest", False):
+        if is_runtime_package_root():
+            return ["FAIL runtime_manifest package_source: profile_manifest_required"]
         return ["runtime_manifest: skipped by health profile"]
 
-    manifest, error = load_runtime_manifest()
+    manifest, error, manifest_sha256 = load_runtime_manifest()
     if error:
         return [f"FAIL runtime_manifest: {error}"]
     assert manifest is not None
@@ -1086,21 +1320,29 @@ def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
     files = manifest.get("files")
     if not isinstance(files, list):
         return ["FAIL runtime_manifest: files must be a list"]
+    if len(files) > RUNTIME_MANIFEST_MAX_MEMBERS:
+        raise RuntimeManifestLimit("member_count_limit")
 
-    lines = [f"runtime_manifest: files={len(files)} root={REPO_ROOT}"]
+    lines = budget
+    lines.append(f"runtime_manifest: files={len(files)} root={REPO_ROOT}")
     seen: set[str] = set()
+    manifest_entries: dict[str, Path] = {}
+    files_clean = True
     for index, item in enumerate(files):
         if not isinstance(item, dict):
             lines.append(f"FAIL runtime_manifest entry[{index}]: must be an object")
+            files_clean = False
             continue
         raw_path = item.get("path")
         expected = item.get("sha256")
         required_text = item.get("mustContain", item.get("requiredText", []))
         if not isinstance(raw_path, str) or not raw_path.strip():
             lines.append(f"FAIL runtime_manifest entry[{index}]: missing path")
+            files_clean = False
             continue
         if not isinstance(expected, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", expected):
             lines.append(f"FAIL runtime_manifest {raw_path}: invalid expected sha256")
+            files_clean = False
             continue
         if isinstance(required_text, str):
             required_markers = [required_text]
@@ -1109,36 +1351,47 @@ def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
             invalid_markers = len(required_markers) != len(required_text)
             if invalid_markers:
                 lines.append(f"FAIL runtime_manifest {raw_path}: mustContain entries must be strings")
+                files_clean = False
                 continue
         else:
             lines.append(f"FAIL runtime_manifest {raw_path}: mustContain must be a string or list")
+            files_clean = False
             continue
         if raw_path in seen:
             lines.append(f"FAIL runtime_manifest {raw_path}: duplicate path")
+            files_clean = False
             continue
         seen.add(raw_path)
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = REPO_ROOT / path
+        path, path_error = runtime_manifest_entry_path(raw_path)
+        if path_error is not None or path is None:
+            lines.append(f"FAIL runtime_manifest {raw_path}: {path_error or 'path_invalid'}")
+            files_clean = False
+            continue
         if not path.exists():
             lines.append(f"FAIL runtime_manifest {raw_path}: missing path={path}")
+            files_clean = False
+            continue
+        if not path.is_file():
+            lines.append(f"FAIL runtime_manifest {raw_path}: non_regular_path")
+            files_clean = False
             continue
         try:
-            actual = sha256_file(path)
+            content, actual = runtime_file_bytes_and_sha256(path, read_budget=budget)
         except OSError as exc:
             lines.append(f"FAIL runtime_manifest {raw_path}: cannot hash path={path} error={exc}")
+            files_clean = False
             continue
         missing_markers: list[str] = []
         if required_markers:
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                lines.append(f"FAIL runtime_manifest {raw_path}: cannot read markers path={path} error={exc}")
-                continue
+            text = content.decode("utf-8", errors="replace")
             for marker in required_markers:
                 if marker not in text:
                     missing_markers.append(marker)
-        prefix = "FAIL " if actual.lower() != expected.lower() else ""
+        entry_clean = actual.lower() == expected.lower() and not missing_markers
+        prefix = "" if entry_clean else "FAIL "
+        if not entry_clean:
+            files_clean = False
+        manifest_entries[raw_path] = path
         lines.append(
             f"{prefix}runtime_manifest {raw_path}: sha256={actual} expected={expected.lower()} "
             f"markers={len(required_markers)} missing_markers={len(missing_markers)} path={path}"
@@ -1147,8 +1400,21 @@ def runtime_manifest_inventory(profile: dict[str, Any]) -> list[str]:
             lines.append(
                 f"FAIL runtime_manifest {raw_path}: missing_marker={redact_evidence_string(marker, 120)} path={path}"
             )
-    lines.append(git_head_sha_line(manifest))
-    return lines
+    git_line = git_head_sha_line(manifest)
+    if is_runtime_package_root():
+        # Git searches ancestor directories; a matching parent HEAD cannot replace
+        # the package's external source pin.
+        package_line = runtime_package_source_line(
+            manifest, profile, manifest_entries, files_clean, manifest_sha256, package_pin_path,
+        )
+        lines.append(package_line or "FAIL runtime_manifest package_source: package_validation_unavailable")
+        if git_line != "WARN git_head_sha: not_a_git_repository":
+            lines.append(git_line)
+            if git_line.startswith("WARN "):
+                lines.append("FAIL runtime_manifest package_source: git_provenance_unavailable")
+    else:
+        lines.append(git_line)
+    return lines.lines
 
 
 def classify_source_update_failure(output: str, rc: int, timed_out: bool) -> str | None:
@@ -3924,6 +4190,15 @@ def format_health_probe(url: str, status: int, body: str = "", expected_name: st
     return f"{prefix}{status} {url}{suffix}"
 
 
+class _NoHealthRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Both probes carry bearer credentials that belong only to the configured endpoint.
+urlopen = build_opener(ProxyHandler({}), _NoHealthRedirect()).open
+
+
 def probe_health(port: int, expected_name: str | None = None) -> str:
     url = f"http://127.0.0.1:{port}/health"
     dry_body = os.environ.get("BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON")
@@ -3951,6 +4226,9 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
             body = response.read(64 * 1024).decode("utf-8", errors="replace")
             return format_health_probe(url, response.status, body, expected_name, token_sent, token_missing)
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            return f"FAIL {url} status={exc.code} redirect_refused"
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return format_health_probe(url, exc.code, body, expected_name, token_sent, token_missing)
     except URLError as exc:
@@ -7151,6 +7429,9 @@ def fleet_api_inventory(profile: dict[str, Any]) -> list[str]:
             body = response.read(256 * 1024).decode("utf-8", errors="replace")
             return [format_fleet_api_response(endpoint, response.status, body, token_source, True, accept_count)]
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            exc.close()
+            return [f"FAIL fleet_api: redirect_refused status={exc.code} endpoint={endpoint}"]
         body = exc.read(64 * 1024).decode("utf-8", errors="replace")
         return [format_fleet_api_response(endpoint, exc.code, body, token_source, True, accept_count)]
     except URLError as exc:
@@ -8313,11 +8594,25 @@ def critical_file_problem(path: Path) -> str | None:
     return None
 
 
-def read_private_json_record(path: Path) -> tuple[dict[str, Any] | None, str | None]:
-    problem = critical_file_problem(path)
-    if problem is not None:
-        return None, problem
-    return read_json_record(path)
+def read_private_json_record(
+    path: Path, max_bytes: int | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if max_bytes is None:
+        problem = critical_file_problem(path)
+        if problem is not None:
+            return None, problem
+        return read_json_record(path)
+    try:
+        raw, _ = runtime_file_bytes_and_sha256(path, max_bytes=max_bytes, private_input=True)
+    except OSError:
+        return None, "private JSON unavailable or exceeds size bound"
+    try:
+        loaded = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        return None, str(exc)
+    if not isinstance(loaded, dict):
+        return None, "JSON root is not an object"
+    return loaded, None
 
 
 def bool_map(value: Any) -> dict[str, bool]:
@@ -9920,6 +10215,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="BOT ERRORS health and deadman checks")
     parser.add_argument("--daily", action="store_true")
     parser.add_argument("--deadman", action="store_true")
+    parser.add_argument("--runtime-manifest", action="store_true")
+    parser.add_argument("--runtime-package-pin", type=Path)
     parser.add_argument("--record-primary-phone-verification", metavar="INSTANCE")
     parser.add_argument("--owner", default="")
     parser.add_argument("--method", default="operator_linked_devices_check")
@@ -9935,6 +10232,8 @@ def main() -> int:
     )
     parser.add_argument("--deadman-cooldown", type=int, default=positive_env_int("BOT_ERRORS_DEADMAN_COOLDOWN_SECONDS", 1800))
     args = parser.parse_args()
+    if args.runtime_package_pin is not None and not args.runtime_manifest:
+        parser.error("--runtime-package-pin requires --runtime-manifest")
 
     if args.record_primary_phone_verification:
         try:
@@ -9953,6 +10252,15 @@ def main() -> int:
             f"instance={args.record_primary_phone_verification} state_file={path}"
         )
         return 0
+    if args.runtime_manifest:
+        try:
+            profile = load_health_profile()
+        except FleetConfigError as exc:
+            print(f"bot-errors-health-check: fail-closed: {exc}", file=sys.stderr)
+            return 2
+        lines = runtime_manifest_inventory(profile, args.runtime_package_pin)
+        print("\n".join(lines))
+        return 2 if any(line.startswith("FAIL ") for line in lines) else 0
     if args.daily:
         return daily()
     if args.deadman:

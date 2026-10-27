@@ -1,4 +1,5 @@
 import type { ExecFileSyncOptions } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -106,13 +107,29 @@ describe('ci-control git fixture spawns', () => {
 
   it('bounds the stdin-fed fixture git spawn and still passes its input', async () => {
     const input = Buffer.from('fixture\n');
-    const spawns = await captureFixtureSpawns(({ hashBlob }) => {
-      hashBlob(FIXTURE_ROOT, input);
+    const spawns = await captureFixtureSpawns(({ gitWithInput }) => {
+      gitWithInput(FIXTURE_ROOT, ['hash-object', '-w', '--stdin'], input);
     });
     expect(spawns).toHaveLength(1);
     expect(spawns[0]!.args).toEqual(['hash-object', '-w', '--stdin']);
     expectBoundedSpawn(spawns[0]!);
     expect(spawns[0]!.options.input).toBe(input);
+  }, 5_000);
+
+  it('hashes raw fixture bytes through a bounded file input without a stdin pipe', async () => {
+    const input = Buffer.from([0, 0xff, 0x0d, 0x0a]);
+    await withMockedFixtureSpawn((file, args, options) => {
+      expectBoundedSpawn({ file, args, options });
+      expect(args.slice(0, 4)).toEqual(['hash-object', '-w', '--no-filters', '--']);
+      expect(args).toHaveLength(5);
+      expect(options.cwd).toBe(FIXTURE_ROOT);
+      expect(options.stdio?.[0]).toBe('ignore');
+      expect(options.input).toBeUndefined();
+      expect(readFileSync(args[4]!)).toEqual(input);
+      return blobOid(input);
+    }, ({ hashBlob }) => {
+      expect(hashBlob(FIXTURE_ROOT, input)).toBe(blobOid(input));
+    });
   }, 5_000);
 
   it('reports the args, cwd and bounded partial stderr when a fixture git times out', async () => {
@@ -156,7 +173,7 @@ describe('ci-control git fixture spawns against real git', () => {
 
   // The 30 s spawn bound must sit far above a healthy run, or a kill would
   // mask a slow-but-correct git instead of a stuck one.
-  it('hashes a small blob through stdin well inside the spawn bound', () => {
+  it('hashes a small blob well inside the spawn bound', () => {
     const { root } = fixture();
     const bytes = Buffer.from('bounded fixture spawn\n');
     const started = performance.now();

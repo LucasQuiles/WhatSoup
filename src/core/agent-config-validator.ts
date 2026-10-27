@@ -57,6 +57,8 @@ import {
 } from '../lib/opencode-execution-profile-contract.ts';
 import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
 import { parseClientOutputPoliciesForInstance } from './client-output-policy-config.ts';
+import { validateHandoffDistillConfig } from '../lib/handoff-distill-config.ts';
+import { validateM365BridgeAgentOptions } from './m365-bridge-policy.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -773,6 +775,7 @@ function opencodeModelPrefixResolvesToService(model: unknown): boolean {
   return service !== null && PROVIDER_API_KEY_SERVICES.has(service) && Boolean(SERVICE_ENV_MAP[service]);
 }
 
+
 function validateAgentOptions(
   raw: Record<string, unknown>,
   ctx: ValidatorContext,
@@ -896,18 +899,8 @@ function validateAgentOptions(
     }
   }
 
-  // allowM365Mutations (#411): per-instance opt-in for propagating the
-  // `ALLOW_M365_MUTATIONS` env var when WHATSOUP_CONNECTOR_FAILCLOSED=1.
-  // The REQUIRED_DENY floor is enforced separately in settings templates.
-  if (
-    opts['allowM365Mutations'] !== undefined &&
-    typeof opts['allowM365Mutations'] !== 'boolean'
-  ) {
-    return err(
-      'agentOptions.allowM365Mutations',
-      'agentOptions.allowM365Mutations must be a boolean when provided',
-    );
-  }
+  const m365BridgeErr = validateM365BridgeAgentOptions(opts);
+  if (m365BridgeErr) return err(m365BridgeErr.field, m365BridgeErr.message);
 
   // nlRouting: flag-gated NL-first routing aliases + per-sender preference
   // store. Strictly boolean — config.ts arms it with `=== true`, so a
@@ -989,6 +982,9 @@ function validateAgentOptions(
       );
     }
   }
+
+  const handoffDistillErr = validateHandoffDistillConfig(opts['handoffDistill']);
+  if (handoffDistillErr) return err(handoffDistillErr.field, handoffDistillErr.message);
 
   const catchupErr = validateTurnRecoveryCatchupReconcileConfig(opts['turnRecoveryCatchupReconcile']);
   if (catchupErr) return err(catchupErr.field, catchupErr.message);

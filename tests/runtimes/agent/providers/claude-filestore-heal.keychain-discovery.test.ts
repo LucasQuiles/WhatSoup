@@ -1,39 +1,34 @@
-// Keychain service-name discovery for the claude file-store heal.
+// Keychain item selection for the claude credential-store check.
 //
-// The unit suite (claude-filestore-heal.test.ts) injects readKeychain wholesale,
-// so the DEFAULT reader's service-name resolution was never exercised — and it
-// only ever tried the bare item name. Hosts where the claude CLI stored the
-// credential under a hash-suffixed service name (the mini11/mini10 shape,
-// e.g. `<bare>-9821b58b`) made the heal permanently return
-// 'skipped-no-keychain-token' while a live credential sat in the keychain.
-// These tests pin the discovery contract: bare name first, then prefix
-// enumeration from `security dump-keychain` METADATA (never `-d`), newest
-// mdat wins.
+// The claude CLI stores the login for a config dir under its own keychain item:
+// the bare service name when neither dir variable is set, and
+// `<bare>-<first 8 hex of sha256(dir)>` otherwise, where dir is
+// CLAUDE_SECURESTORAGE_CONFIG_DIR when set and CLAUDE_CONFIG_DIR else. The
+// check reads exactly one item: the bot's own. Reading the bare item (the
+// operator's default login) or discovering any other suffixed item (another
+// bot's or the maintenance job's login) would describe a different login.
+// These tests pin that contract: one `find-generic-password` for the own item,
+// no `dump-keychain` discovery, never the bare item.
 import { describe, expect, it } from 'vitest';
 import {
-  parseKeychainServiceCandidates,
+  claudeCredentialServiceFor,
+  claudeCredentialServiceForEnv,
+  ensureClaudeFileStoreCredential,
   readKeychainViaSecurity,
+  type ClaudeFileStoreHealDeps,
 } from '../../../../src/runtimes/agent/providers/claude-filestore-heal.ts';
 
 // Assembled from parts for the same reason as the implementation: this is the
 // OS keychain service name, not an attribution string.
 const SVC = ['Claude', 'Code-credentials'].join(' ');
-
-/** One dump-keychain item block in the real `security dump-keychain` shape (metadata only). */
-function dumpItem(svce: string, mdat: string, acct = 'phil'): string {
-  return [
-    'keychain: "/tmp/fixture-home/Library/Keychains/login.keychain-db"',
-    'version: 512',
-    'class: "genp"',
-    'attributes:',
-    `    0x00000007 <blob>="${svce}"`,
-    '    0x00000008 <blob>=<NULL>',
-    `    "acct"<blob>="${acct}"`,
-    `    "cdat"<timedate>=0x32303236  "20260601000000Z\\000"`,
-    `    "mdat"<timedate>=0x32303236  "${mdat}\\000"`,
-    `    "svce"<blob>="${svce}"`,
-  ].join('\n');
-}
+const CONFIG_DIR = '/tmp/wsheal/.claude';
+// Independent oracle: `printf %s /tmp/wsheal/.claude | shasum -a 256 | cut -c1-8`.
+const OWN = `${SVC}-a05f6ba6`;
+const OTHER = `${SVC}-9821b58b`;
+const SECURE_DIR = '/tmp/wsheal-secure/.claude';
+// Independent oracle: `printf %s /tmp/wsheal-secure/.claude | shasum -a 256 | cut -c1-8`.
+const SECURE = `${SVC}-197a7c7a`;
+const NOW = 1_783_000_000_000;
 
 type ExecCall = string[];
 
@@ -54,124 +49,137 @@ const isFind = (svc: string) => (args: string[]) =>
   args[0] === 'find-generic-password' && args.includes('-s') && args[args.indexOf('-s') + 1] === svc;
 const isDump = (args: string[]) => args[0] === 'dump-keychain';
 
-describe('parseKeychainServiceCandidates', () => {
-  it('returns only prefix-matching service names, bare name first, then newest mdat first', () => {
-    const dump = [
-      dumpItem('whatsoup-health-token', '20260728000000Z'),
-      dumpItem(`${SVC}-11111111`, '20260601000000Z'),
-      dumpItem(SVC, '20260501000000Z'),
-      dumpItem(`${SVC}-9821b58b`, '20260727161430Z'),
-      dumpItem('com.bes.agent365.ph-bot', '20260725000000Z'),
-    ].join('\n');
-    expect(parseKeychainServiceCandidates(dump)).toEqual([
-      SVC,
-      `${SVC}-9821b58b`,
-      `${SVC}-11111111`,
-    ]);
+function blob(expiresAt: number): string {
+  return JSON.stringify({ claudeAiOauth: { accessToken: 'tok', refreshToken: 'r', expiresAt } });
+}
+
+/** A service-keyed keychain reader over `items`; records every service it is asked for. */
+function keychain(items: Record<string, string>) {
+  const asked: string[] = [];
+  const read = (service: string): string | null => {
+    asked.push(service);
+    return items[service] ?? null;
+  };
+  return { read, asked };
+}
+
+function deps(over: Partial<ClaudeFileStoreHealDeps> = {}): ClaudeFileStoreHealDeps {
+  return {
+    platform: 'darwin',
+    env: { CLAUDE_CONFIG_DIR: CONFIG_DIR },
+    now: () => NOW,
+    readFileStore: () => null,
+    log: { info: () => {}, warn: () => {} },
+    ...over,
+  };
+}
+
+describe('claudeCredentialServiceFor', () => {
+  it('suffixes the bare service with the first 8 hex of sha256 of the config dir string', () => {
+    expect(claudeCredentialServiceFor(CONFIG_DIR)).toBe(OWN);
   });
 
-  it('handles the hash-suffixed-only shape (mini11/mini10): no bare item present', () => {
-    const dump = dumpItem(`${SVC}-9821b58b`, '20260727161430Z');
-    expect(parseKeychainServiceCandidates(dump)).toEqual([`${SVC}-9821b58b`]);
+  it('hashes the string exactly as set: a trailing slash is a different item', () => {
+    // `printf %s /tmp/wsheal/.claude/ | shasum -a 256 | cut -c1-8`
+    expect(claudeCredentialServiceFor(`${CONFIG_DIR}/`)).toBe(`${SVC}-f507d060`);
+  });
+});
+
+describe('claudeCredentialServiceForEnv', () => {
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR overrides CLAUDE_CONFIG_DIR for the item suffix', () => {
+    // `printf %s /tmp/wsheal-secure/.claude | shasum -a 256 | cut -c1-8`
+    expect(claudeCredentialServiceForEnv({
+      CLAUDE_CONFIG_DIR: CONFIG_DIR,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: SECURE_DIR,
+    })).toBe(SECURE);
   });
 
-  it('returns [] for a dump with no matching items', () => {
-    const dump = dumpItem('whatsoup-health-token', '20260728000000Z');
-    expect(parseKeychainServiceCandidates(dump)).toEqual([]);
+  it('uses CLAUDE_CONFIG_DIR when CLAUDE_SECURESTORAGE_CONFIG_DIR is unset', () => {
+    expect(claudeCredentialServiceForEnv({ CLAUDE_CONFIG_DIR: CONFIG_DIR })).toBe(OWN);
   });
 
-  it('deduplicates repeated service names and tolerates a missing mdat', () => {
-    const noMdat = [
-      'keychain: "/tmp/fixture-home/Library/Keychains/login.keychain-db"',
-      'class: "genp"',
-      'attributes:',
-      `    "svce"<blob>="${SVC}-aaaa0000"`,
-    ].join('\n');
-    const dump = [
-      dumpItem(`${SVC}-9821b58b`, '20260727161430Z'),
-      dumpItem(`${SVC}-9821b58b`, '20260727161430Z'),
-      noMdat,
-    ].join('\n');
-    // A missing mdat sorts last; duplicates collapse.
-    expect(parseKeychainServiceCandidates(dump)).toEqual([
-      `${SVC}-9821b58b`,
-      `${SVC}-aaaa0000`,
-    ]);
+  it('names the bare item when neither is set, or CLAUDE_SECURESTORAGE_CONFIG_DIR is set but empty', () => {
+    expect(claudeCredentialServiceForEnv({})).toBe(SVC);
+    expect(claudeCredentialServiceForEnv({ CLAUDE_CONFIG_DIR: CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR: '' })).toBe(SVC);
   });
 });
 
 describe('readKeychainViaSecurity', () => {
-  it('returns the bare item without ever dumping when the bare name exists', () => {
-    const { exec, calls } = fakeExec([{ match: isFind(SVC), out: '{"claudeAiOauth":{}}\n' }]);
-    expect(readKeychainViaSecurity(exec)).toBe('{"claudeAiOauth":{}}');
-    expect(calls).toHaveLength(1);
+  it('reads only the named item, with one find-generic-password and no discovery', () => {
+    const { exec, calls } = fakeExec([
+      { match: isFind(OWN), out: '{"claudeAiOauth":{}}\n' },
+      { match: isFind(SVC), out: 'bare-payload' },
+      { match: isDump, out: 'dump' },
+    ]);
+    expect(readKeychainViaSecurity(exec, OWN)).toBe('{"claudeAiOauth":{}}');
+    expect(calls).toEqual([['find-generic-password', '-s', OWN, '-w']]);
+  });
+
+  it('returns null when the own item is absent, even though the bare item exists', () => {
+    const { exec, calls } = fakeExec([{ match: isFind(SVC), out: 'bare-payload' }]);
+    expect(readKeychainViaSecurity(exec, OWN)).toBeNull();
+    expect(calls.some(isFind(SVC))).toBe(false);
     expect(calls.some(isDump)).toBe(false);
   });
 
-  it('falls back to prefix discovery and reads the hash-suffixed item (mini11/mini10 shape)', () => {
+  it('reads only the own item when another suffixed item also exists', () => {
     const { exec, calls } = fakeExec([
-      { match: isFind(SVC), out: null },
-      { match: isDump, out: dumpItem(`${SVC}-9821b58b`, '20260727161430Z') },
-      { match: isFind(`${SVC}-9821b58b`), out: '{"claudeAiOauth":{"accessToken":"t"}}' },
+      { match: isFind(OTHER), out: 'other-payload' },
+      { match: isFind(OWN), out: 'own-payload' },
     ]);
-    expect(readKeychainViaSecurity(exec)).toBe('{"claudeAiOauth":{"accessToken":"t"}}');
-    expect(calls.some(isFind(`${SVC}-9821b58b`))).toBe(true);
+    expect(readKeychainViaSecurity(exec, OWN)).toBe('own-payload');
+    expect(calls.some(isFind(OTHER))).toBe(false);
+    expect(calls.some(isDump)).toBe(false);
   });
 
-  it('REFUSES when several suffixed items exist: ambiguous account identity, no secret reads', () => {
-    // The module contract says the heal "never changes which account is used".
-    // The credential blobs carry no comparable account identity, so with two or
-    // more suffixed candidates the right item is unknowable — mirroring the
-    // newest-modified one could silently switch the bot to another account's
-    // token. Refuse instead (fail-open, same as the pre-discovery behavior on
-    // such hosts), and do not read any candidate's secret bytes on the way out.
-    const dump = [
-      dumpItem(`${SVC}-old00000`, '20260601000000Z'),
-      dumpItem(`${SVC}-new00000`, '20260727161430Z'),
-    ].join('\n');
-    const { exec, calls } = fakeExec([
-      { match: isFind(SVC), out: null },
-      { match: isDump, out: dump },
-      { match: isFind(`${SVC}-new00000`), out: 'newest-payload' },
-      { match: isFind(`${SVC}-old00000`), out: 'older-payload' },
-    ]);
-    expect(readKeychainViaSecurity(exec)).toBeNull();
-    expect(calls.some(isFind(`${SVC}-new00000`))).toBe(false);
-    expect(calls.some(isFind(`${SVC}-old00000`))).toBe(false);
+  it('returns null for an empty own item', () => {
+    const { exec } = fakeExec([{ match: isFind(OWN), out: '   ' }]);
+    expect(readKeychainViaSecurity(exec, OWN)).toBeNull();
+  });
+});
+
+describe('ensureClaudeFileStoreCredential keychain item selection', () => {
+  it('bare item present and own item absent: reads only the own item', () => {
+    const kc = keychain({ [SVC]: blob(NOW + 60_000) });
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: kc.read }));
+    expect(r.outcome).toBe('skipped-no-keychain-token');
+    expect(kc.asked).toEqual([OWN]);
   });
 
-  it('returns null when the single suffixed item is empty (no other candidate to fall to)', () => {
-    const { exec } = fakeExec([
-      { match: isFind(SVC), out: null },
-      { match: isDump, out: dumpItem(`${SVC}-new00000`, '20260727161430Z') },
-      { match: isFind(`${SVC}-new00000`), out: '   ' },
-    ]);
-    expect(readKeychainViaSecurity(exec)).toBeNull();
+  it('two suffixed items including the own one: reads the own one only', () => {
+    const kc = keychain({ [OTHER]: blob(NOW + 120_000), [OWN]: blob(NOW + 60_000) });
+    const r = ensureClaudeFileStoreCredential(deps({ readKeychain: kc.read }));
+    expect(r).toMatchObject({ outcome: 'skipped-cli-reads-own-item', keychainExpiresAt: NOW + 60_000 });
+    expect(kc.asked).toEqual([OWN]);
   });
 
-  it('returns null when neither the bare item nor any suffixed item exists', () => {
-    const { exec, calls } = fakeExec([
-      { match: isFind(SVC), out: null },
-      { match: isDump, out: dumpItem('whatsoup-health-token', '20260728000000Z') },
-    ]);
-    expect(readKeychainViaSecurity(exec)).toBeNull();
-    expect(calls.filter(isDump)).toHaveLength(1);
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR set: checks that item and the file store in that dir', () => {
+    const kc = keychain({ [OWN]: blob(NOW + 60_000), [SECURE]: blob(NOW + 90_000) });
+    const filePaths: string[] = [];
+    const r = ensureClaudeFileStoreCredential(deps({
+      env: { CLAUDE_CONFIG_DIR: CONFIG_DIR, CLAUDE_SECURESTORAGE_CONFIG_DIR: SECURE_DIR },
+      readKeychain: kc.read,
+      readFileStore: (path) => { filePaths.push(path); return null; },
+    }));
+    expect(r).toMatchObject({ outcome: 'skipped-cli-reads-own-item', keychainExpiresAt: NOW + 90_000 });
+    expect(kc.asked).toEqual([SECURE]);
+    expect(filePaths).toEqual([`${SECURE_DIR}/.credentials.json`]);
   });
 
-  it('returns null when the dump itself is unreadable', () => {
-    const { exec } = fakeExec([{ match: isFind(SVC), out: null }, { match: isDump, out: null }]);
-    expect(readKeychainViaSecurity(exec)).toBeNull();
+  it('CLAUDE_SECURESTORAGE_CONFIG_DIR alone (no CLAUDE_CONFIG_DIR) still selects its own item', () => {
+    const kc = keychain({ [SECURE]: blob(NOW + 90_000) });
+    const r = ensureClaudeFileStoreCredential(deps({
+      env: { CLAUDE_SECURESTORAGE_CONFIG_DIR: SECURE_DIR },
+      readKeychain: kc.read,
+    }));
+    expect(r.outcome).toBe('skipped-cli-reads-own-item');
+    expect(kc.asked).toEqual([SECURE]);
   });
 
-  it('never requests secret bytes from the dump: no exec call combines dump-keychain with -d', () => {
-    const { exec, calls } = fakeExec([
-      { match: isFind(SVC), out: null },
-      { match: isDump, out: dumpItem(`${SVC}-9821b58b`, '20260727161430Z') },
-      { match: isFind(`${SVC}-9821b58b`), out: 'payload' },
-    ]);
-    readKeychainViaSecurity(exec);
-    for (const call of calls) {
-      if (isDump(call)) expect(call).not.toContain('-d');
-    }
+  it('unset CLAUDE_CONFIG_DIR: reads no keychain item at all', () => {
+    const kc = keychain({ [SVC]: blob(NOW + 60_000) });
+    const r = ensureClaudeFileStoreCredential(deps({ env: {}, readKeychain: kc.read }));
+    expect(r.outcome).toBe('skipped-no-config-dir');
+    expect(kc.asked).toEqual([]);
   });
 });

@@ -125,6 +125,7 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -293,6 +294,7 @@ import {
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
@@ -380,6 +382,7 @@ import {
   drainMessageHandlersForShutdown,
 } from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import { scrubbedAuthStatusEnv } from './providers/account-auth-status.ts';
 import {
   AccountIdentityVerifier,
   type AccountIdentityProbeTrigger,
@@ -705,6 +708,8 @@ export class AgentRuntime implements Runtime {
   private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
@@ -795,6 +800,7 @@ export class AgentRuntime implements Runtime {
   // to resolve. Initialized in the constructor (needs db + instanceName + the
   // config readers, which stay on AgentRuntime for the health/context callers).
   private readonly handoffDistill: HandoffDistillCoordinator;
+  private readonly typedHandoffDistill: TypedHandoffDistillConfig | undefined;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   // Provider-fallback window lifecycle scalars (active-until / activated-at /
   // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
@@ -2700,11 +2706,14 @@ export class AgentRuntime implements Runtime {
       emitAlert: emitAlertChecked,
       clearAlert: clearAlertSourceChecked,
     });
+    const typedHandoffDistill = options?.handoffDistill;
+    this.typedHandoffDistill = typedHandoffDistill;
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
-      isEnabled: () => handoffDistillerEnabled(),
-      getModel: () => handoffDistillModel(),
+      isEnabled: () => typedHandoffDistill?.enabled ?? handoffDistillerEnabled(),
+      getModel: () => typedHandoffDistill?.model ?? handoffDistillModel(),
+      getConfig: typedHandoffDistill ? () => typedHandoffDistill.config : undefined,
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
@@ -2742,6 +2751,13 @@ export class AgentRuntime implements Runtime {
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.m365MutationPolicy = resolveM365MutationPolicy({
+      instanceName: this.instanceName,
+      provider: this.agentProvider,
+      allowM365Mutations: this.allowM365Mutations,
+      enabledPlugins: this.enabledPlugins,
+      binding: options?.m365Bridge,
+    });
     this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
     this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
@@ -3009,9 +3025,12 @@ export class AgentRuntime implements Runtime {
       get agentFallbackDiscovery() { return runtime.agentFallbackDiscovery; },
       get modelCatalogueListFn() { return runtime.modelCatalogueListFn; },
       get allowM365Mutations() { return runtime.allowM365Mutations; },
+      get m365MutationPolicy() { return runtime.m365MutationPolicy; },
+      get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
       get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
       get egressProxy() { return runtime.egressProxy; },
+      get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
@@ -3960,6 +3979,13 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  getM365SettingsPolicy(): M365MutationPolicy | undefined {
+    if (this.m365MutationPolicy === undefined) return undefined;
+    // Grant reconciliation runs before startup restores a persisted fallback.
+    return this.m365SettingsPolicyReady && !this.isFallbackWindowActive
+      ? this.m365MutationPolicy : { status: 'rejected' };
+  }
+
   async start(): Promise<void> {
     // Refuse configured paths before startup writes or provider setup.
     const home = homedir();
@@ -3985,6 +4011,7 @@ export class AgentRuntime implements Runtime {
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
     this.fallback.restorePersistedFallbackWindow();
+    this.m365SettingsPolicyReady = true;
     // Periodic real-completion canary over the chain (no-op unless
     // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
     this.fallback.startChainCanary();
@@ -4072,7 +4099,10 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
+          hasSandbox: !!this.sandbox,
+          m365MutationPolicy: this.getM365SettingsPolicy(),
+        });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
         // global hooks, permissions, or plugins.
@@ -4586,13 +4616,14 @@ export class AgentRuntime implements Runtime {
       } : null,
     });
 
-    // Heal the claude file-store credential from the keychain BEFORE the first
-    // turn can run, so a keychain-only refresh (native login) can't false-arm
-    // the provider fallback on turn 1 (the recovery probe path heals for the
-    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
-    // the file store is already current. Fail-open by contract.
+    // Detect duplicate credential stores before serving; copying refresh tokens
+    // would leave a stale second copy available to the CLI.
     if (this.agentProvider === 'claude-cli') {
-      ensureClaudeFileStoreCredential();
+      try {
+        ensureClaudeFileStoreCredential();
+      } catch (error) {
+        log.warn({ error }, 'could not check Claude credential stores at runtime startup');
+      }
     }
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
@@ -9608,34 +9639,42 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  private isPeriodicUsabilityProbeExpected(): boolean {
+    return this.periodicUsabilityProbeTimer !== null
+      || (this.periodicUsabilityProbeDueAt !== null && this.primaryModelUsability?.probeInFlight === true);
+  }
+
   /** The freshness window the live verdict is judged against: scheduler-derived
-   *  while the periodic probe is armed, the flat 30min otherwise. */
-  private modelUsabilityFreshnessMs(): number {
+   *  while the periodic probe is armed or in flight, the flat 30min otherwise. `checkedAt`
+   *  is the evidence's own receipt time (model usability by default). */
+  private modelUsabilityFreshnessMs(checkedAt: number | null = this.primaryModelUsability?.checkedAt ?? null): number {
     return resolveModelUsabilityFreshnessMs(
-      this.periodicUsabilityProbeTimer !== null,
+      this.isPeriodicUsabilityProbeExpected(),
       periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
-      {
-        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
-        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
-      },
+      { nextProbeDueAt: this.periodicUsabilityProbeDueAt, checkedAt },
     );
   }
 
-  /** Freshness-honest identity verdict for /health, judged against the same
-   *  window as model usability (the identity check rides the same probe). */
+  /** Freshness-honest identity verdict for /health. The deadline is the same
+   *  next probe as model usability (the identity check rides it), but the
+   *  window starts at the identity receipt: a turn success refreshes the
+   *  usability checkedAt only, and must not age the identity receipt early. */
   private accountIdentityHealth(): AccountIdentityHealth {
+    const receipt = this.accountIdentity;
     return deriveAccountIdentityHealth({
       expectedConfigured: this.expectedAccountDigest !== null,
-      verification: this.accountIdentity,
+      verification: receipt,
       armedAtMs: this.accountIdentityArmedAt,
       nowMs: systemClock.now(),
-      freshnessMs: this.modelUsabilityFreshnessMs(),
+      freshnessMs: receipt !== null && receipt.status !== 'disabled'
+        ? this.modelUsabilityFreshnessMs(receipt.checkedAt)
+        : this.modelUsabilityFreshnessMs(),
     });
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const periodicProbeExpected = this.isPeriodicUsabilityProbeExpected();
     const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
     const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
@@ -9807,20 +9846,8 @@ export class AgentRuntime implements Runtime {
           getProviderBinary,
           probeBinaryAuthStatus,
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
-          // Explicit allowlist — never hand the CLI probe the full process env.
-          // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads
-          // creds from the same place as the model probe + turns (launchd keychain
-          // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
-          env: {
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            HOME: process.env['HOME'],
-            // env-allowed: ambient OS PATH contract for executable resolution
-            PATH: process.env['PATH'],
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            USER: process.env['USER'],
-            // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-            ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
-          },
+          // env-allowed: shared explicit allow-list preserves the serving credential selectors
+          env: scrubbedAuthStatusEnv(process.env),
         },
       });
       void runDiagnosticBundle({ workflow: wf, probes, now })
@@ -10417,7 +10444,7 @@ export class AgentRuntime implements Runtime {
     conversationKey: string,
     provider: string,
   ): (() => string | null) | undefined {
-    if (!handoffContextEnabled()) return undefined;
+    if (!(this.typedHandoffDistill?.contextInjection ?? handoffContextEnabled())) return undefined;
     if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
     return () => {
       // Seed the distilled handoff context only into a STAND-IN session spawned
@@ -10545,6 +10572,23 @@ export class AgentRuntime implements Runtime {
       this.singletonProviderToolSession = providerToolSession;
     }
 
+    // Provider identity alone cannot distinguish a same-provider fallback.
+    const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
+      && route.provider === this.agentProvider && route.model === this.model
+      && opts.providerConfigOverride === undefined;
+    const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
+      ? undefined
+      : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+
+    // Each sandbox cwd owns its settings; route changes must restore the deny
+    // floor before a fallback can reuse a workspace approved for the primary.
+    if (this.sandboxPerChat && opts.cwd) {
+      ensurePermissionsSettings(join(opts.cwd, '.claude'), 'agent', this.enabledPlugins, {
+        hasSandbox: true,
+        m365MutationPolicy: sessionM365Policy,
+      });
+    }
+
     const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
@@ -10561,7 +10605,8 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: route.model,
       pluginDirs: this.pluginDirs,
-      allowM365Mutations: this.allowM365Mutations,
+      allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
+      m365MutationPolicy: sessionM365Policy,
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }

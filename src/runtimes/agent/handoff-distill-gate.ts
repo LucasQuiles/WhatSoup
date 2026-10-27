@@ -101,7 +101,8 @@ export function evaluateDistillGate(args: {
   if (globalInFlight >= config.globalConcurrency) return deny('global-saturated');
   // Per-conversation budget — a half-open trial still costs, so it is gated too.
   if (nextState.callsThisWindow >= config.maxCallsPerWindow) return deny('budget-calls');
-  if (nextState.tokensThisWindow >= config.maxTokensPerWindow) return deny('budget-tokens');
+  if (!Number.isSafeInteger(nextState.tokensThisWindow) || nextState.tokensThisWindow < 0 ||
+      nextState.tokensThisWindow >= config.maxTokensPerWindow) return deny('budget-tokens');
 
   return { allow: true, reason: 'ok', nextState };
 }
@@ -113,10 +114,11 @@ export function recordDistillSuccess(
   now: number,
   config: DistillBudgetConfig,
 ): DistillState {
+  if (!Number.isSafeInteger(tokensUsed) || tokensUsed < 0) throw new Error('invalid handoff token usage');
   const rolled = rollWindow(state, now, config.windowMs);
   return {
     ...rolled,
-    tokensThisWindow: rolled.tokensThisWindow + Math.max(0, tokensUsed),
+    tokensThisWindow: Math.min(Number.MAX_SAFE_INTEGER, rolled.tokensThisWindow + tokensUsed),
     callsThisWindow: rolled.callsThisWindow + 1,
     consecutiveFailures: 0,
     breaker: 'closed',

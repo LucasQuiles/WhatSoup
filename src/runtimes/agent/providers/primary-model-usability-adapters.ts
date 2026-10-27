@@ -1,4 +1,5 @@
 import { buildChildEnv, getProviderBinary } from '../session.ts';
+import { scrubbedAuthStatusEnv } from './account-auth-status.ts';
 import { buildOpenCodeRunArgs } from './opencode-execution-profile.ts';
 import { classifyProviderFailure } from '../failure-taxonomy.ts';
 import {
@@ -8,10 +9,7 @@ import {
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from '../../../lib/api-key-resolver.ts';
-import {
-  ensureClaudeFileStoreCredential,
-  type ClaudeFileStoreHealResult,
-} from './claude-filestore-heal.ts';
+import { ensureClaudeFileStoreCredential, type ClaudeFileStoreHealResult } from './claude-filestore-heal.ts';
 import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
@@ -43,8 +41,8 @@ export interface PrimaryModelProbeAdapterDeps {
   resolveApiKey?: (opts: ResolveApiKeyOptions) => string;
   fetch?: typeof fetch;
   /**
-   * Self-heal the claude file-store credential from the keychain before a
-   * claude-cli probe (see claude-filestore-heal.ts). Injectable for tests.
+   * Detect duplicate credential stores before a claude-cli probe without
+   * copying credentials (see claude-filestore-heal.ts). Injectable for tests.
    */
   ensureClaudeFileStoreCredential?: () => ClaudeFileStoreHealResult;
   /**
@@ -174,21 +172,15 @@ async function probeCliModel(
   }
   if (!binary) return { status: 'provider_unavailable' };
 
-  // Before probing claude-cli, ensure the file store the CLI is pinned to (via
-  // CLAUDE_CONFIG_DIR) actually holds a usable token, mirroring it from the
-  // keychain when stale/missing. Without this the probe false-negatives to
-  // credential_unavailable whenever a native login refreshed only the keychain
-  // — arming the fallback and preventing revert. No-op off-darwin / when
-  // CLAUDE_CONFIG_DIR is unset / when the file store is already current.
+  // Duplicate credential stores can leave a stale refresh token available to
+  // the CLI. Detect that state without copying or deleting either credential.
   if (provider !== 'opencode-cli') {
     onStage?.('credential-heal');
-    // Best-effort: the heal is fail-open by contract, but guard the call site too
-    // so no future/injected heal fault can ever break the probe (a broken probe
-    // would strand the fallback — the exact failure mode this change fixes).
+    // Detection must not prevent the probe from observing provider usability.
     try {
       (deps.ensureClaudeFileStoreCredential ?? ensureClaudeFileStoreCredential)();
     } catch {
-      // swallow — proceed to probe exactly as before
+      // Intentional: detection is advisory; the probe still verifies whether the provider can run.
     }
     onStage?.('prepare');
   }
@@ -302,22 +294,8 @@ function modelProbeEnv(
   }
   const proxyUrl = baseOpts ? `http://127.0.0.1:${baseOpts.egressProxyPort}` : undefined;
   return {
-    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-    HOME: process.env.HOME,
-    // env-allowed: ambient OS PATH contract for executable resolution
-    PATH: process.env.PATH,
-    // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-    USER: process.env.USER,
-    NO_COLOR: '1',
-    // Mirror buildBaseChildEnv: forward CLAUDE_CONFIG_DIR (if set) so the
-    // recovery/health probe resolves credentials the same way a real turn does.
-    // On launchd-managed macOS hosts the keychain cred item is unreadable in the
-    // non-GUI context; CLAUDE_CONFIG_DIR=$HOME/.claude routes the probe to the
-    // readable `.credentials.json` file store. Omitting it pinned rb-bot in
-    // auth-required fallback even after a successful reauth. undefined is dropped
-    // by the spawn layer when the var is unset → no change on hosts that omit it.
-    // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-    ...(process.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR } : {}),
+    // env-allowed: shared auth-status allowlist keeps model and identity probes on the same credential store
+    ...scrubbedAuthStatusEnv(process.env),
     // Egress proxy (#1607, F6): UPPER + lower case (curl reads lowercase for
     // plain HTTP; see child-env.ts / F4). Only present when opted in.
     ...(proxyUrl

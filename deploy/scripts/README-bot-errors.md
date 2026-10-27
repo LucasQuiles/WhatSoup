@@ -1466,6 +1466,12 @@ write/hash failure, raw secret output, or authorization ambiguity remains a hard
   the hub's deploy path; restart collector, dispatcher, and q-loop after
   deploying long-running code.
 
+The generic script deployer refuses `deploy` and `verify` for a resolved
+`WhatSoup-health-<source12>` export root, including path aliases, before copying
+files or creating a backup. It does not establish package-pin qualification.
+Use the staged package procedure below for those roots. Emergency `rollback`
+and `rollback-lkg` remain available with their existing backup checks.
+
 The deploy contract is:
 
 1. Take a per-host backup before mutation; abort if the backup path or restore proof cannot
@@ -1473,13 +1479,16 @@ The deploy contract is:
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
    `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
    on any copy error or missing payload hash.
+   The script deployer's managed set includes `write-health-package-pin.py`; its
+   normal hash verification, backup and rollback cover this operator tool too.
 3. Write a host-local runtime manifest at
    `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
    `BOT_ERRORS_RUNTIME_MANIFEST`; abort if the written manifest hash cannot be verified.
 4. On Git-backed hosts, stamp `expected_head_sha` with the host checkout's actual HEAD so
    daily health detects real runtime skew without false mismatches from dirty host trees.
    Stamp immediately after the payload copy. Abort on Git-backed hosts if `git rev-parse HEAD`
-   fails; non-Git runtime trees may report `git_head_sha: not_a_git_repository`.
+   fails. Recognized non-Git health exports use the verified package and external pin
+   procedure below; `not_a_git_repository` alone does not qualify their source binding.
 5. Activate the drift hook with `core.hooksPath=.husky` where the Git config and hooks
    directory are writable. If either path is not writable, abort unless the owner pre-accepted
    that row as a hook exception; for an accepted hook exception, run the manual drift-hook
@@ -1642,6 +1651,115 @@ The expected successful shape is:
 - A stamped Git-backed runtime manifest should produce a `git_head_sha: ... expected=...
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
+
+The daily health check's `/health` and fleet API probes refuse HTTP redirects
+with `redirect_refused`. They send no second request and do not report the
+redirect target or response body. Configure the final endpoint directly so a
+redirect cannot forward its bearer credential or turn another endpoint's response
+into health evidence. Both probes bypass ambient proxies and require direct
+endpoint reachability. Fleet endpoints that previously required an ambient proxy
+must be reachable directly before these probes can qualify their health.
+
+### Read-only exported health-package validation
+
+Run `python3 -B deploy/scripts/bot-errors-health-check.py --runtime-manifest`
+from the installed package to inspect its source binding without publishing an
+event. For a staged package, `--runtime-package-pin <path>` selects an explicit
+private pin for this read-only check; it cannot redirect daily-health validation.
+The consumer rejects any default or explicit pin whose resolved path lies inside
+the runtime package, with `pin_inside_runtime_root` and exit 2.
+
+A recognized `WhatSoup-health-<source12>` export requires an external
+`health-package-pin.json` owned by `health_reporter`. Supported pin modes are
+`no-bot` and `bot-host`. The pin remains required when a matching Git repository
+contains the package directory. The health profile's `role` must equal the pin's `mode`.
+Package profiles must enable `expectRuntimeManifest`; a missing or disabled value
+fails with `profile_manifest_required` and exit 2, even when a valid pin exists.
+Ordinary non-package checkouts can still disable manifest inventory in their profile.
+An unknown or mismatched role produces `pin_mode_mismatch` and exit 2. Do not
+change a pin to make an incompatible package pass.
+
+Use `deploy/scripts/write-health-package-pin.py` from a trusted WhatSoup checkout
+to produce the pin for an already staged export. Its package descriptor has
+`source_commit` (the full lowercase Git SHA), `sha256` (the archive SHA-256), and
+`files` (a map of archive member paths to SHA-256). Obtain that descriptor through
+an independently trusted build or review channel: matching an untrusted archive
+to its own descriptor does not authenticate the source.
+
+Existing unpinned exports require the same staged procedure before enabling the
+new checker. Do not overwrite an active export with the generic deployer or run
+the new consumer before its external pin is qualified. Preserve the prior tree
+for rollback; this procedure does not authorize activation.
+
+For a package transition, keep the currently installed tree and pin intact while
+qualifying the candidate. In order:
+
+1. Verify the descriptor's provenance and safely stage the archive in a separate,
+   owner-private `WhatSoup-health-<source12>` directory (mode `0700`). The producer
+   does not extract archives. Keep exclusive ownership of staging through the
+   producer and checker steps; the pin does not freeze files or activate a snapshot.
+2. Select the intended private health profile. Both the file and its parent must be
+   owned by the invoking user and inaccessible to other users; `expectRuntimeManifest`
+   must be `true`, with role `no-bot` or `bot-host`.
+3. Create a separate private directory for the candidate pin, outside the package,
+   then run the producer with that candidate's archive, descriptor, tree and profile:
+
+   ```bash
+   python3 -B deploy/scripts/write-health-package-pin.py \
+     --package-manifest /absolute/staging/package.json \
+     --archive /absolute/staging/package.tar.gz \
+     --runtime-root /absolute/staging/WhatSoup-health-<source12> \
+     --profile /absolute/private/health-profile.json \
+     --pin-output /absolute/private/candidate/health-package-pin.json
+   ```
+
+   Replace the placeholders before running. The producer verifies the archive's
+   digest, exact regular-file membership, each member hash, and the staged tree
+   against the descriptor. Descriptor membership must equal the runtime manifest's
+   entries plus the manifest itself; the manifest excludes its own digest to avoid
+   a self-hash cycle. There are no other unlisted package members. The producer
+   also checks the runtime manifest's source and member hashes.
+   Symlinks, duplicate members, special files, traversal and mismatches are
+   refused. Tar and gzip-compressed tar are supported, bounded to 64 MiB of archive
+   and expanded tar data, 16 MiB per member, 1,024 files and 1 MiB per JSON input.
+4. Run the staged checker with the same profile and candidate pin:
+
+   ```bash
+   BOT_ERRORS_HEALTH_PROFILE=/absolute/private/health-profile.json \
+     python3 -B /absolute/staging/WhatSoup-health-<source12>/deploy/scripts/bot-errors-health-check.py \
+       --runtime-manifest \
+       --runtime-package-pin /absolute/private/candidate/health-package-pin.json
+   ```
+
+   Require exit zero, `source=package match`, and no `FAIL` or `WARN` lines. Ensure
+   `BOT_ERRORS_HEALTH_PROFILE_JSON`, `BOT_ERRORS_RUNTIME_MANIFEST_JSON` and
+   `BOT_ERRORS_RUNTIME_MANIFEST` are unset so inherited overrides cannot change this
+   check's inputs. This read-only check publishes no event.
+
+The producer writes the pin durably with mode `0600`. An identical existing pin
+is verified without rewriting it; a conflicting pin is preserved and rejected.
+Add `--verify-only` to verify an existing pin without publishing one. A transition
+uses a separate candidate pin; never relabel a role or replace the old pin just to
+make verification pass.
+Requalify any earlier staged package with the current producer before transition;
+an earlier pin alone does not prove the stricter manifest-membership contract.
+
+The checker validates the pin identity, manifest digest, full source commit,
+runtime root, listed file hashes and executing-checker binding. Package validation
+uses bounded, no-follow descriptor reads: 64 KiB for the external pin, 1 MiB for
+the manifest and 16 MiB for each listed file. Each inventory accepts at most
+1,024 listed files, reads at most 64 MiB across those files (including reads later
+rejected by identity checks), and emits at most 64 KiB of UTF-8 evidence including
+newlines. Exceeding a limit stops inventory and returns a single `FAIL` line;
+partial evidence cannot establish a package match. The pin and its immediate parent
+must be private and owned by the invoking user. Hard-linked pins and symlinked
+ancestors are refused, except for the trusted macOS `/tmp` and `/var` aliases
+that are canonicalized before traversal. Hashes and required markers use the same bytes; file or
+parent identity changes during that read are refused. The pin binds the manifest
+bytes used for inventory. This does not freeze the package across separate file observations.
+Package validation
+does not activate the candidate or qualify activation rollback, scheduled jobs or
+alert delivery. Activation follows the separately authorized deploy contract.
 
 ## OPERATIONAL — No-post runtime-skew simulation
 

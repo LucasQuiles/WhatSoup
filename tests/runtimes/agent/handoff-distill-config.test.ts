@@ -6,7 +6,10 @@
  * values clamping to the documented bounds.
  */
 import { describe, it, expect } from 'vitest';
-import { resolveHandoffDistillConfig } from '../../../src/runtimes/agent/handoff-distill-config.ts';
+import {
+  resolveHandoffDistillConfig,
+  resolveTypedHandoffDistillConfig,
+} from '../../../src/runtimes/agent/handoff-distill-config.ts';
 
 const DEFAULTS = {
   sweepMs: 60_000,
@@ -124,5 +127,51 @@ describe('resolveHandoffDistillConfig', () => {
     expect(cfg.budget.maxTokensPerWindow).toBe(1_000);
     expect(cfg.budget.windowMs).toBe(60_000);
     expect(cfg.budget.breakerCooldownMs).toBe(10_000);
+  });
+});
+
+describe('resolveTypedHandoffDistillConfig', () => {
+  it('uses the bounded typed values without consulting legacy environment values', () => {
+    expect(resolveTypedHandoffDistillConfig({
+      enabled: true,
+      contextInjection: false,
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+      sweepMs: 10_000,
+      growthThreshold: 500,
+      verbatimN: 1,
+      maxTokensPerWindow: 1_000,
+      maxCallsPerWindow: 1,
+      windowMs: 60_000,
+      failureThreshold: 1,
+      breakerCooldownMs: 10_000,
+      globalConcurrency: 1,
+    })).toEqual({
+      enabled: true,
+      contextInjection: false,
+      model: 'deepseek-flash',
+      config: {
+        sweepMs: 10_000,
+        growthThreshold: 500,
+        verbatimN: 1,
+        budget: {
+          maxTokensPerWindow: 1_000,
+          maxCallsPerWindow: 1,
+          windowMs: 60_000,
+          failureThreshold: 1,
+          breakerCooldownMs: 10_000,
+          globalConcurrency: 1,
+        },
+      },
+    });
+  });
+
+  it('makes an explicit disabled object a kill switch', () => {
+    expect(resolveTypedHandoffDistillConfig({ enabled: false })).toEqual({
+      enabled: false,
+      contextInjection: false,
+      model: null,
+      config: DEFAULTS,
+    });
   });
 });

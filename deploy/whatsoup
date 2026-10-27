@@ -9,6 +9,12 @@ set -euo pipefail
 
 INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 
+# Match src/fleet/instance-name.ts before any instance-derived path is used.
+if [[ ! "$INSTANCE" =~ ^[a-z][a-z0-9-]*$ ]] || [ "${#INSTANCE}" -gt 30 ]; then
+  echo "FATAL: invalid instance name" >&2
+  exit 64
+fi
+
 # Scrub INHERITED credential material before anything else runs, so ambient
 # wrapper/launchd/session values can never shadow the launcher's deliberate
 # keyring/file resolution below or leak into startup probes. The launcher's own
@@ -25,7 +31,7 @@ INSTANCE="${1:?Usage: whatsoup <instance-name>}"
 _DISTILL_CAPTURE_DEEPSEEK="${DEEPSEEK_API_KEY:-}"
 _DISTILL_CAPTURE_MINIMAX="${MINIMAX_API_KEY:-}"
 _DISTILL_CAPTURE_ZAI="${ZAI_API_KEY:-}"
-unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY ZHIPU_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN
+unset ANTHROPIC_API_KEY OPENAI_API_KEY DEEPSEEK_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY OPENROUTER_API_KEY GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY FIREWORKS_API_KEY TOGETHER_API_KEY ZHIPU_API_KEY PINECONE_API_KEY ELEVENLABS_API_KEY WHATSOUP_HEALTH_TOKEN MS365_AGENT365_API_KEY WHATSOUP_M365_LAUNCH_ADMISSION
 
 # POSIX-portable symlink resolution (readlink -f is GNU-only, unavailable on macOS)
 _resolve_symlinks() {
@@ -65,6 +71,20 @@ keyring_lookup() {
   if [ "$env_first" = "true" ] && [ -n "$envvar" ] && [ -n "${!envvar:-}" ]; then
     echo "${!envvar}"
     return
+  fi
+  if [ "$env_first" = "true" ]; then
+    local credential_file="$XDG_CONFIG/whatsoup/credentials/${service}.key"
+    local file_value=""
+    if [ -e "$credential_file" ] || [ -L "$credential_file" ]; then
+      if ! file_value="$(printf '%s\0' "$credential_file" | "$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types "$SCRIPT_DIR/lib/read-private-credential.mjs")"; then
+        echo "FATAL: private credential file could not be read safely for service $service" >&2
+        return 1
+      fi
+      if [ -n "$file_value" ]; then
+        echo "$file_value"
+        return
+      fi
+    fi
   fi
   local keyring_value=""
   case "$(uname -s)" in
@@ -145,6 +165,16 @@ DATABASE_BOOTSTRAP_TRUST_PATHS=(
   "scripts/lib/cli-args.ts"
   "src/lib/git-env.ts"
   "src/lib/type-guards.ts"
+  "src/lib/handoff-distill-config.ts"
+  "src/lib/time-units.ts"
+  "deploy/m365-bridge-credential-projection.ts"
+  "deploy/lib/read-private-credential.mjs"
+  "deploy/lib/read-agent-handoff-distill-config.mjs"
+  "src/core/m365-bridge-policy.ts"
+  "src/fleet/instance-name.ts"
+  "src/core/private-config-file.ts"
+  "src/lib/process-lock.ts"
+  "src/lib/private-fs.ts"
 )
 # Git probes that decide git mode vs release mode stop upward discovery at the
 # physical parent of REPO_ROOT, so an unrelated ancestor .git cannot turn a
@@ -367,8 +397,30 @@ export TMPDIR
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 INSTANCE_JSON="$XDG_CONFIG/whatsoup/instances/$INSTANCE/config.json"
 INSTANCE_TYPE="chat"
-if [ -f "$INSTANCE_JSON" ]; then
-  INSTANCE_TYPE="$($NODE -e "process.stdout.write(JSON.parse(require('fs').readFileSync('$INSTANCE_JSON','utf8')).type ?? 'chat')")"
+if [ -e "$INSTANCE_JSON" ] || [ -L "$INSTANCE_JSON" ]; then
+  if ! INSTANCE_TYPE="$("$NODE" "$SCRIPT_DIR/lib/read-agent-handoff-distill-config.mjs" "$INSTANCE_JSON" "$INSTANCE" --type)"; then
+    echo "FATAL: instance config admission refused" >&2
+    exit 1
+  fi
+fi
+
+# A typed handoff object owns agent distillation when present. Read only its
+# allowlisted credential projection selector here; the runtime consumes the
+# complete bounded object. An absent object preserves legacy environment behavior.
+HANDOFF_TYPED_PROJECTION="legacy"
+if [ "$INSTANCE_TYPE" = "agent" ]; then
+  if ! HANDOFF_TYPED_PROJECTION="$("$NODE" "$SCRIPT_DIR/lib/read-agent-handoff-distill-config.mjs" "$INSTANCE_JSON" "$INSTANCE")"; then
+    echo "FATAL: handoff-distill credential projection refused" >&2
+    exit 1
+  fi
+  if [ "$HANDOFF_TYPED_PROJECTION" = "disabled" ]; then
+    unset WHATSOUP_HANDOFF_DISTILLER WHATSOUP_HANDOFF_CONTEXT WHATSOUP_HANDOFF_DISTILL_MODEL \
+      WHATSOUP_HANDOFF_DISTILL_SWEEP_MS WHATSOUP_HANDOFF_DISTILL_GROWTH_THRESHOLD \
+      WHATSOUP_HANDOFF_DISTILL_VERBATIM_N WHATSOUP_HANDOFF_DISTILL_MAX_TOKENS \
+      WHATSOUP_HANDOFF_DISTILL_MAX_CALLS WHATSOUP_HANDOFF_DISTILL_WINDOW_MS \
+      WHATSOUP_HANDOFF_DISTILL_FAILURE_THRESHOLD WHATSOUP_HANDOFF_DISTILL_BREAKER_COOLDOWN_MS \
+      WHATSOUP_HANDOFF_DISTILL_GLOBAL_CONCURRENCY 2>/dev/null || true
+  fi
 fi
 
 if [ "$INSTANCE_TYPE" = "chat" ]; then
@@ -403,6 +455,36 @@ else
   # OPENAI_API_KEY is needed by agent instances for Whisper audio transcription when users
   # send voice notes. Passive instances don't call any LLM APIs and the key is harmless.
   unset ANTHROPIC_API_KEY 2>/dev/null || true
+
+  # Only an exact, validated bridge binding may project its instance-bound
+  # Agent365 credential. The probe shares the runtime policy prerequisites and
+  # validates the on-disk agent envelope and bridge binding before this lookup. Rejected or
+  # unconfigured instances keep the scrubbed parent environment unchanged.
+  if "$NODE" \
+    --disable-warning=ExperimentalWarning \
+    --experimental-strip-types \
+    "$SCRIPT_DIR/m365-bridge-credential-projection.ts" "$INSTANCE" "$INSTANCE_JSON"; then
+    if ! MS365_AGENT365_API_KEY="$(keyring_lookup "agent365-${INSTANCE}" "")"; then
+      echo "FATAL: Agent365 bridge credential is empty or unavailable" >&2
+      exit 1
+    fi
+    if [ -z "$MS365_AGENT365_API_KEY" ]; then
+      echo "FATAL: Agent365 bridge credential is empty or unavailable" >&2
+      exit 1
+    fi
+    export MS365_AGENT365_API_KEY
+    # The final exec preserves this PID; inherited admissions and mixed-version
+    # direct starts cannot enable the runtime's mutation exception.
+    if ! WHATSOUP_M365_LAUNCH_ADMISSION="$("$NODE" \
+      --disable-warning=ExperimentalWarning \
+      --experimental-strip-types \
+      "$SCRIPT_DIR/m365-bridge-credential-projection.ts" "$INSTANCE" "$INSTANCE_JSON" --credential-admission "$$")"; then
+      echo "FATAL: Agent365 bridge credential admission failed" >&2
+      exit 1
+    fi
+    export WHATSOUP_M365_LAUNCH_ADMISSION
+  fi
+
   OPENAI_API_KEY="$(keyring_lookup openai OPENAI_API_KEY)"
   if [ -n "$OPENAI_API_KEY" ]; then
     export OPENAI_API_KEY
@@ -416,12 +498,18 @@ else
     export PINECONE_API_KEY
   fi
 
-  # Handoff distiller (WHATSOUP_HANDOFF_DISTILL_MODEL): restore exactly the ONE
-  # provider key the configured distill model resolves against, from the value
-  # captured before the credential scrub above. Keyring first (consistent with
-  # every other restore here), captured EnvironmentFile value as the fallback.
-  # No distill model configured → nothing is restored and the scrub stands.
-  case "${WHATSOUP_HANDOFF_DISTILL_MODEL:-}" in
+  # Handoff distiller: a typed object may project only DeepSeek Flash; otherwise
+  # the established environment-selected behavior remains intact for the fleet.
+  case "$HANDOFF_TYPED_PROJECTION" in
+    deepseek-flash)
+      DEEPSEEK_API_KEY="$(keyring_lookup deepseek DEEPSEEK_API_KEY)"
+      [ -z "$DEEPSEEK_API_KEY" ] && DEEPSEEK_API_KEY="$_DISTILL_CAPTURE_DEEPSEEK"
+      [ -n "$DEEPSEEK_API_KEY" ] && export DEEPSEEK_API_KEY
+      ;;
+    disabled)
+      ;;
+    legacy)
+      case "${WHATSOUP_HANDOFF_DISTILL_MODEL:-}" in
     deepseek*)
       DEEPSEEK_API_KEY="$(keyring_lookup deepseek DEEPSEEK_API_KEY)"
       [ -z "$DEEPSEEK_API_KEY" ] && DEEPSEEK_API_KEY="$_DISTILL_CAPTURE_DEEPSEEK"
@@ -436,6 +524,8 @@ else
       ZAI_API_KEY="$(keyring_lookup zai ZAI_API_KEY)"
       [ -z "$ZAI_API_KEY" ] && ZAI_API_KEY="$_DISTILL_CAPTURE_ZAI"
       [ -n "$ZAI_API_KEY" ] && export ZAI_API_KEY
+      ;;
+      esac
       ;;
   esac
 fi

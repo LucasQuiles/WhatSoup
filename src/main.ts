@@ -489,12 +489,19 @@ if (instanceType === 'agent') {
     pluginDirs?: string[];
     enabledPlugins?: Record<string, boolean>;
     allowM365Mutations?: boolean;
+    m365Bridge?: {
+      tenantId: string;
+      accountId?: string;
+      accountEmail?: string;
+      origin: string;
+      profile: 'user-full-v1';
+    };
     autoCompactInputTokens?: number;
     turnRecoveryCatchupReconcile?: { enabled: boolean; groupLimit?: number };
   } | undefined;
   const cwdResolved = agentOpts?.cwd ? resolveTilde(agentOpts.cwd) : undefined;
   const agentModel = resolveAgentModel(instanceConfig);
-  runtime = new AgentRuntime(db, connectionManager, config.botName, {
+  const agentRuntime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
@@ -516,8 +523,10 @@ if (instanceType === 'agent') {
     }),
     enabledPlugins: agentOpts?.enabledPlugins,
     allowM365Mutations: agentOpts?.allowM365Mutations,
+    m365Bridge: agentOpts?.m365Bridge,
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
     turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
+    handoffDistill: config.handoffDistill,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.
     serviceRestarter: createServiceManager(),
@@ -526,6 +535,7 @@ if (instanceType === 'agent') {
     // with a half-valid expectation.
     expectedAccountDigest: extractExpectedAccountDigest(instanceConfig),
   });
+  runtime = agentRuntime;
   // Wire the capability-grant manager over this agent's .claude/settings.json.
   // Groups are config-driven (empty by default → /grant reports "unknown group").
   // Fail closed to "grants disabled" on a floor-violating group config rather
@@ -536,7 +546,7 @@ if (instanceType === 'agent') {
       const claudeDir = join(cwdResolved, '.claude');
       grantManager = createCapabilityGrantManager({
         groups: config.capabilityGrantGroups,
-        policy: createSettingsPolicyAdapter(claudeDir),
+        policy: createSettingsPolicyAdapter(claudeDir, () => agentRuntime.getM365SettingsPolicy()),
         store: createFileGrantStore(join(claudeDir, 'capability-grant.json')),
         onError: (err, operation) => {
           log.error(

@@ -59,7 +59,7 @@ vi.mock('../../../src/logger.ts', async () => {
 });
 
 vi.mock('../../../src/core/messages.ts', () => ({
-  getRecentMessages: mockGetRecentMessages,
+  getRecentMessageText: mockGetRecentMessages,
 }));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
@@ -408,7 +408,10 @@ describe('handoff-distill-coordinator', () => {
         lastCompactCacheReadTokens: 0,
       });
       const distillRun = vi.fn(async () => ({ summary: 's', seededArtifacts: null, tokensUsed: 1 }));
-      mockBuildHandoffDistill.mockReturnValue(distillRun);
+      mockBuildHandoffDistill.mockReturnValue((reserve: (tokens: number) => void) => {
+        reserve(1_000);
+        return distillRun();
+      });
 
       const runner = view(coord).runner;
       await runner!.tickConversation('c1');
@@ -491,7 +494,10 @@ describe('handoff-distill-coordinator', () => {
         seededArtifacts: 'open PRs: #42',
         tokensUsed: 5,
       }));
-      mockBuildHandoffDistill.mockReturnValue(distillRun);
+      mockBuildHandoffDistill.mockReturnValue((reserve: (tokens: number) => void) => {
+        reserve(1_000);
+        return distillRun();
+      });
 
       const runner = view(coord).runner;
       await runner!.tickConversation('c1');
@@ -514,7 +520,10 @@ describe('handoff-distill-coordinator', () => {
       });
       // Note: seededArtifacts is intentionally omitted from the return.
       const distillRun = vi.fn(async () => ({ summary: 's', tokensUsed: 5 }));
-      mockBuildHandoffDistill.mockReturnValue(distillRun);
+      mockBuildHandoffDistill.mockReturnValue((reserve: (tokens: number) => void) => {
+        reserve(1_000);
+        return distillRun();
+      });
 
       const runner = view(coord).runner;
       await runner!.tickConversation('c1');
@@ -536,7 +545,10 @@ describe('handoff-distill-coordinator', () => {
         lastCompactCacheReadTokens: 0,
       });
       const distillRun = vi.fn(async () => ({ summary: 's', seededArtifacts: null, tokensUsed: 5 }));
-      mockBuildHandoffDistill.mockReturnValue(distillRun);
+      mockBuildHandoffDistill.mockReturnValue((reserve: (tokens: number) => void) => {
+        reserve(1_000);
+        return distillRun();
+      });
 
       const runner = view(coord).runner;
       await runner!.tickConversation('c1');
@@ -583,7 +595,10 @@ describe('handoff-distill-coordinator', () => {
       const distillRun = vi.fn(async () => {
         throw new Error('upstream model exploded');
       });
-      mockBuildHandoffDistill.mockReturnValue(distillRun);
+      mockBuildHandoffDistill.mockReturnValue((reserve: (tokens: number) => void) => {
+        reserve(1_000);
+        return distillRun();
+      });
 
       const runner = view(coord).runner;
       await runner!.tickConversation('c1');

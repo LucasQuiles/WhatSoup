@@ -27,12 +27,15 @@ function deps(over: Partial<RunHandoffDistillDeps> = {}): RunHandoffDistillDeps 
     sourceProvider: 'claude-cli',
     sourceModel: 'claude-opus-4-8',
     tokenBaseline: 1000,
-    distill: async () => ({ summary: 'a summary', tokensUsed: 500 }),
     persist: (a) => { persisted.push(a); },
     onDegraded: (r) => { degraded.push(r); },
     persisted,
     degraded,
     ...over,
+    distill: async (reserve) => {
+      reserve(1_000);
+      return over.distill ? over.distill(reserve) : { summary: 'a summary', tokensUsed: 500 };
+    },
   };
 }
 
@@ -97,4 +100,28 @@ describe('runHandoffDistill', () => {
     await runHandoffDistill(d);
     expect(d.persisted[0]?.seededArtifacts).toBe('open PRs: #1');
   });
+
+  it('rejects invalid spend before persistence and folds it as a failed attempt', async () => {
+    const d = deps({ distill: async () => ({ summary: 'must not persist', tokensUsed: NaN }) });
+    const result = await runHandoffDistill(d);
+    expect(result).toMatchObject({ ran: false, failed: true });
+    expect(d.persisted).toHaveLength(0);
+    expect(result.nextState.tokensThisWindow).toBe(1_000);
+    expect(result.nextState.callsThisWindow).toBe(1);
+    expect(d.degraded[0]).toMatch(/token usage/);
+  });
+
+  it('retains valid provider spend when persistence fails without double-counting the call', async () => {
+    const d = deps({
+      state: { ...initialDistillState(NOW), consecutiveFailures: 1 },
+      persist: () => { throw new Error('storage unavailable'); },
+    });
+    const result = await runHandoffDistill(d);
+    expect(result).toMatchObject({ ran: false, failed: true });
+    expect(d.persisted).toHaveLength(0);
+    expect(result.nextState).toMatchObject({ tokensThisWindow: 500, callsThisWindow: 1,
+      consecutiveFailures: 2, breaker: 'open' });
+    expect(d.degraded[0]).toContain('storage unavailable');
+  });
+
 });

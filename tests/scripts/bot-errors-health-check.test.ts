@@ -1002,9 +1002,8 @@ print(json.dumps(samples, sort_keys=True))
 
   it('passes runtime manifest files when hashes match', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
-    const probe = join(tmpRoot, 'runtime-probe.txt');
-    writeFileSync(probe, 'expected runtime content\nrequired-capability-marker\n');
-    const digest = createHash('sha256').update(readFileSync(probe)).digest('hex');
+    const probe = 'deploy/scripts/bot-errors-health-check.py';
+    const digest = createHash('sha256').update(readFileSync(join(process.cwd(), probe))).digest('hex');
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
@@ -1028,7 +1027,7 @@ print(json.dumps(samples, sort_keys=True))
         }),
         BOT_ERRORS_RUNTIME_MANIFEST_JSON: JSON.stringify({
           schemaVersion: 1,
-          files: [{ path: probe, sha256: digest, mustContain: ['required-capability-marker'] }],
+          files: [{ path: probe, sha256: digest, mustContain: ['runtime_manifest_inventory'] }],
         }),
       },
     });
@@ -1383,8 +1382,7 @@ print(json.dumps(samples, sort_keys=True))
 
   it('fails daily health when runtime manifest hashes drift', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
-    const probe = join(tmpRoot, 'runtime-probe.txt');
-    writeFileSync(probe, 'actual runtime content\n');
+    const probe = 'deploy/scripts/bot-errors-health-check.py';
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),
@@ -1427,8 +1425,7 @@ print(json.dumps(samples, sort_keys=True))
 
   it('does not let a primary-phone warning claim alertSource when runtime manifest has the hard failure', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
-    const probe = join(tmpRoot, 'runtime-probe.txt');
-    writeFileSync(probe, 'actual runtime content\n');
+    const probe = 'deploy/scripts/bot-errors-health-check.py';
     const configDir = join(tmpRoot, '.config', 'whatsoup', 'instances', 'primary-bot');
     const authDir = join(configDir, 'auth');
     mkdirSync(configDir, { recursive: true });
@@ -1495,9 +1492,8 @@ print(json.dumps(samples, sort_keys=True))
 
   it('fails daily health when runtime manifest capability markers are missing', () => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'bot-errors-health-'));
-    const probe = join(tmpRoot, 'runtime-probe.txt');
-    writeFileSync(probe, 'actual runtime content without the required capability\n');
-    const digest = createHash('sha256').update(readFileSync(probe)).digest('hex');
+    const probe = 'deploy/scripts/bot-errors-health-check.py';
+    const digest = createHash('sha256').update(readFileSync(join(process.cwd(), probe))).digest('hex');
 
     execFileSync('python3', ['deploy/scripts/bot-errors-health-check.py', '--daily'], {
       cwd: process.cwd(),

@@ -51,12 +51,17 @@ const RESOLVE_NODE_LIB = join(REPO_ROOT, 'deploy/lib/resolve-node.sh');
 const RUNTIME_PATH_LIB = join(REPO_ROOT, 'deploy/lib/runtime-path.sh');
 const READ_PRIVATE_HEALTH_TOKEN_LIB = join(REPO_ROOT, 'deploy/lib/read-private-health-token.sh');
 const READ_PRIVATE_HEALTH_TOKEN_READER = join(REPO_ROOT, 'deploy/lib/read-private-health-token.mjs');
+const READ_PRIVATE_CREDENTIAL_READER = join(REPO_ROOT, 'deploy/lib/read-private-credential.mjs');
+const READ_HANDOFF_CONFIG = join(REPO_ROOT, 'deploy/lib/read-agent-handoff-distill-config.mjs');
 const BOUNDED_EXEC_LIB = join(REPO_ROOT, 'deploy/lib/bounded-exec.sh');
 const SOURCE_RUNTIME_CHECK = join(REPO_ROOT, 'scripts/source-runtime-drift-check.ts');
 const GUARD_CORE = join(REPO_ROOT, 'scripts/lib/guard-core.ts');
 const CLI_ARGS = join(REPO_ROOT, 'scripts/lib/cli-args.ts');
 const GIT_ENV = join(REPO_ROOT, 'src/lib/git-env.ts');
 const TYPE_GUARDS = join(REPO_ROOT, 'src/lib/type-guards.ts');
+const M365_CREDENTIAL_PROJECTION = join(REPO_ROOT, 'deploy/m365-bridge-credential-projection.ts');
+const M365_BRIDGE_POLICY = join(REPO_ROOT, 'src/core/m365-bridge-policy.ts');
+const INSTANCE_NAME = join(REPO_ROOT, 'src/fleet/instance-name.ts');
 const SOURCE_RUNTIME_MANIFEST = join(REPO_ROOT, 'deploy/source-runtime-manifest.json');
 const SPAWN_TIMEOUT_MS = 15_000;
 const PROTECTED_ENV_NAMES = [...new Set([
@@ -165,6 +170,16 @@ function makeFixtureTree(
     'scripts/lib/cli-args.ts': readFileSync(CLI_ARGS, 'utf8'),
     'src/lib/git-env.ts': readFileSync(GIT_ENV, 'utf8'),
     'src/lib/type-guards.ts': readFileSync(TYPE_GUARDS, 'utf8'),
+    'src/lib/handoff-distill-config.ts': readFileSync(join(REPO_ROOT, 'src/lib/handoff-distill-config.ts'), 'utf8'),
+    'src/lib/time-units.ts': readFileSync(join(REPO_ROOT, 'src/lib/time-units.ts'), 'utf8'),
+    'deploy/m365-bridge-credential-projection.ts': readFileSync(M365_CREDENTIAL_PROJECTION, 'utf8'),
+    'deploy/lib/read-private-credential.mjs': readFileSync(READ_PRIVATE_CREDENTIAL_READER, 'utf8'),
+    'deploy/lib/read-agent-handoff-distill-config.mjs': readFileSync(READ_HANDOFF_CONFIG, 'utf8'),
+    'src/core/m365-bridge-policy.ts': readFileSync(M365_BRIDGE_POLICY, 'utf8'),
+    'src/fleet/instance-name.ts': readFileSync(INSTANCE_NAME, 'utf8'),
+    'src/core/private-config-file.ts': readFileSync(join(REPO_ROOT, 'src/core/private-config-file.ts'), 'utf8'),
+    'src/lib/process-lock.ts': readFileSync(join(REPO_ROOT, 'src/lib/process-lock.ts'), 'utf8'),
+    'src/lib/private-fs.ts': readFileSync(join(REPO_ROOT, 'src/lib/private-fs.ts'), 'utf8'),
   };
   for (const [rel, contents] of Object.entries(integrityFiles)) {
     const abs = join(root, rel);
@@ -308,12 +323,25 @@ function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   copyFileSync(RUNTIME_PATH_LIB, join(lib, 'runtime-path.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_LIB, join(lib, 'read-private-health-token.sh'));
   copyFileSync(READ_PRIVATE_HEALTH_TOKEN_READER, join(lib, 'read-private-health-token.mjs'));
+  copyFileSync(READ_PRIVATE_CREDENTIAL_READER, join(lib, 'read-private-credential.mjs'));
+  copyFileSync(READ_HANDOFF_CONFIG, join(lib, 'read-agent-handoff-distill-config.mjs'));
   copyFileSync(BOUNDED_EXEC_LIB, join(lib, 'bounded-exec.sh'));
   copyFileSync(SOURCE_RUNTIME_CHECK, trustChecker);
   copyFileSync(GUARD_CORE, join(scriptsLib, 'guard-core.ts'));
   copyFileSync(CLI_ARGS, join(scriptsLib, 'cli-args.ts'));
   copyFileSync(GIT_ENV, join(srcLib, 'git-env.ts'));
   copyFileSync(TYPE_GUARDS, join(srcLib, 'type-guards.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/handoff-distill-config.ts'), join(srcLib, 'handoff-distill-config.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/time-units.ts'), join(srcLib, 'time-units.ts'));
+  copyFileSync(M365_CREDENTIAL_PROJECTION, join(deploy, 'm365-bridge-credential-projection.ts'));
+  mkdirSync(join(src, 'core'), { recursive: true });
+  copyFileSync(M365_BRIDGE_POLICY, join(src, 'core', 'm365-bridge-policy.ts'));
+  mkdirSync(join(src, 'fleet'), { recursive: true });
+  copyFileSync(INSTANCE_NAME, join(src, 'fleet', 'instance-name.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/core/private-config-file.ts'), join(root, 'src/core/private-config-file.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/process-lock.ts'), join(root, 'src/lib/process-lock.ts'));
+  copyFileSync(join(REPO_ROOT, 'src/lib/private-fs.ts'), join(root, 'src/lib/private-fs.ts'));
+
   writeFileSync(join(root, '.nvmrc'), `${PINNED_NODE_VERSION}\n`, 'utf8');
   writeFileSync(
     join(root, 'package.json'),
@@ -346,8 +374,8 @@ function makeWrapperFixture(root: string = makeTmpDir()): WrapperFixture {
   writeFileSync(join(src, 'bootstrap.ts'), 'process.exit(0);\n', 'utf8');
   writeFileSync(join(scripts, 'restart-safety-preflight.ts'), 'process.exit(0);\n', 'utf8');
   const instanceConfig = join(configHome, 'whatsoup', 'instances', 'q-bot');
-  mkdirSync(instanceConfig, { recursive: true });
-  writeFileSync(join(instanceConfig, 'config.json'), JSON.stringify({ type: 'passive' }), 'utf8');
+  mkdirSync(instanceConfig, { recursive: true, mode: 0o700 });
+  writeFileSync(join(instanceConfig, 'config.json'), JSON.stringify({ name: 'q-bot', type: 'passive' }), { mode: 0o600 });
 
   writeExecutable(
     join(deploy, 'preflight-check.sh'),
@@ -368,6 +396,9 @@ if [ "\${WHATSOUP_TEST_ASSERT_PROTECTED_ENV_ABSENT:-0}" = "1" ]; then
       exit 91
     fi
   done
+fi
+if [[ "\${1:-}" == */lib/read-agent-handoff-distill-config.mjs ]]; then
+  exec ${JSON.stringify(PINNED_NODE)} "$@"
 fi
 if [[ "\${1:-}" == */lib/read-keychain-secret.mjs ]]; then
   printf '%s %s\\n' "$(basename "$1")" "\${*:2}" >> "\${WHATSOUP_TEST_KEYCHAIN_CALLS:-/dev/null}"
