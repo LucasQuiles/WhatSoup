@@ -65,7 +65,7 @@ function isolationAlerts(h: Harness): string[] {
     .filter((line) => line.includes('harness-maintenance:claude-config-isolation'));
 }
 
-function expectRefused(h: Harness, r: RunResult, reason: string): void {
+function expectRefused(h: Harness, r: RunResult, reason: string, updateStatus: 'refused' | 'unknown' = 'refused'): void {
   // No agent CLI process started: not the installer, not --version, not a listing.
   expect(allFixtureCalls(h)).toEqual([]);
   expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, OLD));
@@ -73,7 +73,7 @@ function expectRefused(h: Harness, r: RunResult, reason: string): void {
   expect(isolation).toHaveLength(1);
   expect(isolation[0]!.status).toBe('refused');
   expect(isolation[0]!.message).toContain(reason);
-  expect(events(r, 'claude').at(-1)?.status).toBe('refused');
+  expect(events(r, 'claude').at(-1)?.status).toBe(updateStatus);
   for (const listing of ['claude-plugins', 'mcp-servers']) {
     expect(events(r, listing).map((e) => e.status), listing).toEqual(['refused']);
   }
@@ -133,7 +133,8 @@ describe('agent CLI login isolation of the maintenance job', () => {
     const h = makeHarness();
     withInstance(h, path.join(h.home, 'bot-config'));
     writeFileSync(path.join(h.systemdDir, 'unit-files.rc'), '1\n');
-    expectRefused(h, run(h), 'service definitions were not read');
+    // Failed inventory retains the update step's unknown diagnosis while every CLI call is blocked.
+    expectRefused(h, run(h), 'service definitions were not read', 'unknown');
   }, T);
 
   it('refuses when the job config dir resolves to an instance config dir through a symlink', () => {

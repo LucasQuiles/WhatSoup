@@ -69,6 +69,10 @@ export type ObservedAccountIdentityFailureReason =
   | 'probe-threw'
   /** A refresh-ahead child for this login is still running; the probe was not started. */
   | 'deferred-refresh-in-flight'
+  /** Refresh ownership could not be safely established; the probe was not started. */
+  | 'refresh-owner-unavailable'
+  /** Refresh completed unsuccessfully or threw; the probe was not started. */
+  | 'refresh-failed'
   | 'not-logged-in'
   | 'identity-fields-missing'
   | 'unparseable';
@@ -201,10 +205,16 @@ export async function observeClaudeAccountIdentity(
   try {
     refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
   } catch {
-    return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
+    return { kind: 'failed', reason: 'refresh-failed' };
   }
-  // An unresolved or failed refresh cannot establish that a killable probe is safe.
-  if (refreshAheadDefersProbe(refreshed)) return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
+  // A refresh failure cannot establish that a killable probe is safe.
+  if (refreshAheadDefersProbe(refreshed)) {
+    const outcome = typeof refreshed === 'object' && refreshed !== null
+      ? (refreshed as { outcome?: unknown }).outcome : undefined;
+    if (outcome === 'still-running') return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
+    if (outcome === 'owner-unavailable') return { kind: 'failed', reason: 'refresh-owner-unavailable' };
+    return { kind: 'failed', reason: 'refresh-failed' };
+  }
   let probe: BinaryAuthStatusResult;
   try {
     probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(
