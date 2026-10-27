@@ -396,6 +396,21 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
   });
 
+  it('defers the initiating caller when its owner claim disappears before close', async () => {
+    const dir = privateStoreDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const run = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    const claim = ownerPath(dir);
+    expect(existsSync(claim)).toBe(true);
+    rmSync(claim);
+
+    h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toEqual({ outcome: 'still-running' });
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
   it('keeps the fence after asynchronous error until close proves completion', async () => {
     const dir = privateStoreDir();
     const firstHarness = harness({ fileStore: store(START.getTime() + 1_000) });
