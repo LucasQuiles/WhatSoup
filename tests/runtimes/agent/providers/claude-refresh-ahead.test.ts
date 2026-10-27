@@ -8,9 +8,9 @@
 // probe it waits while the CLI's refresh lock is held. Fixtures only: the
 // stores are injected readers and the children are fakes.
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   REFRESH_AHEAD_HARD_CAP_MS,
@@ -62,12 +62,10 @@ function store(expiresAt: number | undefined): string {
   });
 }
 
-let dirSeq = 0;
 const privateStoreRoots: string[] = [];
 /** A fresh config dir per test so the per-dir in-flight dedupe never leaks across tests. */
 function configDir(): string {
-  dirSeq += 1;
-  return `/tmp/refresh-ahead-fixture-${dirSeq}/.claude`;
+  return privateStoreDir();
 }
 
 function privateStoreDir(): string {
@@ -76,6 +74,29 @@ function privateStoreDir(): string {
   const dir = join(root, '.claude');
   mkdirSync(dir, { mode: 0o700 });
   return dir;
+}
+
+const OWNER_DIR = '.whatsoup-refresh-ahead';
+const OWNER_FILE = 'owner.json';
+const OWNER_MAX_BYTES = 4 * 1024;
+
+/** Raw fixtures for the proposed production claim; no fake claim parser is used. */
+function ownerPath(configDir: string): string {
+  return join(configDir, OWNER_DIR, OWNER_FILE);
+}
+
+function writeOwnerFixture(configDir: string, raw = 'untrusted-owner-claim'): string {
+  const path = ownerPath(configDir);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  chmodSync(dirname(path), 0o700);
+  writeFileSync(path, raw, { mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
+}
+
+function claimFingerprint(path: string): Pick<ReturnType<typeof lstatSync>, 'ino' | 'mode' | 'nlink' | 'size'> {
+  const state = lstatSync(path);
+  return { ino: state.ino, mode: state.mode, nlink: state.nlink, size: state.size };
 }
 
 function harness(over: Partial<ClaudeRefreshAheadDeps> & { fileStore?: string | null } = {}) {
@@ -99,6 +120,8 @@ function harness(over: Partial<ClaudeRefreshAheadDeps> & { fileStore?: string | 
 
 beforeEach(() => { vi.useFakeTimers({ now: START }); });
 afterEach(() => {
+  vi.doUnmock('node:fs');
+  vi.restoreAllMocks();
   vi.useRealTimers();
   for (const root of privateStoreRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -291,6 +314,193 @@ describe('refreshClaudeLoginAhead: never killed', () => {
     });
     expect(h.lines[0]!.obj.credentialService).toMatch(new RegExp(`^${SVC}-[0-9a-f]{8}$`));
     expect(h.lines[1]!.obj).toMatchObject({ purpose: 'refresh-ahead', durationMs: 2_500, exitCode: 1, spawnFailed: false });
+  });
+});
+
+describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () => {
+  it('uses one claim for canonical aliases and defers a fresh parent before renewed-expiry fast-path', async () => {
+    const dir = privateStoreDir();
+    const alias = join(dirname(dir), 'same-store-alias');
+    symlinkSync(dir, alias, 'dir');
+    const unrelatedConfig = join(dirname(dir), 'unrelated-config');
+    const firstHarness = harness({ fileStore: store(START.getTime() + 1_000) });
+
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const firstRun = first.refreshClaudeLoginAhead('claude', {
+      CLAUDE_CONFIG_DIR: unrelatedConfig,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: dir,
+    }, firstHarness.deps);
+    await vi.advanceTimersByTimeAsync(first.REFRESH_AHEAD_WAIT_MS);
+    await expect(firstRun).resolves.toEqual({ outcome: 'still-running' });
+    expect(firstHarness.spawnImpl).toHaveBeenCalledOnce();
+
+    const claim = ownerPath(dir);
+    const raw = readFileSync(claim, 'utf8');
+    expect(raw).not.toContain(ACCESS_SENTINEL);
+    expect(raw).not.toContain(REFRESH_SENTINEL);
+    expect(raw).not.toContain(dir);
+
+    vi.resetModules();
+    const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const successor = harness({ fileStore: store(START.getTime() + 3_600_000) });
+    const afterRestart = restarted.refreshClaudeLoginAhead('claude', {
+      CLAUDE_CONFIG_DIR: unrelatedConfig,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: alias,
+    }, successor.deps);
+    await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
+    await expect(afterRestart).resolves.toEqual({ outcome: 'still-running' });
+    expect(successor.spawnImpl).not.toHaveBeenCalled();
+    expect(firstHarness.children[0]!.kill).not.toHaveBeenCalled();
+    firstHarness.children[0]!.emit('close', 0, null);
+  });
+
+  it('releases only its own claim on observed close, then permits a successor', async () => {
+    const dir = privateStoreDir();
+    const firstHarness = harness({ fileStore: store(START.getTime() + 1_000) });
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const firstRun = first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, firstHarness.deps);
+    const claim = ownerPath(dir);
+    expect(existsSync(claim)).toBe(true);
+
+    firstHarness.children[0]!.emit('close', 0, null);
+    await expect(firstRun).resolves.toMatchObject({ outcome: 'ran' });
+    expect(existsSync(claim)).toBe(false);
+
+    vi.resetModules();
+    const successorModule = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const successor = harness({ fileStore: store(START.getTime() + 1_000) });
+    const next = successorModule.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
+    expect(successor.spawnImpl).toHaveBeenCalledOnce();
+    successor.children[0]!.emit('close', 0, null);
+    await expect(next).resolves.toMatchObject({ outcome: 'ran' });
+    expect(firstHarness.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
+  it('never deletes a foreign-fence replacement when its original child closes', async () => {
+    const dir = privateStoreDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const run = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    const path = ownerPath(dir);
+    const predecessor = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    const foreignFence = 'foreign-fence-9b6428d1';
+    writeFileSync(path, JSON.stringify({ ...predecessor, fence: foreignFence }), { mode: 0o600 });
+
+    h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toMatchObject({ outcome: 'ran' });
+    expect(existsSync(path)).toBe(true);
+    expect((JSON.parse(readFileSync(path, 'utf8')) as { fence?: unknown }).fence).toBe(foreignFence);
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
+  it('keeps the fence after asynchronous error until close proves completion', async () => {
+    const dir = privateStoreDir();
+    const firstHarness = harness({ fileStore: store(START.getTime() + 1_000) });
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const firstRun = first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, firstHarness.deps);
+    await vi.advanceTimersByTimeAsync(first.REFRESH_AHEAD_WAIT_MS);
+    await expect(firstRun).resolves.toEqual({ outcome: 'still-running' });
+    const claim = ownerPath(dir);
+    const beforeError = readFileSync(claim, 'utf8');
+
+    firstHarness.children[0]!.emit('error', new Error('status pipe ambiguity'));
+    expect(readFileSync(claim, 'utf8')).toBe(beforeError);
+
+    vi.resetModules();
+    const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const successor = harness({ fileStore: store(START.getTime() + 3_600_000) });
+    const afterError = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
+    await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
+    await expect(afterError).resolves.toEqual({ outcome: 'still-running' });
+    expect(successor.spawnImpl).not.toHaveBeenCalled();
+    firstHarness.children[0]!.emit('close', 1, null);
+  });
+
+  it('keeps the fence when spawn throws synchronously, because launch outcome is ambiguous', async () => {
+    const dir = privateStoreDir();
+    const failedSpawn = vi.fn(() => { throw new Error('spawn transport failed'); }) as unknown as typeof import('node:child_process').spawn;
+    const initial = harness({ fileStore: store(START.getTime() + 1_000), spawnImpl: failedSpawn });
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    await first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, initial.deps);
+    const claim = ownerPath(dir);
+    const raw = readFileSync(claim, 'utf8');
+    expect(raw).not.toContain(ACCESS_SENTINEL);
+    expect(raw).not.toContain(REFRESH_SENTINEL);
+
+    vi.resetModules();
+    const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const successor = harness({ fileStore: store(START.getTime() + 3_600_000) });
+    const later = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
+    await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
+    await expect(later).resolves.toEqual({ outcome: 'still-running' });
+    expect(successor.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it.each(['invalid', 'corrupt', 'symlink', 'hardlink', 'wrong-mode', 'oversize'] as const)(
+    'leaves an unsafe %s claim untouched and defers before renewed-expiry fast path',
+    async (kind) => {
+      const dir = privateStoreDir();
+      const path = ownerPath(dir);
+      const target = join(dirname(path), `${kind}-target`);
+      if (kind === 'invalid') writeOwnerFixture(dir, '{}');
+      if (kind === 'corrupt') writeOwnerFixture(dir, '{not-json');
+      if (kind === 'symlink') {
+        writeOwnerFixture(dir);
+        rmSync(path);
+        writeFileSync(target, 'untrusted-owner-claim', { mode: 0o600 });
+        symlinkSync(target, path);
+      }
+      if (kind === 'hardlink') {
+        writeOwnerFixture(dir);
+        rmSync(path);
+        writeFileSync(target, 'untrusted-owner-claim', { mode: 0o600 });
+        linkSync(target, path);
+      }
+      if (kind === 'wrong-mode') {
+        writeOwnerFixture(dir);
+        chmodSync(path, 0o644);
+      }
+      if (kind === 'oversize') writeOwnerFixture(dir, 'x'.repeat(OWNER_MAX_BYTES + 1));
+
+      const before = claimFingerprint(path);
+      const beforeBytes = kind === 'symlink' ? readFileSync(target, 'utf8') : readFileSync(path, 'utf8');
+      vi.resetModules();
+      const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+      const h = harness({ fileStore: store(START.getTime() + 3_600_000) });
+      const result = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+      await vi.advanceTimersByTimeAsync(refreshed.REFRESH_AHEAD_WAIT_MS);
+      await expect(result).resolves.toEqual({ outcome: 'still-running' });
+      expect(h.spawnImpl).not.toHaveBeenCalled();
+      expect(claimFingerprint(path)).toEqual(before);
+      expect(kind === 'symlink' ? readFileSync(target, 'utf8') : readFileSync(path, 'utf8')).toBe(beforeBytes);
+    },
+  );
+
+  it('defers a wrong-owner claim without deleting it', async () => {
+    const dir = privateStoreDir();
+    const path = writeOwnerFixture(dir);
+    const before = claimFingerprint(path);
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      lstatSync: (...args: Parameters<typeof actualFs.lstatSync>) => {
+        const state = actualFs.lstatSync(...args);
+        return args[0] === path ? Object.create(state, { uid: { value: state.uid + 1 } }) : state;
+      },
+    }));
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const h = harness({ fileStore: store(START.getTime() + 3_600_000) });
+    const result = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await vi.advanceTimersByTimeAsync(refreshed.REFRESH_AHEAD_WAIT_MS);
+    await expect(result).resolves.toEqual({ outcome: 'still-running' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(claimFingerprint(path)).toEqual(before);
   });
 });
 
