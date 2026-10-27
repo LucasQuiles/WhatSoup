@@ -10,6 +10,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -95,7 +96,7 @@ function writeOwnerFixture(configDir: string, raw = 'untrusted-owner-claim'): st
   return path;
 }
 
-function claimFingerprint(path: string): Pick<ReturnType<typeof lstatSync>, 'ino' | 'mode' | 'nlink' | 'size'> {
+function claimFingerprint(path: string): Pick<Stats, 'ino' | 'mode' | 'nlink' | 'size'> {
   const state = lstatSync(path);
   return { ino: state.ino, mode: state.mode, nlink: state.nlink, size: state.size };
 }
@@ -539,7 +540,9 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
       ...actualFs,
       lstatSync: (...args: Parameters<typeof actualFs.lstatSync>) => {
         const state = actualFs.lstatSync(...args);
-        return args[0] === path ? Object.create(state, { uid: { value: state.uid + 1 } }) : state;
+        if (args[0] !== path || state === undefined) return state;
+        const uid = typeof state.uid === 'bigint' ? state.uid + 1n : state.uid + 1;
+        return Object.create(state, { uid: { value: uid } });
       },
     }));
     vi.resetModules();
