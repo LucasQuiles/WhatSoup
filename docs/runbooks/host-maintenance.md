@@ -78,7 +78,8 @@ resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
 update. A launchd instance is any `com.whatsoup.<name>` plist that passes
 `<name>` as its argument; a systemd instance is any `whatsoup@<name>` unit,
-assumed to start through the installed `~/.local/bin/whatsoup` link as
+including installed disabled or never-loaded instances, assumed to start
+through the installed `~/.local/bin/whatsoup` link as
 `deploy/whatsoup@.service` does (an `ExecStart` override is not read).
 
 Every instance is resolved only when the wrapper it starts through, followed

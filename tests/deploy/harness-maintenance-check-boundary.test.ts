@@ -58,7 +58,7 @@ afterAll(() => {
 
 // Read-only verbs a check run may use; anything else recorded by a stub is a boundary violation.
 const NPM_READ_ONLY = [/^--version$/, /^config get min-release-age$/, /^view \S+ (version|time --json)$/, /^ls -g --depth=0$/];
-const SYSTEMCTL_READ_ONLY = [/^--user list-units /, /^--user show-environment$/, /^--user show /, /^--user is-active /];
+const SYSTEMCTL_READ_ONLY = [/^--user list-units /, /^--user list-unit-files /, /^--user show-environment$/, /^--user show /, /^--user is-active /];
 const APT_READ_ONLY = [/^list --upgradable$/];
 
 // Helpers the script, its sourced libraries and check-unit-drift.sh call by bare name.

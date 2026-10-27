@@ -157,6 +157,58 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
     refresh.children[0]!.emit('close', 0, null);
   });
 
+  it('an unavailable refresh owner defers the primary probe but requires an alert', async () => {
+    const probe = spawnRecorder();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: async () => ({ outcome: 'owner-unavailable' }),
+        probeBinaryCommand,
+      })),
+    );
+    expect(result).toMatchObject({ status: 'unknown', reason: 'refresh-owner-unavailable' });
+    expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['spawn-failed', { outcome: 'spawn-failed', reason: 'within-window' }],
+    ['nonzero exit', { outcome: 'ran', reason: 'within-window', exitCode: 1, signal: null }],
+    ['signal exit', { outcome: 'ran', reason: 'within-window', exitCode: null, signal: 'SIGTERM' }],
+  ])('a completed refresh with %s defers the primary probe and requires an alert', async (_label, refreshed) => {
+    const probe = spawnRecorder();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: async () => refreshed,
+        probeBinaryCommand,
+      })),
+    );
+    expect(result).toMatchObject({ status: 'unknown', reason: 'refresh-failed' });
+    expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('a thrown refresh defers the primary probe and requires an alert', async () => {
+    const probe = spawnRecorder();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: async () => { throw new Error('refresh transport failed'); },
+        probeBinaryCommand,
+      })),
+    );
+    expect(result).toMatchObject({ status: 'unknown', reason: 'refresh-failed' });
+    expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+  });
+
   it('a caller that cancelled during the refresh wait gets its cancellation, not the deferral', async () => {
     const probe = spawnRecorder();
     const controller = new AbortController();
@@ -232,6 +284,19 @@ describe('account-identity probe', () => {
 });
 
 describe('account-identity probe deferral', () => {
+  it('reports unavailable refresh ownership without starting its killable probe', async () => {
+    const probeBinaryCommandSpy = vi.fn(async () => ({ status: 'ok' as const, output: '{}' }));
+    const observed = await observeClaudeAccountIdentity({
+      getProviderBinary: () => 'claude',
+      env: { CLAUDE_CONFIG_DIR: '/tmp/identity-fixture/.claude' },
+      refreshClaudeLoginAhead: async () => { throw new Error('owner publication unavailable'); },
+      claudeRefreshLockGrace: () => null,
+      probeBinaryCommand: probeBinaryCommandSpy,
+    });
+    expect(observed).toEqual({ kind: 'failed', reason: 'refresh-failed' });
+    expect(probeBinaryCommandSpy).not.toHaveBeenCalled();
+  });
+
   it('does not start its killable probe while the refresh-ahead child still runs', async () => {
     const probeBinaryCommandSpy = vi.fn(async () => ({ status: 'ok' as const, output: '{}' }));
     const observed = await observeClaudeAccountIdentity({
@@ -260,6 +325,13 @@ describe('diagnostic auth-status probe', () => {
     const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
     expect(deps.probeBinaryAuthStatus).not.toHaveBeenCalled();
     expect(result).toMatchObject({ ok: false, confidence: 'suspected' });
+  });
+
+  it('reports unavailable refresh ownership without starting its killable spawn', async () => {
+    const deps = authDeps({ refreshAhead: async () => { throw new Error('owner publication unavailable'); } });
+    const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
+    expect(deps.probeBinaryAuthStatus).not.toHaveBeenCalled();
+    expect(result.summary).toContain('login refresh failed');
   });
 
   function authDeps(over: Partial<AccountAuthStatusDeps> = {}): AccountAuthStatusDeps {

@@ -346,7 +346,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
 
     vi.resetModules();
     const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
-    const successor = harness({ fileStore: store(START.getTime() + 3_600_000) });
+    const successor = harness({ fileStore: store(START.getTime() + 1_000) });
     const afterRestart = restarted.refreshClaudeLoginAhead('claude', {
       CLAUDE_CONFIG_DIR: unrelatedConfig,
       CLAUDE_SECURESTORAGE_CONFIG_DIR: alias,
@@ -438,7 +438,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     firstHarness.children[0]!.emit('close', 1, null);
   });
 
-  it('keeps the fence when spawn throws synchronously, because launch outcome is ambiguous', async () => {
+  it('keeps the fence when an injected spawn throws synchronously, because launch outcome is ambiguous', async () => {
     const dir = privateStoreDir();
     const failedSpawn = vi.fn(() => { throw new Error('spawn transport failed'); }) as unknown as typeof import('node:child_process').spawn;
     const initial = harness({ fileStore: store(START.getTime() + 1_000), spawnImpl: failedSpawn });
@@ -458,6 +458,36 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
     await expect(later).resolves.toEqual({ outcome: 'still-running' });
     expect(successor.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('releases its exact fence after a default native synchronous spawn validation throw so the next caller can recover', async () => {
+    const dir = privateStoreDir();
+    const savedVitest = process.env.VITEST;
+    const savedNodeEnv = process.env.NODE_ENV;
+    delete process.env.VITEST;
+    delete process.env.NODE_ENV;
+    try {
+      vi.resetModules();
+      const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+      await expect(first.refreshClaudeLoginAhead('claude\0invalid', { CLAUDE_CONFIG_DIR: dir }, {
+        platform: 'linux',
+        readFileStore: () => store(START.getTime() + 1_000),
+      })).resolves.toEqual({ outcome: 'spawn-failed', reason: 'within-window' });
+      expect(existsSync(ownerPath(dir))).toBe(false);
+
+      vi.resetModules();
+      const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+      const successor = harness({ fileStore: store(START.getTime() + 1_000) });
+      const later = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
+      expect(successor.spawnImpl).toHaveBeenCalledOnce();
+      successor.children[0]!.emit('close', 0, null);
+      await expect(later).resolves.toEqual({ outcome: 'ran', reason: 'within-window', exitCode: 0, signal: null });
+    } finally {
+      if (savedVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = savedVitest;
+      if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = savedNodeEnv;
+    }
   });
 
   it('reports a pidless child error without close as still-running and retains its claim', async () => {
@@ -491,9 +521,50 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     expect(child.kill).not.toHaveBeenCalled();
   });
 
-  it.each(['invalid', 'corrupt', 'symlink', 'hardlink', 'wrong-mode', 'oversize'] as const)(
-    'leaves an unsafe %s claim untouched and defers before renewed-expiry fast path',
-    async (kind) => {
+  it('reports an owner-directory EACCES without spawning a refresh child', async () => {
+    const dir = privateStoreDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const directory = dirname(ownerPath(dir));
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      mkdirSync: (...args: Parameters<typeof actualFs.mkdirSync>) => {
+        if (args[0] === directory) {
+          const error = new Error('injected EACCES') as NodeJS.ErrnoException;
+          error.code = 'EACCES';
+          throw error;
+        }
+        return actualFs.mkdirSync(...args);
+      },
+    }));
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    await expect(refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(existsSync(ownerPath(dir))).toBe(false);
+  });
+
+  it('reports an unresolved canonical owner location without spawning a refresh child', async () => {
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const missing = join(privateStoreDir(), 'missing-store');
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    await expect(refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['invalid', 'still-running'],
+    ['corrupt', 'still-running'],
+    ['symlink', 'owner-unavailable'],
+    ['hardlink', 'owner-unavailable'],
+    ['wrong-mode', 'owner-unavailable'],
+    ['oversize', 'owner-unavailable'],
+  ] as const)(
+    'leaves a %s claim untouched and defers before renewed-expiry fast path with %s',
+    async (kind, outcome) => {
       const dir = privateStoreDir();
       const path = ownerPath(dir);
       const target = join(dirname(path), `${kind}-target`);
@@ -524,7 +595,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
       const h = harness({ fileStore: store(START.getTime() + 3_600_000) });
       const result = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
       await vi.advanceTimersByTimeAsync(refreshed.REFRESH_AHEAD_WAIT_MS);
-      await expect(result).resolves.toEqual({ outcome: 'still-running' });
+      await expect(result).resolves.toEqual({ outcome });
       expect(h.spawnImpl).not.toHaveBeenCalled();
       expect(claimFingerprint(path)).toEqual(before);
       expect(kind === 'symlink' ? readFileSync(target, 'utf8') : readFileSync(path, 'utf8')).toBe(beforeBytes);
@@ -550,7 +621,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     const h = harness({ fileStore: store(START.getTime() + 3_600_000) });
     const result = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
     await vi.advanceTimersByTimeAsync(refreshed.REFRESH_AHEAD_WAIT_MS);
-    await expect(result).resolves.toEqual({ outcome: 'still-running' });
+    await expect(result).resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(h.spawnImpl).not.toHaveBeenCalled();
     expect(claimFingerprint(path)).toEqual(before);
   });
