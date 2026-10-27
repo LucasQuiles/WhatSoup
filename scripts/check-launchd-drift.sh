@@ -195,11 +195,8 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
 }
 
 # check_maintenance_surface RENDERED INSTALLED: harness-maintenance is compared as a parsed plist, not
-# byte for byte, so the fleet's login-guard wrapper is accepted: the 2026-10-19 fleet-reauth change
-# rewrote the job with plistlib and starts it as /bin/bash <guard> /bin/bash <script>. <guard> must
-# be one of the two deployed locations, $HOME/.local/libexec/fleet-reauth/maint-ccd-guard.sh or
-# $HOME/.local/share/fleet-reauth/maint-ccd-guard.sh (by realpath, so not a symlink to elsewhere),
-# a regular file owned by this user and not group- or world-writable. The job's effective credential
+# byte for byte. ProgramArguments must match the rendered job: ownership and permissions of an
+# extra wrapper do not prove its behavior. The job's effective credential
 # store (defined CLAUDE_SECURESTORAGE_CONFIG_DIR wins over CLAUDE_CONFIG_DIR) must also be its own:
 # equality, the same resolved file store, or the same keychain item as another instance is drift,
 # because the job's agent CLI can refresh, and so rotate or wipe, the login of the store it sees.
@@ -238,24 +235,6 @@ except Exception:
     drift("installed plist does not parse")
 if not isinstance(got, dict):
     drift("installed plist is not a dict")
-args = got.get("ProgramArguments")
-GUARD_HOMES = (".local/libexec/fleet-reauth", ".local/share/fleet-reauth")
-guarded = (isinstance(args, list) and len(args) >= 3 and args[0] == "/bin/bash" and args[2] == "/bin/bash"
-           and isinstance(args[1], str) and args[1].startswith("/") and args[1].endswith("/maint-ccd-guard.sh"))
-if guarded:
-    real_home = os.path.realpath(home)
-    allowed = {os.path.join(real_home, d, "maint-ccd-guard.sh") for d in GUARD_HOMES}
-    real = os.path.realpath(args[1])
-    if real not in allowed:
-        drift("its login guard is not at a deployed location")
-    try:
-        st = os.stat(real)
-    except OSError:
-        drift("its login guard maint-ccd-guard.sh is missing")
-    import stat as stat_mod
-    if not stat_mod.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
-        drift("its login guard is not a regular file owned by this user and closed to group and world writes")
-    got = dict(got, ProgramArguments=args[2:])
 if got != want:
     drift("")
 
@@ -313,16 +292,16 @@ for path in sorted(glob.glob(os.path.join(launchd_dir, "com.whatsoup.*.plist")))
     args = other_plist.get("ProgramArguments") if isinstance(other_plist, dict) else None
     if not isinstance(other_plist, dict) or other_plist.get("Label") != f"com.whatsoup.{stem}" or not isinstance(args, list) or len(args) < 2 or args[1] != stem:
         continue
-    other = effective_selector(other_plist.get("EnvironmentVariables"), stem)
+    other = effective_selector(other_plist.get("EnvironmentVariables"), name)
     if other and not os.path.isabs(other):
-        drift(f"{stem}'s effective credential-store selector is not absolute")
+        drift(f"{name}'s effective credential-store selector is not absolute")
     if own == other:
-        drift(f"effective credential-store selector equals {stem}'s")
+        drift(f"effective credential-store selector equals {name}'s")
     if resolved(own) == resolved(other):
-        drift(f"effective credential-store selector resolves to {stem}'s config dir")
+        drift(f"effective credential-store selector resolves to {name}'s config dir")
     if service(own) == service(other):
-        drift(f"effective credential-store selector shares {stem}'s keychain item")
-print("ok: harness-maintenance" + (" (started through the login guard)" if guarded else ""))
+        drift(f"effective credential-store selector shares {name}'s keychain item")
+print("ok: harness-maintenance")
 PY
   verdict="$(cat "$out")"
   rm -f "$out"

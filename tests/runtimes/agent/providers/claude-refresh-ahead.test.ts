@@ -475,6 +475,21 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     expect(existsSync(ownerPath(dir))).toBe(true);
   });
 
+  it('reports a pidless spawn failure after close and releases only its own claim', async () => {
+    const dir = privateStoreDir();
+    const child = fakeChild(9001);
+    Object.defineProperty(child, 'pid', { value: undefined });
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    const h = harness({ fileStore: store(START.getTime() + 1_000), spawnImpl });
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    child.emit('error', new Error('spawn failed'));
+    expect(existsSync(ownerPath(dir))).toBe(true);
+    child.emit('close', -2, null);
+    await expect(run).resolves.toEqual({ outcome: 'spawn-failed', reason: 'within-window' });
+    expect(existsSync(ownerPath(dir))).toBe(false);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
   it.each(['invalid', 'corrupt', 'symlink', 'hardlink', 'wrong-mode', 'oversize'] as const)(
     'leaves an unsafe %s claim untouched and defers before renewed-expiry fast path',
     async (kind) => {
