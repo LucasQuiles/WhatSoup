@@ -21,8 +21,9 @@
 //     that always finishes. Concurrent callers for one storage dir share it.
 //     A caller waits at most REFRESH_AHEAD_WAIT_MS for it; if it is still
 //     running, the probe is deferred (no killable child is spawned) and the
-//     child keeps running. After REFRESH_AHEAD_HARD_CAP_MS the run stops
-//     blocking later callers (logged at error), still without being killed.
+//     child keeps running. After REFRESH_AHEAD_HARD_CAP_MS the local wait is
+//     logged as hung, but its durable owner claim still defers later callers
+//     until that exact child closes; it is never killed.
 //     The child runs detached (its own process group), so a signal to the
 //     bot's group at shutdown or restart cannot reach it mid-refresh.
 //   - kill grace: before signalling such a child, wait (bounded) while the
@@ -39,10 +40,13 @@
 // logged, and the child's output is never captured.
 
 import { spawn } from 'node:child_process';
-import { realpathSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
+import { createPrivateFileIsolatedSync } from '../../../lib/private-fs-isolated.ts';
+import { deletePrivateFileSync, readPrivateFileSync } from '../../../lib/private-fs.ts';
 import { CLAUDE_AUTH_STATUS_ARGS } from './account-auth-status.ts';
 import {
   claudeCredentialServiceLabel,
@@ -82,12 +86,16 @@ export const REFRESH_LOCK_GRACE_MS = 25_000;
  */
 export const REFRESH_AHEAD_WAIT_MS = 60_000;
 
-/** After this long a still-running refresh-ahead child stops blocking new callers (never killed). */
+/** After this long a still-running child stops local waiting but keeps its durable hold (never killed). */
 export const REFRESH_AHEAD_HARD_CAP_MS = 10 * 60_000;
 
 const REFRESH_LOCK_POLL_MS = 250;
 const STILL_RUNNING_LOG_MS = 60_000;
 const OAUTH_REFRESH_LOCK = '.oauth_refresh.lock';
+const OWNER_DIRECTORY = '.whatsoup-refresh-ahead';
+const OWNER_FILENAME = 'owner.json';
+const OWNER_MAX_BYTES = 4 * 1024;
+const OWNER_LABEL = 'claude refresh-ahead owner claim';
 
 type Log = {
   info: (o: Record<string, unknown>, m: string) => void;
@@ -127,13 +135,81 @@ function trackLive(key: string, delta: 1 | -1): void {
   else liveChildren.delete(key);
 }
 
+type RefreshOwnerLocation = {
+  store: string;
+  directory: string;
+  path: string;
+};
+
 /**
- * Dedupe key: the storage dir, resolved and without a trailing slash, so
- * `/x/.claude` and `/x/.claude/` share one child. The keychain item name is
- * still derived from the raw string, because the CLI hashes what it is given.
+ * The durable owner namespace is the canonical effective store, not its
+ * spelling. A failure to establish that namespace is held conservatively.
  */
-function refreshAheadKey(env: NodeJS.ProcessEnv): string {
-  return resolve(claudeSecureStorageDir(env));
+function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | null {
+  try {
+    const store = realpathSync(claudeSecureStorageDir(env));
+    const directory = join(store, OWNER_DIRECTORY);
+    return { store, directory, path: join(directory, OWNER_FILENAME) };
+  } catch {
+    return null;
+  }
+}
+
+/** Any observed or unsafe claim holds the refresh; its contents are irrelevant to acquisition. */
+function ownerClaimHeld(location: RefreshOwnerLocation): boolean {
+  try {
+    return readPrivateFileSync(location.path, {
+      label: OWNER_LABEL,
+      maxBytes: OWNER_MAX_BYTES,
+      observation: { root: location.store },
+    }) !== null;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Create only our private state child, then observe it again before the
+ * isolated writer could force its mode. Existing or uncertain state holds.
+ */
+function acquireOwnerClaim(location: RefreshOwnerLocation, fence: string): boolean {
+  try {
+    mkdirSync(location.directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+  }
+  if (ownerClaimHeld(location)) return false;
+  try {
+    createPrivateFileIsolatedSync(
+      location.path,
+      JSON.stringify({ version: 1, fence }),
+      OWNER_LABEL,
+    );
+    return true;
+  } catch {
+    // EEXIST and every uncertain publication state both mean a hold.
+    return false;
+  }
+}
+
+/**
+ * The close observer removes only the fence it created. This is cooperative
+ * same-user protection, not isolation against a malicious same-UID replacer.
+ */
+function releaseOwnerClaim(location: RefreshOwnerLocation, fence: string): void {
+  try {
+    const observed = readPrivateFileSync(location.path, {
+      label: OWNER_LABEL,
+      maxBytes: OWNER_MAX_BYTES,
+      observation: { root: location.store },
+    });
+    if (observed === null) return;
+    const parsed = JSON.parse(observed.bytes.toString('utf8')) as { fence?: unknown };
+    if (parsed.fence !== fence) return;
+    deletePrivateFileSync(location.path, OWNER_LABEL);
+  } catch {
+    // Unknown, malformed, and unsafe ownership state remains held.
+  }
 }
 
 function refreshReason(expiresAt: number | null, now: number): ClaudeRefreshAheadReason | null {
@@ -154,19 +230,31 @@ export function refreshClaudeLoginAhead(
   env: NodeJS.ProcessEnv,
   deps: ClaudeRefreshAheadDeps = {},
 ): Promise<ClaudeRefreshAheadResult> {
-  const key = refreshAheadKey(env);
+  // Keep the existing test-runner boundary before any config-store or claim
+  // filesystem operation: default test fixtures may deliberately not exist.
+  if (!deps.spawnImpl && underTestRunner()) {
+    return Promise.resolve({ outcome: 'skipped-test-runner', reason: 'expiry-unknown' });
+  }
+
+  const location = refreshOwnerLocation(env);
+  if (location === null) return Promise.resolve({ outcome: 'still-running' });
+  const key = location.store;
   let run = inFlight.get(key);
+  if (run) return waitBounded(run);
   // A child past its hard cap no longer blocks the wait, but while it is
   // alive no second refresh child and no killable probe may start.
   if (!run && liveChildren.has(key)) return Promise.resolve({ outcome: 'still-running' });
-  if (!run) {
-    const release = (): void => {
-      if (inFlight.get(key) === created) inFlight.delete(key);
-    };
-    const created: Promise<ClaudeRefreshAheadResult> = runRefreshAhead(binary, env, deps, release, key).finally(release);
-    run = created;
-    inFlight.set(key, created);
-  }
+  // A previous parent may have died with its child alive. Its claim must win
+  // over a newly renewed credential or any later expiry fast path.
+  if (ownerClaimHeld(location)) return Promise.resolve({ outcome: 'still-running' });
+  const release = (): void => {
+    if (inFlight.get(key) === created) inFlight.delete(key);
+  };
+  const created: Promise<ClaudeRefreshAheadResult> = runRefreshAhead(
+    binary, env, deps, release, key, location,
+  ).finally(release);
+  run = created;
+  inFlight.set(key, created);
   return waitBounded(run);
 }
 
@@ -185,22 +273,20 @@ async function runRefreshAhead(
   deps: ClaudeRefreshAheadDeps,
   release: () => void,
   key: string,
+  location: RefreshOwnerLocation,
 ): Promise<ClaudeRefreshAheadResult> {
   const now = deps.now ?? (() => systemClock.now());
-  // Never read a live login or start a live CLI from a test run that did not
-  // inject its own child.
-  const testRunnerDefaults = !deps.spawnImpl && underTestRunner();
   let expiresAt: number | null = null;
-  if (!testRunnerDefaults) {
-    try {
-      expiresAt = readClaudeCredentialExpiry(env, deps).expiresAt;
-    } catch {
-      expiresAt = null;
-    }
+  try {
+    expiresAt = readClaudeCredentialExpiry(env, deps).expiresAt;
+  } catch {
+    expiresAt = null;
   }
   const reason = refreshReason(expiresAt, now());
   if (reason === null) return { outcome: 'not-needed' };
-  if (testRunnerDefaults) return { outcome: 'skipped-test-runner', reason };
+
+  const fence = randomUUID();
+  if (!acquireOwnerClaim(location, fence)) return { outcome: 'still-running' };
 
   const log = deps.log ?? createChildLogger('claude-refresh-ahead');
   const base = { purpose: 'refresh-ahead', reason, credentialService: claudeCredentialServiceLabel(env) };
@@ -241,8 +327,8 @@ async function runRefreshAhead(
       ));
     }, STILL_RUNNING_LOG_MS);
     stillRunning.unref?.();
-    // A child that never exits must not block every later probe for this dir.
-    // Awaited through the promise below, but never keeps the bot alive at shutdown.
+    // A child that never exits keeps its durable hold. This only stops later
+    // callers from awaiting this local promise; it never permits another probe.
     child.unref?.();
     trackLive(key, 1);
     const hardCap = setTimeout(() => {
@@ -250,7 +336,7 @@ async function runRefreshAhead(
       clearInterval(stillRunning);
       quietly(() => log.error(
         { event: 'claude_refresh_ahead_hung', purpose: 'refresh-ahead', pid: pid ?? null, elapsedMs: now() - startedAt },
-        'claude refresh-ahead child exceeded its hard cap; no longer blocking probes (still not killed)',
+        'claude refresh-ahead child exceeded its hard cap; durable owner remains held and later probes defer',
       ));
     }, REFRESH_AHEAD_HARD_CAP_MS);
     hardCap.unref?.();
@@ -266,7 +352,10 @@ async function runRefreshAhead(
     };
     // An error from a spawned child does not end it; only close does.
     child.on('error', () => { if (child.pid === undefined) finish(null, null, true); });
-    child.on('close', (code, signal) => finish(code, signal, false));
+    child.on('close', (code, signal) => {
+      releaseOwnerClaim(location, fence);
+      finish(code, signal, false);
+    });
   });
 }
 
