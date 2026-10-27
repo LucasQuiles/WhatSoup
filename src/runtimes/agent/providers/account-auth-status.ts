@@ -27,7 +27,7 @@
 import type { DiagnosticProbe, DiagnosticProbeResult } from '../diagnostic-bundle.ts';
 import type { BinaryAuthStatusResult, BinaryCommandProbeOptions } from './binary-preflight.ts';
 import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
-import type { ClaudeRefreshAheadResult } from './claude-refresh-ahead.ts';
+import { CLAUDE_AUTH_STATUS_ARGS, refreshAheadDefersProbe, type ClaudeRefreshAheadResult } from './claude-refresh-ahead.ts';
 import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
 
@@ -58,9 +58,7 @@ export interface AccountAuthStatusDeps {
   log?: ProbeLifecycleLog;
 }
 
-/** `claude auth status --json` — shared with the account-identity verifier
- *  (claude-account-identity.ts) so both read the same CLI surface. */
-export const CLAUDE_AUTH_STATUS_ARGS: readonly string[] = ['auth', 'status', '--json'];
+export { CLAUDE_AUTH_STATUS_ARGS } from './claude-refresh-ahead.ts';
 const AUTH_STATUS_ARGS = [...CLAUDE_AUTH_STATUS_ARGS];
 
 /** Scrubbed env for the CLI probe — only what the binary needs to resolve auth. */
@@ -120,10 +118,10 @@ export function makeAccountAuthStatusProbe(
         // A failed refresh check cannot establish that a killable probe is safe.
         refreshed = { outcome: 'still-running' };
       }
-      // Never start the killable probe while the refresh child still runs.
+      // An unresolved or failed refresh cannot establish that a killable probe is safe.
       // An abandoned probe reports the abort below, not the deferral.
-      if (refreshed && refreshed.outcome === 'still-running' && !signal.aborted) {
-        return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: login refresh still running`, data: { mode: 'binary', provider: target.provider } };
+      if (refreshAheadDefersProbe(refreshed) && !signal.aborted) {
+        return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: login refresh incomplete`, data: { mode: 'binary', provider: target.provider } };
       }
     }
     // The orchestrator may have already abandoned us; skip the spawn if so.

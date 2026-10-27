@@ -3,8 +3,11 @@
 // auth-status probe. The refresh-ahead child runs before the probe's budget is
 // armed, so a slow refresh can never make the probe time out, and it is never
 // killed. The probes' own kill waits while the CLI's refresh lock is held.
-// Fakes only: no real child, no real store, no real lock.
+// Fake children and credentials; owner claims use a private temporary directory.
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPrimaryModelProbeAdapters, type PrimaryModelProbeAdapterDeps } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import { probePrimaryModelUsability } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
@@ -45,16 +48,26 @@ function spawnRecorder() {
 const quietLog = { info: () => undefined, warn: () => undefined, error: () => undefined };
 const START = new Date('2026-10-19T09:00:00.000Z');
 let savedConfigDir: string | undefined;
+let savedSecureStorageDir: string | undefined;
+let fixtureRoot: string;
 
 beforeEach(() => {
   vi.useFakeTimers({ now: START });
   savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
-  process.env.CLAUDE_CONFIG_DIR = '/tmp/refresh-ahead-wiring/.claude';
+  savedSecureStorageDir = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  fixtureRoot = mkdtempSync(join(tmpdir(), 'refresh-ahead-wiring-'));
+  const store = join(fixtureRoot, '.claude');
+  mkdirSync(store, { mode: 0o700 });
+  process.env.CLAUDE_CONFIG_DIR = store;
+  process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = store;
 });
 afterEach(() => {
   vi.useRealTimers();
   if (savedConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+  if (savedSecureStorageDir === undefined) delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+  else process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = savedSecureStorageDir;
+  rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
 function adapterDeps(probeSpawn: typeof import('node:child_process').spawn, over: Partial<PrimaryModelProbeAdapterDeps> = {}): PrimaryModelProbeAdapterDeps {

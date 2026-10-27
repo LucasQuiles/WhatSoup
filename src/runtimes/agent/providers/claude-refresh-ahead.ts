@@ -47,7 +47,6 @@ import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
 import { createPrivateFileIsolatedSync } from '../../../lib/private-fs-isolated.ts';
 import { deletePrivateFileSync, readPrivateFileSync } from '../../../lib/private-fs.ts';
-import { CLAUDE_AUTH_STATUS_ARGS } from './account-auth-status.ts';
 import {
   claudeCredentialServiceLabel,
   claudeSecureStorageDir,
@@ -66,6 +65,9 @@ import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers } from './probe-lifecycle-
  * the probe's CLI would refresh at its start is refreshed here first.
  */
 export const REFRESH_AHEAD_MS = 300_000;
+
+/** Shared non-interactive auth command for refresh and account probes. */
+export const CLAUDE_AUTH_STATUS_ARGS: readonly string[] = ['auth', 'status', '--json'];
 
 /** The CLI treats its refresh lock as stale after 60 s (proper-lockfile `stale`). */
 export const REFRESH_LOCK_STALE_MS = 60_000;
@@ -114,8 +116,11 @@ export type ClaudeRefreshAheadResult =
   | { outcome: 'still-running' };
 
 /** True when a refresh-ahead result says the probe must be deferred. */
-export function refreshAheadStillRunning(result: unknown): boolean {
-  return typeof result === 'object' && result !== null && (result as { outcome?: unknown }).outcome === 'still-running';
+export function refreshAheadDefersProbe(result: unknown): boolean {
+  if (typeof result !== 'object' || result === null) return false;
+  const refresh = result as { outcome?: unknown; exitCode?: unknown; signal?: unknown };
+  return refresh.outcome === 'still-running' || refresh.outcome === 'spawn-failed'
+    || (refresh.outcome === 'ran' && (refresh.exitCode !== 0 || refresh.signal !== null));
 }
 
 export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
@@ -349,7 +354,9 @@ async function runRefreshAhead(
       clearTimeout(hardCap);
       trackLive(key, -1);
       quietly(() => observers.onExited(exitOf(pid, exitCode, signal, spawnFailed)));
-      resolve(claimReleased ? { outcome: 'ran', reason, exitCode, signal } : { outcome: 'still-running' });
+      if (!claimReleased) resolve({ outcome: 'still-running' });
+      else if (spawnFailed) resolve({ outcome: 'spawn-failed', reason });
+      else resolve({ outcome: 'ran', reason, exitCode, signal });
     };
     // Even a pidless error is not proof that the child has closed.
     let spawnFailed = false;

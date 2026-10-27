@@ -40,7 +40,7 @@ import {
   type BinaryAuthStatusResult,
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
-import { claudeRefreshLockGrace, refreshAheadStillRunning, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
+import { claudeRefreshLockGrace, refreshAheadDefersProbe, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
 import { claudeCredentialServiceLabel } from './claude-filestore-heal.ts';
 import { CLAUDE_PROBE_EVENTS, probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
@@ -203,8 +203,8 @@ export async function observeClaudeAccountIdentity(
   } catch {
     return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
   }
-  // Never start the killable probe while the refresh child still runs.
-  if (refreshAheadStillRunning(refreshed)) return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
+  // An unresolved or failed refresh cannot establish that a killable probe is safe.
+  if (refreshAheadDefersProbe(refreshed)) return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
   let probe: BinaryAuthStatusResult;
   try {
     probe = await (deps.probeBinaryCommand ?? probeBinaryCommand)(

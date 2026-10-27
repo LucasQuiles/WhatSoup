@@ -14,7 +14,7 @@ import {
   ensureClaudeFileStoreCredential,
   type ClaudeFileStoreHealResult,
 } from './claude-filestore-heal.ts';
-import { claudeRefreshLockGrace, refreshAheadStillRunning, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
+import { claudeRefreshLockGrace, refreshAheadDefersProbe, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
 import { DEFERRED_REFRESH_IN_FLIGHT } from './primary-model-usability.ts';
 import { probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
@@ -193,8 +193,8 @@ async function prepareCliModelProbe(
     if (!binary) return;
     const env = modelProbeEnv(target.provider, target.model, providerConfig, deps);
     const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
-    // Never start the killable probe while the refresh child still runs.
-    if (refreshAheadStillRunning(refreshed)) return { defer: DEFERRED_REFRESH_IN_FLIGHT };
+    // An unresolved or failed refresh cannot establish that a killable probe is safe.
+    if (refreshAheadDefersProbe(refreshed)) return { defer: DEFERRED_REFRESH_IN_FLIGHT };
   } catch {
     return { defer: DEFERRED_REFRESH_IN_FLIGHT };
   }
