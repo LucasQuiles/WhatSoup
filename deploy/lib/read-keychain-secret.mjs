@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
+import { userInfo } from 'node:os';
 
-const [service, account] = process.argv.slice(2);
+const [service, requestedAccount] = process.argv.slice(2);
+const account = requestedAccount || (() => {
+  try {
+    return userInfo().username;
+  } catch {
+    return '';
+  }
+})();
 if (!service || !account) process.exit(64);
 
 try {

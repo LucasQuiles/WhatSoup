@@ -113,6 +113,10 @@ export interface PrimaryModelProbeOptions {
 
 /** Reason of a probe deferred because a refresh-ahead child is still running. */
 export const DEFERRED_REFRESH_IN_FLIGHT = 'deferred-refresh-in-flight';
+/** A refresh owner could not be safely read or published; the probe was not started. */
+export const REFRESH_OWNER_UNAVAILABLE = 'refresh-owner-unavailable';
+/** A refresh child completed unsuccessfully; the probe was not started. */
+export const REFRESH_AHEAD_FAILED = 'refresh-failed';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT = Symbol('primary-model-probe-timeout');

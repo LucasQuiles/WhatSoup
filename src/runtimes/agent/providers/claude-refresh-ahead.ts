@@ -112,6 +112,8 @@ export type ClaudeRefreshAheadResult =
   | { outcome: 'skipped-test-runner'; reason: ClaudeRefreshAheadReason }
   | { outcome: 'spawn-failed'; reason: ClaudeRefreshAheadReason }
   | { outcome: 'ran'; reason: ClaudeRefreshAheadReason; exitCode: number | null; signal: NodeJS.Signals | null }
+  /** The refresh owner cannot be read or published; defer without claiming a live child. */
+  | { outcome: 'owner-unavailable' }
   /** The caller's wait ended while the child still runs: defer the probe, spawn nothing killable. */
   | { outcome: 'still-running' };
 
@@ -119,7 +121,7 @@ export type ClaudeRefreshAheadResult =
 export function refreshAheadDefersProbe(result: unknown): boolean {
   if (typeof result !== 'object' || result === null) return false;
   const refresh = result as { outcome?: unknown; exitCode?: unknown; signal?: unknown };
-  return refresh.outcome === 'still-running' || refresh.outcome === 'spawn-failed'
+  return refresh.outcome === 'owner-unavailable' || refresh.outcome === 'still-running' || refresh.outcome === 'spawn-failed'
     || (refresh.outcome === 'ran' && (refresh.exitCode !== 0 || refresh.signal !== null));
 }
 
@@ -148,7 +150,8 @@ type RefreshOwnerLocation = {
 
 /**
  * The durable owner namespace is the canonical effective store, not its
- * spelling. A failure to establish that namespace is held conservatively.
+ * spelling. A failure to establish that namespace fails closed without
+ * claiming a live refresh owner.
  */
 function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | null {
   try {
@@ -160,40 +163,46 @@ function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | nu
   }
 }
 
-/** Any observed or unsafe claim holds the refresh; its contents are irrelevant to acquisition. */
-function ownerClaimHeld(location: RefreshOwnerLocation): boolean {
+type OwnerClaimState = 'absent' | 'held' | 'unavailable';
+type OwnerClaimAcquisition = 'acquired' | Exclude<OwnerClaimState, 'absent'>;
+
+/** A readable private claim is the only durable evidence of a prior owner. */
+function ownerClaimState(location: RefreshOwnerLocation): OwnerClaimState {
   try {
     return readPrivateFileSync(location.path, {
       label: OWNER_LABEL,
       maxBytes: OWNER_MAX_BYTES,
       observation: { root: location.store },
-    }) !== null;
+    }) === null ? 'absent' : 'held';
   } catch {
-    return true;
+    // Do not spawn across an unsafe or unreadable namespace, but do not call it a live refresh.
+    return 'unavailable';
   }
 }
 
 /**
  * Create only our private state child, then observe it again before the
- * isolated writer could force its mode. Existing or uncertain state holds.
+ * isolated writer could force its mode. A readable existing claim holds; a
+ * publication/read failure is deferred separately so callers can alert.
  */
-function acquireOwnerClaim(location: RefreshOwnerLocation, fence: string): boolean {
+function acquireOwnerClaim(location: RefreshOwnerLocation, fence: string): OwnerClaimAcquisition {
   try {
     mkdirSync(location.directory, { mode: 0o700 });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return 'unavailable';
   }
-  if (ownerClaimHeld(location)) return false;
+  const before = ownerClaimState(location);
+  if (before !== 'absent') return before;
   try {
     createPrivateFileIsolatedSync(
       location.path,
       JSON.stringify({ version: 1, fence }),
       OWNER_LABEL,
     );
-    return true;
+    return 'acquired';
   } catch {
-    // EEXIST and every uncertain publication state both mean a hold.
-    return false;
+    // A racing writer may now have published a readable claim; otherwise it is unavailable.
+    return ownerClaimState(location) === 'held' ? 'held' : 'unavailable';
   }
 }
 
@@ -243,7 +252,7 @@ export function refreshClaudeLoginAhead(
   }
 
   const location = refreshOwnerLocation(env);
-  if (location === null) return Promise.resolve({ outcome: 'still-running' });
+  if (location === null) return Promise.resolve({ outcome: 'owner-unavailable' });
   const key = location.store;
   let run = inFlight.get(key);
   if (run) return waitBounded(run);
@@ -252,7 +261,9 @@ export function refreshClaudeLoginAhead(
   if (!run && liveChildren.has(key)) return Promise.resolve({ outcome: 'still-running' });
   // A previous parent may have died with its child alive. Its claim must win
   // over a newly renewed credential or any later expiry fast path.
-  if (ownerClaimHeld(location)) return Promise.resolve({ outcome: 'still-running' });
+  const priorClaim = ownerClaimState(location);
+  if (priorClaim === 'held') return Promise.resolve({ outcome: 'still-running' });
+  if (priorClaim === 'unavailable') return Promise.resolve({ outcome: 'owner-unavailable' });
   const release = (): void => {
     if (inFlight.get(key) === created) inFlight.delete(key);
   };
@@ -292,7 +303,9 @@ async function runRefreshAhead(
   if (reason === null) return { outcome: 'not-needed' };
 
   const fence = randomUUID();
-  if (!acquireOwnerClaim(location, fence)) return { outcome: 'still-running' };
+  const acquisition = acquireOwnerClaim(location, fence);
+  if (acquisition === 'held') return { outcome: 'still-running' };
+  if (acquisition === 'unavailable') return { outcome: 'owner-unavailable' };
 
   const log = deps.log ?? createChildLogger('claude-refresh-ahead');
   const base = { purpose: 'refresh-ahead', reason, credentialService: claudeCredentialServiceLabel(env) };
@@ -319,7 +332,14 @@ async function runRefreshAhead(
     } catch {
       quietly(() => observers.onSpawned(undefined));
       quietly(() => observers.onExited(exitOf(undefined, null, null, true)));
-      resolve({ outcome: 'still-running' });
+      // The production Node spawn path can throw here only before a child exists or after
+      // closing a failed native handle. An injected test seam may throw after side effects,
+      // so it retains the fence until an observed close.
+      if (!deps.spawnImpl && releaseOwnerClaim(location, fence)) {
+        resolve({ outcome: 'spawn-failed', reason });
+      } else {
+        resolve({ outcome: 'still-running' });
+      }
       return;
     }
     const pid = child.pid;

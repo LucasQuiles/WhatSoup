@@ -112,16 +112,25 @@ export function makeAccountAuthStatusProbe(
     // and the killable spawn below is then skipped.
     if (isClaude && deps.refreshAhead && !signal.aborted) {
       let refreshed: ClaudeRefreshAheadResult | void = undefined;
+      let refreshThrew = false;
       try {
         refreshed = await deps.refreshAhead(binary, env);
       } catch {
         // A failed refresh check cannot establish that a killable probe is safe.
-        refreshed = { outcome: 'still-running' };
+        refreshThrew = true;
       }
-      // An unresolved or failed refresh cannot establish that a killable probe is safe.
+      // A refresh failure cannot establish that a killable probe is safe.
       // An abandoned probe reports the abort below, not the deferral.
-      if (refreshAheadDefersProbe(refreshed) && !signal.aborted) {
-        return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: login refresh incomplete`, data: { mode: 'binary', provider: target.provider } };
+      if ((refreshThrew || refreshAheadDefersProbe(refreshed)) && !signal.aborted) {
+        const outcome = refreshed && refreshed.outcome;
+        const detail = refreshThrew
+          ? 'login refresh failed'
+          : outcome === 'still-running'
+          ? 'login refresh incomplete'
+          : outcome === 'owner-unavailable'
+            ? 'refresh ownership unavailable'
+            : 'login refresh failed';
+        return { ok: false, confidence: 'suspected', summary: `auth-status probe deferred for ${target.provider}: ${detail}`, data: { mode: 'binary', provider: target.provider } };
       }
     }
     // The orchestrator may have already abandoned us; skip the spawn if so.

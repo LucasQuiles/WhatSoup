@@ -15,7 +15,7 @@ import {
   type ClaudeFileStoreHealResult,
 } from './claude-filestore-heal.ts';
 import { claudeRefreshLockGrace, refreshAheadDefersProbe, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
-import { DEFERRED_REFRESH_IN_FLIGHT } from './primary-model-usability.ts';
+import { DEFERRED_REFRESH_IN_FLIGHT, REFRESH_AHEAD_FAILED, REFRESH_OWNER_UNAVAILABLE } from './primary-model-usability.ts';
 import { probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
 import { createChildLogger } from '../../../logger.ts';
 import type {
@@ -193,10 +193,17 @@ async function prepareCliModelProbe(
     if (!binary) return;
     const env = modelProbeEnv(target.provider, target.model, providerConfig, deps);
     const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
-    // An unresolved or failed refresh cannot establish that a killable probe is safe.
-    if (refreshAheadDefersProbe(refreshed)) return { defer: DEFERRED_REFRESH_IN_FLIGHT };
+    // Only a currently held refresh suppresses alerts. Other refresh failures still block the
+    // killable probe, but carry an alertable reason because no running child was established.
+    if (refreshAheadDefersProbe(refreshed)) {
+      const outcome = typeof refreshed === 'object' && refreshed !== null
+        ? (refreshed as { outcome?: unknown }).outcome : undefined;
+      if (outcome === 'still-running') return { defer: DEFERRED_REFRESH_IN_FLIGHT };
+      if (outcome === 'owner-unavailable') return { defer: REFRESH_OWNER_UNAVAILABLE };
+      return { defer: REFRESH_AHEAD_FAILED };
+    }
   } catch {
-    return { defer: DEFERRED_REFRESH_IN_FLIGHT };
+    return { defer: REFRESH_AHEAD_FAILED };
   }
   return undefined;
 }
