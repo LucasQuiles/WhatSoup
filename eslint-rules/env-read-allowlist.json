@@ -122,11 +122,6 @@
       "reason": "secret resolver + REQUIRE_OS_KEYRING flag + XDG ambient \u2014 resolver stays env-late. Fifth site: lookupEnvCredential, the env-only read for values that are authoritative by contract (launcher-provenanced health token)."
     },
     {
-      "file": "src/lib/model-advisor.ts",
-      "allowedUnmarkedSites": 1,
-      "reason": "CLAUDE_CONFIG_DIR \u2014 env-late by design (#2192 s4 verdict: external-tool interop; must track the env the spawned claude CLI sees, and the vitest isolation setup deletes it \u2014 env is the sanctioned channel)."
-    },
-    {
       "file": "src/lib/recovery-authority-store.ts",
       "allowedUnmarkedSites": 3,
       "reason": "env-late by design (#2192 slice 3c): BOT_ERRORS_STATE_DIR absence selects the XDG default (absence load-bearing); XDG_DATA_HOME is OS-ambient; WHATSOUP_INSTANCE is deploy-injected identity (systemd/launchd), never set in src."
