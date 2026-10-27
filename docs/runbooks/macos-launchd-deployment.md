@@ -212,12 +212,16 @@ instance `config.json` `service` block (schema:
   decode) stops
   the render: `deploy/setup.sh` runs under `set -e`, so it aborts at that
   timer and installs nothing further until the plist is repaired or removed.
-  Harness maintenance has a separate login: its renderer assigns
-  `$HOME/.claude-maint` and does not preserve a bot's config directory.
-  Do not copy a bot's credentials or credential-store overrides into that job.
-  Maintenance refuses provider CLI execution when it cannot prove that its
-  effective credential store differs from every inventoried bot; other
-  maintenance results do not turn that refusal into a healthy run.
+  Harness maintenance has a separate login: its renderer assigns both
+  `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to
+  `$HOME/.claude-maint` and preserves neither a bot's config directory nor a
+  secure-storage override. The secure-storage selector takes precedence when
+  defined (an empty value selects the default store) and a nonempty selector is
+  NFC-normalized for its keychain item. Do not copy a bot's credentials or
+  credential-store overrides into that job. Maintenance refuses provider CLI
+  execution when it cannot prove that its effective credential store differs
+  from every inventoried bot; other maintenance results do not turn that
+  refusal into a healthy run.
 - `service.pathPrepend` → directories prepended, in order, ahead of the
   generating shell's ambient `PATH` in the rendered service `PATH` (e.g.
   `$HOME/.local/bin` so an opencode fallback binary resolves under launchd), and

@@ -11,10 +11,12 @@ import {
   cleanupHarnesses,
   events,
   makeHarness,
+  onDarwin,
   run,
   systemdUnit,
   type Harness,
   type RunResult,
+  writePlist,
 } from './harness-maintenance-fixture-helper.ts';
 
 // The agent CLI uses, and can refresh, the login of whatever CLAUDE_CONFIG_DIR it sees. The
@@ -41,6 +43,18 @@ function withInstance(h: Harness, config?: string, secureStorage?: string): Harn
   ];
   systemdUnit(h, 'alpha', [`Environment=${env.join(' ')}`]);
   h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+  return h;
+}
+
+/** A structurally valid plist whose selected credential-store field cannot be read as a string. */
+function withUnreadableLaunchdSelector(h: Harness, key: 'CLAUDE_CONFIG_DIR' | 'CLAUDE_SECURESTORAGE_CONFIG_DIR'): Harness {
+  writePlist(h, 'alpha', { PATH: '/usr/bin:/bin', WHATSOUP_NODE: process.execPath, [key]: 'ignored' });
+  const file = path.join(h.home, 'Library/LaunchAgents/com.whatsoup.alpha.plist');
+  const source = readFileSync(file, 'utf8');
+  const stringEntry = `<key>${key}</key>\n    <string>ignored</string>`;
+  if (!source.includes(stringEntry)) throw new Error(`fixture missing ${key}`);
+  writeFileSync(file, source.replace(stringEntry, `<key>${key}</key>\n    <array><string>ignored</string></array>`));
+  h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'launchd';
   return h;
 }
 
@@ -170,6 +184,24 @@ describe('agent CLI login isolation of the maintenance job', () => {
     h.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = path.join(h.home, 'caf\u00e9');
     withInstance(h, path.join(h.home, 'bot-config'), path.join(h.home, 'cafe\u0301'));
     expectRefused(h, run(h), 'CLAUDE_SECURESTORAGE_CONFIG_DIR');
+  }, T);
+
+  it('refuses a self-referential effective secure-storage selector before starting the CLI', () => {
+    const h = makeHarness();
+    const loop = path.join(h.home, 'maintenance-loop');
+    symlinkSync('maintenance-loop', loop);
+    withInstance(h, path.join(h.home, 'bot-config'));
+    expectRefused(h, run(h, [], { CLAUDE_SECURESTORAGE_CONFIG_DIR: loop }), 'could not be resolved');
+  }, T);
+
+  it.runIf(onDarwin)('refuses before CLI execution when an instance config selector is unreadable', () => {
+    const h = withUnreadableLaunchdSelector(makeHarness(), 'CLAUDE_CONFIG_DIR');
+    expectRefused(h, run(h), 'not readable');
+  }, T);
+
+  it.runIf(onDarwin)('refuses before CLI execution when an instance secure-storage selector is unreadable', () => {
+    const h = withUnreadableLaunchdSelector(makeHarness(), 'CLAUDE_SECURESTORAGE_CONFIG_DIR');
+    expectRefused(h, run(h), 'not readable');
   }, T);
 
   it('refuses when an instance config dir could not be read', () => {

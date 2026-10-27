@@ -199,21 +199,23 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
 # rewrote the job with plistlib and starts it as /bin/bash <guard> /bin/bash <script>. <guard> must
 # be one of the two deployed locations, $HOME/.local/libexec/fleet-reauth/maint-ccd-guard.sh or
 # $HOME/.local/share/fleet-reauth/maint-ccd-guard.sh (by realpath, so not a symlink to elsewhere),
-# a regular file owned by this user and not group- or world-writable. The job's CLAUDE_CONFIG_DIR must also be its own:
-# equal to, resolving to, or keyed to the same keychain item as another com.whatsoup.* agent's config
-# dir (a missing key is the default ~/.claude) is drift, because the job's agent CLI can refresh, and
-# so rotate or wipe, the login of the dir it sees. Of other agents only CLAUDE_CONFIG_DIR is read, and
-# only file names are printed.
+# a regular file owned by this user and not group- or world-writable. The job's effective credential
+# store (defined CLAUDE_SECURESTORAGE_CONFIG_DIR wins over CLAUDE_CONFIG_DIR) must also be its own:
+# equality, the same resolved file store, or the same keychain item as another instance is drift,
+# because the job's agent CLI can refresh, and so rotate or wipe, the login of the store it sees.
+# Only file names are printed.
 check_maintenance_surface() {
   local rendered="$1" installed="$2" status=0 verdict out
   # The verdict line is the parser's stdout; its stderr is never shown (it could echo plist content).
   # A file, not $(...): bash 3.2 misparses a quoted heredoc inside a command substitution.
   out="$(mktemp "${TMPDIR:-/tmp}/launchd-drift-maint.XXXXXX")"
   "$PLIST_PYTHON" - "$rendered" "$installed" "$LAUNCHD_DIR" "$HOME" >"$out" 2>/dev/null <<'PY' || status=$?
-import glob, hashlib, os, plistlib, sys
+import glob, hashlib, os, plistlib, sys, unicodedata
 
 rendered_path, installed_path, launchd_dir, home = sys.argv[1:5]
 BASE = "Claude" + " Code-credentials"  # the agent CLI's keychain service base name
+CONFIG = "CLAUDE_CONFIG_DIR"
+SECURE = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
 
 
 def drift(reason):
@@ -257,20 +259,46 @@ if guarded:
 if got != want:
     drift("")
 
-env = got.get("EnvironmentVariables")
-own = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
-if not isinstance(own, str) or not own:
-    drift("no CLAUDE_CONFIG_DIR of its own")
+def effective_selector(env, owner):
+    if env is None:
+        return ""
+    if not isinstance(env, dict):
+        drift(f"{owner} environment is not readable")
+    if SECURE in env:
+        secure = env[SECURE]
+        if not isinstance(secure, str):
+            drift(f"{owner} secure-storage selector is not readable")
+        return unicodedata.normalize("NFC", secure)
+    config = env.get(CONFIG, "")
+    if not isinstance(config, str):
+        drift(f"{owner} config selector is not readable")
+    return config
 
 
-def resolved(d):
-    d = d or os.path.join(home, ".claude")
+def store(selector):
+    return selector or os.path.join(home, ".claude")
+
+
+def resolved(selector):
+    d = store(selector)
     # realpath resolves the existing prefix and keeps a not-yet-created rest; a relative value is kept.
     return os.path.realpath(d) if os.path.isabs(d) else d
 
 
-def service(d):
-    return BASE if not d else f"{BASE}-{hashlib.sha256(d.encode()).hexdigest()[:8]}"
+def service(selector):
+    return BASE if not selector else f"{BASE}-{hashlib.sha256(selector.encode()).hexdigest()[:8]}"
+
+
+env = got.get("EnvironmentVariables")
+if not isinstance(env, dict) or CONFIG not in env or SECURE not in env:
+    drift("both dedicated maintenance selectors are required")
+own = effective_selector(env, "maintenance")
+if not own:
+    drift("secure-storage selector selects the default store")
+if not os.path.isabs(own):
+    drift("effective credential-store selector is not absolute")
+if resolved(own) == resolved(""):
+    drift("effective credential-store selector is the default store")
 
 
 for path in sorted(glob.glob(os.path.join(launchd_dir, "com.whatsoup.*.plist"))):
@@ -278,17 +306,22 @@ for path in sorted(glob.glob(os.path.join(launchd_dir, "com.whatsoup.*.plist")))
     if name == "com.whatsoup.harness-maintenance.plist":
         continue
     try:
-        other_env = load(path).get("EnvironmentVariables")
+        other_plist = load(path)
     except Exception:
-        continue  # an unreadable surface fails its own structural or template check
-    other = other_env.get("CLAUDE_CONFIG_DIR") if isinstance(other_env, dict) else None
-    other = other if isinstance(other, str) else ""
+        drift(f"{name} could not be read to establish whether it is an instance")
+    stem = name[len("com.whatsoup."):-len(".plist")]
+    args = other_plist.get("ProgramArguments") if isinstance(other_plist, dict) else None
+    if not isinstance(other_plist, dict) or other_plist.get("Label") != f"com.whatsoup.{stem}" or not isinstance(args, list) or len(args) < 2 or args[1] != stem:
+        continue
+    other = effective_selector(other_plist.get("EnvironmentVariables"), stem)
+    if other and not os.path.isabs(other):
+        drift(f"{stem}'s effective credential-store selector is not absolute")
     if own == other:
-        drift(f"CLAUDE_CONFIG_DIR equals {name[:-6]}'s")
+        drift(f"effective credential-store selector equals {stem}'s")
     if resolved(own) == resolved(other):
-        drift(f"CLAUDE_CONFIG_DIR resolves to {name[:-6]}'s config dir")
+        drift(f"effective credential-store selector resolves to {stem}'s config dir")
     if service(own) == service(other):
-        drift(f"CLAUDE_CONFIG_DIR shares {name[:-6]}'s keychain item")
+        drift(f"effective credential-store selector shares {stem}'s keychain item")
 print("ok: harness-maintenance" + (" (started through the login guard)" if guarded else ""))
 PY
   verdict="$(cat "$out")"
