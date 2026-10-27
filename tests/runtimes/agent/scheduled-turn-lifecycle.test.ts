@@ -777,6 +777,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       const generation = state.sessionOwnership.get(scheduledMapKey)!.generation;
       const sentCount = session.turnsSent.length;
       const spawnCount = session.spawnSession.mock.calls.length;
+      const shutdownCount = session.shutdown.mock.calls.length;
       const getStatus = session.getStatus.getMockImplementation()!;
       const shutdown = session.shutdown.getMockImplementation()!;
       let resetShutdownAttempted = false;
@@ -812,7 +813,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
           state: 'closing',
         });
         expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scheduledMapKey)).toBe(3);
-        expect(session.shutdown).toHaveBeenCalledTimes(2);
+        expect(session.shutdown).toHaveBeenCalledTimes(shutdownCount + 2);
         expect(session.spawnSession).toHaveBeenCalledTimes(spawnCount);
         expect(session.turnsSent).toHaveLength(sentCount);
 
