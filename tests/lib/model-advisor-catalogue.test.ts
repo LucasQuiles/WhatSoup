@@ -2,34 +2,52 @@
  * Tests for the /config model catalogue seam in model-advisor.ts:
  *   - classifyModelFetchFailure: the single HTTP-concept classifier shared by
  *     every vendor-facing caller (Q 2b: no per-call-site status→reason drift).
- *   - resolveClaudeOAuthCred: reads the claude-cli's OWN OAuth credential (the
- *     subscription CLI authenticates /v1/models with `Authorization: Bearer`,
- *     verified live 2026-07-20 — NOT an x-api-key). present / expired / absent.
  *   - fetchAnthropicModelIdsWithStatus: anthropic-ONLY live listing, classified.
- *     Prefers the OAuth credential (no separate key needed on q); falls back to
- *     an explicit ANTHROPIC_API_KEY (x-api-key).
+ *     Uses an explicit ANTHROPIC_API_KEY (x-api-key) only; it must never
+ *     inspect or reuse a Claude CLI credential.
  *   - fetchAnthropicApiModelIdsWithStatus: the managed API adapter's distinct
- *     x-api-key identity; it never borrows a CLI OAuth catalogue.
+ *     x-api-key identity.
  *
  * fetch + ANTHROPIC_API_KEY are stubbed (same pattern as model-advisor.test.ts);
- * the OAuth credential is injected (no real creds file read in unit tests).
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// resolveApiKey consults keychain before process.env; no catalogue unit test may
+// reach the host keychain. This boundary mock remains valid once the CLI-file
+// reader is removed, because API-key catalogue discovery still uses resolveApiKey.
+const lookupCredentialMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => string | null>(() => null));
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/lib/keyring.ts')>()),
+  lookupCredential: (...args: unknown[]) => lookupCredentialMock(...args),
+}));
 import {
   classifyModelFetchFailure,
-  resolveClaudeOAuthCred,
   fetchAnthropicApiModelIdsWithStatus,
   fetchAnthropicModelIdsWithStatus,
-  type ClaudeOAuthCredResult,
 } from '../../src/lib/model-advisor.ts';
 
+let claudeConfigDir: string;
+let claudeSecureStorageDir: string;
+
+beforeEach(() => {
+  claudeConfigDir = mkdtempSync(join(tmpdir(), 'whatsoup-test-claude-config-'));
+  claudeSecureStorageDir = mkdtempSync(join(tmpdir(), 'whatsoup-test-claude-secure-'));
+  vi.stubEnv('CLAUDE_CONFIG_DIR', claudeConfigDir);
+  vi.stubEnv('CLAUDE_SECURESTORAGE_CONFIG_DIR', claudeSecureStorageDir);
+  lookupCredentialMock.mockReset();
+  lookupCredentialMock.mockReturnValue(null);
+});
+
 afterEach(() => {
+  rmSync(claudeConfigDir, { recursive: true, force: true });
+  rmSync(claudeSecureStorageDir, { recursive: true, force: true });
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
-
-const ABSENT = (): ClaudeOAuthCredResult => ({ status: 'absent' });
 
 describe('classifyModelFetchFailure', () => {
   it('maps 401 and 403 to unauthorized (the credential is not accepted)', () => {
@@ -58,90 +76,28 @@ describe('classifyModelFetchFailure', () => {
   });
 });
 
-describe('resolveClaudeOAuthCred', () => {
-  const T = 1_000_000; // fixed clock
-  const creds = (accessToken: unknown, expiresAt: unknown, refreshToken?: unknown) =>
-    JSON.stringify({ claudeAiOauth: { accessToken, expiresAt, ...(refreshToken !== undefined ? { refreshToken } : {}) } });
-
-  it('returns present with the token when the file has an unexpired accessToken', () => {
-    const out = resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-live', T + 60_000), nowMs: T });
-    expect(out).toStrictEqual({ status: 'present', token: 'oauth-tok-live' });
-  });
-
-  it('returns expired with refresh-token presence when expiresAt is at/before now', () => {
-    // hasRefreshToken lets the credential-state accessor split expired-refreshable
-    // (routable — the CLI refreshes at spawn) from expired-no-refresh (not routable).
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1, 'refresh-x'), nowMs: T }))
-      .toStrictEqual({ status: 'expired', hasRefreshToken: true });
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T), nowMs: T }))
-      .toStrictEqual({ status: 'expired', hasRefreshToken: false });
-    // a present-but-empty refresh token is not a usable refresh token
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-stale', T - 1, ''), nowMs: T }))
-      .toStrictEqual({ status: 'expired', hasRefreshToken: false });
-  });
-
-  it('returns absent when the file is missing, unparseable, or has no token', () => {
-    expect(resolveClaudeOAuthCred({ readFileText: () => null, nowMs: T })).toStrictEqual({ status: 'absent' });
-    expect(resolveClaudeOAuthCred({ readFileText: () => 'not json{', nowMs: T })).toStrictEqual({ status: 'absent' });
-    expect(resolveClaudeOAuthCred({ readFileText: () => JSON.stringify({}), nowMs: T })).toStrictEqual({ status: 'absent' });
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('', T + 60_000), nowMs: T })).toStrictEqual({ status: 'absent' });
-  });
-
-  it('treats a token with no expiresAt as present (server response is the authority)', () => {
-    const out = resolveClaudeOAuthCred({ readFileText: () => JSON.stringify({ claudeAiOauth: { accessToken: 'oauth-tok-x' } }), nowMs: T });
-    expect(out).toStrictEqual({ status: 'present', token: 'oauth-tok-x' });
-  });
-
-  it('applies NO refresh margin — a token still valid for 1ms is present, not expired (Q round 23)', () => {
-    // The credential-state.ts primitive resolveTokenExpiryState has a 5-min refresh
-    // MARGIN (valid-but-soon → 'expiring'). resolveClaudeOAuthCred deliberately does
-    // NOT use it: expiry here is STRICT (expiresAt <= now). This pins that the margin
-    // never flows into the per-provider accessor's states, so a credential valid for
-    // another N minutes stays routable rather than being de-routed early. A future
-    // refactor swapping in the margin-aware primitive breaks this on purpose.
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-soon', T + 1), nowMs: T }))
-      .toStrictEqual({ status: 'present', token: 'oauth-tok-soon' });
-    expect(resolveClaudeOAuthCred({ readFileText: () => creds('oauth-tok-inmargin', T + 60_000), nowMs: T }))
-      .toStrictEqual({ status: 'present', token: 'oauth-tok-inmargin' });
-  });
-});
-
-describe('fetchAnthropicModelIdsWithStatus — OAuth credential path', () => {
-  it('fetches with Authorization: Bearer (not x-api-key) when the OAuth credential is present', async () => {
-    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [{ id: 'claude-opus-4-8' }] }) });
-    vi.stubGlobal('fetch', fetchSpy);
-
-    const out = await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'present', token: 'oauth-tok-live' }) });
-    expect(out).toStrictEqual({ status: 'ok', ids: ['claude-opus-4-8'] });
-
-    const [, init] = fetchSpy.mock.calls[0];
-    expect(init.headers['x-api-key']).toBeUndefined();
-    expect(init.headers.Authorization).toBe('Bearer oauth-tok-live');
-  });
-
-  it('returns credential-expired WITHOUT calling fetch when the OAuth token is expired', async () => {
-    const fetchSpy = vi.fn();
-    vi.stubGlobal('fetch', fetchSpy);
-
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'expired', hasRefreshToken: false }) }))
-      .toStrictEqual({ status: 'credential-expired' });
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it('classifies a 401 on a present (unexpired) OAuth token as failed/unauthorized (revoked)', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: () => ({ status: 'present', token: 'oauth-tok-revoked' }) }))
-      .toStrictEqual({ status: 'failed', category: 'unauthorized' });
-  });
-});
-
-describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth credential)', () => {
-  it('returns no-key without calling fetch when neither OAuth credential nor env key is present', async () => {
+describe('fetchAnthropicModelIdsWithStatus — explicit API-key path', () => {
+  it('returns no-key without calling fetch when no API key is present', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: ABSENT })).toStrictEqual({ status: 'no-key' });
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({ status: 'no-key' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not make a Bearer request from a stale non-selected CLI file', async () => {
+    writeFileSync(
+      join(claudeConfigDir, '.credentials.json'),
+      // Distant fixed expiry: this must be a live-looking stale-selector file,
+      // without a host-speed-sensitive Date.now() window.
+      JSON.stringify({ claudeAiOauth: { accessToken: 'fixture-stale-token', expiresAt: 4_102_444_800_000 } }),
+    );
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({ status: 'no-key' });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -153,7 +109,7 @@ describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth c
     });
     vi.stubGlobal('fetch', fetchSpy);
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: ABSENT })).toStrictEqual({
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({
       status: 'ok',
       ids: ['claude-opus-4-8', 'claude-sonnet-5'],
     });
@@ -166,7 +122,7 @@ describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth c
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: ABSENT })).toStrictEqual({
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({
       status: 'failed',
       category: 'unauthorized',
     });
@@ -176,7 +132,7 @@ describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth c
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: ABSENT })).toStrictEqual({
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({
       status: 'failed',
       category: 'lookup-failed',
     });
@@ -186,7 +142,7 @@ describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth c
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: ABSENT })).toStrictEqual({
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({
       status: 'failed',
       category: 'lookup-failed',
     });
@@ -196,7 +152,7 @@ describe('fetchAnthropicModelIdsWithStatus — env-key fallback path (no OAuth c
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('The operation was aborted due to timeout')));
 
-    expect(await fetchAnthropicModelIdsWithStatus({ readOAuthCred: ABSENT })).toStrictEqual({
+    expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({
       status: 'failed',
       category: 'timeout',
     });

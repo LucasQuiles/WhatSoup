@@ -206,6 +206,14 @@ describe('harness-maintenance always gets its own config dir', () => {
     expect(render(home)).toBe(path.join(home, '.claude-maint'));
   });
 
+  it('pins the maintenance secure-storage selector to its own config directory', () => {
+    const home = tmpHome();
+    writeInstance(home, 'alpha-bot', { service: { claudeConfigDir: '/srv/bot/.claude' } });
+    const env = plistEnv(run(['--home', home], harnessTemplate, {}).output);
+    expect(env['CLAUDE_CONFIG_DIR']).toBe(path.join(home, '.claude-maint'));
+    expect(env['CLAUDE_SECURESTORAGE_CONFIG_DIR']).toBe(path.join(home, '.claude-maint'));
+  });
+
   it('renders $HOME/.claude-maint when no instance configures a dir', () => {
     const home = tmpHome();
     writeInstance(home, 'alpha-bot', {});
