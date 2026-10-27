@@ -679,7 +679,12 @@ if (wasSilentCompact || hadCompactBoundary) {
 if (runtimeContext) {
   host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
     runtimeContext,
-    async () => suspendAfterTerminal(await startCompactAfterTerminal()),
+    () => {
+      const started = startCompactAfterTerminal();
+      return typeof started === 'boolean'
+        ? suspendAfterTerminal(started)
+        : Promise.resolve(started).then(suspendAfterTerminal);
+    },
   );
 } else {
   // Separate catches keep an auto-compact failure from being reported as a
@@ -701,7 +706,7 @@ if (runtimeContext) {
       }
     };
     if (typeof compactStarted === 'boolean') suspend(compactStarted);
-    else void compactStarted.then(suspend).catch((err: unknown) => {
+    else void Promise.resolve(compactStarted).then(suspend).catch((err: unknown) => {
       log.warn({ err, mapKey }, 'auto-compact start rejected after a terminal result with no runtime context');
     });
   }
@@ -1380,7 +1385,12 @@ if (wasSilentCompact || hadCompactBoundary) {
 if (runtimeContext) {
   host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
     runtimeContext,
-    async () => suspendAfterGlobalTerminal(await startGlobalCompactAfterTerminal()),
+    () => {
+      const started = startGlobalCompactAfterTerminal();
+      return typeof started === 'boolean'
+        ? suspendAfterGlobalTerminal(started)
+        : Promise.resolve(started).then(suspendAfterGlobalTerminal);
+    },
   );
 } else {
   // Separate catches keep an auto-compact failure from being reported as a
@@ -1402,7 +1412,7 @@ if (runtimeContext) {
       }
     };
     if (typeof compactStarted === 'boolean') suspend(compactStarted);
-    else void compactStarted.then(suspend).catch((err: unknown) => {
+    else void Promise.resolve(compactStarted).then(suspend).catch((err: unknown) => {
       log.warn({ err }, 'auto-compact start rejected after a global terminal result with no runtime context');
     });
   }
