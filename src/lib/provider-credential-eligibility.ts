@@ -11,7 +11,6 @@
  */
 import { isKeylessOpenCodeRoute, resolveProviderKeyService } from './provider-key-service.ts';
 import { lookupCredential } from './keyring.ts';
-import { resolveClaudeOAuthCred, type ClaudeOAuthCredResult } from './model-advisor.ts';
 import { classifyCredentialValue } from './credential-state.ts';
 
 export type ProviderCredentialState =
@@ -20,32 +19,24 @@ export type ProviderCredentialState =
   | 'expired-no-refresh'
   | 'absent'
   | 'rejected'
-  // codex-cli / gemini-cli (and any future null-service provider): subscription/
+  // Native CLIs (and any future null-service provider): subscription/
   // login auth with no keyring service. Real validity is discovered at spawn
   // (invariant 3 — never presumed), so slice 1 fails OPEN to routable.
   | 'native';
 
 export interface ProviderCredentialDeps {
   lookup?: (service: string) => string | null;
-  oauth?: () => ClaudeOAuthCredResult;
 }
 
 /**
- * The per-provider credential verdict. claude-cli reads its OAuth cred (expired
- * WITH a refresh token is refreshable → routable); keyring providers classify
- * their looked-up value through the shared `classifyCredentialValue`; providers
- * with no keyring service (codex/gemini/unknown) are `native` (fail-open).
+ * Keyring providers classify their looked-up value through the shared
+ * `classifyCredentialValue`. Native CLIs own login selection and validation;
+ * a plaintext credential file cannot establish their routing eligibility.
  */
 export function resolveProviderCredentialState(
   input: { provider: string; model?: string; providerConfig?: unknown },
   deps: ProviderCredentialDeps = {},
 ): ProviderCredentialState {
-  if (input.provider === 'claude-cli') {
-    const cred = (deps.oauth ?? resolveClaudeOAuthCred)();
-    if (cred.status === 'present') return 'present-valid';
-    if (cred.status === 'expired') return cred.hasRefreshToken ? 'present-expired-refreshable' : 'expired-no-refresh';
-    return 'absent';
-  }
   // Free-tier gateway models (`opencode/<model>`) run keyless: the prefix
   // resolves to a service name, but no credential exists or is needed —
   // validity is discovered at spawn, same as a native-auth CLI.
