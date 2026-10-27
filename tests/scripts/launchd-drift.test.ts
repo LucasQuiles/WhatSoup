@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
+import { run as renderClaudeConfigEnv } from '../../scripts/launchd-claude-config-env.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 
 const SCRIPT = join(process.cwd(), 'scripts/check-launchd-drift.sh');
@@ -79,12 +80,8 @@ const HARNESS_TEMPLATE = [
   '',
 ].join('\n');
 
-/** The harness-maintenance job as installed: the render plus its own CLAUDE_CONFIG_DIR, $HOME/.claude-maint. */
 function harnessInstalled(f: { repo: string; home: string }): string {
-  return subst(HARNESS_TEMPLATE, f.repo, f.home).replace(
-    '<dict><key>PATH</key>',
-    `<dict><key>CLAUDE_CONFIG_DIR</key><string>${f.home}/.claude-maint</string><key>PATH</key>`,
-  );
+  return renderClaudeConfigEnv(['--home', f.home], subst(HARNESS_TEMPLATE, f.repo, f.home), {}).output;
 }
 
 const REPLY_TEMPLATE = HARNESS_TEMPLATE
