@@ -363,21 +363,25 @@ describe('shell render call sites apply the injector', () => {
     if (r.status !== 0) throw new Error(`fleet plist rewrite failed: ${r.stderr}`);
   }
 
-  it('the drift checker accepts the fleet login-guard wrapper on the maintenance dir', () => {
+  it('the drift checker refuses an unauthenticated login-guard wrapper on the maintenance dir', () => {
     const home = tmpHome();
     writeInstance(home, 'alpha-bot', { service: { claudeConfigDir: '/srv/bot/.claude' } });
     driftCheck(home, '/srv/bot/.claude');
     installFleetGuarded(home, path.join(home, '.claude-maint'));
-    expect(runDriftCheck(home)).toContain('ok: harness-maintenance');
+    const result = runDriftCheck(home);
+    expect(result).toContain('drift: harness-maintenance');
+    expect(result).not.toContain('ok: harness-maintenance');
   });
 
-  it('the drift checker accepts the guard at its other deployed location, ~/.local/share/fleet-reauth', () => {
+  it('the drift checker refuses an unauthenticated guard at the alternate deployed location', () => {
     const home = tmpHome();
     writeInstance(home, 'alpha-bot', {});
     driftCheck(home, null);
     installFleetGuarded(home, path.join(home, '.claude-maint'), true,
       path.join(home, '.local', 'share', 'fleet-reauth', 'maint-ccd-guard.sh'));
-    expect(runDriftCheck(home)).toContain('ok: harness-maintenance');
+    const result = runDriftCheck(home);
+    expect(result).toContain('drift: harness-maintenance');
+    expect(result).not.toContain('ok: harness-maintenance');
   });
 
   it('the drift checker flags a guard outside the two deployed locations, a symlinked one, or a writable one', () => {

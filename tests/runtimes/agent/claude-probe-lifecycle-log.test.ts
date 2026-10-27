@@ -6,6 +6,7 @@
 // no directory, no other env value, no child output. Fake children only.
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { systemClock } from '../../../src/lib/clock.ts';
 import { probeBinaryCommand } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { observeClaudeAccountIdentity } from '../../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { makeAccountAuthStatusProbe } from '../../../src/runtimes/agent/providers/account-auth-status.ts';
@@ -40,7 +41,10 @@ function expectNoLeak(lines: unknown): void {
 }
 
 beforeEach(() => { vi.useFakeTimers({ now: START }); });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe('account-identity probe lifecycle log', () => {
   it('logs spawn and exit of the auth status child', async () => {
@@ -124,6 +128,61 @@ describe('diagnostic auth-status probe lifecycle log', () => {
     expect(lines.map((l) => l.obj.event)).toEqual(['claude_probe_spawn', 'claude_probe_exit']);
     expect(lines[0]!.obj).toMatchObject({ purpose: 'diagnostic-auth-status', provider: 'claude-cli', credentialService: OWN_SERVICE, pid: 3333 });
     expect(lines[1]!.obj).toMatchObject({ purpose: 'diagnostic-auth-status', pid: 3333, durationMs: 400, exitCode: 0, killedByProbeTimeout: false });
+    expectNoLeak(lines);
+  });
+
+  it.each([
+    { movement: 'rolls back', endedAtMs: START.getTime() - 3_600_000 },
+    { movement: 'jumps forward', endedAtMs: START.getTime() + 3_600_000 },
+  ])('keeps duration monotonic when the wall clock $movement', async ({ endedAtMs }) => {
+    const child = fakeChild(3434);
+    const { lines, log } = capture();
+    let wallNow = START.getTime();
+    let monotonicNow = 40_000;
+    vi.spyOn(systemClock, 'now').mockImplementation(() => wallNow);
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicNow);
+
+    const run = makeAccountAuthStatusProbe({ provider: 'claude-cli' }, {
+      resolveKeyService: () => null,
+      lookupCredential: () => null,
+      getProviderBinary: () => 'claude',
+      probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options, (() => child) as never),
+      isAuthRequiredMessage: () => false,
+      env: { CLAUDE_CONFIG_DIR: CONFIG_DIR },
+      log,
+    })(new AbortController().signal);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(800);
+    wallNow = endedAtMs;
+    monotonicNow += 800;
+    child.stdout.emit('data', Buffer.from(OUTPUT_SENTINEL));
+    child.emit('close', 0, null);
+    await run;
+
+    expect(lines[0]!.obj).toEqual({
+      event: 'claude_probe_spawn',
+      purpose: 'diagnostic-auth-status',
+      provider: 'claude-cli',
+      credentialService: OWN_SERVICE,
+      pid: 3434,
+      startedAt: START.toISOString(),
+    });
+    expect(lines[1]!.obj).toEqual({
+      event: 'claude_probe_exit',
+      purpose: 'diagnostic-auth-status',
+      provider: 'claude-cli',
+      credentialService: OWN_SERVICE,
+      pid: 3434,
+      startedAt: START.toISOString(),
+      endedAt: new Date(endedAtMs).toISOString(),
+      durationMs: 800,
+      exitCode: 0,
+      signal: null,
+      killedByProbeTimeout: false,
+      termination: null,
+      spawnFailed: false,
+    });
     expectNoLeak(lines);
   });
 });
