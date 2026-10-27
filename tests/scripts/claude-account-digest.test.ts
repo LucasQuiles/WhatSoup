@@ -5,9 +5,10 @@
  * line: the opaque digest. A raw identifier never reaches stdout or stderr,
  * so the command is safe to run into a shared terminal log.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { computeAccountIdentityDigest } from '../../src/lib/account-identity-digest.ts';
 import { ACCOUNT_IDENTITY_PROBE_TIMEOUT_MS } from '../../src/runtimes/agent/providers/claude-account-identity.ts';
+import * as refreshAhead from '../../src/runtimes/agent/providers/claude-refresh-ahead.ts';
 import {
   parseClaudeAccountDigestArgs,
   runClaudeAccountDigest,
@@ -53,6 +54,8 @@ describe('parseClaudeAccountDigestArgs', () => {
 });
 
 describe('runClaudeAccountDigest', () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it('prints exactly the digest the runtime verifier would compute, and nothing else', async () => {
     const { d, stdout, stderr } = deps();
     await expect(runClaudeAccountDigest([], d)).resolves.toBe(0);
@@ -107,6 +110,20 @@ describe('runClaudeAccountDigest', () => {
     const failed = deps({ status: 'failed', output: authStatusJson() });
     await expect(runClaudeAccountDigest([], failed.d)).resolves.toBe(4);
     expect(failed.stdout).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ outcome: 'owner-unavailable' }, /refresh ownership unavailable/i],
+    [{ outcome: 'spawn-failed', reason: 'expired' }, /login refresh failed/i],
+  ] as const)('reports a bounded refresh failure without probing or printing identity: %j', async (result, message) => {
+    vi.spyOn(refreshAhead, 'refreshClaudeLoginAhead').mockResolvedValueOnce(result);
+    const { d, stdout, stderr, probes } = deps();
+    await expect(runClaudeAccountDigest([], d)).resolves.toBe(4);
+    expect(probes).toEqual([]);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr.mock.calls.flat().join('\n')).toMatch(message);
+    expect(published(stdout, stderr)).not.toContain(EMAIL);
+    expect(published(stdout, stderr)).not.toContain(ORG_ID);
   });
 
   it('--help prints usage and exits 0 without probing', async () => {
