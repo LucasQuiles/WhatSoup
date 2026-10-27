@@ -223,7 +223,7 @@ export interface RuntimeResultHandlerPort {
     inputTokens: number | undefined,
     consumeWhenNotOverThreshold?: boolean,
   ): void;
-  maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean;
+  maybeStartAutoCompact(session: SessionManager | null, mapKey?: string): boolean | Promise<boolean>;
   flushRouteMarker(held: string | null, chatJid: string, actorJid: string | undefined): string | null;
   clearToolNames(toolScopeKey: string): void;
   recordTurnCostUsd(event: Extract<AgentEvent, { type: 'result' }>): void;
@@ -666,7 +666,7 @@ if (hadCompactBoundary && rowId !== null) {
   markSessionCompacted(host.db, rowId);
   host.recordAutoCompactSuccess(compactScopeKey);
 }
-const startCompactAfterTerminal = (): boolean => (wasSilentCompact || hadCompactBoundary
+const startCompactAfterTerminal = (): boolean | Promise<boolean> => (wasSilentCompact || hadCompactBoundary
   ? false
   : host.maybeStartAutoCompact(session, mapKey));
 const suspendAfterTerminal = (compactStarted: boolean): Promise<void> | void => {
@@ -679,25 +679,31 @@ if (wasSilentCompact || hadCompactBoundary) {
 if (runtimeContext) {
   host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
     runtimeContext,
-    () => suspendAfterTerminal(startCompactAfterTerminal()),
+    async () => suspendAfterTerminal(await startCompactAfterTerminal()),
   );
 } else {
   // Separate catches keep an auto-compact failure from being reported as a
   // host-admission failure; a compact that threw leaves the session as it was.
-  let compactStarted: boolean | null = null;
+  let compactStarted: boolean | Promise<boolean> | null = null;
   try {
     compactStarted = startCompactAfterTerminal();
   } catch (err) {
     log.warn({ err, mapKey }, 'auto-compact start threw after a terminal result with no runtime context');
   }
   if (compactStarted !== null) {
-    try {
-      void Promise.resolve(suspendAfterTerminal(compactStarted)).catch((err: unknown) => {
-        log.warn({ err, mapKey }, 'host-admission terminal suspension rejected');
-      });
-    } catch (err) {
-      log.warn({ err, mapKey }, 'host-admission terminal suspension threw');
-    }
+    const suspend = (started: boolean): void => {
+      try {
+        void Promise.resolve(suspendAfterTerminal(started)).catch((err: unknown) => {
+          log.warn({ err, mapKey }, 'host-admission terminal suspension rejected');
+        });
+      } catch (err) {
+        log.warn({ err, mapKey }, 'host-admission terminal suspension threw');
+      }
+    };
+    if (typeof compactStarted === 'boolean') suspend(compactStarted);
+    else void compactStarted.then(suspend).catch((err: unknown) => {
+      log.warn({ err, mapKey }, 'auto-compact start rejected after a terminal result with no runtime context');
+    });
   }
 }
 {
@@ -1361,7 +1367,7 @@ if (hadCompactBoundary && rowId !== null) {
   markSessionCompacted(host.db, rowId);
   host.recordAutoCompactSuccess(GLOBAL_TOOL_SCOPE_KEY);
 }
-const startGlobalCompactAfterTerminal = (): boolean => (wasSilentCompact || hadCompactBoundary
+const startGlobalCompactAfterTerminal = (): boolean | Promise<boolean> => (wasSilentCompact || hadCompactBoundary
   ? false
   : host.maybeStartAutoCompact(host.session));
 const suspendAfterGlobalTerminal = (compactStarted: boolean): Promise<void> | void => {
@@ -1374,25 +1380,31 @@ if (wasSilentCompact || hadCompactBoundary) {
 if (runtimeContext) {
   host.runtimeTurnCoordinator.appendRuntimeTurnAfterTerminalAction(
     runtimeContext,
-    () => suspendAfterGlobalTerminal(startGlobalCompactAfterTerminal()),
+    async () => suspendAfterGlobalTerminal(await startGlobalCompactAfterTerminal()),
   );
 } else {
   // Separate catches keep an auto-compact failure from being reported as a
   // host-admission failure; a compact that threw leaves the session as it was.
-  let compactStarted: boolean | null = null;
+  let compactStarted: boolean | Promise<boolean> | null = null;
   try {
     compactStarted = startGlobalCompactAfterTerminal();
   } catch (err) {
     log.warn({ err }, 'auto-compact start threw after a global terminal result with no runtime context');
   }
   if (compactStarted !== null) {
-    try {
-      void Promise.resolve(suspendAfterGlobalTerminal(compactStarted)).catch((err: unknown) => {
-        log.warn({ err }, 'host-admission global terminal suspension rejected');
-      });
-    } catch (err) {
-      log.warn({ err }, 'host-admission global terminal suspension threw');
-    }
+    const suspend = (started: boolean): void => {
+      try {
+        void Promise.resolve(suspendAfterGlobalTerminal(started)).catch((err: unknown) => {
+          log.warn({ err }, 'host-admission global terminal suspension rejected');
+        });
+      } catch (err) {
+        log.warn({ err }, 'host-admission global terminal suspension threw');
+      }
+    };
+    if (typeof compactStarted === 'boolean') suspend(compactStarted);
+    else void compactStarted.then(suspend).catch((err: unknown) => {
+      log.warn({ err }, 'auto-compact start rejected after a global terminal result with no runtime context');
+    });
   }
 }
 {

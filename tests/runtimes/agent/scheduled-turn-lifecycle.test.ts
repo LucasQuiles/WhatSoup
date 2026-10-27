@@ -715,6 +715,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       const state = runtime as unknown as {
         autoCompactInputTokens: number;
         autoCompact: AutoCompactController;
+        runtimeTurnSupervisor: { health(): { retainedRetries: number; degradedScopes: number } };
       };
       state.autoCompactInputTokens = 50;
       const first = dispatchScheduled('Reset before shutdown', 51);
@@ -743,6 +744,15 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       }
       expect(session.turnsSent).toHaveLength(1);
       expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
+      expect(status(first)).toBe('complete');
+      expect(status(queued)).toBe('failed');
+      expect(state.runtimeTurnSupervisor.health()).toMatchObject({ retainedRetries: 0, degradedScopes: 0 });
+      for (const seq of [first, queued]) {
+        expect(db.raw.prepare('SELECT COUNT(*) AS count FROM turn_terminal_records WHERE inbound_seq = ?').get(seq))
+          .toEqual({ count: 1 });
+      }
+      expect(db.raw.prepare('SELECT attempt_kind FROM turn_terminal_records WHERE inbound_seq = ?').get(first))
+        .toEqual({ attempt_kind: 'completed' });
     });
 
     it('cell 7 (CRITICAL negative): withheld provider terminal wedges ONLY the scheduled lane; the interactive lane still completes and the stuck turn stays observable', async () => {

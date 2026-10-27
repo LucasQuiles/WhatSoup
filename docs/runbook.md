@@ -3258,6 +3258,13 @@ The default `autoCompactInputTokens` threshold is 150,000 tokens. This triggers 
 
 After a successful auto-compact, the runtime applies a 5-minute success cooldown. If the same scope becomes eligible again inside that rapid re-arm window, the runtime treats the compact as operationally ineffective and escalates the cooldown: 15 minutes, then 30 minutes, then 60 minutes capped. This bounds the slow-response spiral where a high-volume chat repeatedly spends turns compacting instead of replying.
 
+When a scheduled-agent-job scope reaches the compaction convergence limit, its
+hard reset remains part of the completed turn's finalization barrier. Later
+scheduled occurrences wait until the reset settles; an overlapping reset request
+joins the same operation. Shutdown joins that terminal owner and rejects queued
+occurrences without dispatching them. A failed reset retains its convergence
+evidence and recovery state. It does not establish that the scope recovered.
+
 The next real user turn after a successful compact is measured separately. If that turn's own input exceeds `autoCompactInputTokens`, `runtime.agent.autoCompactNextTurnOverThreshold` increments. If it happens inside the rapid re-arm window, it also counts as the rapid re-arm for that compact cycle. If it happens later, it remains telemetry only; delayed eligibility is not the spiral condition.
 
 The three counters `autoCompactIneffective`,
