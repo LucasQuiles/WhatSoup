@@ -195,7 +195,9 @@ async function prepareCliModelProbe(
     const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
     // Never start the killable probe while the refresh child still runs.
     if (refreshAheadStillRunning(refreshed)) return { defer: DEFERRED_REFRESH_IN_FLIGHT };
-  } catch { /* deliberately: refresh-ahead is fail-open; a resolver or refresh fault must not stop the probe, which runs as it did without it */ }
+  } catch {
+    return { defer: DEFERRED_REFRESH_IN_FLIGHT };
+  }
   return undefined;
 }
 
