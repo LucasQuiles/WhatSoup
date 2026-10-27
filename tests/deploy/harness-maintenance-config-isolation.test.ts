@@ -221,10 +221,27 @@ describe('agent CLI login isolation of the maintenance job', () => {
     expect(events(r, 'claude-plugins').map((e) => e.status)).toEqual(['refused']);
     expect(r.status).toBe(1);
   }, T);
-  it('packages both selectors in the Linux maintenance unit', () => {
+  it('runs the Linux unit selectors beside a separately inventoried bot store', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
     const unit = readFileSync(path.join(process.cwd(), 'deploy/harness-maintenance.service'), 'utf8');
-    const environment = unit.split(/\r?\n/).filter((line) => line.startsWith('Environment='));
-    expect(environment).toContain('Environment=CLAUDE_CONFIG_DIR=%h/.claude-maint');
-    expect(environment).toContain('Environment=CLAUDE_SECURESTORAGE_CONFIG_DIR=%h/.claude-maint');
-  });
+    const unitEnv: Record<string, string> = {};
+    for (const key of ['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR']) {
+      const prefix = `Environment=${key}=`;
+      const assignments = unit.split(/\r?\n/).filter((line) => line.startsWith(prefix));
+      expect(assignments).toEqual([`${prefix}%h/.claude-maint`]);
+      unitEnv[key] = assignments[0]!.slice(prefix.length).replace('%h', h.home);
+      expect(unitEnv[key]).toBe(path.join(h.home, '.claude-maint'));
+    }
+    // The shipped unit, not makeHarness's injected selector, supplies the job environment.
+    const r = run(h, [], unitEnv);
+    expect(events(r, 'claude-config-isolation')).toEqual([]);
+    expect(events(r, 'claude').at(-1)).toMatchObject({ status: 'updated', before: OLD, target: TARGET });
+    const calls = allFixtureCalls(h);
+    expect(calls).toContain(`${OLD} install ${TARGET}`);
+    expect(calls).toContain(`${TARGET} --version`);
+    expect(calls).toContain('claude plugin list');
+    expect(calls).toContain('claude mcp list');
+    expect(isolationAlerts(h)).toEqual([]);
+  }, T);
 });
