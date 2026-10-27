@@ -71,6 +71,19 @@ const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
 const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
+/**
+ * The claude-cli probe tests model usability only, so it starts no MCP servers.
+ * `--strict-mcp-config` with no `--mcp-config` excludes user, project, plugin and
+ * claude.ai connector servers. Without it the probe spawns enabled plugin
+ * servers without the env a real turn gets (e.g. the M365 bridge env); a server
+ * that exits is recorded in the config dir's needs-auth cache, and the next real
+ * session skips that server until the cache entry expires.
+ */
+const CLAUDE_MODEL_PROBE_BASE_ARGS: readonly string[] = [
+  '-p',
+  CLAUDE_MODEL_PROBE_PROMPT,
+  '--strict-mcp-config',
+];
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
@@ -272,7 +285,7 @@ function modelProbeCommand(
   // claude-cli only: no configured model => probe the CLI's own default (omit
   // --model) instead of never probing at all — a model-less instance must be able
   // to recover (subscription auth needs no per-model credential).
-  return ['-p', CLAUDE_MODEL_PROBE_PROMPT, ...(model === null ? [] : ['--model', model])];
+  return [...CLAUDE_MODEL_PROBE_BASE_ARGS, ...(model === null ? [] : ['--model', model])];
 }
 
 function modelProbeEnv(

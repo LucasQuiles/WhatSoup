@@ -1157,3 +1157,45 @@ describe('claude-cli default-model probe command (fleet recovery-stall fix)', ()
     expect(args).toContain('configured-primary');
   });
 });
+
+describe('claude-cli model probe starts no MCP servers', () => {
+  // The probe runs without the env real turns get (e.g. the M365 bridge env).
+  // An enabled plugin MCP server that exits during the probe is cached as
+  // needs-auth in the config dir, so the next real session skips it.
+  it.each([
+    { label: 'configured model', model: 'configured-primary' as string | null },
+    { label: 'default model', model: null as string | null },
+  ])('passes --strict-mcp-config with no --mcp-config ($label)', async ({ model }) => {
+    const probeBinaryCommand = vi.fn(
+      async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => 'claude',
+      probeBinaryCommand,
+    });
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model });
+    const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
+    expect(args).toEqual([
+      '-p',
+      'Reply with OK only.',
+      '--strict-mcp-config',
+      ...(model === null ? [] : ['--model', model]),
+    ]);
+    expect(args).not.toContain('--mcp-config');
+  });
+
+  it('does not add the Claude-only flag to the opencode-cli probe', async () => {
+    const probeBinaryCommand = vi.fn(
+      async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(
+      { executionProfile: 'whatsoup-headless' },
+      {
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+        getProviderBinary: () => 'opencode',
+        probeBinaryCommand,
+      },
+    );
+    await adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' });
+    const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
+    expect(args).not.toContain('--strict-mcp-config');
+  });
+});
