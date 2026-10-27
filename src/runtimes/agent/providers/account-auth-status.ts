@@ -116,7 +116,10 @@ export function makeAccountAuthStatusProbe(
       let refreshed: ClaudeRefreshAheadResult | void = undefined;
       try {
         refreshed = await deps.refreshAhead(binary, env);
-      } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
+      } catch {
+        // A failed refresh check cannot establish that a killable probe is safe.
+        refreshed = { outcome: 'still-running' };
+      }
       // Never start the killable probe while the refresh child still runs.
       // An abandoned probe reports the abort below, not the deferral.
       if (refreshed && refreshed.outcome === 'still-running' && !signal.aborted) {

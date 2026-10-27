@@ -200,7 +200,9 @@ export async function observeClaudeAccountIdentity(
   let refreshed: unknown;
   try {
     refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(binary, env);
-  } catch { /* deliberately: refresh-ahead is fail-open (documented never-reject); the probe below runs as it did without it */ }
+  } catch {
+    return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
+  }
   // Never start the killable probe while the refresh child still runs.
   if (refreshAheadStillRunning(refreshed)) return { kind: 'failed', reason: 'deferred-refresh-in-flight' };
   let probe: BinaryAuthStatusResult;
