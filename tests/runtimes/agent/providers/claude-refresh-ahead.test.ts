@@ -390,7 +390,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     writeFileSync(path, JSON.stringify({ ...predecessor, fence: foreignFence }), { mode: 0o600 });
 
     h.children[0]!.emit('close', 0, null);
-    await expect(run).resolves.toMatchObject({ outcome: 'ran' });
+    await expect(run).resolves.toEqual({ outcome: 'still-running' });
     expect(existsSync(path)).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as { fence?: unknown }).fence).toBe(foreignFence);
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
@@ -426,7 +426,8 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     const initial = harness({ fileStore: store(START.getTime() + 1_000), spawnImpl: failedSpawn });
     vi.resetModules();
     const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
-    await first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, initial.deps);
+    await expect(first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, initial.deps))
+      .resolves.toEqual({ outcome: 'still-running' });
     const claim = ownerPath(dir);
     const raw = readFileSync(claim, 'utf8');
     expect(raw).not.toContain(ACCESS_SENTINEL);
@@ -439,6 +440,22 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
     await expect(later).resolves.toEqual({ outcome: 'still-running' });
     expect(successor.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('reports a pidless child error without close as still-running and retains its claim', async () => {
+    const dir = privateStoreDir();
+    const child = fakeChild(9000);
+    Object.defineProperty(child, 'pid', { value: undefined, writable: true });
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    const initial = harness({ fileStore: store(START.getTime() + 1_000), spawnImpl });
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const run = first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, initial.deps);
+
+    child.emit('error', new Error('status pipe ambiguity'));
+    await vi.advanceTimersByTimeAsync(first.REFRESH_AHEAD_WAIT_MS);
+    await expect(run).resolves.toEqual({ outcome: 'still-running' });
+    expect(existsSync(ownerPath(dir))).toBe(true);
   });
 
   it.each(['invalid', 'corrupt', 'symlink', 'hardlink', 'wrong-mode', 'oversize'] as const)(
