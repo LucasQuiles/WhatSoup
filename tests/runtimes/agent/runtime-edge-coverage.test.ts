@@ -381,6 +381,9 @@ type RuntimeView = {
     compactionOutcomeRecordedForCompactAt: Map<string, number>;
     ineffective: number;
   };
+  sessionOwnership: {
+    get(mapKey: string): { state: string; generation: number } | undefined;
+  };
   setOwnedPerChatSession(mapKey: string, session: unknown): void;
   currentTurnReplayText: string | null;
   currentTurnReplayActorJid: string | undefined;
@@ -444,7 +447,7 @@ type RuntimeView = {
     mapKey?: string,
   ): string | null;
   sendDirect(chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard?: boolean): void;
-  maybeStartAutoCompact(session: { getStatus: ReturnType<typeof vi.fn>; getDbRowId: ReturnType<typeof vi.fn>; sendTurn: ReturnType<typeof vi.fn> }, mapKey?: string): void;
+  maybeStartAutoCompact(session: { getStatus: ReturnType<typeof vi.fn>; getDbRowId: ReturnType<typeof vi.fn>; sendTurn: ReturnType<typeof vi.fn> }, mapKey?: string): boolean | Promise<boolean>;
   startQueueSweepTimer(): void;
   ensureSessionAndQueueSync(chatJid: string, initialMapKey?: string, actorJid?: string): void;
   handleProviderFailureResult(wf: ResponseWorkflow, ctx: {
@@ -2302,6 +2305,149 @@ describe('AgentRuntime edge coverage', () => {
       'Auto-compact convergence limit reached',
       expect.stringContaining('SUCCEEDED'),
     );
+  });
+
+  it('shares the pending owned compaction reset with an overlapping starter (#3527 reset barrier)', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', autoCompactInputTokens: 50 });
+    const state = view(runtime);
+    const scopeKey = 'sched-overlap::scheduled-agent-job';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null,
+      sessionId: 'compact-overlap',
+      startedAt: new Date().toISOString(),
+      messageCount: 5,
+      lastMessageAt: new Date().toISOString(),
+      turnInFlight: false,
+    } as never);
+    session.getDbRowId.mockReturnValue(179 as never);
+    state.setOwnedPerChatSession(scopeKey, session);
+    const queue = makeQueue('sched-overlap@s.whatsapp.net');
+    state.chatQueues.set(scopeKey, queue);
+    vi.mocked(getSessionTokenSnapshot).mockReturnValue({
+      totalInputTokens: 200,
+      totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70,
+      lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
+    });
+    const nowMs = Date.now();
+    state.autoCompact.consecutiveRapidRearms.set(scopeKey, 3);
+    state.autoCompact.consecutiveNonConvergentCompactions.set(scopeKey, 3);
+    state.autoCompact.lastSuccessAt.set(scopeKey, nowMs);
+    state.autoCompact.rapidRearmRecordedForSuccessAt.set(scopeKey, nowMs);
+
+    let releaseShutdown!: () => void;
+    const shutdownBarrier = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+    session.shutdown.mockImplementationOnce(() => shutdownBarrier);
+
+    // This barrier is the real owned-reset scheduler seam: a successor cannot
+    // settle past it until the first reset finishes shutdown, cleanup, and spawn.
+    const owner = Promise.resolve(state.maybeStartAutoCompact(session, scopeKey));
+    let ownerSettled = false;
+    void owner.then(() => { ownerSettled = true; });
+    let follower: Promise<boolean> | null = null;
+    let shutdownReleased = false;
+    try {
+      await drainMicrotasks();
+      expect(session.shutdown).toHaveBeenCalledWith(false);
+
+      const followerPromise = Promise.resolve(state.maybeStartAutoCompact(session, scopeKey));
+      follower = followerPromise;
+      let followerSettled = false;
+      void followerPromise.then(() => { followerSettled = true; });
+      await drainMicrotasks();
+
+      expect(ownerSettled).toBe(false);
+      expect(followerSettled).toBe(false);
+      expect(session.shutdown).toHaveBeenCalledTimes(1);
+      expect(session.spawnSession).not.toHaveBeenCalled();
+      expect(state.autoCompact.consecutiveRapidRearms.has(scopeKey)).toBe(true);
+      expect(state.autoCompact.consecutiveNonConvergentCompactions.has(scopeKey)).toBe(true);
+      expect(mockEmitAlert.mock.calls.filter(([, source]) => source === 'auto_compact_convergence_reset')).toHaveLength(0);
+
+      releaseShutdown();
+      shutdownReleased = true;
+      await expect(owner).resolves.toBe(true);
+      await expect(followerPromise).resolves.toBe(true);
+
+      expect(queue.abortTurn).toHaveBeenCalledTimes(1);
+      expect(session.shutdown).toHaveBeenCalledTimes(1);
+      expect(session.spawnSession).toHaveBeenCalledTimes(1);
+      expect(state.autoCompact.consecutiveRapidRearms.has(scopeKey)).toBe(false);
+      expect(state.autoCompact.consecutiveNonConvergentCompactions.has(scopeKey)).toBe(false);
+      const resetAlerts = mockEmitAlert.mock.calls
+        .filter(([, source]) => source === 'auto_compact_convergence_reset');
+      expect(resetAlerts).toHaveLength(1);
+      expect(String(resetAlerts[0]?.[3])).toContain('SUCCEEDED');
+    } finally {
+      if (!shutdownReleased) releaseShutdown();
+      await owner;
+      if (follower) await follower;
+      await drainMicrotasks();
+    }
+  });
+
+  it('keeps compaction evidence and ownership fail-closed when the shared reset barrier fails (#3527 reset failure)', async () => {
+    const runtime = makeRuntime({ sessionScope: 'per_chat', autoCompactInputTokens: 50 });
+    const state = view(runtime);
+    const scopeKey = 'sched-reset-failure::scheduled-agent-job';
+    const session = makeSession();
+    session.getStatus.mockReturnValue({
+      active: true,
+      pid: null,
+      sessionId: 'compact-failure',
+      startedAt: new Date().toISOString(),
+      messageCount: 5,
+      lastMessageAt: new Date().toISOString(),
+      turnInFlight: false,
+    } as never);
+    session.getDbRowId.mockReturnValue(180 as never);
+    session.shutdown.mockRejectedValueOnce(new Error('reset shutdown refused') as never);
+    state.setOwnedPerChatSession(scopeKey, session);
+    const queue = makeQueue('sched-reset-failure@s.whatsapp.net');
+    state.chatQueues.set(scopeKey, queue);
+    vi.mocked(getSessionTokenSnapshot).mockReturnValue({
+      totalInputTokens: 200,
+      totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
+      lastCompactInputTokens: 70,
+      lastCompactOutputTokens: 0,
+      lastCompactCacheReadTokens: 0,
+    });
+    const nowMs = Date.now();
+    state.autoCompact.consecutiveRapidRearms.set(scopeKey, 3);
+    state.autoCompact.consecutiveNonConvergentCompactions.set(scopeKey, 3);
+    state.autoCompact.lastSuccessAt.set(scopeKey, nowMs);
+    state.autoCompact.rapidRearmRecordedForSuccessAt.set(scopeKey, nowMs);
+
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const outcome = await Promise.resolve(state.maybeStartAutoCompact(session, scopeKey));
+      await drainMicrotasks();
+
+      expect(outcome).toBe(true);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+
+    expect(queue.abortTurn).toHaveBeenCalledTimes(1);
+    expect(session.shutdown).toHaveBeenCalledTimes(1);
+    expect(session.spawnSession).not.toHaveBeenCalled();
+    expect(state.autoCompact.consecutiveRapidRearms.has(scopeKey)).toBe(true);
+    expect(state.autoCompact.consecutiveNonConvergentCompactions.has(scopeKey)).toBe(true);
+    expect(state.chatSessions.get(scopeKey)).toBe(session);
+    expect(state.sessionOwnership.get(scopeKey)?.state).toBe('recoverable_dead');
+    expect(() => state.setOwnedPerChatSession(scopeKey, makeSession())).toThrow(/different live owner/);
+    const resetAlerts = mockEmitAlert.mock.calls
+      .filter(([, source]) => source === 'auto_compact_convergence_reset');
+    expect(resetAlerts).toHaveLength(1);
+    expect(String(resetAlerts[0]?.[3])).toContain('FAILED (will retry on the next turn)');
+    expect(String(resetAlerts[0]?.[3])).not.toContain('SUCCEEDED');
   });
 
   it('escalates a 30-minute-cadence livelock the rapid-rearm counter can never see (#3527 F2)', async () => {

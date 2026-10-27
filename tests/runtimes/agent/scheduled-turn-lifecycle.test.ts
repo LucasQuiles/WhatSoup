@@ -354,6 +354,8 @@ import { __setRuntimeLifecycleEmitterForTests, type LifecycleEmitInput } from '.
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
 import { emitAlertChecked, emitObservationChecked } from '../../../src/lib/emit-alert.ts';
 import { createOperationTracker } from '../../../src/runtimes/agent/chat-transport.ts';
+import { getSessionTokenSnapshot } from '../../../src/runtimes/agent/session-db.ts';
+import type { AutoCompactController } from '../../../src/runtimes/agent/auto-compact-controller.ts';
 import { ensureStandbyNoticeSchema, peekStandbyNotice, stashStandbyNotice } from '../../../src/runtimes/agent/standby-notice.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
@@ -579,6 +581,7 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
   // (a W2-reclaimed journal row leaves the live turn's late terminal with no
   // eligible inbound row to finalize against — fail-closed on shutdown).
   let expectUnfinalizableShutdown = false;
+  let shutdownFinished = false;
 
   afterEach(async () => {
     // Release any still-withheld provider turn before shutdown: a pinned
@@ -587,7 +590,9 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
     for (const session of sessionDoubles) {
       if (session.turnInFlight) emitTerminal(session);
     }
-    if (expectUnfinalizableShutdown) {
+    if (shutdownFinished) {
+      shutdownFinished = false;
+    } else if (expectUnfinalizableShutdown) {
       expectUnfinalizableShutdown = false;
       await expect(runtime.shutdown()).rejects.toThrow('AgentRuntime shutdown failed');
     } else {
@@ -640,6 +645,104 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
 
       // Cell 6: a subsequent interactive inbound reaches 'complete'.
       await driveInteractiveToComplete();
+    });
+
+    it('holds the scheduled FIFO through a compaction reset before dispatching the next occurrence', async () => {
+      const state = runtime as unknown as {
+        autoCompactInputTokens: number;
+        autoCompact: AutoCompactController;
+        perChatInboundSeqQueue: Map<string, number[]>;
+        sessionOwnership: { get(key: string): { generation: number } | undefined };
+        runtimeTurnSupervisor: { health(): { retainedRetries: number; degradedScopes: number } };
+      };
+      state.autoCompactInputTokens = 50;
+      const seqs = [
+        dispatchScheduled('First scheduled check', 41),
+        dispatchScheduled('Second scheduled check', 42),
+        dispatchScheduled('Third scheduled check', 43),
+      ];
+      const session = await waitForInFlightTurn((text) => text.includes('First scheduled check'));
+      const generation = state.sessionOwnership.get(scheduledMapKey)!.generation;
+      const spawnCount = session.spawnSession.mock.calls.length;
+      const getStatus = session.getStatus.getMockImplementation()!;
+      session.getStatus.mockImplementation(() => ({ ...getStatus(), pid: null }));
+      state.autoCompact.consecutiveNonConvergentCompactions.set(scheduledMapKey, 3);
+      vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+        totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+        lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+      });
+      let releaseShutdown!: () => void;
+      const shutdownBarrier = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+      session.shutdown.mockImplementationOnce(() => shutdownBarrier);
+
+      try {
+        emitTerminal(session);
+        await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledWith(false));
+        expect(status(seqs[0]!)).toBe('complete');
+        // A real interactive turn provides a progress barrier while the independent
+        // scheduled lane is still waiting for its old process to stop.
+        await driveInteractiveToComplete({ messageId: 'human-during-scheduled-reset' });
+        expect(session.turnsSent).toHaveLength(1);
+        expect(session.spawnSession).toHaveBeenCalledTimes(spawnCount);
+        expect(scheduledQueue()?.pending).toBe(2);
+        expect(scheduledQueue()?.activeTurn?.inboundSeq).toBe(seqs[0]);
+        expect(state.autoCompact.consecutiveNonConvergentCompactions.get(scheduledMapKey)).toBe(3);
+      } finally {
+        releaseShutdown();
+      }
+
+      for (const [index, prompt] of ['Second scheduled check', 'Third scheduled check'].entries()) {
+        const current = await waitForInFlightTurn((text) => text.includes(prompt));
+        expect(session.spawnSession).toHaveBeenCalledTimes(spawnCount + 1);
+        expect(state.sessionOwnership.get(scheduledMapKey)?.generation).toBe(generation + 1);
+        expect(state.perChatInboundSeqQueue.get(scheduledMapKey)).toEqual([seqs[index + 1]]);
+        emitTerminal(current);
+        await vi.waitFor(() => expect(status(seqs[index + 1]!)).toBe('complete'));
+      }
+      await vi.waitFor(() => expect(scheduledQueue()?.activeTurn ?? null).toBeNull());
+      expect(scheduledQueue()?.pending).toBe(0);
+      expect(state.perChatInboundSeqQueue.has(scheduledMapKey)).toBe(false);
+      expect(state.autoCompact.consecutiveNonConvergentCompactions.has(scheduledMapKey)).toBe(false);
+      expect(state.runtimeTurnSupervisor.health()).toMatchObject({ retainedRetries: 0, degradedScopes: 0 });
+      for (const seq of seqs) {
+        expect(db.raw.prepare('SELECT COUNT(*) AS count FROM turn_terminal_records WHERE inbound_seq = ?').get(seq))
+          .toEqual({ count: 1 });
+      }
+      await driveInteractiveToComplete({ messageId: 'human-after-scheduled-reset' });
+    });
+
+    it('does not dispatch a queued scheduled turn when shutdown overlaps its predecessor reset', async () => {
+      const state = runtime as unknown as {
+        autoCompactInputTokens: number;
+        autoCompact: AutoCompactController;
+      };
+      state.autoCompactInputTokens = 50;
+      const first = dispatchScheduled('Reset before shutdown', 51);
+      const queued = dispatchScheduled('Must not run during shutdown', 52);
+      const session = await waitForInFlightTurn((text) => text.includes('Reset before shutdown'));
+      const getStatus = session.getStatus.getMockImplementation()!;
+      session.getStatus.mockImplementation(() => ({ ...getStatus(), pid: null }));
+      state.autoCompact.consecutiveNonConvergentCompactions.set(scheduledMapKey, 3);
+      vi.mocked(getSessionTokenSnapshot).mockReturnValueOnce({
+        totalInputTokens: 200, totalOutputTokens: 0, totalCacheReadTokens: 0,
+        lastCompactInputTokens: 70, lastCompactOutputTokens: 0, lastCompactCacheReadTokens: 0,
+      });
+      let releaseShutdown!: () => void;
+      session.shutdown.mockImplementationOnce(() => new Promise<void>((resolve) => { releaseShutdown = resolve; }));
+      emitTerminal(session);
+      await vi.waitFor(() => expect(session.shutdown).toHaveBeenCalledWith(false));
+      const stopping = runtime.shutdown();
+      try {
+        await vi.waitFor(() => expect(status(queued)).toBe('failed'));
+        expect(status(first)).toBe('complete');
+        expect(session.turnsSent).toHaveLength(1);
+      } finally {
+        releaseShutdown();
+        await stopping;
+        shutdownFinished = true;
+      }
+      expect(session.turnsSent).toHaveLength(1);
+      expect(scheduledQueue()?.activeTurn ?? null).toBeNull();
     });
 
     it('cell 7 (CRITICAL negative): withheld provider terminal wedges ONLY the scheduled lane; the interactive lane still completes and the stuck turn stays observable', async () => {
