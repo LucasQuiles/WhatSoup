@@ -289,6 +289,19 @@ describe('account-identity probe deferral', () => {
     const observed = await observeClaudeAccountIdentity({
       getProviderBinary: () => 'claude',
       env: { CLAUDE_CONFIG_DIR: '/tmp/identity-fixture/.claude' },
+      refreshClaudeLoginAhead: async () => ({ outcome: 'owner-unavailable' }),
+      claudeRefreshLockGrace: () => null,
+      probeBinaryCommand: probeBinaryCommandSpy,
+    });
+    expect(observed).toEqual({ kind: 'failed', reason: 'refresh-owner-unavailable' });
+    expect(probeBinaryCommandSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports a thrown refresh without starting its killable probe', async () => {
+    const probeBinaryCommandSpy = vi.fn(async () => ({ status: 'ok' as const, output: '{}' }));
+    const observed = await observeClaudeAccountIdentity({
+      getProviderBinary: () => 'claude',
+      env: { CLAUDE_CONFIG_DIR: '/tmp/identity-fixture/.claude' },
       refreshClaudeLoginAhead: async () => { throw new Error('owner publication unavailable'); },
       claudeRefreshLockGrace: () => null,
       probeBinaryCommand: probeBinaryCommandSpy,
@@ -328,6 +341,13 @@ describe('diagnostic auth-status probe', () => {
   });
 
   it('reports unavailable refresh ownership without starting its killable spawn', async () => {
+    const deps = authDeps({ refreshAhead: async () => ({ outcome: 'owner-unavailable' }) });
+    const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
+    expect(deps.probeBinaryAuthStatus).not.toHaveBeenCalled();
+    expect(result.summary).toContain('refresh ownership unavailable');
+  });
+
+  it('reports a thrown refresh without starting its killable spawn', async () => {
     const deps = authDeps({ refreshAhead: async () => { throw new Error('owner publication unavailable'); } });
     const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
     expect(deps.probeBinaryAuthStatus).not.toHaveBeenCalled();
