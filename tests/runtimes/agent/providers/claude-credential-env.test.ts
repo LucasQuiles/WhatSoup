@@ -4,6 +4,41 @@ import { makeAccountAuthStatusProbe } from '../../../../src/runtimes/agent/provi
 import { observeClaudeAccountIdentity } from '../../../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { createPrimaryModelProbeAdapters } from '../../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 
+describe('Claude probes defer when refresh ownership cannot be established', () => {
+  const env = { HOME: '/fixture/home', PATH: '/usr/bin', USER: 'fixture' };
+  const refresh = async () => { throw new Error('refresh ownership unavailable'); };
+
+  it('does not spawn a diagnostic child after refresh failure', async () => {
+    const probe = vi.fn(async () => ({ status: 'ok' as const, output: '{}' }));
+    const result = await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, {
+      resolveKeyService: () => null, lookupCredential: () => null,
+      getProviderBinary: () => '/fixture/claude', probeBinaryAuthStatus: probe,
+      isAuthRequiredMessage: () => false, env, refreshAhead: refresh,
+    })(new AbortController().signal);
+    expect(probe).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, confidence: 'suspected' });
+    expect(result.summary).toContain('deferred');
+  });
+
+  it('does not spawn an identity child after refresh failure', async () => {
+    const probe = vi.fn(async () => ({ status: 'ok' as const, output: '{}' }));
+    const result = await observeClaudeAccountIdentity({
+      getProviderBinary: () => '/fixture/claude', probeBinaryCommand: probe,
+      env, refreshClaudeLoginAhead: refresh,
+    });
+    expect(probe).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'failed', reason: 'deferred-refresh-in-flight' });
+  });
+
+  it('defers model probe preparation after refresh failure', async () => {
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => '/fixture/claude', refreshClaudeLoginAhead: refresh,
+    });
+    await expect(adapters.prepareBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' }))
+      .resolves.toEqual({ defer: 'deferred-refresh-in-flight' });
+  });
+});
+
 describe('Claude diagnostic and identity probes use the configured egress proxy', () => {
   const sourceEnv = {
     HOME: '/fixture/home', PATH: '/usr/bin', USER: 'fixture',

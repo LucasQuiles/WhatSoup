@@ -375,23 +375,8 @@ function modelProbeEnv(
     const buildEnv = deps.buildChildEnv ?? buildChildEnv;
     return buildEnv('opencode-cli', baseOpts, model ?? undefined, providerConfig);
   }
-  const proxyUrl = baseOpts ? `http://127.0.0.1:${baseOpts.egressProxyPort}` : undefined;
-  return {
-    // env-allowed: shared auth-status allowlist keeps model and identity probes on the same credential store
-    ...scrubbedAuthStatusEnv(process.env),
-    // Egress proxy (#1607, F6): UPPER + lower case (curl reads lowercase for
-    // plain HTTP; see child-env.ts / F4). Only present when opted in.
-    ...(proxyUrl
-      ? {
-          HTTP_PROXY: proxyUrl,
-          HTTPS_PROXY: proxyUrl,
-          NO_PROXY: 'localhost,127.0.0.1',
-          http_proxy: proxyUrl,
-          https_proxy: proxyUrl,
-          no_proxy: 'localhost,127.0.0.1',
-        }
-      : {}),
-  };
+  // env-allowed: shared allowlist preserves credential selection and configured proxy routing
+  return scrubbedAuthStatusEnv(process.env, deps.egressProxyPort);
 }
 
 function mapCliProbeResult(result: BinaryAuthStatusResult): BinaryModelProbeResult {

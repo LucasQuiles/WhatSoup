@@ -96,6 +96,7 @@ export interface ClaudeAccountIdentityDeps {
   ) => Promise<BinaryAuthStatusResult>;
   /** Explicit env the spawn allow-list is scrubbed FROM (never forwarded whole). */
   env?: NodeJS.ProcessEnv;
+  egressProxyPort?: number;
   now?: () => number;
   timeoutMs?: number;
   /** Refresh-ahead run before the killable probe (claude-refresh-ahead.ts). Injectable for tests. */
@@ -193,7 +194,7 @@ export async function observeClaudeAccountIdentity(
   if (!binary) return { kind: 'failed', reason: 'binary-missing' };
 
   // env-allowed: explicit per-var allow-list scrubbed from the caller-supplied env, not passthrough
-  const env = scrubbedAuthStatusEnv(deps.env ?? process.env);
+  const env = scrubbedAuthStatusEnv(deps.env ?? process.env, deps.egressProxyPort);
   // A due token refresh happens in a child nothing kills, before the probe's
   // own timer starts (claude-refresh-ahead.ts). Never rejects.
   let refreshed: unknown;

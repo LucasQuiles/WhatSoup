@@ -3100,6 +3100,7 @@ export class AgentRuntime implements Runtime {
       get agentProvider() { return runtime.agentProvider; },
       get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get shutdownRequested() { return runtime.shutdownRequested; },
+      get egressProxyPort() { return runtime.egressProxy?.port; },
       get accountIdentity() { return runtime.accountIdentity; },
       set accountIdentity(value) { runtime.accountIdentity = value; },
     };
@@ -6352,12 +6353,8 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
-        // Eligible-side disclosure (Slice 1): the common config is a primary
-        // routed on a `present-expired-refreshable` credential (routable because
-        // a refresh was expected) that then fails. F07 does not gate the primary,
-        // so this is where that turn gets its explanation. The note HEDGES — the
-        // failure here is not distinguishable as a refresh failure, so it names
-        // the observed classification and the likely cause without asserting it.
+        // Preserve classified failure disclosures without inferring native CLI
+        // login state from a separate plaintext credential file.
         const credNote = spawnFailureCredentialNote(
           resolveProviderCredentialState({
             provider: this.agentProvider,
@@ -9428,9 +9425,8 @@ export class AgentRuntime implements Runtime {
     // override", not provider equality alone. F07: cross-provider entries (which
     // DO carry a distinct credential) read the unified accessor
     // (eligibility projection) — replacing the old presence-only `service ?
-    // lookup : true` that treated null-service providers as always credentialed;
-    // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
-    // de-routed, while codex/gemini stay `native` → routable.
+    // lookup : true`. Native CLIs remain routable and validate their own login
+    // at spawn; unrelated credential files cannot exclude their fallback tier.
     if (entry.provider === this.agentProvider) return true;
     return isProviderRoutable(
       resolveProviderCredentialState({
@@ -9842,6 +9838,7 @@ export class AgentRuntime implements Runtime {
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
         accountAuthDeps: {
+          egressProxyPort: this.egressProxy?.port,
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
           getProviderBinary,

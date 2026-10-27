@@ -49,6 +49,7 @@ export interface AccountAuthStatusDeps {
   ) => Promise<BinaryAuthStatusResult>;
   isAuthRequiredMessage: (text: string) => boolean;
   env: NodeJS.ProcessEnv;
+  egressProxyPort?: number;
   /** claude-cli: refresh-ahead run before the killable auth-status child (claude-refresh-ahead.ts). */
   refreshAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<ClaudeRefreshAheadResult | void>;
   /** claude-cli: refresh-lock wait before the auth-status child is signalled. */
@@ -63,11 +64,9 @@ export const CLAUDE_AUTH_STATUS_ARGS: readonly string[] = ['auth', 'status', '--
 const AUTH_STATUS_ARGS = [...CLAUDE_AUTH_STATUS_ARGS];
 
 /** Scrubbed env for the CLI probe — only what the binary needs to resolve auth. */
-export function scrubbedAuthStatusEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return scrubbedEnv(env);
-}
-
-function scrubbedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function scrubbedAuthStatusEnv(env: NodeJS.ProcessEnv, egressProxyPort?: number): NodeJS.ProcessEnv {
+  const proxyUrl = typeof egressProxyPort === 'number' && egressProxyPort > 0
+    ? `http://127.0.0.1:${egressProxyPort}` : undefined;
   return {
     HOME: env['HOME'],
     PATH: env['PATH'],
@@ -78,6 +77,14 @@ function scrubbedEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     ...(env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: env['CLAUDE_CONFIG_DIR'] } : {}),
     ...(env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] !== undefined
       ? { CLAUDE_SECURESTORAGE_CONFIG_DIR: env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] } : {}),
+    ...(proxyUrl ? {
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      NO_PROXY: 'localhost,127.0.0.1',
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      no_proxy: 'localhost,127.0.0.1',
+    } : {}),
   };
 }
 
@@ -100,7 +107,7 @@ export function makeAccountAuthStatusProbe(
     if (!binary) {
       return { ok: false, confidence: 'confirmed', summary: `no binary for provider ${target.provider}`, data: { mode: 'binary', provider: target.provider } };
     }
-    const env = scrubbedEnv(deps.env);
+    const env = scrubbedAuthStatusEnv(deps.env, deps.egressProxyPort);
     const isClaude = target.provider === 'claude-cli';
     // A due token refresh runs first in a child nothing kills. The bundle's
     // deadline may abandon this finding meanwhile; the refresh still finishes,
