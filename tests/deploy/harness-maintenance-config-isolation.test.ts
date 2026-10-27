@@ -31,10 +31,14 @@ import {
 beforeAll(buildNativeFixture);
 afterAll(cleanupHarnesses);
 
-/** Adds the systemd instance `alpha`; its unit sets CLAUDE_CONFIG_DIR to `config` when given. */
-function withInstance(h: Harness, config?: string): Harness {
+/** An empty secure selector selects the default credential store; unset preserves the config selector. */
+function withInstance(h: Harness, config?: string, secureStorage?: string): Harness {
   writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
-  const env = [`WHATSOUP_NODE=${process.execPath}`, ...(config === undefined ? [] : [`CLAUDE_CONFIG_DIR=${config}`])];
+  const env = [
+    `WHATSOUP_NODE=${process.execPath}`,
+    ...(config === undefined ? [] : [`CLAUDE_CONFIG_DIR=${config}`]),
+    ...(secureStorage === undefined ? [] : [`CLAUDE_SECURESTORAGE_CONFIG_DIR=${secureStorage}`]),
+  ];
   systemdUnit(h, 'alpha', [`Environment=${env.join(' ')}`]);
   h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
   return h;
@@ -130,6 +134,44 @@ describe('agent CLI login isolation of the maintenance job', () => {
     expectRefused(h, run(h, [], { CLAUDE_CONFIG_DIR: `${h.home}/.claude/` }), 'is the default config dir');
   }, T);
 
+  it('refuses a nonempty secure-storage selector shared with an instance effective store', () => {
+    const h = makeHarness();
+    const secureStore = path.join(h.home, 'bot-secure-store');
+    h.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = secureStore;
+    withInstance(h, path.join(h.home, 'bot-config'), secureStore);
+    expectRefused(h, run(h), 'CLAUDE_SECURESTORAGE_CONFIG_DIR');
+  }, T);
+
+  it('refuses an explicitly empty secure-storage selector because it selects the default store', () => {
+    const h = makeHarness();
+    h.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = '';
+    withInstance(h, path.join(h.home, 'bot-config'));
+    expectRefused(h, run(h), 'CLAUDE_SECURESTORAGE_CONFIG_DIR');
+  }, T);
+
+  it('compares an instance secure-storage override with the job config store', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'), h.env.CLAUDE_CONFIG_DIR);
+    expectRefused(h, run(h), "alpha's");
+  }, T);
+
+  it('allows a dedicated secure-storage selector next to an instance using the default store', () => {
+    const h = makeHarness();
+    h.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = path.join(h.home, 'maintenance-secure-store');
+    withInstance(h, path.join(h.home, 'bot-config'), '');
+    const result = run(h);
+    expect(events(result, 'claude-config-isolation')).toEqual([]);
+    expect(allFixtureCalls(h)).toContain('claude plugin list');
+    expect(isolationAlerts(h)).toEqual([]);
+  }, T);
+
+  it('compares NFC-normalized secure-storage selectors before invoking the CLI', () => {
+    const h = makeHarness();
+    h.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = path.join(h.home, 'caf\u00e9');
+    withInstance(h, path.join(h.home, 'bot-config'), path.join(h.home, 'cafe\u0301'));
+    expectRefused(h, run(h), 'CLAUDE_SECURESTORAGE_CONFIG_DIR');
+  }, T);
+
   it('refuses when an instance config dir could not be read', () => {
     // A value with an expansion is not read literally, so the inventory records it as unknown.
     const h = withInstance(makeHarness(), '$HOME/expanded-by-systemd');
@@ -147,4 +189,10 @@ describe('agent CLI login isolation of the maintenance job', () => {
     expect(events(r, 'claude-plugins').map((e) => e.status)).toEqual(['refused']);
     expect(r.status).toBe(1);
   }, T);
+  it('packages both selectors in the Linux maintenance unit', () => {
+    const unit = readFileSync(path.join(process.cwd(), 'deploy/harness-maintenance.service'), 'utf8');
+    const environment = unit.split(/\r?\n/).filter((line) => line.startsWith('Environment='));
+    expect(environment).toContain('Environment=CLAUDE_CONFIG_DIR=%h/.claude-maint');
+    expect(environment).toContain('Environment=CLAUDE_SECURESTORAGE_CONFIG_DIR=%h/.claude-maint');
+  });
 });

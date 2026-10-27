@@ -4,6 +4,46 @@ import { makeAccountAuthStatusProbe } from '../../../../src/runtimes/agent/provi
 import { observeClaudeAccountIdentity } from '../../../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { createPrimaryModelProbeAdapters } from '../../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 
+describe('Claude diagnostic and identity probes use the configured egress proxy', () => {
+  const sourceEnv = {
+    HOME: '/fixture/home', PATH: '/usr/bin', USER: 'fixture',
+    CLAUDE_CONFIG_DIR: '/fixture/config', CLAUDE_SECURESTORAGE_CONFIG_DIR: '',
+    HTTP_PROXY: 'http://ambient.invalid:9999', ALL_PROXY: 'http://ambient.invalid:9999',
+  };
+
+  for (const surface of ['diagnostic', 'identity'] as const) {
+    it.each([undefined, 4312])(`${surface} uses only the configured port: %s`, async (egressProxyPort) => {
+      const observed: NodeJS.ProcessEnv[] = [];
+      const probe = async (_binary: string, _args: string[], env: NodeJS.ProcessEnv) => {
+        observed.push(env);
+        return { status: 'ok' as const, output: '{"loggedIn":false}' };
+      };
+      const deps = {
+        resolveKeyService: () => null, lookupCredential: () => null,
+        getProviderBinary: () => '/fixture/claude', probeBinaryAuthStatus: probe,
+        probeBinaryCommand: probe, isAuthRequiredMessage: () => false,
+        env: sourceEnv, egressProxyPort,
+      };
+      if (surface === 'diagnostic') {
+        await makeAccountAuthStatusProbe({ provider: 'claude-cli' }, deps)(new AbortController().signal);
+      } else {
+        await observeClaudeAccountIdentity(deps);
+      }
+      expect(observed).toHaveLength(1);
+      for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
+        expect(observed[0]![key]).toBe(egressProxyPort ? 'http://127.0.0.1:4312' : undefined);
+      }
+      for (const key of ['NO_PROXY', 'no_proxy']) {
+        expect(observed[0]![key]).toBe(egressProxyPort ? 'localhost,127.0.0.1' : undefined);
+      }
+      expect(observed[0]).not.toHaveProperty('ALL_PROXY');
+      expect(observed[0]).not.toHaveProperty('all_proxy');
+      expect(observed[0]!.CLAUDE_CONFIG_DIR).toBe('/fixture/config');
+      expect(observed[0]!.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe('');
+    });
+  }
+});
+
 const cases = [
   { name: 'unset', config: '/fixture/config', secure: undefined },
   { name: 'empty secure override', config: '/fixture/config', secure: '' },

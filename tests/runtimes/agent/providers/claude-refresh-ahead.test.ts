@@ -8,6 +8,9 @@
 // probe it waits while the CLI's refresh lock is held. Fixtures only: the
 // stores are injected readers and the children are fakes.
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   REFRESH_AHEAD_HARD_CAP_MS,
@@ -60,10 +63,19 @@ function store(expiresAt: number | undefined): string {
 }
 
 let dirSeq = 0;
+const privateStoreRoots: string[] = [];
 /** A fresh config dir per test so the per-dir in-flight dedupe never leaks across tests. */
 function configDir(): string {
   dirSeq += 1;
   return `/tmp/refresh-ahead-fixture-${dirSeq}/.claude`;
+}
+
+function privateStoreDir(): string {
+  const root = mkdtempSync(join(tmpdir(), 'whatsoup-refresh-claim-'));
+  privateStoreRoots.push(root);
+  const dir = join(root, '.claude');
+  mkdirSync(dir, { mode: 0o700 });
+  return dir;
 }
 
 function harness(over: Partial<ClaudeRefreshAheadDeps> & { fileStore?: string | null } = {}) {
@@ -86,7 +98,10 @@ function harness(over: Partial<ClaudeRefreshAheadDeps> & { fileStore?: string | 
 }
 
 beforeEach(() => { vi.useFakeTimers({ now: START }); });
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => {
+  vi.useRealTimers();
+  for (const root of privateStoreRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('refreshClaudeLoginAhead: when it runs', () => {
   it('runs no child when the stored token is far from expiry', async () => {
@@ -144,6 +159,32 @@ describe('refreshClaudeLoginAhead: when it runs', () => {
 });
 
 describe('refreshClaudeLoginAhead: never killed', () => {
+  it.each([false, true])('a restarted parent defers an unobserved child even with renewed expiry: %s', async (renewed) => {
+    const dir = privateStoreDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+
+    // Discarding module state represents a parent restart while its detached
+    // child remains alive; only the store claim survives that boundary.
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const firstRun = first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await vi.advanceTimersByTimeAsync(first.REFRESH_AHEAD_WAIT_MS);
+    await expect(firstRun).resolves.toEqual({ outcome: 'still-running' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+
+    vi.resetModules();
+    const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const successor = renewed
+      ? harness({ fileStore: store(START.getTime() + 3_600_000) })
+      : h;
+    const afterRestart = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
+    await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
+    await expect(afterRestart).resolves.toEqual({ outcome: 'still-running' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    if (renewed) expect(successor.spawnImpl).not.toHaveBeenCalled();
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
   it('bounds the caller wait, never the child: still-running after the wait, child runs to its own exit', async () => {
     const h = harness({ fileStore: store(START.getTime() + 1_000) });
     const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: configDir() }, h.deps);
