@@ -185,9 +185,10 @@ structured `advanced fallback chain past structurally-empty entry` log.
 
 ## Warm handoff distiller
 
-An explicit per-instance `agentOptions.handoffDistill` object takes precedence
-over the legacy environment controls below. `{ "enabled": false }` is the kill
-switch: it disables distillation and ignores legacy `WHATSOUP_HANDOFF_*` settings.
+After the [rollout gate](#handoff-distiller-rollout-gate) below is satisfied,
+an explicit per-instance `agentOptions.handoffDistill` object takes precedence
+over the legacy environment controls below. `{ "enabled": false }` disables
+distillation and ignores legacy `WHATSOUP_HANDOFF_*` settings in the new process.
 An enabled object requires `provider: "deepseek"` and `model: "deepseek-flash"`;
 it can set context injection, cadence, budgets, and concurrency within the bounds
 in the [configuration reference](../configuration.md#agentoptions).
@@ -198,6 +199,40 @@ read rejects symlinked ancestors, hard links, and file identity changes during t
 read. The separate type and projection reads are not one atomic snapshot.
 Credentials and instance policy remain local; the shared defaults do not enable
 the feature.
+
+### Handoff distiller rollout gate
+
+Install code before changing the typed policy. An older launcher or runtime can
+ignore `agentOptions.handoffDistill` and keep legacy environment opt-ins active;
+writing `{ "enabled": false }` and restarting that older installation is not a
+kill switch. Config changes also do not disable a process that is already running.
+
+For each instance, require these checks in order before relying on the typed
+disable setting:
+
+1. Install and verify one matching release of `deploy/whatsoup`,
+   `deploy/lib/read-agent-handoff-distill-config.mjs`, and the agent runtime that
+   implements `agentOptions.handoffDistill`. Compare the installed launcher,
+   helper, and runtime artifacts with that release's hashes, and verify the
+   service's actual launch path uses them. A repository checkout or a new runtime
+   behind an old installed launcher does not satisfy this check.
+2. Write the intended per-instance policy, initially `{ "enabled": false }`,
+   using the existing private-config and instance-identity checks. Until this
+   step, an absent object preserves the legacy behavior; installing code alone
+   does not disable an existing opt-in.
+3. Perform the separately authorized instance restart. Verify that the previous
+   process ended and the replacement started after the installation through the
+   verified launcher, using the verified runtime release. Check that its
+   `instance.handoffDistiller.enabled` health value is `false`. A missing health
+   field or an unverified process/release identity is inconclusive, not a
+   successful disable.
+
+Only then may an operator rely on the typed setting or separately enable the
+feature. These instructions do not authorize a deployment or restart. If rolling
+back to a release without this contract, first disable both legacy opt-ins
+(`WHATSOUP_HANDOFF_DISTILLER` and `WHATSOUP_HANDOFF_CONTEXT`) in the actual service
+environment and verify the restarted process's effective behavior. Do not retain
+the typed object as the rollback's sole disable mechanism.
 
 When the typed object is absent, the legacy opt-in controls remain in effect
 (default-off when unset):
