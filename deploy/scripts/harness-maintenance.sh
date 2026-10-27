@@ -455,13 +455,14 @@ flag_class() {
   esac
 }
 
-# claude_instance_env_record <name> <manager> <surface> <config dir> <DISABLE_UPDATES> <DISABLE_AUTOUPDATER>
+# claude_instance_env_record <name> <manager> <surface> <config dir> <secure-storage dir> <DISABLE_UPDATES> <DISABLE_AUTOUPDATER>
 # Observation only (see observe_claude_update_policy). Pass UNSET_MARK for an unset flag and "?"
 # in every value field when the service environment could not be read.
 claude_instance_env_record() {
-  local config="$4"
+  local config="$4" secure="$5"
   case "$config" in *$'\n'*|*$'\037'*) config="?" ;; esac
-  printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "$(flag_class "$5")" "$(flag_class "$6")" \
+  case "$secure" in *$'\n'*|*$'\037'*) secure="?" ;; esac
+  printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "$secure" "$(flag_class "$6")" "$(flag_class "$7")" \
     >> "$CLAUDE_INSTANCE_ENV_FILE"
 }
 
@@ -587,7 +588,7 @@ claude_inventory_launchd() {
     name="${name%.plist}"
     if ! "$PLUTIL_BIN" -lint "$file" >/dev/null 2>&1; then
       claude_consumer_record "$name" launchd unknown "" "" "" "$file is not a readable property list"
-      claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" "?" "?" "?"
+      claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" "?" "?" "?" "?"
       continue
     fi
     label="$(plist_string "$file" Label || true)"
@@ -605,6 +606,7 @@ claude_inventory_launchd() {
     node="$(plist_string "$file" EnvironmentVariables.WHATSOUP_NODE || true)"
     claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" \
       "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
+      "$(plist_flag "$file" CLAUDE_SECURESTORAGE_CONFIG_DIR)" \
       "$(plist_flag "$file" DISABLE_UPDATES)" \
       "$(plist_flag "$file" DISABLE_AUTOUPDATER)"
     if ! reason="$(instance_wrapper_mismatch "$program")"; then
@@ -630,6 +632,12 @@ systemd_assign() {
       case "$value" in
         *\"*|*\'*|*\\*|*\$*|*\`*) SYSTEMD_ENV_CONFIG="?" ;;
         *) SYSTEMD_ENV_CONFIG="$value" ;;
+      esac
+      return 0 ;;
+    CLAUDE_SECURESTORAGE_CONFIG_DIR)
+      case "$value" in
+        *\"*|*\'*|*\\*|*\$*|*\`*) SYSTEMD_ENV_SECURE="?" ;;
+        *) SYSTEMD_ENV_SECURE="$value" ;;
       esac
       return 0 ;;
     *) return 0 ;;
@@ -683,7 +691,7 @@ systemd_environment_file() {
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in
       PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) ;;
-      DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) ;;
+      DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*|CLAUDE_SECURESTORAGE_CONFIG_DIR=*) ;;
       *) continue ;;
     esac
     systemd_assign "$line" || return 1
@@ -715,7 +723,7 @@ claude_inventory_systemd() {
     name="${unit#whatsoup@}"
     name="${name%.service}"
     SYSTEMD_ENV_PATH="" SYSTEMD_ENV_PREPEND="" SYSTEMD_ENV_NODE=""
-    SYSTEMD_ENV_UPDATES="$UNSET_MARK" SYSTEMD_ENV_AUTOUPDATER="$UNSET_MARK" SYSTEMD_ENV_CONFIG=""
+    SYSTEMD_ENV_UPDATES="$UNSET_MARK" SYSTEMD_ENV_AUTOUPDATER="$UNSET_MARK" SYSTEMD_ENV_CONFIG="" SYSTEMD_ENV_SECURE="$UNSET_MARK"
     # Same precedence as the launcher composes (deploy/lib/runtime-path.sh): the user manager
     # environment first, then Environment=, then EnvironmentFiles=. A manager value this reader
     # cannot interpret, or a manager environment that cannot be read, makes the instance unknown:
@@ -726,18 +734,18 @@ claude_inventory_systemd() {
       while IFS= read -r line; do
         case "$line" in
           PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) systemd_assign "$line" || manager_unreadable=1 ;;
-          DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) systemd_assign "$line" || true ;;
+          DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*|CLAUDE_SECURESTORAGE_CONFIG_DIR=*) systemd_assign "$line" || true ;;
         esac
       done <<< "$manager_env"
     fi
     if [ "$manager_unreadable" -eq 1 ]; then
       claude_consumer_record "$name" systemd unknown "" "" "" "user manager environment is not statically readable"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?" "?"
       continue
     fi
     if ! show="$("$SYSTEMCTL_BIN" --user show -p Environment -p EnvironmentFiles "$unit" 2>/dev/null)"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "systemctl show failed for $unit"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?" "?"
       continue
     fi
     if ! systemd_unit_environment "$show"; then
@@ -748,7 +756,7 @@ claude_inventory_systemd() {
     # `systemctl show` reports the unit as loaded, which is also its next launch unless the unit
     # file changed without a daemon-reload.
     claude_instance_env_record "$name" systemd "loaded unit" \
-      "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
+      "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_SECURE" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
     if [ "$wrapper_ok" -eq 0 ]; then
       claude_consumer_record "$name" systemd unknown "" "" "" "$wrapper_reason"
       continue
@@ -775,21 +783,23 @@ claude_service_inventory() {
   return "$rc"
 }
 
-# Agent CLI login isolation. The agent CLI uses, and can refresh, the login stored for whatever
-# CLAUDE_CONFIG_DIR it sees: in that directory and in a login-keychain item named after it. A
-# refresh rotates the token, and a process killed mid-refresh loses the rotated one, so a job that
-# shares a bot's config dir or keychain item can wipe the bot's login. Every step that starts the
-# agent CLI (the native installer and its --version postcheck, the plugin and MCP listings) runs
-# only when claude_config_isolation proves this job has a login of its own. The same rule as the
-# fleet's maint-ccd-guard.sh wrapper, carried natively.
+# Agent CLI login isolation. The agent CLI uses, and can refresh, the login selected by
+# CLAUDE_SECURESTORAGE_CONFIG_DIR when that variable is defined, otherwise CLAUDE_CONFIG_DIR:
+# in that directory and in a login-keychain item named after it. A refresh rotates the token, and
+# a process killed mid-refresh loses the rotated one, so a job that shares a bot's effective store
+# or keychain item can wipe the bot's login. Every step that starts the agent CLI (the native
+# installer and its --version postcheck, the plugin and MCP listings) runs only when
+# claude_config_isolation proves this job has a login of its own. The same rule as the fleet's
+# maint-ccd-guard.sh wrapper, carried natively.
 #
-# The keychain service name: the bare name when CLAUDE_CONFIG_DIR is unset, else the bare name, a
-# dash and the first 8 hex digits of the sha256 of the CLAUDE_CONFIG_DIR string exactly as set.
-# Split so the product name never appears as one phrase (scripts/lib/repo-hygiene-policy.ts would
-# read it as an attribution).
+# The keychain service name: the bare name when the selected selector is empty, else the bare
+# name, a dash and the first 8 hex digits of the sha256 of its string. A defined nonempty secure
+# selector is NFC-normalized before this helper receives it, matching the agent CLI. Split so the
+# product name never appears as one phrase (scripts/lib/repo-hygiene-policy.ts would read it as an
+# attribution).
 CLAUDE_KEYCHAIN_SERVICE='Claude'' Code-credentials'
 
-# claude_keychain_service <config dir or empty>: the keychain service for that config dir.
+# claude_keychain_service <effective selector or empty>: the keychain service for that selector.
 claude_keychain_service() {
   local suffix
   if [ -z "$1" ]; then
@@ -804,10 +814,34 @@ process.stdin.on("data", (d) => hash.update(d)).on("end", () => process.stdout.w
   printf '%s-%s\n' "$CLAUDE_KEYCHAIN_SERVICE" "$suffix"
 }
 
-# claude_config_dir_resolved <config dir or empty>: the directory the agent CLI reads for it (empty
-# is the default $HOME/.claude), with symlinks resolved. A dir that does not exist yet resolves
-# through its nearest existing parent, so /alias/x and /real/x match when alias -> real. A relative
-# value is returned as given.
+# claude_nfc <string>: print the NFC normalization used by the agent CLI for a defined secure
+# selector. The config selector retains the CLI's raw-string semantics.
+claude_nfc() {
+  printf '%s' "$1" | "$REPO_NODE_BIN" -e '
+const { readFileSync } = require("node:fs");
+process.stdout.write(readFileSync(0, "utf8").normalize("NFC"));
+'
+}
+
+# claude_effective_selector <config selector or UNSET_MARK> <secure selector or UNSET_MARK>:
+# secure storage overrides config when defined. Its empty value selects the default file store and
+# bare keychain item; nonempty values are NFC-normalized by the CLI. Config retains its raw string.
+claude_effective_selector() {
+  local config="$1" secure="$2"
+  if [ "$secure" != "$UNSET_MARK" ]; then
+    [ "$secure" != "?" ] || { printf '?\n'; return 0; }
+    claude_nfc "$secure"
+  elif [ "$config" = "$UNSET_MARK" ]; then
+    printf '\n'
+  else
+    printf '%s\n' "$config"
+  fi
+}
+
+# claude_config_dir_resolved <effective selector or empty>: the directory the agent CLI reads for
+# it (empty is the default $HOME/.claude), with symlinks resolved. A dir that does not exist yet
+# resolves through its nearest existing parent, so /alias/x and /real/x match when alias -> real.
+# A relative value is returned as given.
 claude_config_dir_resolved() {
   local dir="${1:-$HOME/.claude}" base rest="" real
   case "$dir" in
@@ -832,57 +866,85 @@ claude_config_dir_resolved() {
   fi
 }
 
-# claude_config_isolation: 0 when this job's CLAUDE_CONFIG_DIR is set, absolute, not the default
-# config dir, and differs as a string, a resolved directory and a keychain service from the config
-# dir of every instance the last inventory read. Otherwise 1 with the reason on stdout. Fails
-# closed: an unread inventory, an unreadable instance value or no instance at all is unproven.
+# claude_config_isolation: 0 when this job's effective selector is set, absolute, not the default
+# config dir, and differs as a string, a resolved directory and a keychain service from every
+# effective instance selector in the last inventory read. Otherwise 1 with the reason on stdout.
+# Fails closed: an unread inventory, an unreadable effective instance value, a relative effective
+# instance selector or no instance at all is unproven.
 claude_config_isolation() {
-  local job="${CLAUDE_CONFIG_DIR:-}" job_dir job_svc other_svc
-  local name manager surface config updates autoupdater checked=0
-  if [ -z "$job" ]; then
+  local job_config="$UNSET_MARK" job_secure="$UNSET_MARK" job job_dir job_svc other other_svc job_selector
+  local name manager surface config secure updates autoupdater checked=0
+  if [ "${CLAUDE_CONFIG_DIR+x}" = x ]; then job_config="$CLAUDE_CONFIG_DIR"; fi
+  if [ "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}" = x ]; then job_secure="$CLAUDE_SECURESTORAGE_CONFIG_DIR"; fi
+  if [ "$job_secure" = "$UNSET_MARK" ] && [ "$job_config" = "$UNSET_MARK" ]; then
     echo "this job's CLAUDE_CONFIG_DIR is unset, so the agent CLI would use the default login"
+    return 1
+  fi
+  job_selector="CLAUDE_CONFIG_DIR"
+  [ "$job_secure" = "$UNSET_MARK" ] || job_selector="CLAUDE_SECURESTORAGE_CONFIG_DIR"
+  if ! job="$(claude_effective_selector "$job_config" "$job_secure")"; then
+    echo "this job's $job_selector could not be normalized, so its credential store is unproven"
+    return 1
+  fi
+  if [ -z "$job" ]; then
+    if [ "$job_secure" != "$UNSET_MARK" ]; then
+      echo "this job's CLAUDE_SECURESTORAGE_CONFIG_DIR selects the default config dir"
+    else
+      echo "this job's CLAUDE_CONFIG_DIR is unset or empty, so the agent CLI would use the default login"
+    fi
     return 1
   fi
   case "$job" in
     /*) ;;
     *)
-      echo "this job's CLAUDE_CONFIG_DIR $job is not an absolute path"
+      echo "this job's $job_selector $job is not an absolute path"
       return 1 ;;
   esac
   job_dir="$(claude_config_dir_resolved "$job")"
   if [ "$job_dir" = "$(claude_config_dir_resolved "")" ]; then
-    echo "this job's CLAUDE_CONFIG_DIR $job is the default config dir"
+    echo "this job's $job_selector $job is the default config dir"
     return 1
   fi
   if ! job_svc="$(claude_keychain_service "$job")"; then
-    echo "the keychain service for this job's CLAUDE_CONFIG_DIR could not be computed"
+    echo "the keychain service for this job's $job_selector could not be computed"
     return 1
   fi
   if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
     echo "service definitions were not read this run, so isolation from every instance is unproven"
     return 1
   fi
-  while IFS=$'\037' read -r name manager surface config updates autoupdater; do
+  while IFS=$'\037' read -r name manager surface config secure updates autoupdater; do
     [ -n "$name" ] || continue
     checked=$((checked + 1))
-    if [ "$config" = "?" ]; then
+    if [ "$secure" = "$UNSET_MARK" ] && [ "$config" = "?" ]; then
       echo "$name's CLAUDE_CONFIG_DIR is not readable, so isolation from it is unproven"
       return 1
     fi
-    if [ "$job" = "$config" ]; then
-      echo "this job's CLAUDE_CONFIG_DIR $job equals $name's"
+    if ! other="$(claude_effective_selector "$config" "$secure")" || [ "$other" = "?" ]; then
+      echo "$name's effective credential-store selector is not readable, so isolation from it is unproven"
       return 1
     fi
-    if [ "$job_dir" = "$(claude_config_dir_resolved "$config")" ]; then
-      echo "this job's CLAUDE_CONFIG_DIR $job resolves to $name's config dir"
+    case "$other" in
+      "") ;;
+      /*) ;;
+      *)
+        echo "$name's effective credential-store selector is not an absolute path, so isolation from it is unproven"
+        return 1 ;;
+    esac
+    if [ "$job" = "$other" ]; then
+      echo "this job's $job_selector $job equals $name's effective credential-store selector"
       return 1
     fi
-    if ! other_svc="$(claude_keychain_service "$config")"; then
-      echo "the keychain service for $name's CLAUDE_CONFIG_DIR could not be computed"
+    if [ "$job_dir" = "$(claude_config_dir_resolved "$other")" ]; then
+      echo "this job's $job_selector $job resolves to $name's config dir (effective credential-store selector)"
+      return 1
+    fi
+    if ! other_svc="$(claude_keychain_service "$other")"; then
+      echo "the keychain service for $name's effective credential-store selector could not be computed"
       return 1
     fi
     if [ "$job_svc" = "$other_svc" ]; then
-      echo "this job's CLAUDE_CONFIG_DIR $job shares $name's keychain item"
+      echo "this job's $job_selector $job shares $name's keychain item"
       return 1
     fi
   done < "$CLAUDE_INSTANCE_ENV_FILE"
@@ -900,7 +962,7 @@ claude_refuse_execution() {
   if ! events_recorded "claude-config-isolation" "refused"; then
     record_event "claude-config-isolation" "refused" "$reason"
     send_alert "claude-config-isolation" "warning" "Agent CLI not started: login not isolated" \
-      "The maintenance job started no agent CLI because $reason. Give the job a CLAUDE_CONFIG_DIR of its own."
+      "The maintenance job started no agent CLI because $reason. Give the job a dedicated effective credential-store selector."
   fi
   for component in "$@"; do
     record_event "$component" "refused" "agent CLI not started: $reason"
@@ -1840,16 +1902,17 @@ policy_summary() {
 }
 
 observe_claude_update_policy() {
-  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto s_files effective
-  local total=0 disabled=0 open="" unknown="" config_dir_state=unset
+  local name manager surface config secure updates autoupdater config_label settings method auto s_updates s_auto s_files effective
+  local total=0 disabled=0 open="" unknown="" config_dir_state=unset secure_storage_state=unset
   [ -z "${CLAUDE_CONFIG_DIR:-}" ] || config_dir_state="set"
+  [ -z "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}" ] || secure_storage_state="set"
   record_event "claude-update-policy" "job-env" \
-    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$config_dir_state"
+    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$config_dir_state CLAUDE_SECURESTORAGE_CONFIG_DIR=$secure_storage_state"
   if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
     policy_summary "unknown" "service definitions were not read this run, so no instance's update policy is known"
     return 0
   fi
-  while IFS=$'\037' read -r name manager surface config updates autoupdater; do
+  while IFS=$'\037' read -r name manager surface config secure updates autoupdater; do
     [ -n "$name" ] || continue
     total=$((total + 1))
     if [ "$updates" = "?" ]; then
