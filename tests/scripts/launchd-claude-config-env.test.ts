@@ -301,7 +301,18 @@ describe('shell render call sites apply the injector', () => {
         .replaceAll('__WHATSOUP_REPO_ROOT__', repoRoot)
         .replaceAll('__HOME__', home);
       const dir = label === 'com.whatsoup.harness-maintenance' ? maint : inject;
-      fs.writeFileSync(path.join(launchd, `${label}.plist`), injectClaudeConfigDir(rendered, dir));
+      const file = path.join(launchd, `${label}.plist`);
+      fs.writeFileSync(file, injectClaudeConfigDir(rendered, dir));
+      if (label === 'com.whatsoup.harness-maintenance' && dir !== null) {
+        const result = spawnSync('python3', ['-c', [
+          'import plistlib, sys',
+          'p, directory = sys.argv[1:3]',
+          'x = plistlib.load(open(p, "rb"))',
+          'x["EnvironmentVariables"]["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = directory',
+          'plistlib.dump(x, open(p, "wb"))',
+        ].join('\n'), file, dir], { encoding: 'utf8' });
+        if (result.status !== 0) throw new Error(`maintenance fixture failed: ${result.stderr}`);
+      }
     }
     return runDriftCheck(home);
   }

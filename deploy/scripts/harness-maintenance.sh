@@ -533,6 +533,29 @@ plist_string() {
   "$PLUTIL_BIN" -extract "$2" raw -o - "$1" 2>/dev/null
 }
 
+# Unlike raw plutil output, credential selectors must distinguish absence from a non-string.
+plist_credential_selector() {
+  local value
+  if value="$("$PLUTIL_BIN" -convert json -o - "$1" 2>/dev/null | "$REPO_NODE_BIN" -e '
+let source = "";
+process.stdin.on("data", (chunk) => { source += chunk; }).on("end", () => {
+  try {
+    const plist = JSON.parse(source);
+    const env = plist.EnvironmentVariables;
+    const [key, absent] = process.argv.slice(1);
+    if (env === undefined) { process.stdout.write(absent); return; }
+    if (env === null || typeof env !== "object" || Array.isArray(env)) process.exit(1);
+    if (!Object.hasOwn(env, key)) { process.stdout.write(absent); return; }
+    if (typeof env[key] !== "string") process.exit(1);
+    process.stdout.write(env[key]);
+  } catch { process.exit(1); }
+});' "$2" "$3" 2>/dev/null)"; then
+    printf '%s' "$value"
+  else
+    printf '?'
+  fi
+}
+
 # What a plist read with plutil shows: the environment of the next launch. The loaded job's
 # environment would need `launchctl print`, which prints every value, so it is not read.
 LAUNCHD_ENV_SURFACE="next launch; loaded job environment not read"
@@ -605,8 +628,8 @@ claude_inventory_launchd() {
     prepend="$(plist_string "$file" EnvironmentVariables.WHATSOUP_PATH_PREPEND || true)"
     node="$(plist_string "$file" EnvironmentVariables.WHATSOUP_NODE || true)"
     claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" \
-      "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
-      "$(plist_flag "$file" CLAUDE_SECURESTORAGE_CONFIG_DIR)" \
+      "$(plist_credential_selector "$file" CLAUDE_CONFIG_DIR "")" \
+      "$(plist_credential_selector "$file" CLAUDE_SECURESTORAGE_CONFIG_DIR "$UNSET_MARK")" \
       "$(plist_flag "$file" DISABLE_UPDATES)" \
       "$(plist_flag "$file" DISABLE_AUTOUPDATER)"
     if ! reason="$(instance_wrapper_mismatch "$program")"; then
@@ -843,27 +866,28 @@ claude_effective_selector() {
 # resolves through its nearest existing parent, so /alias/x and /real/x match when alias -> real.
 # A relative value is returned as given.
 claude_config_dir_resolved() {
-  local dir="${1:-$HOME/.claude}" base rest="" real
-  case "$dir" in
-    /*) ;;
-    *)
-      printf '%s\n' "$dir"
-      return 0 ;;
-  esac
-  while [ "$dir" != "/" ] && [ "${dir%/}" != "$dir" ]; do
-    dir="${dir%/}"
-  done
-  base="$dir"
-  while [ -n "$base" ] && [ ! -d "$base" ]; do
-    rest="/${base##*/}$rest"
-    base="${base%/*}"
-  done
-  if real="$(cd "${base:-/}" 2>/dev/null && pwd -P)"; then
-    real="${real%/}$rest"
-    printf '%s\n' "${real:-/}"
-  else
-    printf '%s\n' "$dir"
-  fi
+  "$REPO_NODE_BIN" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const directory = process.argv[1];
+if (!path.isAbsolute(directory)) { process.stdout.write(directory); process.exit(0); }
+let base = directory.replace(/\/+$/, "") || "/";
+const missing = [];
+try {
+  for (;;) {
+    try { fs.lstatSync(base); break; }
+    catch (error) {
+      if (error.code !== "ENOENT" || base === "/") throw error;
+      const part = path.basename(base);
+      if (part === "." || part === "..") throw error;
+      missing.unshift(part);
+      base = path.dirname(base);
+    }
+  }
+  if (!fs.statSync(base).isDirectory()) process.exit(1);
+  process.stdout.write(path.join(fs.realpathSync(base), ...missing));
+} catch { process.exit(1); }
+' "${1:-$HOME/.claude}" 2>/dev/null
 }
 
 # claude_config_isolation: 0 when this job's effective selector is set, absolute, not the default
@@ -872,7 +896,7 @@ claude_config_dir_resolved() {
 # Fails closed: an unread inventory, an unreadable effective instance value, a relative effective
 # instance selector or no instance at all is unproven.
 claude_config_isolation() {
-  local job_config="$UNSET_MARK" job_secure="$UNSET_MARK" job job_dir job_svc other other_svc job_selector
+  local job_config="$UNSET_MARK" job_secure="$UNSET_MARK" job job_dir default_dir job_svc other other_dir other_svc job_selector
   local name manager surface config secure updates autoupdater checked=0
   if [ "${CLAUDE_CONFIG_DIR+x}" = x ]; then job_config="$CLAUDE_CONFIG_DIR"; fi
   if [ "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}" = x ]; then job_secure="$CLAUDE_SECURESTORAGE_CONFIG_DIR"; fi
@@ -900,8 +924,11 @@ claude_config_isolation() {
       echo "this job's $job_selector $job is not an absolute path"
       return 1 ;;
   esac
-  job_dir="$(claude_config_dir_resolved "$job")"
-  if [ "$job_dir" = "$(claude_config_dir_resolved "")" ]; then
+  if ! job_dir="$(claude_config_dir_resolved "$job")" || ! default_dir="$(claude_config_dir_resolved "")"; then
+    echo "this job's credential-store directory could not be resolved, so its isolation is unproven"
+    return 1
+  fi
+  if [ "$job_dir" = "$default_dir" ]; then
     echo "this job's $job_selector $job is the default config dir"
     return 1
   fi
@@ -935,7 +962,11 @@ claude_config_isolation() {
       echo "this job's $job_selector $job equals $name's effective credential-store selector"
       return 1
     fi
-    if [ "$job_dir" = "$(claude_config_dir_resolved "$other")" ]; then
+    if ! other_dir="$(claude_config_dir_resolved "$other")"; then
+      echo "$name's credential-store directory could not be resolved, so isolation from it is unproven"
+      return 1
+    fi
+    if [ "$job_dir" = "$other_dir" ]; then
       echo "this job's $job_selector $job resolves to $name's config dir (effective credential-store selector)"
       return 1
     fi

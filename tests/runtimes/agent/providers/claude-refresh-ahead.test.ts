@@ -8,6 +8,7 @@
 // probe it waits while the CLI's refresh lock is held. Fixtures only: the
 // stores are injected readers and the children are fakes.
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -169,15 +170,16 @@ describe('refreshClaudeLoginAhead: when it runs', () => {
   });
 
   it('keys the keychain item and the file store to CLAUDE_SECURESTORAGE_CONFIG_DIR when it is set', async () => {
-    // Oracle: printf %s /tmp/refresh-ahead-secure/.claude | shasum -a 256 | cut -c1-8
+    const secureStore = privateStoreDir();
+    const service = `${SVC}-${createHash('sha256').update(secureStore).digest('hex').slice(0, 8)}`;
     const readKeychain = vi.fn((_service: string): string | null => null);
     const h = harness({ platform: 'darwin', readKeychain, fileStore: store(START.getTime() + 3_600_000) });
-    await refreshClaudeLoginAhead('claude', {
+    await expect(refreshClaudeLoginAhead('claude', {
       CLAUDE_CONFIG_DIR: configDir(),
-      CLAUDE_SECURESTORAGE_CONFIG_DIR: '/tmp/refresh-ahead-secure/.claude',
-    }, h.deps);
-    expect(readKeychain).toHaveBeenCalledWith(`${SVC}-165a2af3`);
-    expect(h.readFileStore).toHaveBeenCalledWith('/tmp/refresh-ahead-secure/.claude/.credentials.json');
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: secureStore,
+    }, h.deps)).resolves.toEqual({ outcome: 'not-needed' });
+    expect(readKeychain).toHaveBeenCalledWith(service);
+    expect(h.readFileStore).toHaveBeenCalledWith(join(secureStore, '.credentials.json'));
   });
 });
 
