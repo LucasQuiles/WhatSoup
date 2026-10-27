@@ -91,6 +91,15 @@ an instance on an older release whose wrapper differs only in lines unrelated
 to the PATH still holds. Run the maintenance job from the same release as the
 instances.
 
+The Linux `harness-maintenance.service` user unit sets both `CLAUDE_CONFIG_DIR`
+and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to `%h/.claude-maint`. Provision and
+authenticate this separate maintenance store as the user who owns the unit before
+scheduling agent CLI work. Do not copy a bot's credentials or point maintenance
+at its store. If the job's configuration and effective credential store cannot
+be proven isolated from every inventoried instance, it starts no agent CLI,
+records `claude-config-isolation: refused`, and ends `degraded` until the
+selectors are reconciled.
+
 On systemd the user manager environment, then `Environment=`, then
 `EnvironmentFiles=` are applied, as the launcher does. Finding no instance at
 all holds with a warning alert. The target is the newest release older than `npm.cooldown_minutes`
