@@ -1656,7 +1656,9 @@ The daily health check's `/health` and fleet API probes refuse HTTP redirects
 with `redirect_refused`. They send no second request and do not report the
 redirect target or response body. Configure the final endpoint directly so a
 redirect cannot forward its bearer credential or turn another endpoint's response
-into health evidence.
+into health evidence. Both probes bypass ambient proxies and require direct
+endpoint reachability. Fleet endpoints that previously required an ambient proxy
+must be reachable directly before these probes can qualify their health.
 
 ### Read-only exported health-package validation
 

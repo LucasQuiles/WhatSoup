@@ -51,15 +51,18 @@ def _server(body, status=200):
         server.server_close()
 
 
-def _probe(kind, port, root, monkeypatch):
-    spec = importlib.util.spec_from_file_location("health_redirect_probe", _SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def _probe(kind, port, root, monkeypatch, proxy_environment=None):
     for key in ["BOT_ERRORS_DRY_HEALTH_RESPONSE_JSON", "BOT_ERRORS_DRY_FLEET_API_STATUS",
                 "BOT_ERRORS_DRY_FLEET_API_ERROR", "BOT_ERRORS_DRY_FLEET_TOKEN_JSON"]:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
-    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                "http_proxy", "https_proxy", "all_proxy", "no_proxy", "REQUEST_METHOD"]:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in (proxy_environment or {}).items():
+        monkeypatch.setenv(key, value)
+    spec = importlib.util.spec_from_file_location("health_redirect_probe", _SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     if kind == "health":
         monkeypatch.setenv("WHATSOUP_HEALTH_TOKEN", _TOKEN)
         return module.probe_health(port, "synthetic-instance")
@@ -103,5 +106,22 @@ def test_health_probes_still_authenticate_direct_responses(kind):
         assert source.requests == [("/health" if kind == "health" else "/api/lines", f"Bearer {_TOKEN}")]
         assert "200" in line
         assert "redirect_refused" not in line
+        assert not line.startswith("FAIL ")
+        assert _TOKEN not in line
+
+
+@properties
+@given(kind=st.sampled_from(["health", "fleet"]), proxy_key=st.sampled_from(["HTTP_PROXY", "http_proxy"]))
+@example(kind="health", proxy_key="HTTP_PROXY")
+@example(kind="fleet", proxy_key="http_proxy")
+def test_health_probes_do_not_forward_bearer_to_environment_proxy(kind, proxy_key):
+    body = _PUBLIC_BODY if kind == "health" else b"[]"
+    with private_case() as (root, monkeypatch), _server(body) as proxy, _server(body) as source:
+        line = _probe(kind, source.server_port, root, monkeypatch,
+                      {proxy_key: f"http://127.0.0.1:{proxy.server_port}"})
+
+        assert proxy.requests == []
+        assert source.requests == [("/health" if kind == "health" else "/api/lines", f"Bearer {_TOKEN}")]
+        assert "200" in line
         assert not line.startswith("FAIL ")
         assert _TOKEN not in line

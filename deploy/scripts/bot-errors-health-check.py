@@ -24,7 +24,7 @@ import tempfile
 import time
 from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -4196,7 +4196,7 @@ class _NoHealthRedirect(HTTPRedirectHandler):
 
 
 # Both probes carry bearer credentials that belong only to the configured endpoint.
-urlopen = build_opener(_NoHealthRedirect()).open
+urlopen = build_opener(ProxyHandler({}), _NoHealthRedirect()).open
 
 
 def probe_health(port: int, expected_name: str | None = None) -> str:
