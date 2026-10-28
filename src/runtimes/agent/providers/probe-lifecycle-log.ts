@@ -80,6 +80,7 @@ export function probeLifecycleObservers(
           killedByProbeTimeout: termination === 'cli-timeout' || termination === 'deadline',
           termination,
           spawnFailed: exit.spawnFailed,
+          ...(exit.outputLimitExceeded ? { outputLimitExceeded: true } : {}),
         },
         events.exitMessage,
       );

@@ -1,12 +1,15 @@
 import type { MarkCleanExitResult } from './runtimes/agent/restart-loop-guard.ts';
 import { MessageHandlerDrainTimeoutError } from './runtimes/agent/shutdown-message-handler-drain.ts';
+import { ClaudeRefreshShutdownDeadlineError } from './runtimes/agent/providers/claude-refresh-ahead.ts';
 
-export type ShutdownPhase = 'auxiliaries' | 'runtime' | 'transport' | 'clean_exit';
+export type ShutdownPhase = 'auxiliaries' | 'runtime' | 'refresh' | 'transport' | 'clean_exit';
 
 export type ShutdownFailureCause =
   | 'auxiliaries_phase_failed'
   | 'message_handlers_deadline'
   | 'runtime_phase_failed'
+  | 'refresh_children_deadline'
+  | 'refresh_phase_failed'
   | 'transport_phase_failed'
   | 'clean_exit_persist_failed';
 
@@ -31,6 +34,9 @@ export interface ShutdownSequencePorts {
   auxiliaries: ReadonlyArray<NamedAuxiliaryStop>;
   /** AgentRuntime/ChatRuntime shutdown — flushes queues before the transport closes. */
   shutdownRuntime(): Promise<void>;
+  /** Absolute deadline that leaves the caller time for transport and log cleanup. */
+  refreshDrainDeadlineAt: number;
+  drainRefreshChildren(deadlineAt: number): Promise<void>;
   /** Transport (Baileys/Twilio) teardown. MUST run even when the runtime phase failed. */
   shutdownTransport(): Promise<void> | void;
   /** Restart-loop guard clean-exit mark; reports whether the mark PERSISTED. */
@@ -111,6 +117,13 @@ export async function runShutdownSequence(ports: ShutdownSequencePorts): Promise
     const drainTimeout = findDrainTimeout(err);
     if (drainTimeout !== null && failedPhase === null) blockers = drainTimeout.blockers;
     fail('runtime', drainTimeout !== null ? 'message_handlers_deadline' : 'runtime_phase_failed');
+  }
+
+  try {
+    await ports.drainRefreshChildren(ports.refreshDrainDeadlineAt);
+  } catch (error) {
+    // Child output and credential context must not enter a shutdown receipt.
+    fail('refresh', error instanceof ClaudeRefreshShutdownDeadlineError ? 'refresh_children_deadline' : 'refresh_phase_failed');
   }
 
   let transportTeardown: 'continued' | 'failed' = 'continued';
