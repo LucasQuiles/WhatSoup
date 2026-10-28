@@ -43,9 +43,9 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, realpathSync, statSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
 import { createPrivateFileIsolatedSync, writeAtomicPrivateFileIsolatedSync } from '../../../lib/private-fs-isolated.ts';
@@ -157,7 +157,47 @@ type RefreshOwnerLocation = {
  */
 function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | null {
   try {
-    const store = realpathSync(claudeSecureStorageDir(env));
+    const requested = claudeSecureStorageDir(env);
+    let store: string;
+    try {
+      store = realpathSync(requested);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      // Render admission permits one absent leaf, but never missing ancestors or a dangling link.
+      const parent = realpathSync(dirname(requested));
+      if (typeof process.getuid !== 'function') return null;
+      const uid = process.getuid();
+      const parentIdentity = lstatSync(parent);
+      if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink()
+        || parentIdentity.uid !== uid || (parentIdentity.mode & 0o022) !== 0) return null;
+      // Sticky shared ancestors protect entries owned by this UID (for example /tmp).
+      for (let ancestor = dirname(parent);; ancestor = dirname(ancestor)) {
+        const identity = lstatSync(ancestor);
+        if (!identity.isDirectory() || identity.isSymbolicLink()
+          || (identity.uid !== 0 && identity.uid !== uid)
+          || ((identity.mode & 0o022) !== 0 && (identity.mode & 0o1000) === 0)) return null;
+        if (dirname(ancestor) === ancestor) break;
+      }
+      const leaf = join(parent, basename(requested));
+      try {
+        lstatSync(leaf);
+        return null;
+      } catch (missing) {
+        if ((missing as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      }
+      // Initialization assumes cooperating same-UID writers. A parent exchange can
+      // leave an empty directory; the identity check below still forbids credential access.
+      try { mkdirSync(leaf, { mode: 0o700 }); } catch (creation) {
+        if ((creation as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      }
+      const identity = lstatSync(leaf);
+      if (!identity.isDirectory() || identity.isSymbolicLink() || (identity.mode & 0o077) !== 0
+        || identity.uid !== uid) return null;
+      const currentParent = lstatSync(parent);
+      store = realpathSync(requested);
+      if (store !== leaf || currentParent.isSymbolicLink() || currentParent.dev !== parentIdentity.dev
+        || currentParent.ino !== parentIdentity.ino) return null;
+    }
     const directory = join(store, OWNER_DIRECTORY);
     return { store, directory, path: join(directory, OWNER_FILENAME), guardPath: join(directory, MUTATION_FILENAME) };
   } catch {
