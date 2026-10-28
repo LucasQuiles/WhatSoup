@@ -14,6 +14,23 @@ afterEach(async () => {
 });
 
 describe('model catalogue HTTP boundaries', () => {
+  it.each([
+    [401, 'unauthorized', false],
+    [429, 'lookup-failed', false],
+    [503, 'lookup-failed', true],
+  ] as const)('cancels an unread HTTP %s body while preserving failure classification', async (status, category, cancelFails) => {
+    const cancel = vi.fn(async () => {
+      if (cancelFails) throw new Error('fixture cancellation failure');
+    });
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status })));
+
+    expect(await fetchAnthropicApiModelIdsWithStatus({ resolveKey: () => 'fixture-key' }))
+      .toEqual({ status: 'failed', category });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(body.locked).toBe(false);
+  });
+
   it('does not follow a redirect or forward the API key to its target', async () => {
     const targets: string[] = [];
     const server = createServer((request, response) => {
