@@ -156,6 +156,7 @@ async function fetchModelIdsOnce(
   try {
     const res = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
       return {
         ids: [],
         failure: { vendor, status: res.status, reason: `HTTP ${res.status}` },
