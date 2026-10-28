@@ -1406,9 +1406,16 @@ describe('refreshClaudeLoginAhead: shutdown drain admission and close join', () 
     expect(existsSync(ownerPath(dir))).toBe(true);
 
     const drain = refreshed.awaitActiveClaudeRefreshes(Date.now() + 1);
-    const rejected = expect(drain).rejects.toBeInstanceOf(refreshed.ClaudeRefreshShutdownDeadlineError);
+    const outcome = drain.then(
+      () => ({ status: 'fulfilled' as const }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
     await vi.advanceTimersByTimeAsync(1);
-    await rejected;
+    const settled = await outcome;
+    expect(settled.status).toBe('rejected');
+    if (settled.status === 'rejected') {
+      expect(settled.error).toBeInstanceOf(refreshed.ClaudeRefreshShutdownDeadlineError);
+    }
     expect(existsSync(ownerPath(dir))).toBe(true);
     expect(child.kill).not.toHaveBeenCalled();
 
