@@ -920,14 +920,50 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     expect(existsSync(ownerPath(dir))).toBe(false);
   });
 
-  it('reports an unresolved canonical owner location without spawning a refresh child', async () => {
+  it.each(['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'] as const)(
+    'initializes an absent final %s leaf before coordinating a refresh', async (selector) => {
+      const h = harness({ fileStore: store(START.getTime() + 1_000) });
+      const missing = join(privateStoreDir(), 'fresh-store');
+      const env = { CLAUDE_CONFIG_DIR: privateStoreDir(), [selector]: missing };
+      const run = refreshClaudeLoginAhead('claude', env, h.deps);
+      expect(h.spawnImpl).toHaveBeenCalledOnce();
+      expect(lstatSync(missing).isDirectory()).toBe(true);
+      expect(lstatSync(missing).mode & 0o777).toBe(0o700);
+      expect(existsSync(ownerPath(missing))).toBe(true);
+      const concurrent = refreshClaudeLoginAhead('claude', env, h.deps);
+      expect(h.spawnImpl).toHaveBeenCalledOnce();
+      h.children[0]!.emit('close', 0, null);
+      const expected = { outcome: 'ran', reason: 'within-window', exitCode: 0, signal: null };
+      await expect(run).resolves.toEqual(expected);
+      await expect(concurrent).resolves.toEqual(expected);
+      expect(existsSync(ownerPath(missing))).toBe(false);
+      expect(h.children[0]!.kill).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not create a missing intermediate store directory or spawn a refresh', async () => {
     const h = harness({ fileStore: store(START.getTime() + 1_000) });
-    const missing = join(privateStoreDir(), 'missing-store');
+    const intermediate = join(privateStoreDir(), 'missing-parent');
+    const missing = join(intermediate, 'missing-store');
     vi.resetModules();
     const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
     await expect(refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps))
       .resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(existsSync(intermediate)).toBe(false);
+  });
+
+  it('does not initialize a dangling store symlink or its missing target', async () => {
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const parent = privateStoreDir();
+    const missing = join(parent, 'missing-store');
+    const target = join(parent, 'missing-target');
+    symlinkSync(target, missing);
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(lstatSync(missing).isSymbolicLink()).toBe(true);
+    expect(existsSync(target)).toBe(false);
   });
 
   it.each([
