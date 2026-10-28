@@ -469,7 +469,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
         ? { state: 'absent' } : { state: 'alive', birthToken: fixtureBirthToken(9001) },
     });
     const next = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
-    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(h.deps.spawnImpl).toHaveBeenCalledOnce();
     expect(readFileSync(ownerPath(dir), 'utf8')).not.toBe(oldClaim);
     expect(JSON.parse(readFileSync(ownerPath(dir), 'utf8'))).toMatchObject({
       version: 2, pid: successor.pid, processBirthToken: fixtureBirthToken(successor.pid),
