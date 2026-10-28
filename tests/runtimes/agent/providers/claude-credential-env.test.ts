@@ -6,12 +6,12 @@ import { createPrimaryModelProbeAdapters } from '../../../../src/runtimes/agent/
 import type { ClaudeRefreshAheadResult } from '../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts';
 
 describe('Claude probes require a completed successful refresh before proceeding', () => {
-  const results: Array<{ name: string; result: ClaudeRefreshAheadResult; defer: boolean }> = [
-    { name: 'nonzero exit', result: { outcome: 'ran', reason: 'expired', exitCode: 1, signal: null }, defer: true },
-    { name: 'signal exit', result: { outcome: 'ran', reason: 'expired', exitCode: null, signal: 'SIGTERM' }, defer: true },
-    { name: 'spawn failure', result: { outcome: 'spawn-failed', reason: 'expired' }, defer: true },
-    { name: 'live refresh', result: { outcome: 'still-running' }, defer: true },
-    { name: 'successful close', result: { outcome: 'ran', reason: 'expired', exitCode: 0, signal: null }, defer: false },
+  const results: Array<{ name: string; result: ClaudeRefreshAheadResult; defer: 'refresh-failed' | 'deferred-refresh-in-flight' | null }> = [
+    { name: 'nonzero exit', result: { outcome: 'ran', reason: 'expired', exitCode: 1, signal: null }, defer: 'refresh-failed' },
+    { name: 'signal exit', result: { outcome: 'ran', reason: 'expired', exitCode: null, signal: 'SIGTERM' }, defer: 'refresh-failed' },
+    { name: 'spawn failure', result: { outcome: 'spawn-failed', reason: 'expired' }, defer: 'refresh-failed' },
+    { name: 'live refresh', result: { outcome: 'still-running' }, defer: 'deferred-refresh-in-flight' },
+    { name: 'successful close', result: { outcome: 'ran', reason: 'expired', exitCode: 0, signal: null }, defer: null },
   ];
   for (const surface of ['diagnostic', 'identity', 'model'] as const) {
     it.each(results)(`${surface}: $name`, async ({ result, defer }) => {
@@ -22,7 +22,7 @@ describe('Claude probes require a completed successful refresh before proceeding
           getProviderBinary: () => '/fixture/claude', refreshClaudeLoginAhead: refresh,
         });
         await expect(adapters.prepareBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' }))
-          .resolves.toEqual(defer ? { defer: 'deferred-refresh-in-flight' } : undefined);
+          .resolves.toEqual(defer ? { defer } : undefined);
       } else {
         const deps = {
           getProviderBinary: () => '/fixture/claude',
@@ -37,7 +37,7 @@ describe('Claude probes require a completed successful refresh before proceeding
           if (defer) expect(observed.summary).toContain('deferred');
         } else {
           const observed = await observeClaudeAccountIdentity(deps);
-          if (defer) expect(observed).toEqual({ kind: 'failed', reason: 'deferred-refresh-in-flight' });
+          if (defer) expect(observed).toEqual({ kind: 'failed', reason: defer });
         }
         expect(probe).toHaveBeenCalledTimes(defer ? 0 : 1);
       }
@@ -68,7 +68,7 @@ describe('Claude probes defer when refresh ownership cannot be established', () 
       env, refreshClaudeLoginAhead: refresh,
     });
     expect(probe).not.toHaveBeenCalled();
-    expect(result).toEqual({ kind: 'failed', reason: 'deferred-refresh-in-flight' });
+    expect(result).toEqual({ kind: 'failed', reason: 'refresh-failed' });
   });
 
   it('defers model probe preparation after refresh failure', async () => {
@@ -76,7 +76,7 @@ describe('Claude probes defer when refresh ownership cannot be established', () 
       getProviderBinary: () => '/fixture/claude', refreshClaudeLoginAhead: refresh,
     });
     await expect(adapters.prepareBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' }))
-      .resolves.toEqual({ defer: 'deferred-refresh-in-flight' });
+      .resolves.toEqual({ defer: 'refresh-failed' });
   });
 });
 
