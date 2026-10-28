@@ -101,7 +101,17 @@ function claimFingerprint(path: string): Pick<Stats, 'ino' | 'mode' | 'nlink' | 
   return { ino: state.ino, mode: state.mode, nlink: state.nlink, size: state.size };
 }
 
-function harness(over: Partial<ClaudeRefreshAheadDeps> & { fileStore?: string | null } = {}) {
+type ProcessObservation = { state: 'alive'; birthToken: string } | { state: 'absent' | 'unknown' };
+const fixtureProcessIdentity = {
+  hostId: 'refresh-test-host',
+  inspectProcess: (pid: number): ProcessObservation => ({ state: 'alive', birthToken: `fixture-birth:${pid}` }),
+};
+
+function harness(over: Partial<ClaudeRefreshAheadDeps> & {
+  fileStore?: string | null;
+  hostId?: string;
+  inspectProcess?: (pid: number) => ProcessObservation;
+} = {}) {
   const children: FakeChild[] = [];
   const spawnImpl = vi.fn(() => {
     const child = fakeChild(9000 + children.length);
@@ -115,6 +125,7 @@ function harness(over: Partial<ClaudeRefreshAheadDeps> & { fileStore?: string | 
     readFileStore,
     spawnImpl,
     log,
+    ...fixtureProcessIdentity,
     ...over,
   };
   return { deps, children, spawnImpl, lines, readFileStore };
@@ -181,6 +192,84 @@ describe('refreshClaudeLoginAhead: when it runs', () => {
     }, h.deps)).resolves.toEqual({ outcome: 'not-needed' });
     expect(readKeychain).toHaveBeenCalledWith(service);
     expect(h.readFileStore).toHaveBeenCalledWith(join(secureStore, '.credentials.json'));
+  });
+});
+
+describe('refreshClaudeLoginAhead: durable owner recovery', () => {
+  it('persists the exact child identity without credential contents', async () => {
+    const dir = privateStoreDir();
+    const h = harness();
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    const claim = JSON.parse(readFileSync(ownerPath(dir), 'utf8'));
+    expect(claim).toEqual({
+      version: 2, fence: expect.any(String), hostId: 'refresh-test-host',
+      pid: 9000, processBirthToken: 'fixture-birth:9000',
+    });
+    expect(lstatSync(ownerPath(dir)).mode & 0o777).toBe(0o600);
+    h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toMatchObject({ outcome: 'ran', exitCode: 0 });
+  });
+
+  it.each(['absent', 'reused'] as const)('recovers after parent loss when the recorded child is %s without its close callback', async (state) => {
+    const dir = privateStoreDir();
+    const old = harness();
+    vi.resetModules();
+    const original = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const abandoned = original.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, old.deps);
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS);
+    await expect(abandoned).resolves.toEqual({ outcome: 'still-running' });
+    const oldClaim = readFileSync(ownerPath(dir), 'utf8');
+
+    // Only persisted state survives the parent. No close callback runs in it.
+    vi.resetModules();
+    const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const h = harness({ inspectProcess: () => state === 'absent'
+      ? { state: 'absent' } : { state: 'alive', birthToken: 'successor-birth' } });
+    const next = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(readFileSync(ownerPath(dir), 'utf8')).not.toBe(oldClaim);
+    expect(old.children[0]!.kill).not.toHaveBeenCalled();
+    h.children[0]!.emit('close', 0, null);
+    await expect(next).resolves.toMatchObject({ outcome: 'ran', exitCode: 0 });
+  });
+
+  it.each(['legacy', 'foreign-host', 'unknown-process', 'corrupt'] as const)(
+    'preserves %s ownership but reports it as unavailable, not as a verified running child',
+    async (kind) => {
+      const dir = privateStoreDir();
+      const claim = { version: 2, fence: 'prior-owner', hostId: 'refresh-test-host', pid: 9000, processBirthToken: 'fixture-birth:9000' };
+      const raw = kind === 'legacy' ? JSON.stringify({ version: 1, fence: 'prior-owner' })
+        : kind === 'corrupt' ? '{invalid'
+          : JSON.stringify({ ...claim, hostId: kind === 'foreign-host' ? 'different-host' : claim.hostId });
+      const path = writeOwnerFixture(dir, raw);
+      const before = claimFingerprint(path);
+      const h = harness({
+        fileStore: store(START.getTime() + 3_600_000),
+        inspectProcess: () => kind === 'unknown-process' ? { state: 'unknown' } : { state: 'absent' },
+      });
+      await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+        .resolves.toEqual({ outcome: 'owner-unavailable' });
+      expect(h.spawnImpl).not.toHaveBeenCalled();
+      expect(h.readFileStore).not.toHaveBeenCalled();
+      expect(readFileSync(path, 'utf8')).toBe(raw);
+      expect(claimFingerprint(path)).toEqual(before);
+    },
+  );
+
+  it('does not remove a successor claim that appears during dead-child inspection', async () => {
+    const dir = privateStoreDir();
+    const prior = { version: 2, fence: 'prior-owner', hostId: 'refresh-test-host', pid: 9000, processBirthToken: 'prior-birth' };
+    const replacement = JSON.stringify({ ...prior, fence: 'successor-owner', processBirthToken: 'successor-birth' });
+    const path = writeOwnerFixture(dir, JSON.stringify(prior));
+    const h = harness({ inspectProcess: () => {
+      writeFileSync(path, replacement, { mode: 0o600 });
+      return { state: 'absent' };
+    } });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(h.readFileStore).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(replacement);
   });
 });
 
