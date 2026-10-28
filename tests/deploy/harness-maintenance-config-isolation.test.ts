@@ -144,7 +144,7 @@ describe('agent CLI login isolation of the maintenance job', () => {
       : `EnvironmentFiles=${path.join(h.home, 'absent.env')} (ignore_errors=no)`]);
     const result = run(h);
     expect(result.stderr).not.toContain('unbound variable');
-    expectRefused(h, result, "alpha's CLAUDE_CONFIG_DIR is not readable");
+    expectRefused(h, result, "alpha's effective credential-store selector is not readable");
   }, T);
 
   it('refuses when the job config dir resolves to an instance config dir through a symlink', () => {
