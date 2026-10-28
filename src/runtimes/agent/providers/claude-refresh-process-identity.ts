@@ -58,7 +58,7 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
       const boot = /^\{\s*sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)\s*\}/.exec(
         command('/usr/sbin/sysctl', ['-n', 'kern.boottime'], IDENTITY_ENV).trim(),
       );
-      const birth = command('/usr/bin/python3', ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
+      const birth = command('python3', ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
       if (!boot || !Number.isSafeInteger(Number(boot[1])) || Number(boot[1]) <= 0
         || !Number.isSafeInteger(Number(boot[2])) || Number(boot[2]) > 999_999
         || !/^[1-9]\d{0,19}$/.test(birth) || BigInt(birth) > 18_446_744_073_709_551_615n) {
