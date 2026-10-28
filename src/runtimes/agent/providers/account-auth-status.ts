@@ -143,14 +143,16 @@ export function makeAccountAuthStatusProbe(
       const grace = deps.terminationGrace;
       result = isClaude
         ? await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env, {
+          signal,
           ...probeLifecycleObservers(
             deps.log ?? createChildLogger('diagnostic-auth-status-probe'),
             CLAUDE_PROBE_EVENTS,
             { purpose: 'diagnostic-auth-status', provider: target.provider, credentialService: claudeCredentialServiceLabel(env) },
+            signal,
           ),
           ...(grace ? { terminationGrace: () => grace(env) } : {}),
         })
-        : await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env);
+        : await deps.probeBinaryAuthStatus(binary, AUTH_STATUS_ARGS, env, { signal });
     } catch {
       // probeBinaryAuthStatus is documented never-throw, but stay defensive.
       return { ok: false, confidence: 'suspected', summary: `auth-status probe errored for ${target.provider}`, data: { mode: 'binary', provider: target.provider } };

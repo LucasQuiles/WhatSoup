@@ -10,6 +10,8 @@ import { systemClock } from '../../../src/lib/clock.ts';
 import { probeBinaryCommand } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { observeClaudeAccountIdentity } from '../../../src/runtimes/agent/providers/claude-account-identity.ts';
 import { makeAccountAuthStatusProbe } from '../../../src/runtimes/agent/providers/account-auth-status.ts';
+import { runDiagnosticBundle } from '../../../src/runtimes/agent/diagnostic-bundle.ts';
+import { RESPONSE_WORKFLOWS } from '../../../src/runtimes/agent/response-registry.ts';
 
 const SVC = ['Claude', 'Code-credentials'].join(' ');
 const CONFIG_DIR = '/tmp/probe-log-bot/.claude';
@@ -108,6 +110,95 @@ describe('account-identity probe lifecycle log', () => {
 });
 
 describe('diagnostic auth-status probe lifecycle log', () => {
+  it.each([
+    { provider: 'claude-cli', deadline: false },
+    { provider: 'claude-cli', deadline: true },
+    { provider: 'codex-cli', deadline: false },
+    { provider: 'codex-cli', deadline: true },
+  ])('diagnostic abort reaches a spawned $provider child (deadline=$deadline)', async ({ provider, deadline }) => {
+    const child = fakeChild(3535);
+    const { lines, log } = capture();
+    const controller = new AbortController();
+    const grace = Promise.withResolvers<void>();
+    const terminationGrace = vi.fn(() => grace.promise);
+    const run = makeAccountAuthStatusProbe({ provider }, {
+      resolveKeyService: () => null,
+      lookupCredential: () => null,
+      getProviderBinary: () => provider,
+      probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options, (() => child) as never),
+      isAuthRequiredMessage: () => false,
+      env: { CLAUDE_CONFIG_DIR: CONFIG_DIR },
+      terminationGrace,
+      log,
+    })(controller.signal);
+    let settled = false;
+    void run.then(() => { settled = true; });
+
+    try {
+      controller.abort(deadline ? new DOMException('diagnostic deadline', 'TimeoutError') : undefined);
+      if (provider === 'claude-cli') {
+        expect(terminationGrace).toHaveBeenCalledOnce();
+        expect(child.kill).not.toHaveBeenCalled();
+        grace.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      } else {
+        expect(terminationGrace).not.toHaveBeenCalled();
+      }
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      child.emit('close', 0, null);
+      await expect(run).resolves.toMatchObject({ ok: false, confidence: 'suspected' });
+      if (provider === 'claude-cli') {
+        expect(lines[1]!.obj).toMatchObject({
+          event: 'claude_probe_exit',
+          termination: deadline ? 'deadline' : 'caller-abort',
+          killedByProbeTimeout: deadline,
+        });
+        expectNoLeak(lines);
+      } else {
+        expect(lines).toEqual([]);
+      }
+    } finally {
+      grace.resolve();
+      child.emit('close', 0, null);
+      await run;
+    }
+  });
+
+  it('diagnostic abort from the bundle deadline reaches the child before its own timeout', async () => {
+    const child = fakeChild(3636);
+    const { lines, log } = capture();
+    const probe = makeAccountAuthStatusProbe({ provider: 'claude-cli' }, {
+      resolveKeyService: () => null,
+      lookupCredential: () => null,
+      getProviderBinary: () => 'claude',
+      probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options, (() => child) as never),
+      isAuthRequiredMessage: () => false,
+      env: { CLAUDE_CONFIG_DIR: CONFIG_DIR },
+      log,
+    });
+    const bundle = runDiagnosticBundle({
+      workflow: RESPONSE_WORKFLOWS.provider_usage_limit,
+      probes: { 'account-auth-status': probe },
+      now: START.getTime(),
+      perProbeTimeoutMs: 2_500,
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(2_500);
+      expect(child.kill).toHaveBeenCalledOnce();
+      expect((await bundle).findings).toContainEqual(expect.objectContaining({
+        id: 'account-auth-status', ok: false, confidence: 'suspected',
+        summary: 'probe account-auth-status timed out after 2500ms',
+      }));
+    } finally {
+      child.emit('close', 0, null);
+      await bundle;
+    }
+    expect(lines[1]!.obj).toMatchObject({
+      event: 'claude_probe_exit', termination: 'deadline', killedByProbeTimeout: true,
+    });
+  });
+
   it('logs spawn and exit of the claude auth status child', async () => {
     const child = fakeChild(3333);
     const { lines, log } = capture();
