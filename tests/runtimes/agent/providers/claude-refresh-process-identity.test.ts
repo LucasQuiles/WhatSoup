@@ -7,19 +7,44 @@ const BOOT = '97a51083-c86a-4b14-a7f8-f6a069947ede';
 function darwin(boot = '{ sec = 1793145600, usec = 1234 } Tue Oct 27 00:00:00 2026') {
   return vi.fn((file: string, _args: string[], env: NodeJS.ProcessEnv) => {
     expect(env).toMatchObject({ LANG: 'C', LC_ALL: 'C', TZ: 'UTC' });
-    return file === '/usr/sbin/sysctl' ? boot : ' Tue Oct 27  01:02:03 2026\n';
+    return file === '/usr/sbin/sysctl' ? boot : '412005264\n';
   });
 }
 
 describe('refresh process identity', () => {
+  it('native identity distinguishes same-second PID reuse on macOS', () => {
+    const command = (uniqueId: string) => vi.fn((file: string) => {
+      if (file === '/usr/sbin/sysctl') return '{ sec = 1793145600, usec = 1234 }';
+      if (file === '/bin/ps') return 'Tue Oct 27 01:02:03 2026';
+      if (file === '/usr/bin/python3') return uniqueId;
+      throw new Error('unexpected identity command');
+    });
+    const deps = { platform: 'darwin' as const, signal: vi.fn() };
+    const before = inspectRefreshProcess(PID, { ...deps, command: command('9007199254740992') });
+    const after = inspectRefreshProcess(PID, { ...deps, command: command('9007199254740993') });
+    expect(before).toEqual({ state: 'alive', birthToken: 'refresh-owner-v2:darwin:1793145600.001234:9007199254740992' });
+    expect(after).toEqual({ state: 'alive', birthToken: 'refresh-owner-v2:darwin:1793145600.001234:9007199254740993' });
+    expect(after).not.toEqual(before);
+  });
+
+  it('native identity never falls back to a coarse start display when the native reader is unavailable', () => {
+    const command = vi.fn((file: string) => {
+      if (file === '/usr/sbin/sysctl') return '{ sec = 1793145600, usec = 1234 }';
+      if (file === '/bin/ps') return 'Tue Oct 27 01:02:03 2026';
+      throw new Error('native reader unavailable');
+    });
+    expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toEqual({ state: 'unknown' });
+    expect(command.mock.calls.some(([file]) => file === '/bin/ps')).toBe(false);
+  });
+
   it('uses fixed locale and timezone with numeric boot time on macOS', () => {
     const command = darwin();
     const signal = vi.fn();
     expect(inspectRefreshProcess(PID, { platform: 'darwin', signal, command })).toEqual({
-      state: 'alive', birthToken: 'refresh-owner-v1:darwin:1793145600.001234:Tue Oct 27 01:02:03 2026',
+      state: 'alive', birthToken: 'refresh-owner-v2:darwin:1793145600.001234:412005264',
     });
     expect(command.mock.calls.map(([file, args]) => [file, args])).toEqual([
-      ['/usr/sbin/sysctl', ['-n', 'kern.boottime']], ['/bin/ps', ['-p', String(PID), '-o', 'lstart=']],
+      ['/usr/sbin/sysctl', ['-n', 'kern.boottime']], ['/usr/bin/python3', ['-I', '-S', '-c', expect.any(String), String(PID)]],
     ]);
     expect(signal.mock.calls).toEqual([[PID, 0], [PID, 0]]);
   });
@@ -31,6 +56,11 @@ describe('refresh process identity', () => {
     expect(before.state).toBe('alive');
     expect(after.state).toBe('alive');
     expect(after).not.toEqual(before);
+  });
+
+  it.each(['0', '-1', '1.5', '18446744073709551616', 'unknown', ''])('rejects an invalid native macOS process identifier %s', (identifier) => {
+    const command = vi.fn((file: string) => file === '/usr/sbin/sysctl' ? '{ sec = 1793145600, usec = 1234 }' : identifier);
+    expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toEqual({ state: 'unknown' });
   });
 
   it('reads Linux start ticks after a process name containing spaces and parentheses', () => {

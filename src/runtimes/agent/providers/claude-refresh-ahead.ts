@@ -236,7 +236,7 @@ function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | nu
 }
 
 type OwnerClaimState = 'absent' | 'held' | 'unavailable';
-type RefreshOwner = { version: 2; fence: string; hostId: string; pid: number; processBirthToken: string };
+type RefreshOwner = { version: 2 | 3; fence: string; hostId: string; pid: number; processBirthToken: string };
 
 function readOwnerFile(location: RefreshOwnerLocation, path = location.path): PrivateFileObservation | null {
   return readPrivateFileSync(path, { label: OWNER_LABEL, maxBytes: OWNER_MAX_BYTES, observation: { root: location.store } });
@@ -272,13 +272,20 @@ function acquireMutationGuard(location: RefreshOwnerLocation): PrivateFileObserv
   }
 }
 
+function isCurrentBirthToken(token: string): boolean {
+  return (token.startsWith('refresh-owner-v1:') && !token.startsWith('refresh-owner-v1:darwin:'))
+    || /^refresh-owner-v2:darwin:\d+\.\d{6}:[1-9]\d*$/.test(token);
+}
+
 function parseOwner(observed: PrivateFileObservation): RefreshOwner | null {
   const value = JSON.parse(observed.bytes.toString('utf8')) as Partial<RefreshOwner> | null;
-  if (!value || value.version !== 2 || Object.keys(value).length !== 5
+  if (!value || (value.version !== 2 && value.version !== 3) || Object.keys(value).length !== 5
     || typeof value.fence !== 'string' || value.fence.length === 0
     || typeof value.hostId !== 'string' || value.hostId.length === 0
     || !Number.isSafeInteger(value.pid) || value.pid! <= 0
-    || typeof value.processBirthToken !== 'string' || !value.processBirthToken.startsWith('refresh-owner-v1:')) return null;
+    || typeof value.processBirthToken !== 'string'
+    || !(isCurrentBirthToken(value.processBirthToken)
+      || (value.version === 2 && value.processBirthToken.startsWith('refresh-owner-v1:darwin:')))) return null;
   return value as RefreshOwner;
 }
 
@@ -291,8 +298,12 @@ function reconcileOwnerClaim(location: RefreshOwnerLocation, deps: ClaudeRefresh
     if (owner === null || owner.hostId !== (deps.hostId ?? hostname())) return 'unavailable';
     const process = (deps.inspectProcess ?? inspectRefreshProcess)(owner.pid);
     if (process.state === 'unknown') return 'unavailable';
-    if (process.state === 'alive' && process.birthToken === owner.processBirthToken) return 'held';
-    if (process.state === 'alive' && !process.birthToken.startsWith('refresh-owner-v1:')) return 'unavailable';
+    if (process.state === 'alive') {
+      // A live legacy macOS claim cannot distinguish the original child from same-second PID reuse.
+      if (!isCurrentBirthToken(owner.processBirthToken) || !isCurrentBirthToken(process.birthToken)
+        || process.birthToken.split(':', 2).join(':') !== owner.processBirthToken.split(':', 2).join(':')) return 'unavailable';
+      if (process.birthToken === owner.processBirthToken) return 'held';
+    }
     return removeObserved(location, location.path, observed) ? 'absent' : 'unavailable';
   } catch {
     return 'unavailable';
@@ -511,11 +522,12 @@ async function runRefreshAhead(
     try {
       if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error('refresh child identity unavailable');
       const process = (deps.inspectProcess ?? inspectRefreshProcess)(pid!);
-      if (process.state !== 'alive' || !process.birthToken.startsWith('refresh-owner-v1:')) {
+      if (process.state !== 'alive' || !isCurrentBirthToken(process.birthToken)) {
         throw new Error('refresh child identity unavailable');
       }
       if (!sameObservation(readOwnerFile(location), initialObservation)) throw new Error('refresh owner changed');
-      const owner: RefreshOwner = { version: 2, fence, hostId: deps.hostId ?? hostname(), pid: pid!, processBirthToken: process.birthToken };
+      // Older readers reject this version instead of treating a new identity format as a reused PID.
+      const owner: RefreshOwner = { version: 3, fence, hostId: deps.hostId ?? hostname(), pid: pid!, processBirthToken: process.birthToken };
       const payload = JSON.stringify(owner);
       ownedPayloads.add(payload);
       writeAtomicPrivateFileIsolatedSync(location.path, payload, OWNER_LABEL);

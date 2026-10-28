@@ -14,6 +14,25 @@ interface ProcessIdentityDeps {
 
 const IDENTITY_ENV = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
 
+// PROC_PIDUNIQIDENTIFIERINFO distinguishes PID reuse even within one clock tick.
+const DARWIN_UNIQUE_ID = `
+import ctypes
+import sys
+class Identity(ctypes.Structure):
+    _fields_ = [('uuid', ctypes.c_ubyte * 16), ('unique', ctypes.c_uint64),
+                ('parent', ctypes.c_uint64), ('version', ctypes.c_int32),
+                ('parent_version', ctypes.c_int32), ('reserved2', ctypes.c_uint64),
+                ('reserved3', ctypes.c_uint64)]
+call = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidinfo
+call.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+call.restype = ctypes.c_int
+identity = Identity()
+size = ctypes.sizeof(identity)
+if size != 56 or call(int(sys.argv[1]), 17, 0, ctypes.byref(identity), size) != size or identity.unique == 0:
+    raise SystemExit(1)
+print(identity.unique)
+`;
+
 /** A boot-bound identity independent of the observing parent's locale and timezone. */
 export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {}): RefreshProcessObservation {
   if (!Number.isSafeInteger(pid) || pid <= 0) return { state: 'unknown' };
@@ -39,13 +58,13 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
       const boot = /^\{\s*sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)\s*\}/.exec(
         command('/usr/sbin/sysctl', ['-n', 'kern.boottime'], IDENTITY_ENV).trim(),
       );
-      const birth = command('/bin/ps', ['-p', String(pid), '-o', 'lstart='], IDENTITY_ENV).trim().replace(/\s+/g, ' ');
+      const birth = command('/usr/bin/python3', ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
       if (!boot || !Number.isSafeInteger(Number(boot[1])) || Number(boot[1]) <= 0
         || !Number.isSafeInteger(Number(boot[2])) || Number(boot[2]) > 999_999
-        || !/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(birth)) {
+        || !/^[1-9]\d{0,19}$/.test(birth) || BigInt(birth) > 18_446_744_073_709_551_615n) {
         return { state: 'unknown' };
       }
-      birthToken = `refresh-owner-v1:darwin:${Number(boot[1])}.${boot[2]!.padStart(6, '0')}:${birth}`;
+      birthToken = `refresh-owner-v2:darwin:${Number(boot[1])}.${boot[2]!.padStart(6, '0')}:${birth}`;
     } else if (platform === 'linux') {
       const boot = read('/proc/sys/kernel/random/boot_id').trim();
       const stat = read(`/proc/${pid}/stat`).trim();

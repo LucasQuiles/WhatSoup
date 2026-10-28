@@ -243,6 +243,68 @@ describe('refreshClaudeLoginAhead: when it runs', () => {
 });
 
 describe('refreshClaudeLoginAhead: durable owner recovery', () => {
+  it.each(['same', 'upgraded'] as const)('native identity retains an ambiguous live legacy macOS claim with a %s observation', async (kind) => {
+    const dir = privateStoreDir();
+    const legacy = 'refresh-owner-v1:darwin:1793145600.001234:Tue Oct 27 01:02:03 2026';
+    const raw = JSON.stringify({ version: 2, fence: 'legacy-owner', hostId: 'refresh-test-host', pid: 8000, processBirthToken: legacy });
+    const path = writeOwnerFixture(dir, raw);
+    const h = harness({ inspectProcess: () => ({ state: 'alive', birthToken: kind === 'same' ? legacy : 'refresh-owner-v2:darwin:1793145600.001234:12' }) });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps)).resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(raw);
+  });
+
+  it('native identity recognizes a version-three live macOS owner', async () => {
+    const dir = privateStoreDir();
+    const token = 'refresh-owner-v2:darwin:1793145600.001234:12';
+    const raw = JSON.stringify({ version: 3, fence: 'native-owner', hostId: 'refresh-test-host', pid: 8000, processBirthToken: token });
+    const path = writeOwnerFixture(dir, raw);
+    const h = harness({ inspectProcess: () => ({ state: 'alive', birthToken: token }) });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps)).resolves.toEqual({ outcome: 'still-running' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(raw);
+  });
+
+  it('recovers a legacy macOS claim only after native absence is proven', async () => {
+    const dir = privateStoreDir();
+    const path = writeOwnerFixture(dir, JSON.stringify({ version: 2, fence: 'legacy-owner', hostId: 'refresh-test-host', pid: 8000,
+      processBirthToken: 'refresh-owner-v1:darwin:1793145600.001234:Tue Oct 27 01:02:03 2026' }));
+    const h = harness({ inspectProcess: () => ({ state: 'absent' }), fileStore: store(START.getTime() + 3_600_000) });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps)).resolves.toEqual({ outcome: 'not-needed' });
+    expect(existsSync(path)).toBe(false);
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('recovers a reused macOS PID from a different native process identifier without signaling it', async () => {
+    const dir = privateStoreDir();
+    const path = writeOwnerFixture(dir, JSON.stringify({ version: 3, fence: 'original-owner', hostId: 'refresh-test-host', pid: 8000,
+      processBirthToken: 'refresh-owner-v2:darwin:1793145600.001234:9007199254740992' }));
+    const h = harness({ inspectProcess: (pid) => pid === 8000
+      ? { state: 'alive', birthToken: 'refresh-owner-v2:darwin:1793145600.001234:9007199254740993' }
+      : fixtureProcessIdentity.inspectProcess(pid) });
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    try {
+      expect(h.spawnImpl).toHaveBeenCalledOnce();
+      expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ version: 3, pid: 9000 });
+      expect(h.children[0]!.kill).not.toHaveBeenCalled();
+    } finally {
+      h.children[0]!.emit('close', 0, null);
+      await run;
+    }
+  });
+
+  it('native identity publishes an ownership version that older readers cannot reclaim', async () => {
+    const dir = privateStoreDir();
+    const h = harness();
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    try {
+      expect(JSON.parse(readFileSync(ownerPath(dir), 'utf8'))).toMatchObject({ version: 3, pid: h.children[0]!.pid });
+    } finally {
+      h.children[0]!.emit('close', 0, null);
+      await run;
+    }
+  });
+
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('retains an invalid owner PID %s without probing it', async (pid) => {
     const dir = privateStoreDir();
     const raw = JSON.stringify({ version: 2, fence: 'invalid-pid', hostId: 'refresh-test-host', pid, processBirthToken: fixtureBirthToken(8000) });
@@ -393,8 +455,8 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
       const original = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
       const run = original.refreshClaudeLoginAhead('claude', env, first.deps);
       expect(JSON.parse(readFileSync(ownerPath(dir), 'utf8'))).toMatchObject({
-        version: 2, pid: native.pid, hostId: hostname(),
-        processBirthToken: expect.stringMatching(/^refresh-owner-v1:/),
+        version: 3, pid: native.pid, hostId: hostname(),
+        processBirthToken: expect.stringMatching(process.platform === 'darwin' ? /^refresh-owner-v2:darwin:/ : /^refresh-owner-v1:linux:/),
       });
       expect(nativeLiveness).toHaveBeenCalledWith(native.pid, 0);
       await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS);
@@ -435,8 +497,8 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
         spawnImpl: (() => child) as unknown as typeof import('node:child_process').spawn });
       const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, producer.deps);
       retainedClaim = readFileSync(ownerPath(dir), 'utf8');
-      expect(JSON.parse(retainedClaim)).toMatchObject({ version: 2, pid: native.pid,
-        processBirthToken: expect.stringMatching(/^refresh-owner-v1:/) });
+      expect(JSON.parse(retainedClaim)).toMatchObject({ version: 3, pid: native.pid,
+        processBirthToken: expect.stringMatching(process.platform === 'darwin' ? /^refresh-owner-v2:darwin:/ : /^refresh-owner-v1:linux:/) });
       child.emit('close', 0, null);
       await expect(run).resolves.toMatchObject({ outcome: 'ran' });
     } finally {
@@ -462,7 +524,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
       spawnImpl: (() => child) as unknown as typeof import('node:child_process').spawn });
     const first = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, producer.deps);
     const before = readFileSync(ownerPath(dir), 'utf8');
-    expect(JSON.parse(before)).toMatchObject({ version: 2, pid: process.pid, processBirthToken: expect.any(String) });
+    expect(JSON.parse(before)).toMatchObject({ version: 3, pid: process.pid, processBirthToken: expect.any(String) });
     child.emit('close', 0, null);
     await expect(first).resolves.toMatchObject({ outcome: 'ran' });
     const path = writeOwnerFixture(dir, before);
@@ -481,7 +543,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
     const claim = JSON.parse(readFileSync(ownerPath(dir), 'utf8'));
     expect(claim).toEqual({
-      version: 2, fence: expect.any(String), hostId: 'refresh-test-host',
+      version: 3, fence: expect.any(String), hostId: 'refresh-test-host',
       pid: 9000, processBirthToken: fixtureBirthToken(9000),
     });
     expect(lstatSync(ownerPath(dir)).mode & 0o777).toBe(0o600);
@@ -512,7 +574,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     expect(h.deps.spawnImpl).toHaveBeenCalledOnce();
     expect(readFileSync(ownerPath(dir), 'utf8')).not.toBe(oldClaim);
     expect(JSON.parse(readFileSync(ownerPath(dir), 'utf8'))).toMatchObject({
-      version: 2, pid: successor.pid, processBirthToken: fixtureBirthToken(successor.pid),
+      version: 3, pid: successor.pid, processBirthToken: fixtureBirthToken(successor.pid),
     });
     expect(old.children[0]!.kill).not.toHaveBeenCalled();
     successor.emit('close', 0, null);
