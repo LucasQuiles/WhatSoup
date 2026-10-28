@@ -23,7 +23,9 @@
 //     running, the probe is deferred (no killable child is spawned) and the
 //     child keeps running. After REFRESH_AHEAD_HARD_CAP_MS the local wait is
 //     logged as hung, but its durable owner claim still defers later callers
-//     until that exact child closes; it is never killed.
+//     until that exact child closes. After a parent restart, a boot-bound
+//     child identity permits recovery once that process is proven absent or
+//     replaced. Unknown ownership is alertable and is never called live.
 //     The child runs detached (its own process group), so a signal to the
 //     bot's group at shutdown or restart cannot reach it mid-refresh.
 //   - kill grace: before signalling such a child, wait (bounded) while the
@@ -42,11 +44,13 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, realpathSync, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
-import { createPrivateFileIsolatedSync } from '../../../lib/private-fs-isolated.ts';
-import { deletePrivateFileSync, readPrivateFileSync } from '../../../lib/private-fs.ts';
+import { createPrivateFileIsolatedSync, writeAtomicPrivateFileIsolatedSync } from '../../../lib/private-fs-isolated.ts';
+import { deletePrivateFileSync, readPrivateFileSync, type PrivateFileObservation } from '../../../lib/private-fs.ts';
+import { inspectRefreshProcess, type RefreshProcessObservation } from './claude-refresh-process-identity.ts';
 import {
   claudeCredentialServiceLabel,
   claudeSecureStorageDir,
@@ -96,6 +100,7 @@ const STILL_RUNNING_LOG_MS = 60_000;
 const OAUTH_REFRESH_LOCK = '.oauth_refresh.lock';
 const OWNER_DIRECTORY = '.whatsoup-refresh-ahead';
 const OWNER_FILENAME = 'owner.json';
+const MUTATION_FILENAME = 'owner.mutation.json';
 const OWNER_MAX_BYTES = 4 * 1024;
 const OWNER_LABEL = 'claude refresh-ahead owner claim';
 
@@ -129,23 +134,20 @@ export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
   now?: () => number;
   /** Injected in tests. When absent under a test runner, nothing is read or spawned. */
   spawnImpl?: typeof spawn;
+  hostId?: string;
+  inspectProcess?: (pid: number) => RefreshProcessObservation;
   log?: Log;
 }
 
 const inFlight = new Map<string, Promise<ClaudeRefreshAheadResult>>();
 /** Refresh-ahead children still alive per storage dir, including ones past the hard cap. */
-const liveChildren = new Map<string, number>();
-
-function trackLive(key: string, delta: 1 | -1): void {
-  const next = (liveChildren.get(key) ?? 0) + delta;
-  if (next > 0) liveChildren.set(key, next);
-  else liveChildren.delete(key);
-}
+const liveChildren = new Map<string, { fence: string; verified: boolean }>();
 
 type RefreshOwnerLocation = {
   store: string;
   directory: string;
   path: string;
+  guardPath: string;
 };
 
 /**
@@ -157,72 +159,82 @@ function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | nu
   try {
     const store = realpathSync(claudeSecureStorageDir(env));
     const directory = join(store, OWNER_DIRECTORY);
-    return { store, directory, path: join(directory, OWNER_FILENAME) };
+    return { store, directory, path: join(directory, OWNER_FILENAME), guardPath: join(directory, MUTATION_FILENAME) };
   } catch {
     return null;
   }
 }
 
 type OwnerClaimState = 'absent' | 'held' | 'unavailable';
-type OwnerClaimAcquisition = 'acquired' | Exclude<OwnerClaimState, 'absent'>;
+type RefreshOwner = { version: 2; fence: string; hostId: string; pid: number; processBirthToken: string };
 
-/** A readable private claim is the only durable evidence of a prior owner. */
-function ownerClaimState(location: RefreshOwnerLocation): OwnerClaimState {
+function readOwnerFile(location: RefreshOwnerLocation, path = location.path): PrivateFileObservation | null {
+  return readPrivateFileSync(path, { label: OWNER_LABEL, maxBytes: OWNER_MAX_BYTES, observation: { root: location.store } });
+}
+
+function sameObservation(left: PrivateFileObservation | null, right: PrivateFileObservation): boolean {
+  return left !== null && left.rawSha256 === right.rawSha256
+    && JSON.stringify(left.identity) === JSON.stringify(right.identity);
+}
+
+function removeObserved(location: RefreshOwnerLocation, path: string, observed: PrivateFileObservation): boolean {
   try {
-    return readPrivateFileSync(location.path, {
-      label: OWNER_LABEL,
-      maxBytes: OWNER_MAX_BYTES,
-      observation: { root: location.store },
-    }) === null ? 'absent' : 'held';
+    return sameObservation(readOwnerFile(location, path), observed) && deletePrivateFileSync(path, OWNER_LABEL);
   } catch {
-    // Do not spawn across an unsafe or unreadable namespace, but do not call it a live refresh.
+    return false;
+  }
+}
+
+/** Never reclaim a guard: its owner may be between its final proof and unlink. */
+function acquireMutationGuard(location: RefreshOwnerLocation): PrivateFileObservation | null {
+  try {
+    readOwnerFile(location);
+    try { mkdirSync(location.directory, { mode: 0o700 }); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+    }
+    if (readOwnerFile(location, location.guardPath) !== null) return null;
+    const raw = JSON.stringify({ version: 1, fence: randomUUID() });
+    createPrivateFileIsolatedSync(location.guardPath, raw, OWNER_LABEL);
+    const observed = readOwnerFile(location, location.guardPath);
+    return observed?.bytes.toString('utf8') === raw ? observed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseOwner(observed: PrivateFileObservation): RefreshOwner | null {
+  const value = JSON.parse(observed.bytes.toString('utf8')) as Partial<RefreshOwner> | null;
+  if (!value || value.version !== 2 || Object.keys(value).length !== 5
+    || typeof value.fence !== 'string' || value.fence.length === 0
+    || typeof value.hostId !== 'string' || value.hostId.length === 0
+    || !Number.isSafeInteger(value.pid) || value.pid! <= 0
+    || typeof value.processBirthToken !== 'string' || !value.processBirthToken.startsWith('refresh-owner-v1:')) return null;
+  return value as RefreshOwner;
+}
+
+/** The caller holds the mutation guard through observation, removal and successor publication. */
+function reconcileOwnerClaim(location: RefreshOwnerLocation, deps: ClaudeRefreshAheadDeps): OwnerClaimState {
+  try {
+    const observed = readOwnerFile(location);
+    if (observed === null) return 'absent';
+    const owner = parseOwner(observed);
+    if (owner === null || owner.hostId !== (deps.hostId ?? hostname())) return 'unavailable';
+    const process = (deps.inspectProcess ?? inspectRefreshProcess)(owner.pid);
+    if (process.state === 'unknown') return 'unavailable';
+    if (process.state === 'alive' && process.birthToken === owner.processBirthToken) return 'held';
+    if (process.state === 'alive' && !process.birthToken.startsWith('refresh-owner-v1:')) return 'unavailable';
+    return removeObserved(location, location.path, observed) ? 'absent' : 'unavailable';
+  } catch {
     return 'unavailable';
   }
 }
 
-/**
- * Create only our private state child, then observe it again before the
- * isolated writer could force its mode. A readable existing claim holds; a
- * publication/read failure is deferred separately so callers can alert.
- */
-function acquireOwnerClaim(location: RefreshOwnerLocation, fence: string): OwnerClaimAcquisition {
+function releaseOwnerClaim(location: RefreshOwnerLocation, ownedPayloads: Set<string>): boolean {
   try {
-    mkdirSync(location.directory, { mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return 'unavailable';
-  }
-  const before = ownerClaimState(location);
-  if (before !== 'absent') return before;
-  try {
-    createPrivateFileIsolatedSync(
-      location.path,
-      JSON.stringify({ version: 1, fence }),
-      OWNER_LABEL,
-    );
-    return 'acquired';
+    const observed = readOwnerFile(location);
+    return observed !== null && ownedPayloads.has(observed.bytes.toString('utf8'))
+      && removeObserved(location, location.path, observed);
   } catch {
-    // A racing writer may now have published a readable claim; otherwise it is unavailable.
-    return ownerClaimState(location) === 'held' ? 'held' : 'unavailable';
-  }
-}
-
-/**
- * The close observer removes only the fence it created. This is cooperative
- * same-user protection, not isolation against a malicious same-UID replacer.
- */
-function releaseOwnerClaim(location: RefreshOwnerLocation, fence: string): boolean {
-  try {
-    const observed = readPrivateFileSync(location.path, {
-      label: OWNER_LABEL,
-      maxBytes: OWNER_MAX_BYTES,
-      observation: { root: location.store },
-    });
-    if (observed === null) return false;
-    const parsed = JSON.parse(observed.bytes.toString('utf8')) as { fence?: unknown };
-    if (parsed.fence !== fence) return false;
-    return deletePrivateFileSync(location.path, OWNER_LABEL);
-  } catch {
-    // Unknown, malformed, and unsafe ownership state remains held.
     return false;
   }
 }
@@ -254,25 +266,39 @@ export function refreshClaudeLoginAhead(
   const location = refreshOwnerLocation(env);
   if (location === null) return Promise.resolve({ outcome: 'owner-unavailable' });
   const key = location.store;
-  let run = inFlight.get(key);
+  const live = liveChildren.get(key);
+  if (live && !live.verified) return Promise.resolve({ outcome: 'owner-unavailable' });
+  const run = inFlight.get(key);
   if (run) return waitBounded(run);
   // A child past its hard cap no longer blocks the wait, but while it is
   // alive no second refresh child and no killable probe may start.
-  if (!run && liveChildren.has(key)) return Promise.resolve({ outcome: 'still-running' });
+  if (live) return Promise.resolve({ outcome: 'still-running' });
   // A previous parent may have died with its child alive. Its claim must win
   // over a newly renewed credential or any later expiry fast path.
-  const priorClaim = ownerClaimState(location);
-  if (priorClaim === 'held') return Promise.resolve({ outcome: 'still-running' });
-  if (priorClaim === 'unavailable') return Promise.resolve({ outcome: 'owner-unavailable' });
+  const guard = acquireMutationGuard(location);
+  if (guard === null) return Promise.resolve({ outcome: 'owner-unavailable' });
+  let created: Promise<ClaudeRefreshAheadResult> | undefined;
   const release = (): void => {
-    if (inFlight.get(key) === created) inFlight.delete(key);
+    if (created && inFlight.get(key) === created) inFlight.delete(key);
   };
-  const created: Promise<ClaudeRefreshAheadResult> = runRefreshAhead(
-    binary, env, deps, release, key, location,
-  ).finally(release);
-  run = created;
+  let released = false;
+  try {
+    const priorClaim = reconcileOwnerClaim(location, deps);
+    if (priorClaim === 'held') return Promise.resolve({ outcome: 'still-running' });
+    if (priorClaim === 'unavailable') return Promise.resolve({ outcome: 'owner-unavailable' });
+    created = runRefreshAhead(binary, env, deps, release, key, location).finally(release);
+  } catch {
+    return Promise.resolve({ outcome: 'owner-unavailable' });
+  } finally {
+    released = removeObserved(location, location.guardPath, guard);
+  }
+  if (!released) {
+    const child = liveChildren.get(key);
+    if (child) child.verified = false;
+    return Promise.resolve({ outcome: 'owner-unavailable' });
+  }
   inFlight.set(key, created);
-  return waitBounded(run);
+  return waitBounded(created);
 }
 
 function waitBounded(run: Promise<ClaudeRefreshAheadResult>): Promise<ClaudeRefreshAheadResult> {
@@ -303,9 +329,17 @@ async function runRefreshAhead(
   if (reason === null) return { outcome: 'not-needed' };
 
   const fence = randomUUID();
-  const acquisition = acquireOwnerClaim(location, fence);
-  if (acquisition === 'held') return { outcome: 'still-running' };
-  if (acquisition === 'unavailable') return { outcome: 'owner-unavailable' };
+  const initialPayload = JSON.stringify({ version: 1, fence });
+  const ownedPayloads = new Set([initialPayload]);
+  let initialObservation: PrivateFileObservation;
+  try {
+    createPrivateFileIsolatedSync(location.path, initialPayload, OWNER_LABEL);
+    const observed = readOwnerFile(location);
+    if (observed?.bytes.toString('utf8') !== initialPayload) return { outcome: 'owner-unavailable' };
+    initialObservation = observed;
+  } catch {
+    return { outcome: 'owner-unavailable' };
+  }
 
   const log = deps.log ?? createChildLogger('claude-refresh-ahead');
   const base = { purpose: 'refresh-ahead', reason, credentialService: claudeCredentialServiceLabel(env) };
@@ -335,10 +369,10 @@ async function runRefreshAhead(
       // The production Node spawn path can throw here only before a child exists or after
       // closing a failed native handle. An injected test seam may throw after side effects,
       // so it retains the fence until an observed close.
-      if (!deps.spawnImpl && releaseOwnerClaim(location, fence)) {
+      if (!deps.spawnImpl && releaseOwnerClaim(location, ownedPayloads)) {
         resolve({ outcome: 'spawn-failed', reason });
       } else {
-        resolve({ outcome: 'still-running' });
+        resolve({ outcome: 'owner-unavailable' });
       }
       return;
     }
@@ -356,7 +390,8 @@ async function runRefreshAhead(
     // A child that never exits keeps its durable hold. This only stops later
     // callers from awaiting this local promise; it never permits another probe.
     child.unref?.();
-    trackLive(key, 1);
+    const live = { fence, verified: false };
+    liveChildren.set(key, live);
     const hardCap = setTimeout(() => {
       release();
       clearInterval(stillRunning);
@@ -372,19 +407,53 @@ async function runRefreshAhead(
       finished = true;
       clearInterval(stillRunning);
       clearTimeout(hardCap);
-      trackLive(key, -1);
+      if (liveChildren.get(key)?.fence === fence) liveChildren.delete(key);
       quietly(() => observers.onExited(exitOf(pid, exitCode, signal, spawnFailed)));
-      if (!claimReleased) resolve({ outcome: 'still-running' });
+      if (!claimReleased) resolve({ outcome: 'owner-unavailable' });
       else if (spawnFailed) resolve({ outcome: 'spawn-failed', reason });
       else resolve({ outcome: 'ran', reason, exitCode, signal });
     };
     // Even a pidless error is not proof that the child has closed.
     let spawnFailed = false;
+    let publishing = true;
+    let pendingClose: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     child.on('error', () => { if (child.pid === undefined) spawnFailed = true; });
     child.on('close', (code, signal) => {
-      const claimReleased = releaseOwnerClaim(location, fence);
+      if (publishing) {
+        pendingClose = { code, signal };
+        return;
+      }
+      const guard = acquireMutationGuard(location);
+      if (guard === null) {
+        finish(code, signal, spawnFailed);
+        return;
+      }
+      let claimReleased = false;
+      try { claimReleased = releaseOwnerClaim(location, ownedPayloads); } finally {
+        if (!removeObserved(location, location.guardPath, guard)) claimReleased = false;
+      }
       finish(code, signal, spawnFailed, claimReleased);
     });
+    try {
+      if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error('refresh child identity unavailable');
+      const process = (deps.inspectProcess ?? inspectRefreshProcess)(pid!);
+      if (process.state !== 'alive' || !process.birthToken.startsWith('refresh-owner-v1:')) {
+        throw new Error('refresh child identity unavailable');
+      }
+      if (!sameObservation(readOwnerFile(location), initialObservation)) throw new Error('refresh owner changed');
+      const owner: RefreshOwner = { version: 2, fence, hostId: deps.hostId ?? hostname(), pid: pid!, processBirthToken: process.birthToken };
+      const payload = JSON.stringify(owner);
+      ownedPayloads.add(payload);
+      writeAtomicPrivateFileIsolatedSync(location.path, payload, OWNER_LABEL);
+      if (readOwnerFile(location)?.bytes.toString('utf8') !== payload) throw new Error('refresh owner publication unavailable');
+      live.verified = true;
+    } catch {
+      resolve({ outcome: 'owner-unavailable' });
+    } finally {
+      publishing = false;
+      // A synchronous close during publication uses the guard already held by this call.
+      if (pendingClose) finish(pendingClose.code, pendingClose.signal, spawnFailed, releaseOwnerClaim(location, ownedPayloads));
+    }
   });
 }
 

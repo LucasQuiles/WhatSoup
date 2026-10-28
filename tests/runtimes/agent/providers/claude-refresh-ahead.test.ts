@@ -7,11 +7,12 @@
 // --json` that it never times out and never signals; and before it signals a
 // probe it waits while the CLI's refresh lock is held. Fixtures only: the
 // stores are injected readers and the children are fakes.
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -102,9 +103,12 @@ function claimFingerprint(path: string): Pick<Stats, 'ino' | 'mode' | 'nlink' | 
 }
 
 type ProcessObservation = { state: 'alive'; birthToken: string } | { state: 'absent' | 'unknown' };
+function fixtureBirthToken(pid: number): string {
+  return `refresh-owner-v1:fixture-boot:fixture-birth:${pid}`;
+}
 const fixtureProcessIdentity = {
   hostId: 'refresh-test-host',
-  inspectProcess: (pid: number): ProcessObservation => ({ state: 'alive', birthToken: `fixture-birth:${pid}` }),
+  inspectProcess: (pid: number): ProcessObservation => ({ state: 'alive', birthToken: fixtureBirthToken(pid) }),
 };
 
 function harness(over: Partial<ClaudeRefreshAheadDeps> & {
@@ -134,6 +138,7 @@ function harness(over: Partial<ClaudeRefreshAheadDeps> & {
 beforeEach(() => { vi.useFakeTimers({ now: START }); });
 afterEach(() => {
   vi.doUnmock('node:fs');
+  vi.doUnmock('../../../../src/lib/private-fs-isolated.ts');
   vi.restoreAllMocks();
   vi.useRealTimers();
   for (const root of privateStoreRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -196,6 +201,240 @@ describe('refreshClaudeLoginAhead: when it runs', () => {
 });
 
 describe('refreshClaudeLoginAhead: durable owner recovery', () => {
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('retains an invalid owner PID %s without probing it', async (pid) => {
+    const dir = privateStoreDir();
+    const raw = JSON.stringify({ version: 2, fence: 'invalid-pid', hostId: 'refresh-test-host', pid, processBirthToken: fixtureBirthToken(8000) });
+    const path = writeOwnerFixture(dir, raw);
+    const inspectProcess = vi.fn((): ProcessObservation => ({ state: 'absent' }));
+    const h = harness({ inspectProcess });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(inspectProcess).not.toHaveBeenCalled();
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(raw);
+  });
+
+  it('keeps a child whose identity cannot be established alertable without killing or duplicating it', async () => {
+    const dir = privateStoreDir();
+    const h = harness({ inspectProcess: () => ({ state: 'unknown' }) });
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
+    const raw = readFileSync(ownerPath(dir), 'utf8');
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(readFileSync(ownerPath(dir), 'utf8')).toBe(raw);
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+    h.children[0]!.emit('close', 0, null);
+  });
+
+  it.each(['before-write', 'after-write'] as const)('reports %s publication failure while preserving the live child and claim', async (failure) => {
+    const dir = privateStoreDir();
+    const h = harness();
+    const actual = await vi.importActual<typeof import('../../../../src/lib/private-fs-isolated.ts')>('../../../../src/lib/private-fs-isolated.ts');
+    vi.doMock('../../../../src/lib/private-fs-isolated.ts', () => ({
+      ...actual,
+      writeAtomicPrivateFileIsolatedSync: (...args: Parameters<typeof actual.writeAtomicPrivateFileIsolatedSync>) => {
+        if (failure === 'after-write') actual.writeAtomicPrivateFileIsolatedSync(...args);
+        throw new Error('fixture publication failure');
+      },
+    }));
+    vi.resetModules();
+    const fresh = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    await expect(fresh.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    const raw = readFileSync(ownerPath(dir), 'utf8');
+    await expect(fresh.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(readFileSync(ownerPath(dir), 'utf8')).toBe(raw);
+    expect(existsSync(join(dirname(ownerPath(dir)), 'owner.mutation.json'))).toBe(false);
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+    h.children[0]!.emit('close', 0, null);
+  });
+
+  it('observes close during identity publication and releases the claim after publication completes', async () => {
+    const dir = privateStoreDir();
+    const h = harness();
+    const actual = await vi.importActual<typeof import('../../../../src/lib/private-fs-isolated.ts')>('../../../../src/lib/private-fs-isolated.ts');
+    vi.doMock('../../../../src/lib/private-fs-isolated.ts', () => ({
+      ...actual,
+      writeAtomicPrivateFileIsolatedSync: (...args: Parameters<typeof actual.writeAtomicPrivateFileIsolatedSync>) => {
+        h.children[0]!.emit('close', 0, null);
+        actual.writeAtomicPrivateFileIsolatedSync(...args);
+      },
+    }));
+    vi.resetModules();
+    const fresh = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    await expect(fresh.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toMatchObject({ outcome: 'ran', exitCode: 0 });
+    expect(existsSync(ownerPath(dir))).toBe(false);
+    expect(existsSync(join(dirname(ownerPath(dir)), 'owner.mutation.json'))).toBe(false);
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+  });
+
+  it.each(['busy', 'malformed', 'crashed'] as const)('retains a %s mutation guard and reports unavailable without reading credentials', async (kind) => {
+    const dir = privateStoreDir();
+    const path = writeOwnerFixture(dir, JSON.stringify({ version: 2, fence: 'dead-child', hostId: 'refresh-test-host', pid: 9000, processBirthToken: fixtureBirthToken(9000) }));
+    const guard = join(dirname(path), 'owner.mutation.json');
+    const raw = kind === 'malformed' ? '{broken' : JSON.stringify({ version: 1, fence: `guard-${kind}` });
+    writeFileSync(guard, raw, { mode: 0o600 });
+    const before = readFileSync(path, 'utf8');
+    const h = harness({ inspectProcess: () => ({ state: 'absent' }) });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(h.readFileStore).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(readFileSync(guard, 'utf8')).toBe(raw);
+  });
+
+  it('serializes two restarted reconcilers through the final unlink and successor publication', async () => {
+    const dir = privateStoreDir();
+    const path = writeOwnerFixture(dir, JSON.stringify({ version: 2, fence: 'dead-child', hostId: 'refresh-test-host', pid: 8000, processBirthToken: fixtureBirthToken(8000) }));
+    const inspectProcess = (pid: number): ProcessObservation => pid === 8000
+      ? { state: 'absent' } : fixtureProcessIdentity.inspectProcess(pid);
+    const a = harness({ inspectProcess });
+    const b = harness({ inspectProcess });
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    let contender: Promise<unknown> | undefined;
+    let invokeContender: (() => Promise<unknown>) | undefined;
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      unlinkSync: (target: Parameters<typeof actualFs.unlinkSync>[0]) => {
+        if (target === path && invokeContender) {
+          const invoke = invokeContender;
+          invokeContender = undefined;
+          // Interleave after the deleter's final read, at the real mutation.
+          contender = invoke();
+        }
+        actualFs.unlinkSync(target);
+      },
+    }));
+    vi.resetModules();
+    const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    vi.resetModules();
+    const second = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    invokeContender = () => second.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, b.deps);
+    const run = first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, a.deps);
+    expect(a.spawnImpl).toHaveBeenCalledOnce();
+    expect(contender).toBeDefined();
+    await expect(contender).resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(b.spawnImpl).not.toHaveBeenCalled();
+    const successor = readFileSync(path, 'utf8');
+    await expect(second.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, b.deps))
+      .resolves.toEqual({ outcome: 'still-running' });
+    expect(readFileSync(path, 'utf8')).toBe(successor);
+    expect(b.spawnImpl).not.toHaveBeenCalled();
+    expect(a.children[0]!.kill).not.toHaveBeenCalled();
+    a.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toMatchObject({ outcome: 'ran' });
+  });
+
+  it('keeps the same native child held when the restarted parent changes timezone and locale', async () => {
+    const previous = { TZ: process.env.TZ, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+    const native = spawnProcess(process.execPath, ['-e', 'process.stdin.resume(); setTimeout(() => process.exit(0), 5000).unref()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const ended = once(native, 'close');
+    expect(native.pid).toBeGreaterThan(0);
+    expect(native.pid).not.toBe(process.pid);
+    const child = fakeChild(native.pid!);
+    const nativeLiveness = vi.spyOn(process, 'kill');
+    const dir = privateStoreDir();
+    const env = { CLAUDE_CONFIG_DIR: dir };
+    const first = harness({ hostId: hostname(), inspectProcess: undefined,
+      spawnImpl: (() => child) as unknown as typeof import('node:child_process').spawn });
+    try {
+      process.env.TZ = 'America/New_York';
+      process.env.LANG = 'en_US.UTF-8';
+      process.env.LC_ALL = 'en_US.UTF-8';
+      vi.resetModules();
+      const original = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+      const run = original.refreshClaudeLoginAhead('claude', env, first.deps);
+      expect(JSON.parse(readFileSync(ownerPath(dir), 'utf8'))).toMatchObject({
+        version: 2, pid: native.pid, hostId: hostname(),
+        processBirthToken: expect.stringMatching(/^refresh-owner-v1:/),
+      });
+      expect(nativeLiveness).toHaveBeenCalledWith(native.pid, 0);
+      await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS);
+      await expect(run).resolves.toEqual({ outcome: 'still-running' });
+      const before = readFileSync(ownerPath(dir), 'utf8');
+      process.env.TZ = 'UTC';
+      process.env.LANG = 'C';
+      process.env.LC_ALL = 'C';
+      vi.resetModules();
+      const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+      const next = harness({ hostId: hostname(), inspectProcess: undefined });
+      nativeLiveness.mockClear();
+      await expect(restarted.refreshClaudeLoginAhead('claude', env, next.deps))
+        .resolves.toEqual({ outcome: 'still-running' });
+      expect(next.spawnImpl).not.toHaveBeenCalled();
+      expect(nativeLiveness).toHaveBeenCalledWith(native.pid, 0);
+      expect(readFileSync(ownerPath(dir), 'utf8')).toBe(before);
+      expect(child.kill).not.toHaveBeenCalled();
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      child.emit('close', 0, null);
+      native.stdin.end();
+      await ended;
+    }
+  });
+
+  it('uses native liveness to recover a child that exited after its parent lost observation', async () => {
+    const native = spawnProcess(process.execPath, ['-e', 'process.stdin.resume(); setTimeout(() => process.exit(0), 5000).unref()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const ended = once(native, 'close');
+    expect(native.pid).toBeGreaterThan(0);
+    const child = fakeChild(native.pid!);
+    const dir = privateStoreDir();
+    let retainedClaim: string;
+    try {
+      const producer = harness({ hostId: hostname(), inspectProcess: undefined,
+        spawnImpl: (() => child) as unknown as typeof import('node:child_process').spawn });
+      const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, producer.deps);
+      retainedClaim = readFileSync(ownerPath(dir), 'utf8');
+      expect(JSON.parse(retainedClaim)).toMatchObject({ version: 2, pid: native.pid,
+        processBirthToken: expect.stringMatching(/^refresh-owner-v1:/) });
+      child.emit('close', 0, null);
+      await expect(run).resolves.toMatchObject({ outcome: 'ran' });
+    } finally {
+      child.emit('close', 0, null);
+      native.stdin.end();
+      await ended;
+    }
+    const path = writeOwnerFixture(dir, retainedClaim!);
+    const nativeLiveness = vi.spyOn(process, 'kill');
+    const h = harness({ hostId: hostname(), inspectProcess: undefined, fileStore: store(START.getTime() + 3_600_000) });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'not-needed' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(existsSync(path)).toBe(false);
+    expect(nativeLiveness).toHaveBeenCalledWith(native.pid, 0);
+    expect(nativeLiveness.mock.results).toContainEqual({ type: 'throw', value: expect.objectContaining({ code: 'ESRCH' }) });
+  });
+
+  it('never treats EPERM as proof that the native child exited', async () => {
+    const dir = privateStoreDir();
+    const child = fakeChild(process.pid);
+    const producer = harness({ hostId: hostname(), inspectProcess: undefined,
+      spawnImpl: (() => child) as unknown as typeof import('node:child_process').spawn });
+    const first = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, producer.deps);
+    const before = readFileSync(ownerPath(dir), 'utf8');
+    expect(JSON.parse(before)).toMatchObject({ version: 2, pid: process.pid, processBirthToken: expect.any(String) });
+    child.emit('close', 0, null);
+    await expect(first).resolves.toMatchObject({ outcome: 'ran' });
+    const path = writeOwnerFixture(dir, before);
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); });
+    const h = harness({ hostId: hostname(), inspectProcess: undefined });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(kill).toHaveBeenCalledWith(process.pid, 0);
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(readFileSync(path, 'utf8')).toBe(before);
+  });
+
   it('persists the exact child identity without credential contents', async () => {
     const dir = privateStoreDir();
     const h = harness();
@@ -203,7 +442,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     const claim = JSON.parse(readFileSync(ownerPath(dir), 'utf8'));
     expect(claim).toEqual({
       version: 2, fence: expect.any(String), hostId: 'refresh-test-host',
-      pid: 9000, processBirthToken: 'fixture-birth:9000',
+      pid: 9000, processBirthToken: fixtureBirthToken(9000),
     });
     expect(lstatSync(ownerPath(dir)).mode & 0o777).toBe(0o600);
     h.children[0]!.emit('close', 0, null);
@@ -224,7 +463,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     vi.resetModules();
     const restarted = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
     const h = harness({ inspectProcess: () => state === 'absent'
-      ? { state: 'absent' } : { state: 'alive', birthToken: 'successor-birth' } });
+      ? { state: 'absent' } : { state: 'alive', birthToken: fixtureBirthToken(9001) } });
     const next = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
     expect(h.spawnImpl).toHaveBeenCalledOnce();
     expect(readFileSync(ownerPath(dir), 'utf8')).not.toBe(oldClaim);
@@ -237,7 +476,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     'preserves %s ownership but reports it as unavailable, not as a verified running child',
     async (kind) => {
       const dir = privateStoreDir();
-      const claim = { version: 2, fence: 'prior-owner', hostId: 'refresh-test-host', pid: 9000, processBirthToken: 'fixture-birth:9000' };
+      const claim = { version: 2, fence: 'prior-owner', hostId: 'refresh-test-host', pid: 9000, processBirthToken: fixtureBirthToken(9000) };
       const raw = kind === 'legacy' ? JSON.stringify({ version: 1, fence: 'prior-owner' })
         : kind === 'corrupt' ? '{invalid'
           : JSON.stringify({ ...claim, hostId: kind === 'foreign-host' ? 'different-host' : claim.hostId });
@@ -258,7 +497,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
 
   it('does not remove a successor claim that appears during dead-child inspection', async () => {
     const dir = privateStoreDir();
-    const prior = { version: 2, fence: 'prior-owner', hostId: 'refresh-test-host', pid: 9000, processBirthToken: 'prior-birth' };
+    const prior = { version: 2, fence: 'prior-owner', hostId: 'refresh-test-host', pid: 9000, processBirthToken: fixtureBirthToken(8000) };
     const replacement = JSON.stringify({ ...prior, fence: 'successor-owner', processBirthToken: 'successor-birth' });
     const path = writeOwnerFixture(dir, JSON.stringify(prior));
     const h = harness({ inspectProcess: () => {
@@ -482,7 +721,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     writeFileSync(path, JSON.stringify({ ...predecessor, fence: foreignFence }), { mode: 0o600 });
 
     h.children[0]!.emit('close', 0, null);
-    await expect(run).resolves.toEqual({ outcome: 'still-running' });
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(existsSync(path)).toBe(true);
     expect((JSON.parse(readFileSync(path, 'utf8')) as { fence?: unknown }).fence).toBe(foreignFence);
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
@@ -499,7 +738,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     rmSync(claim);
 
     h.children[0]!.emit('close', 0, null);
-    await expect(run).resolves.toEqual({ outcome: 'still-running' });
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
   });
 
@@ -534,7 +773,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     vi.resetModules();
     const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
     await expect(first.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, initial.deps))
-      .resolves.toEqual({ outcome: 'still-running' });
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
     const claim = ownerPath(dir);
     const raw = readFileSync(claim, 'utf8');
     expect(raw).not.toContain(ACCESS_SENTINEL);
@@ -545,7 +784,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     const successor = harness({ fileStore: store(START.getTime() + 3_600_000) });
     const later = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
     await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
-    await expect(later).resolves.toEqual({ outcome: 'still-running' });
+    await expect(later).resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(successor.spawnImpl).not.toHaveBeenCalled();
   });
 
@@ -579,7 +818,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     }
   });
 
-  it('reports a pidless child error without close as still-running and retains its claim', async () => {
+  it('reports a pidless child error without close as unavailable and retains its claim', async () => {
     const dir = privateStoreDir();
     const child = fakeChild(9000);
     Object.defineProperty(child, 'pid', { value: undefined, writable: true });
@@ -591,11 +830,11 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
 
     child.emit('error', new Error('status pipe ambiguity'));
     await vi.advanceTimersByTimeAsync(first.REFRESH_AHEAD_WAIT_MS);
-    await expect(run).resolves.toEqual({ outcome: 'still-running' });
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(existsSync(ownerPath(dir))).toBe(true);
   });
 
-  it('reports a pidless spawn failure after close and releases only its own claim', async () => {
+  it('reports unavailable for a pidless child and releases only its own claim after close', async () => {
     const dir = privateStoreDir();
     const child = fakeChild(9001);
     Object.defineProperty(child, 'pid', { value: undefined });
@@ -605,7 +844,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     child.emit('error', new Error('spawn failed'));
     expect(existsSync(ownerPath(dir))).toBe(true);
     child.emit('close', -2, null);
-    await expect(run).resolves.toEqual({ outcome: 'spawn-failed', reason: 'within-window' });
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
     expect(existsSync(ownerPath(dir))).toBe(false);
     expect(child.kill).not.toHaveBeenCalled();
   });
@@ -645,8 +884,8 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
   });
 
   it.each([
-    ['invalid', 'still-running'],
-    ['corrupt', 'still-running'],
+    ['invalid', 'owner-unavailable'],
+    ['corrupt', 'owner-unavailable'],
     ['symlink', 'owner-unavailable'],
     ['hardlink', 'owner-unavailable'],
     ['wrong-mode', 'owner-unavailable'],
