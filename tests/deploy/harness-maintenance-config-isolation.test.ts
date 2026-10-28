@@ -137,6 +137,16 @@ describe('agent CLI login isolation of the maintenance job', () => {
     expectRefused(h, run(h), 'service definitions were not read', 'unknown');
   }, T);
 
+  it.each(['quoted environment', 'missing environment file'])('classifies an unreadable systemd %s without aborting inventory', (kind) => {
+    const h = withInstance(makeHarness());
+    systemdUnit(h, 'alpha', [kind === 'quoted environment'
+      ? 'Environment="PATH=/usr/bin:/bin"'
+      : `EnvironmentFiles=${path.join(h.home, 'absent.env')} (ignore_errors=no)`]);
+    const result = run(h);
+    expect(result.stderr).not.toContain('unbound variable');
+    expectRefused(h, result, "alpha's CLAUDE_CONFIG_DIR is not readable");
+  }, T);
+
   it('refuses when the job config dir resolves to an instance config dir through a symlink', () => {
     const h = makeHarness();
     const real = path.join(h.home, 'bot-config');
