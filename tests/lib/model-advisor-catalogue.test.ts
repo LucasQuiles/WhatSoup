@@ -103,10 +103,7 @@ describe('fetchAnthropicModelIdsWithStatus — explicit API-key path', () => {
 
   it('fetches with x-api-key and returns ok on a 200 when only an env key is present', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: 'claude-opus-4-8' }, { id: 'claude-sonnet-5' }] }),
-    });
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ data: [{ id: 'claude-opus-4-8' }, { id: 'claude-sonnet-5' }] }));
     vi.stubGlobal('fetch', fetchSpy);
 
     expect(await fetchAnthropicModelIdsWithStatus()).toStrictEqual({
@@ -161,10 +158,7 @@ describe('fetchAnthropicModelIdsWithStatus — explicit API-key path', () => {
 
 describe('fetchAnthropicApiModelIdsWithStatus — managed API credential path', () => {
   it('uses the managed API key and never a CLI OAuth bearer', async () => {
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ id: 'vendor-model-1' }] }),
-    });
+    const fetchSpy = vi.fn().mockResolvedValue(Response.json({ data: [{ id: 'vendor-model-1' }] }));
     vi.stubGlobal('fetch', fetchSpy);
 
     expect(await fetchAnthropicApiModelIdsWithStatus({ resolveKey: () => 'managed-key-fixture' }))

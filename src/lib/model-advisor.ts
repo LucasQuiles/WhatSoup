@@ -40,6 +40,7 @@ const ALERT_SOURCE = 'model-currency';
 const LIVE_SCAN_ALERT_SOURCE = 'model-currency-live-scan';
 const CHECK_INTERVAL_MS = MS_PER_DAY;
 const FETCH_TIMEOUT_MS = 5_000;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 // Backoff between retries of a transient model-list fetch failure. One length
 // entry per retry, so a vendor must fail 3 times before it degrades the scan.
 const FETCH_RETRY_BACKOFF_MS = [2_000, 8_000];
@@ -125,6 +126,27 @@ function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 
+async function readModelsResponse(response: Response): Promise<ModelsListResponse> {
+  if (!response.body) throw new SyntaxError('models API returned an empty response');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let complete = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) { complete = true; break; }
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) throw new RangeError('models API response exceeds byte limit');
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks, total).toString('utf8')) as ModelsListResponse;
+  } finally {
+    if (!complete) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function fetchModelIdsOnce(
   url: string,
   headers: Record<string, string>,
@@ -132,7 +154,7 @@ async function fetchModelIdsOnce(
 ): Promise<VendorModelFetchResult & { retryable: boolean }> {
   let parsed = false;
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    const res = await fetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) {
       return {
         ids: [],
@@ -140,7 +162,7 @@ async function fetchModelIdsOnce(
         retryable: isRetryableStatus(res.status),
       };
     }
-    const body = (await res.json()) as ModelsListResponse;
+    const body = await readModelsResponse(res);
     parsed = true;
     const ids = (body.data ?? [])
       .map((m) => m.id)
@@ -150,12 +172,12 @@ async function fetchModelIdsOnce(
   } catch (err) {
     // A timeout, abort or socket error, whether connecting or while the body
     // streams in, is transient and worth a retry. Malformed JSON, or a parsed
-    // body of the wrong shape, fails the same way on every attempt.
+    // body of the wrong shape or excessive size, fails on every attempt.
     const reason = sanitizeFetchFailureReason(err);
     return {
       ids: [],
       failure: { vendor, reason },
-      retryable: !parsed && !(err instanceof SyntaxError),
+      retryable: !parsed && !(err instanceof SyntaxError) && !(err instanceof RangeError),
     };
   }
 }

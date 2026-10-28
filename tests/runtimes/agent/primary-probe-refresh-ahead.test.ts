@@ -46,6 +46,10 @@ function spawnRecorder() {
 }
 
 const quietLog = { info: () => undefined, warn: () => undefined, error: () => undefined };
+const fixtureProcessIdentity = {
+  hostId: 'refresh-wiring-test-host',
+  inspectProcess: (pid: number) => ({ state: 'alive' as const, birthToken: `refresh-owner-v1:fixture-boot:fixture-birth:${pid}` }),
+};
 const START = new Date('2026-10-19T09:00:00.000Z');
 let savedConfigDir: string | undefined;
 let savedSecureStorageDir: string | undefined;
@@ -116,6 +120,7 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
           platform: 'linux',
           readFileStore: () => null,
           spawnImpl: refresh.spawnImpl,
+          ...fixtureProcessIdentity,
           log: quietLog,
         }),
       })),
@@ -144,6 +149,7 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
           platform: 'linux',
           readFileStore: () => null,
           spawnImpl: refresh.spawnImpl,
+          ...fixtureProcessIdentity,
           log: quietLog,
         }),
       })),
