@@ -17,8 +17,8 @@
 // Two mitigations, both for WhatSoup's own killable non-turn children:
 //   - refresh-ahead: before such a child, when the stored token is near, past
 //     or of unknown expiry, run one `claude auth status --json` that WhatSoup
-//     never times out and never signals, so the refresh happens in a child
-//     that always finishes. Concurrent callers for one storage dir share it.
+//     never signals, so rotation can finish before a killable probe starts.
+//     Concurrent callers for one storage dir share it.
 //     A caller waits at most REFRESH_AHEAD_WAIT_MS for it; if it is still
 //     running, the probe is deferred (no killable child is spawned) and the
 //     child keeps running. After REFRESH_AHEAD_HARD_CAP_MS the local wait is
@@ -26,8 +26,9 @@
 //     until that exact child closes. After a parent restart, a boot-bound
 //     child identity permits recovery once that process is proven absent or
 //     replaced. Unknown ownership is alertable and is never called live.
-//     The child runs detached (its own process group), so a signal to the
-//     bot's group at shutdown or restart cannot reach it mid-refresh.
+//     The child runs in its own process group. Graceful shutdown joins its
+//     close event within the shutdown deadline; a supervisor's forced stop
+//     can still kill the service cgroup, including a detached child.
 //   - kill grace: before signalling such a child, wait (bounded) while the
 //     refresh lock is held and fresh. The check and the signal are not
 //     atomic: a refresh that takes the lock in the few milliseconds between
@@ -141,7 +142,36 @@ export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
 
 const inFlight = new Map<string, Promise<ClaudeRefreshAheadResult>>();
 /** Refresh-ahead children still alive per storage dir, including ones past the hard cap. */
-const liveChildren = new Map<string, { fence: string; verified: boolean }>();
+const liveChildren = new Map<string, { fence: string; verified: boolean; closed: Promise<void> }>();
+let shutdownAdmissionClosed = false;
+
+/** A content-free deadline result, distinct from an unexpected drain failure. */
+export class ClaudeRefreshShutdownDeadlineError extends Error {
+  constructor() {
+    super('Claude refresh shutdown deadline expired');
+    this.name = 'ClaudeRefreshShutdownDeadlineError';
+  }
+}
+
+/** Join tracked children after callers quiesce, without signalling or releasing their claims. */
+export async function awaitActiveClaudeRefreshes(deadlineAt: number): Promise<void> {
+  // Close admission before taking the snapshot, including when no child is active.
+  shutdownAdmissionClosed = true;
+  const children = [...liveChildren.values()];
+  if (children.length === 0) return;
+  const remainingMs = deadlineAt - systemClock.now();
+  if (remainingMs <= 0) throw new ClaudeRefreshShutdownDeadlineError();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    // Keep shutdown alive even though refresh children and their timers are unref'd.
+    timer = setTimeout(() => reject(new ClaudeRefreshShutdownDeadlineError()), remainingMs);
+  });
+  try {
+    await Promise.race([Promise.all(children.map((child) => child.closed)), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 type RefreshOwnerLocation = {
   store: string;
@@ -297,6 +327,7 @@ export function refreshClaudeLoginAhead(
   env: NodeJS.ProcessEnv,
   deps: ClaudeRefreshAheadDeps = {},
 ): Promise<ClaudeRefreshAheadResult> {
+  if (shutdownAdmissionClosed) return Promise.resolve({ outcome: 'owner-unavailable' });
   // Keep the existing test-runner boundary before any config-store or claim
   // filesystem operation: default test fixtures may deliberately not exist.
   if (!deps.spawnImpl && underTestRunner()) {
@@ -430,7 +461,9 @@ async function runRefreshAhead(
     // A child that never exits keeps its durable hold. This only stops later
     // callers from awaiting this local promise; it never permits another probe.
     child.unref?.();
-    const live = { fence, verified: false };
+    let resolveClosed!: () => void;
+    const closed = new Promise<void>((resolveClose) => { resolveClosed = resolveClose; });
+    const live = { fence, verified: false, closed };
     liveChildren.set(key, live);
     const hardCap = setTimeout(() => {
       release();
@@ -448,6 +481,7 @@ async function runRefreshAhead(
       clearInterval(stillRunning);
       clearTimeout(hardCap);
       if (liveChildren.get(key)?.fence === fence) liveChildren.delete(key);
+      resolveClosed();
       quietly(() => observers.onExited(exitOf(pid, exitCode, signal, spawnFailed)));
       if (!claimReleased) resolve({ outcome: 'owner-unavailable' });
       else if (spawnFailed) resolve({ outcome: 'spawn-failed', reason });

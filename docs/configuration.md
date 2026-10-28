@@ -184,6 +184,18 @@ reach that fence. If an active terminal or recovery handoff lacks exact durable 
 session, outbound queue, FIFO identity, and reply-guarantee ownership remain attached and shutdown
 fails visibly instead of clearing the evidence needed for diagnosis or retry.
 
+Process shutdown then closes refresh-ahead admission and waits for tracked Claude
+refresh children to emit `close`. It retains this wait after the ten-minute caller
+hard cap. The wait ends two seconds before the shared ten-second shutdown deadline
+to leave time for transport and log cleanup. A pending child makes shutdown
+incomplete; the wait never signals the child or releases its credential-store claim.
+Fatal exceptions and rejected promises use that same shutdown watchdog.
+
+The systemd unit retains its 15-second stop timeout and `KillMode=mixed`. A detached
+process group does not escape its service cgroup: a supervisor's forced stop can
+still interrupt a refresh. These bounds reduce ordinary shutdown exposure; they do
+not guarantee completion after the application deadline, a crash or a forced stop.
+
 ### Access Control
 
 | Variable | Type | Default | Description |
@@ -780,12 +792,21 @@ with the account the owner ratified?**
 
 - **Observed identity.** The runtime spawns `claude auth status --json` with the
   same scrubbed allow-list environment the model probe and real turns use
-  (`HOME`, `PATH`, `USER`, `NO_COLOR`, and `CLAUDE_CONFIG_DIR` when set) and
+  (`HOME`, `PATH`, `USER`, `NO_COLOR`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` when set) and
   reduces the answer to an opaque digest. Before probing, shared refresh-ahead
   may refresh and persist an existing CLI-managed login; it never starts an
   interactive login. `npm run --silent claude-account-digest` uses this same
   observation and returns exit 4 if the binary/probe fails, a refresh is still
   running, refresh ownership is unavailable, or the refresh fails.
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` selects credential storage before
+  `CLAUDE_CONFIG_DIR`; a defined empty value selects the default
+  `$HOME/.claude` store. The BOT ERRORS functional probe preserves both
+  selectors, including that empty override. It does not forward credential values.
+  Non-turn command probes accept at most 64 KiB combined stdout and stderr,
+  counted before decoding. Overflow fails the observation and discards its output;
+  termination still respects refresh-lock grace and process ownership lasts until
+  the child closes. Later output is discarded after the result settles.
   The CLI's `email` and `orgId` are
   read only inside the parser; nothing downstream — config, logs, alerts,
   health, this repository's tests — ever carries a raw identifier.

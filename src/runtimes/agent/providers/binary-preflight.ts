@@ -18,6 +18,7 @@ export interface BinaryPreflightResult {
 }
 
 const PROBE_TIMEOUT_MS = 5_000;
+const COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024;
 /** Hard ceiling for model-catalogue stdout. The configured-provider verbose
  *  catalogue is normally well below this; a larger stream is treated as an
  *  untrusted shape change instead of growing memory without bound. */
@@ -142,6 +143,8 @@ export interface BinaryCommandProbeExit {
   killedByAbort: boolean;
   /** No process was started (spawn threw or emitted an error before a pid). */
   spawnFailed: boolean;
+  /** The combined stdout/stderr stream exceeded the raw-byte budget. */
+  outputLimitExceeded?: boolean;
 }
 
 export interface BinaryCommandProbeOptions {
@@ -155,7 +158,7 @@ export interface BinaryCommandProbeOptions {
   /** Called once when the child closes or its spawn is proven to have failed. */
   onExited?: (exit: BinaryCommandProbeExit) => void;
   /**
-   * Called right before the child would be signalled (timeout or abort). A
+   * Called right before the child would be signalled (timeout, abort or output limit). A
    * returned promise defers the signal until it settles; null signals at once.
    * The claude probes use it to wait out a held OAuth refresh lock
    * (claudeRefreshLockGrace). The probe result itself is not delayed by a
@@ -205,6 +208,8 @@ export async function probeBinaryCommand(
     let settled = false;
     let stdoutBuffer = '';
     let stderrBuffer = '';
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
     // Declared before settle() captures them so a synchronous spawn throw
     // cannot hit a TDZ (same hazard as probeFallbackBinary above).
     let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -232,6 +237,7 @@ export async function probeBinaryCommand(
           killedByTimeout: killTimerFired && signalSent,
           killedByAbort: abortRequested && signalSent,
           spawnFailed,
+          ...(outputLimitExceeded ? { outputLimitExceeded: true } : {}),
         });
       } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
     };
@@ -247,6 +253,8 @@ export async function probeBinaryCommand(
     const settle = (result: BinaryAuthStatusResult): void => {
       if (settled) return;
       settled = true;
+      stdoutBuffer = '';
+      stderrBuffer = '';
       resolve(result);
     };
 
@@ -330,12 +338,25 @@ export async function probeBinaryCommand(
       if (options.signal.aborted) abortListener();
     }
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderrBuffer += chunk.toString('utf8');
-    });
+    const collectOutput = (chunk: Buffer, stream: 'stdout' | 'stderr'): void => {
+      if (settled || outputLimitExceeded) return;
+      outputBytes += chunk.byteLength;
+      if (outputBytes > COMMAND_OUTPUT_LIMIT_BYTES) {
+        outputLimitExceeded = true;
+        stdoutBuffer = '';
+        stderrBuffer = '';
+        clearTimeout(killTimer);
+        terminate();
+        // Cancellation owns result settlement until close; overflow still
+        // discards bytes immediately without releasing process ownership.
+        if (!abortRequested) settle({ status: 'failed', output: '' });
+        return;
+      }
+      if (stream === 'stdout') stdoutBuffer += chunk.toString('utf8');
+      else stderrBuffer += chunk.toString('utf8');
+    };
+    child.stdout?.on('data', (chunk: Buffer) => collectOutput(chunk, 'stdout'));
+    child.stderr?.on('data', (chunk: Buffer) => collectOutput(chunk, 'stderr'));
 
     child.on('error', () => {
       clearTimeout(killTimer);
@@ -364,7 +385,7 @@ export async function probeBinaryCommand(
       removeAbortListener();
       notifyProcessClosed();
       notifyExited(code, signal, false);
-      settle({ status: !abortRequested && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
+      settle({ status: !abortRequested && !outputLimitExceeded && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
     });
   });
 }

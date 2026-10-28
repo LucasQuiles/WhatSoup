@@ -82,6 +82,7 @@ import { backfillMetrics, collectHourlyMetrics } from './core/metrics-collector.
 import { startModelCurrencyMonitor } from './lib/model-advisor.ts';
 import { buildMemoryReadinessLogFields } from './lib/memory-operation-telemetry.ts';
 import { runShutdownSequence, shutdownExitCode, type ShutdownSequenceOutcome } from './main-shutdown-policy.ts';
+import { awaitActiveClaudeRefreshes } from './runtimes/agent/providers/claude-refresh-ahead.ts';
 import { markCleanExit, restartLoopGuardPath } from './runtimes/agent/restart-loop-guard.ts';
 import { formatClockForUser } from './runtimes/agent/runtime-presentation.ts';
 import { acquireCoordinationLease, defaultLeaseProbes, releaseCoordinationLease, renewCoordinationLease } from './transport/coordination-lease.ts';
@@ -1369,6 +1370,7 @@ async function shutdown(signal: string): Promise<void> {
   shutdownInProgress = true;
   log.info({ signal }, 'shutting down');
 
+  const deadlineAt = Date.now() + 10_000;
   const timeout = setTimeout(() => {
     log.error('shutdown timed out, forcing exit');
     process.exit(1);
@@ -1407,6 +1409,8 @@ async function shutdown(signal: string): Promise<void> {
       // Flush runtime queue before closing transport so queued messages can be delivered
       // runtime.shutdown() stops enrichment poller internally
       shutdownRuntime: () => runtime.shutdown(),
+      refreshDrainDeadlineAt: deadlineAt - 2_000,
+      drainRefreshChildren: awaitActiveClaudeRefreshes,
       shutdownTransport: () => connectionManager.shutdown(),
       // C5 restart-loop guard: a completed graceful shutdown clears the crash
       // marker — the next boot will not count as crash-interrupted. No-op for
@@ -1445,14 +1449,12 @@ process.on('uncaughtException', (err) => {
   log.fatal({ err, shutdownInProgress }, 'uncaught exception');
   if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
   const done = shutdown('uncaughtException');
-  setTimeout(() => { log.error('shutdown hung after uncaughtException — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 process.on('unhandledRejection', (reason) => {
   log.fatal({ reason, shutdownInProgress }, 'unhandled rejection');
   if (shutdownInProgress) return;  // Don't race with an in-progress shutdown's exit code
   const done = shutdown('unhandledRejection');
-  setTimeout(() => { log.error('shutdown hung after unhandledRejection — forcing exit'); process.exit(1); }, 5_000).unref();
   done.catch(() => process.exit(1));
 });
 // Diagnostic: log actual exit code (uses stderr to avoid writing to closed pino transport)

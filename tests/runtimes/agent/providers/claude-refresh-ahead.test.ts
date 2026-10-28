@@ -1369,3 +1369,101 @@ describe('probeBinaryCommand termination grace', () => {
     expect(child.kill).toHaveBeenCalledOnce();
   });
 });
+describe('refreshClaudeLoginAhead: shutdown drain admission and close join', () => {
+  it('closes process-lifetime refresh admission even after an empty snapshot, so a different secure store creates neither owner nor child', async () => {
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    await expect(refreshed.awaitActiveClaudeRefreshes(Date.now() + 1_000)).resolves.toBeUndefined();
+
+    const deniedStore = privateStoreDir();
+    const denied = harness({ fileStore: store(START.getTime() + 1_000) });
+    const attempt = refreshed.refreshClaudeLoginAhead('claude', {
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: deniedStore,
+    }, denied.deps);
+
+    expect(denied.spawnImpl).not.toHaveBeenCalled();
+    expect(denied.readFileStore).not.toHaveBeenCalled();
+    await expect(attempt).resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(existsSync(ownerPath(deniedStore))).toBe(false);
+  });
+
+  it('keeps a pidless error child pending until close, then reports a typed shutdown deadline without signalling it', async () => {
+    const dir = privateStoreDir();
+    const child = fakeChild(9000);
+    Object.defineProperty(child, 'pid', { value: undefined, writable: true });
+    const initial = harness({
+      fileStore: store(START.getTime() + 1_000),
+      spawnImpl: vi.fn(() => child) as unknown as typeof import('node:child_process').spawn,
+    });
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const run = refreshed.refreshClaudeLoginAhead('claude', {
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: dir,
+    }, initial.deps);
+
+    child.emit('error', new Error('pidless launch observation'));
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(existsSync(ownerPath(dir))).toBe(true);
+
+    const drain = refreshed.awaitActiveClaudeRefreshes(Date.now() + 1);
+    const rejected = expect(drain).rejects.toBeInstanceOf(refreshed.ClaudeRefreshShutdownDeadlineError);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    expect(existsSync(ownerPath(dir))).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    child.emit('close', -1, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(existsSync(ownerPath(dir))).toBe(false);
+  });
+
+  it('joins a real native child past hard cap until close, never signalling it', async () => {
+    const { native, ended } = await nativeChildHeldUntilEof();
+    const nativeKill = vi.spyOn(native, 'kill');
+    const dir = privateStoreDir();
+    const initial = harness({
+      fileStore: store(START.getTime() + 1_000),
+      hostId: hostname(),
+      inspectProcess: undefined,
+      spawnImpl: (() => native) as unknown as typeof import('node:child_process').spawn,
+    });
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+
+    try {
+      const run = refreshed.refreshClaudeLoginAhead('claude', {
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: dir,
+      }, initial.deps);
+      await vi.advanceTimersByTimeAsync(refreshed.REFRESH_AHEAD_WAIT_MS);
+      await expect(run).resolves.toEqual({ outcome: 'still-running' });
+      await vi.advanceTimersByTimeAsync(refreshed.REFRESH_AHEAD_HARD_CAP_MS - refreshed.REFRESH_AHEAD_WAIT_MS);
+
+      const drain = refreshed.awaitActiveClaudeRefreshes(Date.now() + 1_000);
+      let settled = false;
+      void drain.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(native.exitCode).toBeNull();
+      expect(nativeKill).not.toHaveBeenCalled();
+
+      const deniedStore = privateStoreDir();
+      const denied = harness({ fileStore: store(START.getTime() + 1_000) });
+      const attempt = refreshed.refreshClaudeLoginAhead('claude', {
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: deniedStore,
+      }, denied.deps);
+      expect(denied.spawnImpl).not.toHaveBeenCalled();
+      expect(denied.readFileStore).not.toHaveBeenCalled();
+      await expect(attempt).resolves.toEqual({ outcome: 'owner-unavailable' });
+      expect(existsSync(ownerPath(deniedStore))).toBe(false);
+      expect(settled).toBe(false);
+
+      native.stdin!.end();
+      await ended;
+      await expect(drain).resolves.toBeUndefined();
+      expect(nativeKill).not.toHaveBeenCalled();
+    } finally {
+      if (native.exitCode === null) native.stdin!.end();
+      await ended;
+    }
+  });
+});

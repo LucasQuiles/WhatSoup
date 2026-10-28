@@ -4,8 +4,8 @@
  *
  * Runs the SAME identity observation the runtime verifier runs
  * (`claude auth status --json`, scrubbed allow-list env, CLAUDE_CONFIG_DIR
- * taken from the invoking shell so the digest is captured for the config
- * root the service resolves) and the SAME canonicalization
+ * and CLAUDE_SECURESTORAGE_CONFIG_DIR taken from the invoking shell so the
+ * digest uses the service's credential store) and the SAME canonicalization
  * (lib/account-identity-digest.ts), then prints exactly one line: the
  * opaque digest. No raw identifier ever reaches stdout or stderr, so the
  * command is safe to run into a shared terminal log. It may refresh and
@@ -86,7 +86,8 @@ const USAGE = [
   '',
   'Prints ONE line — the opaque sha256 digest of the account the claude CLI is',
   'logged in as — for `service.expectedAccountDigest` in the instance config.',
-  'Run it in the same CLAUDE_CONFIG_DIR context the service resolves, e.g.',
+  'Use the service CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR context.',
+  'The secure-storage selector takes precedence; a defined empty value uses the default store.',
   '  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest',
   'May refresh and persist an existing login; never starts an interactive login.',
   'No raw account identifier is printed. Exit 2 = not logged in, 3 = identity',

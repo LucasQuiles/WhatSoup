@@ -633,9 +633,13 @@ async function importMainWithMocks(options: {
   // Future main shutdown wiring imports only this explicit close join. Keep the
   // partial mock narrow so its behavior stays deterministic without mocking the
   // refresh owner or child lifecycle.
-  vi.doMock('../src/runtimes/agent/providers/claude-refresh-ahead.ts', () => ({
-    awaitActiveClaudeRefreshes: mocks.awaitActiveClaudeRefreshes,
-  }));
+  vi.doMock('../src/runtimes/agent/providers/claude-refresh-ahead.ts', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../src/runtimes/agent/providers/claude-refresh-ahead.ts')>();
+    return {
+      ...original,
+      awaitActiveClaudeRefreshes: mocks.awaitActiveClaudeRefreshes,
+    };
+  });
   vi.doMock('../src/fleet/platform.ts', () => ({ createServiceManager: mocks.createServiceManager }));
 
   await import('../src/main.ts');
