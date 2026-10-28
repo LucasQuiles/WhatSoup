@@ -781,7 +781,12 @@ with the account the owner ratified?**
 - **Observed identity.** The runtime spawns `claude auth status --json` with the
   same scrubbed allow-list environment the model probe and real turns use
   (`HOME`, `PATH`, `USER`, `NO_COLOR`, and `CLAUDE_CONFIG_DIR` when set) and
-  reduces the answer to an opaque digest. The CLI's `email` and `orgId` are
+  reduces the answer to an opaque digest. Before probing, shared refresh-ahead
+  may refresh and persist an existing CLI-managed login; it never starts an
+  interactive login. `npm run --silent claude-account-digest` uses this same
+  observation and returns exit 4 if the binary/probe fails, a refresh is still
+  running, refresh ownership is unavailable, or the refresh fails.
+  The CLI's `email` and `orgId` are
   read only inside the parser; nothing downstream — config, logs, alerts,
   health, this repository's tests — ever carries a raw identifier.
 - **Ratified expectation.** `sha256:` + SHA-256 over a versioned canonical
@@ -796,7 +801,8 @@ with the account the owner ratified?**
   degraded with reason `runtime.credential_identity_mismatch` / cause
   `credential_identity_mismatch`. `unverifiable` (not logged in, identity
   fields missing, output unparseable, binary missing, probe failed or
-  threw, malformed expectation, stale receipt, never verified) → warning
+  threw, refresh in flight, refresh owner unavailable, refresh failed, malformed expectation,
+  stale receipt, never verified) → warning
   alert `credential_identity_unverifiable` + the matching reason/cause pair.
   Unverifiable is never treated as a match, and it never clears an open
   mismatch. A match older than the model-usability freshness window is

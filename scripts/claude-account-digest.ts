@@ -2,16 +2,18 @@
  * `npm run claude-account-digest` — capture the ratified account-identity
  * digest for `service.expectedAccountDigest` (task-21).
  *
- * Runs the SAME read-only probe the runtime verifier runs
+ * Runs the SAME identity observation the runtime verifier runs
  * (`claude auth status --json`, scrubbed allow-list env, CLAUDE_CONFIG_DIR
  * taken from the invoking shell so the digest is captured for the config
  * root the service resolves) and the SAME canonicalization
  * (lib/account-identity-digest.ts), then prints exactly one line: the
  * opaque digest. No raw identifier ever reaches stdout or stderr, so the
- * command is safe to run into a shared terminal log. Never logs in.
+ * command is safe to run into a shared terminal log. It may refresh and
+ * persist an existing login before probing; it never starts an interactive login.
  *
  * Exit codes: 0 digest printed; 2 not logged in; 3 identity fields missing
- * or output unparseable; 4 binary missing or probe failed; 64 usage.
+ * or output unparseable; 4 binary/probe failure, refresh in flight,
+ * refresh owner unavailable, or refresh failed; 64 usage.
  */
 import { parseClosedOptions, type ClosedOptionError } from './lib/cli-args.ts';
 import { scrubbedAuthStatusEnv } from '../src/runtimes/agent/providers/account-auth-status.ts';
@@ -86,8 +88,10 @@ const USAGE = [
   'logged in as — for `service.expectedAccountDigest` in the instance config.',
   'Run it in the same CLAUDE_CONFIG_DIR context the service resolves, e.g.',
   '  CLAUDE_CONFIG_DIR=/absolute/claude-root npm run claude-account-digest',
+  'May refresh and persist an existing login; never starts an interactive login.',
   'No raw account identifier is printed. Exit 2 = not logged in, 3 = identity',
-  'unreadable, 4 = binary missing or probe failed.',
+  'unreadable, 4 = binary/probe failure, refresh in flight, refresh owner',
+  'unavailable, or refresh failed.',
 ].join('\n');
 
 export function parseClaudeAccountDigestArgs(argv: readonly string[]): ClaudeAccountDigestArgs {
