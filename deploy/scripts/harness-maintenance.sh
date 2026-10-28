@@ -783,7 +783,7 @@ claude_inventory_systemd() {
     fi
     if ! systemd_unit_environment "$show"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "unit environment for $unit is not statically readable"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?" "?"
       continue
     fi
     # `systemctl show` reports the unit as loaded, which is also its next launch unless the unit
