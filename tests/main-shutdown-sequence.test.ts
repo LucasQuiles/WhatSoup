@@ -227,3 +227,54 @@ describe('runShutdownSequence', () => {
     expect(source).not.toContain('process.exit(shutdownExitCode(signal));');
   });
 });
+
+
+describe('refresh-child shutdown phase', () => {
+  it('drains refresh children after runtime and before transport, using the cleanup-margin deadline', async () => {
+    const order: string[] = [];
+    const { ports: p } = ports({
+      shutdownRuntime: vi.fn(async () => { order.push('runtime'); }),
+      shutdownTransport: vi.fn(async () => { order.push('transport'); }),
+    });
+    const drainRefreshChildren = vi.fn(async (deadlineAt: number) => {
+      expect(deadlineAt).toBe(8_000);
+      order.push('refresh');
+    });
+    const futurePorts = {
+      ...p,
+      refreshDrainDeadlineAt: 8_000,
+      drainRefreshChildren,
+    } as unknown as Parameters<typeof runShutdownSequence>[0];
+
+    const outcome = await runShutdownSequence(futurePorts);
+
+    expect(drainRefreshChildren).toHaveBeenCalledOnce();
+    expect(order).toEqual(['runtime', 'refresh', 'transport']);
+    expect(outcome).toMatchObject({ complete: true });
+  });
+
+  it('reports a refresh drain deadline as incomplete while still tearing down transport', async () => {
+    const { ports: p, log } = ports();
+    const drainRefreshChildren = vi.fn(async () => {
+      throw new Error('refresh child close deadline expired');
+    });
+    const futurePorts = {
+      ...p,
+      refreshDrainDeadlineAt: 8_000,
+      drainRefreshChildren,
+    } as unknown as Parameters<typeof runShutdownSequence>[0];
+
+    const outcome = await runShutdownSequence(futurePorts);
+
+    expect(drainRefreshChildren).toHaveBeenCalledWith(8_000);
+    expect(p.shutdownTransport).toHaveBeenCalledOnce();
+    expect(p.markCleanExit).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      complete: false,
+      failedPhase: 'refresh',
+      cause: 'refresh_children_deadline',
+    });
+    expect(shutdownExitCode('SIGTERM', outcome)).toBe(1);
+    expect(JSON.stringify(incompleteReceipts(log)[0])).not.toContain('refresh child close deadline expired');
+  });
+});
