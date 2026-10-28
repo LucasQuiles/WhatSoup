@@ -93,7 +93,7 @@ export const REFRESH_LOCK_GRACE_MS = 25_000;
  */
 export const REFRESH_AHEAD_WAIT_MS = 60_000;
 
-/** After this long a still-running child stops local waiting but keeps its durable hold (never killed). */
+/** After this long a still-running child stops local waiting but keeps its durable hold without signalling. */
 export const REFRESH_AHEAD_HARD_CAP_MS = 10 * 60_000;
 
 const REFRESH_LOCK_POLL_MS = 250;
@@ -316,7 +316,7 @@ function refreshReason(expiresAt: number | null, now: number): ClaudeRefreshAhea
 }
 
 /**
- * Run one never-killed `claude auth status --json` with `env` (the env of the
+ * Run one `claude auth status --json` that this provider never signals, with `env` (the env of the
  * probe child that follows) when the stored token is near, past or of unknown
  * expiry, and resolve when it exits, or with 'still-running' once the caller
  * has waited REFRESH_AHEAD_WAIT_MS. Callers for the same storage dir share
@@ -426,8 +426,8 @@ async function runRefreshAhead(
     let child: ReturnType<typeof spawn>;
     try {
       // No timeout, no AbortSignal, output discarded (no pipes hold the parent):
-      // this child always runs to its own exit. Detached: its own process
-      // group, out of reach of a signal sent to the bot's group.
+      // the provider waits for this child's own exit. Detaching protects from
+      // bot process-group signals, not a supervisor's forced cgroup stop.
       child = (deps.spawnImpl ?? spawn)(binary, [...CLAUDE_AUTH_STATUS_ARGS], {
         stdio: ['ignore', 'ignore', 'ignore'],
         env,
