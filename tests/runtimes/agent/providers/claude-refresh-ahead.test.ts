@@ -49,6 +49,48 @@ function fakeChild(pid: number): FakeChild {
   return child;
 }
 
+async function nativeChildHeldUntilEof() {
+  const native = spawnProcess(process.execPath, [
+    '-e',
+    "process.stdin.once('end', () => process.exit(0)); process.stdout.write('ready\\n'); process.stdin.resume();",
+  ], { stdio: ['pipe', 'pipe', 'ignore'] });
+  const ended = new Promise<void>((resolve) => { native.once('close', () => resolve()); });
+  const ready = new Promise<string>((resolve, reject) => {
+    let output = '';
+    const cleanup = (): void => {
+      native.stdout!.off('data', onData);
+      native.off('close', onClose);
+      native.off('error', onError);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      output += String(chunk);
+      const newline = output.indexOf('\n');
+      if (newline === -1) return;
+      cleanup();
+      resolve(output.slice(0, newline));
+    };
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup();
+      reject(new Error(`native child closed before readiness (code ${code}, signal ${signal})`));
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    native.stdout!.on('data', onData);
+    native.once('close', onClose);
+    native.once('error', onError);
+  });
+  try {
+    expect(await ready).toBe('ready');
+    return { native, ended };
+  } catch (error) {
+    if (native.exitCode === null) native.kill();
+    await ended;
+    throw error;
+  }
+}
+
 function capture() {
   const lines: Array<{ obj: Record<string, unknown>; msg: string }> = [];
   const push = (obj: unknown, msg: string): void => { lines.push({ obj: obj as Record<string, unknown>, msg }); };
@@ -334,8 +376,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
 
   it('keeps the same native child held when the restarted parent changes timezone and locale', async () => {
     const previous = { TZ: process.env.TZ, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
-    const native = spawnProcess(process.execPath, ['-e', 'process.stdin.resume(); setTimeout(() => process.exit(0), 5000).unref()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-    const ended = once(native, 'close');
+    const { native, ended } = await nativeChildHeldUntilEof();
     expect(native.pid).toBeGreaterThan(0);
     expect(native.pid).not.toBe(process.pid);
     const child = fakeChild(native.pid!);
@@ -384,8 +425,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
   });
 
   it('uses native liveness to recover a child that exited after its parent lost observation', async () => {
-    const native = spawnProcess(process.execPath, ['-e', 'process.stdin.resume(); setTimeout(() => process.exit(0), 5000).unref()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-    const ended = once(native, 'close');
+    const { native, ended } = await nativeChildHeldUntilEof();
     expect(native.pid).toBeGreaterThan(0);
     const child = fakeChild(native.pid!);
     const dir = privateStoreDir();
