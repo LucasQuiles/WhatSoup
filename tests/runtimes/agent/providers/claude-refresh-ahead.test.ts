@@ -966,6 +966,113 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     expect(existsSync(target)).toBe(false);
   });
 
+  it.each(['denied', 'symlink', 'parent-replaced'] as const)(
+    'refuses %s during final store initialization before reading credentials', async (failure) => {
+      const h = harness({ fileStore: store(START.getTime() + 1_000) });
+      const parent = privateStoreDir();
+      const missing = join(parent, 'fresh-store');
+      const other = privateStoreDir();
+      const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+      vi.doMock('node:fs', () => ({
+        ...actualFs,
+        mkdirSync: (...args: Parameters<typeof actualFs.mkdirSync>) => {
+          if (args[0] === missing) {
+            if (failure === 'parent-replaced') {
+              actualFs.renameSync(parent, `${parent}-original`);
+              actualFs.mkdirSync(parent, { mode: 0o700 });
+              return actualFs.mkdirSync(...args);
+            }
+            if (failure === 'symlink') actualFs.symlinkSync(other, missing);
+            const error = new Error('injected store initialization race') as NodeJS.ErrnoException;
+            error.code = failure === 'denied' ? 'EACCES' : 'EEXIST';
+            throw error;
+          }
+          return actualFs.mkdirSync(...args);
+        },
+      }));
+      vi.resetModules();
+      const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+      await expect(refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps))
+        .resolves.toEqual({ outcome: 'owner-unavailable' });
+      expect(h.spawnImpl).not.toHaveBeenCalled();
+      expect(h.readFileStore).not.toHaveBeenCalled();
+      expect(existsSync(ownerPath(missing))).toBe(false);
+      expect(existsSync(ownerPath(other))).toBe(false);
+      if (failure === 'denied') expect(existsSync(missing)).toBe(false);
+      if (failure === 'symlink') expect(lstatSync(missing).isSymbolicLink()).toBe(true);
+      if (failure === 'parent-replaced') {
+        expect(existsSync(`${parent}-original`)).toBe(true);
+        // Path-based initialization may leave an empty leaf after a same-UID exchange.
+        expect(actualFs.readdirSync(missing)).toEqual([]);
+      }
+    },
+  );
+
+  it.each([0o770, 0o707])('refuses a missing store under a writable-by-others parent (%o)', async (mode) => {
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const parent = privateStoreDir();
+    chmodSync(parent, mode);
+    const missing = join(parent, 'fresh-store');
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(existsSync(missing)).toBe(false);
+    expect(h.readFileStore).not.toHaveBeenCalled();
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('initializes a private store under a conventional current-user 0755 parent', async () => {
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const parent = privateStoreDir();
+    chmodSync(parent, 0o755);
+    const missing = join(parent, 'fresh-store');
+    const run = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps);
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(lstatSync(parent).mode & 0o777).toBe(0o755);
+    expect(lstatSync(missing).mode & 0o777).toBe(0o700);
+    h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toEqual({ outcome: 'ran', reason: 'within-window', exitCode: 0, signal: null });
+  });
+
+  it('refuses a private parent beneath a writable non-sticky ancestor before creating the leaf', async () => {
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const ancestor = privateStoreDir();
+    const parent = join(ancestor, 'private-parent');
+    mkdirSync(parent, { mode: 0o700 });
+    chmodSync(ancestor, 0o777);
+    const missing = join(parent, 'fresh-store');
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps))
+      .resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(existsSync(missing)).toBe(false);
+    expect(h.readFileStore).not.toHaveBeenCalled();
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('accepts a concurrently initialized private store and still claims its refresh', async () => {
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const missing = join(privateStoreDir(), 'fresh-store');
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.doMock('node:fs', () => ({
+      ...actualFs,
+      mkdirSync: (...args: Parameters<typeof actualFs.mkdirSync>) => {
+        if (args[0] === missing) {
+          actualFs.mkdirSync(missing, { mode: 0o700 });
+          const error = new Error('another process created the directory') as NodeJS.ErrnoException;
+          error.code = 'EEXIST';
+          throw error;
+        }
+        return actualFs.mkdirSync(...args);
+      },
+    }));
+    vi.resetModules();
+    const refreshed = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
+    const run = refreshed.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: missing }, h.deps);
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(existsSync(ownerPath(missing))).toBe(true);
+    h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toEqual({ outcome: 'ran', reason: 'within-window', exitCode: 0, signal: null });
+    expect(existsSync(ownerPath(missing))).toBe(false);
+  });
+
   it.each([
     ['invalid', 'owner-unavailable'],
     ['corrupt', 'owner-unavailable'],
