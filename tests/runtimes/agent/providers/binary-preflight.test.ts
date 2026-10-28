@@ -303,7 +303,10 @@ describe('probeBinaryCommand output budget', () => {
       expect(onProcessClosed).not.toHaveBeenCalled();
       expect(onExited).not.toHaveBeenCalled();
 
-      child.stderr.emit('data', Buffer.alloc(outputLimitBytes, 'b'));
+      const discarded = Buffer.alloc(outputLimitBytes, 'b');
+      const decodeDiscarded = vi.spyOn(discarded, 'toString');
+      child.stderr.emit('data', discarded);
+      expect(decodeDiscarded).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(5_001);
       expect(child.kill).not.toHaveBeenCalled();
       releaseGrace();
@@ -320,6 +323,24 @@ describe('probeBinaryCommand output budget', () => {
         outputLimitExceeded: true, killedByTimeout: false, killedByAbort: false,
       }));
       await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('discards output arriving after a timeout has settled the probe', async () => {
+    vi.useFakeTimers();
+    try {
+      const { child, probe } = controlledProbe();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+
+      const discarded = Buffer.alloc(outputLimitBytes + 1, 'a');
+      const decodeDiscarded = vi.spyOn(discarded, 'toString');
+      child.stdout.emit('data', discarded);
+      child.stderr.emit('data', discarded);
+      expect(decodeDiscarded).not.toHaveBeenCalled();
+      child.emit('close', null, 'SIGTERM');
     } finally {
       vi.useRealTimers();
     }
