@@ -58,9 +58,16 @@ describe('refresh process identity', () => {
     expect(after).not.toEqual(before);
   });
 
-  it.each(['0', '-1', '1.5', '18446744073709551616', 'unknown', ''])('rejects an invalid native macOS process identifier %s', (identifier) => {
+  it.each(['0', '-1', '+1', '01', '0x1', '1e2', '1.5', '18446744073709551616', '100000000000000000000', 'unknown', ''])('rejects an invalid native macOS process identifier %s', (identifier) => {
     const command = vi.fn((file: string) => file === '/usr/sbin/sysctl' ? '{ sec = 1793145600, usec = 1234 }' : identifier);
     expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toEqual({ state: 'unknown' });
+  });
+
+  it.each(['1', '18446744073709551615'])('accepts the uint64 native identity boundary %s without precision loss', (identifier) => {
+    const command = vi.fn((file: string) => file === '/usr/sbin/sysctl' ? '{ sec = 1793145600, usec = 1234 }' : identifier);
+    expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toEqual({
+      state: 'alive', birthToken: `refresh-owner-v2:darwin:1793145600.001234:${identifier}`,
+    });
   });
 
   it('reads Linux start ticks after a process name containing spaces and parentheses', () => {
