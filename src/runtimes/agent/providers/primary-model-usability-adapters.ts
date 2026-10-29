@@ -147,7 +147,7 @@ export function buildPrimaryProbeSelectorEnv(
       providerConfig,
     );
   }
-  if (provider === 'claude-cli') return scrubbedAuthStatusEnv(process.env, deps.egressProxyPort);
+  if (provider === 'claude-cli') return buildPrimaryProbeEnv(provider, model, providerConfig, deps);
   return {};
 }
 

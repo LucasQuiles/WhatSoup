@@ -274,7 +274,7 @@ export function resolveExecutable(binary: string, pathValue = process.env.PATH ?
 /** Resolve and hash the exact executable selected by the effective child PATH. */
 export function resolveProviderBinaryIdentity(
   binary: string,
-  pathValue = process.env.PATH ?? '',
+  pathValue?: string,
 ): ProviderBinaryIdentity {
   const resolvedPath = resolveExecutable(binary, pathValue);
   return { resolvedPath, sha256: sha256File(resolvedPath) };

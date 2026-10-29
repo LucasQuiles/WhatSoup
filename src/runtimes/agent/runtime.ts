@@ -368,24 +368,18 @@ import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates
 import {
   canaryStoreProvisioned,
   readProviderCanaryAdmission,
-  resolveProviderBinaryIdentity,
 } from './provider-canary-proof.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
+import { probePrimaryModelUsability } from './providers/primary-model-usability.ts';
+import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import {
-  probePrimaryModelUsability,
-  type PrimaryProbeServiceContext,
-} from './providers/primary-model-usability.ts';
-import {
-  buildPrimaryProbeSelectorEnv,
-  buildPrimaryProbeServiceContext,
-  createPrimaryModelProbeAdapters,
-} from './providers/primary-model-usability-adapters.ts';
-import {
-  buildPrimaryProbeAdapterDeps,
+  buildRuntimePrimaryProbeServiceContext,
+  createRuntimePrimaryProbeAdapters,
   expectedProbeDeadlineFromDueMs,
   expectedProbeDeadlineMs,
   periodicProbeBackoffMultiple,
+  probeRuntimePrimaryProviderRecovered,
 } from './primary-readiness-probe.ts';
 import {
   MessageHandlerDrainTimeoutError,
@@ -3018,58 +3012,15 @@ export class AgentRuntime implements Runtime {
     };
   }
 
-  /**
-   * Host for the extracted fallback coordinator (runtime-fallback.ts, #1977
-   * D2) — live-getter shape. ALL fallback state stays owned here: the
-   * characterization suites bind these fields on the runtime instance, and
-   * probePrimaryProviderRecovered / deactivateProviderFallback are stub/spy
-   * seams that must observe in-cluster calls.
-   */
-  private primaryProbeContextSelectorEnv(): NodeJS.ProcessEnv {
-    try {
-      return buildPrimaryProbeSelectorEnv(
-        this.agentProvider,
-        this.model ?? null,
-        this.agentProviderConfig,
-        { egressProxyPort: this.egressProxy?.port },
-      );
-    } catch {
-      // The primary probe will preserve the existing unknown/probe-error path
-      // when selector construction fails. Startup must not invent an identity.
-      return {};
-    }
-  }
-
   private buildPrimaryProbeServiceContext(): PrimaryProbeServiceContext {
-    const provider = this.agentProvider;
-    const model = this.model ?? null;
-    const cwd = this.cwd ?? homedir();
-    const selectorEnv = this.primaryProbeContextSelectorEnv();
-    const hasBinary = provider === 'claude-cli' || provider === 'opencode-cli';
-    let identity: { resolvedPath: string; sha256: string } | null = null;
-    if (hasBinary) {
-      try {
-        const binaryToken = getProviderBinary(provider);
-        if (binaryToken) {
-          identity = resolveProviderBinaryIdentity(binaryToken, selectorEnv.PATH ?? '');
-        }
-      } catch {
-        identity = null;
-      }
-    }
-    return buildPrimaryProbeServiceContext({
-      provider,
-      model,
-      serviceGeneration: this.primaryProbeServiceGeneration,
-      cwd,
-      providerConfig: this.agentProviderConfig,
-      // A missing CLI identity remains bound to this generation. Installing a
-      // binary later is adopted only by an explicit new configuration
-      // generation (currently a service restart), never by a probe.
-      selectorEnv,
-      binaryState: hasBinary ? (identity ? 'resolved' : 'missing') : 'none',
-      binaryIdentity: identity,
-    });
+    return buildRuntimePrimaryProbeServiceContext(
+      this.agentProvider,
+      this.model ?? null,
+      this.primaryProbeServiceGeneration,
+      this.cwd,
+      this.agentProviderConfig,
+      this.egressProxy?.port,
+    );
   }
 
   private capturePrimaryProbeServiceContext(): void {
@@ -9846,39 +9797,20 @@ export class AgentRuntime implements Runtime {
   }
 
 
-  /**
-   * Probe whether the primary provider can serve again. Recovery requires a
-   * real model-usability success, not credential presence: a revoked API key or
-   * expired OAuth token can still be present in the key store while live turns
-   * continue returning auth failures. The probe is deadline-cancelled and never
-   * rejects; a timeout result waits for cancellation acknowledgement.
-   * `onEvidence` (DUR-02) gets the full result pre-resolve — see
-   * resolveFallbackRecoveryDecision for why a callback, not a field.
-   */
-  private async probePrimaryProviderRecovered(
+  private probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(
-      this.agentProviderConfig,
-      buildPrimaryProbeAdapterDeps(
-        this.agentProvider,
-        this.model,
-        this.cwd,
-        this.egressProxy?.port,
-        this.providerExecutionGate,
-        'recovery',
-        this.primaryProbeServiceContext ?? undefined,
-        true,
-        () => this.currentPrimaryProbeServiceContext(),
-      ),
-    );
-    const result = signal
-      ? await probePrimaryModelUsability(target, adapters, { signal })
-      : await probePrimaryModelUsability(target, adapters);
-    onEvidence?.({ ...result, checkedAt: Date.now() });
-    return result.status === 'usable';
+    return probeRuntimePrimaryProviderRecovered({
+      agentProvider: this.agentProvider,
+      model: this.model,
+      agentProviderConfig: this.agentProviderConfig,
+      cwd: this.cwd,
+      egressProxy: this.egressProxy,
+      providerExecutionGate: this.providerExecutionGate,
+      primaryProbeServiceContext: this.primaryProbeServiceContext,
+      currentPrimaryProbeServiceContext: () => this.currentPrimaryProbeServiceContext(),
+    }, onEvidence, signal);
   }
 
   private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
@@ -9921,19 +9853,11 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(
-            this.agentProviderConfig,
-            buildPrimaryProbeAdapterDeps(
-              this.agentProvider,
-              this.model,
-              this.cwd,
-              this.egressProxy?.port,
-              this.providerExecutionGate,
-              'diagnostic',
-              this.primaryProbeServiceContext ?? undefined,
-              true,
-              () => this.currentPrimaryProbeServiceContext(),
-            ),
+          createRuntimePrimaryProbeAdapters(
+            this.agentProviderConfig, this.agentProvider, this.model, this.cwd,
+            this.egressProxy?.port, this.providerExecutionGate, 'diagnostic',
+            this.primaryProbeServiceContext ?? undefined,
+            () => this.currentPrimaryProbeServiceContext(),
           ),
           { signal },
         ),

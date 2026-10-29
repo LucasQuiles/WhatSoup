@@ -478,9 +478,13 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
   };
 });
 
-vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
-  createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
-}));
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts')>();
+  return {
+    ...actual,
+    createPrimaryModelProbeAdapters: mockCreatePrimaryModelProbeAdapters,
+  };
+});
 
 vi.mock('../../../src/core/provider-mcp-config.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/core/provider-mcp-config.ts')>();
