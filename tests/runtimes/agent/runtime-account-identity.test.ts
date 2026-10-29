@@ -32,7 +32,8 @@ vi.mock('../../../src/lib/emit-alert.ts', async (importOriginal) => ({
 }));
 
 const healSeam = vi.hoisted(() => ({ ensureClaudeFileStoreCredential: vi.fn(() => ({ outcome: 'skipped-not-darwin' })) }));
-vi.mock('../../../src/runtimes/agent/providers/claude-filestore-heal.ts', () => ({
+vi.mock('../../../src/runtimes/agent/providers/claude-filestore-heal.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/runtimes/agent/providers/claude-filestore-heal.ts')>(),
   ensureClaudeFileStoreCredential: healSeam.ensureClaudeFileStoreCredential,
 }));
 
@@ -42,10 +43,29 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
   probePrimaryModelUsability: vi.fn(() => new Promise((resolve) => { probeControl.resolvers.push(resolve); })),
 }));
 
+const adapterFactoryCalls = vi.hoisted(() => ({ calls: [] as Array<{ deps: unknown }> }));
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts')>();
+  return {
+    ...actual,
+    createPrimaryModelProbeAdapters: vi.fn((...args: Parameters<typeof actual.createPrimaryModelProbeAdapters>) => {
+      adapterFactoryCalls.calls.push({ deps: args[1] });
+      return actual.createPrimaryModelProbeAdapters(...args);
+    }),
+  };
+});
+
 import { Database } from '../../../src/core/database.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../../src/lib/emit-alert.ts';
-import type { PrimaryModelUsabilityResult } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
+import type {
+  PrimaryModelUsabilityResult,
+  PrimaryProbeServiceContext,
+} from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import type { AccountIdentityVerification } from '../../../src/runtimes/agent/providers/claude-account-identity.ts';
+import {
+  buildPrimaryProbeServiceContext,
+  type PrimaryModelProbeAdapterDeps,
+} from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import type { AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { makeRuntimeState, type RuntimeState } from './lib/runtime-terminal-coordinator-harness.ts';
 
@@ -64,6 +84,11 @@ type IdentityState = RuntimeState & {
     schedulePrimaryModelUsabilityProbe(trigger: ProbeTrigger): void;
     scheduleNextPeriodicUsabilityProbe(): void;
   };
+};
+
+type ContextBoundState = IdentityState & {
+  primaryProbeServiceContext: PrimaryProbeServiceContext | null;
+  currentPrimaryProbeServiceContext(): PrimaryProbeServiceContext | null;
 };
 
 function verification(over: Partial<AccountIdentityVerification>): AccountIdentityVerification {
@@ -88,6 +113,7 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     vi.useFakeTimers({ now: START });
     vi.spyOn(Math, 'random').mockReturnValue(1);
     probeControl.resolvers.length = 0;
+    adapterFactoryCalls.calls.length = 0;
     vi.mocked(emitAlertChecked).mockClear();
     vi.mocked(clearAlertSourceChecked).mockClear();
     healSeam.ensureClaudeFileStoreCredential.mockClear();
@@ -140,6 +166,39 @@ describe('AgentRuntime — account identity rides the usability probe seam', () 
     expect(reasons()).toEqual([]);
     expect(snapshot().status).toBe('healthy');
     expect(vi.mocked(emitAlertChecked)).not.toHaveBeenCalled();
+  });
+
+  it('passes one required immutable context through the real coordinator for startup, manual, and periodic probes', async () => {
+    const { state } = makeRuntimeState<ContextBoundState>(db);
+    const context = buildPrimaryProbeServiceContext({
+      provider: 'claude-cli',
+      model: null,
+      serviceGeneration: 'test-generation',
+      cwd: '/runtime-cwd',
+      selectorEnv: { PATH: '/runtime-bin' },
+      binaryState: 'missing',
+    });
+    state.primaryProbeServiceContext = context;
+    state.currentPrimaryProbeServiceContext = vi.fn(() => context);
+
+    for (const trigger of ['startup', 'manual', 'periodic'] as const) {
+      state.fallback.schedulePrimaryModelUsabilityProbe(trigger);
+      await settle();
+      const call = adapterFactoryCalls.calls.at(-1);
+      expect(call).toBeDefined();
+      const deps = call!.deps as PrimaryModelProbeAdapterDeps;
+      expect(deps).toMatchObject({
+        serviceContext: context,
+        requireServiceContext: true,
+        probeTrigger: trigger,
+      });
+      expect(deps.currentServiceContext?.()).toEqual(context);
+
+      const resolve = probeControl.resolvers.shift();
+      expect(resolve).toBeDefined();
+      resolve!(USABLE);
+      await settle();
+    }
   });
 
   it('mismatch: degradedReasons + accountIdentity + critical alert; a later match clears', async () => {

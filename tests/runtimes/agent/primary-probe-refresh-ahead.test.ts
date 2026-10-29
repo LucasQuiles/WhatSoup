@@ -77,6 +77,7 @@ afterEach(() => {
 function adapterDeps(probeSpawn: typeof import('node:child_process').spawn, over: Partial<PrimaryModelProbeAdapterDeps> = {}): PrimaryModelProbeAdapterDeps {
   return {
     getProviderBinary: () => 'claude',
+    resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
     ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
     probeBinaryCommand: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options, probeSpawn),
     claudeRefreshLockGrace: () => null,
@@ -161,6 +162,22 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
     expect(probe.spawnImpl).not.toHaveBeenCalled();
     expect(refresh.children[0]!.kill).not.toHaveBeenCalled();
     refresh.children[0]!.emit('close', 0, null);
+  });
+
+  it('a hung refresh owner reaches prepareCliModelProbe as an alertable failure without spawning the probe', async () => {
+    const probe = spawnRecorder();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const result = await probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: async () => ({ outcome: 'hung' }),
+        probeBinaryCommand,
+      })),
+    );
+    expect(result).toMatchObject({ status: 'unknown', reason: 'refresh-failed' });
+    expect(primaryModelUsabilityRequiresAlert(result)).toBe(true);
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
   });
 
   it('an unavailable refresh owner defers the primary probe but requires an alert', async () => {

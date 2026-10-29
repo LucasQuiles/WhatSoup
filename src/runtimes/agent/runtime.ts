@@ -365,13 +365,22 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
+import {
+  canaryStoreProvisioned,
+  readProviderCanaryAdmission,
+  resolveProviderBinaryIdentity,
+} from './provider-canary-proof.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
 import {
   probePrimaryModelUsability,
+  type PrimaryProbeServiceContext,
 } from './providers/primary-model-usability.ts';
-import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
+import {
+  buildPrimaryProbeSelectorEnv,
+  buildPrimaryProbeServiceContext,
+  createPrimaryModelProbeAdapters,
+} from './providers/primary-model-usability-adapters.ts';
 import {
   buildPrimaryProbeAdapterDeps,
   expectedProbeDeadlineFromDueMs,
@@ -731,6 +740,10 @@ export class AgentRuntime implements Runtime {
    *  the /model list render + apply path added in this task. */
   private readonly catalogueSnapshot: CatalogueSnapshotCache;
   private readonly providerExecutionGate: ProviderExecutionGate;
+  /** Runtime/configuration generation for the global primary readiness proof. */
+  private readonly primaryProbeServiceGeneration = randomUUID();
+  /** Captured once after startup configuration settles; never sourced from a child. */
+  private primaryProbeServiceContext: PrimaryProbeServiceContext | null = null;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -3012,6 +3025,62 @@ export class AgentRuntime implements Runtime {
    * probePrimaryProviderRecovered / deactivateProviderFallback are stub/spy
    * seams that must observe in-cluster calls.
    */
+  private primaryProbeContextSelectorEnv(): NodeJS.ProcessEnv {
+    try {
+      return buildPrimaryProbeSelectorEnv(
+        this.agentProvider,
+        this.model ?? null,
+        this.agentProviderConfig,
+        { egressProxyPort: this.egressProxy?.port },
+      );
+    } catch {
+      // The primary probe will preserve the existing unknown/probe-error path
+      // when selector construction fails. Startup must not invent an identity.
+      return {};
+    }
+  }
+
+  private buildPrimaryProbeServiceContext(): PrimaryProbeServiceContext {
+    const provider = this.agentProvider;
+    const model = this.model ?? null;
+    const cwd = this.cwd ?? homedir();
+    const selectorEnv = this.primaryProbeContextSelectorEnv();
+    const hasBinary = provider === 'claude-cli' || provider === 'opencode-cli';
+    let identity: { resolvedPath: string; sha256: string } | null = null;
+    if (hasBinary) {
+      try {
+        const binaryToken = getProviderBinary(provider);
+        if (binaryToken) {
+          identity = resolveProviderBinaryIdentity(binaryToken, selectorEnv.PATH ?? '');
+        }
+      } catch {
+        identity = null;
+      }
+    }
+    return buildPrimaryProbeServiceContext({
+      provider,
+      model,
+      serviceGeneration: this.primaryProbeServiceGeneration,
+      cwd,
+      providerConfig: this.agentProviderConfig,
+      // A missing CLI identity remains bound to this generation. Installing a
+      // binary later is adopted only by an explicit new configuration
+      // generation (currently a service restart), never by a probe.
+      selectorEnv,
+      binaryState: hasBinary ? (identity ? 'resolved' : 'missing') : 'none',
+      binaryIdentity: identity,
+    });
+  }
+
+  private capturePrimaryProbeServiceContext(): void {
+    this.primaryProbeServiceContext = this.buildPrimaryProbeServiceContext();
+  }
+
+  private currentPrimaryProbeServiceContext(): PrimaryProbeServiceContext | null {
+    if (!this.primaryProbeServiceContext) return null;
+    return this.buildPrimaryProbeServiceContext();
+  }
+
   private createRuntimeFallbackHost(): RuntimeFallbackPort {
     const runtime = this;
     return {
@@ -3033,6 +3102,8 @@ export class AgentRuntime implements Runtime {
       get egressProxy() { return runtime.egressProxy; },
       get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
+      get primaryProbeServiceContext() { return runtime.primaryProbeServiceContext; },
+      currentPrimaryProbeServiceContext: () => runtime.currentPrimaryProbeServiceContext(),
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
       get fallbackMetrics() { return runtime.fallbackMetrics; },
@@ -4627,6 +4698,10 @@ export class AgentRuntime implements Runtime {
         log.warn({ error }, 'could not check Claude credential stores at runtime startup');
       }
     }
+    // Capture the global primary service context once per runtime generation.
+    // It is intentionally independent of any resumed or active SessionManager;
+    // recovery must remain possible after a child fails or is retired.
+    this.capturePrimaryProbeServiceContext();
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
@@ -9785,7 +9860,20 @@ export class AgentRuntime implements Runtime {
     signal?: AbortSignal,
   ): Promise<boolean> {
     const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, 'recovery'));
+    const adapters = createPrimaryModelProbeAdapters(
+      this.agentProviderConfig,
+      buildPrimaryProbeAdapterDeps(
+        this.agentProvider,
+        this.model,
+        this.cwd,
+        this.egressProxy?.port,
+        this.providerExecutionGate,
+        'recovery',
+        this.primaryProbeServiceContext ?? undefined,
+        true,
+        () => this.currentPrimaryProbeServiceContext(),
+      ),
+    );
     const result = signal
       ? await probePrimaryModelUsability(target, adapters, { signal })
       : await probePrimaryModelUsability(target, adapters);
@@ -9833,7 +9921,20 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate, 'diagnostic')),
+          createPrimaryModelProbeAdapters(
+            this.agentProviderConfig,
+            buildPrimaryProbeAdapterDeps(
+              this.agentProvider,
+              this.model,
+              this.cwd,
+              this.egressProxy?.port,
+              this.providerExecutionGate,
+              'diagnostic',
+              this.primaryProbeServiceContext ?? undefined,
+              true,
+              () => this.currentPrimaryProbeServiceContext(),
+            ),
+          ),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),

@@ -14,25 +14,27 @@ export type PrimaryModelUsabilityStatus =
   | 'probe-blocked'
   | 'probe-error';
 
-// #3017 AXIS C: content-free serving-context receipt. The probe is bound to
-// the serving admission/environment: if the config root, credential-store
-// class, binary digest, provider, or model differs from what the runtime
-// is actually serving, the probe fail-closes with 'probe-blocked' rather
-// than producing evidence about a DIFFERENT environment that could read green
-// for a primary whose real serving context is broken. All fields are
-// content-free hashes or identifiers — never credential material, paths
-// that expose user data, or account identity.
-export interface ServingContextReceipt {
-  /** Short hash of the sandboxed config root (CLAUDE_CONFIG_DIR or equivalent). */
-  configRootHash: string | null;
-  /** Credential-store class identifier (e.g. 'keychain', 'file-store', 'api-key'). */
-  credentialStoreClass: string | null;
-  /** Short hash of the provider binary path + version, when applicable. */
-  binaryDigest: string | null;
-  /** The provider the runtime is serving turns with. */
-  provider: string;
-  /** The model the runtime is serving turns with (null = provider default). */
-  model: string | null;
+// #3017 AXIS C: content-free runtime-primary service context. This is captured
+// once for the configured service generation, independently of any active child.
+// Every later probe compares its effective selector environment and the exact
+// executable identity it will invoke against this immutable context.
+export type PrimaryProbeBinaryState = 'none' | 'missing' | 'resolved';
+
+export interface PrimaryProbeServiceContext {
+  /** Configured primary provider for this runtime generation. */
+  readonly provider: string;
+  /** Configured primary model; null means the provider default. */
+  readonly model: string | null;
+  /** Runtime/configuration generation; never serialized raw. */
+  readonly serviceGeneration: string;
+  /** Hash of the safe effective launch selectors only. */
+  readonly launchContextHash: string;
+  /** APIs have no CLI identity; CLI is either resolved or missing. */
+  readonly binaryState: PrimaryProbeBinaryState;
+  /** Hash of the resolved executable path, never the raw path. */
+  readonly resolvedBinaryPathHash: string | null;
+  /** Full SHA-256 of the resolved executable, when present. */
+  readonly binarySha256: string | null;
 }
 
 export interface PrimaryModelProbeTarget {

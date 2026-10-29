@@ -19,7 +19,9 @@ describe('Claude probes require a completed successful refresh before proceeding
       const probe = vi.fn(async () => ({ status: 'ok' as const, output: '{"loggedIn":false}' }));
       if (surface === 'model') {
         const adapters = createPrimaryModelProbeAdapters(undefined, {
-          getProviderBinary: () => '/fixture/claude', refreshClaudeLoginAhead: refresh,
+          getProviderBinary: () => '/fixture/claude',
+          resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
+          refreshClaudeLoginAhead: refresh,
         });
         await expect(adapters.prepareBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' }))
           .resolves.toEqual(defer ? { defer } : undefined);
@@ -73,7 +75,9 @@ describe('Claude probes defer when refresh ownership cannot be established', () 
 
   it('defers model probe preparation after refresh failure', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
-      getProviderBinary: () => '/fixture/claude', refreshClaudeLoginAhead: refresh,
+      getProviderBinary: () => '/fixture/claude',
+      resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
+      refreshClaudeLoginAhead: refresh,
     });
     await expect(adapters.prepareBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' }))
       .resolves.toEqual({ defer: 'refresh-failed' });
@@ -158,7 +162,9 @@ describe('Claude credential selection agrees across serving and probes', () => {
         await observeClaudeAccountIdentity({ getProviderBinary: () => '/fixture/claude', probeBinaryCommand: probe, env });
       } else {
         const adapters = createPrimaryModelProbeAdapters(undefined, {
-          getProviderBinary: () => '/fixture/claude', probeBinaryCommand: probe,
+          getProviderBinary: () => '/fixture/claude',
+          resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
+          probeBinaryCommand: probe,
           ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-not-darwin' }),
         });
         await adapters.probeBinaryModel!({ provider: 'claude-cli', model: 'fixture-model' });

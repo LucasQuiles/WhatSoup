@@ -10,10 +10,8 @@
 // on the AgentRuntime instance (they're process-local lifecycle state), but
 // the scheduling CALCULATION and the receipt CONSTRUCTION live here.
 
-import { shortHash } from '../../lib/short-hash.ts';
-import { getProviderBinary } from './session.ts';
+import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import { homedir } from 'node:os';
-import type { ServingContextReceipt } from './providers/primary-model-usability.ts';
 import type {
   PrimaryModelProbeAdapterDeps,
   PrimaryModelProbeTrigger,
@@ -147,63 +145,28 @@ export function calculatePeriodicProbeBackoff(
 }
 
 /**
- * #3017 AXIS C: build the serving-context receipt — content-free hashes of
- * the config root, credential-store class, binary digest, provider, and model
- * the runtime is actually serving with. The probe fail-closes when any of
- * these differ from the probe target, preventing a probe of a DIFFERENT
- * environment from reading green for a primary whose real serving context is
- * broken. Never includes credential material, paths that expose user data,
- * or account identity.
- */
-export function buildServingContextReceipt(
-  agentProvider: string,
-  model: string | null | undefined,
-  cwd: string | null | undefined,
-): ServingContextReceipt {
-  const configRoot = cwd ?? homedir();
-  // Defensive — getProviderBinary may be unavailable in test mocks; null
-  // is a valid "no binary digest" receipt field.
-  let binary: string | null = null;
-  try {
-    binary = getProviderBinary(agentProvider);
-  } catch {
-    binary = null;
-  }
-  return {
-    configRootHash: shortHash(configRoot),
-    credentialStoreClass: deriveCredentialStoreClass(agentProvider),
-    binaryDigest: binary !== null ? shortHash(binary) : null,
-    provider: agentProvider,
-    model: model ?? null,
-  };
-}
-
-function deriveCredentialStoreClass(provider: string): string | null {
-  if (provider === 'claude-cli') return 'keychain-or-file-store';
-  if (provider === 'opencode-cli') return 'keyring';
-  if (provider === 'openai-api' || provider === 'anthropic-api') return 'api-key';
-  return null;
-}
-
-/**
- * Build the PrimaryModelProbeAdapterDeps with the serving-context receipt
- * bound (AXIS C). The caller passes its existing adapter deps (cwd,
- * egressProxyPort, providerExecutionGate) and the probe trigger (logged with
- * each probe child), and this function adds the servingContext.
+ * Build adapter deps with the immutable runtime-primary context bound. The
+ * context is captured by AgentRuntime at its configuration boundary; this
+ * builder never manufactures a fresh expected context.
  */
 export function buildPrimaryProbeAdapterDeps(
-  agentProvider: string,
-  model: string | null | undefined,
+  _agentProvider: string,
+  _model: string | null | undefined,
   cwd: string | null | undefined,
   egressProxyPort: number | undefined,
   providerExecutionGate: PrimaryModelProbeAdapterDeps['providerExecutionGate'],
   probeTrigger?: PrimaryModelProbeTrigger,
+  serviceContext?: PrimaryProbeServiceContext,
+  requireServiceContext = false,
+  currentServiceContext?: () => PrimaryProbeServiceContext | null,
 ): PrimaryModelProbeAdapterDeps {
   return {
     cwd: cwd ?? homedir(),
     egressProxyPort,
     providerExecutionGate,
-    servingContext: buildServingContextReceipt(agentProvider, model, cwd),
+    ...(serviceContext ? { serviceContext } : {}),
+    ...(requireServiceContext ? { requireServiceContext } : {}),
+    ...(currentServiceContext ? { currentServiceContext } : {}),
     ...(probeTrigger ? { probeTrigger } : {}),
   };
 }

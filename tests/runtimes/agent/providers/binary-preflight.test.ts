@@ -150,14 +150,12 @@ describe('probeFallbackBinary', () => {
   it('returns unknown and kills the child when the probe times out', async () => {
     vi.useFakeTimers();
 
-    let killCalled = false;
-
     const fakeChild = new EventEmitter() as EventEmitter & {
       stdout: EventEmitter;
-      kill: () => void;
+      kill: ReturnType<typeof vi.fn>;
     };
     fakeChild.stdout = new EventEmitter();
-    fakeChild.kill = () => { killCalled = true; };
+    fakeChild.kill = vi.fn(() => true);
 
     const spawnImpl = ((_binary: string, _args: string[]) => fakeChild) as unknown as SpawnImpl;
 
@@ -168,9 +166,55 @@ describe('probeFallbackBinary', () => {
 
     const result = await probePromise;
     expect(result).toStrictEqual({ status: 'unknown', version: null });
-    expect(killCalled).toBe(true);
+    expect(fakeChild.kill).toHaveBeenNthCalledWith(1);
+
+    // The promise settles fail-open, but data listeners must not retain or
+    // decode later stream chunks while process cleanup remains armed.
+    const discarded = Buffer.alloc(64 * 1024 + 1, 'a');
+    const decodeDiscarded = vi.spyOn(discarded, 'toString');
+    fakeChild.stdout.emit('data', discarded);
+    expect(decodeDiscarded).not.toHaveBeenCalled();
+
+    // A hung child still receives a bounded SIGKILL escalation after the
+    // caller has received its fail-open timeout result.
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(fakeChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    fakeChild.emit('close', null, 'SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  it('bounds raw fallback output and reclaims a child that keeps streaming after settlement', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+        kill: vi.fn(() => true),
+      });
+      const spawnImpl = vi.fn(() => child) as unknown as SpawnImpl;
+      const probe = probeFallbackBinary('noisy-binary', PROBE_ENV, spawnImpl);
+
+      // The byte budget is shared across stdout and stderr and is checked
+      // before decoding, so a single oversized Buffer cannot be retained.
+      child.stdout.emit('data', Buffer.alloc(64 * 1024 + 1, 'a'));
+      await expect(probe).resolves.toEqual({ status: 'unknown', version: null });
+      expect(child.kill).toHaveBeenNthCalledWith(1);
+
+      // A settled fallback must ignore later stream chunks while close-owned
+      // cleanup keeps the child under control.
+      const discarded = Buffer.alloc(64 * 1024 + 1, 'b');
+      const decodeDiscarded = vi.spyOn(discarded, 'toString');
+      child.stderr.emit('data', discarded);
+      expect(decodeDiscarded).not.toHaveBeenCalled();
+
+      // A prompt close owns cleanup and cancels the escalation timer.
+      child.emit('close', null, 'SIGTERM');
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(child.kill).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── incompatible architecture (strict-signal heuristic) ──────────────────────
