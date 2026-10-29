@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1086,6 +1087,44 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(requestInit?.signal?.aborted).toBe(true);
   });
 
+  it('refuses a real API redirect before the credential reaches its target', async () => {
+    const redirectedAuthorizations: string[] = [];
+    const server = createServer((request, response) => {
+      if (request.url === '/v1/chat/completions') {
+        response.writeHead(302, { location: '/redirected' });
+        response.end();
+        return;
+      }
+      redirectedAuthorizations.push(String(request.headers.authorization ?? ''));
+      response.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('missing fixture address');
+      const adapters = createPrimaryModelProbeAdapters(
+        { baseUrl: `http://127.0.0.1:${address.port}/v1` },
+        {
+          resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+          resolveApiKey: vi.fn(() => 'sk-test-secret'),
+        },
+      );
+
+      await expect(
+        adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+      ).resolves.toEqual({ status: 'provider_unavailable' });
+      expect(redirectedAuthorizations).toEqual([]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
   it('uses the default API-key resolver and OpenAI generation endpoint when no resolver is injected', async () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-secret';
@@ -1277,6 +1316,48 @@ describe('createPrimaryModelProbeAdapters', () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-missing-model' }),
+    ).resolves.toEqual({ status: 'not_found' });
+  });
+
+  it('caps and cancels an oversized API error body before a beyond-cap classifier marker', async () => {
+    const cancel = vi.fn();
+    const capBytes = 64 * 1024;
+    const chunks = [
+      new TextEncoder().encode('x'.repeat(capBytes)),
+      new TextEncoder().encode('model_not_found: beyond-cap'),
+      new TextEncoder().encode('unread tail'),
+      null,
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks.shift();
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      fetch: vi.fn(async () => new Response(body, { status: 400 })) as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-missing-model' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+  });
+
+  it('keeps status mapping for a non-OK API response with no body', async () => {
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      fetch: vi.fn(async () => new Response(null, { status: 404 })) as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
 

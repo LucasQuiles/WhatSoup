@@ -13,6 +13,7 @@ import {
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from '../../../lib/api-key-resolver.ts';
+import { readBodyCapped } from '../../../lib/ssrf-fetch.ts';
 import {
   claudeCredentialServiceForEnv,
   claudeCredentialServiceLabel,
@@ -99,6 +100,7 @@ export interface PrimaryModelProbeAdapterDeps {
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
+const API_ERROR_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
@@ -588,6 +590,7 @@ async function probeApiModelAccess(
     onStage?.('api-request');
     const response = await fetchImpl(apiGenerationUrl(provider, providerConfig), {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/json',
         ...apiHeaders(provider, apiKey),
@@ -596,7 +599,9 @@ async function probeApiModelAccess(
       signal: controller.signal,
     });
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
+      const errText = response.body
+        ? await readBodyCapped(response, API_ERROR_RESPONSE_LIMIT_BYTES).catch(() => '')
+        : '';
       return mapApiGenerationFailure(response.status, errText);
     }
     return { status: 'found' };
