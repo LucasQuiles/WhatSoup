@@ -59,9 +59,10 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
         command('/usr/sbin/sysctl', ['-n', 'kern.boottime'], IDENTITY_ENV).trim(),
       );
       const birth = command('python3', ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
+      const unique = birth.length <= 20 ? BigInt(birth) : 0n;
       if (!boot || !Number.isSafeInteger(Number(boot[1])) || Number(boot[1]) <= 0
         || !Number.isSafeInteger(Number(boot[2])) || Number(boot[2]) > 999_999
-        || !/^[1-9]\d{0,19}$/.test(birth) || BigInt(birth) > 18_446_744_073_709_551_615n) {
+        || unique <= 0n || unique > 18_446_744_073_709_551_615n || unique.toString() !== birth) {
         return { state: 'unknown' };
       }
       birthToken = `refresh-owner-v2:darwin:${Number(boot[1])}.${boot[2]!.padStart(6, '0')}:${birth}`;
