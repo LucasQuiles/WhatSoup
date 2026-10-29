@@ -313,9 +313,13 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
   };
 });
 
-vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
-  createPrimaryModelProbeAdapters: vi.fn(() => ({})),
-}));
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts')>();
+  return {
+    ...actual,
+    createPrimaryModelProbeAdapters: vi.fn(() => ({})),
+  };
+});
 
 vi.mock('../../../src/mcp/registry.ts', () => ({
   ToolRegistry: class {

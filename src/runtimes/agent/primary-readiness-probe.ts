@@ -11,11 +11,20 @@
 // the scheduling CALCULATION and the receipt CONSTRUCTION live here.
 
 import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
+import { probePrimaryModelUsability } from './providers/primary-model-usability.ts';
 import { homedir } from 'node:os';
 import type {
   PrimaryModelProbeAdapterDeps,
   PrimaryModelProbeTrigger,
 } from './providers/primary-model-usability-adapters.ts';
+import {
+  buildPrimaryProbeSelectorEnv,
+  buildPrimaryProbeServiceContext as buildServiceContext,
+  createPrimaryModelProbeAdapters,
+} from './providers/primary-model-usability-adapters.ts';
+import type { ProviderExecutionGate } from './provider-execution-gate.ts';
+import { getProviderBinary } from './session.ts';
+import { resolveProviderBinaryIdentity } from './provider-canary-proof.ts';
 
 // #3017 AXIS A: periodic primary-readiness probe. The freshness window
 // (MODEL_USABILITY_FRESHNESS_MS in runtime.ts = 30min) only matters if
@@ -169,6 +178,111 @@ export function buildPrimaryProbeAdapterDeps(
     ...(currentServiceContext ? { currentServiceContext } : {}),
     ...(probeTrigger ? { probeTrigger } : {}),
   };
+}
+
+/** Build the runtime-owned primary context while preserving fail-closed capture semantics. */
+export function buildRuntimePrimaryProbeServiceContext(
+  provider: string,
+  model: string | null,
+  serviceGeneration: string,
+  cwd: string | null | undefined,
+  providerConfig: Record<string, unknown> | undefined,
+  egressProxyPort: number | undefined,
+): PrimaryProbeServiceContext {
+  let selectorEnv: NodeJS.ProcessEnv;
+  try {
+    selectorEnv = buildPrimaryProbeSelectorEnv(provider, model, providerConfig, { egressProxyPort });
+  } catch {
+    // Preserve unknown/probe-error behavior; startup must not invent identity.
+    selectorEnv = {};
+  }
+  const hasBinary = provider === 'claude-cli' || provider === 'opencode-cli';
+  let identity: { resolvedPath: string; sha256: string } | null = null;
+  if (hasBinary) {
+    try {
+      const binaryToken = getProviderBinary(provider);
+      if (binaryToken) identity = resolveProviderBinaryIdentity(binaryToken, selectorEnv.PATH ?? '');
+    } catch {
+      // Missing CLI identity stays bound to this service generation; later installation
+      // is adopted only by an explicit new configuration generation.
+      identity = null;
+    }
+  }
+  return buildServiceContext({
+    provider,
+    model,
+    serviceGeneration,
+    cwd: cwd ?? homedir(),
+    providerConfig,
+    selectorEnv,
+    binaryState: hasBinary ? (identity ? 'resolved' : 'missing') : 'none',
+    binaryIdentity: identity,
+  });
+}
+
+/** Keep recovery and diagnostic adapter construction in one place. */
+export function createRuntimePrimaryProbeAdapters(
+  providerConfig: Record<string, unknown> | undefined,
+  provider: string,
+  model: string | null | undefined,
+  cwd: string | null | undefined,
+  egressProxyPort: number | undefined,
+  providerExecutionGate: ProviderExecutionGate,
+  probeTrigger: PrimaryModelProbeTrigger,
+  serviceContext: PrimaryProbeServiceContext | undefined,
+  currentServiceContext: () => PrimaryProbeServiceContext | null,
+) {
+  return createPrimaryModelProbeAdapters(
+    providerConfig,
+    buildPrimaryProbeAdapterDeps(
+      provider,
+      model,
+      cwd,
+      egressProxyPort,
+      providerExecutionGate,
+      probeTrigger,
+      serviceContext,
+      true,
+      currentServiceContext,
+    ),
+  );
+}
+
+export interface RuntimePrimaryProbeHost {
+  agentProvider: string;
+  model: string | null | undefined;
+  agentProviderConfig: Record<string, unknown> | undefined;
+  cwd: string | null | undefined;
+  egressProxy?: { port?: number };
+  providerExecutionGate: ProviderExecutionGate;
+  primaryProbeServiceContext: PrimaryProbeServiceContext | null;
+  currentPrimaryProbeServiceContext: () => PrimaryProbeServiceContext | null;
+}
+
+/** Run the recovery probe with the runtime's immutable context and evidence callback. */
+export async function probeRuntimePrimaryProviderRecovered(
+  host: RuntimePrimaryProbeHost,
+  onEvidence?: (evidence: Awaited<ReturnType<typeof probePrimaryModelUsability>> & { checkedAt: number }) => void,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const { agentProvider, model, agentProviderConfig, cwd, egressProxy, providerExecutionGate } = host;
+  const target = { provider: agentProvider, model: model ?? null };
+  const adapters = createRuntimePrimaryProbeAdapters(
+    agentProviderConfig,
+    agentProvider,
+    model,
+    cwd,
+    egressProxy?.port,
+    providerExecutionGate,
+    'recovery',
+    host.primaryProbeServiceContext ?? undefined,
+    () => host.currentPrimaryProbeServiceContext(),
+  );
+  const result = signal
+    ? await probePrimaryModelUsability(target, adapters, { signal })
+    : await probePrimaryModelUsability(target, adapters);
+  onEvidence?.({ ...result, checkedAt: Date.now() });
+  return result.status === 'usable';
 }
 
 /**

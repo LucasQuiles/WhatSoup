@@ -12,8 +12,16 @@
  * 5-hour default revert window is exercised without real wall-clock delay.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import * as fallbackStateDb from '../../../src/runtimes/agent/fallback-state-db.ts';
 import { formatContextLines } from '../../../src/runtimes/agent/context-lines.ts';
+
+const primaryProbeBinaryFixture = vi.hoisted(() => ({
+  binaryPath: null as string | null,
+  pathValue: null as string | null,
+}));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => {
   const emitAlert = vi.fn(() => true);
@@ -89,6 +97,29 @@ vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   return {
     ...actual,
     lookupCredential: (service: string) => lookupCredentialMock(service),
+  };
+});
+
+// Keep the actual service-context builder and executable identity resolver, but
+// make the OpenCode binary and selector PATH deterministic in the one CLI
+// recovery probe below. The fixture is an executable file created by that test.
+vi.mock('../../../src/runtimes/agent/session.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/session.ts')>();
+  return {
+    ...actual,
+    buildChildEnv: (...args: Parameters<typeof actual.buildChildEnv>) => {
+      const [provider] = args;
+      const env = actual.buildChildEnv(...args);
+      if (provider === 'opencode-cli' && primaryProbeBinaryFixture.pathValue !== null) {
+        return { ...env, PATH: primaryProbeBinaryFixture.pathValue };
+      }
+      return env;
+    },
+    getProviderBinary: (provider: string) => (
+      provider === 'opencode-cli' && primaryProbeBinaryFixture.binaryPath !== null
+        ? primaryProbeBinaryFixture.binaryPath
+        : actual.getProviderBinary(provider)
+    ),
   };
 });
 
@@ -171,6 +202,7 @@ function makeRuntime(overrides: RuntimeOverrides = {}): AgentRuntime {
 
 /** Bracket-access view of the private fallback state machine. */
 type FallbackView = {
+  capturePrimaryProbeServiceContext(): void;
   fallbackWindow: { activeUntil: number | null };
   fallbackPrimaryProbeTimer: ReturnType<typeof setTimeout> | null;
   revertTimer: ReturnType<typeof setTimeout> | null;
@@ -755,6 +787,7 @@ describe('AgentRuntime — primary recovery probe validity', () => {
         agentFallbackProvider: 'opencode-cli',
         agentFallbackModel: 'minimax/MiniMax-M2.7',
       });
+      view(runtime).capturePrimaryProbeServiceContext();
 
       // A present-but-invalid credential must NOT count as recovery: the probe
       // sends a real minimal-generation turn and a 401 keeps the primary down.
@@ -776,19 +809,33 @@ describe('AgentRuntime — primary recovery probe validity', () => {
       status: 'failed',
       output: 'Error: invalid_api_key',
     });
-    const runtime = makeRuntime({
-      agentProvider: 'opencode-cli',
-      model: 'openai/gpt-5.2',
-      agentFallbackProvider: 'claude-cli',
-    });
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'whatsoup-opencode-recovery-probe-'));
+    const fixtureBinary = join(fixtureRoot, 'opencode');
+    writeFileSync(fixtureBinary, '#!/bin/sh\nexit 1\n');
+    chmodSync(fixtureBinary, 0o700);
+    primaryProbeBinaryFixture.binaryPath = fixtureBinary;
+    primaryProbeBinaryFixture.pathValue = fixtureRoot;
+    try {
+      const runtime = makeRuntime({
+        agentProvider: 'opencode-cli',
+        model: 'openai/gpt-5.2',
+        agentFallbackProvider: 'claude-cli',
+      });
+      view(runtime).capturePrimaryProbeServiceContext();
 
-    await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
-    expect(probeBinaryCommandMock).toHaveBeenCalledWith(
-      'opencode',
-      ['run', '--format', 'json', '--pure', '-m', 'openai/gpt-5.2', 'Reply with OK only.'],
-      expect.objectContaining({ OPENAI_API_KEY: 'present-but-invalid' }),
-      expect.objectContaining({ timeoutMs: 15_000 }),
-    );
+      await expect(view(runtime).probePrimaryProviderRecovered()).resolves.toBe(false);
+      expect(probeBinaryCommandMock).toHaveBeenCalledOnce();
+      expect(probeBinaryCommandMock).toHaveBeenCalledWith(
+        fixtureBinary,
+        ['run', '--format', 'json', '--pure', '-m', 'openai/gpt-5.2', 'Reply with OK only.'],
+        expect.objectContaining({ OPENAI_API_KEY: 'present-but-invalid' }),
+        expect.objectContaining({ timeoutMs: 15_000 }),
+      );
+    } finally {
+      primaryProbeBinaryFixture.binaryPath = null;
+      primaryProbeBinaryFixture.pathValue = null;
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });
 

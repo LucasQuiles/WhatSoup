@@ -110,9 +110,13 @@ vi.mock('../../../src/runtimes/agent/providers/primary-model-usability.ts', asyn
   return { ...actual, probePrimaryModelUsability: (...args: unknown[]) => probePrimaryModelUsabilityMock(...args) };
 });
 const createAdaptersMock = vi.fn<(...args: unknown[]) => Record<string, unknown>>(() => ({}));
-vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', () => ({
-  createPrimaryModelProbeAdapters: (...args: unknown[]) => createAdaptersMock(...args),
-}));
+vi.mock('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts')>();
+  return {
+    ...actual,
+    createPrimaryModelProbeAdapters: (...args: unknown[]) => createAdaptersMock(...args),
+  };
+});
 
 import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import type { Database } from '../../../src/core/database.ts';
@@ -132,6 +136,7 @@ function makeMessenger(): Messenger {
 }
 
 type RecoveryView = {
+  capturePrimaryProbeServiceContext(): void;
   probePrimaryProviderRecovered(): Promise<boolean>;
   activateProviderFallback(
     resetAt: Date | null,
@@ -236,6 +241,7 @@ describe('AgentRuntime.probePrimaryProviderRecovered — validity, not presence'
     getProviderBinaryMock.mockImplementation(() => { throw new Error('unknown provider'); });
     probePrimaryModelUsabilityMock.mockResolvedValue(usability('usable'));
     const v = view(makeRuntime('claude-cli'));
+    v.capturePrimaryProbeServiceContext();
     await expect(v.probePrimaryProviderRecovered()).resolves.toBe(true);
     expect(getProviderBinaryMock).toHaveBeenCalled();
     expect(probePrimaryModelUsabilityMock).toHaveBeenCalledTimes(1);
