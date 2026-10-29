@@ -12,6 +12,7 @@ const lockfiles = [
 
 type LockPackage = { version?: unknown };
 type PackageLock = { packages?: Record<string, LockPackage> };
+type RootPackageJson = { overrides?: Record<string, unknown> };
 type ExactVersion = readonly [number, number, number];
 
 // GHSA-q2hr-2g5m-vwhr fixes for the reviewed v1 and v5 release lines.
@@ -46,6 +47,13 @@ function readLockPackages(lockfilePath: string): Record<string, LockPackage> {
   }
 
   return lockfile.packages;
+}
+
+function rootMusicMetadataOverride(): unknown {
+  const manifest = JSON.parse(
+    readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+  ) as RootPackageJson;
+  return manifest.overrides?.['music-metadata'];
 }
 
 function parseExactVersion(version: unknown): ExactVersion | null {
@@ -106,6 +114,11 @@ function findAffectedMusicMetadataNodes(lockfilePath: string): string[] {
 }
 
 describe('dependency security lock policy', () => {
+  it('retains the exact reviewed root music-metadata override', () => {
+    expect(rootMusicMetadataOverride()).toBe('11.16.1');
+    expect(readLockPackages('package-lock.json')['node_modules/music-metadata']?.version).toBe('11.16.1');
+  });
+
   it('recognizes every reviewed music-metadata advisory range', () => {
     expect(affectedMusicMetadataAdvisories('11.12.3')).toEqual([
       'GHSA-f94x-6692-553q',
