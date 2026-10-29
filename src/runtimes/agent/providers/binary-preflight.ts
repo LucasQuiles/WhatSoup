@@ -95,7 +95,10 @@ export async function probeFallbackBinary(
       try { child.kill(); } catch { /* ignore kill errors */ }
       killEscalationTimer = setTimeout(() => {
         if (childClosed) return;
-        try { child.kill(SIGNAL.KILL); } catch { /* ignore kill errors */ }
+        try { child.kill(SIGNAL.KILL); } catch {
+          // Deliberately: the probe has already returned unknown. A failed
+          // signal must not escape the timer; cleanup still waits for close.
+        }
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
     };
