@@ -1665,14 +1665,19 @@ and can therefore check a different credential store.
    for `deploy/scripts/bot-errors-health-check.py`. An active
    `WhatSoup-health-<source12>` export instead stays on its separately pinned staged
    package procedure; do not overwrite it with the generic deployer.
-2. For a macOS instance with this selector, trigger its installed daily-health
-   job with `launchctl kickstart -k "gui/$(id -u)/${BOT_ERRORS_HEALTH_LABEL:-com.bot-errors.health}"`,
-   then require the configured health output from that invocation to contain a fresh
-   `provider_probe <instance> ... status=ok` completion. The probe reads that instance's loaded
-   `com.whatsoup.<instance>` launchd environment, not the health job's parent
-   environment. On Linux or any platform without an equally verified installed
-   per-instance probe route, hold that target; do not substitute a manually assembled
-   environment or infer selector parity from the health job's environment.
+2. For a configured macOS instance, first verify that the installed health
+   LaunchAgent plist `Label` and its loaded `gui/<uid>/<Label>` job agree with the
+   deployment receipt. Then kickstart that verified label with
+   `launchctl kickstart -k "gui/$(id -u)/<verified-health-label>"`; the placeholder
+   is deliberate, so do not trust a caller-provided `BOT_ERRORS_HEALTH_LABEL` shell
+   value. Require the configured health output timestamp-correlated with that
+   invocation to contain a fresh `provider_probe <instance> ... status=ok` completion.
+   The probe reads that instance's loaded `com.whatsoup.<instance>` launchd
+   environment, not the health job's parent environment. A profile with no bot or
+   zero configured instances cannot qualify this transition. On Linux or any platform
+   without an equally verified installed per-instance probe route, hold that target;
+   do not substitute a manually assembled environment or infer selector parity from
+   the health job's environment.
 3. Only after those two checks may the separately authorized runtime activation enable
    the new `child-env.ts` producer.
 
