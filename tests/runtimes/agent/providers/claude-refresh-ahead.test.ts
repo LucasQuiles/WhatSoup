@@ -10,7 +10,7 @@
 import { EventEmitter, once } from 'node:events';
 import { spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -260,7 +260,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     const raw = JSON.stringify({ version: 3, fence: 'native-owner', hostId: 'refresh-test-host', pid: 8000, processBirthToken: token });
     const path = writeOwnerFixture(dir, raw);
     const h = harness({ inspectProcess: () => ({ state: 'alive', birthToken: token }) });
-    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps)).resolves.toEqual({ outcome: 'still-running' });
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps)).resolves.toEqual({ outcome: 'hung' });
     expect(h.spawnImpl).not.toHaveBeenCalled();
     expect(readFileSync(path, 'utf8')).toBe(raw);
   });
@@ -428,7 +428,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
     expect(b.spawnImpl).not.toHaveBeenCalled();
     const successor = readFileSync(path, 'utf8');
     await expect(second.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, b.deps))
-      .resolves.toEqual({ outcome: 'still-running' });
+      .resolves.toEqual({ outcome: 'hung' });
     expect(readFileSync(path, 'utf8')).toBe(successor);
     expect(b.spawnImpl).not.toHaveBeenCalled();
     expect(a.children[0]!.kill).not.toHaveBeenCalled();
@@ -470,7 +470,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
       const next = harness({ hostId: hostname(), inspectProcess: undefined });
       nativeLiveness.mockClear();
       await expect(restarted.refreshClaudeLoginAhead('claude', env, next.deps))
-        .resolves.toEqual({ outcome: 'still-running' });
+        .resolves.toEqual({ outcome: 'hung' });
       expect(next.spawnImpl).not.toHaveBeenCalled();
       expect(nativeLiveness).toHaveBeenCalledWith(native.pid, 0);
       expect(readFileSync(ownerPath(dir), 'utf8')).toBe(before);
@@ -622,7 +622,7 @@ describe('refreshClaudeLoginAhead: durable owner recovery', () => {
 });
 
 describe('refreshClaudeLoginAhead: never killed', () => {
-  it.each([false, true])('a restarted parent defers an unobserved child even with renewed expiry: %s', async (renewed) => {
+  it.each([false, true])('a restarted parent alerts on an unobserved child without signalling it, even with renewed expiry: %s', async (renewed) => {
     const dir = privateStoreDir();
     const h = harness({ fileStore: store(START.getTime() + 1_000) });
 
@@ -642,7 +642,7 @@ describe('refreshClaudeLoginAhead: never killed', () => {
       : h;
     const afterRestart = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
     await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
-    await expect(afterRestart).resolves.toEqual({ outcome: 'still-running' });
+    await expect(afterRestart).resolves.toEqual({ outcome: 'hung' });
     expect(h.spawnImpl).toHaveBeenCalledOnce();
     if (renewed) expect(successor.spawnImpl).not.toHaveBeenCalled();
     expect(h.children[0]!.kill).not.toHaveBeenCalled();
@@ -709,7 +709,7 @@ describe('refreshClaudeLoginAhead: never killed', () => {
     let settled: unknown = 'pending';
     void refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps).then((r) => { settled = r; });
     await vi.advanceTimersByTimeAsync(0);
-    expect(settled).toEqual({ outcome: 'still-running' });
+    expect(settled).toEqual({ outcome: 'hung' });
     expect(h.spawnImpl).toHaveBeenCalledOnce();
 
     // Once A exits, a caller runs its own check again.
@@ -758,7 +758,7 @@ describe('refreshClaudeLoginAhead: never killed', () => {
 });
 
 describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () => {
-  it('uses one claim for canonical aliases and defers a fresh parent before renewed-expiry fast-path', async () => {
+  it('uses one claim for canonical aliases, preserves the CLI selector, and alerts a fresh parent', async () => {
     const dir = privateStoreDir();
     const alias = join(dirname(dir), 'same-store-alias');
     symlinkSync(dir, alias, 'dir');
@@ -769,11 +769,16 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     const first = await import('../../../../src/runtimes/agent/providers/claude-refresh-ahead.ts');
     const firstRun = first.refreshClaudeLoginAhead('claude', {
       CLAUDE_CONFIG_DIR: unrelatedConfig,
-      CLAUDE_SECURESTORAGE_CONFIG_DIR: dir,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: alias,
     }, firstHarness.deps);
     await vi.advanceTimersByTimeAsync(first.REFRESH_AHEAD_WAIT_MS);
     await expect(firstRun).resolves.toEqual({ outcome: 'still-running' });
     expect(firstHarness.spawnImpl).toHaveBeenCalledOnce();
+    const options = (firstHarness.spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![2] as { env: NodeJS.ProcessEnv };
+    expect(options.env).toMatchObject({
+      CLAUDE_CONFIG_DIR: unrelatedConfig,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: alias,
+    });
 
     const claim = ownerPath(dir);
     const raw = readFileSync(claim, 'utf8');
@@ -786,10 +791,10 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     const successor = harness({ fileStore: store(START.getTime() + 1_000) });
     const afterRestart = restarted.refreshClaudeLoginAhead('claude', {
       CLAUDE_CONFIG_DIR: unrelatedConfig,
-      CLAUDE_SECURESTORAGE_CONFIG_DIR: alias,
+      CLAUDE_SECURESTORAGE_CONFIG_DIR: dir,
     }, successor.deps);
     await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
-    await expect(afterRestart).resolves.toEqual({ outcome: 'still-running' });
+    await expect(afterRestart).resolves.toEqual({ outcome: 'hung' });
     expect(successor.spawnImpl).not.toHaveBeenCalled();
     expect(firstHarness.children[0]!.kill).not.toHaveBeenCalled();
     firstHarness.children[0]!.emit('close', 0, null);
@@ -870,7 +875,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     const successor = harness({ fileStore: store(START.getTime() + 3_600_000) });
     const afterError = restarted.refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, successor.deps);
     await vi.advanceTimersByTimeAsync(restarted.REFRESH_AHEAD_WAIT_MS);
-    await expect(afterError).resolves.toEqual({ outcome: 'still-running' });
+    await expect(afterError).resolves.toEqual({ outcome: 'hung' });
     expect(successor.spawnImpl).not.toHaveBeenCalled();
     firstHarness.children[0]!.emit('close', 1, null);
   });
@@ -1081,6 +1086,43 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
     expect(h.readFileStore).not.toHaveBeenCalled();
     expect(h.spawnImpl).not.toHaveBeenCalled();
   });
+
+  it.each(['store-mode', 'parent-mode', 'ancestor-mode', 'non-directory', 'alias-target-mode', 'alias-parent-mode'] as const)(
+    'refuses an unsafe existing credential store (%s) before reading or spawning', async (kind) => {
+      const h = harness({ fileStore: store(START.getTime() + 1_000) });
+      const ancestor = privateStoreDir();
+      const parent = join(ancestor, 'existing-parent');
+      const selected = join(parent, 'existing-store');
+      mkdirSync(parent, { mode: 0o700 });
+      mkdirSync(selected, { mode: 0o700 });
+      if (kind === 'store-mode') chmodSync(selected, 0o755);
+      if (kind === 'parent-mode') chmodSync(parent, 0o777);
+      if (kind === 'ancestor-mode') chmodSync(ancestor, 0o777);
+      if (kind === 'non-directory') {
+        rmdirSync(selected);
+        writeFileSync(selected, 'not-a-store', { mode: 0o600 });
+      }
+      if (kind === 'alias-target-mode') {
+        const target = join(parent, 'alias-target');
+        mkdirSync(target, { mode: 0o700 });
+        chmodSync(target, 0o755);
+        rmdirSync(selected);
+        symlinkSync(target, selected, 'dir');
+      }
+      if (kind === 'alias-parent-mode') {
+        const target = join(ancestor, 'safe-target');
+        mkdirSync(target, { mode: 0o700 });
+        chmodSync(parent, 0o777);
+        rmdirSync(selected);
+        symlinkSync(target, selected, 'dir');
+      }
+
+      await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: selected }, h.deps))
+        .resolves.toEqual({ outcome: 'owner-unavailable' });
+      expect(h.readFileStore).not.toHaveBeenCalled();
+      expect(h.spawnImpl).not.toHaveBeenCalled();
+    },
+  );
 
   it('initializes a private store under a conventional current-user 0755 parent', async () => {
     const h = harness({ fileStore: store(START.getTime() + 1_000) });
@@ -1534,5 +1576,24 @@ describe('refreshClaudeLoginAhead: shutdown drain admission and close join', () 
       if (native.exitCode === null) native.stdin!.end();
       await ended;
     }
+  });
+
+  it('reports a verified child as hung after its hard cap without releasing or killing it', async () => {
+    const dir = privateStoreDir();
+    const h = harness({ fileStore: store(START.getTime() + 1_000) });
+    const first = refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps);
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_WAIT_MS);
+    await expect(first).resolves.toEqual({ outcome: 'still-running' });
+
+    await vi.advanceTimersByTimeAsync(REFRESH_AHEAD_HARD_CAP_MS - REFRESH_AHEAD_WAIT_MS);
+    await expect(refreshClaudeLoginAhead('claude', { CLAUDE_CONFIG_DIR: dir }, h.deps))
+      .resolves.toEqual({ outcome: 'hung' });
+    expect(h.spawnImpl).toHaveBeenCalledOnce();
+    expect(h.children[0]!.kill).not.toHaveBeenCalled();
+    expect(existsSync(ownerPath(dir))).toBe(true);
+
+    h.children[0]!.emit('close', 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(existsSync(ownerPath(dir))).toBe(false);
   });
 });

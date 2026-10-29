@@ -46,6 +46,7 @@ function adaptersFor(child: FakeChild, log: ReturnType<typeof capture>['log'], t
   const spawnImpl = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
   return createPrimaryModelProbeAdapters(undefined, {
     getProviderBinary: () => 'claude',
+    resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
     ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
     probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
     probeTrigger: trigger as 'periodic',
@@ -202,6 +203,7 @@ describe('primary model probe lifecycle log', () => {
     const spawnImpl = vi.fn(() => { throw new Error('spawn EMFILE'); }) as unknown as typeof import('node:child_process').spawn;
     const adapters = createPrimaryModelProbeAdapters(undefined, {
       getProviderBinary: () => 'claude',
+      resolveProviderBinaryIdentity: (binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) }),
       ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' }),
       probeBinaryCommand: (binary, args, env, options) => runBinaryCommandProbe(binary, args, env, options, spawnImpl),
       probeTrigger: 'periodic',

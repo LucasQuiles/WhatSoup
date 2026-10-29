@@ -22,11 +22,13 @@ import {
   PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE,
   calculatePeriodicProbeDelay,
   calculatePeriodicProbeBackoff,
-  buildServingContextReceipt,
   buildPrimaryProbeAdapterDeps,
   formatPrimaryModelUsabilityEvidence,
 } from '../../../src/runtimes/agent/primary-readiness-probe.ts';
-import { homedir } from 'node:os';
+import {
+  buildPrimaryProbeSelectorEnv,
+  buildPrimaryProbeServiceContext,
+} from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 
 const NOW = 1_786_000_000_000;
 
@@ -66,51 +68,61 @@ describe('primary-readiness-probe module units', () => {
     expect(calculatePeriodicProbeBackoff(99, false)).toBe(Math.log2(PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE));
   });
 
-  it('P3: receipt is content-free, falls back to homedir on null cwd, maps credential-store classes, unknown provider -> null class', () => {
-    const r = buildServingContextReceipt('claude-cli', 'opus', '/some/config/root');
+  it('P3: service context binds generation and effective selectors without raw paths', () => {
+    const env = buildPrimaryProbeSelectorEnv('claude-cli', 'opus', undefined);
+    const r = buildPrimaryProbeServiceContext({
+      provider: 'claude-cli',
+      model: 'opus',
+      serviceGeneration: 'generation-a',
+      cwd: '/some/config/root',
+      selectorEnv: env,
+      binaryState: 'missing',
+    });
     expect(r.provider).toBe('claude-cli');
     expect(r.model).toBe('opus');
-    expect(r.credentialStoreClass).toBe('keychain-or-file-store');
-    // Content-free: the receipt must not contain the raw path anywhere.
+    expect(r.serviceGeneration).toBe('generation-a');
+    expect(r.binaryState).toBe('missing');
+    expect(r.binarySha256).toBeNull();
     expect(JSON.stringify(r)).not.toContain('/some/config/root');
-    expect(typeof r.configRootHash).toBe('string');
+    expect(JSON.stringify(r)).not.toContain('CLAUDE_');
 
-    const rHome = buildServingContextReceipt('opencode-cli', null, null);
-    expect(rHome.credentialStoreClass).toBe('keyring');
-    expect(rHome.model).toBeNull();
-    // Null cwd -> homedir hash, still content-free.
-    expect(JSON.stringify(rHome)).not.toContain(homedir());
-
-    expect(buildServingContextReceipt('anthropic-api', undefined, null).credentialStoreClass).toBe('api-key');
-    expect(buildServingContextReceipt('openai-api', undefined, null).credentialStoreClass).toBe('api-key');
-    // Unknown provider: no credential-store class, no binary digest (the
-    // defensive catch path) — pin the full receipt shape decisively.
-    const rUnknown = buildServingContextReceipt('mystery-provider', undefined, null);
-    expect(rUnknown).toEqual({
-      configRootHash: rUnknown.configRootHash,
-      credentialStoreClass: null,
-      binaryDigest: null,
-      provider: 'mystery-provider',
-      model: null,
+    const api = buildPrimaryProbeServiceContext({
+      provider: 'anthropic-api',
+      model: 'opus',
+      serviceGeneration: 'generation-a',
+      cwd: '/some/config/root',
+      selectorEnv: {},
+      binaryState: 'none',
     });
+    expect(api).toMatchObject({
+      provider: 'anthropic-api',
+      model: 'opus',
+      serviceGeneration: 'generation-a',
+      binaryState: 'none',
+      resolvedBinaryPathHash: null,
+      binarySha256: null,
+    });
+    expect(api.launchContextHash).toMatch(/^[a-f0-9]{12}$/);
+    expect(JSON.stringify(api)).not.toContain('/some/config/root');
   });
 
-  it('P4: adapter deps carry the bound receipt and the cwd fallback', () => {
+  it('P4: adapter deps carry the immutable service context and trigger', () => {
     const gate = { acquire: vi.fn() } as never;
-    const deps = buildPrimaryProbeAdapterDeps('anthropic-api', 'opus', null, 8080, gate);
-    expect(deps.cwd).toBe(homedir());
-    expect(deps.egressProxyPort).toBe(8080);
-    expect(deps.servingContext?.provider).toBe('anthropic-api');
-    expect(deps.servingContext?.model).toBe('opus');
-
-    const deps2 = buildPrimaryProbeAdapterDeps('claude-cli', null, '/cfg', undefined, gate);
-    expect(deps2.servingContext?.model).toBeNull();
-    expect(deps2).toEqual({
+    const serviceContext = buildPrimaryProbeServiceContext({
+      provider: 'anthropic-api',
+      model: 'opus',
+      serviceGeneration: 'generation-a',
       cwd: '/cfg',
-      egressProxyPort: undefined,
-      providerExecutionGate: gate,
-      servingContext: buildServingContextReceipt('claude-cli', null, '/cfg'),
+      selectorEnv: {},
+      binaryState: 'none',
     });
+    const deps = buildPrimaryProbeAdapterDeps('anthropic-api', 'opus', '/cfg', 8080, gate, 'startup', serviceContext, true);
+    expect(deps.cwd).toBe('/cfg');
+    expect(deps.egressProxyPort).toBe(8080);
+    expect(deps.serviceContext?.provider).toBe('anthropic-api');
+    expect(deps.serviceContext?.model).toBe('opus');
+    expect(deps.requireServiceContext).toBe(true);
+    expect(deps.probeTrigger).toBe('startup');
   });
 
   it('P5: evidence string appends reason/suggestion only when present and routes every value through the formatter', () => {

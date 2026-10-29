@@ -121,13 +121,19 @@ export type ClaudeRefreshAheadResult =
   /** The refresh owner cannot be read or published; defer without claiming a live child. */
   | { outcome: 'owner-unavailable' }
   /** The caller's wait ended while the child still runs: defer the probe, spawn nothing killable. */
-  | { outcome: 'still-running' };
+  | { outcome: 'still-running' }
+  /**
+   * A verified refresh is unhealthy: it exceeded this parent's hard cap, or it
+   * was adopted from a prior parent whose elapsed duration cannot be bounded.
+   * Its ownership fence remains held; callers must not signal or replace it.
+   */
+  | { outcome: 'hung' };
 
 /** True when a refresh-ahead result says the probe must be deferred. */
 export function refreshAheadDefersProbe(result: unknown): boolean {
   if (typeof result !== 'object' || result === null) return false;
   const refresh = result as { outcome?: unknown; exitCode?: unknown; signal?: unknown };
-  return refresh.outcome === 'owner-unavailable' || refresh.outcome === 'still-running' || refresh.outcome === 'spawn-failed'
+  return refresh.outcome === 'owner-unavailable' || refresh.outcome === 'still-running' || refresh.outcome === 'hung' || refresh.outcome === 'spawn-failed'
     || (refresh.outcome === 'ran' && (refresh.exitCode !== 0 || refresh.signal !== null));
 }
 
@@ -142,7 +148,7 @@ export interface ClaudeRefreshAheadDeps extends ClaudeCredentialReadDeps {
 
 const inFlight = new Map<string, Promise<ClaudeRefreshAheadResult>>();
 /** Refresh-ahead children still alive per storage dir, including ones past the hard cap. */
-const liveChildren = new Map<string, { fence: string; verified: boolean; closed: Promise<void> }>();
+const liveChildren = new Map<string, { fence: string; verified: boolean; unhealthy: boolean; closed: Promise<void> }>();
 let shutdownAdmissionClosed = false;
 
 /** A content-free deadline result, distinct from an unexpected drain failure. */
@@ -181,6 +187,39 @@ type RefreshOwnerLocation = {
 };
 
 /**
+ * Existing stores receive the same ownership, privacy, and ancestor checks as
+ * a store initialized by refresh-ahead. A final symlink is an established
+ * canonical alias, so it may resolve to the store; the alias and its physical
+ * parent chain, plus the resolved store and its physical ancestors, must
+ * remain private and ownership-safe.
+ */
+function validatePrivateStoreParent(parent: string, uid: number): boolean {
+  const parentIdentity = lstatSync(parent);
+  if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink()
+    || parentIdentity.uid !== uid || (parentIdentity.mode & 0o022) !== 0) return false;
+  for (let ancestor = dirname(parent);; ancestor = dirname(ancestor)) {
+    const ancestorIdentity = lstatSync(ancestor);
+    if (!ancestorIdentity.isDirectory() || ancestorIdentity.isSymbolicLink()
+      || (ancestorIdentity.uid !== 0 && ancestorIdentity.uid !== uid)
+      || ((ancestorIdentity.mode & 0o022) !== 0 && (ancestorIdentity.mode & 0o1000) === 0)) return false;
+    if (dirname(ancestor) === ancestor) break;
+  }
+  return true;
+}
+
+function validateExistingCredentialStore(requested: string, store: string): boolean {
+  if (typeof process.getuid !== 'function') return false;
+  const uid = process.getuid();
+  const requestedIdentity = lstatSync(requested);
+  if (!requestedIdentity.isDirectory() && !requestedIdentity.isSymbolicLink()) return false;
+  if (requestedIdentity.uid !== uid) return false;
+  if (!validatePrivateStoreParent(realpathSync(dirname(requested)), uid)) return false;
+  const identity = lstatSync(store);
+  if (!identity.isDirectory() || identity.isSymbolicLink() || identity.uid !== uid || (identity.mode & 0o077) !== 0) return false;
+  return validatePrivateStoreParent(dirname(store), uid);
+}
+
+/**
  * The durable owner namespace is the canonical effective store, not its
  * spelling. A failure to establish that namespace fails closed without
  * claiming a live refresh owner.
@@ -191,6 +230,7 @@ function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | nu
     let store: string;
     try {
       store = realpathSync(requested);
+      if (!validateExistingCredentialStore(requested, store)) return null;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
       // Render admission permits one absent leaf, but never missing ancestors or a dangling link.
@@ -354,9 +394,10 @@ export function refreshClaudeLoginAhead(
   if (run) return waitBounded(run);
   // A child past its hard cap no longer blocks the wait, but while it is
   // alive no second refresh child and no killable probe may start.
-  if (live) return Promise.resolve({ outcome: 'still-running' });
+  if (live) return Promise.resolve({ outcome: live.unhealthy ? 'hung' : 'still-running' });
   // A previous parent may have died with its child alive. Its claim must win
-  // over a newly renewed credential or any later expiry fast path.
+  // over a newly renewed credential or any later expiry fast path. Its duration
+  // is unknowable after adoption, so report an alertable hold without signalling it.
   const guard = acquireMutationGuard(location);
   if (guard === null) return Promise.resolve({ outcome: 'owner-unavailable' });
   let created: Promise<ClaudeRefreshAheadResult> | undefined;
@@ -366,7 +407,7 @@ export function refreshClaudeLoginAhead(
   let released = false;
   try {
     const priorClaim = reconcileOwnerClaim(location, deps);
-    if (priorClaim === 'held') return Promise.resolve({ outcome: 'still-running' });
+    if (priorClaim === 'held') return Promise.resolve({ outcome: 'hung' });
     if (priorClaim === 'unavailable') return Promise.resolve({ outcome: 'owner-unavailable' });
     created = runRefreshAhead(binary, env, deps, release, key, location).finally(release);
   } catch {
@@ -474,9 +515,10 @@ async function runRefreshAhead(
     child.unref?.();
     let resolveClosed!: () => void;
     const closed = new Promise<void>((resolveClose) => { resolveClosed = resolveClose; });
-    const live = { fence, verified: false, closed };
+    const live = { fence, verified: false, unhealthy: false, closed };
     liveChildren.set(key, live);
     const hardCap = setTimeout(() => {
+      live.unhealthy = true;
       release();
       clearInterval(stillRunning);
       quietly(() => log.error(
