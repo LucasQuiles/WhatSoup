@@ -22,6 +22,7 @@ import type {
   ProviderExecutionLease,
 } from '../provider-execution-gate.ts';
 import { shortHash } from '../../../lib/short-hash.ts';
+import { createChildLogger } from '../../../logger.ts';
 
 export interface PrimaryModelProbeAdapterDeps {
   cwd?: string;
@@ -78,12 +79,22 @@ const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
  * servers without the env a real turn gets (e.g. the M365 bridge env); a server
  * that exits is recorded in the config dir's needs-auth cache, and the next real
  * session skips that server until the cache entry expires.
+ *
+ * The host `claude` binary is not pinned, so a CLI release without the flag must
+ * not turn a usable model into a failed probe. Such a CLI rejects the argv before
+ * any model call (`error: unknown option '--strict-mcp-config'`); the probe then
+ * runs once more without the flag, which is the behavior before the flag was
+ * added. See {@link rejectsStrictMcpConfig}.
  */
+const CLAUDE_STRICT_MCP_CONFIG_FLAG = '--strict-mcp-config';
 const CLAUDE_MODEL_PROBE_BASE_ARGS: readonly string[] = [
   '-p',
   CLAUDE_MODEL_PROBE_PROMPT,
-  '--strict-mcp-config',
+  CLAUDE_STRICT_MCP_CONFIG_FLAG,
 ];
+/** The CLI argument parser's rejection of the flag itself, not a model error. */
+const STRICT_MCP_CONFIG_UNKNOWN_OPTION = /unknown option ['"]?--strict-mcp-config(?![\w-])/i;
+const log = createChildLogger('primary-model-usability-adapters');
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
@@ -236,9 +247,9 @@ async function probeCliModel(
       executionLease?.setPhase('executing');
       executionLease?.markProgress();
     }
-    result = await probe(
+    const runProbe = (probeArgs: string[]): Promise<BinaryAuthStatusResult> => probe(
       binary,
-      args,
+      probeArgs,
       env,
       {
         ...(deps.cwd ? { cwd: deps.cwd } : {}),
@@ -252,6 +263,15 @@ async function probeCliModel(
         } : {}),
       },
     );
+    result = await runProbe(args);
+    if (rejectsStrictMcpConfig(args, result) && !signal?.aborted) {
+      log.warn(
+        { binary },
+        'claude CLI rejected --strict-mcp-config; model probe re-ran without it, so it starts '
+          + 'plugin MCP servers (upgrade the host claude CLI)',
+      );
+      result = await runProbe(args.filter((arg) => arg !== CLAUDE_STRICT_MCP_CONFIG_FLAG));
+    }
     // Injected test/probe adapters predate onProcessClosed and may not invoke
     // it. Their returned promise is their complete process-lifetime contract.
     terminalizeExecutionLease();
@@ -286,6 +306,18 @@ function modelProbeCommand(
   // --model) instead of never probing at all — a model-less instance must be able
   // to recover (subscription auth needs no per-model credential).
   return [...CLAUDE_MODEL_PROBE_BASE_ARGS, ...(model === null ? [] : ['--model', model])];
+}
+
+/**
+ * True when the probe argv carried `--strict-mcp-config` and the CLI's argument
+ * parser rejected that flag as unknown. The parser exits before any model call,
+ * so the failure says nothing about model usability and must not map to
+ * `unknown` (which would mark the model unusable and degrade health).
+ */
+function rejectsStrictMcpConfig(args: readonly string[], result: BinaryAuthStatusResult): boolean {
+  return result.status === 'failed'
+    && args.includes(CLAUDE_STRICT_MCP_CONFIG_FLAG)
+    && STRICT_MCP_CONFIG_UNKNOWN_OPTION.test(result.output);
 }
 
 function modelProbeEnv(
