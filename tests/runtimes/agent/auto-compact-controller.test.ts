@@ -40,6 +40,7 @@ import {
   SILENT_COMPACT_TTL_MS,
   AUTO_COMPACT_BACKOFF_TIERS_MS,
   AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
+  AUTO_COMPACT_SUCCESS_COOLDOWN_MS,
 } from '../../../src/runtimes/agent/auto-compact-controller.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -146,6 +147,32 @@ describe('AutoCompactController — healthSnapshot', () => {
       activeBackoffScopes: 0,
       worstCurrentBackoffTier: 0,
     });
+  });
+
+  // #3717 regression: three instances reported backoff after an expired
+  // rapid-rearm backoff was followed by a successful compact, because the
+  // snapshot read the success cooldown plus the retained streak as backoff.
+  it('reports idle after an expired backoff is followed by a successful compact', () => {
+    const c = new AutoCompactController(1000);
+    vi.setSystemTime(0);
+    c.recordAutoCompactSuccess('scope-a');
+    vi.setSystemTime(60_000);
+    c.recordAutoCompactRapidRearm('scope-a', 0, 60_000);
+    expect(c.healthSnapshot(61_000).state).toBe('backoff');
+
+    // The 15-min tier-1 backoff has expired; the next compact succeeds.
+    const later = 60_000 + AUTO_COMPACT_BACKOFF_TIERS_MS[1] + 5 * 60_000;
+    vi.setSystemTime(later);
+    c.recordAutoCompactSuccess('scope-a');
+
+    expect(c.healthSnapshot(later + 1_000)).toEqual({
+      state: 'idle',
+      activeBackoffScopes: 0,
+      worstCurrentBackoffTier: 0,
+    });
+    // The streak is retained; only the active backoff ended.
+    expect(c.consecutiveRapidRearms.get('scope-a')).toBe(1);
+    expect(c.cooldownUntil.get('scope-a')).toBe(later + AUTO_COMPACT_SUCCESS_COOLDOWN_MS);
   });
 
   it('clears current state on scope cleanup while preserving lifetime counters', () => {
