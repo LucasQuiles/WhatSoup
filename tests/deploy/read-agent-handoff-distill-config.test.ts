@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { writeKeychainFixture } from './keychain-security-preload-fixture.ts';
+
 const roots: string[] = [];
 const reader = join(process.cwd(), 'deploy/lib/read-agent-handoff-distill-config.mjs');
 
@@ -39,6 +41,8 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string, shape?: s
 } {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'whatsoup-handoff-launcher-')));
   roots.push(root);
+  const fixture = writeKeychainFixture(root);
+  const keychainResponses = JSON.stringify({ ['deepseek\u0000fixture-user']: 'synthetic-key\n' });
   const bin = join(root, 'bin');
   const configHome = join(root, 'config');
   const instanceDir = join(configHome, 'whatsoup', 'instances', 'fixture-agent');
@@ -91,7 +95,7 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string, shape?: s
     'set -euo pipefail',
     'INSTANCE=fixture-agent',
     between(source, '_DISTILL_CAPTURE_DEEPSEEK=', '\n\n# POSIX-portable symlink resolution'),
-    `NODE=${JSON.stringify(process.execPath)}`,
+    `NODE=${JSON.stringify(fixture.node)}`,
     `SCRIPT_DIR=${JSON.stringify(join(process.cwd(), 'deploy'))}`,
     `. ${JSON.stringify(join(process.cwd(), 'deploy/lib/bounded-exec.sh'))}`,
     between(source, 'macos_keychain_lookup() {', '\n# Pinned Node path'),
@@ -118,6 +122,11 @@ function runLauncherProjection(handoff: unknown, legacyModel?: string, shape?: s
       TMPDIR: root,
       LOOKUP_LOG: lookupLog,
       DEEPSEEK_API_KEY: 'synthetic-inherited-key',
+      WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+      WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: join(root, 'keychain-probe.jsonl'),
+      WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
+      WHATSOUP_TEST_KEYCHAIN_COMPAT_LOG: lookupLog,
       ...(legacyModel === undefined ? {} : { WHATSOUP_HANDOFF_DISTILL_MODEL: legacyModel }),
     },
   });

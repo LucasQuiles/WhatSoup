@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,7 +10,10 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+
+import { writeKeychainFixture } from './keychain-security-preload-fixture.ts';
 
 const repoRoot = path.resolve('.');
 const helperPath = path.join(repoRoot, 'deploy/lib/read-keychain-secret.mjs');
@@ -34,29 +38,50 @@ function withoutUser(extra: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+type KeychainProbeRecord = {
+  phase: 'ready' | 'exec';
+  fixturePath?: string;
+  command?: string;
+  args?: string[];
+  childPath?: string | null;
+  childHome?: string | null;
+  childHasSentinel?: boolean;
+  timeout?: number | null;
+  killSignal?: string | null;
+  maxBuffer?: number | null;
+  stdio?: unknown;
+};
+
+function readKeychainProbeRecords(logPath: string): KeychainProbeRecord[] {
+  return readFileSync(logPath, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as KeychainProbeRecord);
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('deploy keyring probes without USER', () => {
-  it('uses the OS account for a direct macOS helper lookup with no account argument', () => {
+  it('binds a direct macOS helper lookup to trusted PATH without ambient child environment', () => {
     const root = makeRoot();
-    const bin = path.join(root, 'bin');
-    const log = path.join(root, 'security.log');
-    mkdirSync(bin);
-    writeExecutable(
-      path.join(bin, 'security'),
-      [
-        '#!/usr/bin/env bash',
-        `printf '%s\\n' "$*" > ${JSON.stringify(log)}`,
-        `printf 'synthetic-value\\n'`,
-        '',
-      ].join('\n'),
-    );
+    const log = path.join(root, 'keychain-probe.jsonl');
+    const fixture = writeKeychainFixture(root);
+    const account = os.userInfo().username;
+    const sentinel = 'ambient-child-env-sentinel';
 
-    const result = spawnSync(process.execPath, [helperPath, 'openai', ''], {
+    const result = spawnSync(fixture.node, [helperPath, 'openai', ''], {
       encoding: 'utf8',
-      env: withoutUser({ PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}` }),
+      env: withoutUser({
+        HOME: root,
+        PATH: path.join(root, 'untrusted-bin') + ':' + (process.env.PATH ?? '/usr/bin:/bin'),
+        WHATSOUP_TEST_KEYCHAIN_CHILD_ENV_SENTINEL: sentinel,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: log,
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: JSON.stringify({ ['openai\u0000' + account]: 'synthetic-value\n' }),
+      }),
       timeout: SPAWN_TIMEOUT_MS,
       killSignal: 'SIGKILL',
     });
@@ -65,9 +90,128 @@ describe('deploy keyring probes without USER', () => {
     expect(result.signal).toBeNull();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe('synthetic-value\n');
-    expect(readFileSync(log, 'utf8')).toBe(
-      `find-generic-password -s openai -a ${os.userInfo().username} -w\n`,
-    );
+    const records = readKeychainProbeRecords(log);
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ phase: 'ready', fixturePath: fixture.securityFixture });
+    expect(records[1]?.childPath).toBe('/usr/bin:/bin:/usr/sbin:/sbin');
+    expect(records[1]?.childHome).toBe(root);
+    expect(records[1]?.childHasSentinel).toBe(false);
+    expect(records[1]).toMatchObject({
+      phase: 'exec',
+      command: 'security',
+      args: ['find-generic-password', '-s', 'openai', '-a', account, '-w'],
+      timeout: 3_000,
+      killSignal: 'SIGKILL',
+      maxBuffer: 4_096,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  });
+
+  it('fails before the helper when the test preload is missing', () => {
+    const root = makeRoot();
+    const log = path.join(root, 'keychain-probe.jsonl');
+    const fixture = writeKeychainFixture(root);
+    const result = spawnSync(process.execPath, [
+      '--import', pathToFileURL(path.join(root, 'missing-preload.mjs')).href,
+      helperPath, 'openai', os.userInfo().username,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: log,
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: '{}',
+      },
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('ERR_MODULE_NOT_FOUND');
+    expect(existsSync(log)).toBe(false);
+  });
+
+
+  it('fails before the helper when the test preload is malformed', () => {
+    const root = makeRoot();
+    const log = path.join(root, 'keychain-probe.jsonl');
+    const fixture = writeKeychainFixture(root);
+    const malformed = path.join(root, 'malformed-preload.mjs');
+    writeFileSync(malformed, 'this is not JavaScript', { mode: 0o600 });
+    const result = spawnSync(process.execPath, [
+      '--import', pathToFileURL(malformed).href,
+      helperPath, 'openai', os.userInfo().username,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: log,
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: '{}',
+      },
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('SyntaxError');
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it('rejects an unexpected executable without starting the synthetic security fixture', () => {
+    const root = makeRoot();
+    const log = path.join(root, 'keychain-probe.jsonl');
+    const fixture = writeKeychainFixture(root);
+    const probe = path.join(root, 'unexpected-command.mjs');
+    writeFileSync(probe, "import { execFileSync } from 'node:child_process'; execFileSync('unexpected-command');", { mode: 0o600 });
+    const result = spawnSync(fixture.node, [probe], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: log,
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: '{}',
+      },
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('unexpected synthetic child command');
+    expect(readKeychainProbeRecords(log)).toEqual([
+      expect.objectContaining({ phase: 'ready', fixturePath: fixture.securityFixture }),
+    ]);
+  });
+
+  it('refuses an unmapped helper service and account before synthetic execution', () => {
+    const root = makeRoot();
+    const log = path.join(root, 'keychain-probe.jsonl');
+    const fixture = writeKeychainFixture(root);
+    const result = spawnSync(fixture.node, [helperPath, 'unmapped-service', 'unmapped-account'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: log,
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: '{}',
+      },
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(readKeychainProbeRecords(log)).toEqual([
+      expect.objectContaining({ phase: 'ready', fixturePath: fixture.securityFixture }),
+    ]);
   });
 
   it('runs the actual presence checker without USER and keeps returned values off stdout', () => {
