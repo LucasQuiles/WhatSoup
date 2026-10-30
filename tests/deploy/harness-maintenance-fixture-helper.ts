@@ -121,7 +121,12 @@ const FAKE_SYSTEMCTL = [
   '  list-units) cat "$d/units" 2>/dev/null; exit "$(cat "$d/list.rc" 2>/dev/null || echo 0)" ;;',
   '  list-unit-files) cat "$d/unit-files" 2>/dev/null; exit "$(cat "$d/unit-files.rc" 2>/dev/null || echo 0)" ;;',
   '  show-environment) cat "$d/manager.env" 2>/dev/null; exit 0 ;;',
-  '  show) for last; do :; done; cat "$d/$last.show" 2>/dev/null; exit 0 ;;',
+  '  show)',
+  '    if [ "$2" = "-p" ] && [ "$3" = "UnitPath" ] && [ "$4" = "--value" ]; then',
+  '      cat "$d/unit-path" 2>/dev/null',
+  '      exit "$(cat "$d/unit-path.rc" 2>/dev/null || echo 0)"',
+  '    fi',
+  '    for last; do :; done; cat "$d/$last.show" 2>/dev/null; exit 0 ;;',
   '  is-active) echo inactive; exit 3 ;;',
   'esac',
   'exit 0',
@@ -186,7 +191,8 @@ export function makeHarness(): Harness {
   const versions = path.join(home, '.local/share/claude/versions');
   const localBin = path.join(home, '.local/bin');
   const systemdDir = path.join(home, 'systemd-fixture');
-  for (const dir of [fakeBin, versions, localBin, systemdDir, path.join(home, 'tmp'), path.join(home, 'Library/LaunchAgents')]) {
+  const systemdUnitRoot = path.join(home, '.config', 'systemd', 'user');
+  for (const dir of [fakeBin, versions, localBin, systemdDir, systemdUnitRoot, path.join(home, 'tmp'), path.join(home, 'Library/LaunchAgents')]) {
     mkdirSync(dir, { recursive: true, mode: 0o755 });
   }
   const h: Harness = {
@@ -248,6 +254,7 @@ export function makeHarness(): Harness {
     HM_ALERT_LOG: h.alertLog,
     HM_SYSTEMD_DIR: systemdDir,
   };
+  writeFileSync(path.join(systemdDir, 'unit-path'), `${systemdUnitRoot}\n`);
   return h;
 }
 

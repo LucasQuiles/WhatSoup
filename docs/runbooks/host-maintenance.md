@@ -78,8 +78,14 @@ resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
 update. A launchd instance is any `com.whatsoup.<name>` plist that passes
 `<name>` as its argument; a systemd instance is any `whatsoup@<name>` unit,
-including installed disabled or never-loaded instances, assumed to start
-through the installed `~/.local/bin/whatsoup` link as
+including installed disabled or never-loaded instances. The job asks the live
+user manager for its `UnitPath`, then discovers direct unit files or aliases,
+per-instance `.service.d` drop-ins, and links in `.wants` or `.requires`
+directories in those paths. A UnitPath read or directory it cannot read is
+unknown, not an empty inventory. UnitPath is a shell-quoted array rendering;
+the job accepts only unquoted absolute path tokens and treats a quoted or
+escaped token as unknown rather than interpreting manager output. Instances are
+assumed to start through the installed `~/.local/bin/whatsoup` link as
 `deploy/whatsoup@.service` does (an `ExecStart` override is not read).
 
 Every instance is resolved only when the wrapper it starts through, followed
@@ -102,8 +108,9 @@ records `claude-config-isolation: refused`, and ends `degraded` until the
 selectors are reconciled.
 
 On systemd the user manager environment, then `Environment=`, then
-`EnvironmentFiles=` are applied, as the launcher does. Finding no instance at
-all holds with a warning alert. The target is the newest release older than `npm.cooldown_minutes`
+`EnvironmentFiles=` are applied from the manager's resolved unit definition,
+as the launcher does. Finding no instance at all holds with a warning alert.
+The target is the newest release older than `npm.cooldown_minutes`
 (never a downgrade or prerelease). The install runs from the verified previous
 binary; a failed install or postcheck swaps the launcher link back to that
 binary (never a network reinstall) and still ends `degraded`. Event statuses

@@ -721,12 +721,83 @@ systemd_environment_file() {
   done < "$1"
 }
 
+# systemd_configured_instance_units <live user-manager UnitPath>: print each
+# configured WhatSoup instance candidate found in the manager's actual search
+# paths. A missing or unreadable advertised path is not an empty inventory.
+systemd_configured_instance_units() {
+  local paths="$1" root entry dependency unit
+  local IFS=' '
+  local -a roots
+  case "$paths" in
+    ""|[[:space:]]*|*[[:space:]]|*'  '*|*$'\t'*|*$'\n'*|*$'\r'*)
+      echo "systemctl UnitPath is empty or malformed"
+      return 1 ;;
+  esac
+  read -r -a roots <<< "$paths" || {
+    echo "systemctl UnitPath could not be parsed"
+    return 1
+  }
+  [ "${#roots[@]}" -gt 0 ] || {
+    echo "systemctl UnitPath has no user-manager search paths"
+    return 1
+  }
+  for root in "${roots[@]}"; do
+    case "$root" in
+      /*) ;;
+      *) echo "systemctl UnitPath contains a non-absolute path"; return 1 ;;
+    esac
+    # UnitPath is a shell-quoted array rendering. This reader deliberately
+    # accepts only unquoted path tokens and never evaluates manager output.
+    case "$root" in
+      *[![:alnum:]_./+@=,:-]*)
+        echo "systemctl UnitPath contains an unsupported quoted or escaped path"
+        return 1 ;;
+    esac
+    [ -d "$root" ] && [ -r "$root" ] && [ -x "$root" ] || {
+      echo "systemctl UnitPath directory is not readable: $root"
+      return 1
+    }
+    for entry in "$root"/whatsoup@*.service; do
+      [ -f "$entry" ] || [ -L "$entry" ] || continue
+      unit="${entry##*/}"
+      case "$unit" in whatsoup@?*.service) printf '%s\n' "$unit" ;; esac
+    done
+    for entry in "$root"/whatsoup@*.service.d; do
+      [ -d "$entry" ] || continue
+      unit="${entry##*/}"
+      unit="${unit%.d}"
+      case "$unit" in whatsoup@?*.service) printf '%s\n' "$unit" ;; esac
+    done
+    for dependency in "$root"/*.wants "$root"/*.requires; do
+      [ -d "$dependency" ] || continue
+      [ -r "$dependency" ] && [ -x "$dependency" ] || {
+        echo "systemctl UnitPath dependency directory is not readable: $dependency"
+        return 1
+      }
+      for entry in "$dependency"/whatsoup@*.service; do
+        [ -f "$entry" ] || [ -L "$entry" ] || continue
+        unit="${entry##*/}"
+        case "$unit" in whatsoup@?*.service) printf '%s\n' "$unit" ;; esac
+      done
+    done
+  done
+}
+
 claude_inventory_systemd() {
-  local loaded unit_files units unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
+  local loaded unit_files configured_units units unit_paths unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
   SYSTEMCTL_BIN="$(job_tool systemctl)" || {
     echo "systemctl not found on the job PATH"
     return 1
   }
+  unit_paths="$("$SYSTEMCTL_BIN" --user show -p UnitPath --value 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "systemctl UnitPath read failed rc=$rc"
+    return 1
+  fi
+  if ! configured_units="$(systemd_configured_instance_units "$unit_paths")"; then
+    echo "$configured_units"
+    return 1
+  fi
   loaded="$("$SYSTEMCTL_BIN" --user list-units --all --type=service --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "systemctl list-units failed rc=$rc"
@@ -738,7 +809,7 @@ claude_inventory_systemd() {
     echo "systemctl list-unit-files failed rc=$rc"
     return 1
   fi
-  units="$(printf '%s\n%s\n' "$loaded" "$unit_files" | awk '$1 ~ /^whatsoup@.+\.service$/ && !seen[$1]++ { print $1 }')" || {
+  units="$(printf '%s\n%s\n%s\n' "$loaded" "$unit_files" "$configured_units" | awk '$1 ~ /^whatsoup@.+\.service$/ && !seen[$1]++ { print $1 }')" || {
     echo "systemctl unit inventory could not be normalized"
     return 1
   }
@@ -773,22 +844,22 @@ claude_inventory_systemd() {
     fi
     if [ "$manager_unreadable" -eq 1 ]; then
       claude_consumer_record "$name" systemd unknown "" "" "" "user manager environment is not statically readable"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "manager unit definition" "?" "?" "?" "?"
       continue
     fi
     if ! show="$("$SYSTEMCTL_BIN" --user show -p Environment -p EnvironmentFiles "$unit" 2>/dev/null)"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "systemctl show failed for $unit"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "manager unit definition" "?" "?" "?" "?"
       continue
     fi
     if ! systemd_unit_environment "$show"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "unit environment for $unit is not statically readable"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "manager unit definition" "?" "?" "?" "?"
       continue
     fi
-    # `systemctl show` reports the unit as loaded, which is also its next launch unless the unit
-    # file changed without a daemon-reload.
-    claude_instance_env_record "$name" systemd "loaded unit" \
+    # The manager resolves the current unit definition; its next launch can differ only after
+    # that definition changes without a daemon-reload.
+    claude_instance_env_record "$name" systemd "manager unit definition" \
       "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_SECURE" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
     if [ "$wrapper_ok" -eq 0 ]; then
       claude_consumer_record "$name" systemd unknown "" "" "" "$wrapper_reason"
