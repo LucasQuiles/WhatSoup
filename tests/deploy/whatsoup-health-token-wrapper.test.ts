@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { fakeTimeoutBody } from './fake-timeout-helper.ts';
+import { writeKeychainFixture } from './keychain-security-preload-fixture.ts';
 
 const tmp = trackTmpDirs('');
 
@@ -81,6 +83,10 @@ function runKeyringLookupProbe(
   scenario: 'canonical-hit' | 'canonical-miss-legacy-hit' = 'canonical-hit',
 ): { stdout: string; log: string } {
   const tmpDir = tmp.make('whatsoup-wrapper-health-token');
+  const fixture = writeKeychainFixture(tmpDir);
+  const keychainResponses = scenario === 'canonical-hit'
+    ? JSON.stringify({ ['whatsoup-health-token\u0000test-instance']: 'canonical-secret\n' })
+    : JSON.stringify({ ['whatsoup_health\u0000local-user']: 'legacy-keyring-token\n' });
   const binDir = path.join(tmpDir, 'bin');
   fs.mkdirSync(binDir);
   const logPath = path.join(tmpDir, 'calls.log');
@@ -92,10 +98,20 @@ function runKeyringLookupProbe(
   writeExecutable(path.join(binDir, 'secret-tool'), `#!/usr/bin/env bash\nprintf 'secret-tool %s\\n' "$*" >> "$LOG_PATH"\nif [ "$SCENARIO" = "canonical-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup-health-token" ] && [ "$4" = "user" ] && [ "$5" = "test-instance" ]; then\n  printf 'canonical-secret\\n'\n  exit 0\nfi\nif [ "$SCENARIO" = "canonical-miss-legacy-hit" ] && [ "$1" = "lookup" ] && [ "$3" = "whatsoup_health" ]; then\n  printf 'legacy-keyring-token\\n'\n  exit 0\nfi\nexit 1\n`);
 
   const scriptPath = path.join(tmpDir, 'probe.sh');
-  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${process.execPath}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n. "${path.resolve('deploy/lib/bounded-exec.sh')}"\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
+  fs.writeFileSync(scriptPath, `#!/usr/bin/env bash\nset -euo pipefail\nPATH="${binDir}:$PATH"\nexport LOG_PATH="${logPath}"\nexport SCENARIO="${scenario}"\nUSER=local-user\nNODE="${fixture.node}"\nSCRIPT_DIR="${path.resolve('deploy')}"\nWHATSOUP_HEALTH_TOKEN=shared-env-token\n. "${path.resolve('deploy/lib/bounded-exec.sh')}"\n${extractKeyringLookup(source)}\nTOKEN="$(keyring_lookup whatsoup-health-token "" user test-instance)"\nif [ -z "$TOKEN" ]; then\n  TOKEN="$(keyring_lookup whatsoup_health WHATSOUP_HEALTH_TOKEN)"\nfi\nprintf '%s\\n' "$TOKEN"\n`, 'utf8');
   fs.chmodSync(scriptPath, 0o700);
 
-  const stdout = execFileSync('bash', [scriptPath], { encoding: 'utf8' }).trim();
+  const stdout = execFileSync('bash', [scriptPath], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+      WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: path.join(tmpDir, 'keychain-probe.jsonl'),
+      WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
+      WHATSOUP_TEST_KEYCHAIN_COMPAT_LOG: logPath,
+    },
+  }).trim();
   const log = fs.readFileSync(logPath, 'utf8');
   return { stdout, log };
 }
@@ -153,6 +169,14 @@ function runHealthTokenFileProbe(
   harnessTimeoutMs = PROBE_HARNESS_TIMEOUT_MS,
 ): { status: number | null; stdout: string; stderr: string; log: string } {
   const tmpDir = tmp.make('whatsoup-wrapper-health-token-file');
+  const fixture = writeKeychainFixture(tmpDir);
+  const keychainResponses = scenario === 'keyring-hang'
+    ? JSON.stringify({ ['whatsoup-health-token\u0000fixture-bot']: { mode: 'hang' } })
+    : scenario === 'keyring-hit' || scenario === 'keyring-only'
+      ? JSON.stringify({ ['whatsoup-health-token\u0000fixture-bot']: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n' })
+      : scenario === 'legacy-hit'
+        ? JSON.stringify({ ['whatsoup_health\u0000' + os.userInfo().username]: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n' })
+        : '{}';
   const binDir = path.join(tmpDir, 'bin');
   const homeDir = path.join(tmpDir, 'home');
   const instanceDir = path.join(homeDir, '.config', 'whatsoup', 'instances', 'fixture-bot');
@@ -242,7 +266,7 @@ HOME="${homeDir}"
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_CONFIG="$XDG_CONFIG_HOME"
 INSTANCE=fixture-bot
-NODE="${process.execPath}"
+NODE="${fixture.node}"
 SCRIPT_DIR="${path.resolve('deploy')}"
 WHATSOUP_HEALTH_TOKEN=${scenario === 'preloaded-env' ? 'e'.repeat(64) : ''}
 export LOG_PATH="${logPath}"
@@ -261,7 +285,18 @@ printf 'resolved=%s\\n' "\${WHATSOUP_HEALTH_TOKEN-}"
   fs.chmodSync(scriptPath, 0o700);
 
   const startedAt = performance.now();
-  const result = spawnSync('/bin/bash', [scriptPath], { encoding: 'utf8', timeout: harnessTimeoutMs });
+  const result = spawnSync('/bin/bash', [scriptPath], {
+    encoding: 'utf8',
+    timeout: harnessTimeoutMs,
+    env: {
+      ...process.env,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+      WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: path.join(tmpDir, 'keychain-probe.jsonl'),
+      WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
+      WHATSOUP_TEST_KEYCHAIN_COMPAT_LOG: logPath,
+    },
+  });
   requireProbeCompletion(result, harnessTimeoutMs, performance.now() - startedAt);
   return {
     status: result.status,
@@ -278,6 +313,8 @@ function runHealthTokenCheckerProbe(): {
   log: string;
 } {
   const tmpDir = tmp.make('whatsoup-health-token-checker');
+  const fixture = writeKeychainFixture(tmpDir);
+  const keychainResponses = JSON.stringify({ ['whatsoup-health-token\u0000fixture-checker']: { mode: 'hang' } });
   const binDir = path.join(tmpDir, 'bin');
   const configRoot = path.join(tmpDir, 'config');
   const instanceDir = path.join(configRoot, 'whatsoup', 'instances', 'fixture-checker');
@@ -309,7 +346,7 @@ case "\${1-}" in
   -e) printf '26' ;;
   -p) printf '24' ;;
   --version) printf 'v24.15.0\n' ;;
-  *) exec "${process.execPath}" "$@" ;;
+  *) exec "${fixture.node}" "$@" ;;
 esac
 `);
 
@@ -326,6 +363,11 @@ esac
         PATH: `${binDir}:${process.env.PATH ?? ''}`,
         WHATSOUP_NODE: pinnedNode,
         XDG_CONFIG_HOME: configRoot,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: path.join(tmpDir, 'keychain-probe.jsonl'),
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
+        WHATSOUP_TEST_KEYCHAIN_COMPAT_LOG: logPath,
       },
       timeout: PROBE_HARNESS_TIMEOUT_MS,
     },
