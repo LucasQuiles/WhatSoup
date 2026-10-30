@@ -25,10 +25,7 @@ import {
   buildPrimaryProbeAdapterDeps,
   formatPrimaryModelUsabilityEvidence,
 } from '../../../src/runtimes/agent/primary-readiness-probe.ts';
-import {
-  buildPrimaryProbeSelectorEnv,
-  buildPrimaryProbeServiceContext,
-} from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
+import { buildPrimaryProbeServiceContext } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 
 const NOW = 1_786_000_000_000;
 
@@ -68,42 +65,75 @@ describe('primary-readiness-probe module units', () => {
     expect(calculatePeriodicProbeBackoff(99, false)).toBe(Math.log2(PERIODIC_PROBE_BACKOFF_MAX_MULTIPLE));
   });
 
-  it('P3: service context binds generation and effective selectors without raw paths', () => {
-    const env = buildPrimaryProbeSelectorEnv('claude-cli', 'opus', undefined);
-    const r = buildPrimaryProbeServiceContext({
-      provider: 'claude-cli',
+  it('P3: runtime-local service contexts redact selector content, preserve selector distinctions, and rotate on a fresh module', async () => {
+    const baseUrl = 'https://synthetic-user:synthetic-password@base-url.example.invalid/v1?token=synthetic-query';
+    const proxyUrl = 'http://synthetic-user:synthetic-password@proxy.example.invalid:3128/?ticket=synthetic-query';
+    const input = {
+      provider: 'anthropic-api',
       model: 'opus',
       serviceGeneration: 'generation-a',
       cwd: '/some/config/root',
-      selectorEnv: env,
-      binaryState: 'missing',
-    });
-    expect(r.provider).toBe('claude-cli');
-    expect(r.model).toBe('opus');
-    expect(r.serviceGeneration).toBe('generation-a');
-    expect(r.binaryState).toBe('missing');
-    expect(r.binarySha256).toBeNull();
-    expect(JSON.stringify(r)).not.toContain('/some/config/root');
-    expect(JSON.stringify(r)).not.toContain('CLAUDE_');
+      providerConfig: { baseUrl, apiKeyService: 'fixture-keyring-service' },
+      selectorEnv: { HTTP_PROXY: proxyUrl },
+      binaryState: 'none' as const,
+    };
+    const target = { provider: 'anthropic-api', model: 'opus' } as const;
 
-    const api = buildPrimaryProbeServiceContext({
-      provider: 'anthropic-api',
-      model: 'opus',
-      serviceGeneration: 'generation-a',
-      cwd: '/some/config/root',
-      selectorEnv: {},
-      binaryState: 'none',
-    });
-    expect(api).toMatchObject({
-      provider: 'anthropic-api',
-      model: 'opus',
-      serviceGeneration: 'generation-a',
-      binaryState: 'none',
-      resolvedBinaryPathHash: null,
-      binarySha256: null,
-    });
-    expect(api.launchContextHash).toMatch(/^[a-f0-9]{12}$/);
-    expect(JSON.stringify(api)).not.toContain('/some/config/root');
+    vi.resetModules();
+    try {
+      const firstModule = await import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts');
+      const cli = firstModule.buildPrimaryProbeServiceContext({
+        provider: 'claude-cli',
+        model: 'opus',
+        serviceGeneration: 'generation-a',
+        cwd: '/some/config/root',
+        selectorEnv: firstModule.buildPrimaryProbeSelectorEnv('claude-cli', 'opus', undefined),
+        binaryState: 'missing',
+      });
+      expect(cli).toMatchObject({ provider: 'claude-cli', model: 'opus', serviceGeneration: 'generation-a', binaryState: 'missing', binarySha256: null });
+      expect(JSON.stringify(cli)).not.toContain('/some/config/root');
+      expect(JSON.stringify(cli)).not.toContain('CLAUDE_');
+      const initial = firstModule.buildPrimaryProbeServiceContext(input);
+      const sameLiveContext = firstModule.buildPrimaryProbeServiceContext(input);
+      const changedService = firstModule.buildPrimaryProbeServiceContext({
+        ...input,
+        providerConfig: { ...input.providerConfig, apiKeyService: 'fixture-keyring-service-changed' },
+      });
+      const changedProxy = firstModule.buildPrimaryProbeServiceContext({
+        ...input,
+        selectorEnv: { HTTP_PROXY: `${proxyUrl}&changed=1` },
+      });
+      const proxyAbsent = firstModule.buildPrimaryProbeServiceContext({ ...input, selectorEnv: {} });
+      const proxyEmpty = firstModule.buildPrimaryProbeServiceContext({ ...input, selectorEnv: { HTTP_PROXY: '' } });
+      const serialized = JSON.stringify(initial);
+
+      expect(initial).toMatchObject({ provider: 'anthropic-api', model: 'opus', serviceGeneration: 'generation-a', binaryState: 'none', resolvedBinaryPathHash: null, binarySha256: null });
+      expect(serialized).not.toContain(baseUrl);
+      expect(serialized).not.toContain(proxyUrl);
+      expect(serialized).not.toContain('synthetic-password');
+      expect(serialized).not.toContain('fixture-keyring-service');
+      expect(initial.launchContextHash).toBe(sameLiveContext.launchContextHash);
+      expect(initial.launchContextHash).not.toBe(changedService.launchContextHash);
+      expect(initial.launchContextHash).not.toBe(changedProxy.launchContextHash);
+      expect(proxyAbsent.launchContextHash).not.toBe(proxyEmpty.launchContextHash);
+      expect(firstModule.verifyServingContext(target, {
+        serviceContext: initial,
+        currentServiceContext: () => sameLiveContext,
+        requireServiceContext: true,
+      })).toBeNull();
+      expect(firstModule.verifyServingContext(target, {
+        serviceContext: initial,
+        currentServiceContext: () => changedProxy,
+        requireServiceContext: true,
+      })).toBe('context-mismatch-launch');
+
+      vi.resetModules();
+      const independentlyLoadedModule = await import('../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts');
+      const independentlyLoadedContext = independentlyLoadedModule.buildPrimaryProbeServiceContext(input);
+      expect(independentlyLoadedContext.launchContextHash).not.toBe(initial.launchContextHash);
+    } finally {
+      vi.resetModules();
+    }
   });
 
   it('P4: adapter deps carry the immutable service context and trigger', () => {

@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { buildChildEnv, getProviderBinary } from '../session.ts';
 import {
   resolveProviderBinaryIdentity,
@@ -38,6 +39,12 @@ import type {
   ProviderExecutionLease,
 } from '../provider-execution-gate.ts';
 import { shortHash } from '../../../lib/short-hash.ts';
+
+const SELECTOR_FINGERPRINT_KEY = randomBytes(32);
+
+function selectorFingerprint(value: string, length = 12): string {
+  return createHmac('sha256', SELECTOR_FINGERPRINT_KEY).update(value).digest('hex').slice(0, length);
+}
 
 /** Why a primary-model probe runs; carried into its lifecycle log lines. */
 export type PrimaryModelProbeTrigger = 'startup' | 'manual' | 'periodic' | 'recovery' | 'diagnostic';
@@ -117,13 +124,13 @@ interface PrimaryProbeInvocation {
 
 function hashEnvValue(env: NodeJS.ProcessEnv, key: string): string | null {
   return Object.prototype.hasOwnProperty.call(env, key)
-    ? shortHash(env[key] ?? '')
+    ? selectorFingerprint(env[key] ?? '')
     : null;
 }
 
 function hashConfigValue(config: Record<string, unknown> | undefined, key: string): string | null {
   const value = config?.[key];
-  return typeof value === 'string' ? shortHash(value) : null;
+  return typeof value === 'string' ? selectorFingerprint(value) : null;
 }
 
 /**
@@ -166,7 +173,7 @@ export function buildPrimaryProbeServiceContext(input: {
 }): PrimaryProbeServiceContext {
   const env = input.selectorEnv;
   const selectorShape = {
-    cwdHash: shortHash(input.cwd),
+    cwdHash: selectorFingerprint(input.cwd),
     homeHash: hashEnvValue(env, 'HOME'),
     pathHash: hashEnvValue(env, 'PATH'),
     xdgConfigHash: hashEnvValue(env, 'XDG_CONFIG_HOME'),
@@ -179,9 +186,9 @@ export function buildPrimaryProbeServiceContext(input: {
     claudeSecureStorageHash: input.provider === 'claude-cli'
       ? hashEnvValue(env, 'CLAUDE_SECURESTORAGE_CONFIG_DIR') : null,
     claudeCredentialServiceHash: input.provider === 'claude-cli'
-      ? shortHash(claudeCredentialServiceForEnv(env)) : null,
+      ? selectorFingerprint(claudeCredentialServiceForEnv(env)) : null,
     claudeStorageDirHash: input.provider === 'claude-cli'
-      ? shortHash(claudeSecureStorageDir(env)) : null,
+      ? selectorFingerprint(claudeSecureStorageDir(env)) : null,
     providerBaseUrlHash: hashConfigValue(input.providerConfig, 'baseUrl'),
     providerApiKeyServiceHash: hashConfigValue(input.providerConfig, 'apiKeyService'),
   };
@@ -190,9 +197,9 @@ export function buildPrimaryProbeServiceContext(input: {
     provider: input.provider,
     model: input.model,
     serviceGeneration: input.serviceGeneration,
-    launchContextHash: shortHash(JSON.stringify(selectorShape)),
+    launchContextHash: selectorFingerprint(JSON.stringify(selectorShape)),
     binaryState: input.binaryState,
-    resolvedBinaryPathHash: identity ? shortHash(identity.resolvedPath) : null,
+    resolvedBinaryPathHash: identity ? selectorFingerprint(identity.resolvedPath) : null,
     binarySha256: identity?.sha256 ?? null,
   };
 }
