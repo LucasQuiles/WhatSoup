@@ -41,6 +41,7 @@ import {
   AUTO_COMPACT_BACKOFF_TIERS_MS,
   AUTO_COMPACT_RAPID_REARM_WINDOW_MS,
   AUTO_COMPACT_SUCCESS_COOLDOWN_MS,
+  AUTO_COMPACT_CONVERGENCE_LIMIT,
 } from '../../../src/runtimes/agent/auto-compact-controller.ts';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -119,10 +120,9 @@ describe('AutoCompactController — healthSnapshot', () => {
 
   it('aggregates active scopes and caps the worst current tier without exposing identities', () => {
     const c = new AutoCompactController(1000);
-    c.consecutiveRapidRearms.set('scope-a', 1);
-    c.cooldownUntil.set('scope-a', 10_000);
+    c.recordAutoCompactRapidRearm('scope-a', 100, 1_000);
     c.consecutiveRapidRearms.set('scope-b', AUTO_COMPACT_BACKOFF_TIERS_MS.length + 8);
-    c.cooldownUntil.set('scope-b', 20_000);
+    c.recordAutoCompactRapidRearm('scope-b', 200, 2_000);
 
     const snapshot = c.healthSnapshot(5_000);
 
@@ -134,13 +134,13 @@ describe('AutoCompactController — healthSnapshot', () => {
     expect(JSON.stringify(snapshot)).not.toContain('scope-');
   });
 
-  it('ignores zero-count, missing-cooldown, and expired scopes', () => {
+  it('ignores a retained streak with no backoff, a non-backoff cooldown, and an expired backoff', () => {
     const c = new AutoCompactController(1000);
-    c.consecutiveRapidRearms.set('zero-count', 0);
-    c.cooldownUntil.set('zero-count', 10_000);
-    c.consecutiveRapidRearms.set('missing-cooldown', 2);
-    c.consecutiveRapidRearms.set('expired', 3);
-    c.cooldownUntil.set('expired', 5_000);
+    c.consecutiveRapidRearms.set('streak-only', 2);
+    c.consecutiveRapidRearms.set('timeout-cooldown', 2);
+    c.cooldownUntil.set('timeout-cooldown', 10_000);
+    c.recordAutoCompactRapidRearm('expired', 100, 5_000 - AUTO_COMPACT_BACKOFF_TIERS_MS[1]);
+    c.rapidRearmBackoff.set('non-finite', { until: Number.NaN, tier: 2 });
 
     expect(c.healthSnapshot(5_000)).toEqual({
       state: 'idle',
@@ -173,6 +173,46 @@ describe('AutoCompactController — healthSnapshot', () => {
     // The streak is retained; only the active backoff ended.
     expect(c.consecutiveRapidRearms.get('scope-a')).toBe(1);
     expect(c.cooldownUntil.get('scope-a')).toBe(later + AUTO_COMPACT_SUCCESS_COOLDOWN_MS);
+  });
+
+  it('still escalates to the next tier when the compact after an expired backoff rapidly re-arms', () => {
+    const c = new AutoCompactController(1000);
+    vi.setSystemTime(0);
+    c.recordAutoCompactSuccess('scope-a');
+    c.recordAutoCompactRapidRearm('scope-a', 0, 60_000);
+
+    const later = 60_000 + AUTO_COMPACT_BACKOFF_TIERS_MS[1] + 5 * 60_000;
+    vi.setSystemTime(later);
+    c.recordAutoCompactSuccess('scope-a');
+    expect(c.healthSnapshot(later).state).toBe('idle');
+
+    // First turn after this compact is still over threshold inside the window.
+    vi.setSystemTime(later + 30_000);
+    c.recordAutoCompactNextTurnIfNeeded('scope-a', 5_000);
+
+    expect(c.consecutiveRapidRearms.get('scope-a')).toBe(2);
+    expect(c.cooldownUntil.get('scope-a')).toBe(later + 30_000 + AUTO_COMPACT_BACKOFF_TIERS_MS[2]);
+    expect(c.healthSnapshot(later + 31_000)).toEqual({
+      state: 'backoff',
+      activeBackoffScopes: 1,
+      worstCurrentBackoffTier: 2,
+    });
+  });
+
+  it('reaches the convergence limit across success / rapid re-arm cycles', () => {
+    const c = new AutoCompactController(1000);
+    let t = 0;
+    for (let i = 1; i <= AUTO_COMPACT_CONVERGENCE_LIMIT; i += 1) {
+      vi.setSystemTime(t);
+      c.recordAutoCompactSuccess('scope-a');
+      expect(c.rapidRearmBackoff.has('scope-a')).toBe(false);
+      vi.setSystemTime(t + 30_000);
+      c.recordAutoCompactNextTurnIfNeeded('scope-a', 5_000);
+      expect(c.consecutiveRapidRearms.get('scope-a')).toBe(i);
+      t += 30_000 + AUTO_COMPACT_BACKOFF_TIERS_MS[Math.min(i, AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1)];
+    }
+    expect(c.consecutiveRapidRearms.get('scope-a')).toBe(AUTO_COMPACT_CONVERGENCE_LIMIT);
+    expect(c.healthSnapshot(t - 1).worstCurrentBackoffTier).toBe(AUTO_COMPACT_CONVERGENCE_LIMIT);
   });
 
   it('clears current state on scope cleanup while preserving lifetime counters', () => {
@@ -543,6 +583,7 @@ describe('AutoCompactController — cleanupScope', () => {
     c.lastSuccessAt.set('scope-a', 2);
     c.rapidRearmRecordedForSuccessAt.set('scope-a', 3);
     c.consecutiveRapidRearms.set('scope-a', 4);
+    c.rapidRearmBackoff.set('scope-a', { until: 10_000, tier: 3 });
     c.measureNextTurn.add('scope-a');
     c.beginSilentCompact('scope-a');
     const { promise } = installFakeWaiter(c, 'scope-a');
@@ -554,6 +595,7 @@ describe('AutoCompactController — cleanupScope', () => {
     expect(c.lastSuccessAt.has('scope-a')).toBe(false);
     expect(c.rapidRearmRecordedForSuccessAt.has('scope-a')).toBe(false);
     expect(c.consecutiveRapidRearms.has('scope-a')).toBe(false);
+    expect(c.rapidRearmBackoff.has('scope-a')).toBe(false);
     expect(c.measureNextTurn.has('scope-a')).toBe(false);
     expect(c.silentCompactScopes.has('scope-a')).toBe(false);
     expect(c.waiters.has('scope-a')).toBe(false);
@@ -574,6 +616,7 @@ describe('AutoCompactController — rekey', () => {
     expect(c.lastSuccessAt.size).toBe(0);
     expect(c.rapidRearmRecordedForSuccessAt.size).toBe(0);
     expect(c.consecutiveRapidRearms.size).toBe(0);
+    expect(c.rapidRearmBackoff.size).toBe(0);
     expect(c.measureNextTurn.size).toBe(0);
   });
 
@@ -583,6 +626,7 @@ describe('AutoCompactController — rekey', () => {
     c.lastSuccessAt.set('old', 2_000);
     c.rapidRearmRecordedForSuccessAt.set('old', 3_000);
     c.consecutiveRapidRearms.set('old', 4);
+    c.rapidRearmBackoff.set('old', { until: 10_000, tier: 3 });
     c.measureNextTurn.add('old');
 
     c.rekey('old', 'new');
@@ -591,12 +635,14 @@ describe('AutoCompactController — rekey', () => {
     expect(c.lastSuccessAt.has('old')).toBe(false);
     expect(c.rapidRearmRecordedForSuccessAt.has('old')).toBe(false);
     expect(c.consecutiveRapidRearms.has('old')).toBe(false);
+    expect(c.rapidRearmBackoff.has('old')).toBe(false);
     expect(c.measureNextTurn.has('old')).toBe(false);
 
     expect(c.cooldownUntil.get('new')).toBe(1_000);
     expect(c.lastSuccessAt.get('new')).toBe(2_000);
     expect(c.rapidRearmRecordedForSuccessAt.get('new')).toBe(3_000);
     expect(c.consecutiveRapidRearms.get('new')).toBe(4);
+    expect(c.rapidRearmBackoff.get('new')).toEqual({ until: 10_000, tier: 3 });
     expect(c.measureNextTurn.has('new')).toBe(true);
   });
 });
@@ -628,6 +674,7 @@ describe('AutoCompactController — shutdown', () => {
     c.lastSuccessAt.set('scope-a', 200);
     c.rapidRearmRecordedForSuccessAt.set('scope-a', 200);
     c.consecutiveRapidRearms.set('scope-a', 1);
+    c.rapidRearmBackoff.set('scope-a', { until: 10_000, tier: 1 });
     c.measureNextTurn.add('scope-a');
     const waiterA = installFakeWaiter(c, 'scope-a');
     const waiterB = installFakeWaiter(c, 'scope-b');
@@ -641,6 +688,7 @@ describe('AutoCompactController — shutdown', () => {
     expect(c.lastSuccessAt.size).toBe(0);
     expect(c.rapidRearmRecordedForSuccessAt.size).toBe(0);
     expect(c.consecutiveRapidRearms.size).toBe(0);
+    expect(c.rapidRearmBackoff.size).toBe(0);
     expect(c.measureNextTurn.size).toBe(0);
 
     // Both waiters resolved.

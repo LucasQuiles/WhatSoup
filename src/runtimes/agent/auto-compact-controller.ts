@@ -80,6 +80,14 @@ export class AutoCompactController {
   readonly rapidRearmRecordedForSuccessAt = new Map<string, number>();
   /** Scope → count of consecutive rapid re-arms (drives the backoff tier). */
   readonly consecutiveRapidRearms = new Map<string, number>();
+  /**
+   * #3717: scope → the rapid-rearm backoff currently in force (deadline + tier).
+   * Kept apart from consecutiveRapidRearms, which is a retained streak that
+   * survives a later successful compact so the next rapid re-arm escalates a
+   * tier. A success replaces the backoff with the ordinary success cooldown and
+   * removes this entry; health reports backoff only while an entry is unexpired.
+   */
+  readonly rapidRearmBackoff = new Map<string, { until: number; tier: number }>();
   /** Scopes to measure on their next turn for post-compact effectiveness. */
   readonly measureNextTurn = new Set<string>();
   /**
@@ -126,25 +134,10 @@ export class AutoCompactController {
   healthSnapshot(now = Date.now()): AutoCompactHealthSnapshot {
     let activeBackoffScopes = 0;
     let worstCurrentBackoffTier = 0;
-    for (const [scopeKey, consecutiveRapidRearms] of this.consecutiveRapidRearms) {
-      const cooldownUntil = this.cooldownUntil.get(scopeKey);
-      if (
-        !Number.isFinite(consecutiveRapidRearms)
-        || consecutiveRapidRearms <= 0
-        || cooldownUntil === undefined
-        || !Number.isFinite(cooldownUntil)
-        || cooldownUntil <= now
-      ) {
-        continue;
-      }
+    for (const { until, tier } of this.rapidRearmBackoff.values()) {
+      if (!Number.isFinite(until) || until <= now) continue;
       activeBackoffScopes += 1;
-      worstCurrentBackoffTier = Math.max(
-        worstCurrentBackoffTier,
-        Math.min(
-          Math.floor(consecutiveRapidRearms),
-          AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1,
-        ),
-      );
+      worstCurrentBackoffTier = Math.max(worstCurrentBackoffTier, tier);
     }
     return {
       state: activeBackoffScopes > 0 ? 'backoff' : 'idle',
@@ -193,6 +186,10 @@ export class AutoCompactController {
     this.rapidRearmRecordedForSuccessAt.delete(scopeKey);
     this.measureNextTurn.add(scopeKey);
     this.cooldownUntil.set(scopeKey, now + AUTO_COMPACT_SUCCESS_COOLDOWN_MS);
+    // #3717: the success cooldown supersedes any rapid-rearm backoff. The streak
+    // in consecutiveRapidRearms is kept so a rapid re-arm of THIS compact still
+    // escalates to the next tier.
+    this.rapidRearmBackoff.delete(scopeKey);
   }
 
   recordAutoCompactRapidRearm(scopeKey: string, lastSuccessAt: number, now: number): void {
@@ -206,6 +203,7 @@ export class AutoCompactController {
     }
     const tier = Math.min(next, AUTO_COMPACT_BACKOFF_TIERS_MS.length - 1);
     this.cooldownUntil.set(scopeKey, now + AUTO_COMPACT_BACKOFF_TIERS_MS[tier]);
+    this.rapidRearmBackoff.set(scopeKey, { until: now + AUTO_COMPACT_BACKOFF_TIERS_MS[tier], tier });
     log.warn(
       {
         scopeKey,
@@ -309,6 +307,7 @@ export class AutoCompactController {
     this.lastSuccessAt.delete(scopeKey);
     this.rapidRearmRecordedForSuccessAt.delete(scopeKey);
     this.consecutiveRapidRearms.delete(scopeKey);
+    this.rapidRearmBackoff.delete(scopeKey);
     this.consecutiveNonConvergentCompactions.delete(scopeKey);
     this.compactionOutcomeRecordedForCompactAt.delete(scopeKey);
     this.measureNextTurn.delete(scopeKey);
@@ -320,8 +319,8 @@ export class AutoCompactController {
   /**
    * Migrate auto-compact bookkeeping from oldKey to newKey on a JID-alias change.
    * Mirrors the prior inline per-map get/delete/set sequence exactly: only the
-   * cooldown, last-success, rapid-rearm-recorded, consecutive-rapid-rearm, and
-   * measure-next-turn entries move (silent-compact timers, the boundary set, and
+   * cooldown, last-success, rapid-rearm-recorded, consecutive-rapid-rearm,
+   * rapid-rearm-backoff, and measure-next-turn entries move (silent-compact timers, the boundary set, and
    * in-flight waiters are intentionally left untouched, as before).
    */
   rekey(oldKey: string, newKey: string): void {
@@ -344,6 +343,11 @@ export class AutoCompactController {
     if (consecutiveRapidRearms !== undefined) {
       this.consecutiveRapidRearms.delete(oldKey);
       this.consecutiveRapidRearms.set(newKey, consecutiveRapidRearms);
+    }
+    const backoff = this.rapidRearmBackoff.get(oldKey);
+    if (backoff !== undefined) {
+      this.rapidRearmBackoff.delete(oldKey);
+      this.rapidRearmBackoff.set(newKey, backoff);
     }
     // #3523 layer 1: the non-convergence streak and its per-compaction dedupe
     // travel with the scope for the same reason the rapid-rearm counter does —
@@ -386,6 +390,7 @@ export class AutoCompactController {
     this.lastSuccessAt.clear();
     this.rapidRearmRecordedForSuccessAt.clear();
     this.consecutiveRapidRearms.clear();
+    this.rapidRearmBackoff.clear();
     this.consecutiveNonConvergentCompactions.clear();
     this.compactionOutcomeRecordedForCompactAt.clear();
     this.measureNextTurn.clear();
