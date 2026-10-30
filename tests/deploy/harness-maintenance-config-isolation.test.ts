@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -45,6 +45,76 @@ function withInstance(h: Harness, config?: string, secureStorage?: string): Harn
   systemdUnit(h, 'alpha', [`Environment=${env.join(' ')}`]);
   h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
   return h;
+}
+
+function managerUnitRoot(h: Harness, name: string): string {
+  const root = path.join(h.home, name);
+  mkdirSync(root, { recursive: true });
+  return root;
+}
+
+/** Write systemctl --user show -p UnitPath --value array rendering for the fixture. */
+function systemdUnitPaths(h: Harness, paths: string[]): void {
+  writeFileSync(path.join(h.systemdDir, 'unit-path'), `${paths.join(' ')}\n`);
+}
+
+type ConfiguredSystemdArtifacts = {
+  unit?: boolean;
+  wants?: boolean;
+  requires?: boolean;
+  dropIn?: boolean;
+};
+
+/**
+ * Writes real configured-instance surfaces beneath a manager UnitPath. The
+ * fake systemctl supplies resolved properties only after source discovery; no
+ * list-unit-files fixture row is written.
+ */
+function configuredSystemdInstance(
+  h: Harness,
+  root: string,
+  name: string,
+  config: string,
+  artifacts: ConfiguredSystemdArtifacts,
+): void {
+  const unit = `whatsoup@${name}.service`;
+  const environment = `WHATSOUP_NODE=${process.execPath} CLAUDE_CONFIG_DIR=${config}`;
+  writeFileSync(path.join(root, 'whatsoup@.service'), `[Service]\nEnvironment=${environment}\n`);
+  if (artifacts.unit) writeFileSync(path.join(root, unit), `[Service]\nEnvironment=${environment}\n`);
+  for (const kind of ['wants', 'requires'] as const) {
+    if (!artifacts[kind]) continue;
+    const dependency = path.join(root, `maintenance.target.${kind}`);
+    mkdirSync(dependency, { recursive: true });
+    symlinkSync(artifacts.unit ? `../${unit}` : '../whatsoup@.service', path.join(dependency, unit));
+  }
+  if (artifacts.dropIn) {
+    const dropIn = path.join(root, `${unit}.d`);
+    mkdirSync(dropIn, { recursive: true });
+    writeFileSync(path.join(dropIn, '10-fixture.conf'), `[Service]\nEnvironment=${environment}\n`);
+  }
+  writeFileSync(path.join(h.systemdDir, `${unit}.show`), `Environment=${environment}\n`);
+}
+
+function expectOneSystemdConsumerPerInventory(h: Harness, r: RunResult, name: string): void {
+  // A successful update intentionally inventories before install and again for its
+  // postcheck. There must be one resolved consumer event in each inventory, not
+  // one event for the entire update.
+  expect(events(r, 'claude-consumer').filter((event) => event.message.startsWith(`${name} via systemd:`)))
+    .toEqual([expect.objectContaining({ status: 'resolved' }), expect.objectContaining({ status: 'resolved' })]);
+
+  // The fake records each systemctl argv before dispatch. UnitPath starts every
+  // inventory, so this proves the source's unit normalization invokes `show`
+  // exactly once for this instance in both the pre-update and postcheck pass.
+  const unitPath = '--user show -p UnitPath --value';
+  const unitDefinition = `--user show -p Environment -p EnvironmentFiles whatsoup@${name}.service`;
+  const definitionShowsPerInventory: number[] = [];
+  for (const argv of readFileSync(path.join(h.systemdDir, 'argv.log'), 'utf8').trimEnd().split('\n')) {
+    if (argv === unitPath) definitionShowsPerInventory.push(0);
+    if (argv === unitDefinition && definitionShowsPerInventory.length > 0) {
+      definitionShowsPerInventory[definitionShowsPerInventory.length - 1]! += 1;
+    }
+  }
+  expect(definitionShowsPerInventory).toEqual([1, 1]);
 }
 
 /** A structurally valid plist whose selected credential-store field cannot be read as a string. */
@@ -118,6 +188,96 @@ describe('agent CLI login isolation of the maintenance job', () => {
       `Environment=WHATSOUP_NODE=${process.execPath} CLAUDE_CONFIG_DIR=${h.env.CLAUDE_CONFIG_DIR}`,
     ]);
     expectRefused(h, run(h), "equals beta's");
+  }, T);
+
+  it('refuses every agent CLI step when a manager UnitPath .wants link shares the job store', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const root = managerUnitRoot(h, 'manager-units');
+    systemdUnitPaths(h, [root]);
+    configuredSystemdInstance(h, root, 'beta', h.env.CLAUDE_CONFIG_DIR, { wants: true });
+    expect(existsSync(path.join(h.systemdDir, 'unit-files'))).toBe(false);
+    expect(readFileSync(path.join(h.systemdDir, 'units'), 'utf8')).not.toContain(['whatsoup', 'beta.service'].join('@'));
+    expectRefused(h, run(h), "equals beta's");
+  }, T);
+
+  it('allows distinct stores from direct, .requires, and drop-in UnitPath surfaces', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const first = managerUnitRoot(h, 'manager-first');
+    const second = managerUnitRoot(h, 'manager-second');
+    systemdUnitPaths(h, [first, second]);
+    configuredSystemdInstance(h, first, 'beta', path.join(h.home, 'beta-config'), { unit: true });
+    configuredSystemdInstance(h, second, 'gamma', path.join(h.home, 'gamma-config'), { requires: true });
+    configuredSystemdInstance(h, second, 'delta', path.join(h.home, 'delta-config'), { dropIn: true });
+    const result = run(h);
+    expect(events(result, 'claude-config-isolation')).toEqual([]);
+    for (const name of ['beta', 'gamma', 'delta']) expectOneSystemdConsumerPerInventory(h, result, name);
+    expect(allFixtureCalls(h)).toContain('claude plugin list');
+  }, T);
+
+  it('fails closed when the manager UnitPath cannot be read', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    writeFileSync(path.join(h.systemdDir, 'unit-path.rc'), '1\n');
+    expectRefused(h, run(h), 'service definitions were not read', 'unknown');
+  }, T);
+
+  it('fails closed on a shell-quoted UnitPath entry instead of evaluating it', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const root = managerUnitRoot(h, 'quoted manager path');
+    writeFileSync(path.join(h.systemdDir, 'unit-path'), `'${root}'\n`);
+    expectRefused(h, run(h), 'service definitions were not read', 'unknown');
+  }, T);
+
+  it('fails closed on an escaped UnitPath entry instead of interpreting it', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const root = managerUnitRoot(h, 'escaped-manager-path');
+    writeFileSync(path.join(h.systemdDir, 'unit-path'), `${root}\\ path\n`);
+    expectRefused(h, run(h), 'service definitions were not read', 'unknown');
+  }, T);
+
+  it('fails closed on a malformed non-absolute UnitPath token', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    writeFileSync(path.join(h.systemdDir, 'unit-path'), 'relative-manager-path\n');
+    expectRefused(h, run(h), 'service definitions were not read', 'unknown');
+  }, T);
+
+  it('fails closed when a manager UnitPath directory cannot be read', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const root = managerUnitRoot(h, 'unreadable-manager-path');
+    systemdUnitPaths(h, [root]);
+    chmodSync(root, 0o000);
+    try {
+      expectRefused(h, run(h), 'service definitions were not read', 'unknown');
+    } finally {
+      chmodSync(root, 0o755);
+    }
+  }, T);
+
+  it('fails closed when an advertised manager UnitPath vanishes before discovery', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    systemdUnitPaths(h, [path.join(h.home, 'vanished-manager-path')]);
+    expectRefused(h, run(h), 'service definitions were not read', 'unknown');
+  }, T);
+
+  it('deduplicates one configured instance across direct, .wants, .requires, and drop-in surfaces', () => {
+    const h = makeHarness();
+    withInstance(h, path.join(h.home, 'bot-config'));
+    const root = managerUnitRoot(h, 'manager-unit-path');
+    systemdUnitPaths(h, [root]);
+    configuredSystemdInstance(h, root, 'beta', path.join(h.home, 'beta-config'), {
+      unit: true, wants: true, requires: true, dropIn: true,
+    });
+    const result = run(h);
+    expect(events(result, 'claude-config-isolation')).toEqual([]);
+    expectOneSystemdConsumerPerInventory(h, result, 'beta');
+    expect(allFixtureCalls(h)).toContain('claude plugin list');
   }, T);
 
   it('refuses every agent CLI step when a disabled never-loaded unit selector is unreadable', () => {
