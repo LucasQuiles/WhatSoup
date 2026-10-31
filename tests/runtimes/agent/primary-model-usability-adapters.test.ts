@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import { probePrimaryModelUsability } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import { probeBinaryCommand as runBinaryCommandProbe } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
@@ -1155,5 +1158,115 @@ describe('claude-cli default-model probe command (fleet recovery-stall fix)', ()
     const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
     expect(args).toContain('--model');
     expect(args).toContain('configured-primary');
+  });
+});
+
+describe('claude-cli model probe starts no MCP servers', () => {
+  // The probe runs without the env real turns get (e.g. the M365 bridge env).
+  // An enabled plugin MCP server that exits during the probe is cached as
+  // needs-auth in the config dir, so the next real session skips it.
+  it.each([
+    { label: 'configured model', model: 'configured-primary' as string | null },
+    { label: 'default model', model: null as string | null },
+  ])('passes --strict-mcp-config with no --mcp-config ($label)', async ({ model }) => {
+    const probeBinaryCommand = vi.fn(
+      async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: () => 'claude',
+      probeBinaryCommand,
+    });
+    await adapters.probeBinaryModel?.({ provider: 'claude-cli', model });
+    const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
+    expect(args).toEqual([
+      '-p',
+      'Reply with OK only.',
+      '--strict-mcp-config',
+      ...(model === null ? [] : ['--model', model]),
+    ]);
+    expect(args).not.toContain('--mcp-config');
+  });
+
+  it('does not add the Claude-only flag to the opencode-cli probe', async () => {
+    const probeBinaryCommand = vi.fn(
+      async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(
+      { executionProfile: 'whatsoup-headless' },
+      {
+        buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
+        getProviderBinary: () => 'opencode',
+        probeBinaryCommand,
+      },
+    );
+    await adapters.probeBinaryModel?.({ provider: 'opencode-cli', model: 'configured-primary' });
+    const args = probeBinaryCommand.mock.calls[0]?.[1] ?? [];
+    expect(args).not.toContain('--strict-mcp-config');
+  });
+
+  // Real child processes: a fake `claude` that parses argv like the CLI does.
+  // The host CLI is not pinned, so a release without the flag must not turn a
+  // usable model into a failed (unknown → model_usable:false) probe.
+  describe('against a fake claude binary', () => {
+    let dir: string;
+    afterEach(() => {
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    });
+
+    // `rejected` = the option this fake CLI's parser does not know.
+    function fakeClaude(rejected: string | null): { binary: string; calls: () => string[][] } {
+      dir = mkdtempSync(join(tmpdir(), 'fake-claude-probe-'));
+      const binary = join(dir, 'claude');
+      const callLog = join(dir, 'calls.log');
+      const reject = rejected === null
+        ? '  :\n'
+        : `  if [ "$a" = '${rejected}' ]; then echo "error: unknown option '${rejected}'" >&2; exit 1; fi\n`;
+      writeFileSync(binary, [
+        '#!/bin/sh',
+        `printf '%s\\037' "$@" >> '${callLog}'`,
+        `printf '\\n' >> '${callLog}'`,
+        'for a in "$@"; do',
+        reject + 'done',
+        'echo OK',
+        '',
+      ].join('\n'));
+      chmodSync(binary, 0o755);
+      const calls = (): string[][] => readFileSync(callLog, 'utf8')
+        .split('\n')
+        .filter((line) => line.length > 0)
+        .map((line) => line.split('\u001f').filter((arg) => arg.length > 0));
+      return { binary, calls };
+    }
+
+    function adaptersFor(binary: string) {
+      return createPrimaryModelProbeAdapters(undefined, {
+        getProviderBinary: () => binary,
+        ensureClaudeFileStoreCredential: () => ({ outcome: 'skipped-cli-reads-own-item' as const }),
+      });
+    }
+
+    it('runs once with --strict-mcp-config when the CLI supports it', async () => {
+      const cli = fakeClaude(null);
+      await expect(adaptersFor(cli.binary).probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }))
+        .resolves.toEqual({ status: 'ok' });
+      expect(cli.calls()).toEqual([
+        ['-p', 'Reply with OK only.', '--strict-mcp-config', '--model', 'configured-primary'],
+      ]);
+    });
+
+    it('reports a usable model when an older CLI rejects --strict-mcp-config', async () => {
+      const cli = fakeClaude('--strict-mcp-config');
+      await expect(adaptersFor(cli.binary).probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }))
+        .resolves.toEqual({ status: 'ok' });
+      expect(cli.calls()).toEqual([
+        ['-p', 'Reply with OK only.', '--strict-mcp-config', '--model', 'configured-primary'],
+        ['-p', 'Reply with OK only.', '--model', 'configured-primary'],
+      ]);
+    });
+
+    it('does not retry when the CLI rejects a different option', async () => {
+      const cli = fakeClaude('--model');
+      await expect(adaptersFor(cli.binary).probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }))
+        .resolves.toEqual({ status: 'unknown', reason: 'binary-model-probe-failed' });
+      expect(cli.calls()).toHaveLength(1);
+    });
   });
 });
