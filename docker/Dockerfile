@@ -52,6 +52,7 @@ COPY --from=deps /app/package.json ./package.json
 # Source code — no build step, TypeScript runs via --experimental-strip-types
 COPY src/ ./src/
 COPY tsconfig.json ./
+COPY requirements/python/lock-policy.json ./requirements/python/
 
 # Built console from stage 2
 COPY --from=console-build /app/dist ./dist/

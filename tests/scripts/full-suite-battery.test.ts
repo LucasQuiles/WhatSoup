@@ -6,9 +6,10 @@
  * cannot advance an external process's wall clock.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as realDelay } from 'node:timers/promises';
 
 import { describe, expect, it } from 'vitest';
 
@@ -99,9 +100,16 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     expect(existsSync(marker)).toBe(false); // reaped on close — the descendant did NOT survive the clean exit
   }, 30_000);
 
-  it('FALSIFIER (finding 4): when the child never closes (an escaped descendant holds the stdio pipe), the bound resolves NON-ZERO via the terminal grace — never a false 0', async () => {
+  it.each([0, 600])('FALSIFIER (finding 4): a ready escaped pipe-holder forces terminal grace after %ims startup — never a false 0', async (startupMs) => {
     const dir = tmp.make('no-close');
     const parent = join(dir, 'parent.cjs');
+    const holder = join(dir, 'holder.cjs');
+    const ready = join(dir, 'holder-ready');
+    writeFileSync(holder, [
+      'const fs=require("node:fs");const ready=process.argv[2];',
+      'fs.writeFileSync(ready+".tmp",String(process.pid));fs.renameSync(ready+".tmp",ready);',
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10000);',
+    ].join('\n'));
     // The parent forks a DETACHED grandchild in its OWN process group that INHERITS the
     // runner's stdout pipe (fd1) and stays alive, then blocks so the bound fires. On the
     // bound, killGroup(-parentPid) reaps the parent's group but NOT the escaped grandchild,
@@ -110,25 +118,40 @@ describe('runBoundedBattery (externally bounded full-suite runner)', () => {
     writeFileSync(
       parent,
       [
+        `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${startupMs});`,
         'const cp=require("node:child_process");',
         // detached:true → own group (escapes the group reap); stdio inherit → holds parent fd1
-        // (the runner pipe). The grandchild blocks synchronously (bounded, no timer) so it holds
-        // the pipe past the grace, then exits on its own — self-cleaning, not a leak.
-        'const gc=cp.spawn(process.execPath,["-e","Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,2500)"],{detached:true,stdio:"inherit"});',
+        // (the runner pipe). Its real-time bound also contains a failed test's cleanup.
+        `const gc=cp.spawn(process.execPath,[${JSON.stringify(holder)},${JSON.stringify(ready)}],{detached:true,stdio:"inherit"});`,
         'gc.unref();',
         'require("node:net").createServer(function(){}).listen(0,"127.0.0.1");', // block so the bound fires
       ].join('\n'),
     );
+    // Reserve a setup window and prove the pipe-holder is ready before the real
+    // timeout. The original 300ms bound could kill the parent during startup.
     const start = Date.now();
-    // graceMs (600) < the grandchild's hold (2500ms): the terminal GRACE must resolve FIRST.
-    // WITHOUT an unconditional non-unref'd grace the runner would instead wait for the delayed
-    // `close` (~2500ms) and report timedOut/124 — so these strict assertions falsify a regression.
-    const r = await runBoundedBattery({ command: NODE, args: [parent], timeoutMs: 300, stdio: 'pipe', graceMs: 600 });
-    const elapsed = Date.now() - start;
-    expect(r.timedOut).toBe(true);
-    expect(r.outcome).toBe('inconclusive'); // resolved via the terminal grace, NOT the delayed close
-    expect(r.wrappedExit).toBe(125); // NEVER a false 0; the grace's inconclusive exit
-    expect(elapsed).toBeLessThan(2_000); // grace (600ms) fired well before the grandchild's 2500ms release
+    const running = runBoundedBattery({ command: NODE, args: [parent], timeoutMs: 5_000, stdio: 'pipe', graceMs: 600 });
+    try {
+      const setupDeadline = start + 3_000;
+      while (!existsSync(ready) && Date.now() < setupDeadline) await realDelay(10);
+      expect(existsSync(ready), 'escaped pipe-holder must be running before timeout').toBe(true);
+      const r = await running;
+      expect(r.timedOut).toBe(true);
+      expect(r.outcome).toBe('inconclusive');
+      expect(r.wrappedExit).toBe(125);
+      expect(Date.now() - start).toBeLessThan(8_000); // before the holder's 10s release
+    } finally {
+      if (existsSync(ready)) {
+        const holderPid = Number(readFileSync(ready, 'utf8'));
+        expect(Number.isSafeInteger(holderPid) && holderPid > 1).toBe(true);
+        try {
+          process.kill(-holderPid, 'SIGKILL');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        }
+      }
+      await running;
+    }
   }, 30_000);
 
   it('FALSIFIER (round-20 finding 4): a reap FAILURE during a timeout is INCONCLUSIVE (125), never an ordinary timeout (124)', async () => {

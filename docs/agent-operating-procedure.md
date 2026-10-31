@@ -31,7 +31,12 @@ the skill to invoke and the repo command that verifies the work.
   private labels / emails / local paths) → `guard:publication:staged` →
   `guard:design-system-hygiene` → `guard:node-pin-consistency` →
   `guard:claude-settings` → console lint-staged.
-- **Pre-push (husky):** `guard:pre-push` → design metrics/burndown.
+- **Pre-push (husky):** `guard:pre-push` runs estate and candidate-alignment
+  checks, then the branch or release verification composite. Each complete
+  composite has a 60-minute deadline, matching the CI job allowance. This does
+  not extend the inner battery's 30-minute default or individual test deadlines.
+  Expiry fails publication; inspect the completed stages before any retry.
+  Delete-only pushes run design metrics/burndown after the estate check.
 - **On demand:** `npm test` · `npm run typecheck:all` · `npm run guard:repo`
   (`--staged` / `--branch-diff` / `--scan-history`) · `npm run guard:lint:src` ·
   `npm run guard:test-integrity` · `npm run guard:boundaries`.

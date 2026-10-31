@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -18,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { fakeTimeoutBody } from './fake-timeout-helper.ts';
+import { resolveTestPython } from '../helpers/python-interpreter.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const installer = join(repoRoot, 'deploy/scripts/install-host-dependencies.sh');
@@ -65,7 +67,7 @@ function resolveHostTool(name: string): string {
 
 function installShellToolbox(bin: string): void {
   for (const name of [
-    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp',
+    'bash', 'cat', 'chmod', 'cp', 'dirname', 'mkdir', 'mkfifo', 'mktemp', 'mv',
     'ps', 'rm', 'rmdir', 'sed', 'sleep', 'tr',
   ]) {
     symlinkSync(resolveHostTool(name), join(bin, name));
@@ -73,6 +75,7 @@ function installShellToolbox(bin: string): void {
 }
 
 function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
+  const realPython = resolveTestPython();
   const home = mkdtempSync(join(tmpdir(), 'whatsoup-host-install-'));
   roots.push(home);
   const bin = join(home, 'bin');
@@ -107,9 +110,11 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
   executable(join(bin, platform === 'Darwin' ? 'gtimeout' : 'timeout'), fakeTimeoutBody());
   if (platform === 'Linux') versionTool(bin, 'flock', 'flock 2.40');
 
-  executable(join(bin, 'python3.12'), [
+  executable(join(bin, 'python3.13'), [
+    '[ "$1" != "-I" ] || shift',
     'case "${1:-}" in',
-    "  --version) printf '%s\\n' 'Python 3.12.13'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  --version) printf '%s\\n' 'Python 3.13.16'; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
+    "  -c) case \"$2\" in *platform.machine*) printf '%s\\n' \"${FAKE_PYTHON_ARCH:-arm64}\" ;; *sys.implementation*) printf '%s\\n' 'cpython:3.13.16' ;; *) exec \"$WHATSOUP_TEST_REAL_PYTHON\" -I \"$@\" ;; esac; exit \"${FAKE_PYTHON_PROBE_EXIT:-0}\" ;;",
     '  -m)',
     '    case "${2:-}" in',
     '      venv)',
@@ -118,7 +123,7 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
     '        cp "$0" "$3/bin/python"',
     '        chmod 755 "$3/bin/python"',
     '        ;;',
-    '      pip) printf "python %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER" ;;',
+    '      pip) printf "python %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER"; cat "${@: -1}" > "$WHATSOUP_TEST_LOCK_SNAPSHOT"; exit "${FAKE_PIP_EXIT:-0}" ;;',
     '    esac',
     '    ;;',
     'esac',
@@ -142,6 +147,8 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
       HOME: home,
       PATH: bin,
       WHATSOUP_TEST_LEDGER: ledger,
+      WHATSOUP_TEST_REAL_PYTHON: realPython.includes('/') ? realPython : resolveHostTool(realPython),
+      WHATSOUP_TEST_LOCK_SNAPSHOT: join(home, 'validated-lock'),
       WHATSOUP_QUALITY_VENV: join(home, 'quality-venv'),
     },
   };
@@ -191,7 +198,28 @@ describe('explicit host dependency installer', () => {
       platform: 'darwin',
       manager: 'brew',
       mode: 'plan',
-      packages: ['git', 'python@3.12', 'ripgrep', 'zsh', 'shellcheck'],
+      packages: ['git', 'python@3.13', 'ripgrep', 'zsh', 'shellcheck'],
+    });
+    expect(ledger(fx)).toEqual([]);
+  });
+
+  it('plans compatibility test tools without installing the locked Python stack', () => {
+    const fx = fixture('Linux');
+    const result = runInstaller(fx, [
+      '--profile',
+      'compatibility',
+      '--node-policy',
+      'compatibility',
+      '--manager',
+      'apt',
+      '--json',
+    ]);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(receipt(result)).toMatchObject({
+      profile: 'compatibility',
+      nodePolicy: 'compatibility',
+      packages: ['git', 'ripgrep', 'zsh', 'shellcheck'],
     });
     expect(ledger(fx)).toEqual([]);
   });
@@ -268,10 +296,12 @@ describe('explicit host dependency installer', () => {
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(ledger(fx)).toEqual([
-      'brew install git python@3.12 ripgrep zsh shellcheck',
+      'brew install git python@3.13 ripgrep zsh shellcheck',
       `python -m venv ${join(fx.home, 'quality-venv')}`,
-      'python -m pip install pytest pytest-cov hypothesis ruff==0.15.10',
+      expect.stringMatching(/^python -m pip --isolated install --disable-pip-version-check --require-hashes --only-binary :all: --index-url https:\/\/pypi\.org\/simple -r .+\/whatsoup-quality-cpython313-darwin-arm64\.txt\.[A-Za-z0-9]+$/),
     ]);
+    expect(readFileSync(join(fx.home, 'validated-lock'), 'utf8')).toContain('pytest==');
+    expect(readFileSync(join(fx.home, 'validated-lock'), 'utf8')).toContain('--hash=sha256:');
     expect(statSync(join(fx.home, 'quality-venv')).mode & 0o777).toBe(0o700);
   });
 
@@ -282,8 +312,25 @@ describe('explicit host dependency installer', () => {
     const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
-    expect(ledger(fx)).toEqual(['brew install git python@3.12 ripgrep zsh shellcheck']);
-    expect(result.stderr).toContain('Python 3.12 or newer is required');
+    expect(ledger(fx)).toEqual(['brew install git python@3.13 ripgrep zsh shellcheck']);
+    expect(result.stderr).toContain('CPython 3.13.16 is required');
+  });
+
+  it.each(['pip', 'doctor'])('restores the prior quality environment after %s fails', (boundary) => {
+    const fx = fixture();
+    const target = join(fx.home, 'quality-venv');
+    mkdirSync(target);
+    writeFileSync(join(target, 'pyvenv.cfg'), 'prior-runtime\n');
+    writeFileSync(join(target, 'retained-package'), 'accepted-package\n');
+    if (boundary === 'pip') fx.env.FAKE_PIP_EXIT = '17';
+    else unlinkSync(join(fx.bin, 'rg'));
+    const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
+    expect(result.status, result.stderr).toBe(boundary === 'pip' ? 17 : 1);
+    expect(readFileSync(join(target, 'pyvenv.cfg'), 'utf8')).toBe('prior-runtime\n');
+    expect(readFileSync(join(target, 'retained-package'), 'utf8')).toBe('accepted-package\n');
+    const retained = readdirSync(fx.home).filter((name) => name.startsWith('quality-venv.previous.'));
+    expect(retained).toHaveLength(1);
+    expect(statSync(join(fx.home, retained[0]!, 'failed-environment/bin/python')).isFile()).toBe(true);
   });
 
   it('does not install packages after a failed platform discovery', () => {
@@ -314,7 +361,7 @@ describe('explicit host dependency installer', () => {
     fx.env.FAKE_NODE_VERSION = '25.4.0';
     const result = runInstaller(fx, [
       '--profile',
-      'quality',
+      'compatibility',
       '--node-policy',
       'compatibility',
       '--manager',
@@ -324,6 +371,7 @@ describe('explicit host dependency installer', () => {
     ]);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(ledger(fx)).toEqual(['brew install git ripgrep zsh shellcheck']);
     expect(result.stderr).toContain('"outcome":"compatibility_only"');
   });
 

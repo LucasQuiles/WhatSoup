@@ -45,7 +45,8 @@ accepts only `y` or `yes`; automation must additionally pass `--yes`. Without
 | Profile | Required capabilities |
 |---|---|
 | `runtime` | Exact `.nvmrc` Node and npm, Git, and the platform service manager |
-| `quality` | Runtime plus Python 3.12+, ripgrep, zsh, and ShellCheck |
+| `compatibility` | Runtime plus the host tools used by the Node compatibility suite; omits the version-invariant locked Python stack |
+| `quality` | Runtime plus Python 3.13, ripgrep, zsh, and ShellCheck |
 | `release` | Quality plus GNU timeout and, on Linux, external `flock` |
 
 Host readiness requires Node `24.15.0` and matching native/process
@@ -62,12 +63,43 @@ selects packages. The installer rejects a failed Python probe before creating it
 managed environment and requires the post-install doctor to pass. These checks
 do not prove a service is running or that a particular agent runtime can use it.
 
-Quality and release setup create a private managed interpreter at
+Quality and release setup require CPython `3.13.16`, then create a private managed interpreter at
 `${WHATSOUP_QUALITY_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/whatsoup/quality-venv}`
-and install `pytest`, `pytest-cov`, Hypothesis, and pinned Ruff there. WhatSoup's
+and install the committed, hash-locked `pytest`, `pytest-cov`, Hypothesis, and Ruff graph there.
+Lock selection uses that interpreter's architecture, so an x86_64 interpreter
+under Rosetta receives the `darwin-x64` graph rather than the Mac's ARM graph.
+Python identity and architecture probes have a five-second budget; the host
+doctor reports an expired exact-identity probe as inconclusive, and installers
+stop before using a lock. `WHATSOUP_PYTHON_PROBE_TIMEOUT` sets that probe budget.
+Before pip starts, the same budget covers validation of the selected regular lock
+and its directory components. Symlinks, empty locks, additional package sources,
+and requirements without exact versions and SHA-256 hashes are rejected. Pip
+reads a private snapshot of the validated bytes; later source changes cannot
+replace those inputs. The snapshot is removed when the install command exits.
+Each install creates a fresh environment and retains the old directory at the
+printed adjacent `.previous.*` path. Keep consumers stopped during replacement.
+Creation, package installation, imports and the installer's final acceptance run
+within the restoration boundary: failure restores the prior live environment
+and retains the failed replacement. A first installation failure leaves no
+incomplete environment at the live path. INT, TERM and HUP sent to the installer
+also restore it. Uncatchable termination or a failed restore still requires
+recovery from the printed backup. Transcription models download into a private
+adjacent `.pending.*` directory and publish atomically after hash verification;
+failed downloads preserve the prior live model. Symlink and non-file model
+destinations are refused. A successful replacement retains `previous-model`
+in the staging directory for recovery and consumer verification.
+After successful installation and consumer checks, retire the retained directory
+through the applicable storage procedure; see [Python lock recovery](../requirements/python/README.md#replacing-managed-environments).
+Host package managers can provide the `3.13` command but do not prove its patch
+level; the installer fails closed when it is not `3.13.16`. WhatSoup's
 JavaScript release-proof tests supply a hermetic `flock` fixture on macOS, where
 external `flock` is not a host requirement. Linux release operations still
 require the real `util-linux` implementation.
+
+Transcription setup bounds Homebrew, pip and model downloads to 600 seconds each;
+timeouts fail the installation. The lock helper enforces the pip budget for
+direct CI and release callers too. The [Python lock recovery and update procedure](../requirements/python/README.md)
+documents the operation-budget overrides and retained environments.
 
 Setup bootstraps and proves Node before its first npm command, so a fresh host
 does not need a separate `npm ci` beforehand.
@@ -3368,7 +3400,7 @@ WhatSoup can run in a Docker container as an alternative to the systemd/launchd 
 docker compose build
 ```
 
-The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies. The Quality workflow builds this image to check the complete packaging path.
+The multi-stage build installs production dependencies and applies the required dependency patches, builds the console frontend, and produces a slim runtime image based on `node:24-slim`. Git and certificates are installed in the dependency build stage before `npm ci`; the final image receives the patched dependencies and the Python lock policy imported by the transcription providers. The Quality workflow builds this image and loads the default transcription chain inside it with networking disabled. This checks runtime module packaging; it does not install a local transcription engine or exercise model inference.
 
 ### Configure
 
