@@ -2,6 +2,16 @@
   "schemaVersion": 1,
   "generatedAt": "2026-09-16T00:00:00Z",
   "scope": "bot-errors-runtime-scripts",
+  "activationRequirements": {
+    "botErrorsHealth": {
+      "secureStorageSelector": 1
+    }
+  },
+  "consumerCapabilities": {
+    "botErrorsHealth": {
+      "secureStorageSelector": 1
+    }
+  },
   "expectedHeadShaPolicy": "populated at deploy time by deploy step; absent here so committed state is observability-only",
   "files": [
     {
@@ -170,6 +180,7 @@
       "sha256": "6dd613813c1db15015e5595ee285ba25124b6038a5be28db907a0b2b796c1212",
       "mustContain": [
         "critical_file_problem",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
         "mustContain",
         "q_loop_state_inventory",
         "RUNTIME_MANIFEST_FAILURE_RE",
