@@ -1,4 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getAudioDuration } from '@whiskeysockets/baileys';
 import { describe, expect, it } from 'vitest';
@@ -30,5 +32,20 @@ describe('Baileys audio duration with the installed parser', () => {
     await expect(getAudioDuration(truncatedTag)).rejects.toThrow(
       'ID3v2 tag size 4096 exceeds remaining file size 0',
     );
+  });
+
+  it('rejects a malformed file path whose ID3v2 size exceeds the remaining audio', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'whatsoup-audio-duration-'));
+    const malformedPath = path.join(directory, 'truncated-id3.mp3');
+    const truncatedTag = Buffer.from('49443304000000002000', 'hex');
+
+    try {
+      await writeFile(malformedPath, truncatedTag);
+      await expect(getAudioDuration(malformedPath)).rejects.toThrow(
+        'ID3v2 tag size 4096 exceeds remaining file size 0',
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
