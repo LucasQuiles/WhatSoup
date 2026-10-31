@@ -255,6 +255,106 @@ describe('release:activate BOT ERRORS consumer compatibility', () => {
     expect(world.mutatingCalls()).toEqual([]);
   });
 
+  it.each(['regular file', 'symlink'])('accepts a trusted configured Python interpreter: %s', async (kind) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const bin = path.join(fixture.base, 'bin');
+    mkdirSync(bin);
+    const target = path.join(bin, 'python3.15');
+    writeFileSync(target, '', { mode: 0o700 });
+    const python = kind === 'symlink' ? path.join(bin, 'python3') : target;
+    if (kind === 'symlink') symlinkSync(target, python);
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python), stderr: '' }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.ready).toBe(true);
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('refuses different runner and checker Python interpreters', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const bin = path.join(fixture.base, 'bin');
+    mkdirSync(bin);
+    const python = path.join(bin, 'python3');
+    const other = path.join(bin, 'python3.15');
+    for (const interpreter of [python, other]) writeFileSync(interpreter, '', { mode: 0o700 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({
+        code: 0,
+        stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python)
+          .replace(`\t\t--\n\t\t${python}\n`, `\t\t--\n\t\t${other}\n`),
+        stderr: '',
+      }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(world.mutatingCalls()).toEqual([]);
+    expect(snapshotTree(fixture.base)).toEqual(before);
+  });
+
+  it.each(['relative', 'noncanonical', 'missing', 'directory', 'non-executable', 'group-writable', 'world-writable', 'wrong-name'])(
+    'refuses an unsafe configured Python interpreter: %s', async (kind) => {
+      writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+      writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+      const bin = path.join(fixture.base, 'bin');
+      mkdirSync(bin);
+      let python = path.join(bin, kind === 'wrong-name' ? 'bash' : 'python3');
+      if (kind === 'directory') mkdirSync(python);
+      else if (kind !== 'missing') writeFileSync(python, '', { mode: 0o700 });
+      if (kind === 'non-executable') chmodSync(python, 0o600);
+      if (kind === 'group-writable') chmodSync(python, 0o720);
+      if (kind === 'world-writable') chmodSync(python, 0o702);
+      if (kind === 'relative') python = 'bin/python3';
+      if (kind === 'noncanonical') python = `${bin}/../bin/python3`;
+      const world = new SimulatedLaunchd(fixture, {
+        botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python), stderr: '' }),
+      });
+      const before = snapshotTree(fixture.base);
+
+      const result = await run(world, activationArgs(fixture));
+
+      expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+      expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+        .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+      expect(world.mutatingCalls()).toEqual([]);
+      expect(snapshotTree(fixture.base)).toEqual(before);
+    },
+  );
+
+  it('rechecks interpreter permissions immediately before switching', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const bin = path.join(fixture.base, 'bin');
+    mkdirSync(bin);
+    const python = path.join(bin, 'python3');
+    writeFileSync(python, '', { mode: 0o700 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => {
+        if (read === 2) chmodSync(python, 0o720);
+        return { code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease, 'workstation.json', python), stderr: '' };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
   it.each(['health-prod.json', 'HOST_2.json'])('accepts a safe loaded health profile filename %s', async (profileName) => {
     writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
     writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });

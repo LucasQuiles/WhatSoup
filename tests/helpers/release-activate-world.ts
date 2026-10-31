@@ -193,7 +193,7 @@ export function writeBotErrorsRuntime(
 }
 
 /** The observed live launchctl grammar: bash -c hydration wrapper, sentinel argv0, then runner and checker. */
-export function botErrorsHealthPrint(fixture: Fixture, root: string, profileName = 'workstation.json'): string {
+export function botErrorsHealthPrint(fixture: Fixture, root: string, profileName = 'workstation.json', python = '/usr/bin/python3'): string {
   const envFile = path.join(fixture.home, '.config', 'whatsoup', 'bot-errors.env');
   const wrapper = [
     `BOT_ERRORS_ENV_FILE=${envFile}`,
@@ -212,13 +212,13 @@ export function botErrorsHealthPrint(fixture: Fixture, root: string, profileName
   ].join('; ');
   const args = [
     '/bin/bash', '-c', wrapper, 'bot-errors-health',
-    '/usr/bin/python3', `${root}/deploy/scripts/bot-errors-runner.py`,
+    python, `${root}/deploy/scripts/bot-errors-runner.py`,
     '--instance', 'bot-errors-health',
     '--source', 'service-exit',
     '--summary', 'BOT ERRORS daily health command failed',
     '--log-hint', `${fixture.home}/.local/state/bot-errors/logs/health.err.log`,
     '--diagnostic', 'launchd_label=com.bot-errors.health',
-    '--', '/usr/bin/python3', `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily',
+    '--', python, `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily',
   ];
   return [
     'com.bot-errors.health = {',

@@ -11,7 +11,7 @@
  * selects each auxiliary job's release, and WorkingDirectory selects nothing.
  */
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -212,6 +212,20 @@ function readRegularBelow(root: string, relative: string): Buffer | null {
   }
 }
 
+function isTrustedHealthPython(python: string): boolean {
+  if (!path.isAbsolute(python) || path.normalize(python) !== python || !/^python3(?:\.\d+)?$/.test(path.basename(python))) return false;
+  try {
+    const resolved = realpathSync(python);
+    const stat = lstatSync(resolved);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0) return false;
+    if (stat.uid !== 0 && stat.uid !== process.geteuid?.()) return false;
+    accessSync(resolved, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parseHealthDefinition(stdout: string, home: string): { root: string } | null {
   const lines = stdout.split('\n');
   if (!lines.includes('\tprogram = /bin/bash')) return null;
@@ -221,6 +235,8 @@ function parseHealthDefinition(stdout: string, home: string): { root: string } |
   const args = lines.slice(begin + 1, end).map((line) => line.startsWith('\t\t') ? line.slice(2) : null);
   if (args.some((arg) => arg === null) || args.length !== 20) return null;
   const values = args as string[];
+  const python = values[4];
+  if (python === undefined || !isTrustedHealthPython(python)) return null;
   const runner = values[5];
   if (runner === undefined) return null;
   const root = path.dirname(path.dirname(path.dirname(runner)));
@@ -236,13 +252,13 @@ function parseHealthDefinition(stdout: string, home: string): { root: string } |
   if (!/^[A-Za-z0-9_-]+\.json$/.test(profileName)) return null;
   const expected = [
     '/bin/bash', '-c', botErrorsHealthWrapper(home, root, profileName), 'bot-errors-health',
-    '/usr/bin/python3', path.join(root, BOT_ERRORS_HEALTH_RUNNER),
+    python, path.join(root, BOT_ERRORS_HEALTH_RUNNER),
     '--instance', 'bot-errors-health',
     '--source', 'service-exit',
     '--summary', 'BOT ERRORS daily health command failed',
     '--log-hint', path.join(home, '.local', 'state', 'bot-errors', 'logs', 'health.err.log'),
     '--diagnostic', `launchd_label=${BOT_ERRORS_HEALTH_LABEL}`,
-    '--', '/usr/bin/python3', path.join(root, BOT_ERRORS_HEALTH_CHECKER), '--daily',
+    '--', python, path.join(root, BOT_ERRORS_HEALTH_CHECKER), '--daily',
   ];
   if (values.some((value, index) => value !== expected[index])) return null;
   return { root };
