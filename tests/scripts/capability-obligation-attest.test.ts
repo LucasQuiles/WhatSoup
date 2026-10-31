@@ -192,7 +192,7 @@ describe('runResolverCanary (bounded, non-sending resolver probe)', () => {
   it('PASS: a resolver that exits 0 with sufficient output over the substituted source', async () => {
     const dir = tmp.make('canary-pass');
     const outcome = await runResolverCanary({ ...canaryInput(dir, 'process.stdout.write("processed:" + process.argv[2])\n'), probeSource: 'https://probe.example/clip', nonce: 'run-1' });
-    expect(outcome).toMatchObject({ result: 'pass', nonce: 'run-1' });
+    expect(outcome, JSON.stringify(outcome.detail)).toMatchObject({ result: 'pass', nonce: 'run-1' });
   });
 
   it('FALSIFIER: a resolver that exits non-zero fails', async () => {
