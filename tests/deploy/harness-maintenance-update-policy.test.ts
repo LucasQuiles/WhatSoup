@@ -346,11 +346,11 @@ describe('agent CLI update policy surfaces', () => {
     const policy = events(r, 'claude-update-policy');
     const instance = (name: string) => policy.find((e) => e.status === 'instance' && e.message.startsWith(`${name} `))!;
 
-    expect(instance('alpha').message).toContain('alpha via systemd (loaded unit): DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset');
+    expect(instance('alpha').message).toContain('alpha via systemd (manager unit definition): DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset');
     expect(instance('alpha').message).toContain('config default');
     expect(instance('alpha').message).toContain('installMethod=npm-global autoUpdates=true');
     expect(instance('alpha').message).toContain('settings env DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set');
-    expect(instance('beta').message).toContain('(loaded unit): DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set');
+    expect(instance('beta').message).toContain('(manager unit definition): DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set');
     expect(instance('gamma').message).toContain('config set by the service');
     expect(instance('gamma').message).toContain('installMethod=native autoUpdates=false');
     expect(instance('gamma').message).toContain('settings env DISABLE_UPDATES=set');
