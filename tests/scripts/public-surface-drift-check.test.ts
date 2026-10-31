@@ -110,10 +110,23 @@ describe('public surface drift check', () => {
     const healthStatusRow = registry
       .split('\n')
       .find((line) => line.includes('`http:health.status`'));
+    // Locate the GET /health guard in the source rather than pinning its line
+    // number here, which went stale with every edit above the handler.
+    const getHealthRouteLines = readFileSync(path.join(repoRoot, 'src/core/health.ts'), 'utf8')
+      .split('\n')
+      .flatMap((line, index) =>
+        line.includes("req.url !== '/health'") && line.includes("req.method !== 'GET'")
+          ? [index + 1]
+          : [],
+      );
+    const healthStatusAnchors = [
+      ...(healthStatusRow ?? '').matchAll(/`src\/core\/health\.ts:(\d+)`/g),
+    ].map((match) => Number(match[1]));
 
     expect(normalizedHealthSection).toContain('Inspection-only startup binds to `127.0.0.1`');
     expect(normalizedHealthSection).toContain('canonical instance `healthPort`');
-    expect(healthStatusRow).toContain('`src/core/health.ts:2058`');
+    expect(getHealthRouteLines).toHaveLength(1);
+    expect(healthStatusAnchors).toEqual(getHealthRouteLines);
     expect(healthStatusRow).toContain('`src/core/database-compatibility-early.ts:172`');
     expect(healthStatusRow).toContain('`service_mode: "inspection_only"`');
     expect(healthStatusRow).toContain('`startup_block`');
