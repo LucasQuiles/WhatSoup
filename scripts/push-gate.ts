@@ -75,6 +75,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/work-index.test.ts',
   'tests/scripts/guard-doc-tally.test.ts',
   'tests/scripts/node-pin-consistency.test.ts',
+  'tests/scripts/verify-buildx-runtime.test.ts',
   'tests/scripts/clock-budget.test.ts',
   'tests/scripts/console-usage-budget.test.ts',
   'tests/scripts/env-read-allowlist.test.ts',
