@@ -1,14 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
-import { createPrimaryModelProbeAdapters } from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  buildPrimaryProbeServiceContext,
+  createPrimaryModelProbeAdapters,
+} from '../../../src/runtimes/agent/providers/primary-model-usability-adapters.ts';
 import { probePrimaryModelUsability } from '../../../src/runtimes/agent/providers/primary-model-usability.ts';
 import { probeBinaryCommand as runBinaryCommandProbe } from '../../../src/runtimes/agent/providers/binary-preflight.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { resolveProviderBinaryIdentity } from '../../../src/runtimes/agent/provider-canary-proof.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
 import { deferred } from '../../helpers/deferred.ts';
 
 describe('createPrimaryModelProbeAdapters', () => {
+  const temporaryRoots: string[] = [];
+
   afterEach(() => {
+    for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
     vi.unstubAllGlobals();
   });
 
@@ -18,6 +29,7 @@ describe('createPrimaryModelProbeAdapters', () => {
   ])('maps %s to provider_unavailable', async (_label, getProviderBinary) => {
     const probeBinaryCommand = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary,
       probeBinaryCommand,
     });
@@ -35,6 +47,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const }));
     const probeBinaryCommand = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary,
       ensureClaudeFileStoreCredential,
       probeBinaryCommand,
@@ -51,9 +64,72 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(probeBinaryCommand).not.toHaveBeenCalled();
   });
 
+  it('passes the same resolved identity path used for context binding to the probe child', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      getProviderBinary: vi.fn(() => 'configured-claude'),
+      resolveProviderBinaryIdentity: vi.fn(() => ({
+        resolvedPath: '/resolved/claude',
+        sha256: 'b'.repeat(64),
+      })),
+      probeBinaryCommand,
+    });
+
+    await expect(
+      adapters.probeBinaryModel?.({ provider: 'claude-cli', model: 'configured-primary' }),
+    ).resolves.toEqual({ status: 'ok' });
+    expect(probeBinaryCommand).toHaveBeenCalledWith(
+      '/resolved/claude',
+      expect.any(Array),
+      expect.any(Object),
+      expect.objectContaining({ timeoutMs: 15_000 }),
+    );
+  });
+
+  it('maps missing or mismatched required service context to unknown before a child can be green', async () => {
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapterDeps = {
+      buildChildEnv: vi.fn(() => ({ PATH: '/probe-bin' })),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      resolveProviderBinaryIdentity: vi.fn(() => ({
+        resolvedPath: '/probe-bin/opencode',
+        sha256: 'c'.repeat(64),
+      })),
+      probeBinaryCommand,
+      requireServiceContext: true,
+    };
+    const target = { provider: 'opencode-cli', model: 'openai/context-bound' } as const;
+
+    const missing = createPrimaryModelProbeAdapters(undefined, adapterDeps);
+    await expect(probePrimaryModelUsability(target, missing)).resolves.toMatchObject({
+      status: 'unknown',
+      reason: 'context-missing-service',
+    });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+
+    const mismatched = createPrimaryModelProbeAdapters(undefined, {
+      ...adapterDeps,
+      serviceContext: buildPrimaryProbeServiceContext({
+        provider: 'claude-cli',
+        model: target.model,
+        serviceGeneration: 'generation-a',
+        cwd: '',
+        selectorEnv: { PATH: '/probe-bin' },
+        binaryState: 'resolved',
+        binaryIdentity: { resolvedPath: '/probe-bin/opencode', sha256: 'c'.repeat(64) },
+      }),
+    });
+    await expect(probePrimaryModelUsability(target, mismatched)).resolves.toMatchObject({
+      status: 'unknown',
+      reason: 'context-mismatch-provider',
+    });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+  });
+
   it('uses the default binary resolver when no resolver dependency is injected', async () => {
     const probeBinaryCommand = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       probeBinaryCommand,
     });
 
@@ -69,6 +145,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     process.env.CLAUDE_CONFIG_DIR = '/tmp/rachel/.claude';
     try {
       const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         getProviderBinary: vi.fn(() => 'claude'),
         probeBinaryCommand,
       });
@@ -92,6 +169,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     delete process.env.CLAUDE_CONFIG_DIR;
     try {
       const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         getProviderBinary: vi.fn(() => 'claude'),
         probeBinaryCommand,
       });
@@ -114,6 +192,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     // threaded from the runtime's `this.egressProxy?.port`.
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
       egressProxyPort: 4321,
@@ -143,6 +222,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       async (_binary: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }),
     );
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
     });
@@ -165,6 +245,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       output: '{"type":"message","role":"assistant","content":"OK"}',
     }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
       egressProxyPort: 4321,
@@ -187,7 +268,12 @@ describe('createPrimaryModelProbeAdapters', () => {
     const gate = new ProviderExecutionGate();
     const activeTurn = await gate.acquire();
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const resolveProviderBinaryIdentity = vi.fn((binary: string) => ({
+      resolvedPath: binary,
+      sha256: 'a'.repeat(64),
+    }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity,
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
       providerExecutionGate: gate,
@@ -199,6 +285,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     });
     await Promise.resolve();
     expect(probeBinaryCommand).not.toHaveBeenCalled();
+    expect(resolveProviderBinaryIdentity).not.toHaveBeenCalled();
     expect(gate.snapshot()).toMatchObject({
       active: true,
       pending: 1,
@@ -208,7 +295,92 @@ describe('createPrimaryModelProbeAdapters', () => {
 
     activeTurn.release();
     await expect(probe).resolves.toEqual({ status: 'ok' });
+    expect(resolveProviderBinaryIdentity).toHaveBeenCalledOnce();
     expect(probeBinaryCommand).toHaveBeenCalledOnce();
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('releases the execution lease when post-gate environment construction throws', async () => {
+    const gate = new ProviderExecutionGate();
+    const activeTurn = await gate.acquire();
+    const first = createPrimaryModelProbeAdapters(undefined, {
+      buildChildEnv: vi.fn(() => {
+        throw new Error('probe env failed');
+      }),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      providerExecutionGate: gate,
+    });
+    const firstProbe = first.probeBinaryModel?.({
+      provider: 'opencode-cli',
+      model: 'openai/env-failure',
+    });
+    await Promise.resolve();
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+
+    activeTurn.release();
+    await expect(firstProbe).rejects.toThrow('probe env failed');
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+
+    const secondProbeCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const second = createPrimaryModelProbeAdapters(undefined, {
+      buildChildEnv: vi.fn(() => ({ PATH: '/tmp' })),
+      getProviderBinary: vi.fn(() => 'opencode'),
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      probeBinaryCommand: secondProbeCommand,
+      providerExecutionGate: gate,
+    });
+    await expect(second.probeBinaryModel?.({
+      provider: 'opencode-cli',
+      model: 'openai/successor',
+    })).resolves.toEqual({ status: 'ok' });
+    expect(secondProbeCommand).toHaveBeenCalledOnce();
+    expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
+  });
+
+  it('blocks a queued probe when the real executable is replaced before gate admission', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'primary-probe-replacement-'));
+    temporaryRoots.push(root);
+    const executable = join(root, 'provider');
+    writeFileSync(executable, '#!/bin/sh\nprintf old\\n');
+    chmodSync(executable, 0o755);
+
+    const initialIdentity = resolveProviderBinaryIdentity('provider', root);
+    const serviceContext = buildPrimaryProbeServiceContext({
+      provider: 'opencode-cli',
+      model: 'openai/replacement',
+      serviceGeneration: 'generation-a',
+      cwd: '',
+      selectorEnv: { PATH: root },
+      binaryState: 'resolved',
+      binaryIdentity: initialIdentity,
+    });
+    const gate = new ProviderExecutionGate();
+    const activeTurn = await gate.acquire();
+    const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      buildChildEnv: vi.fn(() => ({ PATH: root })),
+      getProviderBinary: vi.fn(() => 'provider'),
+      resolveProviderBinaryIdentity: (binary, pathValue) => resolveProviderBinaryIdentity(binary, pathValue),
+      probeBinaryCommand,
+      providerExecutionGate: gate,
+      serviceContext,
+      requireServiceContext: true,
+    });
+
+    const probe = adapters.probeBinaryModel?.({
+      provider: 'opencode-cli',
+      model: 'openai/replacement',
+    });
+    await Promise.resolve();
+    expect(gate.snapshot()).toMatchObject({ active: true, pending: 1 });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
+
+    writeFileSync(executable, '#!/bin/sh\nprintf changed\\n');
+    chmodSync(executable, 0o755);
+    activeTurn.release();
+
+    await expect(probe).resolves.toEqual({ status: 'unknown', reason: 'context-mismatch-binary-sha' });
+    expect(probeBinaryCommand).not.toHaveBeenCalled();
     expect(gate.snapshot()).toMatchObject({ active: false, pending: 0 });
   });
 
@@ -218,6 +390,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const pendingProbe = deferred<{ status: 'ok'; output: string }>();
     const probeBinaryCommand = vi.fn(() => pendingProbe.promise);
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
       providerExecutionGate: gate,
@@ -254,6 +427,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const pendingProbe = deferred<{ status: 'ok'; output: string }>();
     const probeBinaryCommand = vi.fn(() => pendingProbe.promise);
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
       providerExecutionGate: gate,
@@ -285,6 +459,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       const activeTurn = await gate.acquire();
       const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
       const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         getProviderBinary: vi.fn(() => 'opencode'),
         probeBinaryCommand,
         providerExecutionGate: gate,
@@ -323,6 +498,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       const activeTurn = await gate.acquire();
       const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
       const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         getProviderBinary: vi.fn(() => 'opencode'),
         probeBinaryCommand,
         providerExecutionGate: gate,
@@ -391,6 +567,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       options?: Parameters<typeof runBinaryCommandProbe>[3],
     ) => runBinaryCommandProbe(binary, args, env, options, spawnImpl);
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
@@ -480,6 +657,7 @@ describe('createPrimaryModelProbeAdapters', () => {
         options?: Parameters<typeof runBinaryCommandProbe>[3],
       ) => runBinaryCommandProbe(binary, args, env, options, spawnImpl);
       const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
         getProviderBinary: vi.fn(() => 'opencode'),
         probeBinaryCommand,
@@ -550,6 +728,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       );
     };
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
@@ -572,6 +751,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
       ensureClaudeFileStoreCredential,
@@ -591,6 +771,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       return { outcome: 'skipped-cli-reads-own-item' as const };
     });
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       ensureClaudeFileStoreCredential,
       probeBinaryCommand: vi.fn(async () => { order.push('probe'); return { status: 'ok' as const, output: 'OK' }; }),
@@ -614,6 +795,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     });
     const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-cli-reads-own-item' as const }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
       ensureClaudeFileStoreCredential,
@@ -631,6 +813,7 @@ describe('createPrimaryModelProbeAdapters', () => {
   it('a skipped credential-store check does not mask an unavailable credential', async () => {
     const ensureClaudeFileStoreCredential = vi.fn(() => ({ outcome: 'skipped-no-keychain-token' as const }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand: vi.fn(async () => ({ status: 'failed' as const, output: 'Error: invalid API key provided' })),
       ensureClaudeFileStoreCredential,
@@ -646,6 +829,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const ensureClaudeFileStoreCredential = vi.fn(() => { throw new Error('store detection failed'); });
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand,
       ensureClaudeFileStoreCredential,
@@ -659,6 +843,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
   it('maps the real Claude CLI selected-model rejection through the shared binary status contract', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryAuthStatus: vi.fn(async () => ({
         status: 'failed' as const,
@@ -679,6 +864,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const adapters = createPrimaryModelProbeAdapters(
       { executionProfile: 'whatsoup-headless' },
       {
+        resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         cwd: '/agent-cwd',
         buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
         getProviderBinary: vi.fn(() => 'opencode'),
@@ -699,7 +885,7 @@ describe('createPrimaryModelProbeAdapters', () => {
         'Reply with OK only.',
       ],
       expect.any(Object),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+      { cwd: '/agent-cwd', timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
@@ -708,6 +894,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const adapters = createPrimaryModelProbeAdapters(
       { executionProfile: 'fullstack-lead' },
       {
+        resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         cwd: '/agent-cwd',
         buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin' })),
         getProviderBinary: vi.fn(() => 'opencode'),
@@ -731,6 +918,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     // buildChildEnv so the test documents the actual contract.
     const probeBinaryCommand = vi.fn(async () => ({ status: 'ok' as const, output: 'OK' }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       cwd: '/agent-cwd',
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
@@ -754,6 +942,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     ['silent failure output', '', { status: 'provider_unavailable' }],
   ] as const)('maps CLI probe %s output through the provider taxonomy', async (_label, output, expected) => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'claude'),
       probeBinaryCommand: vi.fn(async () => ({
         status: 'failed' as const,
@@ -768,6 +957,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
   it('falls back to the shared binary command probe when no probe dependency is injected', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => process.execPath),
     });
 
@@ -784,6 +974,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       output: '{"type":"message","role":"assistant","content":"OK"}',
     }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: vi.fn(() => 'opencode'),
       probeBinaryCommand,
     });
@@ -801,7 +992,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', '-m', 'openai/configured-primary', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { timeoutMs: 15_000 },
+      { timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
@@ -813,6 +1004,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const adapters = createPrimaryModelProbeAdapters(
       { baseUrl: 'https://openai-compatible.example/v1', apiKeyService: 'tenant-openai' },
       {
+        resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         cwd: '/agent-cwd',
         buildChildEnv: vi.fn(() => ({ PATH: '/usr/bin', OPENAI_API_KEY: 'sk-test-secret' })),
         getProviderBinary: vi.fn(() => 'opencode'),
@@ -828,13 +1020,14 @@ describe('createPrimaryModelProbeAdapters', () => {
       'opencode',
       ['run', '--format', 'json', '--pure', 'Reply with OK only.'],
       expect.objectContaining({ OPENAI_API_KEY: 'sk-test-secret' }),
-      { cwd: '/agent-cwd', timeoutMs: 15_000 },
+      { cwd: '/agent-cwd', timeoutMs: 15_000, onSpawned: expect.any(Function), onExited: expect.any(Function) },
     );
   });
 
   it('maps an unavailable fetch implementation without resolving model access', async () => {
     vi.stubGlobal('fetch', undefined);
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
 
@@ -849,6 +1042,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const resolveApiKey = vi.fn(() => 'sk-test-secret');
     const fetchImpl = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey,
     });
@@ -876,6 +1070,7 @@ describe('createPrimaryModelProbeAdapters', () => {
         }, { once: true });
       }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
@@ -892,6 +1087,44 @@ describe('createPrimaryModelProbeAdapters', () => {
     expect(requestInit?.signal?.aborted).toBe(true);
   });
 
+  it('refuses a real API redirect before the credential reaches its target', async () => {
+    const redirectedAuthorizations: string[] = [];
+    const server = createServer((request, response) => {
+      if (request.url === '/v1/chat/completions') {
+        response.writeHead(302, { location: '/redirected' });
+        response.end();
+        return;
+      }
+      redirectedAuthorizations.push(String(request.headers.authorization ?? ''));
+      response.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error('missing fixture address');
+      const adapters = createPrimaryModelProbeAdapters(
+        { baseUrl: `http://127.0.0.1:${address.port}/v1` },
+        {
+          resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+          resolveApiKey: vi.fn(() => 'sk-test-secret'),
+        },
+      );
+
+      await expect(
+        adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+      ).resolves.toEqual({ status: 'provider_unavailable' });
+      expect(redirectedAuthorizations).toEqual([]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
   it('uses the default API-key resolver and OpenAI generation endpoint when no resolver is injected', async () => {
     const previous = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-test-secret';
@@ -900,6 +1133,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       { status: 200, headers: { 'content-type': 'application/json' } },
     ));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
     });
 
@@ -938,6 +1172,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const adapters = createPrimaryModelProbeAdapters(
       { apiKeyService: 'tenant-openai', baseUrl: 'https://openai.example/v1' },
       {
+        resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
         fetch: fetchImpl as unknown as typeof fetch,
         resolveApiKey: vi.fn(() => 'sk-test-secret'),
       },
@@ -972,6 +1207,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       );
     });
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
@@ -1005,6 +1241,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     ));
     const resolveApiKey = vi.fn(() => 'anthropic-test-secret');
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey,
     });
@@ -1039,6 +1276,7 @@ describe('createPrimaryModelProbeAdapters', () => {
   it('maps missing API credentials without making a network call', async () => {
     const fetchImpl = vi.fn();
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => ''),
     });
@@ -1060,6 +1298,7 @@ describe('createPrimaryModelProbeAdapters', () => {
   ] as const)('maps API generation HTTP %s to provider status', async (status, expected) => {
     const fetchImpl = vi.fn(async () => new Response('', { status }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
@@ -1075,7 +1314,50 @@ describe('createPrimaryModelProbeAdapters', () => {
       { status: 400, headers: { 'content-type': 'application/json' } },
     ));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-missing-model' }),
+    ).resolves.toEqual({ status: 'not_found' });
+  });
+
+  it('caps and cancels an oversized API error body before a beyond-cap classifier marker', async () => {
+    const cancel = vi.fn();
+    const capBytes = 64 * 1024;
+    const chunks = [
+      new TextEncoder().encode('x'.repeat(capBytes)),
+      new TextEncoder().encode('model_not_found: beyond-cap'),
+      new TextEncoder().encode('unread tail'),
+      null,
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks.shift();
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      fetch: vi.fn(async () => new Response(body, { status: 400 })) as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-missing-model' }),
+    ).resolves.toEqual({ status: 'provider_unavailable' });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+  });
+
+  it('keeps status mapping for a non-OK API response with no body', async () => {
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      fetch: vi.fn(async () => new Response(null, { status: 404 })) as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
 
@@ -1090,6 +1372,7 @@ describe('createPrimaryModelProbeAdapters', () => {
       headers: { 'content-type': 'application/json' },
     }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: fetchImpl as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
@@ -1101,6 +1384,7 @@ describe('createPrimaryModelProbeAdapters', () => {
 
   it('maps non-Error fetch throws to provider_unavailable', async () => {
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: vi.fn(async () => { throw 'network down'; }) as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
@@ -1118,6 +1402,7 @@ describe('createPrimaryModelProbeAdapters', () => {
     const err = new Error(`${name} from fetch`);
     err.name = name;
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       fetch: vi.fn(async () => { throw err; }) as unknown as typeof fetch,
       resolveApiKey: vi.fn(() => 'sk-test-secret'),
     });
@@ -1133,6 +1418,7 @@ describe('claude-cli default-model probe command (fleet recovery-stall fix)', ()
     const probeBinaryCommand = vi.fn(
       async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: () => 'claude',
       probeBinaryCommand,
     });
@@ -1148,6 +1434,7 @@ describe('claude-cli default-model probe command (fleet recovery-stall fix)', ()
     const probeBinaryCommand = vi.fn(
       async (_cmd: string, _args: string[], _env: NodeJS.ProcessEnv) => ({ status: 'ok' as const, output: 'OK' }));
     const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
       getProviderBinary: () => 'claude',
       probeBinaryCommand,
     });

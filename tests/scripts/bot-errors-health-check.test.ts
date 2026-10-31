@@ -212,6 +212,29 @@ function runOpenCodeFallbackProbeInventory(
   ].join('\n'))) as string[];
 }
 
+describe('Claude provider-probe credential selector', () => {
+  it('forwards the secure-storage selector, including its defined-empty default override', () => {
+    const result = JSON.parse(python([
+      importHealthModulePrelude(),
+      'import json',
+      'base = {"HOME": "/fixture/home", "PATH": "/fixture/bin:/usr/bin:/bin", "USER": "fixture", "CLAUDE_CONFIG_DIR": "/fixture/config", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/fixture/secure", "PRIVATE_SENTINEL": "not-forwarded"}',
+      'selected = m.governed_child_environment("/fixture/bin:/usr/bin:/bin", "agent-alpha", None, base, env_keys=m.CLAUDE_FUNCTIONAL_ENV_KEYS)',
+      'empty_override = dict(base)',
+      'empty_override["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""',
+      'default_selected = m.governed_child_environment("/fixture/bin:/usr/bin:/bin", "agent-alpha", None, empty_override, env_keys=m.CLAUDE_FUNCTIONAL_ENV_KEYS)',
+      'print(json.dumps({"config": selected.get("CLAUDE_CONFIG_DIR"), "secure": selected.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), "default_secure": default_selected.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), "default_key_present": "CLAUDE_SECURESTORAGE_CONFIG_DIR" in default_selected, "secret_present": "PRIVATE_SENTINEL" in selected}))',
+    ].join('\n'))) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      config: '/fixture/config',
+      secure: '/fixture/secure',
+      default_secure: '',
+      default_key_present: true,
+      secret_present: false,
+    });
+  });
+});
+
 function runDeadman(tmpRoot: string, extraEnv: Record<string, string> = {}) {
   return spawnSync('python3', [
     'deploy/scripts/bot-errors-health-check.py',

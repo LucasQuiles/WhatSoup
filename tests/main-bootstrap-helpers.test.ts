@@ -498,6 +498,8 @@ async function importMainWithMocks(options: {
     releaseProcessLock,
     flushLogger: vi.fn(async () => {}),
     shutdownExitCode: vi.fn((_signal: string, _outcome?: { complete: boolean }): 0 | 1 => 0),
+    runShutdownSequence: vi.fn(),
+    awaitActiveClaudeRefreshes: vi.fn(async () => {}),
     recordStartupBoot,
     settleStartupNotification,
     startupNotifyPath,
@@ -621,7 +623,22 @@ async function importMainWithMocks(options: {
   vi.doMock('../src/main-shutdown-policy.ts', async (importOriginal) => {
     const original = await importOriginal<typeof import('../src/main-shutdown-policy.ts')>();
     mocks.shutdownExitCode.mockImplementation(original.shutdownExitCode);
-    return { ...original, shutdownExitCode: mocks.shutdownExitCode };
+    mocks.runShutdownSequence.mockImplementation(original.runShutdownSequence);
+    return {
+      ...original,
+      runShutdownSequence: mocks.runShutdownSequence,
+      shutdownExitCode: mocks.shutdownExitCode,
+    };
+  });
+  // Future main shutdown wiring imports only this explicit close join. Keep the
+  // partial mock narrow so its behavior stays deterministic without mocking the
+  // refresh owner or child lifecycle.
+  vi.doMock('../src/runtimes/agent/providers/claude-refresh-ahead.ts', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../src/runtimes/agent/providers/claude-refresh-ahead.ts')>();
+    return {
+      ...original,
+      awaitActiveClaudeRefreshes: mocks.awaitActiveClaudeRefreshes,
+    };
   });
   vi.doMock('../src/fleet/platform.ts', () => ({ createServiceManager: mocks.createServiceManager }));
 
@@ -796,8 +813,10 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
 
       const shutdownPromise = (sigterm[0] as () => Promise<void>)();
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(exitSpy).not.toHaveBeenCalled();
 
+      await vi.advanceTimersByTimeAsync(1);
       expect(h.logger.error).toHaveBeenCalledWith('shutdown timed out, forcing exit');
       expect(exitSpy).toHaveBeenCalledWith(1);
 
@@ -909,16 +928,21 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
-    it('forces exit if uncaughtException shutdown remains past the emergency timer', async () => {
-      const h = await importMainWithMocks();
+    it('shares the common shutdown watchdog when uncaughtException shutdown remains pending', async () => {
+      const h = await importMainWithMocks({ runtimeShutdownDeferred: true });
       const uncaught = h.processOn.handlers.get('uncaughtException')!;
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
 
       (uncaught[0] as (err: Error) => void)(new Error('boom'));
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(exitSpy).not.toHaveBeenCalled();
 
-      expect(h.logger.error).toHaveBeenCalledWith('shutdown hung after uncaughtException — forcing exit');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.logger.error).toHaveBeenCalledWith('shutdown timed out, forcing exit');
       expect(exitSpy).toHaveBeenCalledWith(1);
+
+      h.resolveRuntimeShutdown();
+      await flushMicrotasks();
     });
   });
 
@@ -939,16 +963,51 @@ describe('main.ts — uncovered helpers and signal paths', () => {
       );
     });
 
-    it('forces exit if unhandledRejection shutdown remains past the emergency timer', async () => {
-      const h = await importMainWithMocks();
+    it('shares the common shutdown watchdog when unhandledRejection shutdown remains pending', async () => {
+      const h = await importMainWithMocks({ runtimeShutdownDeferred: true });
       const handler = h.processOn.handlers.get('unhandledRejection')!;
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
 
       (handler[0] as (reason: unknown) => void)('hung rejection');
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(exitSpy).not.toHaveBeenCalled();
 
-      expect(h.logger.error).toHaveBeenCalledWith('shutdown hung after unhandledRejection — forcing exit');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.logger.error).toHaveBeenCalledWith('shutdown timed out, forcing exit');
       expect(exitSpy).toHaveBeenCalledWith(1);
+
+      h.resolveRuntimeShutdown();
+      await flushMicrotasks();
+    });
+
+    it('reserves refresh cleanup margin inside the ordinary deadline and does not add a fatal-only watchdog', async () => {
+      const h = await importMainWithMocks({ runtimeShutdownDeferred: true });
+      const sigterm = h.processOn.handlers.get('SIGTERM')!;
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+      vi.setSystemTime(new Date('2026-10-28T18:00:00.000Z'));
+      const shutdownStartedAt = Date.now();
+      const ordinaryBefore = h.capturedTimeouts.length;
+      const ordinary = (sigterm[0] as () => Promise<void>)();
+      await flushMicrotasks();
+      expect(h.capturedTimeouts.slice(ordinaryBefore).map((timer) => timer.ms)).toEqual([10_000]);
+      expect(h.runShutdownSequence).toHaveBeenCalledWith(expect.objectContaining({
+        refreshDrainDeadlineAt: shutdownStartedAt + 8_000,
+        drainRefreshChildren: expect.any(Function),
+      }));
+      h.resolveRuntimeShutdown();
+      await ordinary;
+      exitSpy.mockClear();
+
+      const fatal = await importMainWithMocks({ runtimeShutdownDeferred: true });
+      const fatalUncaught = fatal.processOn.handlers.get('uncaughtException')!;
+      const fatalBefore = fatal.capturedTimeouts.length;
+      (fatalUncaught[0] as (err: Error) => void)(new Error('boom'));
+      await flushMicrotasks();
+      expect(fatal.capturedTimeouts.slice(fatalBefore).map((timer) => timer.ms)).toEqual([10_000]);
+      expect(exitSpy).not.toHaveBeenCalled();
+      fatal.resolveRuntimeShutdown();
+      await flushMicrotasks();
     });
 
     it('does not re-enter shutdown when shutdownInProgress=true', async () => {

@@ -1,4 +1,9 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { buildChildEnv, getProviderBinary } from '../session.ts';
+import {
+  resolveProviderBinaryIdentity,
+  type ProviderBinaryIdentity,
+} from '../provider-canary-proof.ts';
 import { scrubbedAuthStatusEnv } from './account-auth-status.ts';
 import { buildOpenCodeRunArgs } from './opencode-execution-profile.ts';
 import { classifyProviderFailure } from '../failure-taxonomy.ts';
@@ -9,13 +14,25 @@ import {
   type BinaryCommandProbeOptions,
 } from './binary-preflight.ts';
 import { resolveApiKey, type ResolveApiKeyOptions } from '../../../lib/api-key-resolver.ts';
-import { ensureClaudeFileStoreCredential, type ClaudeFileStoreHealResult } from './claude-filestore-heal.ts';
+import { readBodyCapped } from '../../../lib/ssrf-fetch.ts';
+import {
+  claudeCredentialServiceForEnv,
+  claudeCredentialServiceLabel,
+  claudeSecureStorageDir,
+  ensureClaudeFileStoreCredential,
+  type ClaudeFileStoreHealResult,
+} from './claude-filestore-heal.ts';
+import { claudeRefreshLockGrace, refreshAheadDefersProbe, refreshClaudeLoginAhead } from './claude-refresh-ahead.ts';
+import { DEFERRED_REFRESH_IN_FLIGHT, REFRESH_AHEAD_FAILED, REFRESH_OWNER_UNAVAILABLE } from './primary-model-usability.ts';
+import { probeLifecycleObservers, type ProbeLifecycleLog } from './probe-lifecycle-log.ts';
+import { createChildLogger } from '../../../logger.ts';
 import type {
   ApiModelAccessProbeResult,
   BinaryModelProbeResult,
   PrimaryModelProbeAdapters,
   PrimaryModelProbeStageReporter,
-  ServingContextReceipt,
+  PrimaryProbeServiceContext,
+  PrimaryProbeBinaryState,
 } from './primary-model-usability.ts';
 import type {
   ProviderExecutionGate,
@@ -23,10 +40,26 @@ import type {
 } from '../provider-execution-gate.ts';
 import { shortHash } from '../../../lib/short-hash.ts';
 
+const SELECTOR_FINGERPRINT_KEY = randomBytes(32);
+
+function selectorFingerprint(value: string, length = 12): string {
+  return createHmac('sha256', SELECTOR_FINGERPRINT_KEY).update(value).digest('hex').slice(0, length);
+}
+
+/** Why a primary-model probe runs; carried into its lifecycle log lines. */
+export type PrimaryModelProbeTrigger = 'startup' | 'manual' | 'periodic' | 'recovery' | 'diagnostic';
+
+/** Sink for the probe child's spawn and exit lines (a pino logger in production). */
+export type PrimaryModelProbeLog = ProbeLifecycleLog;
+
 export interface PrimaryModelProbeAdapterDeps {
   cwd?: string;
   buildChildEnv?: typeof buildChildEnv;
   getProviderBinary?: (provider: string) => string | null;
+  resolveProviderBinaryIdentity?: (
+    binary: string,
+    pathValue: string,
+  ) => ProviderBinaryIdentity;
   probeBinaryAuthStatus?: (
     binary: string,
     args: string[],
@@ -55,78 +88,212 @@ export interface PrimaryModelProbeAdapterDeps {
   egressProxyPort?: number;
   /** Shared OpenCode state-store execution gate owned by the AgentRuntime. */
   providerExecutionGate?: ProviderExecutionGate;
-  /**
-   * #3017 AXIS C: serving-context receipt. When provided, the probe is bound
-   * to the serving admission/environment: if the config root, credential-store
-   * class, binary digest, provider, or model differs from the serving context,
-   * the probe fail-closes with 'probe-blocked' rather than producing evidence
-   * about a different environment. Content-free hashes only — never credential
-   * material, paths that expose user data, or account identity.
-   */
-  servingContext?: ServingContextReceipt;
+  /** Immutable runtime-primary context captured before readiness consumers run. */
+  serviceContext?: PrimaryProbeServiceContext;
+  /** Production requires the immutable context; isolated legacy fixtures may omit it. */
+  requireServiceContext?: boolean;
+  /** Test seam for context comparison; production builds this from the final invocation. */
+  currentServiceContext?: () => PrimaryProbeServiceContext | null;
+  /** Why this probe runs. Logged with each CLI probe child; 'unspecified' when absent. */
+  probeTrigger?: PrimaryModelProbeTrigger;
+  /** Lifecycle log sink for CLI probe children. Injectable for tests. */
+  log?: PrimaryModelProbeLog;
+  /** claude-cli refresh-ahead run before the probe budget (claude-refresh-ahead.ts). Injectable for tests. */
+  refreshClaudeLoginAhead?: (binary: string, env: NodeJS.ProcessEnv) => Promise<unknown>;
+  /** claude-cli refresh-lock wait before the probe child is signalled. Injectable for tests. */
+  claudeRefreshLockGrace?: (env: NodeJS.ProcessEnv) => Promise<unknown> | null;
 }
 
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 const API_PROBE_TIMEOUT_MS = 5_000;
+const API_ERROR_RESPONSE_LIMIT_BYTES = 64 * 1024;
 const CLI_MODEL_PROBE_TIMEOUT_MS = 15_000;
 const CLAUDE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const OPENCODE_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 const API_MODEL_PROBE_PROMPT = 'Reply with OK only.';
 
-// #3017 AXIS C: verify the probe target matches the serving context receipt.
-// Returns a reason string when the context differs (fail-closed), or null when
-// the context matches (or no receipt was provided — backward-compatible). All
-// comparisons are content-free: hashes, class identifiers, provider/model
-// names. Never credential material or account identity.
+interface PrimaryProbeInvocation {
+  readonly binaryToken: string | null;
+  readonly executablePath: string | null;
+  readonly binarySha256: string | null;
+  readonly env: NodeJS.ProcessEnv;
+  readonly context: PrimaryProbeServiceContext;
+  readonly blockedReason: string | null;
+}
+
+function hashEnvValue(env: NodeJS.ProcessEnv, key: string): string | null {
+  return Object.prototype.hasOwnProperty.call(env, key)
+    ? selectorFingerprint(env[key] ?? '')
+    : null;
+}
+
+function hashConfigValue(config: Record<string, unknown> | undefined, key: string): string | null {
+  const value = config?.[key];
+  return typeof value === 'string' ? selectorFingerprint(value) : null;
+}
+
+/**
+ * Build the exact selector environment used by a CLI readiness probe. The
+ * OpenCode path intentionally omits credential values; credentials do not
+ * select the route, and this keeps startup context capture content-free.
+ */
+export function buildPrimaryProbeSelectorEnv(
+  provider: string,
+  model: string | null,
+  providerConfig: Record<string, unknown> | undefined,
+  deps: Pick<PrimaryModelProbeAdapterDeps, 'buildChildEnv' | 'egressProxyPort'> = {},
+): NodeJS.ProcessEnv {
+  const baseOpts = typeof deps.egressProxyPort === 'number' && deps.egressProxyPort > 0
+    ? { egressProxyPort: deps.egressProxyPort }
+    : undefined;
+  if (provider === 'opencode-cli') {
+    const buildEnv = deps.buildChildEnv ?? buildChildEnv;
+    return buildEnv(
+      'opencode-cli',
+      { ...baseOpts, providerCredentials: 'omit' },
+      model || undefined,
+      providerConfig,
+    );
+  }
+  if (provider === 'claude-cli') return buildPrimaryProbeEnv(provider, model, providerConfig, deps);
+  return {};
+}
+
+/** Build a content-free fingerprint from the effective launch selectors. */
+export function buildPrimaryProbeServiceContext(input: {
+  provider: string;
+  model: string | null;
+  serviceGeneration: string;
+  cwd: string;
+  providerConfig?: Record<string, unknown>;
+  selectorEnv: NodeJS.ProcessEnv;
+  binaryState: PrimaryProbeBinaryState;
+  binaryIdentity?: ProviderBinaryIdentity | null;
+}): PrimaryProbeServiceContext {
+  const env = input.selectorEnv;
+  const selectorShape = {
+    cwdHash: selectorFingerprint(input.cwd),
+    homeHash: hashEnvValue(env, 'HOME'),
+    pathHash: hashEnvValue(env, 'PATH'),
+    xdgConfigHash: hashEnvValue(env, 'XDG_CONFIG_HOME'),
+    xdgDataHash: hashEnvValue(env, 'XDG_DATA_HOME'),
+    httpProxyHash: hashEnvValue(env, 'HTTP_PROXY'),
+    httpsProxyHash: hashEnvValue(env, 'HTTPS_PROXY'),
+    httpProxyLowerHash: hashEnvValue(env, 'http_proxy'),
+    httpsProxyLowerHash: hashEnvValue(env, 'https_proxy'),
+    claudeConfigHash: input.provider === 'claude-cli' ? hashEnvValue(env, 'CLAUDE_CONFIG_DIR') : null,
+    claudeSecureStorageHash: input.provider === 'claude-cli'
+      ? hashEnvValue(env, 'CLAUDE_SECURESTORAGE_CONFIG_DIR') : null,
+    claudeCredentialServiceHash: input.provider === 'claude-cli'
+      ? selectorFingerprint(claudeCredentialServiceForEnv(env)) : null,
+    claudeStorageDirHash: input.provider === 'claude-cli'
+      ? selectorFingerprint(claudeSecureStorageDir(env)) : null,
+    providerBaseUrlHash: hashConfigValue(input.providerConfig, 'baseUrl'),
+    providerApiKeyServiceHash: hashConfigValue(input.providerConfig, 'apiKeyService'),
+  };
+  const identity = input.binaryIdentity ?? null;
+  return {
+    provider: input.provider,
+    model: input.model,
+    serviceGeneration: input.serviceGeneration,
+    launchContextHash: selectorFingerprint(JSON.stringify(selectorShape)),
+    binaryState: input.binaryState,
+    resolvedBinaryPathHash: identity ? selectorFingerprint(identity.resolvedPath) : null,
+    binarySha256: identity?.sha256 ?? null,
+  };
+}
+
+function comparePrimaryProbeContext(
+  target: { provider: string; model: string | null },
+  expected: PrimaryProbeServiceContext | undefined,
+  current: PrimaryProbeServiceContext | null,
+  requireServiceContext: boolean,
+): string | null {
+  if (!expected) return requireServiceContext ? 'context-missing-service' : null;
+  if (!current) return 'context-missing-current';
+  if (expected.provider !== target.provider || current.provider !== target.provider) {
+    return 'context-mismatch-provider';
+  }
+  if ((expected.model ?? null) !== (target.model ?? null) || (current.model ?? null) !== (target.model ?? null)) {
+    return 'context-mismatch-model';
+  }
+  if (expected.serviceGeneration !== current.serviceGeneration) return 'context-mismatch-generation';
+  if (expected.launchContextHash !== current.launchContextHash) return 'context-mismatch-launch';
+  if (expected.binaryState !== current.binaryState) return 'context-mismatch-binary-state';
+  if (expected.binaryState === 'resolved') {
+    if (!current.resolvedBinaryPathHash || !current.binarySha256) return 'context-binary-missing';
+    if (expected.resolvedBinaryPathHash !== current.resolvedBinaryPathHash) return 'context-mismatch-binary-path';
+    if (expected.binarySha256 !== current.binarySha256) return 'context-mismatch-binary-sha';
+  }
+  return null;
+}
+
+// #3017 AXIS C: verify the probe target against the immutable runtime-primary
+// service context. A current context callback is retained as a test seam;
+// production CLI probes use the invocation snapshot below so the compared
+// executable path is the path actually passed to probeBinaryCommand.
 export function verifyServingContext(
   target: { provider: string; model: string | null },
   deps: PrimaryModelProbeAdapterDeps,
 ): string | null {
-  const ctx = deps.servingContext;
-  if (!ctx) return null; // no receipt → backward-compatible (no binding)
-  if (ctx.provider !== target.provider) {
-    return 'context-mismatch-provider';
-  }
-  if ((ctx.model ?? null) !== (target.model ?? null)) {
-    return 'context-mismatch-model';
-  }
-  // Config root: hash the deps.cwd and compare to the receipt's configRootHash.
-  if (ctx.configRootHash !== null && deps.cwd) {
-    const probeConfigRootHash = shortHash(deps.cwd);
-    if (probeConfigRootHash !== ctx.configRootHash) {
-      return 'context-mismatch-config-root';
-    }
-  }
-  // Credential-store class + binary digest: these are derived from the provider
-  // and its binary; the receipt captures what the runtime is serving with. If
-  // the probe's binary differs (e.g. a different claude binary version), block.
-  if (ctx.binaryDigest !== null && typeof deps.getProviderBinary === 'function') {
-    const binary = deps.getProviderBinary(target.provider);
-    if (binary !== null) {
-      const probeBinaryDigest = shortHash(binary);
-      if (probeBinaryDigest !== ctx.binaryDigest) {
-        return 'context-mismatch-binary-digest';
-      }
-    }
-  }
-  // Credential-store class is provider-derived; the receipt captures it at
-  // admission. A mismatch means the provider's credential-store class changed
-  // since admission (e.g. keychain → file-store migration mid-session).
-  if (ctx.credentialStoreClass !== null) {
-    const probeCredStoreClass = deriveCredentialStoreClass(target.provider);
-    if (probeCredStoreClass !== ctx.credentialStoreClass) {
-      return 'context-mismatch-credential-store-class';
-    }
-  }
-  return null; // context matches → proceed
+  return comparePrimaryProbeContext(
+    target,
+    deps.serviceContext,
+    deps.currentServiceContext?.() ?? null,
+    deps.requireServiceContext === true,
+  );
 }
 
-function deriveCredentialStoreClass(provider: string): string | null {
-  if (provider === 'claude-cli') return 'keychain-or-file-store';
-  if (provider === 'opencode-cli') return 'keyring';
-  if (provider === 'openai-api' || provider === 'anthropic-api') return 'api-key';
-  return null;
+function buildPrimaryProbeInvocation(
+  target: { provider: string; model: string | null },
+  providerConfig: Record<string, unknown> | undefined,
+  deps: PrimaryModelProbeAdapterDeps,
+): PrimaryProbeInvocation {
+  const env = buildPrimaryProbeEnv(target.provider, target.model, providerConfig, deps);
+  const resolveBinary = deps.getProviderBinary ?? getProviderBinary;
+  let binaryToken: string | null = null;
+  try {
+    binaryToken = resolveBinary(target.provider);
+  } catch {
+    binaryToken = null;
+  }
+
+  let identity: ProviderBinaryIdentity | null = null;
+  const binaryState: PrimaryProbeBinaryState = binaryToken === null ? 'missing' : 'resolved';
+  if (binaryToken !== null) {
+    try {
+      identity = (deps.resolveProviderBinaryIdentity ?? resolveProviderBinaryIdentity)(
+        binaryToken,
+        env.PATH ?? '',
+      );
+    } catch {
+      identity = null;
+    }
+  }
+  const context = buildPrimaryProbeServiceContext({
+    provider: target.provider,
+    model: target.model,
+    serviceGeneration: deps.serviceContext?.serviceGeneration ?? '',
+    cwd: deps.cwd ?? '',
+    providerConfig,
+    selectorEnv: env,
+    binaryState: identity === null ? 'missing' : binaryState,
+    binaryIdentity: identity,
+  });
+  return {
+    binaryToken,
+    executablePath: identity?.resolvedPath ?? null,
+    binarySha256: identity?.sha256 ?? null,
+    env,
+    context,
+    blockedReason: comparePrimaryProbeContext(
+      target,
+      deps.serviceContext,
+      context,
+      deps.requireServiceContext === true,
+    ),
+  };
 }
 
 export function createPrimaryModelProbeAdapters(
@@ -134,23 +301,65 @@ export function createPrimaryModelProbeAdapters(
   deps: PrimaryModelProbeAdapterDeps = {},
 ): PrimaryModelProbeAdapters {
   return {
-    probeBinaryModel: (target, signal, onStage) => {
-      // #3017 AXIS C: fail closed when the probe target context differs from
-      // the serving context receipt.
-      const mismatch = verifyServingContext(target, deps);
-      if (mismatch !== null) {
-        return Promise.resolve({ status: 'unknown', reason: mismatch });
-      }
-      return probeCliModel(target.provider, target.model, providerConfig, deps, signal, onStage);
-    },
+    prepareBinaryModel: (target) => prepareCliModelProbe(target, providerConfig, deps),
+    probeBinaryModel: (target, signal, onStage) =>
+      probeCliModel(target.provider, target.model, providerConfig, deps, signal, onStage),
     probeApiModelAccess: (target, signal, onStage) => {
-      const mismatch = verifyServingContext(target, deps);
+      const current = deps.currentServiceContext?.() ?? buildPrimaryProbeServiceContext({
+        provider: target.provider,
+        model: target.model,
+        serviceGeneration: deps.serviceContext?.serviceGeneration ?? '',
+        cwd: deps.cwd ?? '',
+        providerConfig,
+        selectorEnv: {},
+        binaryState: 'none',
+      });
+      const mismatch = comparePrimaryProbeContext(
+        target,
+        deps.serviceContext,
+        current,
+        deps.requireServiceContext === true,
+      );
       if (mismatch !== null) {
         return Promise.resolve({ status: 'unknown', reason: mismatch });
       }
       return probeApiModelAccess(target.provider, target.model, providerConfig, deps, signal, onStage);
     },
   };
+}
+
+/**
+ * claude-cli only: run the refresh-ahead child with the probe child's env, so
+ * a due token refresh happens in a child nothing kills rather than in the
+ * probe (see claude-refresh-ahead.ts). The usability probe awaits this before
+ * it arms its deadline. Never rejects.
+ */
+async function prepareCliModelProbe(
+  target: { provider: string; model: string | null },
+  providerConfig: Record<string, unknown> | undefined,
+  deps: PrimaryModelProbeAdapterDeps,
+): Promise<void | { defer: string }> {
+  if (target.provider !== 'claude-cli') return;
+  try {
+    // This preflight only decides whether refresh-ahead may run. The final
+    // probe builds a fresh invocation and passes that exact resolved path to
+    // probeBinaryCommand; this preflight is never readiness evidence.
+    const invocation = buildPrimaryProbeInvocation(target, providerConfig, deps);
+    if (invocation.blockedReason !== null || !invocation.binaryToken || !invocation.executablePath) return;
+    const refreshed = await (deps.refreshClaudeLoginAhead ?? refreshClaudeLoginAhead)(invocation.binaryToken, invocation.env);
+    // Only a currently held refresh suppresses alerts. Other refresh failures still block the
+    // killable probe, but carry an alertable reason because no running child was established.
+    if (refreshAheadDefersProbe(refreshed)) {
+      const outcome = typeof refreshed === 'object' && refreshed !== null
+        ? (refreshed as { outcome?: unknown }).outcome : undefined;
+      if (outcome === 'still-running') return { defer: DEFERRED_REFRESH_IN_FLIGHT };
+      if (outcome === 'owner-unavailable') return { defer: REFRESH_OWNER_UNAVAILABLE };
+      return { defer: REFRESH_AHEAD_FAILED };
+    }
+  } catch {
+    return { defer: REFRESH_AHEAD_FAILED };
+  }
+  return undefined;
 }
 
 async function probeCliModel(
@@ -163,14 +372,6 @@ async function probeCliModel(
 ): Promise<BinaryModelProbeResult> {
   if (signal?.aborted) return { status: 'timeout' };
   onStage?.('prepare');
-  const resolveBinary = deps.getProviderBinary ?? getProviderBinary;
-  let binary: string | null;
-  try {
-    binary = resolveBinary(provider);
-  } catch {
-    return { status: 'provider_unavailable' };
-  }
-  if (!binary) return { status: 'provider_unavailable' };
 
   // Duplicate credential stores can leave a stale refresh token available to
   // the CLI. Detect that state without copying or deleting either credential.
@@ -191,7 +392,6 @@ async function probeCliModel(
       return probeBinaryCommand(cmd, args, env, options);
     });
   const args = modelProbeCommand(provider, model, providerConfig);
-  const env = modelProbeEnv(provider, model, providerConfig, deps);
   let executionLease: ProviderExecutionLease | null = null;
   if (provider === 'opencode-cli' && deps.providerExecutionGate) {
     onStage?.('gate-wait');
@@ -216,21 +416,44 @@ async function probeCliModel(
     executionLease?.release();
     executionLease = null;
   };
-  let result: BinaryAuthStatusResult;
   try {
+    // Resolve and hash only after all waits above. The executable path passed
+    // to the child is therefore the identity observed after the execution
+    // gate, rather than a SHA captured before a long gate wait. Keep every
+    // post-acquire setup step in this cleanup scope: environment construction,
+    // lifecycle observer construction, and context mapping can all throw before
+    // probeBinaryCommand gets a chance to invoke onProcessClosed.
+    const invocation = buildPrimaryProbeInvocation({ provider, model }, providerConfig, deps);
+    if (invocation.blockedReason !== null) {
+      releaseExecutionLease();
+      return { status: 'unknown', reason: invocation.blockedReason };
+    }
+    if (!invocation.binaryToken || !invocation.executablePath || !invocation.binarySha256) {
+      releaseExecutionLease();
+      return { status: 'provider_unavailable' };
+    }
+    const env = invocation.env;
+    const lifecycle = probeChildLifecycleLog(provider, env, deps, signal);
     onStage?.('child-run');
     if (!signal?.aborted) {
       executionLease?.setPhase('executing');
       executionLease?.markProgress();
     }
-    result = await probe(
-      binary,
+    const result = await probe(
+      invocation.executablePath,
       args,
       env,
       {
         ...(deps.cwd ? { cwd: deps.cwd } : {}),
         timeoutMs: CLI_MODEL_PROBE_TIMEOUT_MS,
         ...(signal ? { signal } : {}),
+        ...lifecycle,
+        ...(provider === 'claude-cli'
+          ? {
+              terminationGrace: () => (deps.claudeRefreshLockGrace
+                ?? ((childEnv: NodeJS.ProcessEnv) => claudeRefreshLockGrace(childEnv, 'primary-model-probe')))(env),
+            }
+          : {}),
         ...(executionLease ? {
           onProcessClosed: () => {
             terminalizeExecutionLease();
@@ -243,12 +466,41 @@ async function probeCliModel(
     // it. Their returned promise is their complete process-lifetime contract.
     terminalizeExecutionLease();
     if (deps.probeBinaryCommand || deps.probeBinaryAuthStatus) releaseExecutionLease();
+    return mapCliProbeResult(result);
   } catch (err) {
     terminalizeExecutionLease();
     releaseExecutionLease();
     throw err;
   }
-  return mapCliProbeResult(result);
+}
+
+/**
+ * The spawn and exit lines of a CLI probe child (probe-lifecycle-log.ts). They
+ * name the keychain item of the child's config dir ('default' for the bare
+ * item), never the directory itself, any other environment value, or the
+ * child's output.
+ */
+function probeChildLifecycleLog(
+  provider: string,
+  env: NodeJS.ProcessEnv,
+  deps: PrimaryModelProbeAdapterDeps,
+  signal: AbortSignal | undefined,
+): Required<Pick<BinaryCommandProbeOptions, 'onSpawned' | 'onExited'>> {
+  return probeLifecycleObservers(
+    deps.log ?? createChildLogger('primary-model-probe'),
+    {
+      spawnEvent: 'primary_model_probe_spawn',
+      spawnMessage: 'primary model probe spawned',
+      exitEvent: 'primary_model_probe_exit',
+      exitMessage: 'primary model probe exited',
+    },
+    {
+      trigger: deps.probeTrigger ?? 'unspecified',
+      provider,
+      ...(provider === 'claude-cli' ? { credentialService: claudeCredentialServiceLabel(env) } : {}),
+    },
+    signal,
+  );
 }
 
 function modelProbeCommand(
@@ -275,7 +527,7 @@ function modelProbeCommand(
   return ['-p', CLAUDE_MODEL_PROBE_PROMPT, ...(model === null ? [] : ['--model', model])];
 }
 
-function modelProbeEnv(
+export function buildPrimaryProbeEnv(
   provider: string,
   model: string | null,
   providerConfig: Record<string, unknown> | undefined,
@@ -292,23 +544,8 @@ function modelProbeEnv(
     const buildEnv = deps.buildChildEnv ?? buildChildEnv;
     return buildEnv('opencode-cli', baseOpts, model ?? undefined, providerConfig);
   }
-  const proxyUrl = baseOpts ? `http://127.0.0.1:${baseOpts.egressProxyPort}` : undefined;
-  return {
-    // env-allowed: shared auth-status allowlist keeps model and identity probes on the same credential store
-    ...scrubbedAuthStatusEnv(process.env),
-    // Egress proxy (#1607, F6): UPPER + lower case (curl reads lowercase for
-    // plain HTTP; see child-env.ts / F4). Only present when opted in.
-    ...(proxyUrl
-      ? {
-          HTTP_PROXY: proxyUrl,
-          HTTPS_PROXY: proxyUrl,
-          NO_PROXY: 'localhost,127.0.0.1',
-          http_proxy: proxyUrl,
-          https_proxy: proxyUrl,
-          no_proxy: 'localhost,127.0.0.1',
-        }
-      : {}),
-  };
+  // env-allowed: shared allowlist preserves credential selection and configured proxy routing
+  return scrubbedAuthStatusEnv(process.env, deps.egressProxyPort);
 }
 
 function mapCliProbeResult(result: BinaryAuthStatusResult): BinaryModelProbeResult {
@@ -360,6 +597,7 @@ async function probeApiModelAccess(
     onStage?.('api-request');
     const response = await fetchImpl(apiGenerationUrl(provider, providerConfig), {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/json',
         ...apiHeaders(provider, apiKey),
@@ -368,7 +606,9 @@ async function probeApiModelAccess(
       signal: controller.signal,
     });
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
+      const errText = response.body
+        ? await readBodyCapped(response, API_ERROR_RESPONSE_LIMIT_BYTES).catch(() => '')
+        : '';
       return mapApiGenerationFailure(response.status, errText);
     }
     return { status: 'found' };

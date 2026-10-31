@@ -123,12 +123,9 @@ describe('ChatRuntime fallback model resolution', () => {
   it('resolves a symbolic fallback model to the concrete live ID before the provider call', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     vi.stubEnv('OPENAI_API_KEY', 'fake-openai-key');
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        data: [{ id: 'gpt-5.5' }, { id: 'gpt-5.5-codex' }, { id: 'gpt-5.4' }, { id: 'gpt-5.6-preview' }],
-      }),
-    }));
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => Response.json({
+      data: [{ id: 'gpt-5.5' }, { id: 'gpt-5.5-codex' }, { id: 'gpt-5.4' }, { id: 'gpt-5.6-preview' }],
+    })));
 
     const primary = badRequestPrimary();
     const fallback = capturingFallback();

@@ -4,4 +4,6 @@ Documentation=https://github.com/LucasQuiles/WhatSoup
 
 [Service]
 Type=oneshot
+Environment=CLAUDE_CONFIG_DIR=%h/.claude-maint
+Environment=CLAUDE_SECURESTORAGE_CONFIG_DIR=%h/.claude-maint
 ExecStart=%h/.local/bin/whatsoup-harness-maintenance

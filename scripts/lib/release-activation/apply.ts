@@ -51,6 +51,7 @@ import {
   type ActivationContext,
   bootstrapEntrypointFor,
   countRenderDriftLines,
+  readBotErrorsHealthConsumer,
   wrapperTargetFor,
 } from './plan.ts';
 
@@ -591,6 +592,20 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
   // ---- coordinated switch ----
   let failure: string | null = null;
   try {
+    if (context.botErrorsHealthConsumer !== null) {
+      const consumer = await readBotErrorsHealthConsumer(host, context.domain, context.home);
+      const sameConsumer = consumer.consumer !== null
+        && consumer.consumer.root === context.botErrorsHealthConsumer.root
+        && consumer.consumer.capability >= context.botErrorsHealthConsumer.required;
+      steps.push({
+        step: 'recheck-bot-errors-health-consumer-before-switch',
+        ok: sameConsumer,
+        detail: consumer.detail,
+      });
+      if (!sameConsumer) {
+        return refuse('BOT ERRORS health consumer changed or no longer satisfies the selector capability', backupPath);
+      }
+    }
     repointSymlink(context.wrapperLink, wrapperTargetFor(args.release));
     steps.push({ step: 'switch-symlink', ok: true });
     for (const entry of context.staged) writePlist(entry.plistPath, entry.staged!);

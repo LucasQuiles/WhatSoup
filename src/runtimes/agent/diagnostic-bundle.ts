@@ -81,7 +81,7 @@ async function runProbeGuarded(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<DiagnosticProbeResult>((resolve) => {
     timer = setTimeout(() => {
-      controller.abort();
+      controller.abort(new DOMException('diagnostic probe deadline', 'TimeoutError'));
       resolve({ ok: false, confidence: 'suspected', summary: `probe ${id} timed out after ${timeoutMs}ms` });
     }, timeoutMs);
     timer.unref?.();

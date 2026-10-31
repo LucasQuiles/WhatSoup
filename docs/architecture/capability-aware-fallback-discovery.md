@@ -345,10 +345,11 @@ runtime's current default"; neither the first catalogue result nor an old reposi
 is silently selected. An unavailable or failed catalogue remains visible and preserves a
 manual provider-native entry path.
 
-Catalogue identity follows execution identity. A managed API adapter lists with its API-key
-credential, while an agent using an existing CLI session lists with that CLI's OAuth
-credential. They share response classification and rendering but cannot borrow one another's
-account catalogue. The review step renders the configured keys themselves, so fields accepted
+An Anthropic catalogue request uses an explicit API-key credential. Its organization
+catalogue does not establish which models a separately authenticated CLI session can execute.
+Catalogue discovery does not read CLI credential files or use their OAuth tokens; native
+CLI login validation remains with the CLI. They share response classification and rendering.
+The review step renders the configured keys themselves, so fields accepted
 for a newly reported adapter do not disappear merely because the browser bundle lacks local
 metadata for that adapter.
 

@@ -150,14 +150,12 @@ describe('probeFallbackBinary', () => {
   it('returns unknown and kills the child when the probe times out', async () => {
     vi.useFakeTimers();
 
-    let killCalled = false;
-
     const fakeChild = new EventEmitter() as EventEmitter & {
       stdout: EventEmitter;
-      kill: () => void;
+      kill: ReturnType<typeof vi.fn>;
     };
     fakeChild.stdout = new EventEmitter();
-    fakeChild.kill = () => { killCalled = true; };
+    fakeChild.kill = vi.fn(() => true);
 
     const spawnImpl = ((_binary: string, _args: string[]) => fakeChild) as unknown as SpawnImpl;
 
@@ -168,9 +166,55 @@ describe('probeFallbackBinary', () => {
 
     const result = await probePromise;
     expect(result).toStrictEqual({ status: 'unknown', version: null });
-    expect(killCalled).toBe(true);
+    expect(fakeChild.kill).toHaveBeenNthCalledWith(1);
+
+    // The promise settles fail-open, but data listeners must not retain or
+    // decode later stream chunks while process cleanup remains armed.
+    const discarded = Buffer.alloc(64 * 1024 + 1, 'a');
+    const decodeDiscarded = vi.spyOn(discarded, 'toString');
+    fakeChild.stdout.emit('data', discarded);
+    expect(decodeDiscarded).not.toHaveBeenCalled();
+
+    // A hung child still receives a bounded SIGKILL escalation after the
+    // caller has received its fail-open timeout result.
+    await vi.advanceTimersByTimeAsync(2_001);
+    expect(fakeChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    fakeChild.emit('close', null, 'SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  it('bounds raw fallback output and reclaims a child that keeps streaming after settlement', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+        kill: vi.fn(() => true),
+      });
+      const spawnImpl = vi.fn(() => child) as unknown as SpawnImpl;
+      const probe = probeFallbackBinary('noisy-binary', PROBE_ENV, spawnImpl);
+
+      // The byte budget is shared across stdout and stderr and is checked
+      // before decoding, so a single oversized Buffer cannot be retained.
+      child.stdout.emit('data', Buffer.alloc(64 * 1024 + 1, 'a'));
+      await expect(probe).resolves.toEqual({ status: 'unknown', version: null });
+      expect(child.kill).toHaveBeenNthCalledWith(1);
+
+      // A settled fallback must ignore later stream chunks while close-owned
+      // cleanup keeps the child under control.
+      const discarded = Buffer.alloc(64 * 1024 + 1, 'b');
+      const decodeDiscarded = vi.spyOn(discarded, 'toString');
+      child.stderr.emit('data', discarded);
+      expect(decodeDiscarded).not.toHaveBeenCalled();
+
+      // A prompt close owns cleanup and cancels the escalation timer.
+      child.emit('close', null, 'SIGTERM');
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(child.kill).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── incompatible architecture (strict-signal heuristic) ──────────────────────
@@ -230,6 +274,143 @@ describe('probeFallbackBinary', () => {
 // on a dead auth primary. These tests pin the async replacement: same 5 s
 // timeout discipline as the other probes, plus SIGKILL escalation when the
 // child ignores the first kill.
+
+describe('probeBinaryCommand output budget', () => {
+  const outputLimitBytes = 64 * 1024;
+
+  function controlledProbe(options: Parameters<typeof probeBinaryCommand>[3] = {}) {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 9920,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: vi.fn(() => true),
+    });
+    const onProcessClosed = vi.fn();
+    const onExited = vi.fn();
+    const probe = probeBinaryCommand('claude', ['auth', 'status', '--json'], {}, {
+      ...options, onProcessClosed, onExited,
+    }, vi.fn(() => child) as unknown as SpawnImpl);
+    return { child, probe, onProcessClosed, onExited };
+  }
+
+  it.each(['stdout', 'stderr', 'combined'] as const)('rejects %s output beyond the shared raw-byte limit', async (stream) => {
+    const { child, probe, onExited } = controlledProbe();
+    if (stream === 'combined') {
+      child.stdout.emit('data', Buffer.alloc(outputLimitBytes / 2, 'a'));
+      child.stderr.emit('data', Buffer.alloc(outputLimitBytes / 2 + 1, 'b'));
+    } else {
+      child[stream].emit('data', Buffer.alloc(outputLimitBytes + 1, 'a'));
+    }
+    child.emit('close', 0, null);
+
+    await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(onExited).toHaveBeenCalledWith(expect.objectContaining({ outputLimitExceeded: true }));
+  });
+
+  it('accepts output exactly at the shared byte limit', async () => {
+    const { child, probe } = controlledProbe();
+    const stdout = 'a'.repeat(outputLimitBytes / 2);
+    const stderr = 'b'.repeat(outputLimitBytes / 2);
+    child.stdout.emit('data', Buffer.from(stdout));
+    child.stderr.emit('data', Buffer.from(stderr));
+    child.emit('close', 0, null);
+
+    await expect(probe).resolves.toEqual({ status: 'ok', output: `${stdout}\n${stderr}` });
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it('counts multibyte output as raw bytes rather than decoded characters', async () => {
+    const { child, probe } = controlledProbe();
+    child.stdout.emit('data', Buffer.from('€'.repeat(Math.ceil(outputLimitBytes / 3))));
+    child.emit('close', 0, null);
+
+    await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+    expect(child.kill).toHaveBeenCalledOnce();
+  });
+
+  it('discards overflow while preserving refresh grace, escalation and close-only ownership', async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseGrace!: () => void;
+      const grace = new Promise<void>((resolve) => { releaseGrace = resolve; });
+      const terminationGrace = vi.fn(() => grace);
+      const { child, probe, onProcessClosed, onExited } = controlledProbe({ terminationGrace });
+      child.stdout.emit('data', Buffer.alloc(outputLimitBytes + 1, 'a'));
+      await vi.advanceTimersByTimeAsync(0);
+      let result: Awaited<typeof probe> | undefined;
+      void probe.then((value) => { result = value; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(result).toEqual({ status: 'failed', output: '' });
+      expect(terminationGrace).toHaveBeenCalledOnce();
+      expect(child.kill).not.toHaveBeenCalled();
+      expect(onProcessClosed).not.toHaveBeenCalled();
+      expect(onExited).not.toHaveBeenCalled();
+
+      const discarded = Buffer.alloc(outputLimitBytes, 'b');
+      const decodeDiscarded = vi.spyOn(discarded, 'toString');
+      child.stderr.emit('data', discarded);
+      expect(decodeDiscarded).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(child.kill).not.toHaveBeenCalled();
+      releaseGrace();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(child.kill).toHaveBeenNthCalledWith(1);
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+      expect(onProcessClosed).not.toHaveBeenCalled();
+
+      child.emit('close', null, 'SIGKILL');
+      child.emit('close', null, 'SIGKILL');
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+      expect(onExited).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        outputLimitExceeded: true, killedByTimeout: false, killedByAbort: false,
+      }));
+      await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('discards output arriving after a timeout has settled the probe', async () => {
+    vi.useFakeTimers();
+    try {
+      const { child, probe } = controlledProbe();
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+
+      const discarded = Buffer.alloc(outputLimitBytes + 1, 'a');
+      const decodeDiscarded = vi.spyOn(discarded, 'toString');
+      child.stdout.emit('data', discarded);
+      child.stderr.emit('data', discarded);
+      expect(decodeDiscarded).not.toHaveBeenCalled();
+      child.emit('close', null, 'SIGTERM');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an aborted overflowing child pending until close', async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const { child, probe, onProcessClosed } = controlledProbe({ signal: controller.signal });
+      let settled = false;
+      void probe.then(() => { settled = true; });
+      controller.abort();
+      child.stdout.emit('data', Buffer.alloc(outputLimitBytes + 1, 'a'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+      expect(onProcessClosed).not.toHaveBeenCalled();
+      expect(child.kill).toHaveBeenCalledOnce();
+      child.emit('close', null, 'SIGTERM');
+      await expect(probe).resolves.toEqual({ status: 'failed', output: '' });
+      expect(onProcessClosed).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('probeBinaryAuthStatus', () => {
   interface AuthFakeChildOptions {

@@ -24,6 +24,12 @@
 //                  CLAUDE_CONFIG_DIR the installed plist P already has, so a
 //                  re-render never strips a hand-added key. A configured value
 //                  always wins over it. A missing P preserves nothing.
+// Exception: the harness-maintenance job (Label com.whatsoup.harness-maintenance)
+// always gets its own <home>/.claude-maint for both config and secure storage,
+// never an instance's or the installed value. It runs `claude plugin list`,
+// `claude mcp list` and the native installer, which can refresh the login of
+// the store they see, so sharing the bot's store let the job rotate or wipe the
+// bot's login (RCA 2026-10-18 M3).
 // No value ⇒ output is byte-identical to input. Exit 2 on an invalid config, a
 // plist without an EnvironmentVariables dict, or a --preserve-from plist that
 // mentions CLAUDE_CONFIG_DIR but that the reader refuses (fail closed: never
@@ -38,30 +44,42 @@ import { escapeXml } from '../src/fleet/platform.ts';
 import { isValidInstanceName } from '../src/fleet/instance-name.ts';
 import { parseClosedOptions } from './lib/cli-args.ts';
 
-const KEY = 'CLAUDE_CONFIG_DIR';
+const CONFIG_KEY = 'CLAUDE_CONFIG_DIR';
+const SECURE_STORAGE_KEY = 'CLAUDE_SECURESTORAGE_CONFIG_DIR';
+const MAINTENANCE_LABEL = /<key>Label<\/key>\s*<string>com\.whatsoup\.harness-maintenance<\/string>/;
+const MAINTENANCE_DIR_NAME = '.claude-maint';
 
 /**
- * Insert CLAUDE_CONFIG_DIR as the first EnvironmentVariables entry. The dict is
+ * Insert named values as the first EnvironmentVariables entries. The dict is
  * located by the hardened drift reader (src/fleet/launchd-env-drift.ts), so
  * the injector and the drift check agree on which dict is the environment: a
  * decoy inside a comment or CDATA is ignored, and a duplicated or unparseable
  * declaration is refused rather than guessed at.
  */
-export function injectClaudeConfigDir(plist: string, dir: string | null): string {
-  if (dir === null) return plist;
+function injectClaudeEnvironmentValues(plist: string, values: ReadonlyArray<readonly [string, string]>): string {
   const environment = readLaunchdEnvironment(plist);
   if (environment === null || environment.bodyStart === null) {
     throw new Error('plist has no EnvironmentVariables dict to extend');
   }
-  if (environment.env.has(KEY)) throw new Error(`plist already carries ${KEY}`);
+  for (const [key] of values) {
+    if (environment.env.has(key)) throw new Error(`plist already carries ${key}`);
+  }
   // Insert at the dict body's first byte, never after "the next newline": in a
   // compact dict that newline can lie past </dict> or inside a string value.
   // For the usual one-entry-per-line layout the bytes are the same either way.
   const lineStart = plist.lastIndexOf('\n', environment.bodyStart) + 1;
   const indent = `${/^[ \t]*/.exec(plist.slice(lineStart))?.[0] ?? ''}  `;
   const at = environment.bodyStart;
-  const entry = `\n${indent}<key>${KEY}</key>\n${indent}<string>${escapeXml(dir)}</string>`;
+  const entry = values.map(([key, value]) => `\n${indent}<key>${key}</key>\n${indent}<string>${escapeXml(value)}</string>`).join('');
   return plist.slice(0, at) + entry + plist.slice(at);
+}
+
+export function injectClaudeConfigDir(plist: string, dir: string | null): string {
+  return dir === null ? plist : injectClaudeEnvironmentValues(plist, [[CONFIG_KEY, dir]]);
+}
+
+function injectClaudeMaintenanceSelectors(plist: string, dir: string): string {
+  return injectClaudeEnvironmentValues(plist, [[CONFIG_KEY, dir], [SECURE_STORAGE_KEY, dir]]);
 }
 
 /**
@@ -89,10 +107,10 @@ export function readInstalledClaudeConfigDir(file: string): string | null {
   }
   const environment = readLaunchdEnvironment(source);
   if (environment === null) {
-    if (!source.includes(KEY)) return null;
-    throw new Error(`--preserve-from ${file}: mentions ${KEY} but its EnvironmentVariables dict is duplicated or unparseable`);
+    if (!source.includes(CONFIG_KEY)) return null;
+    throw new Error(`--preserve-from ${file}: mentions ${CONFIG_KEY} but its EnvironmentVariables dict is duplicated or unparseable`);
   }
-  return environment.env.get(KEY) ?? null;
+  return environment.env.get(CONFIG_KEY) ?? null;
 }
 
 export interface HostClaudeConfigDir {
@@ -166,6 +184,9 @@ function readOptions(argv: readonly string[]): Options {
 
 export function run(argv: readonly string[], input: string, env: NodeJS.ProcessEnv): { output: string; warning: string | null } {
   const { preserveFrom, ...args } = readOptions(argv);
+  if (MAINTENANCE_LABEL.test(input)) {
+    return { output: injectClaudeMaintenanceSelectors(input, path.join(args.home, MAINTENANCE_DIR_NAME)), warning: null };
+  }
   const resolved = resolveHostClaudeConfigDir({ ...args, env });
   // A configured value always wins. Only when config yields none (unset, or
   // several different values) does the installed plist's own value carry

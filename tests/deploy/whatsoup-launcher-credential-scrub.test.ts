@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SERVICE_ENV_MAP } from '../../src/lib/provider-key-service.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { writeKeychainFixture } from './keychain-security-preload-fixture.ts';
 
 const tmp = trackTmpDirs('');
 
@@ -116,6 +118,11 @@ function runManagedCodingPlanBoundary(
 ): ManagedBoundaryResult {
   const suffix = service === 'zai-coding-plan' ? 'zhipu' : service;
   const root = tmp.make('whatsoup-launcher-coding-plan');
+  const fixture = writeKeychainFixture(root);
+  const runtimeProbeNode = process.platform === 'darwin' ? fixture.node : process.execPath;
+  const keychainResponses = route === 'keyring'
+    ? JSON.stringify({ [service + '\u0000' + userInfo().username]: 'synthetic-keyring-' + suffix + '\n' })
+    : '{}';
   const bin = join(root, 'bin');
   const configHome = join(root, 'config');
   const dataHome = join(root, 'data');
@@ -141,6 +148,7 @@ function runManagedCodingPlanBoundary(
     );
   }
   const keyringHit = route === 'keyring' ? 'yes' : 'no';
+  const secretToolTrace = join(root, 'secret-tool-trace.txt');
   writeFileSync(join(bin, 'security'), [
     '#!/usr/bin/env bash',
     `if [ "${keyringHit}" = yes ] && [ "$1" = find-generic-password ] && [ "$3" = ${service} ]; then`,
@@ -152,8 +160,13 @@ function runManagedCodingPlanBoundary(
   ].join('\n'), { mode: 0o700 });
   writeFileSync(join(bin, 'secret-tool'), [
     '#!/usr/bin/env bash',
-    '[ "$1" = --help ] && exit 0',
-    `if [ "${keyringHit}" = yes ] && [ "$1" = lookup ] && [ "$3" = ${service} ]; then`,
+    `trace=${JSON.stringify(secretToolTrace)}`,
+    'if [ "$1" = "--help" ]; then',
+    "  printf '%s\\n' 'secret-tool:probe' >> \"$trace\"",
+    '  exit 0',
+    'fi',
+    `if [ "${keyringHit}" = yes ] && [ "$1" = lookup ] && [ "$2" = service ] && [ "$3" = ${service} ]; then`,
+    "  printf '%s\\n' 'secret-tool:lookup' >> \"$trace\"",
     `  printf 'synthetic-keyring-${suffix}\\n'; exit 0`,
     'fi',
     'exit 1',
@@ -181,12 +194,12 @@ function runManagedCodingPlanBoundary(
     'set -euo pipefail',
     'INSTANCE=fixture-agent',
     sliceBetween(source, '_DISTILL_CAPTURE_DEEPSEEK=', '\n\n# POSIX-portable symlink resolution'),
-    `NODE=${JSON.stringify(process.execPath)}`,
+    `NODE=${JSON.stringify(fixture.node)}`,
     `SCRIPT_DIR=${JSON.stringify(resolve('deploy'))}`,
     `. ${JSON.stringify(resolve('deploy/lib/bounded-exec.sh'))}`,
     sliceBetween(source, 'macos_keychain_lookup() {', '\n# Pinned Node path'),
     sliceBetween(source, '# Detect instance type', '\n# Health server auth token'),
-    `exec "$NODE" --disable-warning=ExperimentalWarning --experimental-strip-types ${JSON.stringify(probe)}`,
+    `exec ${JSON.stringify(runtimeProbeNode)} --disable-warning=ExperimentalWarning --experimental-strip-types ${JSON.stringify(probe)}`,
     '',
   ].join('\n'));
   chmodSync(script, 0o700);
@@ -201,6 +214,10 @@ function runManagedCodingPlanBoundary(
       TMPDIR: root,
       XDG_CONFIG_HOME: configHome,
       XDG_DATA_HOME: dataHome,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+      WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: join(root, 'keychain-probe.jsonl'),
+      WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+      WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
       // The documented service-manager values (systemd Environment=, launchd
       // EnvironmentVariables) arrive exactly like this: inherited by the wrapper.
       ZHIPU_API_KEY: 'synthetic-ambient-zhipu',
@@ -213,6 +230,10 @@ function runManagedCodingPlanBoundary(
   expect(result.signal).toBeNull();
   const output = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
   expect(result.status, output).toBe(0);
+  if (route === 'keyring' && process.platform !== 'darwin') {
+    expect(existsSync(secretToolTrace), output).toBe(true);
+    expect(readFileSync(secretToolTrace, 'utf8')).toBe('secret-tool:probe\nsecret-tool:lookup\n');
+  }
   // Runtime logs may share stdout/stderr; they must never carry a key value.
   expect(output).not.toContain('synthetic-');
   expect(existsSync(resultFile), output).toBe(true);

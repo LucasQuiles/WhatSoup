@@ -365,17 +365,21 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
-import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
 import {
-  probePrimaryModelUsability,
-} from './providers/primary-model-usability.ts';
-import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
+  canaryStoreProvisioned,
+  readProviderCanaryAdmission,
+} from './provider-canary-proof.ts';
+import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
+import { probePrimaryModelUsability } from './providers/primary-model-usability.ts';
+import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import {
-  buildPrimaryProbeAdapterDeps,
+  buildRuntimePrimaryProbeServiceContext,
+  createRuntimePrimaryProbeAdapters,
   expectedProbeDeadlineFromDueMs,
   expectedProbeDeadlineMs,
   periodicProbeBackoffMultiple,
+  probeRuntimePrimaryProviderRecovered,
 } from './primary-readiness-probe.ts';
 import {
   MessageHandlerDrainTimeoutError,
@@ -730,6 +734,10 @@ export class AgentRuntime implements Runtime {
    *  the /model list render + apply path added in this task. */
   private readonly catalogueSnapshot: CatalogueSnapshotCache;
   private readonly providerExecutionGate: ProviderExecutionGate;
+  /** Runtime/configuration generation for the global primary readiness proof. */
+  private readonly primaryProbeServiceGeneration = randomUUID();
+  /** Captured once after startup configuration settles; never sourced from a child. */
+  private primaryProbeServiceContext: PrimaryProbeServiceContext | null = null;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -3004,13 +3012,26 @@ export class AgentRuntime implements Runtime {
     };
   }
 
-  /**
-   * Host for the extracted fallback coordinator (runtime-fallback.ts, #1977
-   * D2) — live-getter shape. ALL fallback state stays owned here: the
-   * characterization suites bind these fields on the runtime instance, and
-   * probePrimaryProviderRecovered / deactivateProviderFallback are stub/spy
-   * seams that must observe in-cluster calls.
-   */
+  private buildPrimaryProbeServiceContext(): PrimaryProbeServiceContext {
+    return buildRuntimePrimaryProbeServiceContext(
+      this.agentProvider,
+      this.model ?? null,
+      this.primaryProbeServiceGeneration,
+      this.cwd,
+      this.agentProviderConfig,
+      this.egressProxy?.port,
+    );
+  }
+
+  private capturePrimaryProbeServiceContext(): void {
+    this.primaryProbeServiceContext = this.buildPrimaryProbeServiceContext();
+  }
+
+  private currentPrimaryProbeServiceContext(): PrimaryProbeServiceContext | null {
+    if (!this.primaryProbeServiceContext) return null;
+    return this.buildPrimaryProbeServiceContext();
+  }
+
   private createRuntimeFallbackHost(): RuntimeFallbackPort {
     const runtime = this;
     return {
@@ -3032,6 +3053,8 @@ export class AgentRuntime implements Runtime {
       get egressProxy() { return runtime.egressProxy; },
       get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
+      get primaryProbeServiceContext() { return runtime.primaryProbeServiceContext; },
+      currentPrimaryProbeServiceContext: () => runtime.currentPrimaryProbeServiceContext(),
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
       get fallbackMetrics() { return runtime.fallbackMetrics; },
@@ -3099,6 +3122,7 @@ export class AgentRuntime implements Runtime {
       get agentProvider() { return runtime.agentProvider; },
       get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get shutdownRequested() { return runtime.shutdownRequested; },
+      get egressProxyPort() { return runtime.egressProxy?.port; },
       get accountIdentity() { return runtime.accountIdentity; },
       set accountIdentity(value) { runtime.accountIdentity = value; },
     };
@@ -4625,6 +4649,10 @@ export class AgentRuntime implements Runtime {
         log.warn({ error }, 'could not check Claude credential stores at runtime startup');
       }
     }
+    // Capture the global primary service context once per runtime generation.
+    // It is intentionally independent of any resumed or active SessionManager;
+    // recovery must remain possible after a child fails or is retired.
+    this.capturePrimaryProbeServiceContext();
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
@@ -6351,12 +6379,8 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
-        // Eligible-side disclosure (Slice 1): the common config is a primary
-        // routed on a `present-expired-refreshable` credential (routable because
-        // a refresh was expected) that then fails. F07 does not gate the primary,
-        // so this is where that turn gets its explanation. The note HEDGES — the
-        // failure here is not distinguishable as a refresh failure, so it names
-        // the observed classification and the likely cause without asserting it.
+        // Preserve classified failure disclosures without inferring native CLI
+        // login state from a separate plaintext credential file.
         const credNote = spawnFailureCredentialNote(
           resolveProviderCredentialState({
             provider: this.agentProvider,
@@ -9427,9 +9451,8 @@ export class AgentRuntime implements Runtime {
     // override", not provider equality alone. F07: cross-provider entries (which
     // DO carry a distinct credential) read the unified accessor
     // (eligibility projection) — replacing the old presence-only `service ?
-    // lookup : true` that treated null-service providers as always credentialed;
-    // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
-    // de-routed, while codex/gemini stay `native` → routable.
+    // lookup : true`. Native CLIs remain routable and validate their own login
+    // at spawn; unrelated credential files cannot exclude their fallback tier.
     if (entry.provider === this.agentProvider) return true;
     return isProviderRoutable(
       resolveProviderCredentialState({
@@ -9774,26 +9797,20 @@ export class AgentRuntime implements Runtime {
   }
 
 
-  /**
-   * Probe whether the primary provider can serve again. Recovery requires a
-   * real model-usability success, not credential presence: a revoked API key or
-   * expired OAuth token can still be present in the key store while live turns
-   * continue returning auth failures. The probe is deadline-cancelled and never
-   * rejects; a timeout result waits for cancellation acknowledgement.
-   * `onEvidence` (DUR-02) gets the full result pre-resolve — see
-   * resolveFallbackRecoveryDecision for why a callback, not a field.
-   */
-  private async probePrimaryProviderRecovered(
+  private probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
-    const result = signal
-      ? await probePrimaryModelUsability(target, adapters, { signal })
-      : await probePrimaryModelUsability(target, adapters);
-    onEvidence?.({ ...result, checkedAt: Date.now() });
-    return result.status === 'usable';
+    return probeRuntimePrimaryProviderRecovered({
+      agentProvider: this.agentProvider,
+      model: this.model,
+      agentProviderConfig: this.agentProviderConfig,
+      cwd: this.cwd,
+      egressProxy: this.egressProxy,
+      providerExecutionGate: this.providerExecutionGate,
+      primaryProbeServiceContext: this.primaryProbeServiceContext,
+      currentPrimaryProbeServiceContext: () => this.currentPrimaryProbeServiceContext(),
+    }, onEvidence, signal);
   }
 
   private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
@@ -9836,15 +9853,23 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
+          createRuntimePrimaryProbeAdapters(
+            this.agentProviderConfig, this.agentProvider, this.model, this.cwd,
+            this.egressProxy?.port, this.providerExecutionGate, 'diagnostic',
+            this.primaryProbeServiceContext ?? undefined,
+            () => this.currentPrimaryProbeServiceContext(),
+          ),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
         accountAuthDeps: {
+          egressProxyPort: this.egressProxy?.port,
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
           getProviderBinary,
-          probeBinaryAuthStatus,
+          probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
+          refreshAhead: (binary, env) => refreshClaudeLoginAhead(binary, env),
+          terminationGrace: (env) => claudeRefreshLockGrace(env, 'diagnostic-auth-status'),
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
           // env-allowed: shared explicit allow-list preserves the serving credential selectors
           env: scrubbedAuthStatusEnv(process.env),

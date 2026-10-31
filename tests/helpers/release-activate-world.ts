@@ -151,6 +151,90 @@ export function writeRelease(root: string, commit: string, withDependencies: boo
   }));
 }
 
+/** Add the optional schema-v1 BOT ERRORS activation/consumer capability records to a fabricated release. */
+export function writeBotErrorsRuntime(
+  root: string,
+  options: { capability?: number; requirement?: number; checkerBody?: string; checkerHashMismatch?: boolean } = {},
+): void {
+  const capability = options.capability ?? 1;
+  const requirement = options.requirement ?? 0;
+  const checkerBody = options.checkerBody ?? '# fabricated BOT ERRORS health checker forwards CLAUDE_SECURESTORAGE_CONFIG_DIR\n';
+  const runnerBody = '# fabricated BOT ERRORS health runner\n';
+  const runnerRelative = 'deploy/scripts/bot-errors-runner.py';
+  const checkerRelative = 'deploy/scripts/bot-errors-health-check.py';
+  const runtimeRelative = 'deploy/bot-errors-runtime-manifest.json';
+  const runnerPath = path.join(root, runnerRelative);
+  const checkerPath = path.join(root, checkerRelative);
+  const runtimePath = path.join(root, runtimeRelative);
+  writeFileSync(runnerPath, runnerBody);
+  writeFileSync(checkerPath, checkerBody);
+  const runtime = {
+    schemaVersion: 1,
+    files: [
+      { path: runnerRelative, sha256: createHash('sha256').update(runnerBody).digest('hex') },
+      {
+        path: checkerRelative,
+        sha256: options.checkerHashMismatch ? '0'.repeat(64) : createHash('sha256').update(checkerBody).digest('hex'),
+        mustContain: ['CLAUDE_SECURESTORAGE_CONFIG_DIR'],
+      },
+    ],
+    ...(requirement > 0 ? { activationRequirements: { botErrorsHealth: { secureStorageSelector: requirement } } } : {}),
+    ...(capability > 0 ? { consumerCapabilities: { botErrorsHealth: { secureStorageSelector: capability } } } : {}),
+  };
+  const runtimeBytes = JSON.stringify(runtime);
+  writeFileSync(runtimePath, runtimeBytes);
+  const outerPath = path.join(root, '.whatsoup-release-manifest.json');
+  const outer = JSON.parse(readFileSync(outerPath, 'utf8')) as { files: Array<{ path: string; sha256: string; sizeBytes: number }> };
+  outer.files = [
+    ...outer.files.filter((entry) => entry.path !== runtimeRelative),
+    { path: runtimeRelative, sha256: createHash('sha256').update(runtimeBytes).digest('hex'), sizeBytes: Buffer.byteLength(runtimeBytes) },
+  ];
+  writeFileSync(outerPath, JSON.stringify(outer));
+}
+
+/** The observed live launchctl grammar: bash -c hydration wrapper, sentinel argv0, then runner and checker. */
+export function botErrorsHealthPrint(fixture: Fixture, root: string, profileName = 'workstation.json', python = '/usr/bin/python3'): string {
+  const envFile = path.join(fixture.home, '.config', 'whatsoup', 'bot-errors.env');
+  const wrapper = [
+    `BOT_ERRORS_ENV_FILE=${envFile}`,
+    'export BOT_ERRORS_ENV_FILE',
+    'if [[ ! -r "$BOT_ERRORS_ENV_FILE" ]]; then printf "%s\\n" "missing BOT_ERRORS_ENV_FILE=$BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 64; fi',
+    'set -a',
+    'source "$BOT_ERRORS_ENV_FILE"',
+    'set +a',
+    'if [[ -z "${BOT_ERRORS_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi',
+    'if [[ -z "${BOT_ERRORS_EXPECTED_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_EXPECTED_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi',
+    'if [[ "$BOT_ERRORS_JID" != *@g.us ]]; then printf "%s\\n" "BOT_ERRORS_JID must be a WhatsApp group JID" >/dev/stderr; exit 65; fi',
+    'if [[ "$BOT_ERRORS_JID" != "$BOT_ERRORS_EXPECTED_JID" ]]; then printf "%s\\n" "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID" >/dev/stderr; exit 65; fi',
+    `if [[ -z "\${BOT_ERRORS_STATE_DIR:-}" ]]; then export BOT_ERRORS_STATE_DIR=${path.join(fixture.home, '.local', 'state', 'bot-errors')}; fi`,
+    `if [[ -z "\${BOT_ERRORS_HEALTH_PROFILE:-}" ]]; then export BOT_ERRORS_HEALTH_PROFILE=${path.join(root, 'deploy', 'health-profiles', profileName)}; fi`,
+    ' exec "$@"',
+  ].join('; ');
+  const args = [
+    '/bin/bash', '-c', wrapper, 'bot-errors-health',
+    python, `${root}/deploy/scripts/bot-errors-runner.py`,
+    '--instance', 'bot-errors-health',
+    '--source', 'service-exit',
+    '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', `${fixture.home}/.local/state/bot-errors/logs/health.err.log`,
+    '--diagnostic', 'launchd_label=com.bot-errors.health',
+    '--', python, `${root}/deploy/scripts/bot-errors-health-check.py`, '--daily',
+  ];
+  return [
+    'com.bot-errors.health = {',
+    `\tpath = ${fixture.home}/Library/LaunchAgents/com.bot-errors.health.plist`,
+    '\ttype = LaunchAgent',
+    '\tstate = not running',
+    '\tprogram = /bin/bash',
+    '\targuments = {',
+    ...args.map((arg) => `\t\t${arg}`),
+    '\t}',
+    `\tworking directory = ${root}`,
+    '}',
+    '',
+  ].join('\n');
+}
+
 export function installFixture(): Fixture {
   const base = tmp.make('world');
   const home = path.join(base, 'home');
@@ -279,6 +363,8 @@ export interface WorldOptions {
   clockFaultAfterArgvRead?: boolean;
   /** Rewrite the definition `launchctl print` shows for an auxiliary label (e.g. one that still names the old release). */
   auxDefinition?: (label: string, definition: string) => string;
+  /** Raw `launchctl print` result for the separately loaded BOT ERRORS health consumer. */
+  botErrorsHealthPrint?: (read: number) => ExecResult;
 }
 
 export const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -343,6 +429,8 @@ export class SimulatedLaunchd {
   private clock = 1_767_225_600_000;
   readonly transient: Record<string, number>;
   readonly initialInstancePid: number;
+  /** Count of BOT ERRORS health consumer identity reads. */
+  botErrorsHealthPrintReads = 0;
 
   constructor(private readonly fixture: Fixture, private readonly options: WorldOptions = {}) {
     this.transient = { ...(options.transientBootstrapFailures ?? {}) };
@@ -496,6 +584,10 @@ export class SimulatedLaunchd {
         }
         if (file === 'launchctl') {
           const [verb, ...rest] = args;
+          if (verb === 'print' && this.labelOf(rest[0]!) === 'com.bot-errors.health' && this.options.botErrorsHealthPrint !== undefined) {
+            this.botErrorsHealthPrintReads += 1;
+            return this.options.botErrorsHealthPrint(this.botErrorsHealthPrintReads);
+          }
           if (verb === 'print') {
             const job = this.loaded.get(this.labelOf(rest[0]!));
             if (!job) return { code: 113, stdout: '', stderr: 'Could not find service' };

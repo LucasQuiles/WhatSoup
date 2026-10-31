@@ -243,7 +243,7 @@ describe('formatAvailableModels', () => {
     );
   });
 
-  it('unavailable no-key: actionable, named harness, credential-neutral wording', () => {
+  it('unavailable no-key: identifies the missing API key without implying CLI OAuth was consulted', () => {
     const out = formatAvailableModels({
       ...base,
       harnessLabel: 'claude-cli',
@@ -251,7 +251,7 @@ describe('formatAvailableModels', () => {
       listing: { status: 'unavailable', reason: { kind: 'no-key' }, asOfLabel: 'just now' },
     });
     expect(out).toBe(
-      `*Available models:* unavailable — no anthropic credential reachable on this host (harness: claude-cli, as of just now)`,
+      `*Available models:* unavailable — no Anthropic API key configured for live catalogue discovery (harness: claude-cli, as of just now)`,
     );
   });
 

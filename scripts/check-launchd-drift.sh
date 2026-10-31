@@ -147,6 +147,8 @@ subst_render() { # TEMPLATE_ABS DEST BOT(optional) INSTALLED_ABS(optional)
   # deploy/setup.sh installs them (same filter and --preserve-from source, run
   # from THIS checkout), so a hand-added key the config does not own is kept
   # on both sides rather than reported as drift and stripped on reinstall.
+  # harness-maintenance is the exception: the filter always gives it its own
+  # $HOME/.claude-maint (see check_maintenance_surface).
   case "$(basename "$template")" in
     com.whatsoup.harness-maintenance.plist|com.whatsoup.reply-guarantee.plist)
       if ! bash "$TOOL_ROOT/scripts/run-with-pinned-node.sh" "$TOOL_ROOT/scripts/launchd-claude-config-env.ts" \
@@ -178,7 +180,9 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
     rm -f "$rendered"
     exit 2
   fi
-  if cmp -s "$rendered" "$installed"; then
+  if [ "$name" = "harness-maintenance" ]; then
+    check_maintenance_surface "$rendered" "$installed"
+  elif cmp -s "$rendered" "$installed"; then
     echo "ok: $name"
   else
     echo "drift: $name" >&2
@@ -188,6 +192,131 @@ check_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS BOT(optional)
     failures=$((failures + 1))
   fi
   rm -f "$rendered"
+}
+
+# check_maintenance_surface RENDERED INSTALLED: harness-maintenance is compared as a parsed plist, not
+# byte for byte. ProgramArguments must match the rendered job: ownership and permissions of an
+# extra wrapper do not prove its behavior. The job's effective credential
+# store (defined CLAUDE_SECURESTORAGE_CONFIG_DIR wins over CLAUDE_CONFIG_DIR) must also be its own:
+# equality, the same resolved file store, or the same keychain item as another instance is drift,
+# because the job's agent CLI can refresh, and so rotate or wipe, the login of the store it sees.
+# Only file names are printed.
+check_maintenance_surface() {
+  local rendered="$1" installed="$2" status=0 verdict out
+  # The verdict line is the parser's stdout; its stderr is never shown (it could echo plist content).
+  # A file, not $(...): bash 3.2 misparses a quoted heredoc inside a command substitution.
+  out="$(mktemp "${TMPDIR:-/tmp}/launchd-drift-maint.XXXXXX")"
+  "$PLIST_PYTHON" - "$rendered" "$installed" "$LAUNCHD_DIR" "$HOME" >"$out" 2>/dev/null <<'PY' || status=$?
+import glob, hashlib, os, plistlib, sys, unicodedata
+
+rendered_path, installed_path, launchd_dir, home = sys.argv[1:5]
+BASE = "Claude" + " Code-credentials"  # the agent CLI's keychain service base name
+CONFIG = "CLAUDE_CONFIG_DIR"
+SECURE = "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+
+
+def drift(reason):
+    print(f"drift: harness-maintenance{': ' + reason if reason else ''}")
+    sys.exit(1)
+
+
+def load(path):
+    with open(path, "rb") as f:
+        return plistlib.load(f)
+
+
+try:
+    want = load(rendered_path)
+except Exception:
+    sys.exit(2)
+try:
+    got = load(installed_path)
+except Exception:
+    drift("installed plist does not parse")
+if not isinstance(got, dict):
+    drift("installed plist is not a dict")
+if got != want:
+    drift("")
+
+def effective_selector(env, owner):
+    if env is None:
+        return ""
+    if not isinstance(env, dict):
+        drift(f"{owner} environment is not readable")
+    if SECURE in env:
+        secure = env[SECURE]
+        if not isinstance(secure, str):
+            drift(f"{owner} secure-storage selector is not readable")
+        return unicodedata.normalize("NFC", secure)
+    config = env.get(CONFIG, "")
+    if not isinstance(config, str):
+        drift(f"{owner} config selector is not readable")
+    return config
+
+
+def store(selector):
+    return selector or os.path.join(home, ".claude")
+
+
+def resolved(selector):
+    d = store(selector)
+    # realpath resolves the existing prefix and keeps a not-yet-created rest; a relative value is kept.
+    return os.path.realpath(d) if os.path.isabs(d) else d
+
+
+def service(selector):
+    return BASE if not selector else f"{BASE}-{hashlib.sha256(selector.encode()).hexdigest()[:8]}"
+
+
+env = got.get("EnvironmentVariables")
+if not isinstance(env, dict) or CONFIG not in env or SECURE not in env:
+    drift("both dedicated maintenance selectors are required")
+own = effective_selector(env, "maintenance")
+if not own:
+    drift("secure-storage selector selects the default store")
+if not os.path.isabs(own):
+    drift("effective credential-store selector is not absolute")
+if resolved(own) == resolved(""):
+    drift("effective credential-store selector is the default store")
+
+
+for path in sorted(glob.glob(os.path.join(launchd_dir, "com.whatsoup.*.plist"))):
+    name = os.path.basename(path)
+    if name == "com.whatsoup.harness-maintenance.plist":
+        continue
+    try:
+        other_plist = load(path)
+    except Exception:
+        drift(f"{name} could not be read to establish whether it is an instance")
+    stem = name[len("com.whatsoup."):-len(".plist")]
+    args = other_plist.get("ProgramArguments") if isinstance(other_plist, dict) else None
+    if not isinstance(other_plist, dict) or other_plist.get("Label") != f"com.whatsoup.{stem}" or not isinstance(args, list) or len(args) < 2 or args[1] != stem:
+        continue
+    other = effective_selector(other_plist.get("EnvironmentVariables"), name)
+    if other and not os.path.isabs(other):
+        drift(f"{name}'s effective credential-store selector is not absolute")
+    if own == other:
+        drift(f"effective credential-store selector equals {name}'s")
+    if resolved(own) == resolved(other):
+        drift(f"effective credential-store selector resolves to {name}'s config dir")
+    if service(own) == service(other):
+        drift(f"effective credential-store selector shares {name}'s keychain item")
+print("ok: harness-maintenance")
+PY
+  verdict="$(cat "$out")"
+  rm -f "$out"
+  case "$status" in
+    0) echo "$verdict" ;;
+    1)
+      echo "$verdict" >&2
+      if [ "$SHOW_DIFF" -eq 1 ]; then
+        diff -u "$rendered" "$installed" | sed -n '1,80p' >&2 || true
+      fi
+      failures=$((failures + 1)) ;;
+    *)
+      echo "plist field evidence unavailable: harness-maintenance could not be compared (parser status $status)" >&2
+      exit 2 ;;
+  esac
 }
 
 check_optional_template_surface() { # NAME TEMPLATE_REL INSTALLED_ABS

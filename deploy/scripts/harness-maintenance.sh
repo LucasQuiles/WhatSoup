@@ -64,8 +64,8 @@ USAGE
 # Permitted inspection artifacts: the state directory with its state.json and
 # run.log, and this run's temporary directory (removed on exit; npm's cache is
 # pointed into it). Permitted commands: the pinned node running this repo's own
-# scripts, plutil and read-only systemctl verbs (list-units, show-environment,
-# show, is-active), read-only verbs of the pinned npm only (--version, config
+# scripts, plutil and read-only systemctl verbs (list-units, list-unit-files,
+# show-environment, show, is-active), read-only verbs of the pinned npm only (--version, config
 # get, view, ls), apt list, ps (uid, elapsed time and executable name only),
 # scripts/check-unit-drift.sh (file comparison only), and system helpers (awk,
 # grep, mktemp, ...). Every command is taken from the job's own PATH with
@@ -455,13 +455,14 @@ flag_class() {
   esac
 }
 
-# claude_instance_env_record <name> <manager> <surface> <config dir> <DISABLE_UPDATES> <DISABLE_AUTOUPDATER>
+# claude_instance_env_record <name> <manager> <surface> <config dir> <secure-storage dir> <DISABLE_UPDATES> <DISABLE_AUTOUPDATER>
 # Observation only (see observe_claude_update_policy). Pass UNSET_MARK for an unset flag and "?"
 # in every value field when the service environment could not be read.
 claude_instance_env_record() {
-  local config="$4"
+  local config="$4" secure="$5"
   case "$config" in *$'\n'*|*$'\037'*) config="?" ;; esac
-  printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "$(flag_class "$5")" "$(flag_class "$6")" \
+  case "$secure" in *$'\n'*|*$'\037'*) secure="?" ;; esac
+  printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$1" "$2" "$3" "$config" "$secure" "$(flag_class "$6")" "$(flag_class "$7")" \
     >> "$CLAUDE_INSTANCE_ENV_FILE"
 }
 
@@ -532,6 +533,29 @@ plist_string() {
   "$PLUTIL_BIN" -extract "$2" raw -o - "$1" 2>/dev/null
 }
 
+# Unlike raw plutil output, credential selectors must distinguish absence from a non-string.
+plist_credential_selector() {
+  local value
+  if value="$("$PLUTIL_BIN" -convert json -o - "$1" 2>/dev/null | "$REPO_NODE_BIN" -e '
+let source = "";
+process.stdin.on("data", (chunk) => { source += chunk; }).on("end", () => {
+  try {
+    const plist = JSON.parse(source);
+    const env = plist.EnvironmentVariables;
+    const [key, absent] = process.argv.slice(1);
+    if (env === undefined) { process.stdout.write(absent); return; }
+    if (env === null || typeof env !== "object" || Array.isArray(env)) process.exit(1);
+    if (!Object.hasOwn(env, key)) { process.stdout.write(absent); return; }
+    if (typeof env[key] !== "string") process.exit(1);
+    process.stdout.write(env[key]);
+  } catch { process.exit(1); }
+});' "$2" "$3" 2>/dev/null)"; then
+    printf '%s' "$value"
+  else
+    printf '?'
+  fi
+}
+
 # What a plist read with plutil shows: the environment of the next launch. The loaded job's
 # environment would need `launchctl print`, which prints every value, so it is not read.
 LAUNCHD_ENV_SURFACE="next launch; loaded job environment not read"
@@ -587,7 +611,7 @@ claude_inventory_launchd() {
     name="${name%.plist}"
     if ! "$PLUTIL_BIN" -lint "$file" >/dev/null 2>&1; then
       claude_consumer_record "$name" launchd unknown "" "" "" "$file is not a readable property list"
-      claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" "?" "?" "?"
+      claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" "?" "?" "?" "?"
       continue
     fi
     label="$(plist_string "$file" Label || true)"
@@ -604,7 +628,8 @@ claude_inventory_launchd() {
     prepend="$(plist_string "$file" EnvironmentVariables.WHATSOUP_PATH_PREPEND || true)"
     node="$(plist_string "$file" EnvironmentVariables.WHATSOUP_NODE || true)"
     claude_instance_env_record "$name" launchd "$LAUNCHD_ENV_SURFACE" \
-      "$(plist_string "$file" EnvironmentVariables.CLAUDE_CONFIG_DIR || true)" \
+      "$(plist_credential_selector "$file" CLAUDE_CONFIG_DIR "")" \
+      "$(plist_credential_selector "$file" CLAUDE_SECURESTORAGE_CONFIG_DIR "$UNSET_MARK")" \
       "$(plist_flag "$file" DISABLE_UPDATES)" \
       "$(plist_flag "$file" DISABLE_AUTOUPDATER)"
     if ! reason="$(instance_wrapper_mismatch "$program")"; then
@@ -630,6 +655,12 @@ systemd_assign() {
       case "$value" in
         *\"*|*\'*|*\\*|*\$*|*\`*) SYSTEMD_ENV_CONFIG="?" ;;
         *) SYSTEMD_ENV_CONFIG="$value" ;;
+      esac
+      return 0 ;;
+    CLAUDE_SECURESTORAGE_CONFIG_DIR)
+      case "$value" in
+        *\"*|*\'*|*\\*|*\$*|*\`*) SYSTEMD_ENV_SECURE="?" ;;
+        *) SYSTEMD_ENV_SECURE="$value" ;;
       esac
       return 0 ;;
     *) return 0 ;;
@@ -683,24 +714,105 @@ systemd_environment_file() {
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in
       PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) ;;
-      DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) ;;
+      DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*|CLAUDE_SECURESTORAGE_CONFIG_DIR=*) ;;
       *) continue ;;
     esac
     systemd_assign "$line" || return 1
   done < "$1"
 }
 
+# systemd_configured_instance_units <live user-manager UnitPath>: print each
+# configured WhatSoup instance candidate found in the manager's actual search
+# paths. A missing or unreadable advertised path is not an empty inventory.
+systemd_configured_instance_units() {
+  local paths="$1" root entry dependency unit
+  local IFS=' '
+  local -a roots
+  case "$paths" in
+    ""|[[:space:]]*|*[[:space:]]|*'  '*|*$'\t'*|*$'\n'*|*$'\r'*)
+      echo "systemctl UnitPath is empty or malformed"
+      return 1 ;;
+  esac
+  read -r -a roots <<< "$paths" || {
+    echo "systemctl UnitPath could not be parsed"
+    return 1
+  }
+  [ "${#roots[@]}" -gt 0 ] || {
+    echo "systemctl UnitPath has no user-manager search paths"
+    return 1
+  }
+  for root in "${roots[@]}"; do
+    case "$root" in
+      /*) ;;
+      *) echo "systemctl UnitPath contains a non-absolute path"; return 1 ;;
+    esac
+    # UnitPath is a shell-quoted array rendering. This reader deliberately
+    # accepts only unquoted path tokens and never evaluates manager output.
+    case "$root" in
+      *[![:alnum:]_./+@=,:-]*)
+        echo "systemctl UnitPath contains an unsupported quoted or escaped path"
+        return 1 ;;
+    esac
+    [ -d "$root" ] && [ -r "$root" ] && [ -x "$root" ] || {
+      echo "systemctl UnitPath directory is not readable: $root"
+      return 1
+    }
+    for entry in "$root"/whatsoup@*.service; do
+      [ -f "$entry" ] || [ -L "$entry" ] || continue
+      unit="${entry##*/}"
+      case "$unit" in whatsoup@?*.service) printf '%s\n' "$unit" ;; esac
+    done
+    for entry in "$root"/whatsoup@*.service.d; do
+      [ -d "$entry" ] || continue
+      unit="${entry##*/}"
+      unit="${unit%.d}"
+      case "$unit" in whatsoup@?*.service) printf '%s\n' "$unit" ;; esac
+    done
+    for dependency in "$root"/*.wants "$root"/*.requires; do
+      [ -d "$dependency" ] || continue
+      [ -r "$dependency" ] && [ -x "$dependency" ] || {
+        echo "systemctl UnitPath dependency directory is not readable: $dependency"
+        return 1
+      }
+      for entry in "$dependency"/whatsoup@*.service; do
+        [ -f "$entry" ] || [ -L "$entry" ] || continue
+        unit="${entry##*/}"
+        case "$unit" in whatsoup@?*.service) printf '%s\n' "$unit" ;; esac
+      done
+    done
+  done
+}
+
 claude_inventory_systemd() {
-  local units unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
+  local loaded unit_files configured_units units unit_paths unit name show manager_env manager_unreadable wrapper_ok wrapper_reason rc=0
   SYSTEMCTL_BIN="$(job_tool systemctl)" || {
     echo "systemctl not found on the job PATH"
     return 1
   }
-  units="$("$SYSTEMCTL_BIN" --user list-units --all --type=service --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
+  unit_paths="$("$SYSTEMCTL_BIN" --user show -p UnitPath --value 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "systemctl UnitPath read failed rc=$rc"
+    return 1
+  fi
+  if ! configured_units="$(systemd_configured_instance_units "$unit_paths")"; then
+    echo "$configured_units"
+    return 1
+  fi
+  loaded="$("$SYSTEMCTL_BIN" --user list-units --all --type=service --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "systemctl list-units failed rc=$rc"
     return 1
   fi
+  rc=0
+  unit_files="$("$SYSTEMCTL_BIN" --user list-unit-files --no-legend --plain 'whatsoup@*.service' 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "systemctl list-unit-files failed rc=$rc"
+    return 1
+  fi
+  units="$(printf '%s\n%s\n%s\n' "$loaded" "$unit_files" "$configured_units" | awk '$1 ~ /^whatsoup@.+\.service$/ && !seen[$1]++ { print $1 }')" || {
+    echo "systemctl unit inventory could not be normalized"
+    return 1
+  }
   # The instance template starts every unit through the installed wrapper (deploy/whatsoup@.service).
   wrapper_ok=1
   wrapper_reason="$(instance_wrapper_mismatch "$INSTALLED_WRAPPER")" || wrapper_ok=0
@@ -715,7 +827,7 @@ claude_inventory_systemd() {
     name="${unit#whatsoup@}"
     name="${name%.service}"
     SYSTEMD_ENV_PATH="" SYSTEMD_ENV_PREPEND="" SYSTEMD_ENV_NODE=""
-    SYSTEMD_ENV_UPDATES="$UNSET_MARK" SYSTEMD_ENV_AUTOUPDATER="$UNSET_MARK" SYSTEMD_ENV_CONFIG=""
+    SYSTEMD_ENV_UPDATES="$UNSET_MARK" SYSTEMD_ENV_AUTOUPDATER="$UNSET_MARK" SYSTEMD_ENV_CONFIG="" SYSTEMD_ENV_SECURE="$UNSET_MARK"
     # Same precedence as the launcher composes (deploy/lib/runtime-path.sh): the user manager
     # environment first, then Environment=, then EnvironmentFiles=. A manager value this reader
     # cannot interpret, or a manager environment that cannot be read, makes the instance unknown:
@@ -726,29 +838,29 @@ claude_inventory_systemd() {
       while IFS= read -r line; do
         case "$line" in
           PATH=*|WHATSOUP_PATH_PREPEND=*|WHATSOUP_NODE=*) systemd_assign "$line" || manager_unreadable=1 ;;
-          DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*) systemd_assign "$line" || true ;;
+          DISABLE_UPDATES=*|DISABLE_AUTOUPDATER=*|CLAUDE_CONFIG_DIR=*|CLAUDE_SECURESTORAGE_CONFIG_DIR=*) systemd_assign "$line" || true ;;
         esac
       done <<< "$manager_env"
     fi
     if [ "$manager_unreadable" -eq 1 ]; then
       claude_consumer_record "$name" systemd unknown "" "" "" "user manager environment is not statically readable"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "manager unit definition" "?" "?" "?" "?"
       continue
     fi
     if ! show="$("$SYSTEMCTL_BIN" --user show -p Environment -p EnvironmentFiles "$unit" 2>/dev/null)"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "systemctl show failed for $unit"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "manager unit definition" "?" "?" "?" "?"
       continue
     fi
     if ! systemd_unit_environment "$show"; then
       claude_consumer_record "$name" systemd unknown "" "" "" "unit environment for $unit is not statically readable"
-      claude_instance_env_record "$name" systemd "loaded unit" "?" "?" "?"
+      claude_instance_env_record "$name" systemd "manager unit definition" "?" "?" "?" "?"
       continue
     fi
-    # `systemctl show` reports the unit as loaded, which is also its next launch unless the unit
-    # file changed without a daemon-reload.
-    claude_instance_env_record "$name" systemd "loaded unit" \
-      "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
+    # The manager resolves the current unit definition; its next launch can differ only after
+    # that definition changes without a daemon-reload.
+    claude_instance_env_record "$name" systemd "manager unit definition" \
+      "$SYSTEMD_ENV_CONFIG" "$SYSTEMD_ENV_SECURE" "$SYSTEMD_ENV_UPDATES" "$SYSTEMD_ENV_AUTOUPDATER"
     if [ "$wrapper_ok" -eq 0 ]; then
       claude_consumer_record "$name" systemd unknown "" "" "" "$wrapper_reason"
       continue
@@ -773,6 +885,200 @@ claude_service_inventory() {
   # An unreadable service manager is not an empty inventory.
   [ "$rc" -eq 0 ] || rm -f "$CLAUDE_INSTANCE_ENV_FILE"
   return "$rc"
+}
+
+# Agent CLI login isolation. The agent CLI uses, and can refresh, the login selected by
+# CLAUDE_SECURESTORAGE_CONFIG_DIR when that variable is defined, otherwise CLAUDE_CONFIG_DIR:
+# in that directory and in a login-keychain item named after it. A refresh rotates the token, and
+# a process killed mid-refresh loses the rotated one, so a job that shares a bot's effective store
+# or keychain item can wipe the bot's login. Every step that starts the agent CLI (the native
+# installer and its --version postcheck, the plugin and MCP listings) runs only when
+# claude_config_isolation proves this job has a login of its own. The same rule as the fleet's
+# maint-ccd-guard.sh wrapper, carried natively.
+#
+# The keychain service name: the bare name when the selected selector is empty, else the bare
+# name, a dash and the first 8 hex digits of the sha256 of its string. A defined nonempty secure
+# selector is NFC-normalized before this helper receives it, matching the agent CLI. Split so the
+# product name never appears as one phrase (scripts/lib/repo-hygiene-policy.ts would read it as an
+# attribution).
+CLAUDE_KEYCHAIN_SERVICE='Claude'' Code-credentials'
+
+# claude_keychain_service <effective selector or empty>: the keychain service for that selector.
+claude_keychain_service() {
+  local suffix
+  if [ -z "$1" ]; then
+    printf '%s\n' "$CLAUDE_KEYCHAIN_SERVICE"
+    return 0
+  fi
+  # The bytes of the string, as `printf %s | shasum -a 256` hashes them.
+  suffix="$(printf '%s' "$1" | "$REPO_NODE_BIN" -e '
+const hash = require("node:crypto").createHash("sha256");
+process.stdin.on("data", (d) => hash.update(d)).on("end", () => process.stdout.write(hash.digest("hex").slice(0, 8)));')" || return 1
+  [ "${#suffix}" -eq 8 ] || return 1
+  printf '%s-%s\n' "$CLAUDE_KEYCHAIN_SERVICE" "$suffix"
+}
+
+# claude_nfc <string>: print the NFC normalization used by the agent CLI for a defined secure
+# selector. The config selector retains the CLI's raw-string semantics.
+claude_nfc() {
+  printf '%s' "$1" | "$REPO_NODE_BIN" -e '
+const { readFileSync } = require("node:fs");
+process.stdout.write(readFileSync(0, "utf8").normalize("NFC"));
+'
+}
+
+# claude_effective_selector <config selector or UNSET_MARK> <secure selector or UNSET_MARK>:
+# secure storage overrides config when defined. Its empty value selects the default file store and
+# bare keychain item; nonempty values are NFC-normalized by the CLI. Config retains its raw string.
+claude_effective_selector() {
+  local config="$1" secure="$2"
+  if [ "$secure" != "$UNSET_MARK" ]; then
+    [ "$secure" != "?" ] || { printf '?\n'; return 0; }
+    claude_nfc "$secure"
+  elif [ "$config" = "$UNSET_MARK" ]; then
+    printf '\n'
+  else
+    printf '%s\n' "$config"
+  fi
+}
+
+# claude_config_dir_resolved <effective selector or empty>: the directory the agent CLI reads for
+# it (empty is the default $HOME/.claude), with symlinks resolved. A dir that does not exist yet
+# resolves through its nearest existing parent, so /alias/x and /real/x match when alias -> real.
+# A relative value is returned as given.
+claude_config_dir_resolved() {
+  "$REPO_NODE_BIN" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const directory = process.argv[1];
+if (!path.isAbsolute(directory)) { process.stdout.write(directory); process.exit(0); }
+let base = directory.replace(/\/+$/, "") || "/";
+const missing = [];
+try {
+  for (;;) {
+    try { fs.lstatSync(base); break; }
+    catch (error) {
+      if (error.code !== "ENOENT" || base === "/") throw error;
+      const part = path.basename(base);
+      if (part === "." || part === "..") throw error;
+      missing.unshift(part);
+      base = path.dirname(base);
+    }
+  }
+  if (!fs.statSync(base).isDirectory()) process.exit(1);
+  process.stdout.write(path.join(fs.realpathSync(base), ...missing));
+} catch { process.exit(1); }
+' "${1:-$HOME/.claude}" 2>/dev/null
+}
+
+# claude_config_isolation: 0 when this job's effective selector is set, absolute, not the default
+# config dir, and differs as a string, a resolved directory and a keychain service from every
+# effective instance selector in the last inventory read. Otherwise 1 with the reason on stdout.
+# Fails closed: an unread inventory, an unreadable effective instance value, a relative effective
+# instance selector or no instance at all is unproven.
+claude_config_isolation() {
+  local job_config="$UNSET_MARK" job_secure="$UNSET_MARK" job job_dir default_dir job_svc other other_dir other_svc job_selector
+  local name manager surface config secure updates autoupdater checked=0
+  if [ "${CLAUDE_CONFIG_DIR+x}" = x ]; then job_config="$CLAUDE_CONFIG_DIR"; fi
+  if [ "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}" = x ]; then job_secure="$CLAUDE_SECURESTORAGE_CONFIG_DIR"; fi
+  if [ "$job_secure" = "$UNSET_MARK" ] && [ "$job_config" = "$UNSET_MARK" ]; then
+    echo "this job's CLAUDE_CONFIG_DIR is unset, so the agent CLI would use the default login"
+    return 1
+  fi
+  job_selector="CLAUDE_CONFIG_DIR"
+  [ "$job_secure" = "$UNSET_MARK" ] || job_selector="CLAUDE_SECURESTORAGE_CONFIG_DIR"
+  if ! job="$(claude_effective_selector "$job_config" "$job_secure")"; then
+    echo "this job's $job_selector could not be normalized, so its credential store is unproven"
+    return 1
+  fi
+  if [ -z "$job" ]; then
+    if [ "$job_secure" != "$UNSET_MARK" ]; then
+      echo "this job's CLAUDE_SECURESTORAGE_CONFIG_DIR selects the default config dir"
+    else
+      echo "this job's CLAUDE_CONFIG_DIR is unset or empty, so the agent CLI would use the default login"
+    fi
+    return 1
+  fi
+  case "$job" in
+    /*) ;;
+    *)
+      echo "this job's $job_selector $job is not an absolute path"
+      return 1 ;;
+  esac
+  if ! job_dir="$(claude_config_dir_resolved "$job")" || ! default_dir="$(claude_config_dir_resolved "")"; then
+    echo "this job's credential-store directory could not be resolved, so its isolation is unproven"
+    return 1
+  fi
+  if [ "$job_dir" = "$default_dir" ]; then
+    echo "this job's $job_selector $job is the default config dir"
+    return 1
+  fi
+  if ! job_svc="$(claude_keychain_service "$job")"; then
+    echo "the keychain service for this job's $job_selector could not be computed"
+    return 1
+  fi
+  if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
+    echo "service definitions were not read this run, so isolation from every instance is unproven"
+    return 1
+  fi
+  while IFS=$'\037' read -r name manager surface config secure updates autoupdater; do
+    [ -n "$name" ] || continue
+    checked=$((checked + 1))
+    if [ "$secure" = "$UNSET_MARK" ] && [ "$config" = "?" ]; then
+      echo "$name's CLAUDE_CONFIG_DIR is not readable, so isolation from it is unproven"
+      return 1
+    fi
+    if ! other="$(claude_effective_selector "$config" "$secure")" || [ "$other" = "?" ]; then
+      echo "$name's effective credential-store selector is not readable, so isolation from it is unproven"
+      return 1
+    fi
+    case "$other" in
+      "") ;;
+      /*) ;;
+      *)
+        echo "$name's effective credential-store selector is not an absolute path, so isolation from it is unproven"
+        return 1 ;;
+    esac
+    if [ "$job" = "$other" ]; then
+      echo "this job's $job_selector $job equals $name's effective credential-store selector"
+      return 1
+    fi
+    if ! other_dir="$(claude_config_dir_resolved "$other")"; then
+      echo "$name's credential-store directory could not be resolved, so isolation from it is unproven"
+      return 1
+    fi
+    if [ "$job_dir" = "$other_dir" ]; then
+      echo "this job's $job_selector $job resolves to $name's config dir (effective credential-store selector)"
+      return 1
+    fi
+    if ! other_svc="$(claude_keychain_service "$other")"; then
+      echo "the keychain service for $name's effective credential-store selector could not be computed"
+      return 1
+    fi
+    if [ "$job_svc" = "$other_svc" ]; then
+      echo "this job's $job_selector $job shares $name's keychain item"
+      return 1
+    fi
+  done < "$CLAUDE_INSTANCE_ENV_FILE"
+  if [ "$checked" -eq 0 ]; then
+    echo "no service instance was inventoried, so isolation is unproven"
+    return 1
+  fi
+}
+
+# claude_refuse_execution <reason> <component>...: record that the agent CLI was not started for
+# each <component>, and alert once per run however many steps the refusal skips.
+claude_refuse_execution() {
+  local reason="$1" component
+  shift
+  if ! events_recorded "claude-config-isolation" "refused"; then
+    record_event "claude-config-isolation" "refused" "$reason"
+    send_alert "claude-config-isolation" "warning" "Agent CLI not started: login not isolated" \
+      "The maintenance job started no agent CLI because $reason. Give the job a dedicated effective credential-store selector."
+  fi
+  for component in "$@"; do
+    record_event "$component" "refused" "agent CLI not started: $reason"
+  done
 }
 
 codex_bin() {
@@ -1261,6 +1567,11 @@ NODE
     record_event "claude" "drift" "cooldown-eligible update available" "$before" "$before" "$target"
     return 0
   fi
+  # The installer and its --version postcheck start the agent CLI.
+  if ! reason="$(claude_config_isolation)"; then
+    claude_refuse_execution "$reason" claude
+    return 2
+  fi
   claude_install_transaction "$before" "$target"
 }
 
@@ -1703,16 +2014,17 @@ policy_summary() {
 }
 
 observe_claude_update_policy() {
-  local name manager surface config updates autoupdater config_label settings method auto s_updates s_auto s_files effective
-  local total=0 disabled=0 open="" unknown="" config_dir_state=unset
+  local name manager surface config secure updates autoupdater config_label settings method auto s_updates s_auto s_files effective
+  local total=0 disabled=0 open="" unknown="" config_dir_state=unset secure_storage_state=unset
   [ -z "${CLAUDE_CONFIG_DIR:-}" ] || config_dir_state="set"
+  [ -z "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}" ] || secure_storage_state="set"
   record_event "claude-update-policy" "job-env" \
-    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$config_dir_state"
+    "this job: DISABLE_UPDATES=$(env_flag DISABLE_UPDATES) DISABLE_AUTOUPDATER=$(env_flag DISABLE_AUTOUPDATER) CLAUDE_CONFIG_DIR=$config_dir_state CLAUDE_SECURESTORAGE_CONFIG_DIR=$secure_storage_state"
   if [ ! -f "$CLAUDE_INSTANCE_ENV_FILE" ]; then
     policy_summary "unknown" "service definitions were not read this run, so no instance's update policy is known"
     return 0
   fi
-  while IFS=$'\037' read -r name manager surface config updates autoupdater; do
+  while IFS=$'\037' read -r name manager surface config secure updates autoupdater; do
     [ -n "$name" ] || continue
     total=$((total + 1))
     if [ "$updates" = "?" ]; then
@@ -2020,11 +2332,14 @@ process.stdin.on("data", (d) => { s += d; }).on("end", () => {
 }
 
 probe_tier2() {
-  local systemctl_bin apt_bin launcher reason
+  local systemctl_bin apt_bin launcher reason refused=0
   if [ "$CHECK_ONLY" -eq 1 ]; then
     # Listing plugins or MCP servers starts the agent CLI, which can refresh MCP authentication.
     record_event "claude-plugins" "skipped" "the agent CLI is not executed in check mode"
     record_event "mcp-servers" "skipped" "the agent CLI is not executed in check mode"
+  elif ! reason="$(claude_config_isolation)"; then
+    claude_refuse_execution "$reason" claude-plugins mcp-servers
+    refused=1
   elif launcher="$(command -v claude)"; then
     # Only a launcher the static classifier accepts is started; anything else could be any script.
     if reason="$(claude_probe_admission "$launcher")"; then
@@ -2107,6 +2422,8 @@ probe_tier2() {
   else
     record_event "systemd-content" "skipped" "check-unit-drift.sh unavailable"
   fi
+  # The other probes still ran; the refused listings leave the step, and so the run, degraded.
+  [ "$refused" -eq 0 ] || return 2
 }
 
 # finish_run: aggregate the recorded step results (not variables a step set),

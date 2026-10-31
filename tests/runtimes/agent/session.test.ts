@@ -25,8 +25,18 @@ vi.mock('../../../src/runtimes/agent/provider-canary-proof.ts');
 // reads `log` calls today, so switching from "new object per call" to "one
 // shared object" is behaviorally invisible to every other test here.
 // TYPE NOTE: mockLogger.debug asserted at L7187; typed for property access.
-const { mockLogger } = vi.hoisted(() => ({
+type ClaudeRefreshGraceResult = {
+  outcome: 'lock-released' | 'grace-exhausted';
+  waitedMs: number;
+};
+
+const { mockLogger, mockClaudeRefreshLockGrace } = vi.hoisted(() => ({
   mockLogger: {} as Record<string, ReturnType<typeof vi.fn>>,
+  // Session tests control the grace explicitly. The default preserves the
+  // production helper's no-held-lock fast path for every unrelated test.
+  mockClaudeRefreshLockGrace: vi.fn<
+    (env: NodeJS.ProcessEnv, purpose: string) => Promise<ClaudeRefreshGraceResult> | null
+  >(() => null),
 }));
 
 vi.mock('../../../src/logger.ts', async () => {
@@ -34,6 +44,11 @@ vi.mock('../../../src/logger.ts', async () => {
   const { createChildLogger } = hoistedLoggerMock(mockLogger);
   return { createChildLogger };
 });
+
+vi.mock('../../../src/runtimes/agent/providers/claude-refresh-ahead.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/runtimes/agent/providers/claude-refresh-ahead.ts')>(),
+  claudeRefreshLockGrace: mockClaudeRefreshLockGrace,
+}));
 
 vi.mock('node:os', () => ({
   homedir: vi.fn(() => '/mock/home'),
@@ -290,6 +305,8 @@ describe('SessionManager', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockClaudeRefreshLockGrace.mockReset();
+    mockClaudeRefreshLockGrace.mockReturnValue(null);
     mockChild = makeMockChild(12345);
     (spawn as ReturnType<typeof vi.fn>).mockReturnValue(mockChild);
   });
@@ -1271,6 +1288,32 @@ describe('SessionManager', () => {
       } else {
         delete process.env['CLAUDE_CONFIG_DIR'];
       }
+    }
+  });
+
+  it('keeps transcript storage under CLAUDE_CONFIG_DIR when secure storage selects a different root', async () => {
+    const previousConfig = process.env['CLAUDE_CONFIG_DIR'];
+    const previousSecure = process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'];
+    process.env['CLAUDE_CONFIG_DIR'] = '/custom/claude-config';
+    process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] = '/separate/credential-store';
+
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: () => {} });
+      await sm.spawnSession();
+
+      mockChild.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'ses_distinct_roots' }) + '\n'));
+
+      expect(updateTranscriptPath).toHaveBeenCalledWith(
+        db, 42,
+        join('/custom/claude-config', 'projects', '-mock-home', 'ses_distinct_roots.jsonl'),
+      );
+    } finally {
+      if (previousConfig === undefined) delete process.env['CLAUDE_CONFIG_DIR'];
+      else process.env['CLAUDE_CONFIG_DIR'] = previousConfig;
+      if (previousSecure === undefined) delete process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'];
+      else process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] = previousSecure;
     }
   });
 
@@ -2645,6 +2688,59 @@ describe('SessionManager', () => {
     expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  it('waits for a held Claude refresh grace before each shutdown signal', async () => {
+    vi.useFakeTimers();
+    const previousSecure = process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'];
+    const secureStore = '/session-grace/credential-store';
+    process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] = secureStore;
+    const released: ClaudeRefreshGraceResult = { outcome: 'lock-released', waitedMs: 0 };
+    let releaseTerm!: () => void;
+    let releaseKill!: () => void;
+    const termGrace = new Promise<ClaudeRefreshGraceResult>((resolve) => { releaseTerm = () => resolve(released); });
+    const killGrace = new Promise<ClaudeRefreshGraceResult>((resolve) => { releaseKill = () => resolve(released); });
+    mockClaudeRefreshLockGrace.mockReturnValueOnce(termGrace).mockReturnValueOnce(killGrace);
+
+    try {
+      const db = makeDb();
+      const { messenger } = makeMessenger();
+      const graceMs = (SessionManager as unknown as { SHUTDOWN_GRACE_MS: number }).SHUTDOWN_GRACE_MS;
+      const sm = new SessionManager({ db, messenger, chatJid: CHAT_JID, onEvent: vi.fn(), provider: 'claude-cli' });
+      await sm.spawnSession();
+      const childEnv = vi.mocked(spawn).mock.calls[0]?.[2]?.env;
+      expect(childEnv).toEqual(expect.objectContaining({ CLAUDE_SECURESTORAGE_CONFIG_DIR: secureStore }));
+
+      const stopping = sm.shutdown();
+      expect(mockClaudeRefreshLockGrace).toHaveBeenCalledTimes(1);
+      expect(mockClaudeRefreshLockGrace).toHaveBeenNthCalledWith(
+        1,
+        childEnv,
+        'session-kill',
+      );
+      expect(mockChild.kill).not.toHaveBeenCalled();
+
+      releaseTerm();
+      await stopping;
+      expect(mockChild.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+
+      await vi.advanceTimersByTimeAsync(graceMs + 1);
+      expect(mockClaudeRefreshLockGrace).toHaveBeenCalledTimes(2);
+      expect(mockClaudeRefreshLockGrace).toHaveBeenNthCalledWith(
+        2,
+        childEnv,
+        'session-kill',
+      );
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+
+      releaseKill();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockChild.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    } finally {
+      if (previousSecure === undefined) delete process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'];
+      else process.env['CLAUDE_SECURESTORAGE_CONFIG_DIR'] = previousSecure;
+      vi.useRealTimers();
+    }
   });
 
   it('repeated resets keep a shutdown escalation timer for every superseded child', async () => {

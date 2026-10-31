@@ -78,6 +78,13 @@ resolves the installer-managed launcher `~/.local/bin/claude` and that
 launcher is the native layout; any pin, unknown or missing instance holds the
 update. A launchd instance is any `com.whatsoup.<name>` plist that passes
 `<name>` as its argument; a systemd instance is any `whatsoup@<name>` unit,
+including installed disabled or never-loaded instances. The job asks the live
+user manager for its `UnitPath`, then discovers direct unit files or aliases,
+per-instance `.service.d` drop-ins, and links in `.wants` or `.requires`
+directories in those paths. A UnitPath read or directory it cannot read is
+unknown, not an empty inventory. UnitPath is a shell-quoted array rendering;
+the job accepts only unquoted absolute path tokens and treats a quoted or
+escaped token as unknown rather than interpreting manager output. Instances are
 assumed to start through the installed `~/.local/bin/whatsoup` link as
 `deploy/whatsoup@.service` does (an `ExecStart` override is not read).
 
@@ -91,9 +98,19 @@ an instance on an older release whose wrapper differs only in lines unrelated
 to the PATH still holds. Run the maintenance job from the same release as the
 instances.
 
+The Linux `harness-maintenance.service` user unit sets both `CLAUDE_CONFIG_DIR`
+and `CLAUDE_SECURESTORAGE_CONFIG_DIR` to `%h/.claude-maint`. Provision and
+authenticate this separate maintenance store as the user who owns the unit before
+scheduling agent CLI work. Do not copy a bot's credentials or point maintenance
+at its store. If the job's configuration and effective credential store cannot
+be proven isolated from every inventoried instance, it starts no agent CLI,
+records `claude-config-isolation: refused`, and ends `degraded` until the
+selectors are reconciled.
+
 On systemd the user manager environment, then `Environment=`, then
-`EnvironmentFiles=` are applied, as the launcher does. Finding no instance at
-all holds with a warning alert. The target is the newest release older than `npm.cooldown_minutes`
+`EnvironmentFiles=` are applied from the manager's resolved unit definition,
+as the launcher does. Finding no instance at all holds with a warning alert.
+The target is the newest release older than `npm.cooldown_minutes`
 (never a downgrade or prerelease). The install runs from the verified previous
 binary; a failed install or postcheck swaps the launcher link back to that
 binary (never a network reinstall) and still ends `degraded`. Event statuses
@@ -116,7 +133,7 @@ surface is its own event:
 | `claude-launcher` `moved-during-probes` / `baseline` | A normal run takes the next `baseline` after its probes. If the launcher changed during the probes, the move is recorded as `moved-during-probes` and alerted (once per target) as a change made during this job, not left for the next run to report as a change outside it. The message says the job ran the agent CLI only when the plugin and MCP listing actually started it. |
 | `claude-launcher` `observation-incomplete` | A normal run whose launcher comparison did not complete (the observation step failed, or the launcher could not be read at the start) does not advance the baseline: it carries the last `baseline` and `alert-history` forward, so the next run still compares, and alerts, the move. A run that ends before its baseline step (the final state is `failed`) carries both forward the same way. |
 | `claude-launcher` `check-observation` | `--check` never advances the baseline: it records the launcher it saw under this status and carries the last normal run's `baseline` (and `alert-history`) forward unchanged, so a move seen only by a check run is still alerted by the next normal run. A check run on a host with no baseline creates none. |
-| `claude-update-policy` `instance` | Per instance: `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` and a relocated `CLAUDE_CONFIG_DIR` from the service definition (launchd: plist on disk = next launch, the loaded job environment is not read; systemd: the loaded unit), and from that config directory's settings on disk: `installMethod`, `autoUpdates` and the settings `env` flags. The `env` flags come from managed settings (`managed-settings.json` in `/Library/Application Support/ClaudeCode` on macOS or `/etc/claude-code` on Linux, then each `*.json` in the `managed-settings.d` drop-in directory beside it in lexical order, a later file overriding an earlier one), then the config directory's `settings.json`, then the service environment: the first that sets a flag decides it, and a settings file that exists but cannot be parsed makes the flags `unreadable`. `settings.local.json` is not a source: the agent CLI reads it per project. `settings files` names the files present. Not read, and named in the summary: the project-level settings in each instance's workspace, the macOS `com.anthropic.claudecode` preference domain and remote-managed settings. The resulting error can go either way: these sources can disable updates the job reports open, and project and local settings apply after user settings, so a workspace `env` can reopen updates while the job reports the instance `disabled`. Flags are `set` only for `1` or `true` (any case); any other value, including `0` and empty, is `set-unrecognized`. Values are never recorded. |
+| `claude-update-policy` `instance` | Per instance: `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` and a relocated `CLAUDE_CONFIG_DIR` from the service definition (launchd: plist on disk = next launch, the loaded job environment is not read; systemd: the loaded unit), and from that config directory's settings on disk: `installMethod`, `autoUpdates` and the settings `env` flags. The isolation guard also inventories `CLAUDE_SECURESTORAGE_CONFIG_DIR`: when defined it selects the credential file store and keychain item ahead of `CLAUDE_CONFIG_DIR`; defined-empty means the default store, and a nonempty secure selector is NFC-normalized for its keychain item. Settings inspection remains rooted at `CLAUDE_CONFIG_DIR`. The `env` flags come from managed settings (`managed-settings.json` in `/Library/Application Support/ClaudeCode` on macOS or `/etc/claude-code` on Linux, then each `*.json` in the `managed-settings.d` drop-in directory beside it in lexical order, a later file overriding an earlier one), then the config directory's `settings.json`, then the service environment: the first that sets a flag decides it, and a settings file that exists but cannot be parsed makes the flags `unreadable`. `settings.local.json` is not a source: the agent CLI reads it per project. `settings files` names the files present. Not read, and named in the summary: the project-level settings in each instance's workspace, the macOS `com.anthropic.claudecode` preference domain and remote-managed settings. The resulting error can go either way: these sources can disable updates the job reports open, and project and local settings apply after user settings, so a workspace `env` can reopen updates while the job reports the instance `disabled`. Flags are `set` only for `1` or `true` (any case); any other value, including `0` and empty, is `set-unrecognized`. Values are never recorded. |
 | `claude-update-policy` `job-env` | This maintenance job's own environment. |
 | `claude-update-policy` `advisory` / `disabled` / `none` / `unknown` | Summary: `advisory` names the instances that start the CLI without `DISABLE_UPDATES` (service environment or settings env); `unknown` when an instance has an unrecognized value or unreadable settings and none is plainly unset. `DISABLE_AUTOUPDATER` alone is not counted. |
 | `claude-processes` `observed` | Count of this user's native-layout CLI processes and those running over 30 minutes. No command line is read or recorded. |

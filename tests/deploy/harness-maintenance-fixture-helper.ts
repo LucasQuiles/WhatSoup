@@ -119,8 +119,14 @@ const FAKE_SYSTEMCTL = [
   '[ "$1" = "--user" ] && shift',
   'case "$1" in',
   '  list-units) cat "$d/units" 2>/dev/null; exit "$(cat "$d/list.rc" 2>/dev/null || echo 0)" ;;',
+  '  list-unit-files) cat "$d/unit-files" 2>/dev/null; exit "$(cat "$d/unit-files.rc" 2>/dev/null || echo 0)" ;;',
   '  show-environment) cat "$d/manager.env" 2>/dev/null; exit 0 ;;',
-  '  show) for last; do :; done; cat "$d/$last.show" 2>/dev/null; exit 0 ;;',
+  '  show)',
+  '    if [ "$2" = "-p" ] && [ "$3" = "UnitPath" ] && [ "$4" = "--value" ]; then',
+  '      cat "$d/unit-path" 2>/dev/null',
+  '      exit "$(cat "$d/unit-path.rc" 2>/dev/null || echo 0)"',
+  '    fi',
+  '    for last; do :; done; cat "$d/$last.show" 2>/dev/null; exit 0 ;;',
   '  is-active) echo inactive; exit 3 ;;',
   'esac',
   'exit 0',
@@ -185,7 +191,8 @@ export function makeHarness(): Harness {
   const versions = path.join(home, '.local/share/claude/versions');
   const localBin = path.join(home, '.local/bin');
   const systemdDir = path.join(home, 'systemd-fixture');
-  for (const dir of [fakeBin, versions, localBin, systemdDir, path.join(home, 'tmp'), path.join(home, 'Library/LaunchAgents')]) {
+  const systemdUnitRoot = path.join(home, '.config', 'systemd', 'user');
+  for (const dir of [fakeBin, versions, localBin, systemdDir, systemdUnitRoot, path.join(home, 'tmp'), path.join(home, 'Library/LaunchAgents')]) {
     mkdirSync(dir, { recursive: true, mode: 0o755 });
   }
   const h: Harness = {
@@ -234,6 +241,9 @@ export function makeHarness(): Harness {
     WHATSOUP_ALERT_BIN: path.join(fakeBin, 'alert'),
     WHATSOUP_HARNESS_NPM_GLOBAL_PREFIX: path.join(home, 'npm-global'),
     WHATSOUP_HARNESS_SERVICE_MANAGER: 'launchd',
+    // The job's own agent CLI config dir: absolute, not the default ~/.claude and shared with no
+    // fixture instance, so the script's login isolation check admits the agent CLI steps.
+    CLAUDE_CONFIG_DIR: path.join(home, 'maintenance-claude-config'),
     // The host's own managed settings file must not leak into a test.
     WHATSOUP_HARNESS_MANAGED_SETTINGS_FILE: path.join(home, 'no-managed-settings.json'),
     HM_FIXTURE_SCRIPT: behaviour,
@@ -244,6 +254,7 @@ export function makeHarness(): Harness {
     HM_ALERT_LOG: h.alertLog,
     HM_SYSTEMD_DIR: systemdDir,
   };
+  writeFileSync(path.join(systemdDir, 'unit-path'), `${systemdUnitRoot}\n`);
   return h;
 }
 
@@ -398,6 +409,14 @@ export function systemdUnit(h: Harness, name: string, show: string[]): void {
   const units = path.join(h.systemdDir, 'units');
   const prior = existsSync(units) ? readFileSync(units, 'utf8') : '';
   writeFileSync(units, `${prior}whatsoup@${name}.service loaded active running WhatSoup ${name}\n`);
+  writeFileSync(path.join(h.systemdDir, `whatsoup@${name}.service.show`), `${show.join('\n')}\n`);
+}
+
+/** An installed unit file that is disabled and has never entered systemd's loaded-unit set. */
+export function systemdUnitFile(h: Harness, name: string, show: string[]): void {
+  const files = path.join(h.systemdDir, 'unit-files');
+  const prior = existsSync(files) ? readFileSync(files, 'utf8') : '';
+  writeFileSync(files, `${prior}whatsoup@${name}.service disabled\n`);
   writeFileSync(path.join(h.systemdDir, `whatsoup@${name}.service.show`), `${show.join('\n')}\n`);
 }
 

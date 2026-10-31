@@ -13,6 +13,7 @@ import {
   faultScript,
   installNative,
   makeHarness,
+  pinDir,
   portableInstance,
   run,
   systemdUnit,
@@ -35,6 +36,19 @@ const UID = process.getuid?.() ?? 0;
 function idleHarness(): Harness {
   const h = makeHarness();
   writeFileSync(path.join(h.systemdDir, 'units'), '');
+  h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
+  return h;
+}
+
+/**
+ * Like idleHarness, the update is held and runs never install, but one instance exists: its service
+ * PATH pins its own agent CLI. The job's login isolation check needs an inventoried instance to
+ * prove isolation from, so only with one does a normal run start the agent CLI for its listings.
+ */
+function listingHarness(): Harness {
+  const h = makeHarness();
+  writeFileSync(path.join(h.systemdDir, 'manager.env'), 'PATH=/usr/bin:/bin\n');
+  systemdUnit(h, 'alpha', [`Environment=WHATSOUP_NODE=${process.execPath} WHATSOUP_PATH_PREPEND=${pinDir(h)}`]);
   h.env.WHATSOUP_HARNESS_SERVICE_MANAGER = 'systemd';
   return h;
 }
@@ -67,7 +81,7 @@ describe('out-of-band launcher movement', () => {
   }, T);
 
   it('reports a launcher repointed between runs as moved, with an alert under its own source', () => {
-    const h = idleHarness();
+    const h = listingHarness();
     run(h);
     repoint(h, '2.1.281');
     const { r, launcher } = launcherEvents(h);
@@ -282,7 +296,7 @@ describe('out-of-band launcher movement', () => {
   }, T);
 
   it('attributes a launcher move during the job\'s own agent CLI listing to the job, and baselines after it', () => {
-    const h = idleHarness();
+    const h = listingHarness();
     writeFileSync(h.modeFile, 'selfupdate');
     const { launcher } = launcherEvents(h);
     expect(readlinkSync(h.launcher)).toBe(path.join(h.versions, '9.9.9'));
@@ -332,17 +346,17 @@ describe('agent CLI update policy surfaces', () => {
     const policy = events(r, 'claude-update-policy');
     const instance = (name: string) => policy.find((e) => e.status === 'instance' && e.message.startsWith(`${name} `))!;
 
-    expect(instance('alpha').message).toContain('alpha via systemd (loaded unit): DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset');
+    expect(instance('alpha').message).toContain('alpha via systemd (manager unit definition): DISABLE_UPDATES=set DISABLE_AUTOUPDATER=unset');
     expect(instance('alpha').message).toContain('config default');
     expect(instance('alpha').message).toContain('installMethod=npm-global autoUpdates=true');
     expect(instance('alpha').message).toContain('settings env DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set');
-    expect(instance('beta').message).toContain('(loaded unit): DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set');
+    expect(instance('beta').message).toContain('(manager unit definition): DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set');
     expect(instance('gamma').message).toContain('config set by the service');
     expect(instance('gamma').message).toContain('installMethod=native autoUpdates=false');
     expect(instance('gamma').message).toContain('settings env DISABLE_UPDATES=set');
 
     expect(policy.find((e) => e.status === 'job-env')!.message)
-      .toBe('this job: DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set CLAUDE_CONFIG_DIR=unset');
+      .toBe('this job: DISABLE_UPDATES=unset DISABLE_AUTOUPDATER=set CLAUDE_CONFIG_DIR=set CLAUDE_SECURESTORAGE_CONFIG_DIR=unset');
     // alpha (unit) and gamma (settings) have DISABLE_UPDATES; beta's DISABLE_AUTOUPDATER is not counted.
     const summary = policy.at(-1)!;
     expect(summary.status).toBe('advisory');

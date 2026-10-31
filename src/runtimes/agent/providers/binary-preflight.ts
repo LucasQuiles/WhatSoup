@@ -18,6 +18,10 @@ export interface BinaryPreflightResult {
 }
 
 const PROBE_TIMEOUT_MS = 5_000;
+/** Bound every short-lived provider probe by raw stream bytes, before decoding. */
+const COMMAND_OUTPUT_LIMIT_BYTES = 64 * 1024;
+/** Grace period between a probe's SIGTERM and SIGKILL escalation. */
+const KILL_ESCALATION_GRACE_MS = 2_000;
 /** Hard ceiling for model-catalogue stdout. The configured-provider verbose
  *  catalogue is normally well below this; a larger stream is treated as an
  *  untrusted shape change instead of growing memory without bound. */
@@ -33,7 +37,8 @@ const CODEX_MODEL_CATALOG_MAX_ENTRIES = 4_096;
  *
  * - `ENOENT` spawn error → `{ status: 'missing', version: null }`
  * - stdout produced before exit (regardless of exit code) → `{ status: 'present', version: <first line> }`
- * - timeout or any non-ENOENT error → `{ status: 'unknown', version: null }` (fail-open)
+ * - timeout, output beyond the 64 KiB raw-byte budget, or any non-ENOENT
+ *   error → `{ status: 'unknown', version: null }` (fail-open)
  *
  * Injectable `spawnImpl` for unit tests (defaults to `node:child_process` `spawn`).
  * Never throws.
@@ -47,15 +52,23 @@ export async function probeFallbackBinary(
     let settled = false;
     let stdoutBuffer = '';
     let stderrBuffer = '';
-    // Declare killTimer before settle() captures it in a closure so there is no
-    // TDZ hazard when spawnImpl throws synchronously (settle would be called
-    // before the `const killTimer = …` assignment is reached).
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
+    let childClosed = false;
+    let terminationStarted = false;
+    // Declare timers before settle() captures them so a synchronous spawn
+    // throw cannot hit a TDZ.
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
 
     const settle = (result: BinaryPreflightResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(killTimer);
+      // A result no longer owns captured output. The close listener retains
+      // only process cleanup until the child has actually exited.
+      stdoutBuffer = '';
+      stderrBuffer = '';
       resolve(result);
     };
 
@@ -77,19 +90,56 @@ export async function probeFallbackBinary(
       return;
     }
 
-    killTimer = setTimeout(() => {
+    const signalChild = (): void => {
+      if (childClosed) return;
       try { child.kill(); } catch { /* ignore kill errors */ }
+      killEscalationTimer = setTimeout(() => {
+        if (childClosed) return;
+        try { child.kill(SIGNAL.KILL); } catch {
+          // Deliberately: the probe has already returned unknown. A failed
+          // signal must not escape the timer; cleanup still waits for close.
+        }
+      }, KILL_ESCALATION_GRACE_MS);
+      killEscalationTimer.unref?.();
+    };
+
+    const terminate = (): void => {
+      if (terminationStarted) return;
+      terminationStarted = true;
+      signalChild();
+    };
+
+    killTimer = setTimeout(() => {
+      terminate();
       settle({ status: 'unknown', version: null });
     }, PROBE_TIMEOUT_MS);
+    killTimer.unref?.();
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderrBuffer += chunk.toString('utf8');
-    });
+    const collectOutput = (chunk: Buffer, stream: 'stdout' | 'stderr'): void => {
+      if (settled || outputLimitExceeded) return;
+      outputBytes += chunk.byteLength;
+      if (outputBytes > COMMAND_OUTPUT_LIMIT_BYTES) {
+        outputLimitExceeded = true;
+        // Drop the buffers before cancellation so an untrusted probe cannot
+        // retain a partial stream while process cleanup is still pending.
+        stdoutBuffer = '';
+        stderrBuffer = '';
+        clearTimeout(killTimer);
+        terminate();
+        settle({ status: 'unknown', version: null });
+        return;
+      }
+      if (stream === 'stdout') stdoutBuffer += chunk.toString('utf8');
+      else stderrBuffer += chunk.toString('utf8');
+    };
+    child.stdout?.on('data', (chunk: Buffer) => collectOutput(chunk, 'stdout'));
+    child.stderr?.on('data', (chunk: Buffer) => collectOutput(chunk, 'stderr'));
 
     child.on('error', (err: NodeJS.ErrnoException) => {
+      clearTimeout(killTimer);
+      // Spawn errors have no child to reclaim. A later error from a spawned
+      // child leaves any already-armed escalation to the close handler.
+      if (child.pid === undefined) clearTimeout(killEscalationTimer);
       if (err.code === 'ENOENT') {
         settle({ status: 'missing', version: null });
       } else {
@@ -98,6 +148,9 @@ export async function probeFallbackBinary(
     });
 
     child.on('close', () => {
+      childClosed = true;
+      clearTimeout(killTimer);
+      clearTimeout(killEscalationTimer);
       if (settled) return;
 
       // Incompatible architecture binary — stderr contains a recognized
@@ -130,16 +183,41 @@ export interface BinaryAuthStatusResult {
   output: string;
 }
 
+/** How a probe child ended, reported once by {@link BinaryCommandProbeOptions.onExited}. */
+export interface BinaryCommandProbeExit {
+  /** Undefined when the spawn failed and no process ever existed. */
+  pid: number | undefined;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  /** The probe's own kill timer (`timeoutMs`) fired and terminated the child. */
+  killedByTimeout: boolean;
+  /** The caller's abort signal terminated the child. */
+  killedByAbort: boolean;
+  /** No process was started (spawn threw or emitted an error before a pid). */
+  spawnFailed: boolean;
+  /** The combined stdout/stderr stream exceeded the raw-byte budget. */
+  outputLimitExceeded?: boolean;
+}
+
 export interface BinaryCommandProbeOptions {
   cwd?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
   /** Called once spawn is proven absent or the child emits close. */
   onProcessClosed?: () => void;
+  /** Called once, right after spawn returned or threw (pid undefined if no process was created). */
+  onSpawned?: (pid: number | undefined) => void;
+  /** Called once when the child closes or its spawn is proven to have failed. */
+  onExited?: (exit: BinaryCommandProbeExit) => void;
+  /**
+   * Called right before the child would be signalled (timeout, abort or output limit). A
+   * returned promise defers the signal until it settles; null signals at once.
+   * The claude probes use it to wait out a held OAuth refresh lock
+   * (claudeRefreshLockGrace). The probe result itself is not delayed by a
+   * timeout grace; an abort still settles only when the child closes.
+   */
+  terminationGrace?: () => Promise<unknown> | null;
 }
-
-/** Grace period between the timeout kill (SIGTERM) and the SIGKILL escalation. */
-const KILL_ESCALATION_GRACE_MS = 2_000;
 
 /**
  * Probe a provider binary's auth status without blocking the event loop.
@@ -179,6 +257,8 @@ export async function probeBinaryCommand(
     let settled = false;
     let stdoutBuffer = '';
     let stderrBuffer = '';
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
     // Declared before settle() captures them so a synchronous spawn throw
     // cannot hit a TDZ (same hazard as probeFallbackBinary above).
     let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -186,7 +266,30 @@ export async function probeBinaryCommand(
     let processClosedNotified = false;
     let terminationStarted = false;
     let abortRequested = false;
+    let killTimerFired = false;
+    let exitNotified = false;
     let abortListener: (() => void) | undefined;
+    let childPid: number | undefined;
+    let childClosed = false;
+    // Whether a signal was actually sent: a child that exits on its own during
+    // a termination grace was not killed, even though a timer or abort fired.
+    let signalSent = false;
+
+    const notifyExited = (exitCode: number | null, signal: NodeJS.Signals | null, spawnFailed: boolean): void => {
+      if (exitNotified) return;
+      exitNotified = true;
+      try {
+        options.onExited?.({
+          pid: childPid,
+          exitCode,
+          signal,
+          killedByTimeout: killTimerFired && signalSent,
+          killedByAbort: abortRequested && signalSent,
+          spawnFailed,
+          ...(outputLimitExceeded ? { outputLimitExceeded: true } : {}),
+        });
+      } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
+    };
 
     const notifyProcessClosed = (): void => {
       if (processClosedNotified) return;
@@ -199,6 +302,8 @@ export async function probeBinaryCommand(
     const settle = (result: BinaryAuthStatusResult): void => {
       if (settled) return;
       settled = true;
+      stdoutBuffer = '';
+      stderrBuffer = '';
       resolve(result);
     };
 
@@ -225,22 +330,48 @@ export async function probeBinaryCommand(
       });
     } catch {
       notifyProcessClosed();
+      // Lifecycle observers always see a spawn before an exit, even when no
+      // process was created (pid undefined, spawnFailed on the exit).
+      try {
+        options.onSpawned?.(undefined);
+      } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
+      notifyExited(null, null, true);
       settle({ status: 'failed', output: '' });
       return;
     }
+    childPid = child.pid;
+    try {
+      options.onSpawned?.(childPid);
+    } catch { /* deliberately: a lifecycle observer (a log line) must never change the probe's outcome */ }
 
-    const terminate = (): void => {
-      if (terminationStarted) return;
-      terminationStarted = true;
-      try { child.kill(); } catch { /* ignore kill errors */ }
+    const signalChild = (): void => {
+      if (childClosed) return;
+      try { if (child.kill() === true) signalSent = true; } catch { /* deliberately: a kill that throws sent no signal (the child already exited or cannot be signalled), so signalSent stays false and the SIGKILL escalation below still runs */ }
       killEscalationTimer = setTimeout(() => {
-        try { child.kill(SIGNAL.KILL); } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
+        try { if (child.kill(SIGNAL.KILL) === true) signalSent = true; } catch { /* already exited: the probe process may have already exited before this escalation fires, so kill throwing here is expected and safe to ignore. */ }
       }, KILL_ESCALATION_GRACE_MS);
       killEscalationTimer.unref?.();
     };
 
+    const terminate = (): void => {
+      if (terminationStarted) return;
+      terminationStarted = true;
+      let grace: Promise<unknown> | null = null;
+      try {
+        grace = options.terminationGrace?.() ?? null;
+      } catch {
+        grace = null;
+      }
+      if (grace === null) {
+        signalChild();
+        return;
+      }
+      void grace.catch(() => undefined).then(signalChild);
+    };
+
     const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
     killTimer = setTimeout(() => {
+      killTimerFired = true;
       terminate();
       settle({ status: 'failed', output: combinedOutput() });
     }, timeoutMs);
@@ -256,12 +387,25 @@ export async function probeBinaryCommand(
       if (options.signal.aborted) abortListener();
     }
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderrBuffer += chunk.toString('utf8');
-    });
+    const collectOutput = (chunk: Buffer, stream: 'stdout' | 'stderr'): void => {
+      if (settled || outputLimitExceeded) return;
+      outputBytes += chunk.byteLength;
+      if (outputBytes > COMMAND_OUTPUT_LIMIT_BYTES) {
+        outputLimitExceeded = true;
+        stdoutBuffer = '';
+        stderrBuffer = '';
+        clearTimeout(killTimer);
+        terminate();
+        // Cancellation owns result settlement until close; overflow still
+        // discards bytes immediately without releasing process ownership.
+        if (!abortRequested) settle({ status: 'failed', output: '' });
+        return;
+      }
+      if (stream === 'stdout') stdoutBuffer += chunk.toString('utf8');
+      else stderrBuffer += chunk.toString('utf8');
+    };
+    child.stdout?.on('data', (chunk: Buffer) => collectOutput(chunk, 'stdout'));
+    child.stderr?.on('data', (chunk: Buffer) => collectOutput(chunk, 'stderr'));
 
     child.on('error', () => {
       clearTimeout(killTimer);
@@ -272,6 +416,7 @@ export async function probeBinaryCommand(
       if (child.pid === undefined) {
         removeAbortListener();
         notifyProcessClosed();
+        notifyExited(null, null, true);
       }
       // Once caller cancellation owns a spawned child, `close` is the shared
       // terminal event for both result settlement and lease release. An
@@ -282,12 +427,14 @@ export async function probeBinaryCommand(
       }
     });
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
+      childClosed = true;
       clearTimeout(killTimer);
       clearTimeout(killEscalationTimer);
       removeAbortListener();
       notifyProcessClosed();
-      settle({ status: !abortRequested && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
+      notifyExited(code, signal, false);
+      settle({ status: !abortRequested && !outputLimitExceeded && code === 0 ? 'ok' : 'failed', output: combinedOutput() });
     });
   });
 }
