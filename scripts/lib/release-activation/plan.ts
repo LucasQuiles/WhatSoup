@@ -10,6 +10,7 @@
  * symlink selects the bot's release, an absolute ProgramArguments path
  * selects each auxiliary job's release, and WorkingDirectory selects nothing.
  */
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,6 +23,7 @@ import { parsePlist } from '../../check-service-units.ts';
 import {
   parseReleaseSnapshotManifest,
   RELEASE_MANIFEST_FILE,
+  type ReleaseSnapshotManifest,
   validateReleaseManifestFile,
 } from '../../release-snapshot-plan.ts';
 import { type ActivationHost, resolveInstanceHealthToken } from './host.ts';
@@ -83,6 +85,8 @@ export interface ActivationContext {
   healthToken: string | null;
   newCommit: string | null;
   oldCommit: string | null;
+  /** Loaded BOT ERRORS health consumer bound from launchd, when the next release requires it. */
+  botErrorsHealthConsumer: { root: string; capability: number; required: number } | null;
   instanceLabel: string;
   preconditions: Precondition[];
   staged: StagedPlist[];
@@ -90,6 +94,30 @@ export interface ActivationContext {
 
 export const LABEL_PATTERN = /^com\.whatsoup\.[A-Za-z0-9._-]+$/;
 const FULL_COMMIT = /^[0-9a-f]{40}$/;
+const BOT_ERRORS_HEALTH_LABEL = 'com.bot-errors.health';
+const BOT_ERRORS_RUNTIME_MANIFEST = 'deploy/bot-errors-runtime-manifest.json';
+const BOT_ERRORS_HEALTH_RUNNER = 'deploy/scripts/bot-errors-runner.py';
+const BOT_ERRORS_HEALTH_CHECKER = 'deploy/scripts/bot-errors-health-check.py';
+
+/** Exact fixed hydration wrapper observed in the loaded health service; its two paths bind it to the same home/release as the runner. */
+function botErrorsHealthWrapper(home: string, root: string, profileName: string): string {
+  const envFile = path.join(home, '.config', 'whatsoup', 'bot-errors.env');
+  return [
+    `BOT_ERRORS_ENV_FILE=${envFile}`,
+    'export BOT_ERRORS_ENV_FILE',
+    'if [[ ! -r "$BOT_ERRORS_ENV_FILE" ]]; then printf "%s\\n" "missing BOT_ERRORS_ENV_FILE=$BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 64; fi',
+    'set -a',
+    'source "$BOT_ERRORS_ENV_FILE"',
+    'set +a',
+    'if [[ -z "${BOT_ERRORS_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi',
+    'if [[ -z "${BOT_ERRORS_EXPECTED_JID:-}" ]]; then printf "%s\\n" "missing BOT_ERRORS_EXPECTED_JID in $BOT_ERRORS_ENV_FILE" >/dev/stderr; exit 65; fi',
+    'if [[ "$BOT_ERRORS_JID" != *@g.us ]]; then printf "%s\\n" "BOT_ERRORS_JID must be a WhatsApp group JID" >/dev/stderr; exit 65; fi',
+    'if [[ "$BOT_ERRORS_JID" != "$BOT_ERRORS_EXPECTED_JID" ]]; then printf "%s\\n" "BOT_ERRORS_JID does not match BOT_ERRORS_EXPECTED_JID" >/dev/stderr; exit 65; fi',
+    `if [[ -z "\${BOT_ERRORS_STATE_DIR:-}" ]]; then export BOT_ERRORS_STATE_DIR=${path.join(home, '.local', 'state', 'bot-errors')}; fi`,
+    `if [[ -z "\${BOT_ERRORS_HEALTH_PROFILE:-}" ]]; then export BOT_ERRORS_HEALTH_PROFILE=${path.join(root, 'deploy', 'health-profiles', profileName)}; fi`,
+    ' exec "$@"',
+  ].join('; ');
+}
 
 export function instanceLabelFor(instance: string): string {
   return `com.whatsoup.${instance}`;
@@ -111,12 +139,157 @@ export function mentionsReleaseRoot(text: string, root: string): boolean {
   ));
 }
 
-function readManifestCommit(releaseRoot: string): { commit: string | null; releasePath: string | null; error: string | null } {
+function readManifestCommit(releaseRoot: string): {
+  commit: string | null;
+  releasePath: string | null;
+  manifest: ReleaseSnapshotManifest | null;
+  error: string | null;
+} {
   const manifestPath = path.join(releaseRoot, RELEASE_MANIFEST_FILE);
   const report = validateReleaseManifestFile(manifestPath);
-  if (!report.ok) return { commit: null, releasePath: null, error: report.error?.kind ?? 'invalid' };
-  const manifest = parseReleaseSnapshotManifest(JSON.parse(readFileSync(manifestPath, 'utf8')));
-  return { commit: manifest.source.commit, releasePath: manifest.release.path, error: null };
+  if (!report.ok) return { commit: null, releasePath: null, manifest: null, error: report.error?.kind ?? 'invalid' };
+  try {
+    const manifest = parseReleaseSnapshotManifest(JSON.parse(readFileSync(manifestPath, 'utf8')));
+    return { commit: manifest.source.commit, releasePath: manifest.release.path, manifest, error: null };
+  } catch {
+    return { commit: null, releasePath: null, manifest: null, error: 'invalid' };
+  }
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function positiveInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function object(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** The candidate release must seal any positive producer requirement through its release manifest files[] entry. */
+function releaseBotErrorsRequirement(releaseRoot: string, manifest: ReleaseSnapshotManifest): { required: number | null; detail: string } {
+  const entry = manifest.files.find((file) => file.path === BOT_ERRORS_RUNTIME_MANIFEST);
+  if (entry === undefined) return { required: 0, detail: 'no sealed BOT ERRORS activation requirement' };
+  const manifestPath = path.join(releaseRoot, entry.path);
+  try {
+    const stat = lstatSync(manifestPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      return { required: null, detail: 'candidate BOT ERRORS manifest is not a regular file' };
+    }
+    const bytes = readFileSync(manifestPath);
+    if (sha256(bytes) !== entry.sha256) return { required: null, detail: 'candidate BOT ERRORS manifest differs from sealed release file' };
+    const parsed = object(JSON.parse(bytes.toString('utf8')));
+    if (parsed === null || parsed['activationRequirements'] === undefined) {
+      return { required: 0, detail: 'no BOT ERRORS activation requirement' };
+    }
+    const requirements = object(parsed['activationRequirements']);
+    const health = requirements === null ? null : object(requirements['botErrorsHealth']);
+    const required = health === null ? null : positiveInteger(health['secureStorageSelector']);
+    return required === null
+      ? { required: null, detail: 'candidate BOT ERRORS activation requirement is invalid' }
+      : { required, detail: `BOT ERRORS selector capability ${required} required` };
+  } catch {
+    return { required: null, detail: 'candidate BOT ERRORS manifest is unreadable' };
+  }
+}
+
+function readRegularBelow(root: string, relative: string): Buffer | null {
+  if (!path.isAbsolute(root) || path.resolve(root) !== root || relative.split('/').some((part) => part === '' || part === '.' || part === '..')) return null;
+  let current = root;
+  try {
+    const rootStat = lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return null;
+    for (const part of relative.split('/')) {
+      current = path.join(current, part);
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) return null;
+    }
+    return lstatSync(current).isFile() ? readFileSync(current) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseHealthDefinition(stdout: string, home: string): { root: string } | null {
+  const lines = stdout.split('\n');
+  if (!lines.includes('\tprogram = /bin/bash')) return null;
+  const begin = lines.indexOf('\targuments = {');
+  const end = begin < 0 ? -1 : lines.indexOf('\t}', begin + 1);
+  if (begin < 0 || end < 0) return null;
+  const args = lines.slice(begin + 1, end).map((line) => line.startsWith('\t\t') ? line.slice(2) : null);
+  if (args.some((arg) => arg === null) || args.length !== 20) return null;
+  const values = args as string[];
+  const runner = values[5];
+  if (runner === undefined) return null;
+  const root = path.dirname(path.dirname(path.dirname(runner)));
+  if (!lines.includes(`\tworking directory = ${root}`)) return null;
+  const wrapper = values[2];
+  if (wrapper === undefined) return null;
+  const profilePrefix = `if [[ -z "\${BOT_ERRORS_HEALTH_PROFILE:-}" ]]; then export BOT_ERRORS_HEALTH_PROFILE=${path.join(root, 'deploy', 'health-profiles')}/`;
+  const profileStart = wrapper.indexOf(profilePrefix);
+  if (profileStart < 0) return null;
+  const profileEnd = wrapper.indexOf('; fi', profileStart + profilePrefix.length);
+  if (profileEnd < 0) return null;
+  const profileName = wrapper.slice(profileStart + profilePrefix.length, profileEnd);
+  if (!/^[A-Za-z0-9_-]+\.json$/.test(profileName)) return null;
+  const expected = [
+    '/bin/bash', '-c', botErrorsHealthWrapper(home, root, profileName), 'bot-errors-health',
+    '/usr/bin/python3', path.join(root, BOT_ERRORS_HEALTH_RUNNER),
+    '--instance', 'bot-errors-health',
+    '--source', 'service-exit',
+    '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', path.join(home, '.local', 'state', 'bot-errors', 'logs', 'health.err.log'),
+    '--diagnostic', `launchd_label=${BOT_ERRORS_HEALTH_LABEL}`,
+    '--', '/usr/bin/python3', path.join(root, BOT_ERRORS_HEALTH_CHECKER), '--daily',
+  ];
+  if (values.some((value, index) => value !== expected[index])) return null;
+  return { root };
+}
+
+/** Bind a loaded consumer to the runner/checker path launchd actually has, then verify its sealed runtime manifest. */
+export async function readBotErrorsHealthConsumer(
+  host: ActivationHost,
+  domain: string,
+  home: string,
+): Promise<{ consumer: { root: string; capability: number } | null; detail: string }> {
+  const result = await host.exec('launchctl', ['print', `${domain}/${BOT_ERRORS_HEALTH_LABEL}`]);
+  if (result.code !== 0) return { consumer: null, detail: 'BOT ERRORS health service is not loaded' };
+  const definition = parseHealthDefinition(result.stdout, home);
+  if (definition === null) return { consumer: null, detail: 'BOT ERRORS health service grammar is unrecognized' };
+  const manifestBytes = readRegularBelow(definition.root, BOT_ERRORS_RUNTIME_MANIFEST);
+  const runnerBytes = readRegularBelow(definition.root, BOT_ERRORS_HEALTH_RUNNER);
+  const checkerBytes = readRegularBelow(definition.root, BOT_ERRORS_HEALTH_CHECKER);
+  if (manifestBytes === null || runnerBytes === null || checkerBytes === null) {
+    return { consumer: null, detail: 'BOT ERRORS consumer files are not regular root-bound files' };
+  }
+  try {
+    const parsed = object(JSON.parse(manifestBytes.toString('utf8')));
+    if (parsed === null || parsed['schemaVersion'] !== 1) throw new Error();
+    const capabilities = object(parsed['consumerCapabilities']);
+    const health = capabilities === null ? null : object(capabilities['botErrorsHealth']);
+    const capability = health === null ? null : positiveInteger(health['secureStorageSelector']);
+    const files = Array.isArray(parsed['files']) ? parsed['files'] : null;
+    const checker = files === null ? [] : files
+      .map((item) => object(item))
+      .filter((item): item is Record<string, unknown> => item !== null)
+      .filter((item) => item['path'] === BOT_ERRORS_HEALTH_CHECKER);
+    const runner = files === null ? [] : files
+      .map((item) => object(item))
+      .filter((item): item is Record<string, unknown> => item !== null)
+      .filter((item) => item['path'] === BOT_ERRORS_HEALTH_RUNNER);
+    if (
+      capability === null
+      || checker.length !== 1
+      || runner.length !== 1
+      || checker[0]!['sha256'] !== sha256(checkerBytes)
+      || runner[0]!['sha256'] !== sha256(runnerBytes)
+    ) throw new Error();
+    return { consumer: { root: definition.root, capability }, detail: `BOT ERRORS consumer capability ${capability}` };
+  } catch {
+    return { consumer: null, detail: 'BOT ERRORS consumer runtime manifest is invalid or does not seal its checker' };
+  }
 }
 
 function isDirectory(target: string): boolean {
@@ -324,6 +497,7 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     healthToken: null,
     newCommit: null,
     oldCommit: null,
+    botErrorsHealthConsumer: null,
     instanceLabel,
     preconditions,
     staged: [],
@@ -343,6 +517,28 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     const full = next.commit !== null && FULL_COMMIT.test(next.commit);
     check('release-manifest-commit', full, full ? `commit ${next.commit}` : 'manifest source.commit is not a full 40-hex commit');
     if (full) context.newCommit = next.commit;
+    const requirement = next.manifest === null
+      ? { required: null, detail: 'candidate release manifest is unavailable after validation' }
+      : releaseBotErrorsRequirement(args.release, next.manifest);
+    const required = requirement.required;
+    const consumer = host.platform === 'darwin' && required !== null && required > 0
+      ? await readBotErrorsHealthConsumer(host, context.domain, home)
+      : null;
+    const compatible = required === null
+      ? false
+      : required === 0 || (consumer !== null && consumer.consumer !== null && consumer.consumer.capability >= required);
+    if (required !== 0) {
+      check('bot-errors-health-consumer-compatible', compatible,
+        required === null ? requirement.detail
+          : compatible ? consumer!.detail : `${requirement.detail}; ${consumer!.detail}`);
+    }
+    if (required !== null && required > 0 && consumer !== null && consumer.consumer !== null && consumer.consumer.capability >= required) {
+      context.botErrorsHealthConsumer = {
+        root: consumer.consumer.root,
+        capability: consumer.consumer.capability,
+        required,
+      };
+    }
   }
   check('release-wrapper-present', isRegularFile(wrapperTargetFor(args.release)), 'deploy/whatsoup in the new release');
   check('release-entrypoint-present', isRegularFile(bootstrapEntrypointFor(args.release)), 'src/bootstrap.ts in the new release');
@@ -457,6 +653,12 @@ export function describeActions(context: ActivationContext): Array<Record<string
     { step: 'record-symlink', link: context.wrapperLink, to: '<backup>/symlink.before' },
     { step: 'backup-plists', labels, to: '<backup>/<label>.plist', mode: '0600' },
     { step: 'write-staged-plists', labels, to: '<backup>/<label>.staged.plist', lint: 'plutil -lint' },
+    ...(context.botErrorsHealthConsumer === null ? [] : [{
+      step: 'recheck-bot-errors-health-consumer-before-switch',
+      label: BOT_ERRORS_HEALTH_LABEL,
+      boundRoot: context.botErrorsHealthConsumer.root,
+      minimumSelectorCapability: context.botErrorsHealthConsumer.required,
+    }]),
     { step: 'switch-symlink', link: context.wrapperLink, target: wrapperTargetFor(args.release), atomic: true },
     { step: 'install-plists', labels, dir: context.launchAgentsDir, atomic: true },
     ...labels.map((label) => ({

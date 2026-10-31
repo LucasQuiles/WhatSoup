@@ -210,6 +210,45 @@ Preconditions include: the wrapper symlink points at
 currently runs from `--expect-current`; a health token and port resolve; the
 database exists; and no staged plist still references `--expect-current`.
 
+#### BOT ERRORS health-consumer prerequisite
+
+A candidate release can declare the minimum BOT ERRORS health-consumer
+capability it needs in its sealed runtime manifest:
+
+```json
+{
+  "activationRequirements": {
+    "botErrorsHealth": { "secureStorageSelector": 1 }
+  }
+}
+```
+
+When this positive requirement is present, `release:activate` reads the loaded
+`com.bot-errors.health` definition and accepts only the supported bash wrapper
+shape. It binds the runner and checker as regular, non-symlinked files below
+one consumer root, then verifies that the consumer runtime manifest records
+matching hashes for both files. The consumer must advertise
+`consumerCapabilities.botErrorsHealth.secureStorageSelector` at or above the
+required value. A newer compatible value is accepted.
+
+A missing consumer, an unrecognised or malformed loaded definition, a lower
+capability, or a runner or checker hash mismatch makes the plan not ready and
+refuses activation before a switch. When the sealed runtime-manifest entry is
+absent, or its document has no `activationRequirements` declaration, the
+existing activation behaviour remains. A present but malformed or non-positive
+declaration is invalid and refuses activation.
+
+During `--apply`, after backup staging and immediately before the wrapper
+symlink changes, the command reads the consumer again. It requires the same
+root and a capability at or above the declared minimum; a compatible capability
+change remains allowed. If either condition is not met, the command refuses
+before the symlink or plist switch. This check is an activation precondition;
+it does not establish a generic rollback-to-consumer association.
+
+`release:activate` remains macOS launchd only. On every other platform, its
+existing platform precondition refuses before activation work; this consumer
+check supplies no portable replacement.
+
 Renderers (`--aux-label <label>=<renderer>`):
 
 - `setup-timer` re-renders `deploy/<label>.plist` exactly as `deploy/setup.sh`
