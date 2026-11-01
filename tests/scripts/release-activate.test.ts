@@ -35,6 +35,7 @@ const fsFaults = vi.hoisted(() => ({
   /** Runs before fsyncSync with the path its fd was opened on (a directory fsync opens the directory). */
   fsync: null as null | ((openedPath: string) => void),
   opened: new Map<number, string>(),
+  beforeReadOpen: null as null | ((target: string) => void),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -49,7 +50,12 @@ vi.mock('node:fs', async (importOriginal) => {
       fsFaults.write?.(args[0], args[1]);
       return actual.writeFileSync(...args);
     },
+    readFileSync: (...args: Parameters<typeof actual.readFileSync>) => {
+      fsFaults.beforeReadOpen?.(String(args[0]));
+      return actual.readFileSync(...args);
+    },
     openSync: (...args: Parameters<typeof actual.openSync>) => {
+      fsFaults.beforeReadOpen?.(String(args[0]));
       const fd = actual.openSync(...args);
       fsFaults.opened.set(fd, String(args[0]));
       return fd;
@@ -134,6 +140,7 @@ afterEach(() => {
   fsFaults.rename = null;
   fsFaults.write = null;
   fsFaults.fsync = null;
+  fsFaults.beforeReadOpen = null;
 });
 
 function directHealthDefinition(programArguments: string[], workingDirectory: string, plistPath: string, program = programArguments[0] ?? ''): string {
@@ -638,12 +645,15 @@ describe('release:activate BOT ERRORS consumer compatibility', () => {
     expect(world.mutatingCalls()).toEqual([]);
   });
 
-  it('rechecks the checker contract immediately before switching the same consumer root', async () => {
+  it.each([
+    ['invalid marker', '# old checker without the required selector\n'],
+    ['valid replacement', '# replacement forwards CLAUDE_SECURESTORAGE_CONFIG_DIR\n'],
+  ])('refuses a same-root consumer changed to an %s after planning', async (_kind, checkerBody) => {
     writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
     writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
     const world = new SimulatedLaunchd(fixture, {
       botErrorsHealthPrint: (read) => {
-        if (read === 2) writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerBody: '# old checker without the required selector\n' });
+        if (read === 2) writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerBody });
         return { code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' };
       },
     });
@@ -654,6 +664,30 @@ describe('release:activate BOT ERRORS consumer compatibility', () => {
     expect(result.json.outcome).toBe('refused');
     expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
     expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('refuses a consumer checker replaced by a symlink at its read-open boundary', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const checker = path.join(fixture.oldRelease, 'deploy/scripts/bot-errors-health-check.py');
+    const substitute = path.join(fixture.base, 'substitute-checker.py');
+    writeFileSync(substitute, readFileSync(checker));
+    let substituted = false;
+    fsFaults.beforeReadOpen = (target) => {
+      if (target !== checker) return;
+      fsFaults.beforeReadOpen = null;
+      unlinkSync(checker);
+      symlinkSync(substitute, checker);
+      substituted = true;
+    };
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+    const result = await run(world, activationArgs(fixture));
+    expect(substituted).toBe(true);
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
     expect(world.mutatingCalls()).toEqual([]);
   });
 
@@ -1119,6 +1153,7 @@ describe('release:activate: health invariants are report-only (#2481)', () => {
 
     const result = await run(world, activationArgs(fixture, ['--apply']));
     fsFaults.fsync = null;
+  fsFaults.beforeReadOpen = null;
 
     // The final receipt was published: its bytes carry the helper status.
     expect(receiptOf().invariants).toMatchObject({ alert: { attempted: true, kind: 'warning', status: 1 } });

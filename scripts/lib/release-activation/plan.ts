@@ -85,8 +85,8 @@ export interface ActivationContext {
   healthToken: string | null;
   newCommit: string | null;
   oldCommit: string | null;
-  /** Loaded BOT ERRORS health consumer bound from launchd, when the next release requires it. */
-  botErrorsHealthConsumer: { root: string; capability: number; required: number } | null;
+  /** Loaded BOT ERRORS health consumer bound from launchd and sealed at plan time, when the next release requires it. */
+  botErrorsHealthConsumer: PlannedBotErrorsHealthConsumer | null;
   /** Candidate requirement and observed rollback-target capability; compatibility is advisory until rollback. */
   refreshRollbackFence: {
     required: number | null;
@@ -108,6 +108,12 @@ const BOT_ERRORS_HEALTH_LABEL = 'com.bot-errors.health';
 const BOT_ERRORS_RUNTIME_MANIFEST = 'deploy/bot-errors-runtime-manifest.json';
 const BOT_ERRORS_HEALTH_RUNNER = 'deploy/scripts/bot-errors-runner.py';
 const BOT_ERRORS_HEALTH_CHECKER = 'deploy/scripts/bot-errors-health-check.py';
+const BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES = 256 * 1024;
+const BOT_ERRORS_HEALTH_CONSUMER_OPEN_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
+interface BotErrorsHealthConsumer {
+  root: string; capability: number; manifestSha256: string; runnerSha256: string; checkerSha256: string;
+}
+type PlannedBotErrorsHealthConsumer = BotErrorsHealthConsumer & { required: number };
 const REFRESH_ROLLBACK_FENCE = 'deploy/claude-refresh-rollback-fence.json';
 const REFRESH_ROLLBACK_FENCE_KEY = 'claudeRefreshOwnerV3';
 const REFRESH_ROLLBACK_FENCE_MAX_BYTES = 16 * 1024;
@@ -214,21 +220,49 @@ function releaseBotErrorsRequirement(releaseRoot: string, manifest: ReleaseSnaps
   }
 }
 
-function readRegularBelow(root: string, relative: string): Buffer | null {
+type StableConsumerNode = { dev: number; ino: number; mode: number };
+type StableConsumerFile = StableConsumerNode & { size: number; mtimeMs: number; ctimeMs: number };
+function stableConsumerNode(stat: { dev: number; ino: number; mode: number }): StableConsumerNode {
+  return { dev: stat.dev, ino: stat.ino, mode: stat.mode };
+}
+function sameStableConsumerNode(left: StableConsumerNode, right: StableConsumerNode): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode;
+}
+function stableConsumerFile(stat: { dev: number; ino: number; mode: number; size: number; mtimeMs: number; ctimeMs: number }): StableConsumerFile {
+  return { ...stableConsumerNode(stat), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
+}
+function sameStableConsumerFile(left: StableConsumerFile, right: StableConsumerFile): boolean {
+  return sameStableConsumerNode(left, right) && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+function stableConsumerDirectory(target: string): StableConsumerNode | null {
+  try { const stat = lstatSync(target); return stat.isDirectory() && !stat.isSymbolicLink() ? stableConsumerNode(stat) : null; } catch { return null; }
+}
+function stableConsumerRegularFile(target: string): StableConsumerFile | null {
+  try { const stat = lstatSync(target); return stat.isFile() && !stat.isSymbolicLink() ? stableConsumerFile(stat) : null; } catch { return null; }
+}
+/** Read one consumer file from a no-follow descriptor while binding its file and ancestor identities before and after. */
+function readBoundedConsumerFile(root: string, relative: string): Buffer | null {
   if (!path.isAbsolute(root) || path.resolve(root) !== root || relative.split('/').some((part) => part === '' || part === '.' || part === '..')) return null;
-  let current = root;
+  const parts = relative.split('/'), directories = [root];
+  let parent = root;
+  for (const part of parts.slice(0, -1)) { parent = path.join(parent, part); directories.push(parent); }
+  const beforeDirectories = directories.map(stableConsumerDirectory);
+  if (beforeDirectories.some((stat) => stat === null)) return null;
+  const filePath = path.join(root, relative), beforeFile = stableConsumerRegularFile(filePath);
+  if (beforeFile === null || !Number.isSafeInteger(beforeFile.size) || beforeFile.size < 0 || beforeFile.size > BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES) return null;
+  let fd: number | null = null;
   try {
-    const rootStat = lstatSync(root);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return null;
-    for (const part of relative.split('/')) {
-      current = path.join(current, part);
-      const stat = lstatSync(current);
-      if (stat.isSymbolicLink()) return null;
-    }
-    return lstatSync(current).isFile() ? readFileSync(current) : null;
-  } catch {
-    return null;
-  }
+    fd = openSync(filePath, BOT_ERRORS_HEALTH_CONSUMER_OPEN_FLAGS);
+    const descriptorBefore = fstatSync(fd);
+    if (!descriptorBefore.isFile() || !sameStableConsumerFile(beforeFile, stableConsumerFile(descriptorBefore))) return null;
+    const bytes = Buffer.alloc(beforeFile.size);
+    for (let offset = 0; offset < bytes.length;) { const count = readSync(fd, bytes, offset, bytes.length - offset, offset); if (count <= 0) return null; offset += count; }
+    const descriptorAfter = fstatSync(fd), afterFile = stableConsumerRegularFile(filePath), afterDirectories = directories.map(stableConsumerDirectory);
+    if (!descriptorAfter.isFile() || !sameStableConsumerFile(beforeFile, stableConsumerFile(descriptorAfter)) || afterFile === null || !sameStableConsumerFile(beforeFile, afterFile) || afterDirectories.some((stat, index) => stat === null || !sameStableConsumerNode(beforeDirectories[index]!, stat))) return null;
+    closeSync(fd);
+    fd = null;
+    return bytes;
+  } catch { return null; } finally { if (fd !== null) { try { closeSync(fd); } catch { /* best effort after refusal */ } } }
 }
 
 type RefreshRollbackFenceRead = { required: number | null; capability: number | null; digest: string | null; detail: string };
@@ -388,14 +422,14 @@ export async function readBotErrorsHealthConsumer(
   host: ActivationHost,
   domain: string,
   home: string,
-): Promise<{ consumer: { root: string; capability: number } | null; detail: string }> {
+): Promise<{ consumer: BotErrorsHealthConsumer | null; detail: string }> {
   const result = await host.exec('launchctl', ['print', `${domain}/${BOT_ERRORS_HEALTH_LABEL}`]);
   if (result.code !== 0) return { consumer: null, detail: 'BOT ERRORS health service is not loaded' };
   const definition = parseHealthDefinition(result.stdout, home);
   if (definition === null) return { consumer: null, detail: 'BOT ERRORS health service grammar is unrecognized' };
-  const manifestBytes = readRegularBelow(definition.root, BOT_ERRORS_RUNTIME_MANIFEST);
-  const runnerBytes = readRegularBelow(definition.root, BOT_ERRORS_HEALTH_RUNNER);
-  const checkerBytes = readRegularBelow(definition.root, BOT_ERRORS_HEALTH_CHECKER);
+  const manifestBytes = readBoundedConsumerFile(definition.root, BOT_ERRORS_RUNTIME_MANIFEST);
+  const runnerBytes = readBoundedConsumerFile(definition.root, BOT_ERRORS_HEALTH_RUNNER);
+  const checkerBytes = readBoundedConsumerFile(definition.root, BOT_ERRORS_HEALTH_CHECKER);
   if (manifestBytes === null || runnerBytes === null || checkerBytes === null) {
     return { consumer: null, detail: 'BOT ERRORS consumer files are not regular root-bound files' };
   }
@@ -428,7 +462,13 @@ export async function readBotErrorsHealthConsumer(
       || !markers.includes('CLAUDE_SECURESTORAGE_CONFIG_DIR')
       || !markers.every((marker) => typeof marker === 'string' && marker.trim().length > 0 && checkerText.includes(marker))
     ) throw new Error();
-    return { consumer: { root: definition.root, capability }, detail: `BOT ERRORS consumer capability ${capability}` };
+    return {
+      consumer: {
+        root: definition.root, capability,
+        manifestSha256: sha256(manifestBytes), runnerSha256: sha256(runnerBytes), checkerSha256: sha256(checkerBytes),
+      },
+      detail: 'BOT ERRORS consumer capability ' + capability,
+    };
   } catch {
     return { consumer: null, detail: 'BOT ERRORS consumer runtime manifest is invalid or does not seal its checker' };
   }
@@ -685,9 +725,8 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
     }
     if (required !== null && required > 0 && consumer !== null && consumer.consumer !== null && consumer.consumer.capability >= required) {
       context.botErrorsHealthConsumer = {
-        root: consumer.consumer.root,
-        capability: consumer.consumer.capability,
-        required,
+        root: consumer.consumer.root, capability: consumer.consumer.capability, required,
+        manifestSha256: consumer.consumer.manifestSha256, runnerSha256: consumer.consumer.runnerSha256, checkerSha256: consumer.consumer.checkerSha256,
       };
     }
   }

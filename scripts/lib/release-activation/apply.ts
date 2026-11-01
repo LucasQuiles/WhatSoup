@@ -620,7 +620,11 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
       const consumer = await readBotErrorsHealthConsumer(host, context.domain, context.home);
       const sameConsumer = consumer.consumer !== null
         && consumer.consumer.root === context.botErrorsHealthConsumer.root
-        && consumer.consumer.capability >= context.botErrorsHealthConsumer.required;
+        && consumer.consumer.capability === context.botErrorsHealthConsumer.capability
+        && consumer.consumer.capability >= context.botErrorsHealthConsumer.required
+        && consumer.consumer.manifestSha256 === context.botErrorsHealthConsumer.manifestSha256
+        && consumer.consumer.runnerSha256 === context.botErrorsHealthConsumer.runnerSha256
+        && consumer.consumer.checkerSha256 === context.botErrorsHealthConsumer.checkerSha256;
       steps.push({
         step: 'recheck-bot-errors-health-consumer-before-switch',
         ok: sameConsumer,

@@ -226,15 +226,15 @@ capability it needs in its sealed runtime manifest:
 
 When this positive requirement is present, `release:activate` reads the loaded
 `com.bot-errors.health` definition and accepts only the supported bash wrapper
-shape. It binds the runner and checker as regular, non-symlinked files below
-one consumer root, then verifies that the consumer runtime manifest records
-matching hashes for both files. The consumer must advertise
-`consumerCapabilities.botErrorsHealth.secureStorageSelector` at or above the
-required value. A newer compatible value is accepted. The checker's
-`mustContain` contract must include `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and
-every declared marker must be a nonblank string present in the checker.
-This checks the packaged contract; marker presence does not prove deployed
-probe behavior.
+shape. It reads the consumer manifest, runner and checker through bounded,
+no-follow file descriptors below one consumer root. Each read requires stable
+file identity and metadata, plus stable root and ancestor directory identities.
+The manifest must record matching runner and checker hashes. The consumer must
+advertise `consumerCapabilities.botErrorsHealth.secureStorageSelector` at or
+above the required value. The checker's `mustContain` contract must include
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, and every declared marker must be a nonblank
+string present in the checker. This checks the packaged contract; marker
+presence does not prove deployed probe behavior.
 
 A missing consumer, an unrecognised or malformed loaded definition, a lower
 capability, a runner or checker hash mismatch, or a missing or invalid checker
@@ -245,11 +245,14 @@ existing activation behaviour remains. A present but malformed or non-positive
 declaration is invalid and refuses activation.
 
 During `--apply`, after backup staging and immediately before the wrapper
-symlink changes, the command reads the consumer again. It requires the same
-root and a capability at or above the declared minimum; a compatible capability
-change remains allowed. If either condition is not met, the command refuses
-before the symlink or plist switch. This check is an activation precondition;
-it does not establish a generic rollback-to-consumer association.
+symlink changes, the command reads the consumer again. Its root, capability and
+manifest, runner and checker SHA-256 values must exactly match the plan. A
+compatible capability or byte change requires a new plan. Any mismatch refuses
+activation before the symlink or plist switch. These bounded reads establish
+samples; they do not make later launchd execution bytes immutable. Consumer
+roots must remain deployment-owned and writers must be serialized through
+activation; later execution needs its own controls. This check does not
+establish a generic rollback-to-consumer association.
 
 `release:activate` remains macOS launchd only. On every other platform, its
 existing platform precondition refuses before activation work; this consumer
