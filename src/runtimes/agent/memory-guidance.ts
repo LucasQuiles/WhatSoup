@@ -7,19 +7,23 @@
 // use it; this block says what to save, what never to save, and how far a saved
 // memory reaches.
 //
-// A session gets the block when memory is configured for this instance and
+// A session gets the block when memory is usable for this instance and
 // memory_write is listed for the session and allowed by any explicit sandbox
-// MCP allowlist. "Configured" means startup readiness got past its local
-// checks; the provider's answer does not matter, so a startup timeout or outage
-// cannot hide the guidance for the whole process lifetime (memory_write reports
-// its own errors).
+// MCP allowlist. "Usable" means startup readiness was ready, or its provider
+// call failed only transiently, so a startup timeout or outage cannot hide the
+// guidance for the whole process lifetime (memory_write reports its own
+// errors). A local refusal or a definitive provider answer hides it.
 //
 // The reach sentence must stay true to src/core/memory-scope.ts. memory_write
 // files every record under the calling conversation. Verified admin senders, in
 // any chat including groups with other people, and contacts set to 'instance'
 // rank other chats in. The operator instance recalls every chat everywhere.
 
-import type { MemoryEvidenceCoverage, MemoryReadinessState } from '../../lib/memory-operation-telemetry.ts';
+import type {
+  MemoryEvidenceCoverage,
+  MemoryOperationFailureCode,
+  MemoryReadinessState,
+} from '../../lib/memory-operation-telemetry.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import { noExecutingSession, resolveSessionContext, type SessionContext } from '../../mcp/types.ts';
@@ -27,8 +31,23 @@ import { noExecutingSession, resolveSessionContext, type SessionContext } from '
 /** The fields of the startup readiness observation (pinecone.ts) the gate reads. */
 export interface MemoryReadinessSnapshot {
   state: MemoryReadinessState;
+  failureCode: MemoryOperationFailureCode;
   evidenceCoverage: MemoryEvidenceCoverage;
 }
+
+/**
+ * Startup provider failures that may clear while the process runs, as
+ * classifyMemoryOperationFailure names them: timeout (408, ETIMEDOUT, abort),
+ * network_error, provider_unavailable (5xx) and rate_limited (429). Every other
+ * code, auth_failed (401/403), invalid_request and unknown included, is treated
+ * as definitive.
+ */
+const TRANSIENT_STARTUP_FAILURES: ReadonlySet<MemoryOperationFailureCode> = new Set([
+  'timeout',
+  'network_error',
+  'provider_unavailable',
+  'rate_limited',
+]);
 
 const MEMORY_REACH =
   "- Memories are saved to this chat. The bot's admins, and contacts they allow, can recall them from other chats, and an admin can do so even in a group with other people.";
@@ -49,13 +68,14 @@ export function buildMemoryGuidance(opts: { operatorInstance: boolean; searchesM
 }
 
 /**
- * Memory is configured when startup readiness (getPineconeReadinessObservation)
- * passed its local checks (index named, key present, project guard set) and so
- * asked the provider. Whatever the provider answered, memory stays configured;
- * a local refusal is reported with evidence `local_guard` and never gets here.
+ * Memory is usable when startup readiness (getPineconeReadinessObservation) was
+ * `ready`, or its provider call failed transiently. A local refusal
+ * (`local_guard`: no index, no key, no project guard) and a definitive provider
+ * answer (`index_missing`, `project_mismatch`, an auth rejection) are not.
  */
-export function memoryConfigured(readiness: MemoryReadinessSnapshot | undefined): boolean {
-  return readiness?.evidenceCoverage === 'provider_response' || readiness?.evidenceCoverage === 'provider_error';
+export function memoryUsable(readiness: MemoryReadinessSnapshot | undefined): boolean {
+  if (readiness?.state === 'ready') return true;
+  return readiness?.evidenceCoverage === 'provider_error' && TRANSIENT_STARTUP_FAILURES.has(readiness.failureCode);
 }
 
 /** deploy/hooks/agent-sandbox.sh's MCP rule: an absent or empty allowlist allows every tool. */
@@ -74,7 +94,7 @@ function searchableIndexes(inputSchema: Record<string, unknown> | undefined): un
 
 /**
  * The `memoryGuidanceBlock` callback for a new SessionManager, or undefined
- * (prompt stays byte-identical) when memory is not configured, memory_write is
+ * (prompt stays byte-identical) when memory is not usable, memory_write is
  * not listed for `session`, or an explicit sandbox allowlist omits it. The
  * knowledge_search line needs that tool to accept `memoryIndex`, the index
  * memory_write writes to.
@@ -87,7 +107,7 @@ export function memoryGuidanceSystemBlock(input: {
   memoryIndex: string;
   allowedMcpTools: readonly string[] | undefined;
 }): (() => string) | undefined {
-  if (!memoryConfigured(input.readiness)) return undefined;
+  if (!memoryUsable(input.readiness)) return undefined;
   // This checks registration, not per-session tool filtering. Listing filters
   // only by tier, conversation binding and the scheduled-job forbidden set
   // (registry.ts sessionWouldList). Both memory tools are chat-scope tools

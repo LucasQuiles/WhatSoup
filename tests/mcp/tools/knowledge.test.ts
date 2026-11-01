@@ -545,7 +545,7 @@ describe('registerKnowledgeTools - registration gating', () => {
       schema: z.object({ chatJid: z.string() }), handler: async () => ({ ok: true }),
     });
     const guidanceFor = (memoryIndex: string): string => memoryGuidanceSystemBlock({
-      readiness: { state: 'ready', evidenceCoverage: 'provider_response' },
+      readiness: { state: 'ready', failureCode: 'none', evidenceCoverage: 'provider_response' },
       registry, session: { tier: 'chat-scoped', conversationKey: 'chat' }, instanceName: 'bot', memoryIndex, allowedMcpTools: undefined,
     })?.() ?? '';
 

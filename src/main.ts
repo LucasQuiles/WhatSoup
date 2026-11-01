@@ -527,8 +527,8 @@ if (instanceType === 'agent') {
     autoCompactInputTokens: agentOpts?.autoCompactInputTokens,
     turnRecoveryCatchupReconcile: agentOpts?.turnRecoveryCatchupReconcile,
     handoffDistill: config.handoffDistill,
-    // The memory guidance prompt block needs memory configured; this startup
-    // observation says whether readiness got past its local checks.
+    // The memory guidance prompt block needs memory usable; this startup
+    // observation says whether it was ready or failed only transiently.
     memoryReadiness: pineconeReadiness,
     // Composition root owns the fleet/systemd binding; inject it so the runtimes
     // layer (which cannot import fleet) can offer the restart_self tool.

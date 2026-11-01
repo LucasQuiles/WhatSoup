@@ -14,19 +14,20 @@ import {
   type InstanceIdentities,
   type MemoryScopeDeps,
 } from '../../../src/core/memory-scope.ts';
+import { classifyMemoryOperationFailure } from '../../../src/lib/memory-operation-telemetry.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import {
   buildMemoryGuidance,
-  memoryConfigured,
   memoryGuidanceSystemBlock,
+  memoryUsable,
   type MemoryReadinessSnapshot,
 } from '../../../src/runtimes/agent/memory-guidance.ts';
 
 const CHAT_SESSION: SessionContext = { tier: 'chat-scoped', conversationKey: '15550002', deliveryJid: '15550002@s.whatsapp.net' };
 const SHARED_SESSION: SessionContext = { tier: 'global' };
 const MEMORY_INDEX = 'memory';
-const READY: MemoryReadinessSnapshot = { state: 'ready', evidenceCoverage: 'provider_response' };
+const READY: MemoryReadinessSnapshot = { state: 'ready', failureCode: 'none', evidenceCoverage: 'provider_response' };
 const REACH = "Memories are saved to this chat. The bot's admins, and contacts they allow, can recall them from other chats, and an admin can do so even in a group with other people.";
 
 /** A registry holding stand-ins for the named memory tools; knowledge_search accepts `searchIndexes`. */
@@ -150,36 +151,58 @@ describe('reach sentence agrees with memory-scope.ts', () => {
   });
 });
 
-describe('memoryConfigured', () => {
-  it('is configured once readiness got past its local checks, whatever the provider answered', () => {
-    const cases: Array<[MemoryReadinessSnapshot, boolean]> = [
-      [{ state: 'ready', evidenceCoverage: 'provider_response' }, true],
-      [{ state: 'network_error', evidenceCoverage: 'provider_error' }, true],
-      [{ state: 'unknown', evidenceCoverage: 'provider_error' }, true],
-      [{ state: 'auth_failed', evidenceCoverage: 'provider_error' }, true],
-      [{ state: 'disabled', evidenceCoverage: 'local_guard' }, false],
-      [{ state: 'project_mismatch', evidenceCoverage: 'local_guard' }, false],
+/** A startup provider error as getPineconeReadinessObservation records it: the code comes from the real classifier. */
+function providerError(state: MemoryReadinessSnapshot['state'], err: unknown): MemoryReadinessSnapshot {
+  return { state, failureCode: classifyMemoryOperationFailure(err).code, evidenceCoverage: 'provider_error' };
+}
+
+const TIMEOUT = providerError('network_error', new DOMException('Pinecone readiness deadline exceeded', 'AbortError'));
+const AUTH_401 = providerError('auth_failed', { status: 401 });
+const INDEX_MISSING: MemoryReadinessSnapshot = { state: 'index_missing', failureCode: 'none', evidenceCoverage: 'provider_response' };
+const WRONG_PROJECT: MemoryReadinessSnapshot = { state: 'project_mismatch', failureCode: 'project_guard_failed', evidenceCoverage: 'provider_response' };
+
+describe('memoryUsable', () => {
+  it('is usable when ready or after a transient provider failure only', () => {
+    const cases: Array<[string, MemoryReadinessSnapshot | undefined, boolean]> = [
+      ['ready', READY, true],
+      ['timeout', TIMEOUT, true],
+      ['network error', providerError('network_error', { cause: { code: 'ECONNREFUSED' } }), true],
+      ['5xx', providerError('unknown', { status: 503 }), true],
+      ['429', providerError('unknown', { status: 429 }), true],
+      ['401', AUTH_401, false],
+      ['403', providerError('auth_failed', { status: 403 }), false],
+      ['unclassified error', providerError('unknown', new Error('boom')), false],
+      ['index_missing', INDEX_MISSING, false],
+      ['project_mismatch from the provider', WRONG_PROJECT, false],
+      ['disabled locally', { state: 'disabled', failureCode: 'none', evidenceCoverage: 'local_guard' }, false],
+      ['no project guard', { state: 'project_mismatch', failureCode: 'project_guard_failed', evidenceCoverage: 'local_guard' }, false],
+      ['no observation', undefined, false],
     ];
-    expect(cases.map(([readiness]) => memoryConfigured(readiness))).toEqual(cases.map(([, configured]) => configured));
-    expect(memoryConfigured(undefined)).toBe(false);
+    expect(cases.map(([label, readiness]) => [label, memoryUsable(readiness)]))
+      .toEqual(cases.map(([label, , usable]) => [label, usable]));
   });
 });
 
 describe('memoryGuidanceSystemBlock', () => {
-  it('returns the full block when memory is configured and memory_write is listed', () => {
+  it('returns the full block when memory is ready and memory_write is listed', () => {
     for (const session of [CHAT_SESSION, SHARED_SESSION]) {
       expect(gate({ session })).toBe(buildMemoryGuidance({ operatorInstance: false, searchesMemory: true }));
     }
   });
 
-  it('keeps the block after a startup provider failure or timeout', () => {
-    expect(gate({ readiness: { state: 'network_error', evidenceCoverage: 'provider_error' } }))
-      .toBe(buildMemoryGuidance({ operatorInstance: false, searchesMemory: true }));
+  it('keeps the block after a startup timeout', () => {
+    expect(gate({ readiness: TIMEOUT })).toBe(buildMemoryGuidance({ operatorInstance: false, searchesMemory: true }));
+  });
+
+  it('returns undefined after a definitive startup answer: index_missing, project_mismatch, 401', () => {
+    expect([INDEX_MISSING, WRONG_PROJECT, AUTH_401].map((readiness) => gate({ readiness }) ?? 'absent'))
+      .toEqual(['absent', 'absent', 'absent']);
   });
 
   it('returns undefined when memory is locally disabled (no key, or no project guard)', () => {
-    expect(gate({ readiness: { state: 'disabled', evidenceCoverage: 'local_guard' } })).toBeUndefined();
-    expect(gate({ readiness: { state: 'project_mismatch', evidenceCoverage: 'local_guard' } })).toBeUndefined();
+    expect(gate({ readiness: { state: 'disabled', failureCode: 'none', evidenceCoverage: 'local_guard' } })).toBeUndefined();
+    expect(gate({ readiness: { state: 'project_mismatch', failureCode: 'project_guard_failed', evidenceCoverage: 'local_guard' } }))
+      .toBeUndefined();
   });
 
   it('returns undefined when memory_write is not registered', () => {

@@ -58,8 +58,8 @@ export interface AgentRuntimeOptions {
   handoffDistill?: TypedHandoffDistillConfig;
   /**
    * The startup Pinecone readiness observation (main.ts). The memory guidance
-   * prompt block (memory-guidance.ts) needs it to show memory configured.
-   * Absent = not configured.
+   * prompt block (memory-guidance.ts) needs it to show memory usable: ready,
+   * or failed only transiently. Absent = not usable.
    */
   memoryReadiness?: MemoryReadinessSnapshot;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */

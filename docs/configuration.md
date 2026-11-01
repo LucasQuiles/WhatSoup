@@ -1269,18 +1269,21 @@ says:
   recall them from other chats, and an admin can do so even in a group with
   other people. On `q` it says every chat can recall them.
 
-The runtime adds the block, for every provider, when memory is configured for
-the instance and `memory_write` is listed for that session's tool context.
-Configured means the startup readiness check got past its local checks (index
-named, key present, project guard set for a non-`q` instance). The provider's
-answer does not matter: a timeout or outage at startup still gives the block,
-and `memory_write` reports its own errors. Readiness `disabled`, or
-`project_mismatch` because no guard is configured, gives no block. An explicit
-`sandbox.allowedMcpTools` list that omits `memory_write` also gives no block,
-and one that omits `knowledge_search` drops the check-first wording. Otherwise
-the prompt is unchanged. The block does not prove writes work: an index whose
-field map does not name `text` still gets it, and its writes fail as
-`invalid_request`.
+The runtime adds the block, for every provider, when memory is usable for the
+instance and `memory_write` is listed for that session's tool context. Usable
+means the startup readiness check was `ready`, or its provider call failed only
+transiently: failure code `timeout`, `network_error`, `provider_unavailable`
+(5xx) or `rate_limited` (429). That way a startup outage does not hide the
+block for the process lifetime; `memory_write` reports its own errors. A local
+refusal (`disabled`, or `project_mismatch` because no guard is configured) and a
+definitive provider answer (`index_missing`, `project_mismatch`, or
+`auth_failed` from a 401/403) give no block, as does any other failure code.
+An explicit `sandbox.allowedMcpTools` list that omits `memory_write` gives no
+block for any provider, although only claude-cli sessions enforce the list
+(through the `agent-sandbox.sh` hook); a list that omits `knowledge_search`
+drops the check-first wording. Otherwise the prompt is unchanged. The block does
+not prove writes work: an index whose field map does not name `text` still gets
+it, and its writes fail as `invalid_request`.
 
 #### Legacy Migration
 

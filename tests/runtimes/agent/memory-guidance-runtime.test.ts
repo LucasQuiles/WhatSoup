@@ -290,7 +290,7 @@ const chatJid = '15550002@s.whatsapp.net';
 const senderJid = '15550002@s.whatsapp.net';
 const MEMORY_TOOLS = ['memory_write', 'knowledge_search'] as const;
 type MemoryTool = (typeof MEMORY_TOOLS)[number];
-const READY: MemoryReadinessSnapshot = { state: 'ready', evidenceCoverage: 'provider_response' };
+const READY: MemoryReadinessSnapshot = { state: 'ready', failureCode: 'none', evidenceCoverage: 'provider_response' };
 
 function makeMessenger(): Messenger {
   return {
@@ -400,9 +400,9 @@ describe('memory guidance wiring', () => {
     expect(opts.memoryGuidanceBlock?.()).toContain('memory_write');
   });
 
-  it('keeps the block when the startup provider call failed (memory configured, provider unreachable)', async () => {
+  it('keeps the block when the startup provider call timed out', async () => {
     const opts = await spawnedSessionOpts(
-      { sessionScope: 'per_chat', memoryReadiness: { state: 'network_error', evidenceCoverage: 'provider_error' } },
+      { sessionScope: 'per_chat', memoryReadiness: { state: 'network_error', failureCode: 'timeout', evidenceCoverage: 'provider_error' } },
       MEMORY_TOOLS,
     );
 
@@ -431,7 +431,7 @@ describe('memory guidance wiring', () => {
 
   it('no block when memory is locally disabled at startup (no index or key)', async () => {
     const opts = await spawnedSessionOpts(
-      { sessionScope: 'per_chat', memoryReadiness: { state: 'disabled', evidenceCoverage: 'local_guard' } },
+      { sessionScope: 'per_chat', memoryReadiness: { state: 'disabled', failureCode: 'none', evidenceCoverage: 'local_guard' } },
       MEMORY_TOOLS,
     );
     expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
@@ -439,11 +439,23 @@ describe('memory guidance wiring', () => {
 
   it('no block when the project guard is missing at startup (local check)', async () => {
     const opts = await spawnedSessionOpts(
-      { sessionScope: 'per_chat', memoryReadiness: { state: 'project_mismatch', evidenceCoverage: 'local_guard' } },
+      { sessionScope: 'per_chat', memoryReadiness: { state: 'project_mismatch', failureCode: 'project_guard_failed', evidenceCoverage: 'local_guard' } },
       MEMORY_TOOLS,
     );
     expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
   });
+
+  // Definitive provider answers at startup: the block would only invite failing writes.
+  for (const [label, memoryReadiness] of [
+    ['index_missing', { state: 'index_missing', failureCode: 'none', evidenceCoverage: 'provider_response' }],
+    ['project_mismatch (key reaches another project)', { state: 'project_mismatch', failureCode: 'project_guard_failed', evidenceCoverage: 'provider_response' }],
+    ['401 auth rejection', { state: 'auth_failed', failureCode: 'auth_failed', evidenceCoverage: 'provider_error' }],
+  ] as const) {
+    it(`no block when the startup provider answered ${label}`, async () => {
+      const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReadiness }, MEMORY_TOOLS);
+      expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
+    });
+  }
 
   it('no block when readiness was never supplied', async () => {
     const opts = await spawnedSessionOpts({ sessionScope: 'per_chat' }, MEMORY_TOOLS);
