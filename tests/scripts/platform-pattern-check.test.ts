@@ -50,6 +50,20 @@ describe('platform-pattern-check', () => {
     ]);
   });
 
+  it('allows the documented Darwin identity source while retaining a sibling finding', () => {
+    const root = tmp.make('fixed-candidate-identity');
+    const identity = path.join(root, 'src', 'runtimes', 'agent', 'providers');
+    mkdirSync(identity, { recursive: true });
+    writeFileSync(path.join(identity, 'claude-refresh-process-identity.ts'), "const candidate = '/usr/bin/python3';\n");
+    writeFileSync(path.join(root, 'src', 'sibling.ts'), "const candidate = '/usr/bin/python3';\n");
+
+    const [rule] = loadRuleSpecs(['portability.no-hardcoded-platform-binaries']);
+
+    expect(scanRule(root, rule!).map(({ line, pattern }) => ({ line, pattern }))).toEqual([
+      { line: 1, pattern: "'/usr/bin/python" },
+    ]);
+  });
+
   it('does not flag direct Linux if consequents for platform paths', () => {
     expect(scanFixture([
       "if (process.platform === 'linux') {",
