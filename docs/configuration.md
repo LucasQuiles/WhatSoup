@@ -1250,20 +1250,36 @@ and treats them as configurable groups.
 
 Agent instances have no automatic memory write path, so a memory is saved only
 when the model calls `memory_write`. The agent system prompt therefore carries a
-short "Long-term memory" block (`src/runtimes/agent/memory-guidance.ts`): save
-when the person states a lasting fact, preference, decision or commitment, or
-asks to be remembered; never save passwords, keys, codes, payment or health
-details, or private details about anyone else; and, when `knowledge_search` is
-available, check memory before asking again. Its reach sentence follows the
-recall table above rather than promising strict per-chat recall: memories are
-saved to the calling chat, and outside it only admins and contacts set to
-`instance` can recall them, never a group with other people; on `q` it says
-every chat can recall them. The runtime adds the block, for every provider, only
-when Pinecone readiness was `ready` at startup and `memory_write` is listed for
-that session's tool context. Readiness is checked once at process start, so a
-change takes effect on restart; otherwise the prompt is unchanged. `ready` does
-not check the index field map: an index whose field map does not name `text`
-still reports `ready`, and with the block present its writes fail as
+short "Long-term memory" block (`src/runtimes/agent/memory-guidance.ts`). It
+says:
+
+- Save only what will matter in a later conversation, using the tool's memory
+  types: a lasting fact, plan or arrangement (`user_fact`, or `group_context`
+  for facts about a group), a preference (`preference`), a fix to something
+  saved before (`correction`), or anything the person asks you to remember.
+- Do not save the same thing twice. When `knowledge_search` accepts the memory
+  index (`memory.pinecone.index` is among its `allowedIndexes` that have a
+  knowledge profile), the line also says to check `knowledge_search` first,
+  before saving and before asking again.
+- Never save passwords, keys, codes or payment details, even if asked, and say
+  so. Save health details or details about other people only when the person
+  asks.
+- The reach of a memory, following the recall table above: memories are saved
+  to the calling chat; the bot's admins, and contacts set to `instance`, can
+  recall them from other chats, and an admin can do so even in a group with
+  other people. On `q` it says every chat can recall them.
+
+The runtime adds the block, for every provider, when memory is configured for
+the instance and `memory_write` is listed for that session's tool context.
+Configured means the startup readiness check got past its local checks (index
+named, key present, project guard set for a non-`q` instance). The provider's
+answer does not matter: a timeout or outage at startup still gives the block,
+and `memory_write` reports its own errors. Readiness `disabled`, or
+`project_mismatch` because no guard is configured, gives no block. An explicit
+`sandbox.allowedMcpTools` list that omits `memory_write` also gives no block,
+and one that omits `knowledge_search` drops the check-first wording. Otherwise
+the prompt is unchanged. The block does not prove writes work: an index whose
+field map does not name `text` still gets it, and its writes fail as
 `invalid_request`.
 
 #### Legacy Migration

@@ -4,59 +4,105 @@
 // Agent instances have no automatic memory write path (enrichment and
 // consolidation run on chat instances only), so a memory is saved only when the
 // model chooses memory_write. The tool description alone has not led models to
-// use it; this block says when to save, what never to save, and how far a
-// saved memory reaches. A session gets it only when Pinecone memory was ready
-// at startup and memory_write is listed for that session's tool context, so it
-// never points the model at a tool it cannot call.
+// use it; this block says what to save, what never to save, and how far a saved
+// memory reaches.
+//
+// A session gets the block when memory is configured for this instance and
+// memory_write is listed for the session and allowed by any explicit sandbox
+// MCP allowlist. "Configured" means startup readiness got past its local
+// checks; the provider's answer does not matter, so a startup timeout or outage
+// cannot hide the guidance for the whole process lifetime (memory_write reports
+// its own errors).
 //
 // The reach sentence must stay true to src/core/memory-scope.ts. memory_write
-// files every record under the calling conversation. A non-admin contact's
-// direct chat and a group with other members recall only their own chat;
-// admin senders, contacts set to 'instance' and owner-only groups also rank
-// other chats in. The operator instance recalls every chat everywhere.
+// files every record under the calling conversation. Verified admin senders, in
+// any chat including groups with other people, and contacts set to 'instance'
+// rank other chats in. The operator instance recalls every chat everywhere.
 
+import type { MemoryEvidenceCoverage, MemoryReadinessState } from '../../lib/memory-operation-telemetry.ts';
 import { isOperatorInstance } from '../../lib/pinecone-project-guard.ts';
 import type { ToolRegistry } from '../../mcp/registry.ts';
 import { noExecutingSession, resolveSessionContext, type SessionContext } from '../../mcp/types.ts';
 
+/** The fields of the startup readiness observation (pinecone.ts) the gate reads. */
+export interface MemoryReadinessSnapshot {
+  state: MemoryReadinessState;
+  evidenceCoverage: MemoryEvidenceCoverage;
+}
+
 const MEMORY_REACH =
-  "- Memories are saved to this chat. Outside this chat, only the bot's admins and contacts they allow can recall them; groups with other people cannot.";
+  "- Memories are saved to this chat. The bot's admins, and contacts they allow, can recall them from other chats, and an admin can do so even in a group with other people.";
 const OPERATOR_MEMORY_REACH =
   '- Memories are saved to this chat. On this instance every chat can recall them.';
 
-export function buildMemoryGuidance(opts: { operatorInstance: boolean; knowledgeSearch: boolean }): string {
+export function buildMemoryGuidance(opts: { operatorInstance: boolean; searchesMemory: boolean }): string {
   return [
     'Long-term memory (memory_write):',
-    '- Save a memory with memory_write when the person states a lasting fact, preference, decision or commitment, or asks you to remember something.',
+    '- Save only what will matter in a later conversation: a lasting fact, plan or arrangement (memory_type user_fact, or group_context for facts about a group), a preference (preference), a fix to something saved before (correction), or anything the person asks you to remember.',
+    opts.searchesMemory
+      ? '- Check knowledge_search first, before saving and before asking something the person may already have told you; do not save the same thing twice.'
+      : '- Do not save the same thing twice.',
+    "- Never save passwords, keys, codes or payment details, even if asked; say you can't keep those.",
+    '- Save health details or details about other people only when the person asks you to remember them.',
     opts.operatorInstance ? OPERATOR_MEMORY_REACH : MEMORY_REACH,
-    '- Never save passwords, keys, codes, payment details, health details, or private details about anyone other than the person you are talking to.',
-    ...(opts.knowledgeSearch
-      ? ['- Before asking the person something they may already have told you, check memory with knowledge_search.']
-      : []),
   ].join('\n');
 }
 
 /**
+ * Memory is configured when startup readiness (getPineconeReadinessObservation)
+ * passed its local checks (index named, key present, project guard set) and so
+ * asked the provider. Whatever the provider answered, memory stays configured;
+ * a local refusal is reported with evidence `local_guard` and never gets here.
+ */
+export function memoryConfigured(readiness: MemoryReadinessSnapshot | undefined): boolean {
+  return readiness?.evidenceCoverage === 'provider_response' || readiness?.evidenceCoverage === 'provider_error';
+}
+
+/** deploy/hooks/agent-sandbox.sh's MCP rule: an absent or empty allowlist allows every tool. */
+function sandboxAllows(allowedMcpTools: readonly string[] | undefined, name: string): boolean {
+  return !allowedMcpTools?.length
+    || allowedMcpTools.includes(name)
+    || allowedMcpTools.includes(`mcp__whatsoup__${name}`);
+}
+
+/** The indexes knowledge_search accepts: its listed `index` enum (allowedIndexes that have a profile, knowledge.ts). */
+function searchableIndexes(inputSchema: Record<string, unknown> | undefined): unknown[] {
+  const properties = inputSchema?.['properties'] as Record<string, { enum?: unknown } | undefined> | undefined;
+  const values = properties?.['index']?.enum;
+  return Array.isArray(values) ? values : [];
+}
+
+/**
  * The `memoryGuidanceBlock` callback for a new SessionManager, or undefined
- * (prompt stays byte-identical) when memory was not ready at startup or
- * memory_write is not listed for `session`. Listing uses the session's static
- * tool context; memory_write is outside the scheduled-job forbidden set, so an
- * unresolved executing context lists it exactly as a live turn would.
+ * (prompt stays byte-identical) when memory is not configured, memory_write is
+ * not listed for `session`, or an explicit sandbox allowlist omits it. The
+ * knowledge_search line needs that tool to accept `memoryIndex`, the index
+ * memory_write writes to.
  */
 export function memoryGuidanceSystemBlock(input: {
-  memoryReady: boolean;
+  readiness: MemoryReadinessSnapshot | undefined;
   registry: Pick<ToolRegistry, 'listTools'>;
   session: SessionContext;
   instanceName: string;
+  memoryIndex: string;
+  allowedMcpTools: readonly string[] | undefined;
 }): (() => string) | undefined {
-  if (!input.memoryReady) return undefined;
-  const listed = new Set(
-    input.registry.listTools(resolveSessionContext(input.session, noExecutingSession())).map((tool) => tool.name),
+  if (!memoryConfigured(input.readiness)) return undefined;
+  // This checks registration, not per-session tool filtering. Listing filters
+  // only by tier, conversation binding and the scheduled-job forbidden set
+  // (registry.ts sessionWouldList). Both memory tools are chat-scope tools
+  // outside that set, so every session lists them once they are registered,
+  // and the blank executing context changes nothing for them.
+  const tools = new Map(
+    input.registry.listTools(resolveSessionContext(input.session, noExecutingSession())).map((tool) => [tool.name, tool]),
   );
-  if (!listed.has('memory_write')) return undefined;
+  if (!tools.has('memory_write') || !sandboxAllows(input.allowedMcpTools, 'memory_write')) return undefined;
+  const search = tools.get('knowledge_search');
   const block = buildMemoryGuidance({
     operatorInstance: isOperatorInstance(input.instanceName),
-    knowledgeSearch: listed.has('knowledge_search'),
+    searchesMemory: search !== undefined
+      && sandboxAllows(input.allowedMcpTools, 'knowledge_search')
+      && searchableIndexes(search.inputSchema).includes(input.memoryIndex),
   });
   return () => block;
 }

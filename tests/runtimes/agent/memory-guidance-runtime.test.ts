@@ -1,6 +1,7 @@
 // Memory guidance wiring: the runtime hands a session the memory guidance block
-// only when Pinecone memory was ready at startup AND memory_write is listed for
-// that session's tool context. Agent instances have no automatic memory write
+// only when memory is configured (startup readiness got past its local checks)
+// AND memory_write is listed for that session's tool context and allowed by any
+// explicit sandbox allowlist. Agent instances have no automatic memory write
 // path, so without the block the model is never told to save anything.
 //
 // REAL AgentRuntime + REAL ToolRegistry + REAL coordinator; the provider
@@ -147,6 +148,7 @@ const { mockConfig } = vi.hoisted(() => ({
     proactiveResumeOnStartup: false,
     mediaDir: `/tmp/whatsoup-test-media-memory-guidance-${process.pid}`,
     pineconeAllowedIndexes: [] as string[],
+    pineconeIndex: 'memory',
     voiceReply: 'never' as const,
     elevenlabs: { defaultVoiceId: 'v', defaultModel: 'm', stability: 0.5, similarityBoost: 0.75 },
     memory: { adminJid: 'admin@s.whatsapp.net' },
@@ -279,6 +281,7 @@ import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
+import type { MemoryReadinessSnapshot } from '../../../src/runtimes/agent/memory-guidance.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -287,6 +290,7 @@ const chatJid = '15550002@s.whatsapp.net';
 const senderJid = '15550002@s.whatsapp.net';
 const MEMORY_TOOLS = ['memory_write', 'knowledge_search'] as const;
 type MemoryTool = (typeof MEMORY_TOOLS)[number];
+const READY: MemoryReadinessSnapshot = { state: 'ready', evidenceCoverage: 'provider_response' };
 
 function makeMessenger(): Messenger {
   return {
@@ -319,10 +323,15 @@ describe('memory guidance wiring', () => {
   let engine: DurabilityEngine;
   let runtime: AgentRuntime | undefined;
 
-  /** Build a runtime with the given memory tools on its real registry, send one message, return the spawned session's options. */
+  /**
+   * Build a runtime with the given memory tools on its real registry, send one
+   * message, return the spawned session's options. The knowledge_search
+   * stand-in accepts `searchIndexes`, as the real tool's `index` enum does.
+   */
   async function spawnedSessionOpts(
     options: AgentRuntimeOptions,
     tools: readonly MemoryTool[],
+    searchIndexes: [string, ...string[]] = [mockConfig.pineconeIndex],
   ): Promise<(typeof sessionDoubles)[number]['ctorOpts']> {
     runtime = new AgentRuntime(db, makeMessenger(), 'test', options);
     installFakePerChatMcpSocketManager(runtime);
@@ -333,8 +342,10 @@ describe('memory guidance wiring', () => {
         name,
         description: `${name} stand-in`,
         scope: 'chat',
-        targetMode: 'injected',
-        schema: z.object({ chatJid: z.string() }),
+        targetMode: name === 'memory_write' ? 'injected' : 'caller-supplied',
+        schema: name === 'memory_write'
+          ? z.object({ chatJid: z.string() })
+          : z.object({ index: z.enum(searchIndexes), query: z.string() }),
         handler: async () => ({ ok: true }),
       });
     }
@@ -373,27 +384,44 @@ describe('memory guidance wiring', () => {
   for (const provider of ['claude-cli', 'anthropic-api'] as const) {
     it(`${provider}: a memory-ready per_chat session gets the guidance block`, async () => {
       mockConfig.agentProvider = provider;
-      const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReady: true }, MEMORY_TOOLS);
+      const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReadiness: READY }, MEMORY_TOOLS);
 
       expect(opts.provider).toBe(provider);
       const block = opts.memoryGuidanceBlock?.() ?? '';
       expect(block).toContain('memory_write');
       expect(block).toContain('Memories are saved to this chat.');
-      expect(block).toContain('knowledge_search');
+      expect(block).toContain('Check knowledge_search first');
     });
   }
 
   it('a shared-scope session (no pinned conversation at spawn) still gets the block', async () => {
-    const opts = await spawnedSessionOpts({ sessionScope: 'shared', memoryReady: true }, MEMORY_TOOLS);
+    const opts = await spawnedSessionOpts({ sessionScope: 'shared', memoryReadiness: READY }, MEMORY_TOOLS);
 
     expect(opts.memoryGuidanceBlock?.()).toContain('memory_write');
   });
 
+  it('keeps the block when the startup provider call failed (memory configured, provider unreachable)', async () => {
+    const opts = await spawnedSessionOpts(
+      { sessionScope: 'per_chat', memoryReadiness: { state: 'network_error', evidenceCoverage: 'provider_error' } },
+      MEMORY_TOOLS,
+    );
+
+    expect(opts.memoryGuidanceBlock?.()).toContain('Save only what will matter in a later conversation');
+  });
+
   it('omits the knowledge_search line when only memory_write is listed', async () => {
-    const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReady: true }, ['memory_write']);
+    const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReadiness: READY }, ['memory_write']);
 
     const block = opts.memoryGuidanceBlock?.() ?? '';
     expect(block).toContain('memory_write');
+    expect(block).not.toContain('knowledge_search');
+  });
+
+  it('omits the knowledge_search line when search cannot reach the memory index', async () => {
+    const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReadiness: READY }, MEMORY_TOOLS, ['docs']);
+
+    const block = opts.memoryGuidanceBlock?.() ?? '';
+    expect(block).toContain('Save only what will matter in a later conversation');
     expect(block).not.toContain('knowledge_search');
   });
 
@@ -401,8 +429,19 @@ describe('memory guidance wiring', () => {
   // created and the missing block is the runtime's decision, not a missed spawn.
   const NO_GUIDANCE = { provider: 'claude-cli', memoryGuidanceBlock: undefined };
 
-  it('no block when memory was not ready at startup', async () => {
-    const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReady: false }, MEMORY_TOOLS);
+  it('no block when memory is locally disabled at startup (no index or key)', async () => {
+    const opts = await spawnedSessionOpts(
+      { sessionScope: 'per_chat', memoryReadiness: { state: 'disabled', evidenceCoverage: 'local_guard' } },
+      MEMORY_TOOLS,
+    );
+    expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
+  });
+
+  it('no block when the project guard is missing at startup (local check)', async () => {
+    const opts = await spawnedSessionOpts(
+      { sessionScope: 'per_chat', memoryReadiness: { state: 'project_mismatch', evidenceCoverage: 'local_guard' } },
+      MEMORY_TOOLS,
+    );
     expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
   });
 
@@ -412,7 +451,16 @@ describe('memory guidance wiring', () => {
   });
 
   it('no block when memory_write is not registered (memory disabled)', async () => {
-    const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReady: true }, ['knowledge_search']);
+    const opts = await spawnedSessionOpts({ sessionScope: 'per_chat', memoryReadiness: READY }, ['knowledge_search']);
+    expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
+  });
+
+  it('no block when the instance sandbox allowlist omits memory_write', async () => {
+    const opts = await spawnedSessionOpts({
+      sessionScope: 'per_chat',
+      memoryReadiness: READY,
+      sandbox: { allowedPaths: [], allowedTools: [], bash: { enabled: false }, allowedMcpTools: ['mcp__whatsoup__knowledge_search'] },
+    }, MEMORY_TOOLS);
     expect({ provider: opts.provider, memoryGuidanceBlock: opts.memoryGuidanceBlock }).toEqual(NO_GUIDANCE);
   });
 });
