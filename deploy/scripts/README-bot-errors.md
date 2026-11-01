@@ -1675,9 +1675,13 @@ keyring item may hold a different key.
 | index in the configured project, and `embed.field_map` is not `{"text": "text"}` | `FAIL bot_memory <instance>: field_map=…` (a small map of strings as written, anything else as `<type size=n>`; the line ends with the reason: every memory save fails) | critical, plus a per-instance event |
 | `/health` readiness unobserved | `WARN bot_memory <instance>: readiness_unreadable http=… why=…`, where `why` is `no_health_token`, `no_health_port`, `redirect_refused`, `unparsed_body`, `health_token_rejected` (401/403 or the public body), `not_diagnostic`, `health_identity_missing`, `health_identity_mismatch`, `no_memory_readiness` or a transport error name | warning |
 | index read rejected or unreachable (401, 403, 5xx, network) | `WARN bot_memory <instance>: index_unreadable http=…` | warning |
+| record-count read (`describe_index_stats`) rejected or unreachable | `WARN bot_memory <instance>: stats_unreadable http=…`; evidence shows `records=unknown` | warning |
+| index host passes the configured guard but is not a Pinecone data host | evidence line ends `records=unknown stats_not_probed=host_not_pinecone`; the key is not sent | none |
 | no key visible to the job | evidence line ends `index_not_probed=key_not_visible` | none |
 | deletion protection off, or zero records | shown in the evidence line only | none |
-| an instance config larger than the per-config limit | `WARN bot_memory <instance>: config_skipped size=… limit=… (not read)`; later instances still run | warning |
+| an instance folder or `config.json` that is a symbolic link, is not this user's, is writable by group or others, is not a regular file, has more than one hard link, cannot be opened without following a link, or has a name outside `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` | `WARN bot_memory <instance>: config_refused reason=symlink\|foreign_owner\|writable_by_others\|not_regular\|multiple_links\|unopenable\|unsafe_name`; nothing is probed and no token is sent for it | warning |
+| the instances folder itself is not this user's or is writable by group or others | `WARN bot_memory_inventory: instances_refused reason=foreign_owner\|writable_by_others`; no instance is read | warning, never a per-instance event |
+| an instance config larger than the per-config limit | `WARN bot_memory <instance>: config_skipped size=… limit=… (not parsed)`; later instances still run | warning |
 | an inventory-wide limit is reached (see Limits) | `WARN bot_memory_inventory: truncated limit=<limit> instances_reported=<n>`, once, after the lines already produced | warning, never a per-instance event |
 
 `bot_memory` is an instance-scoped FAIL prefix, so each FAIL also queues a per-instance
@@ -1699,14 +1703,29 @@ here; set the guard in its config. The checker also refuses an instance whose co
 `name` is empty, which the runtime runs unguarded. Each read is bounded by its timeout
 (`HEALTH_PROBE_TIMEOUT_SECONDS` for `/health`, `BOT_MEMORY_TIMEOUT_SECONDS` for each
 Pinecone call). The whole inventory is bounded too (`BotMemoryBudget`): at most
-`BOT_MEMORY_MAX_CONFIGS` configs scanned (`config_count_limit`),
+`BOT_MEMORY_MAX_ENTRIES` entries discovered in the instances folder
+(`instance_entry_limit`; a larger folder is not read at all, so the result never depends on
+directory order), at most `BOT_MEMORY_MAX_CONFIGS` configs scanned (`config_count_limit`),
 `BOT_MEMORY_MAX_SECONDS` of wall time (`wall_time_limit`, checked before each step, so a
-run can overrun by at most one step's timeout), and `BOT_MEMORY_MAX_LINES` lines or
-`BOT_MEMORY_MAX_OUTPUT_BYTES` bytes of output (`output_line_limit`, `output_byte_limit`).
-An instance's lines enter whole or not at all. A config larger than
-`BOT_MEMORY_CONFIG_MAX_BYTES` is skipped unread (checked before the read) with one
-`WARN bot_memory <instance>: config_skipped size=… limit=… (not read)` line, and the
-inventory continues with the next instance. A config or `/health` body that cannot be
+run can overrun by at most one step's timeout), and at most `BOT_MEMORY_MAX_LINES` lines
+and `BOT_MEMORY_MAX_OUTPUT_BYTES` bytes of output, the truncation line included
+(`output_line_limit`, `output_byte_limit`; one line and
+`BOT_MEMORY_TRUNCATION_RESERVE_BYTES` bytes stay reserved for it). An instance's lines
+enter whole or not at all.
+
+The `healthPort` read from a config receives that instance's bearer token, so configs are
+read without following links: each folder and `config.json` is classified by `lstat`, then
+opened with `O_NOFOLLOW` relative to its checked parent (a swap in between fails the open),
+and must be this user's own, not writable by group or others, and, for the file, a regular
+file with one hard link. Readable by others is accepted. The read is capped at
+`BOT_MEMORY_CONFIG_MAX_BYTES` + 1 bytes from that one descriptor: a config whose size or
+bytes read exceed `BOT_MEMORY_CONFIG_MAX_BYTES` gets one
+`WARN bot_memory <instance>: config_skipped size=… limit=… (not parsed)` line (`size` is
+the file size, or the limit + 1 when the file grew during the read), and the inventory
+continues with the next instance. Residual: the token itself still comes from the shared
+`instance_health_token` reader, which reads `tokens.env` in that same checked folder and
+follows a link there; a plant by this same user is outside this threat model, as for the
+legacy receipt repair. A config or `/health` body that cannot be
 parsed, deep nesting included, never stops the run: the config is skipped (the instance
 config inventory reports it as invalid JSON) and the body leaves readiness unobserved.
 Body-supplied readiness values and the deletion-protection value are rendered as

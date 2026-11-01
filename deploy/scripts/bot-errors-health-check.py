@@ -4262,11 +4262,17 @@ BOT_MEMORY_OPERATOR_INSTANCE = "q"
 BOT_MEMORY_OPERATOR_PROJECT_ID = "o6fsxb8"
 # Inventory-wide allowances. Each network step is bounded by its own timeout,
 # so the wall time can overrun BOT_MEMORY_MAX_SECONDS by at most one step.
+BOT_MEMORY_MAX_ENTRIES = 256
 BOT_MEMORY_MAX_CONFIGS = 64
 BOT_MEMORY_CONFIG_MAX_BYTES = 1024 * 1024
 BOT_MEMORY_MAX_LINES = 320
 BOT_MEMORY_MAX_OUTPUT_BYTES = 64 * 1024
 BOT_MEMORY_MAX_SECONDS = 120.0
+# Held back from the line and byte allowances for the one truncation line: a
+# fixed limit name plus an instance count bounded by BOT_MEMORY_MAX_ENTRIES.
+BOT_MEMORY_TRUNCATION_RESERVE_BYTES = 128
+# Entry names reach the report verbatim, so a name outside this set is refused.
+BOT_MEMORY_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
 class BotMemoryLimit(ValueError):
@@ -4278,8 +4284,8 @@ class BotMemoryBudget:
         self.clock = clock
         self.deadline = clock() + BOT_MEMORY_MAX_SECONDS
         self.configs_remaining = BOT_MEMORY_MAX_CONFIGS
-        self.lines_remaining = BOT_MEMORY_MAX_LINES
-        self.output_remaining = BOT_MEMORY_MAX_OUTPUT_BYTES
+        self.lines_remaining = BOT_MEMORY_MAX_LINES - 1
+        self.output_remaining = BOT_MEMORY_MAX_OUTPUT_BYTES - BOT_MEMORY_TRUNCATION_RESERVE_BYTES
         self.instances = 0
         self.lines: list[str] = []
 
@@ -4293,8 +4299,8 @@ class BotMemoryBudget:
             raise BotMemoryLimit("config_count_limit")
         self.configs_remaining -= 1
 
-    def append_instance(self, lines: list[str]) -> None:
-        """One instance's lines enter whole or not at all."""
+    def append_lines(self, lines: list[str]) -> None:
+        """Lines enter whole or not at all."""
         size = sum(len(line.encode("utf-8")) + 1 for line in lines)
         if len(lines) > self.lines_remaining:
             raise BotMemoryLimit("output_line_limit")
@@ -4303,6 +4309,9 @@ class BotMemoryBudget:
         self.lines_remaining -= len(lines)
         self.output_remaining -= size
         self.lines.extend(lines)
+
+    def append_instance(self, lines: list[str]) -> None:
+        self.append_lines(lines)
         self.instances += 1
 
 
@@ -4327,39 +4336,152 @@ def bot_memory_field_map_text(field_map: Any) -> str:
     return f"<{type(field_map).__name__}{size}>"
 
 
+def bot_memory_private_refusal(node: os.stat_result) -> str | None:
+    """Why another user could have planted or rewritten this node, or None.
+
+    Readable by others is accepted (fleet folders were 755 until recently);
+    writable by group or others is not.
+    """
+    if node.st_uid != os.getuid():
+        return "foreign_owner"
+    if stat.S_IMODE(node.st_mode) & 0o022:
+        return "writable_by_others"
+    return None
+
+
+def bot_memory_read_bytes(fd: int, limit: int) -> bytes:
+    """At most `limit` bytes from one descriptor."""
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining:
+        chunk = os.read(fd, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def bot_memory_read_config(root_fd: int, name: str) -> tuple[str, Any]:
+    """One instance's config.json, read without following any link.
+
+    ("ok", bytes), ("absent", None), ("oversized", size) or ("refused", reason).
+    Each node is classified by lstat, then opened with O_NOFOLLOW relative to
+    its checked parent, so a swap in between fails the open instead of
+    redirecting it. The read is capped by the bytes taken from that descriptor,
+    not by the earlier size check. The refusal reason never comes from errno:
+    darwin and Linux report a refused link differently.
+    """
+    try:
+        entry = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return "absent", None
+    if stat.S_ISLNK(entry.st_mode):
+        return "refused", "symlink"
+    if not stat.S_ISDIR(entry.st_mode):
+        return "absent", None
+    no_follow = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        dir_fd = os.open(name, no_follow | os.O_DIRECTORY, dir_fd=root_fd)
+    except OSError:
+        return "refused", "unopenable"
+    try:
+        reason = bot_memory_private_refusal(os.fstat(dir_fd))
+        if reason:
+            return "refused", reason
+        try:
+            leaf = os.stat("config.json", dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "absent", None
+        except OSError:
+            return "refused", "unopenable"
+        if stat.S_ISLNK(leaf.st_mode):
+            return "refused", "symlink"
+        try:
+            # O_NONBLOCK so a FIFO fails the regular-file check instead of blocking the open.
+            fd = os.open("config.json", no_follow | os.O_NONBLOCK, dir_fd=dir_fd)
+        except OSError:
+            return "refused", "unopenable"
+        try:
+            node = os.fstat(fd)
+            if not stat.S_ISREG(node.st_mode):
+                return "refused", "not_regular"
+            reason = bot_memory_private_refusal(node)
+            if reason:
+                return "refused", reason
+            if node.st_nlink != 1:
+                return "refused", "multiple_links"
+            if node.st_size > BOT_MEMORY_CONFIG_MAX_BYTES:
+                return "oversized", node.st_size
+            data = bot_memory_read_bytes(fd, BOT_MEMORY_CONFIG_MAX_BYTES + 1)
+            if len(data) > BOT_MEMORY_CONFIG_MAX_BYTES:
+                return "oversized", len(data)
+            return "ok", data
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+
+
 def bot_memory_configs(home: Path, budget: BotMemoryBudget) -> Iterator[tuple[str, dict[str, str], int | None]]:
     """(instance, settings, healthPort) for every instance that configures memory.
 
     settings holds the memory.pinecone strings plus the config `name`, which the
-    runtime resolves its project guard by (botName in src/config.ts).
+    runtime resolves its project guard by (botName in src/config.ts). The
+    healthPort chosen here receives the instance's bearer token, so every
+    folder and config must be this user's own and writable by no one else.
     """
-    root = home / ".config/whatsoup/instances"
-    if not root.is_dir():
+    try:
+        root_fd = os.open(home / ".config/whatsoup/instances", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+    except OSError:
         return
-    for entry in sorted(root.iterdir()):
-        path = entry / "config.json"
-        try:
-            size = path.stat().st_size
-        except OSError:
-            continue
-        budget.take_config()
-        if size > BOT_MEMORY_CONFIG_MAX_BYTES:
-            # One oversized file must not hide every instance after it: skip it unread.
-            budget.append_instance([f"WARN bot_memory {entry.name}: config_skipped size={size} "
-                                    f"limit={BOT_MEMORY_CONFIG_MAX_BYTES} (not read)"])
-            continue
-        config, _error = read_instance_config(path)
-        memory = config.get("memory") if isinstance(config, dict) else None
-        pinecone = memory.get("pinecone") if isinstance(memory, dict) else None
-        if not isinstance(pinecone, dict) or not pinecone:
-            continue
-        settings = {key: value for key, value in pinecone.items()
-                    if key in ("projectId", "expectedHostSuffix", "index", "apiKeyEnv", "apiKeyService")
-                    and isinstance(value, str)}
-        if isinstance(config.get("name"), str):
-            settings["name"] = config["name"]
-        port = config.get("healthPort")
-        yield entry.name, settings, port if isinstance(port, int) else None
+    try:
+        reason = bot_memory_private_refusal(os.fstat(root_fd))
+        if reason:
+            budget.append_lines([f"WARN bot_memory_inventory: instances_refused reason={reason}"])
+            return
+        # Discovery itself is bounded: a damaged or hostile folder must not cost
+        # unbounded time or memory before the config allowance applies.
+        names: list[str] = []
+        with os.scandir(root_fd) as entries:
+            for item in entries:
+                if len(names) >= BOT_MEMORY_MAX_ENTRIES:
+                    raise BotMemoryLimit("instance_entry_limit")
+                names.append(item.name)
+        for name in sorted(names):
+            budget.require_time()
+            status, value = bot_memory_read_config(root_fd, name)
+            if status == "absent":
+                continue
+            budget.take_config()
+            if not BOT_MEMORY_SAFE_NAME_RE.fullmatch(name):
+                budget.append_instance([f"WARN bot_memory {safe_segment(name)}: config_refused reason=unsafe_name"])
+                continue
+            if status == "refused":
+                budget.append_instance([f"WARN bot_memory {name}: config_refused reason={value}"])
+                continue
+            if status == "oversized":
+                # One oversized file must not hide every instance after it.
+                budget.append_instance([f"WARN bot_memory {name}: config_skipped size={value} "
+                                        f"limit={BOT_MEMORY_CONFIG_MAX_BYTES} (not parsed)"])
+                continue
+            try:
+                config = json.loads(value.decode("utf-8"))
+            except (ValueError, RecursionError):  # the instance config inventory reports it
+                continue
+            memory = config.get("memory") if isinstance(config, dict) else None
+            pinecone = memory.get("pinecone") if isinstance(memory, dict) else None
+            if not isinstance(pinecone, dict) or not pinecone:
+                continue
+            settings = {key: value for key, value in pinecone.items()
+                        if key in ("projectId", "expectedHostSuffix", "index", "apiKeyEnv", "apiKeyService")
+                        and isinstance(value, str)}
+            if isinstance(config.get("name"), str):
+                settings["name"] = config["name"]
+            port = config.get("healthPort")
+            yield name, settings, port if isinstance(port, int) else None
+    finally:
+        os.close(root_fd)
 
 
 def bot_memory_readiness(instance: str, port: int | None) -> dict[str, Any]:
@@ -4517,8 +4639,13 @@ def bot_memory_lines(
             flagged.append(f"FAIL bot_memory {instance}: field_map={bot_memory_field_map_text(field_map)} "
                            "(WhatSoup writes `text`; every memory save fails)")
         records = (stats or {}).get("records") if (stats or {}).get("http") == 200 else "unknown"
+        if stats is not None and stats.get("http") != 200:
+            flagged.append(f"WARN bot_memory {instance}: stats_unreadable http={stats.get('http')}")
         evidence += [f"field_map={'text' if field_map == BOT_MEMORY_TEXT_FIELD else 'other'}",
                      f"protection={index.get('deletion_protection')}", f"records={records}"]
+        if in_project and stats is None and not PINECONE_DATA_HOST_RE.fullmatch(host):
+            # The guard accepted the host, but the key goes only to a Pinecone data host.
+            evidence.append("stats_not_probed=host_not_pinecone")
     return flagged + [f"bot_memory {instance}: " + " ".join(evidence)]
 
 
@@ -4529,8 +4656,8 @@ def bot_memory_inventory(profile: dict[str, Any], budget: BotMemoryBudget | None
     try:
         _bot_memory_inventory(budget)
     except BotMemoryLimit as exc:
-        # The instances already reported stand; the one truncation line sits
-        # outside the output allowance and names no instance.
+        # The instances already reported stand; the one truncation line names no
+        # instance and fits the line and bytes the budget held back for it.
         budget.lines.append(f"WARN bot_memory_inventory: truncated limit={exc} instances_reported={budget.instances}")
     return budget.lines
 

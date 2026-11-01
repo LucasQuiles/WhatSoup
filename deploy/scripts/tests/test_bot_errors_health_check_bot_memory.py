@@ -20,6 +20,7 @@ import importlib.util
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 import re
 import threading
@@ -40,7 +41,16 @@ def _load_module():
 
 _mod = _load_module()
 
-TAIL = "-proj123.svc.example.pinecone.io"
+
+@pytest.fixture(autouse=True)
+def _not_writable_by_others():
+    """The inventory refuses folders and configs others can write, so fixtures never are."""
+    previous = os.umask(0o022)
+    yield
+    os.umask(previous)
+
+
+TAIL ="-proj123.svc.example.pinecone.io"
 CFG = {"expectedHostSuffix": TAIL, "index": "whatsapp-bot"}
 READY = {"state": "ready", "http": 200, "failure_code": "none"}
 INDEX = {"http": 200, "host": "whatsapp-bot" + TAIL, "field_map": {"text": "text"},
@@ -153,6 +163,18 @@ def test_rejected_key_warns() -> None:
         "WARN bot_memory bot-a: index_unreadable http=401"]
 
 
+def test_a_failed_record_count_read_warns() -> None:
+    lines = _lines(stats={"http": 503, "records": None})
+    assert _flagged(lines) == ["WARN bot_memory bot-a: stats_unreadable http=503"]
+    assert lines[-1].endswith("records=unknown")
+
+
+def test_a_record_count_never_attempted_is_not_a_read_failure() -> None:
+    # Outside the project the key never reaches the data host, so no read failed.
+    lines = _lines(index=dict(INDEX, host=OTHER_HOST), stats=None)
+    assert not any("stats_unreadable" in line for line in lines)
+
+
 def test_inventory_is_off_unless_the_profile_opts_in(monkeypatch) -> None:
     def boom(*_args, **_kwargs):
         raise AssertionError("no probe may run when the profile does not opt in")
@@ -221,7 +243,8 @@ def test_key_is_not_sent_to_a_host_that_is_not_pinecone(tmp_path, monkeypatch) -
     # The host passes the configured guard, so only the Pinecone-host rule refuses it.
     cfg = {"expectedHostSuffix": ".example.com", "index": "whatsapp-bot"}
     lines = _probe_with_described_host(tmp_path, monkeypatch, cfg, "whatsapp-bot.example.com")
-    assert lines == ["bot_memory bot-a: readiness=ready index=whatsapp-bot field_map=text protection=enabled records=unknown"]
+    assert lines == ["bot_memory bot-a: readiness=ready index=whatsapp-bot field_map=text protection=enabled "
+                     "records=unknown stats_not_probed=host_not_pinecone"]
 
 
 def test_instance_with_its_own_key_variable_is_not_probed(tmp_path, monkeypatch) -> None:
@@ -529,18 +552,18 @@ def test_oversized_config_is_skipped_unread_and_later_instances_still_run(tmp_pa
     seen = _stub_probes(monkeypatch)
     monkeypatch.setattr(_mod, "BOT_MEMORY_CONFIG_MAX_BYTES", 4096)
     reads = []
-    real_read = _mod.read_instance_config
+    real_read = _mod.bot_memory_read_bytes
 
-    def read(path):
-        reads.append(path.parent.name)
-        return real_read(path)
-    monkeypatch.setattr(_mod, "read_instance_config", read)
+    def read(fd, limit):
+        reads.append(limit)
+        return real_read(fd, limit)
+    monkeypatch.setattr(_mod, "bot_memory_read_bytes", read)
     lines = _mod.bot_memory_inventory({"expectBotMemory": True})
-    # One oversized file must not hide every instance after it.
-    assert reads == ["bot-a", "bot-c"]
+    # One oversized file must not hide every instance after it, and it is never read.
+    assert reads == [4097, 4097]
     assert lines[0] == _healthy("bot-a")
     assert lines[1].startswith("WARN bot_memory bot-b: config_skipped size=")
-    assert lines[1].endswith(" limit=4096 (not read)")
+    assert lines[1].endswith(" limit=4096 (not parsed)")
     assert lines[2] == _healthy("bot-c")
     assert len(lines) == 3
     assert not any(line.startswith("WARN bot_memory_inventory:") for line in lines)
@@ -575,19 +598,245 @@ def test_wall_time_is_bounded(tmp_path, monkeypatch) -> None:
 
 
 def test_output_lines_are_bounded(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(_mod, "BOT_MEMORY_MAX_LINES", 2)
+    monkeypatch.setattr(_mod, "BOT_MEMORY_MAX_LINES", 3)
     _inventory_home(tmp_path, monkeypatch, ["bot-a", "bot-b", "bot-c"])
     lines = _mod.bot_memory_inventory({"expectBotMemory": True})
+    # One line stays reserved, so the truncation line keeps the total within the limit.
     assert lines[:-1] == [_healthy("bot-a"), _healthy("bot-b")]
     _assert_truncated(lines, "output_line_limit", 2)
+    assert len(lines) == 3
 
 
 def test_output_bytes_are_bounded(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(_mod, "BOT_MEMORY_MAX_OUTPUT_BYTES", len(_healthy("bot-a")) + 1)
+    limit = len(_healthy("bot-a")) + 1 + _mod.BOT_MEMORY_TRUNCATION_RESERVE_BYTES
+    monkeypatch.setattr(_mod, "BOT_MEMORY_MAX_OUTPUT_BYTES", limit)
     _inventory_home(tmp_path, monkeypatch, ["bot-a", "bot-b"])
     lines = _mod.bot_memory_inventory({"expectBotMemory": True})
     assert lines[:-1] == [_healthy("bot-a")]
     _assert_truncated(lines, "output_byte_limit", 1)
+    assert sum(len(line.encode("utf-8")) + 1 for line in lines) <= limit
+
+
+def test_the_longest_truncation_line_fits_its_reservation() -> None:
+    limit = max(("wall_time_limit", "config_count_limit", "output_line_limit", "output_byte_limit",
+                 "instance_entry_limit"), key=len)
+    # Every reported instance took one discovered entry, so the count never exceeds the entry bound.
+    line = f"WARN bot_memory_inventory: truncated limit={limit} instances_reported={_mod.BOT_MEMORY_MAX_ENTRIES}"
+    assert len(line.encode("utf-8")) + 1 <= _mod.BOT_MEMORY_TRUNCATION_RESERVE_BYTES
+
+
+def _instance_dir(tmp_path: Path, name: str) -> Path:
+    return tmp_path / ".config/whatsoup/instances" / name
+
+
+def _refused(name: str, reason: str) -> str:
+    return f"WARN bot_memory {name}: config_refused reason={reason}"
+
+
+def _track_readiness(monkeypatch) -> list:
+    asked = []
+
+    def readiness(name, port):
+        asked.append(name)
+        return READY
+    monkeypatch.setattr(_mod, "bot_memory_readiness", readiness)
+    return asked
+
+
+def _fstat_reports(monkeypatch, path: Path, field: int, value: int) -> None:
+    """fstat of this one inode reports `value` in stat field `field` (4 = uid, 6 = size)."""
+    target = os.stat(path).st_ino
+    real_fstat = os.fstat
+
+    def fstat(fd):
+        result = real_fstat(fd)
+        if result.st_ino != target:
+            return result
+        fields = list(result[:10])
+        fields[field] = value
+        return os.stat_result(fields)
+    monkeypatch.setattr(os, "fstat", fstat)
+
+
+def test_a_symlinked_instance_folder_is_refused_and_never_probed(tmp_path, monkeypatch) -> None:
+    seen = _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "config.json").write_text(json.dumps({"healthPort": 9999, "memory": {"pinecone": CFG}}))
+    _instance_dir(tmp_path, "bot-b").symlink_to(elsewhere, target_is_directory=True)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_healthy("bot-a"), _refused("bot-b", "symlink")]
+    assert asked == ["bot-a"]
+    assert seen["describe"] == ["whatsapp-bot"]
+
+
+def test_a_symlinked_config_is_refused_and_never_probed(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"healthPort": 9999, "memory": {"pinecone": CFG}}))
+    folder = _instance_dir(tmp_path, "bot-a")
+    folder.mkdir(parents=True)
+    (folder / "config.json").symlink_to(elsewhere)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "symlink")]
+    assert asked == []
+
+
+def test_a_config_swapped_for_a_symlink_after_its_check_is_not_followed(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    decoy = tmp_path / "decoy.json"
+    decoy.write_text(json.dumps({"healthPort": 9999, "memory": {"pinecone": CFG}}))
+    folder = _instance_dir(tmp_path, "bot-a")
+    folder.mkdir(parents=True)
+    (folder / "config.json").symlink_to(decoy)
+    real_stat = os.stat
+
+    def stat_before_swap(path, *, dir_fd=None, follow_symlinks=True):
+        # The classification still sees a regular file; the link appears before the open.
+        if path == "config.json" and not follow_symlinks:
+            return real_stat(decoy)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+    monkeypatch.setattr(os, "stat", stat_before_swap)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "unopenable")]
+    assert asked == []
+
+
+def test_an_instance_folder_swapped_for_a_symlink_after_its_check_is_not_followed(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "config.json").write_text(json.dumps({"healthPort": 9999, "memory": {"pinecone": CFG}}))
+    _instance_dir(tmp_path, "bot-a").parent.mkdir(parents=True)
+    _instance_dir(tmp_path, "bot-a").symlink_to(decoy, target_is_directory=True)
+    real_stat = os.stat
+
+    def stat_before_swap(path, *, dir_fd=None, follow_symlinks=True):
+        # The classification still sees a folder; the link appears before the open.
+        if path == "bot-a" and not follow_symlinks:
+            return real_stat(decoy)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+    monkeypatch.setattr(os, "stat", stat_before_swap)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "unopenable")]
+    assert asked == []
+
+
+def test_a_config_others_can_write_is_refused(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    (_instance_dir(tmp_path, "bot-a") / "config.json").chmod(0o664)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "writable_by_others")]
+    assert asked == []
+
+
+def test_an_instance_folder_others_can_write_is_refused(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    _instance_dir(tmp_path, "bot-a").chmod(0o775)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "writable_by_others")]
+    assert asked == []
+
+
+def test_a_readable_instance_folder_is_accepted(tmp_path, monkeypatch) -> None:
+    # Fleet folders were 755 until recently: readable by others is not a refusal, writable is.
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    _instance_dir(tmp_path, "bot-a").chmod(0o755)
+    (_instance_dir(tmp_path, "bot-a") / "config.json").chmod(0o644)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_healthy("bot-a")]
+
+
+def test_an_instances_root_others_can_write_is_refused_whole(tmp_path, monkeypatch) -> None:
+    seen = _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    (tmp_path / ".config/whatsoup/instances").chmod(0o777)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        "WARN bot_memory_inventory: instances_refused reason=writable_by_others"]
+    assert asked == [] and seen["describe"] == []
+
+
+def test_an_instances_root_owned_by_another_user_is_refused_whole(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    _fstat_reports(monkeypatch, tmp_path / ".config/whatsoup/instances", 4, os.getuid() + 1)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        "WARN bot_memory_inventory: instances_refused reason=foreign_owner"]
+    assert asked == []
+
+
+def test_an_instance_folder_owned_by_another_user_is_refused(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    _fstat_reports(monkeypatch, _instance_dir(tmp_path, "bot-a"), 4, os.getuid() + 1)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "foreign_owner")]
+    assert asked == []
+
+
+def test_a_config_owned_by_another_user_is_refused(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    _fstat_reports(monkeypatch, _instance_dir(tmp_path, "bot-a") / "config.json", 4, os.getuid() + 1)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "foreign_owner")]
+    assert asked == []
+
+
+def test_a_hard_linked_config_is_refused(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    os.link(_instance_dir(tmp_path, "bot-a") / "config.json", tmp_path / "second-name.json")
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "multiple_links")]
+    assert asked == []
+
+
+def test_a_fifo_config_is_refused_without_blocking(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    folder = _instance_dir(tmp_path, "bot-a")
+    folder.mkdir(parents=True)
+    os.mkfifo(folder / "config.json")
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot-a", "not_regular")]
+
+
+def test_the_config_read_stops_at_the_limit_even_if_the_file_grew_after_its_size_check(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    monkeypatch.setattr(_mod, "BOT_MEMORY_CONFIG_MAX_BYTES", 64)
+    config = _instance_dir(tmp_path, "bot-a") / "config.json"
+    assert config.stat().st_size > 64
+    _fstat_reports(monkeypatch, config, 6, 10)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        "WARN bot_memory bot-a: config_skipped size=65 limit=64 (not parsed)"]
+    assert asked == []
+
+
+def test_instance_discovery_is_bounded_before_any_config_is_read(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_mod, "BOT_MEMORY_MAX_ENTRIES", 3)
+    _inventory_home(tmp_path, monkeypatch, ["bot-a", "bot-b", "bot-c", "bot-d"])
+    reads = []
+    monkeypatch.setattr(_mod, "bot_memory_read_config", lambda root_fd, name: reads.append(name))
+    lines = _mod.bot_memory_inventory({"expectBotMemory": True})
+    assert lines == ["WARN bot_memory_inventory: truncated limit=instance_entry_limit instances_reported=0"]
+    _assert_truncated(lines, "instance_entry_limit", 0)
+    assert reads == []
+
+
+def test_instance_discovery_at_its_bound_still_runs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_mod, "BOT_MEMORY_MAX_ENTRIES", 3)
+    _inventory_home(tmp_path, monkeypatch, ["bot-a", "bot-b", "bot-c"])
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        _healthy("bot-a"), _healthy("bot-b"), _healthy("bot-c")]
+
+
+def test_an_unsafe_instance_name_is_refused_as_one_safe_line(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot\nFAIL health x"])
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_refused("bot_FAIL_health_x", "unsafe_name")]
+    assert asked == []
+
+
+def test_a_plain_file_beside_the_instances_is_ignored(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    (tmp_path / ".config/whatsoup/instances/.DS_Store").write_bytes(b"\0")
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_healthy("bot-a")]
 
 
 def test_readiness_without_a_token_sends_nothing(monkeypatch) -> None:
