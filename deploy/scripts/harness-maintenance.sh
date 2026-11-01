@@ -1002,7 +1002,7 @@ claude_config_isolation() {
   case "$job" in
     /*) ;;
     *)
-      echo "this job's $job_selector $job is not an absolute path"
+      echo "this job's $job_selector is not an absolute path"
       return 1 ;;
   esac
   if ! job_dir="$(claude_config_dir_resolved "$job")" || ! default_dir="$(claude_config_dir_resolved "")"; then
@@ -1010,7 +1010,7 @@ claude_config_isolation() {
     return 1
   fi
   if [ "$job_dir" = "$default_dir" ]; then
-    echo "this job's $job_selector $job is the default config dir"
+    echo "this job's $job_selector is the default config dir"
     return 1
   fi
   if ! job_svc="$(claude_keychain_service "$job")"; then
@@ -1040,7 +1040,7 @@ claude_config_isolation() {
         return 1 ;;
     esac
     if [ "$job" = "$other" ]; then
-      echo "this job's $job_selector $job equals $name's effective credential-store selector"
+      echo "this job's $job_selector equals $name's effective credential-store selector"
       return 1
     fi
     if ! other_dir="$(claude_config_dir_resolved "$other")"; then
@@ -1048,7 +1048,7 @@ claude_config_isolation() {
       return 1
     fi
     if [ "$job_dir" = "$other_dir" ]; then
-      echo "this job's $job_selector $job resolves to $name's config dir (effective credential-store selector)"
+      echo "this job's $job_selector resolves to $name's config dir (effective credential-store selector)"
       return 1
     fi
     if ! other_svc="$(claude_keychain_service "$other")"; then
@@ -1056,7 +1056,7 @@ claude_config_isolation() {
       return 1
     fi
     if [ "$job_svc" = "$other_svc" ]; then
-      echo "this job's $job_selector $job shares $name's keychain item"
+      echo "this job's $job_selector shares $name's keychain item"
       return 1
     fi
   done < "$CLAUDE_INSTANCE_ENV_FILE"

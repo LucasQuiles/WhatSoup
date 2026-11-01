@@ -105,7 +105,8 @@ scheduling agent CLI work. Do not copy a bot's credentials or point maintenance
 at its store. If the job's configuration and effective credential store cannot
 be proven isolated from every inventoried instance, it starts no agent CLI,
 records `claude-config-isolation: refused`, and ends `degraded` until the
-selectors are reconciled.
+selectors are reconciled. Refusal events, state, run logs and alert evidence name
+the selector field and failed comparison without recording its value.
 
 On systemd the user manager environment, then `Environment=`, then
 `EnvironmentFiles=` are applied from the manager's resolved unit definition,

@@ -154,6 +154,56 @@ function expectRefused(h: Harness, r: RunResult, reason: string, updateStatus: '
 }
 
 describe('agent CLI login isolation of the maintenance job', () => {
+
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'] as const) {
+    for (const refusal of ['relative', 'default', 'equal', 'resolved', 'keychain'] as const) {
+      it(`does not disclose ${key} in ${refusal} refusal outputs`, () => {
+        const h = withInstance(makeHarness(), '/distinct-bot-store');
+        let selected: string;
+        let reason: string;
+        if (refusal === 'relative') {
+          selected = 'private-selector-value/relative';
+          reason = 'is not an absolute path';
+        } else if (refusal === 'default') {
+          selected = `${h.home}/.claude/`;
+          mkdirSync(selected);
+          reason = 'is the default config dir';
+        } else if (refusal === 'equal') {
+          selected = path.join(h.home, 'private-selector-value');
+          withInstance(h, selected);
+          reason = "equals alpha's";
+        } else if (refusal === 'resolved') {
+          const real = path.join(h.home, 'bot-store');
+          selected = path.join(h.home, 'private-selector-alias');
+          mkdirSync(real);
+          symlinkSync(real, selected);
+          withInstance(h, real);
+          reason = "resolves to alpha's";
+        } else {
+          // Distinct nonexistent paths with the same eight-digit SHA-256 prefix.
+          selected = '/__whatsoup_selector_fixture__/store-41292';
+          withInstance(h, '/__whatsoup_selector_fixture__/store-103760');
+          expect(existsSync('/__whatsoup_selector_fixture__')).toBe(false);
+          reason = "shares alpha's keychain item";
+        }
+        const result = run(h, [], { [key]: selected });
+        expectRefused(h, result, reason);
+        expect(events(result, 'claude-config-isolation')[0]!.message).toContain(key);
+        const outputRoot = path.join(h.home, '.cache/whatsoup/harness-maintenance');
+        const outputs = {
+          state: readFileSync(path.join(outputRoot, 'state.json'), 'utf8'),
+          runLog: readFileSync(path.join(outputRoot, 'run.log'), 'utf8'),
+          alert: readFileSync(h.alertLog, 'utf8'),
+          stdout: result.stdout,
+          stderr: result.stderr,
+        };
+        for (const [surface, output] of Object.entries(outputs)) {
+          expect(output, `${surface} must not disclose the selected credential store`).not.toContain(selected);
+        }
+      }, T);
+    }
+  }
+
   it('starts the installer, its --version postcheck and the listings when the job has its own config dir', () => {
     const h = makeHarness();
     withInstance(h, path.join(h.home, 'bot-config'));
