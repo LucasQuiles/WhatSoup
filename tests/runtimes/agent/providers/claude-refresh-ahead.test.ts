@@ -779,7 +779,7 @@ describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () =>
       rmSync(middle);
       symlinkSync(second, middle, 'dir');
       return h.spawnImpl(...args);
-    }) as typeof spawnProcess;
+    }) as unknown as typeof spawnProcess;
 
     const run = refreshClaudeLoginAhead('claude', { [selector]: requested }, { ...h.deps, spawnImpl });
     for (const child of h.children) child.emit('close', 0, null);
