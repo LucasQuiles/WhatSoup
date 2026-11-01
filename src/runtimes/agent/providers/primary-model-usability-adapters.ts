@@ -611,6 +611,8 @@ async function probeApiModelAccess(
         : '';
       return mapApiGenerationFailure(response.status, errText);
     }
+    // Success is established by status; cancellation must not wait for the response stream.
+    void response.body?.cancel().catch(() => undefined);
     return { status: 'found' };
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
@@ -618,6 +620,7 @@ async function probeApiModelAccess(
       ? { status: 'timeout' }
       : { status: 'provider_unavailable' };
   } finally {
+    controller.abort();
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
   }

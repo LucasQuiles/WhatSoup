@@ -1366,6 +1366,57 @@ describe('createPrimaryModelProbeAdapters', () => {
     ).resolves.toEqual({ status: 'not_found' });
   });
 
+  it.each([
+    ['openai-api', 'complete'],
+    ['openai-api', 'reject'],
+    ['openai-api', 'pending'],
+    ['anthropic-api', 'complete'],
+    ['anthropic-api', 'reject'],
+    ['anthropic-api', 'pending'],
+  ] as const)('releases a successful %s response with %s cancellation without waiting for its body', async (provider, cancellation) => {
+    const cancel = vi.fn(() => {
+      if (cancellation === 'reject') return Promise.reject(new Error('fixture cancellation failed'));
+      if (cancellation === 'pending') return new Promise<void>(() => {});
+      return undefined;
+    });
+    const body = new ReadableStream<Uint8Array>({ cancel }, { highWaterMark: 0 });
+    let requestSignal: AbortSignal | null | undefined;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      requestSignal = init?.signal;
+      return new Response(body, { status: 200 });
+    });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider, model: 'api-live-model' }),
+    ).resolves.toEqual({ status: 'found' });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
+  it('releases a successful bodyless request before returning usability', async () => {
+    let requestSignal: AbortSignal | null | undefined;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      requestSignal = init?.signal;
+      return new Response(null, { status: 204 });
+    });
+    const adapters = createPrimaryModelProbeAdapters(undefined, {
+      resolveProviderBinaryIdentity: vi.fn((binary) => ({ resolvedPath: binary, sha256: 'a'.repeat(64) })),
+      fetch: fetchImpl as unknown as typeof fetch,
+      resolveApiKey: vi.fn(() => 'sk-test-secret'),
+    });
+
+    await expect(
+      adapters.probeApiModelAccess?.({ provider: 'openai-api', model: 'api-live-model' }),
+    ).resolves.toEqual({ status: 'found' });
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it('does not parse successful generation bodies while checking usability', async () => {
     const fetchImpl = vi.fn(async () => new Response('{not-json', {
       status: 200,

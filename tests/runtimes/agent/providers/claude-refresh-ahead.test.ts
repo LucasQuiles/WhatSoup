@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   REFRESH_AHEAD_HARD_CAP_MS,
@@ -758,6 +758,82 @@ describe('refreshClaudeLoginAhead: never killed', () => {
 });
 
 describe('refreshClaudeLoginAhead: durable owner claim (proposed repair)', () => {
+  it.each([
+    ['CLAUDE_CONFIG_DIR', 'existing'],
+    ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'existing'],
+    ['CLAUDE_CONFIG_DIR', 'missing'],
+    ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'missing'],
+  ] as const)('refuses an intermediate alias for %s with an %s store before credential access', async (selector, state) => {
+    const root = privateStoreDir();
+    const first = join(root, 'first');
+    const second = join(root, 'second');
+    mkdirSync(first, { mode: 0o700 });
+    mkdirSync(second, { mode: 0o700 });
+    if (state === 'existing') mkdirSync(join(first, 'store'), { mode: 0o700 });
+    mkdirSync(join(second, 'store'), { mode: 0o700 });
+    const middle = join(root, 'middle');
+    symlinkSync(first, middle, 'dir');
+    const requested = join(middle, 'store');
+    const h = harness();
+    const spawnImpl = vi.fn((...args: Parameters<typeof spawnProcess>) => {
+      rmSync(middle);
+      symlinkSync(second, middle, 'dir');
+      return h.spawnImpl(...args);
+    }) as typeof spawnProcess;
+
+    const run = refreshClaudeLoginAhead('claude', { [selector]: requested }, { ...h.deps, spawnImpl });
+    for (const child of h.children) child.emit('close', 0, null);
+
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(spawnImpl).not.toHaveBeenCalled();
+    expect(h.readFileStore).not.toHaveBeenCalled();
+    expect(existsSync(join(first, 'store', OWNER_DIR))).toBe(false);
+    expect(existsSync(join(second, 'store', OWNER_DIR))).toBe(false);
+    if (state === 'missing') expect(existsSync(join(first, 'store'))).toBe(false);
+  });
+
+  it.each([
+    ['CLAUDE_CONFIG_DIR', 'relative'],
+    ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'relative'],
+    ['CLAUDE_CONFIG_DIR', 'dot'],
+    ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'dot'],
+    ['CLAUDE_CONFIG_DIR', 'parent'],
+    ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'parent'],
+  ] as const)('refuses a %s selector with %s path segments before credential access', async (selector, spelling) => {
+    const dir = privateStoreDir();
+    const requested = spelling === 'relative' ? relative(process.cwd(), dir)
+      : spelling === 'dot' ? `${dirname(dir)}/./.claude` : `${dir}/../.claude`;
+    const h = harness();
+
+    const run = refreshClaudeLoginAhead('claude', { [selector]: requested }, h.deps);
+    for (const child of h.children) child.emit('close', 0, null);
+
+    await expect(run).resolves.toEqual({ outcome: 'owner-unavailable' });
+    expect(h.spawnImpl).not.toHaveBeenCalled();
+    expect(h.readFileStore).not.toHaveBeenCalled();
+    expect(existsSync(join(dir, OWNER_DIR))).toBe(false);
+  });
+
+  it.each(['/tmp', '/var/tmp'])('preserves an accepted platform prefix at %s and its exact selector', async (prefix) => {
+    const root = mkdtempSync(join(prefix, 'whatsoup-refresh-platform-'));
+    privateStoreRoots.push(root);
+    const dir = join(root, '.claude');
+    mkdirSync(dir, { mode: 0o700 });
+    const requested = `${dir}/`;
+    const env = { CLAUDE_SECURESTORAGE_CONFIG_DIR: requested };
+    const h = harness();
+
+    const run = refreshClaudeLoginAhead('claude', env, h.deps);
+    expect(h.spawnImpl).toHaveBeenCalledTimes(1);
+    const options = (h.spawnImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0]![2] as { env: NodeJS.ProcessEnv };
+    expect(options.env).toBe(env);
+    expect(options.env.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBe(requested);
+    expect(existsSync(ownerPath(dir))).toBe(true);
+    h.children[0]!.emit('close', 0, null);
+    await expect(run).resolves.toMatchObject({ outcome: 'ran', exitCode: 0 });
+    expect(existsSync(ownerPath(dir))).toBe(false);
+  });
+
   it('uses one claim for canonical aliases, preserves the CLI selector, and alerts a fresh parent', async () => {
     const dir = privateStoreDir();
     const alias = join(dirname(dir), 'same-store-alias');

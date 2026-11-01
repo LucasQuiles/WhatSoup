@@ -46,7 +46,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { createChildLogger } from '../../../logger.ts';
 import { systemClock } from '../../../lib/clock.ts';
 import { createPrivateFileIsolatedSync, writeAtomicPrivateFileIsolatedSync } from '../../../lib/private-fs-isolated.ts';
@@ -191,14 +191,20 @@ type RefreshOwnerLocation = {
  * a store initialized by refresh-ahead. A final symlink is an established
  * canonical alias, so it may resolve to the store; the alias and its physical
  * parent chain, plus the resolved store and its physical ancestors, must
- * remain private and ownership-safe.
+ * remain private and ownership-safe. User-owned intermediate aliases are refused;
+ * only the root-owned macOS /var and /tmp prefix aliases are accepted. This
+ * assumes cooperating same-UID writers, including changes to a final private alias.
  */
-function validatePrivateStoreParent(parent: string, uid: number): boolean {
+function validatePrivateStoreParent(parent: string, uid: number, originalAncestry = false): boolean {
   const parentIdentity = lstatSync(parent);
   if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink()
     || parentIdentity.uid !== uid || (parentIdentity.mode & 0o022) !== 0) return false;
   for (let ancestor = dirname(parent);; ancestor = dirname(ancestor)) {
     const ancestorIdentity = lstatSync(ancestor);
+    const systemTarget = ancestor === '/var' ? '/private/var' : ancestor === '/tmp' ? '/private/tmp' : null;
+    if (originalAncestry && process.platform === 'darwin' && systemTarget !== null
+      && ancestorIdentity.isSymbolicLink() && ancestorIdentity.uid === 0
+      && realpathSync(ancestor) === systemTarget) continue;
     if (!ancestorIdentity.isDirectory() || ancestorIdentity.isSymbolicLink()
       || (ancestorIdentity.uid !== 0 && ancestorIdentity.uid !== uid)
       || ((ancestorIdentity.mode & 0o022) !== 0 && (ancestorIdentity.mode & 0o1000) === 0)) return false;
@@ -226,7 +232,11 @@ function validateExistingCredentialStore(requested: string, store: string): bool
  */
 function refreshOwnerLocation(env: NodeJS.ProcessEnv): RefreshOwnerLocation | null {
   try {
-    const requested = claudeSecureStorageDir(env);
+    const selector = claudeSecureStorageDir(env);
+    if (!isAbsolute(selector) || selector.split('/').some((part) => part === '.' || part === '..')) return null;
+    const requested = selector.replace(/\/+$/, '') || '/';
+    if (typeof process.getuid !== 'function'
+      || !validatePrivateStoreParent(dirname(requested), process.getuid(), true)) return null;
     let store: string;
     try {
       store = realpathSync(requested);
