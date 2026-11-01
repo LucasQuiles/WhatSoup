@@ -5,6 +5,7 @@
  * launchd world (tests/helpers/release-activate-world.ts). All identifiers are
  * fabricated.
  */
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   lstatSync,
@@ -65,6 +66,7 @@ import {
 } from '../../scripts/release-activate.ts';
 import { argvNamesEntrypoint } from '../../scripts/lib/release-activation/apply.ts';
 import { classifyAuthenticatedHealth } from '../../scripts/lib/release-activation/host.ts';
+import { parsePlist } from '../../scripts/check-service-units.ts';
 import { stageInstancePlist } from '../../scripts/lib/release-activation/plan.ts';
 import {
   activationArgs,
@@ -133,6 +135,51 @@ afterEach(() => {
   fsFaults.write = null;
   fsFaults.fsync = null;
 });
+
+function directHealthDefinition(programArguments: string[], workingDirectory: string, plistPath: string, program = programArguments[0] ?? ''): string {
+  return [
+    'com.bot-errors.health = {',
+    `\tpath = ${plistPath}`,
+    '\ttype = LaunchAgent',
+    '\tstate = not running',
+    `\tprogram = ${program}`,
+    '\targuments = {',
+    ...programArguments.map((arg) => `\t\t${arg}`),
+    '\t}',
+    `\tworking directory = ${workingDirectory}`,
+    '}',
+    '',
+  ].join('\n');
+}
+
+function directHealthArguments(root: string, home: string, python: string): string[] {
+  return [
+    python, path.join(root, 'deploy', 'scripts', 'bot-errors-runner.py'),
+    '--instance', 'bot-errors-health',
+    '--source', 'service-exit',
+    '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', path.join(home, '.local', 'state', 'bot-errors', 'logs', 'health.err.log'),
+    '--diagnostic', 'launchd_label=com.bot-errors.health',
+    '--', python, path.join(root, 'deploy', 'scripts', 'bot-errors-health-check.py'), '--daily',
+  ];
+}
+
+function directHealthDefinitionFromPlist(plistText: string, plistPath: string): string {
+  const parsed = parsePlist(plistText);
+  const workingDirectory = parsed?.scalarKeys['WorkingDirectory'];
+  if (parsed === null || workingDirectory === undefined) {
+    throw new Error('health installer plist is not a parseable direct-Python definition');
+  }
+  return directHealthDefinition(parsed.programArguments, workingDirectory, plistPath);
+}
+
+function trustedHealthPython(name = 'python3'): string {
+  const bin = path.join(fixture.base, 'health & bin');
+  mkdirSync(bin, { recursive: true });
+  const python = path.join(bin, name);
+  writeFileSync(python, '', { mode: 0o700 });
+  return python;
+}
 
 describe('release:activate arguments', () => {
   it('registers the npm script on the pinned-node runner', () => {
@@ -252,6 +299,119 @@ describe('release:activate BOT ERRORS consumer compatibility', () => {
     expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
     expect(result.json.ready).toBe(true);
     expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('accepts the real direct-Python health installer definition without starting a real service', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const shimDir = path.join(fixture.base, 'installer-shims');
+    mkdirSync(shimDir);
+    for (const command of ['launchctl', 'plutil']) {
+      writeFileSync(path.join(shimDir, command), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    }
+    const python = trustedHealthPython();
+    const profile = path.join(fixture.base, 'health-profile.json');
+    const stateDir = path.join(fixture.home, '.local', 'state', 'bot-errors');
+    const envFile = path.join(fixture.base, 'bot-errors.env');
+    writeFileSync(profile, '{}\n');
+    writeFileSync(envFile, '');
+    execFileSync('/bin/bash', ['deploy/scripts/install-bot-errors-health-launchd.sh'], {
+      cwd: process.cwd(),
+      env: {
+        HOME: fixture.home,
+        PATH: `${shimDir}:/usr/bin:/bin`,
+        BOT_ERRORS_REPO_ROOT: fixture.oldRelease,
+        BOT_ERRORS_PYTHON: python,
+        BOT_ERRORS_HEALTH_PROFILE: profile,
+        BOT_ERRORS_STATE_DIR: stateDir,
+        BOT_ERRORS_ENV_FILE: envFile,
+        BOT_ERRORS_HEALTH_LABEL: 'com.bot-errors.health',
+        BOT_ERRORS_HEALTH_HOUR: '7',
+        BOT_ERRORS_HEALTH_MINUTE: '20',
+      },
+      timeout: 5_000,
+    });
+    const plistPath = path.join(fixture.launchAgents, 'com.bot-errors.health.plist');
+    const installed = readFileSync(plistPath, 'utf8');
+    const directDefinition = directHealthDefinitionFromPlist(installed, plistPath);
+    expect(parsePlist(installed)?.programArguments).toHaveLength(16);
+    expect(installed).toContain('health &amp; bin');
+    expect(parsePlist(installed)?.programArguments[0]).toBe(python);
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({
+        code: 0,
+        stdout: directDefinition,
+        stderr: '',
+      }),
+    });
+
+    const result = await run(world, activationArgs(fixture));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.ok);
+    expect(result.json.ready).toBe(true);
+    expect(world.botErrorsHealthPrintReads).toBe(1);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each(['program mismatch', 'checker interpreter mismatch', 'checker path mismatch', 'unsafe Python'])(
+    'refuses a direct health grammar with %s', async (kind) => {
+      writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+      writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+      const python = trustedHealthPython();
+      const args = directHealthArguments(fixture.oldRelease, fixture.home, python);
+      if (kind === 'checker interpreter mismatch') args[13] = trustedHealthPython('python3.15');
+      if (kind === 'checker path mismatch') args[14] = path.join(fixture.oldRelease, 'deploy', 'scripts', 'other-check.py');
+      if (kind === 'unsafe Python') args[0] = 'relative/python3';
+      const world = new SimulatedLaunchd(fixture, {
+        botErrorsHealthPrint: () => ({
+          code: 0,
+          stdout: directHealthDefinition(
+            args,
+            fixture.oldRelease,
+            path.join(fixture.launchAgents, 'com.bot-errors.health.plist'),
+            kind === 'program mismatch' ? '/bin/bash' : args[0]!,
+          ),
+          stderr: '',
+        }),
+      });
+      const before = snapshotTree(fixture.base);
+
+      const result = await run(world, activationArgs(fixture));
+
+      expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+      expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+        .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+      expect(world.mutatingCalls()).toEqual([]);
+      expect(snapshotTree(fixture.base)).toEqual(before);
+    },
+  );
+
+  it('rechecks a direct health consumer immediately before switching', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const python = trustedHealthPython();
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => {
+        const root = read === 1 ? fixture.oldRelease : fixture.newRelease;
+        return {
+          code: 0,
+          stdout: directHealthDefinition(
+            directHealthArguments(root, fixture.home, python),
+            root,
+            path.join(fixture.launchAgents, 'com.bot-errors.health.plist'),
+          ),
+          stderr: '',
+        };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
     expect(world.mutatingCalls()).toEqual([]);
   });
 

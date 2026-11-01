@@ -226,21 +226,44 @@ function isTrustedHealthPython(python: string): boolean {
   }
 }
 
+/** Validate the immutable runner/checker suffix shared by the historical wrapper and direct installer grammars. */
+function parseHealthRunnerSuffix(values: string[], start: number, home: string): { root: string } | null {
+  const python = values[start];
+  if (python === undefined || !isTrustedHealthPython(python)) return null;
+  const runner = values[start + 1];
+  if (runner === undefined) return null;
+  const root = path.dirname(path.dirname(path.dirname(runner)));
+  const expected = [
+    python, path.join(root, BOT_ERRORS_HEALTH_RUNNER),
+    '--instance', 'bot-errors-health',
+    '--source', 'service-exit',
+    '--summary', 'BOT ERRORS daily health command failed',
+    '--log-hint', path.join(home, '.local', 'state', 'bot-errors', 'logs', 'health.err.log'),
+    '--diagnostic', `launchd_label=${BOT_ERRORS_HEALTH_LABEL}`,
+    '--', python, path.join(root, BOT_ERRORS_HEALTH_CHECKER), '--daily',
+  ];
+  if (values.length !== start + expected.length || expected.some((value, index) => values[start + index] !== value)) return null;
+  return { root };
+}
+
 function parseHealthDefinition(stdout: string, home: string): { root: string } | null {
   const lines = stdout.split('\n');
-  if (!lines.includes('\tprogram = /bin/bash')) return null;
   const begin = lines.indexOf('\targuments = {');
   const end = begin < 0 ? -1 : lines.indexOf('\t}', begin + 1);
   if (begin < 0 || end < 0) return null;
   const args = lines.slice(begin + 1, end).map((line) => line.startsWith('\t\t') ? line.slice(2) : null);
-  if (args.some((arg) => arg === null) || args.length !== 20) return null;
+  if (args.some((arg) => arg === null)) return null;
   const values = args as string[];
-  const python = values[4];
-  if (python === undefined || !isTrustedHealthPython(python)) return null;
-  const runner = values[5];
-  if (runner === undefined) return null;
-  const root = path.dirname(path.dirname(path.dirname(runner)));
-  if (!lines.includes(`\tworking directory = ${root}`)) return null;
+  const programLines = lines.filter((line) => line.startsWith('\tprogram = '));
+  const program = programLines.length === 1 ? programLines[0]?.slice('\tprogram = '.length) : undefined;
+  if (values.length === 16 && program !== undefined && program === values[0]) {
+    const direct = parseHealthRunnerSuffix(values, 0, home);
+    return direct !== null && lines.includes(`\tworking directory = ${direct.root}`) ? direct : null;
+  }
+  if (!lines.includes('\tprogram = /bin/bash') || values.length !== 20) return null;
+  const suffix = parseHealthRunnerSuffix(values, 4, home);
+  if (suffix === null || !lines.includes(`\tworking directory = ${suffix.root}`)) return null;
+  const root = suffix.root;
   const wrapper = values[2];
   if (wrapper === undefined) return null;
   const profilePrefix = `if [[ -z "\${BOT_ERRORS_HEALTH_PROFILE:-}" ]]; then export BOT_ERRORS_HEALTH_PROFILE=${path.join(root, 'deploy', 'health-profiles')}/`;
@@ -252,15 +275,8 @@ function parseHealthDefinition(stdout: string, home: string): { root: string } |
   if (!/^[A-Za-z0-9_-]+\.json$/.test(profileName)) return null;
   const expected = [
     '/bin/bash', '-c', botErrorsHealthWrapper(home, root, profileName), 'bot-errors-health',
-    python, path.join(root, BOT_ERRORS_HEALTH_RUNNER),
-    '--instance', 'bot-errors-health',
-    '--source', 'service-exit',
-    '--summary', 'BOT ERRORS daily health command failed',
-    '--log-hint', path.join(home, '.local', 'state', 'bot-errors', 'logs', 'health.err.log'),
-    '--diagnostic', `launchd_label=${BOT_ERRORS_HEALTH_LABEL}`,
-    '--', python, path.join(root, BOT_ERRORS_HEALTH_CHECKER), '--daily',
   ];
-  if (values.some((value, index) => value !== expected[index])) return null;
+  if (values.slice(0, 4).some((value, index) => value !== expected[index])) return null;
   return { root };
 }
 
