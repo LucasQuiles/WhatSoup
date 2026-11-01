@@ -24,6 +24,7 @@ import tempfile
 import time
 from typing import Any, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -2891,6 +2892,7 @@ _INSTANCE_FAIL_PREFIXES = {
     "profile_coverage",
     "profile_coverage_service",
     "tree_provenance",
+    "bot_memory",
 }
 
 # Infrastructure-class daily-health FAIL categories: host-environment problems
@@ -4235,6 +4237,193 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:
         return f"FAIL {url} {exc}"
+
+
+# Bot memory inventory (owner rulings 2026-11-01). A real memory defect pages
+# BOT ERRORS as a per-instance FAIL; deletion protection off and zero saved
+# records are evidence only. The inventory may use each instance's OWN Pinecone
+# key for two read-only calls to that instance's own project (describe index,
+# index stats): a scoped exception to the "provider credentials stay excluded"
+# probe envelope above. The key is resolved in the runtime lookup order
+# (provider_credential_value), held in memory and never written to a line.
+# Off unless the health profile sets expectBotMemory.
+BOT_MEMORY_TEXT_FIELD = {"text": "text"}  # toPineconeRecord writes `text` (src/runtimes/chat/providers/pinecone.ts)
+BOT_MEMORY_DEFAULT_INDEX = "whatsapp-bot"
+BOT_MEMORY_TIMEOUT_SECONDS = 6
+BOT_MEMORY_BODY_LIMIT = 4 * 1024 * 1024
+PINECONE_CONTROL_URL = "https://api.pinecone.io"
+PINECONE_API_VERSION = "2025-10"
+PINECONE_DATA_HOST_RE = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.pinecone\.io")
+
+
+def bot_memory_configs(home: Path) -> list[tuple[str, dict[str, str], int | None]]:
+    """(instance, memory.pinecone settings, healthPort) for every instance that configures memory."""
+    root = home / ".config/whatsoup/instances"
+    found: list[tuple[str, dict[str, str], int | None]] = []
+    if not root.is_dir():
+        return found
+    for entry in sorted(root.iterdir()):
+        try:
+            config = json.loads((entry / "config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        memory = config.get("memory") if isinstance(config, dict) else None
+        pinecone = memory.get("pinecone") if isinstance(memory, dict) else None
+        if not isinstance(pinecone, dict) or not pinecone:
+            continue
+        settings = {key: value for key, value in pinecone.items()
+                    if key in ("projectId", "expectedHostSuffix", "index", "apiKeyEnv", "apiKeyService")
+                    and isinstance(value, str)}
+        port = config.get("healthPort")
+        found.append((entry.name, settings, port if isinstance(port, int) else None))
+    return found
+
+
+def bot_memory_readiness(instance: str, port: int | None) -> dict[str, Any]:
+    """memory.readiness from the instance's privileged /health body."""
+    token = instance_health_token(instance)
+    if not token or port is None:
+        return {"state": None, "http": None, "why": "no_health_token" if not token else "no_health_port"}
+    req = Request(f"http://127.0.0.1:{port}/health", method="GET", headers={"Authorization": f"Bearer {token}"})
+    try:
+        try:
+            with urlopen(req, timeout=HEALTH_PROBE_TIMEOUT_SECONDS) as response:
+                code, raw = response.status, response.read(BOT_MEMORY_BODY_LIMIT)
+        except HTTPError as exc:  # an unhealthy instance answers 503 with the same privileged body
+            if 300 <= exc.code < 400:
+                exc.close()
+                return {"state": None, "http": exc.code, "why": "redirect_refused"}
+            code, raw = exc.code, exc.read(BOT_MEMORY_BODY_LIMIT)
+    except Exception as exc:  # the daily report must survive any probe failure
+        return {"state": None, "http": None, "why": type(exc).__name__}
+    try:
+        body = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return {"state": None, "http": code, "why": "unparsed_body"}
+    memory = body.get("memory") if isinstance(body, dict) else None
+    readiness = memory.get("readiness") if isinstance(memory, dict) else None
+    if isinstance(readiness, dict) and isinstance(readiness.get("state"), str):
+        return {"state": readiness["state"], "http": code, "failure_code": readiness.get("failure_code")}
+    if isinstance(readiness, str):
+        return {"state": readiness, "http": code, "failure_code": None}
+    return {"state": None, "http": code, "why": "no_memory_readiness"}
+
+
+def _pinecone_read(key: str, url: str, method: str = "GET") -> tuple[int | None, Any]:
+    req = Request(url, method=method, data=b"{}" if method == "POST" else None,
+                  headers={"Api-Key": key, "X-Pinecone-Api-Version": PINECONE_API_VERSION,
+                           "Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=BOT_MEMORY_TIMEOUT_SECONDS) as response:
+            return response.status, json.loads(response.read(BOT_MEMORY_BODY_LIMIT) or b"null")
+    except HTTPError as exc:  # redirects are refused, so the key never leaves this host
+        exc.close()
+        return exc.code, None
+    except Exception:  # the daily report must survive any probe failure
+        return None, None
+
+
+def pinecone_describe_index(key: str, index: str) -> dict[str, Any]:
+    """Read-only control-plane describe of one index in the key's own project."""
+    code, body = _pinecone_read(key, f"{PINECONE_CONTROL_URL}/indexes/{quote(index, safe='')}")
+    if code != 200 or not isinstance(body, dict):
+        return {"http": code}
+    embed = body.get("embed") if isinstance(body.get("embed"), dict) else {}
+    return {"http": code, "host": body.get("host"), "field_map": embed.get("field_map"),
+            "model": embed.get("model"), "deletion_protection": body.get("deletion_protection")}
+
+
+def pinecone_index_stats(key: str, host: str) -> dict[str, Any]:
+    """Read-only data-plane record count of one index."""
+    code, body = _pinecone_read(key, f"https://{host}/describe_index_stats", "POST")
+    records = body.get("totalVectorCount") if isinstance(body, dict) else None
+    return {"http": code, "records": records if isinstance(records, int) else None}
+
+
+def bot_memory_host_in_project(host: str, cfg: dict[str, str]) -> bool:
+    """The runtime's project guard (src/lib/pinecone-project-guard.ts) applied to an index host."""
+    suffix, project = cfg.get("expectedHostSuffix"), cfg.get("projectId")
+    if suffix and not host.endswith(suffix):
+        return False
+    return not (project and f"-{project}." not in host)
+
+
+def bot_memory_lines(
+    instance: str,
+    cfg: dict[str, str],
+    readiness: dict[str, Any] | None,
+    index: dict[str, Any] | None,
+    stats: dict[str, Any] | None,
+    key_resolved: bool,
+) -> list[str]:
+    """Verdict for one instance: FAIL/WARN lines first, then one evidence line."""
+    index_name = cfg.get("index") or BOT_MEMORY_DEFAULT_INDEX
+    readiness = readiness or {}
+    state = readiness.get("state")
+    flagged: list[str] = []
+    if state is None:
+        flagged.append(f"WARN bot_memory {instance}: readiness_unreadable http={readiness.get('http')} why={readiness.get('why')}")
+    elif state != "ready":
+        flagged.append(f"FAIL bot_memory {instance}: readiness={state} failure_code={readiness.get('failure_code')}")
+    # The bot's own readiness already reports index_missing and project_mismatch
+    # with the bot's key. With readiness=ready, the same finding through this
+    # job's key means the job resolved a different key, not a bot defect.
+    if state == "ready":
+        level, note = "WARN", " job_key_differs (readiness=ready)"
+    elif state is None:
+        level, note = "WARN", " unconfirmed (readiness unreadable)"
+    else:
+        level, note = "FAIL", ""
+    evidence = [f"readiness={state}", f"index={index_name}"]
+    if not key_resolved:
+        evidence.append("index_not_probed=key_not_visible")
+    elif not index or index.get("http") != 200:
+        code = (index or {}).get("http")
+        if code == 404:
+            flagged.append(f"{level} bot_memory {instance}: index_missing index={index_name}{note}")
+        else:
+            flagged.append(f"WARN bot_memory {instance}: index_unreadable http={code}")
+        evidence.append(f"index_http={code}")
+    else:
+        in_project = bot_memory_host_in_project(index.get("host") or "", cfg)
+        if not in_project:
+            flagged.append(f"{level} bot_memory {instance}: wrong_project index host is outside the configured project{note}")
+        field_map = index.get("field_map")
+        # Readiness never checks the field map, so a wrong map on the bot's own index always fails.
+        if in_project and field_map != BOT_MEMORY_TEXT_FIELD:
+            flagged.append(f"FAIL bot_memory {instance}: field_map={field_map} (WhatSoup writes `text`; every memory save fails)")
+        records = (stats or {}).get("records") if (stats or {}).get("http") == 200 else "unknown"
+        evidence += [f"field_map={'text' if field_map == BOT_MEMORY_TEXT_FIELD else 'other'}",
+                     f"protection={index.get('deletion_protection')}", f"records={records}"]
+    return flagged + [f"bot_memory {instance}: " + " ".join(evidence)]
+
+
+def bot_memory_inventory(profile: dict[str, Any]) -> list[str]:
+    if not profile_bool(profile, "expectBotMemory", False):
+        return []
+    env_key = service_env_var("pinecone")
+    # The bot launcher unsets PINECONE_API_KEY before its own lookup, so this
+    # job's environment must not stand in for the bot's key either.
+    source_env = {name: value for name, value in os.environ.items() if name != env_key}
+    lines: list[str] = []
+    for instance, cfg, port in bot_memory_configs(Path.home()):
+        readiness = bot_memory_readiness(instance, port)
+        key = None
+        # A per-instance key variable (apiKeyEnv) lives only in that launcher's
+        # environment, and another keyring service (apiKeyService) may hold a
+        # different key than the one this lookup finds.
+        if cfg.get("apiKeyEnv") in (None, env_key) and cfg.get("apiKeyService") in (None, "pinecone"):
+            key = provider_credential_value("pinecone", BOT_MEMORY_TIMEOUT_SECONDS, source_env)
+        index = stats = None
+        if key:
+            index = pinecone_describe_index(key, cfg.get("index") or BOT_MEMORY_DEFAULT_INDEX)
+            host = index.get("host") if index.get("http") == 200 else None
+            # The key goes only to a Pinecone data host inside the configured project.
+            if (isinstance(host, str) and PINECONE_DATA_HOST_RE.fullmatch(host)
+                    and bot_memory_host_in_project(host, cfg)):
+                stats = pinecone_index_stats(key, host)
+        lines.extend(bot_memory_lines(instance, cfg, readiness, index, stats, bool(key)))
+    return lines
 
 
 def provider_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -9664,6 +9853,7 @@ def daily() -> int:
         *credential_metadata(profile),
         *disk_inventory(),
         *instance_db_inventory(),
+        *bot_memory_inventory(profile),
         *clock_inventory(),
         *tool_lines,
         *tool_extra_lines,

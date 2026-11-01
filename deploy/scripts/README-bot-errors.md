@@ -1627,6 +1627,66 @@ recovery-unverified path instead of closing on proof. And the health-check event
 `source=daily-health`, so it refreshes daily-health liveness: a host with no profile never
 shows cadence-stale, although it raises this critical alert every UTC day.
 
+## OPERATIONAL — Bot memory inventory (`expectBotMemory`)
+
+Daily health can check each instance's Pinecone memory. The check is off by default; a
+health profile turns it on with `"expectBotMemory": true`, and the next daily run reads
+it. It covers every instance whose `~/.config/whatsoup/instances/<name>/config.json` has a
+non-empty `memory.pinecone` block, under the home of the user that runs daily health
+(the same scope as the instance DB inventory). Per instance it makes three reads:
+
+1. `memory.readiness` from the instance's privileged `/health` body, with the instance's
+   health token. A 503 body is read too; a redirect is refused.
+2. One control-plane describe of the configured index (`memory.pinecone.index`, default
+   `whatsapp-bot`).
+3. One `describe_index_stats` call on that index's host, for the record count.
+
+Reads 2 and 3 use the instance's own Pinecone key. It is resolved in the runtime lookup
+order (`provider_credential_value`: the WhatSoup credential file, then the keychain or
+`secret-tool`, last the opencode auth file) with `PINECONE_API_KEY` removed from the
+job's environment, as the bot launcher removes it. The launcher does not read the opencode
+auth file; a key found only there means the bot itself has none, and its readiness line
+already fails. Both calls are read-only and reach only the key's own project. The
+key stays in memory and never appears in a line. It goes to `api.pinecone.io`, and to the
+index's data host only when that host is a `pinecone.io` name inside the configured
+project; redirects are refused. This is a scoped exception to the probe rule that
+provider credentials stay excluded. An instance that names its own `apiKeyEnv` (anything
+other than `PINECONE_API_KEY`) is not probed, because that variable exists only in its
+launcher. Nor is one that names an `apiKeyService` other than `pinecone`, because that
+keyring item may hold a different key.
+
+| Condition | Evidence line | Daily-health event |
+|---|---|---|
+| healthy | `bot_memory <instance>: readiness=ready index=<name> field_map=text protection=<value> records=<n>` | none |
+| readiness is not `ready` | `FAIL bot_memory <instance>: readiness=<state> failure_code=<code>` | critical, plus a per-instance event |
+| index not found (404), and readiness is not `ready` | `FAIL bot_memory <instance>: index_missing index=<name>` | critical, plus a per-instance event |
+| index host fails the runtime's project guard (`expectedHostSuffix` suffix, `-<projectId>.` in the host), and readiness is not `ready` | `FAIL bot_memory <instance>: wrong_project …` | critical, plus a per-instance event |
+| either finding above while readiness is `ready`, or unreadable | the same line as `WARN`, ending `job_key_differs (readiness=ready)` or `unconfirmed (readiness unreadable)` | warning |
+| index in the configured project, and `embed.field_map` is not `{"text": "text"}` | `FAIL bot_memory <instance>: field_map=…` (the line ends with the reason: every memory save fails) | critical, plus a per-instance event |
+| `/health` unreadable (no token, no port, redirect, unparsed body, no `memory.readiness`) | `WARN bot_memory <instance>: readiness_unreadable http=… why=…` | warning |
+| index read rejected or unreachable (401, 403, 5xx, network) | `WARN bot_memory <instance>: index_unreadable http=…` | warning |
+| no key visible to the job | evidence line ends `index_not_probed=key_not_visible` | none |
+| deletion protection off, or zero records | shown in the evidence line only | none |
+
+`bot_memory` is an instance-scoped FAIL prefix, so each FAIL also queues a per-instance
+critical event. The runtime's own readiness, made with the bot's key, already reports
+`index_missing` and `project_mismatch`. When it says `ready`, the same finding through
+the job's key means the job resolved a different key, so that line is only a warning.
+Readiness never checks the field map. The field-map rule follows the writer: `toPineconeRecord`
+(`src/runtimes/chat/providers/pinecone.ts`) puts the record text in the field `text`, and
+an integrated index embeds only the field its map names, so any other mapping fails every
+save. Protection off and zero records are normal states (a new bot has no records yet;
+protection is an operator setting), so they are evidence only.
+
+Limits: the readiness read is a second `/health` request beside the existing health
+probe. The project check uses only the instance config: the runtime's environment
+fallbacks (`PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`, `PINECONE_INDEX`) and
+its operator-instance default project are not visible to this job, so an instance that
+relies on them gets no project check here (the runtime still applies its own guard, and
+a mismatch shows as a readiness FAIL). Each read is bounded by its timeout
+(`HEALTH_PROBE_TIMEOUT_SECONDS` for `/health`, `BOT_MEMORY_TIMEOUT_SECONDS` for each
+Pinecone call).
+
 ## OPERATIONAL — Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.
