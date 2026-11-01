@@ -13,6 +13,11 @@ interface ProcessIdentityDeps {
 }
 
 const IDENTITY_ENV = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
+const DARWIN_IDENTITY_PYTHONS = [
+  '/opt/homebrew/bin/python3',
+  '/usr/local/bin/python3',
+  '/usr/bin/python3',
+] as const;
 
 // PROC_PIDUNIQIDENTIFIERINFO distinguishes PID reuse even within one clock tick.
 const DARWIN_UNIQUE_ID = `
@@ -58,7 +63,16 @@ export function inspectRefreshProcess(pid: number, deps: ProcessIdentityDeps = {
       const boot = /^\{\s*sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)\s*\}/.exec(
         command('/usr/sbin/sysctl', ['-n', 'kern.boottime'], IDENTITY_ENV).trim(),
       );
-      const birth = command('python3', ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
+      let birth = '';
+      for (const python of DARWIN_IDENTITY_PYTHONS) {
+        try {
+          birth = command(python, ['-I', '-S', '-c', DARWIN_UNIQUE_ID, String(pid)], IDENTITY_ENV).trim();
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+      if (birth === '') return { state: 'unknown' };
       const unique = birth.length <= 20 ? BigInt(birth) : 0n;
       if (!boot || !Number.isSafeInteger(Number(boot[1])) || Number(boot[1]) <= 0
         || !Number.isSafeInteger(Number(boot[2])) || Number(boot[2]) > 999_999

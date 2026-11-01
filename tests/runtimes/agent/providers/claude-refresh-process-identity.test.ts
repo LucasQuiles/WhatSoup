@@ -16,7 +16,7 @@ describe('refresh process identity', () => {
     const command = (uniqueId: string) => vi.fn((file: string) => {
       if (file === '/usr/sbin/sysctl') return '{ sec = 1793145600, usec = 1234 }';
       if (file === '/bin/ps') return 'Tue Oct 27 01:02:03 2026';
-      if (file === 'python3') return uniqueId;
+      if (['python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3'].includes(file)) return uniqueId;
       throw new Error('unexpected identity command');
     });
     const deps = { platform: 'darwin' as const, signal: vi.fn() };
@@ -37,16 +37,56 @@ describe('refresh process identity', () => {
     expect(command.mock.calls.some(([file]) => file === '/bin/ps')).toBe(false);
   });
 
-  it('uses fixed locale and timezone with numeric boot time on macOS', () => {
+  it('uses the first fixed trusted Darwin Python candidate with numeric boot time', () => {
     const command = darwin();
     const signal = vi.fn();
     expect(inspectRefreshProcess(PID, { platform: 'darwin', signal, command })).toEqual({
       state: 'alive', birthToken: 'refresh-owner-v2:darwin:1793145600.001234:412005264',
     });
     expect(command.mock.calls.map(([file, args]) => [file, args])).toEqual([
-      ['/usr/sbin/sysctl', ['-n', 'kern.boottime']], ['python3', ['-I', '-S', '-c', expect.any(String), String(PID)]],
+      ['/usr/sbin/sysctl', ['-n', 'kern.boottime']], ['/opt/homebrew/bin/python3', ['-I', '-S', '-c', expect.any(String), String(PID)]],
     ]);
     expect(signal.mock.calls).toEqual([[PID, 0], [PID, 0]]);
+  });
+
+  it('tries the next fixed trusted Darwin Python candidate only after ENOENT', () => {
+    const command = vi.fn((file: string) => {
+      if (file === '/usr/sbin/sysctl') return '{ sec = 1793145600, usec = 1234 }';
+      if (file === '/opt/homebrew/bin/python3') throw Object.assign(new Error('not found'), { code: 'ENOENT' });
+      if (file === '/usr/local/bin/python3') return '412005264\n';
+      throw new Error(`unexpected identity command: ${file}`);
+    });
+
+    expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toMatchObject({ state: 'alive' });
+    expect(command.mock.calls.map(([file]) => file)).toEqual([
+      '/usr/sbin/sysctl', '/opt/homebrew/bin/python3', '/usr/local/bin/python3',
+    ]);
+  });
+
+  it('refuses to try a second trusted Darwin Python candidate after a non-ENOENT failure', () => {
+    const command = vi.fn((file: string) => {
+      if (file === '/usr/sbin/sysctl') return '{ sec = 1793145600, usec = 1234 }';
+      if (file === '/opt/homebrew/bin/python3') throw Object.assign(new Error('cannot execute'), { code: 'EACCES' });
+      throw new Error(`unexpected identity command: ${file}`);
+    });
+
+    expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toEqual({ state: 'unknown' });
+    expect(command.mock.calls.map(([file]) => file)).toEqual([
+      '/usr/sbin/sysctl', '/opt/homebrew/bin/python3',
+    ]);
+  });
+
+  it('returns unknown without ps when no fixed trusted Darwin Python candidate exists', () => {
+    const command = vi.fn((file: string) => {
+      if (file === '/usr/sbin/sysctl') return '{ sec = 1793145600, usec = 1234 }';
+      throw Object.assign(new Error('not found'), { code: 'ENOENT' });
+    });
+
+    expect(inspectRefreshProcess(PID, { platform: 'darwin', signal: vi.fn(), command })).toEqual({ state: 'unknown' });
+    expect(command.mock.calls.map(([file]) => file)).toEqual([
+      '/usr/sbin/sysctl', '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3',
+    ]);
+    expect(command.mock.calls.some(([file]) => file === '/bin/ps')).toBe(false);
   });
 
   it('distinguishes the same PID and start display after a host reboot', () => {

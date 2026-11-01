@@ -44,9 +44,15 @@ accepts only `y` or `yes`; automation must additionally pass `--yes`. Without
 
 | Profile | Required capabilities |
 |---|---|
-| `runtime` | Exact `.nvmrc` Node and npm, Git, and the platform service manager |
+| `runtime` | Exact `.nvmrc` Node and npm, Git, and the platform service manager; on macOS, a functional trusted Python for refresh-owner PID identity |
 | `quality` | Runtime plus Python 3.12+, ripgrep, zsh, and ShellCheck |
 | `release` | Quality plus GNU timeout and, on Linux, external `flock` |
+
+On macOS the identity reader tries only `/opt/homebrew/bin/python3`,
+`/usr/local/bin/python3`, then `/usr/bin/python3`; a missing path may advance to
+the next candidate, while any other interpreter failure leaves readiness
+inconclusive. The runtime setup plan includes generic Homebrew `python` for
+this requirement. It does not consume a caller `PATH` or the quality venv.
 
 Host readiness requires Node `24.15.0` and matching native/process
 architectures. The Node 25 CI lane deliberately emits `compatibility_only`; it
