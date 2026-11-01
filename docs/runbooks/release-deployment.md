@@ -229,10 +229,15 @@ shape. It binds the runner and checker as regular, non-symlinked files below
 one consumer root, then verifies that the consumer runtime manifest records
 matching hashes for both files. The consumer must advertise
 `consumerCapabilities.botErrorsHealth.secureStorageSelector` at or above the
-required value. A newer compatible value is accepted.
+required value. A newer compatible value is accepted. The checker's
+`mustContain` contract must include `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and
+every declared marker must be a nonblank string present in the checker.
+This checks the packaged contract; marker presence does not prove deployed
+probe behavior.
 
 A missing consumer, an unrecognised or malformed loaded definition, a lower
-capability, or a runner or checker hash mismatch makes the plan not ready and
+capability, a runner or checker hash mismatch, or a missing or invalid checker
+marker contract makes the plan not ready and
 refuses activation before a switch. When the sealed runtime-manifest entry is
 absent, or its document has no `activationRequirements` declaration, the
 existing activation behaviour remains. A present but malformed or non-positive

@@ -318,6 +318,13 @@ export async function readBotErrorsHealthConsumer(
       || checker[0]!['sha256'] !== sha256(checkerBytes)
       || runner[0]!['sha256'] !== sha256(runnerBytes)
     ) throw new Error();
+    const markers = checker[0]!['mustContain'];
+    const checkerText = checkerBytes.toString('utf8');
+    if (
+      !Array.isArray(markers)
+      || !markers.includes('CLAUDE_SECURESTORAGE_CONFIG_DIR')
+      || !markers.every((marker) => typeof marker === 'string' && marker.trim().length > 0 && checkerText.includes(marker))
+    ) throw new Error();
     return { consumer: { root: definition.root, capability }, detail: `BOT ERRORS consumer capability ${capability}` };
   } catch {
     return { consumer: null, detail: 'BOT ERRORS consumer runtime manifest is invalid or does not seal its checker' };

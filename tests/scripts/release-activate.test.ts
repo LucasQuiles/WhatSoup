@@ -590,6 +590,72 @@ describe('release:activate BOT ERRORS consumer compatibility', () => {
     expect(world.mutatingCalls()).toEqual([]);
   });
 
+  it('refuses a selector-blind checker even when its capability and hash agree', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerBody: '# old checker without the required selector\n' });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(snapshotTree(fixture.base)).toEqual(before);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['empty', []],
+    ['non-array', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'],
+    ['non-string', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 1]],
+    ['empty-marker', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', '']],
+    ['blank-marker', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', ' ']],
+    ['unfulfilled', ['CLAUDE_SECURESTORAGE_CONFIG_DIR', 'missing-contract-marker']],
+  ])('refuses a %s checker marker contract with matching hashes', async (_name, markers) => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const manifestPath = path.join(fixture.oldRelease, 'deploy/bot-errors-runtime-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<Record<string, unknown>> };
+    const checker = manifest.files.find((entry) => entry.path === 'deploy/scripts/bot-errors-health-check.py')!;
+    checker.mustContain = markers;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: () => ({ code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' }),
+    });
+    const before = snapshotTree(fixture.base);
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect((result.json.preconditions as Array<{ id: string; ok: boolean }>)
+      .find((entry) => entry.id === 'bot-errors-health-consumer-compatible')).toMatchObject({ ok: false });
+    expect(snapshotTree(fixture.base)).toEqual(before);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
+  it('rechecks the checker contract immediately before switching the same consumer root', async () => {
+    writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
+    writeBotErrorsRuntime(fixture.oldRelease, { capability: 2 });
+    const world = new SimulatedLaunchd(fixture, {
+      botErrorsHealthPrint: (read) => {
+        if (read === 2) writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerBody: '# old checker without the required selector\n' });
+        return { code: 0, stdout: botErrorsHealthPrint(fixture, fixture.oldRelease), stderr: '' };
+      },
+    });
+
+    const result = await run(world, activationArgs(fixture, ['--apply']));
+
+    expect(result.code).toBe(RELEASE_ACTIVATE_EXIT.refused);
+    expect(result.json.outcome).toBe('refused');
+    expect(readlinkSync(fixture.wrapperLink)).toBe(path.join(fixture.oldRelease, 'deploy', 'whatsoup'));
+    expect(world.botErrorsHealthPrintReads).toBe(2);
+    expect(world.mutatingCalls()).toEqual([]);
+  });
+
   it('refuses a loaded consumer whose checker does not match its runtime manifest hash', async () => {
     writeBotErrorsRuntime(fixture.newRelease, { requirement: 1 });
     writeBotErrorsRuntime(fixture.oldRelease, { capability: 2, checkerHashMismatch: true });
