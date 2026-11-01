@@ -14,7 +14,6 @@ import {
   type InstanceIdentities,
   type MemoryScopeDeps,
 } from '../../../src/core/memory-scope.ts';
-import { classifyMemoryOperationFailure } from '../../../src/lib/memory-operation-telemetry.ts';
 import { ToolRegistry } from '../../../src/mcp/registry.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import {
@@ -151,13 +150,17 @@ describe('reach sentence agrees with memory-scope.ts', () => {
   });
 });
 
-/** A startup provider error as getPineconeReadinessObservation records it: the code comes from the real classifier. */
-function providerError(state: MemoryReadinessSnapshot['state'], err: unknown): MemoryReadinessSnapshot {
-  return { state, failureCode: classifyMemoryOperationFailure(err).code, evidenceCoverage: 'provider_error' };
+/**
+ * A startup provider failure with the code getPineconeReadinessObservation
+ * records. How real SDK errors map to these codes is pinned through the real
+ * SDK in memory-guidance-readiness.test.ts; this table pins the gate's code set.
+ */
+function providerFailure(failureCode: MemoryReadinessSnapshot['failureCode']): MemoryReadinessSnapshot {
+  return { state: failureCode === 'auth_failed' ? 'auth_failed' : 'unknown', failureCode, evidenceCoverage: 'provider_error' };
 }
 
-const TIMEOUT = providerError('network_error', new DOMException('Pinecone readiness deadline exceeded', 'AbortError'));
-const AUTH_401 = providerError('auth_failed', { status: 401 });
+const TIMEOUT = providerFailure('timeout');
+const AUTH_401 = providerFailure('auth_failed');
 const INDEX_MISSING: MemoryReadinessSnapshot = { state: 'index_missing', failureCode: 'none', evidenceCoverage: 'provider_response' };
 const WRONG_PROJECT: MemoryReadinessSnapshot = { state: 'project_mismatch', failureCode: 'project_guard_failed', evidenceCoverage: 'provider_response' };
 
@@ -166,12 +169,12 @@ describe('memoryUsable', () => {
     const cases: Array<[string, MemoryReadinessSnapshot | undefined, boolean]> = [
       ['ready', READY, true],
       ['timeout', TIMEOUT, true],
-      ['network error', providerError('network_error', { cause: { code: 'ECONNREFUSED' } }), true],
-      ['5xx', providerError('unknown', { status: 503 }), true],
-      ['429', providerError('unknown', { status: 429 }), true],
-      ['401', AUTH_401, false],
-      ['403', providerError('auth_failed', { status: 403 }), false],
-      ['unclassified error', providerError('unknown', new Error('boom')), false],
+      ['network_error', providerFailure('network_error'), true],
+      ['provider_unavailable (5xx)', providerFailure('provider_unavailable'), true],
+      ['rate_limited (429)', providerFailure('rate_limited'), true],
+      ['auth_failed (401/403)', AUTH_401, false],
+      ['invalid_request (other 4xx)', providerFailure('invalid_request'), false],
+      ['unknown', providerFailure('unknown'), false],
       ['index_missing', INDEX_MISSING, false],
       ['project_mismatch from the provider', WRONG_PROJECT, false],
       ['disabled locally', { state: 'disabled', failureCode: 'none', evidenceCoverage: 'local_guard' }, false],

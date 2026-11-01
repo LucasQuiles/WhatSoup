@@ -1272,18 +1272,28 @@ says:
 The runtime adds the block, for every provider, when memory is usable for the
 instance and `memory_write` is listed for that session's tool context. Usable
 means the startup readiness check was `ready`, or its provider call failed only
-transiently: failure code `timeout`, `network_error`, `provider_unavailable`
-(5xx) or `rate_limited` (429). That way a startup outage does not hide the
-block for the process lifetime; `memory_write` reports its own errors. A local
+transiently. Pinecone SDK errors carry no HTTP status, so the readiness probe
+classifies a failure from the status of the last response its own fetch
+wrapper saw: 5xx is `provider_unavailable`, 429 `rate_limited` and 408
+`timeout` (all transient); 401/403 is `auth_failed` (also the `/health`
+readiness state) and any other 4xx `invalid_request` (both definitive). With no
+response, the readiness deadline and connection failures are transient
+(`timeout`, or `network_error` for a connection error code such as
+`ECONNREFUSED`, `UND_ERR_CONNECT_TIMEOUT`, `UND_ERR_SOCKET`, `EHOSTUNREACH` or
+`ENETUNREACH`, or a bare `fetch failed`). Any other failure is `unknown` and
+hides the block. A transient startup failure therefore does not hide the block
+for the process lifetime; `memory_write` reports its own errors. A local
 refusal (`disabled`, or `project_mismatch` because no guard is configured) and a
-definitive provider answer (`index_missing`, `project_mismatch`, or
-`auth_failed` from a 401/403) give no block, as does any other failure code.
-An explicit `sandbox.allowedMcpTools` list that omits `memory_write` gives no
-block for any provider, although only claude-cli sessions enforce the list
-(through the `agent-sandbox.sh` hook); a list that omits `knowledge_search`
-drops the check-first wording. Otherwise the prompt is unchanged. The block does
-not prove writes work: an index whose field map does not name `text` still gets
-it, and its writes fail as `invalid_request`.
+definitive provider answer (`index_missing`, `project_mismatch`, `auth_failed`,
+`invalid_request`) give no block. An explicit `sandbox.allowedMcpTools` list
+that omits `memory_write` gives no block for any provider, although only
+claude-cli sessions enforce the list (through the `agent-sandbox.sh` hook); a
+list that omits `knowledge_search` drops the check-first wording. Otherwise the
+prompt is unchanged. The block does not prove writes work: an index whose field
+map does not name `text` still gets it, and each of its writes fails. Pinecone
+rejects the record without an HTTP status the SDK keeps, so the upsert is logged
+with failure code `unknown`, rethrown as `PINECONE_UNAVAILABLE`, and
+`memory_write` returns code `provider_unavailable` with `retryable: true`.
 
 #### Legacy Migration
 
