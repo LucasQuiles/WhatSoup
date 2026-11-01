@@ -167,6 +167,7 @@ import type { ModelRouteEvent } from './route-events.ts';
 import { RuntimeRoutingCoordinator, type RuntimeRoutingPort } from './runtime-routing.ts';
 import { RuntimeFallbackCoordinator, type RuntimeFallbackPort } from './runtime-fallback.ts';
 import { emitManagedLoopDegradedNotice, isManagedLoopFallbackDegraded, managedLoopDegradedSystemBlock } from './managed-loop-disclosure.ts';
+import { memoryGuidanceSystemBlock } from './memory-guidance.ts';
 import { RuntimePollBridgeCoordinator, type RuntimePollBridgePort } from './runtime-poll-bridge.ts';
 import { buildRoutingPromptContract } from './route-intent.ts';
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
@@ -711,6 +712,7 @@ export class AgentRuntime implements Runtime {
   private readonly m365MutationPolicy: M365MutationPolicy | undefined;
   private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
+  private readonly memoryReady: boolean;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
   private readonly agentDataPolicy: ProviderDataPolicy | null;
@@ -2749,6 +2751,7 @@ export class AgentRuntime implements Runtime {
         : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
     this.autoCompact = new AutoCompactController(this.autoCompactInputTokens);
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
+    this.memoryReady = options?.memoryReady === true;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
     this.m365MutationPolicy = resolveM365MutationPolicy({
@@ -10630,6 +10633,9 @@ export class AgentRuntime implements Runtime {
         ? managedLoopDegradedSystemBlock
         : undefined,
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      memoryGuidanceBlock: memoryGuidanceSystemBlock({
+        memoryReady: this.memoryReady, registry: this.registry, session: providerToolSession, instanceName: this.instanceName,
+      }),
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,

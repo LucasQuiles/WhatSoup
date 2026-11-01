@@ -55,6 +55,11 @@ export interface AgentRuntimeOptions {
   autoCompactInputTokens?: number;
   /** Typed per-instance handoff policy. Absent preserves legacy environment behavior. */
   handoffDistill?: TypedHandoffDistillConfig;
+  /**
+   * Pinecone memory readiness at process start was 'ready' (main.ts). Gates the
+   * memory guidance prompt block (memory-guidance.ts). Absent = not ready.
+   */
+  memoryReady?: boolean;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
   /**

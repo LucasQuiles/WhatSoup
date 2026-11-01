@@ -1246,6 +1246,26 @@ group, and the group's own records are limited to shared records and the
 sender's own. It has no membership reader, so it does not detect DM-lane groups
 and treats them as configurable groups.
 
+##### Memory guidance in the agent prompt
+
+Agent instances have no automatic memory write path, so a memory is saved only
+when the model calls `memory_write`. The agent system prompt therefore carries a
+short "Long-term memory" block (`src/runtimes/agent/memory-guidance.ts`): save
+when the person states a lasting fact, preference, decision or commitment, or
+asks to be remembered; never save passwords, keys, codes, payment or health
+details, or private details about anyone else; and, when `knowledge_search` is
+available, check memory before asking again. Its reach sentence follows the
+recall table above rather than promising strict per-chat recall: memories are
+saved to the calling chat, and outside it only admins and contacts set to
+`instance` can recall them, never a group with other people; on `q` it says
+every chat can recall them. The runtime adds the block, for every provider, only
+when Pinecone readiness was `ready` at startup and `memory_write` is listed for
+that session's tool context. Readiness is checked once at process start, so a
+change takes effect on restart; otherwise the prompt is unchanged. `ready` does
+not check the index field map: an index whose field map does not name `text`
+still reports `ready`, and with the block present its writes fail as
+`invalid_request`.
+
 #### Legacy Migration
 
 Dry-run all local instance configs:

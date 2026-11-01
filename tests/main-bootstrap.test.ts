@@ -971,6 +971,20 @@ describe('main bootstrap', () => {
     expect(h.sendTracked).not.toHaveBeenCalled();
   });
 
+  it('tells the agent runtime memory is not ready when startup readiness is not ready', async () => {
+    const h = await importMainWithMocks({
+      instanceConfig: { name: 'q', type: 'agent', agentOptions: {} },
+      pineconeState: 'index_missing',
+    });
+
+    expect(h.AgentRuntime).toHaveBeenCalledWith(
+      h.db,
+      h.connection,
+      'q',
+      expect.objectContaining({ memoryReady: false }),
+    );
+  });
+
   it('reaches the controller strict-readiness seam for a structural agent-runtime stub', async () => {
     const h = await importMainWithMocks({
       instanceConfig: {
@@ -1013,6 +1027,7 @@ describe('main bootstrap', () => {
         allowM365Mutations: false,
         autoCompactInputTokens: 123,
         turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 7 },
+        memoryReady: true,
       }),
     );
     expect(h.resolveLatestPluginDir).toHaveBeenCalledWith(expect.stringMatching(/\/plugins\/one$/));
