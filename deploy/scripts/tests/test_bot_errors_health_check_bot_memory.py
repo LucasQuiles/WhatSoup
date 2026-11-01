@@ -14,6 +14,7 @@ bounded: hostile or broken input ends in one truncation line, never a crash.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import inspect
@@ -442,7 +443,9 @@ def test_readiness_reads_a_real_diagnostic_response(monkeypatch) -> None:
     assert readiness == {"state": "ready", "http": 200, "failure_code": "none"}
 
 
-@pytest.mark.parametrize("status", [301, 302, 307, 308])
+# The probe refuses the whole 3xx range, so every 3xx status the stdlib names is a
+# case, including each code urllib would follow.
+@pytest.mark.parametrize("status", [code.value for code in HTTPStatus if 300 <= code < 400])
 def test_readiness_refuses_a_real_redirect_without_forwarding_the_token(monkeypatch, status) -> None:
     body = json.dumps(_diagnostic(memory=MEMORY_READY)).encode()
     monkeypatch.setattr(_mod, "instance_health_token", lambda name: "health-token-value")
