@@ -1636,7 +1636,11 @@ non-empty `memory.pinecone` block, under the home of the user that runs daily he
 (the same scope as the instance DB inventory). Per instance it makes three reads:
 
 1. `memory.readiness` from the instance's privileged `/health` body, with the instance's
-   health token. A 503 body is read too; a redirect is refused.
+   health token. A 503 body is read too; a redirect is refused. Readiness counts only
+   under the health probe's own rules: the diagnostic projection (`classify_projection`
+   in `lib/health_reader.py`) reached with an accepted token, whose `instance.name` is
+   this instance. A public, rejected (401/403), memory-only or other-instance body leaves
+   readiness unobserved.
 2. One control-plane describe of the configured index (`memory.pinecone.index`, default
    `whatsapp-bot`).
 3. One `describe_index_stats` call on that index's host, for the record count.
@@ -1648,9 +1652,14 @@ job's environment, as the bot launcher removes it. The launcher does not read th
 auth file; a key found only there means the bot itself has none, and its readiness line
 already fails. Both calls are read-only and reach only the key's own project. The
 key stays in memory and never appears in a line. It goes to `api.pinecone.io`, and to the
-index's data host only when that host is a `pinecone.io` name inside the configured
+index's data host only when that host is a `pinecone.io` name inside the guarded
 project; redirects are refused. This is a scoped exception to the probe rule that
-provider credentials stay excluded. An instance that names its own `apiKeyEnv` (anything
+provider credentials stay excluded. The project guard is resolved as the runtime
+resolves it (`resolvePineconeProjectGuard` in `src/lib/pinecone-project-guard.ts`):
+the configured `projectId`/`expectedHostSuffix` first, otherwise the operator project
+for the operator instance (config `name`, trimmed and lower-cased; the checker keeps a
+copy of the runtime constants, and a parity test keeps the copies equal). With no guard,
+the key is never resolved or sent. An instance that names its own `apiKeyEnv` (anything
 other than `PINECONE_API_KEY`) is not probed, because that variable exists only in its
 launcher. Nor is one that names an `apiKeyService` other than `pinecone`, because that
 keyring item may hold a different key.
@@ -1662,11 +1671,14 @@ keyring item may hold a different key.
 | index not found (404), and readiness is not `ready` | `FAIL bot_memory <instance>: index_missing index=<name>` | critical, plus a per-instance event |
 | index host fails the runtime's project guard (`expectedHostSuffix` suffix, `-<projectId>.` in the host), and readiness is not `ready` | `FAIL bot_memory <instance>: wrong_project …` | critical, plus a per-instance event |
 | either finding above while readiness is `ready`, or unreadable | the same line as `WARN`, ending `job_key_differs (readiness=ready)` or `unconfirmed (readiness unreadable)` | warning |
-| index in the configured project, and `embed.field_map` is not `{"text": "text"}` | `FAIL bot_memory <instance>: field_map=…` (the line ends with the reason: every memory save fails) | critical, plus a per-instance event |
-| `/health` unreadable (no token, no port, redirect, unparsed body, no `memory.readiness`) | `WARN bot_memory <instance>: readiness_unreadable http=… why=…` | warning |
+| no project guard: neither `projectId` nor `expectedHostSuffix` configured, and not the operator instance | `FAIL bot_memory <instance>: project_guard_missing …`; evidence line ends `index_not_probed=project_guard_missing` | critical, plus a per-instance event |
+| index in the configured project, and `embed.field_map` is not `{"text": "text"}` | `FAIL bot_memory <instance>: field_map=…` (a small map of strings as written, anything else as `<type size=n>`; the line ends with the reason: every memory save fails) | critical, plus a per-instance event |
+| `/health` readiness unobserved | `WARN bot_memory <instance>: readiness_unreadable http=… why=…`, where `why` is `no_health_token`, `no_health_port`, `redirect_refused`, `unparsed_body`, `health_token_rejected` (401/403 or the public body), `not_diagnostic`, `health_identity_missing`, `health_identity_mismatch`, `no_memory_readiness` or a transport error name | warning |
 | index read rejected or unreachable (401, 403, 5xx, network) | `WARN bot_memory <instance>: index_unreadable http=…` | warning |
 | no key visible to the job | evidence line ends `index_not_probed=key_not_visible` | none |
 | deletion protection off, or zero records | shown in the evidence line only | none |
+| an instance config larger than the per-config limit | `WARN bot_memory <instance>: config_skipped size=… limit=… (not read)`; later instances still run | warning |
+| an inventory-wide limit is reached (see Limits) | `WARN bot_memory_inventory: truncated limit=<limit> instances_reported=<n>`, once, after the lines already produced | warning, never a per-instance event |
 
 `bot_memory` is an instance-scoped FAIL prefix, so each FAIL also queues a per-instance
 critical event. The runtime's own readiness, made with the bot's key, already reports
@@ -1679,13 +1691,26 @@ save. Protection off and zero records are normal states (a new bot has no record
 protection is an operator setting), so they are evidence only.
 
 Limits: the readiness read is a second `/health` request beside the existing health
-probe. The project check uses only the instance config: the runtime's environment
-fallbacks (`PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`, `PINECONE_INDEX`) and
-its operator-instance default project are not visible to this job, so an instance that
-relies on them gets no project check here (the runtime still applies its own guard, and
-a mismatch shows as a readiness FAIL). Each read is bounded by its timeout
+probe. The project guard comes from the instance config and the operator default only:
+the runtime's environment fallbacks (`PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`,
+`PINECONE_INDEX`) live in the bot's own environment and are not visible to this job. An
+instance that relies on an environment guard therefore gets `project_guard_missing`
+here; set the guard in its config. The checker also refuses an instance whose config
+`name` is empty, which the runtime runs unguarded. Each read is bounded by its timeout
 (`HEALTH_PROBE_TIMEOUT_SECONDS` for `/health`, `BOT_MEMORY_TIMEOUT_SECONDS` for each
-Pinecone call).
+Pinecone call). The whole inventory is bounded too (`BotMemoryBudget`): at most
+`BOT_MEMORY_MAX_CONFIGS` configs scanned (`config_count_limit`),
+`BOT_MEMORY_MAX_SECONDS` of wall time (`wall_time_limit`, checked before each step, so a
+run can overrun by at most one step's timeout), and `BOT_MEMORY_MAX_LINES` lines or
+`BOT_MEMORY_MAX_OUTPUT_BYTES` bytes of output (`output_line_limit`, `output_byte_limit`).
+An instance's lines enter whole or not at all. A config larger than
+`BOT_MEMORY_CONFIG_MAX_BYTES` is skipped unread (checked before the read) with one
+`WARN bot_memory <instance>: config_skipped size=… limit=… (not read)` line, and the
+inventory continues with the next instance. A config or `/health` body that cannot be
+parsed, deep nesting included, never stops the run: the config is skipped (the instance
+config inventory reports it as invalid JSON) and the body leaves readiness unobserved.
+Body-supplied readiness values and the deletion-protection value are rendered as
+bounded tokens.
 
 ## OPERATIONAL — Manual daily-health validation
 
