@@ -199,9 +199,10 @@ npm --silent run release:activate -- \
      definition on the new release).
 
   Any failure after the switch restores the symlink and plists, reloads every
-  label, and verifies the rollback the same way — unless the new release
-  changed the database schema (see "Rollback against a migrated database"
-  below). `receipt.json` in the backup directory records the outcome.
+  label, and verifies the rollback the same way — unless database migration or
+  the sealed refresh-fence compatibility gate blocks automatic rollback (see
+  "Rollback" below). `receipt.json` in the backup directory records the
+  outcome.
 
 Preconditions include: the wrapper symlink points at
 `<expect-current>/deploy/whatsoup`; the new manifest is schema-valid, names
@@ -275,7 +276,9 @@ activation failed and the rollback could not be verified, so manual attention
 is required; `4` activation failed and the automatic rollback was blocked
 because the new release changed the database schema migration level (or the
 level could not be read) — outcome `rollback-blocked-migrated`, manual database
-restore required.
+restore required; `5` activation failed and the automatic rollback was blocked
+by an incompatible or unreadable sealed refresh fence — outcome
+`rollback-blocked-refresh-fence`, manual recovery required.
 
 #### Health invariants verdict (report-only, #2481)
 
@@ -674,6 +677,32 @@ launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/<label>.plist
 
 Never leave a `-wal` or `-shm` file from the migrated database beside the
 restored `bot.db`.
+
+#### Rollback blocked by refresh-fence compatibility (exit `5`)
+
+`deploy/claude-refresh-rollback-fence.json` is a regular, manifest-sealed
+release file. A release that requires `claudeRefreshOwnerV3` records that
+requirement and the capability it provides. This is a compatibility fence for
+automatic rollback, not evidence that a refresh child is live or dead.
+
+An upgrade from a legacy release is allowed: the plan reports that automatic
+rollback is unavailable if verification later fails. Before the live switch,
+the activating release's exact manifest commit, sealed contract digest, and
+requirement are read again. A changed, malformed or unsealed requirement
+refuses before live selection changes.
+
+After a failed verification, the rollback target is checked immediately before
+stopping the new instance and again after that stop, immediately before any
+symlink/plist restore or bootstrapping the old release. Both checks bind the
+target's planned manifest commit, contract digest, and capability. If the
+target is missing, malformed, unsealed, hash-mismatched, changed, or below the
+candidate requirement, the operation exits `5` with
+`rollback-blocked-refresh-fence`. A failure before the stop keeps the new
+instance selected and running; a failure after the stop keeps the new release
+selected but does not start the old release. The result records
+`refreshFenceBlockedAt` as `before-instance-stop` or `after-instance-stop`.
+It neither finds nor kills refresh children; follow the retained receipt and
+the release recovery runbook for manual resolution.
 
 ## Drift Detection
 

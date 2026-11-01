@@ -64,6 +64,7 @@ export const INVARIANTS_ALERT_SOURCE = invariantsSourceFor(INVARIANTS_SCHEMA, IN
 /** The commit the fake host reports for the activating tool's own tree (the floor's source). */
 export const TOOL_COMMIT = 'a'.repeat(40);
 export const CURRENT_BLOCK = { schema: INVARIANTS_SCHEMA, ids: DECLARED_INVARIANTS };
+export const REFRESH_ROLLBACK_FENCE_REL = 'deploy/claude-refresh-rollback-fence.json';
 /**
  * A producer that predates the block. A sentinel, not `undefined`: a default
  * parameter would silently turn an explicit `undefined` back into the current
@@ -190,6 +191,49 @@ export function writeBotErrorsRuntime(
     { path: runtimeRelative, sha256: createHash('sha256').update(runtimeBytes).digest('hex'), sizeBytes: Buffer.byteLength(runtimeBytes) },
   ];
   writeFileSync(outerPath, JSON.stringify(outer));
+}
+
+/** Add a release-manifest-sealed refresh rollback fence to a fabricated release. */
+export function writeRefreshRollbackFence(
+  root: string,
+  options: { requirement?: number; capability?: number; seal?: boolean; pretty?: boolean } = {},
+): void {
+  const requirement = options.requirement ?? 3;
+  const capability = options.capability ?? 3;
+  const body = JSON.stringify({
+    schemaVersion: 1,
+    activationRequirements: { rollbackTarget: { claudeRefreshOwnerV3: requirement } },
+    rollbackCapabilities: { claudeRefreshOwnerV3: capability },
+  }, null, options.pretty ? 2 : undefined);
+  writeFileSync(path.join(root, REFRESH_ROLLBACK_FENCE_REL), body);
+  if (options.seal === false) return;
+  const manifestPath = path.join(root, '.whatsoup-release-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<{ path: string; sha256: string; sizeBytes: number }> };
+  manifest.files = [
+    ...manifest.files.filter((entry) => entry.path !== REFRESH_ROLLBACK_FENCE_REL),
+    { path: REFRESH_ROLLBACK_FENCE_REL, sha256: createHash('sha256').update(body).digest('hex'), sizeBytes: Buffer.byteLength(body) },
+  ];
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+}
+
+/** Write arbitrary fixture fence bytes and reseal them to distinguish schema rejection from a hash mismatch. */
+export function writeRefreshRollbackFenceRaw(root: string, body: string): void {
+  writeFileSync(path.join(root, REFRESH_ROLLBACK_FENCE_REL), body);
+  const manifestPath = path.join(root, '.whatsoup-release-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { files: Array<{ path: string; sha256: string; sizeBytes: number }> };
+  manifest.files = [
+    ...manifest.files.filter((entry) => entry.path !== REFRESH_ROLLBACK_FENCE_REL),
+    { path: REFRESH_ROLLBACK_FENCE_REL, sha256: createHash('sha256').update(body).digest('hex'), sizeBytes: Buffer.byteLength(body) },
+  ];
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+}
+
+/** Change only a fabricated release manifest's source commit; used to prove exact commit binding. */
+export function rewriteReleaseManifestCommit(root: string, commit: string): void {
+  const manifestPath = path.join(root, '.whatsoup-release-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { source: { commit: string } };
+  manifest.source.commit = commit;
+  writeFileSync(manifestPath, JSON.stringify(manifest));
 }
 
 /** The observed live launchctl grammar: bash -c hydration wrapper, sentinel argv0, then runner and checker. */

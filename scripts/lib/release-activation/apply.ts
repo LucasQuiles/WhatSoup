@@ -1,7 +1,8 @@
 /**
  * Mutating half of `release:activate`: back up, switch the wrapper symlink and
  * the staged plists as one step, reload every label, verify from the executing
- * process, and roll back automatically on any failure.
+ * process, and roll back automatically only when the schema and refresh-fence
+ * compatibility gates permit it.
  *
  * The rollback starts the OLD binary, which refuses a database the new
  * release already migrated. So the schema migration level is recorded before
@@ -52,6 +53,8 @@ import {
   bootstrapEntrypointFor,
   countRenderDriftLines,
   readBotErrorsHealthConsumer,
+  recheckCandidateRefreshRollbackFence,
+  recheckRollbackRefreshFenceTarget,
   wrapperTargetFor,
 } from './plan.ts';
 
@@ -116,13 +119,18 @@ export interface SchemaMigrationRecord {
 }
 
 export interface ApplyOutcome {
-  outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified' | 'rollback-blocked-migrated';
+  outcome: 'activated' | 'refused' | 'rolled-back' | 'rollback-unverified' | 'rollback-blocked-migrated' | 'rollback-blocked-refresh-fence';
   backupPath: string | null;
   steps: StepRecord[];
   failure: string | null;
   verification: InstanceObservation | null;
   schemaMigration: SchemaMigrationRecord;
-  rollback: { steps: StepRecord[]; verified: boolean; observation: InstanceObservation | null } | null;
+  rollback: {
+    steps: StepRecord[];
+    verified: boolean;
+    observation: InstanceObservation | null;
+    refreshFenceBlockedAt: 'before-instance-stop' | 'after-instance-stop' | null;
+  } | null;
 }
 
 function utcStamp(epochMs: number): string {
@@ -488,6 +496,11 @@ async function rollback(
   schemaBefore: number,
 ): Promise<NonNullable<ApplyOutcome['rollback']> & { blocked: SchemaLevelCheck | null }> {
   const steps: StepRecord[] = [];
+  const beforeStopFence = recheckRollbackRefreshFenceTarget(context);
+  steps.push({ step: 'recheck-refresh-rollback-fence-before-instance-stop', ok: beforeStopFence.ok, detail: beforeStopFence.detail });
+  if (!beforeStopFence.ok) {
+    return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: 'before-instance-stop' };
+  }
   const attempt = async (step: string, action: () => Promise<string | null> | string | null): Promise<void> => {
     try {
       const failure = await action();
@@ -497,14 +510,19 @@ async function rollback(
     }
   };
   await attempt(`stop:${context.instanceLabel}`, () => stopLabel(host, context, context.instanceLabel));
-  if (!steps[0]!.ok) return { steps, verified: false, observation: null, blocked: null };
+  if (!steps[1]!.ok) return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: null };
   const recheck = checkSchemaLevel(context.dbPath, schemaBefore);
   steps.push({
     step: 'recheck-schema-level',
     ok: !recheck.changed,
     detail: recheck.afterError ?? `schema migration ${schemaBefore} -> ${recheck.after}`,
   });
-  if (recheck.changed) return { steps, verified: false, observation: null, blocked: recheck };
+  if (recheck.changed) return { steps, verified: false, observation: null, blocked: recheck, refreshFenceBlockedAt: null };
+  const afterStopFence = recheckRollbackRefreshFenceTarget(context);
+  steps.push({ step: 'recheck-refresh-rollback-fence-after-instance-stop', ok: afterStopFence.ok, detail: afterStopFence.detail });
+  if (!afterStopFence.ok) {
+    return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: 'after-instance-stop' };
+  }
   await attempt('restore-symlink', () => {
     repointSymlink(context.wrapperLink, readFileSync(path.join(backupPath, 'symlink.before'), 'utf8'));
     return null;
@@ -531,6 +549,7 @@ async function rollback(
     verified: steps.every((entry) => entry.ok),
     observation: verification.observation,
     blocked: null,
+    refreshFenceBlockedAt: null,
   };
 }
 
@@ -592,6 +611,11 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
   // ---- coordinated switch ----
   let failure: string | null = null;
   try {
+    const candidateRefreshFence = recheckCandidateRefreshRollbackFence(context);
+    steps.push({ step: 'recheck-refresh-rollback-fence-requirement-before-switch', ok: candidateRefreshFence.ok, detail: candidateRefreshFence.detail });
+    if (!candidateRefreshFence.ok) {
+      return refuse('refresh rollback fence requirement changed or cannot be revalidated before switch', backupPath);
+    }
     if (context.botErrorsHealthConsumer !== null) {
       const consumer = await readBotErrorsHealthConsumer(host, context.domain, context.home);
       const sameConsumer = consumer.consumer !== null
@@ -657,6 +681,9 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
     return { outcome: 'rollback-blocked-migrated', backupPath, steps, failure, verification, schemaMigration, rollback: null };
   }
   const { blocked, ...rolledBack } = await rollback(host, context, backupPath, schemaBefore);
+  if (rolledBack.refreshFenceBlockedAt !== null) {
+    return { outcome: 'rollback-blocked-refresh-fence', backupPath, steps, failure, verification, schemaMigration, rollback: rolledBack };
+  }
   if (blocked !== null) {
     schemaMigration.after = blocked.after;
     schemaMigration.afterError = blocked.afterError;
