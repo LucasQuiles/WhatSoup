@@ -105,6 +105,7 @@ export interface ScanError {
   kind:
     | 'worktree_status_failed'
     | 'worktree_status_rescan_failed'
+    | 'operation_branch_attribution_failed'
     | 'topology_rescan_failed';
   message: string;
   worktree?: string;
@@ -124,6 +125,7 @@ export interface EstateSnapshotWithoutHash {
   commonDir: string;
   baselinePath: string;
   invokingWorktreePath: string;
+  statusScope: 'pusher' | 'repository';
   topologyFingerprintStart: string;
   topologyFingerprintEnd: string;
   statusFingerprintStart: string;
@@ -179,8 +181,9 @@ export interface GuardDecision {
   blockingFindingIds: string[];
   /** Empty in pre-commit, which retains repository-wide finding warnings. */
   advisoryFindingIds: string[];
-  advisoryScanErrorWorktrees: string[];
   scopedRacing: boolean;
+  scopedRacingWorktrees: string[];
+  scopedRacingBranches: string[];
   advisoryRacingWorktrees: string[];
   advisoryRacingBranches: string[];
   countGrowth: {
