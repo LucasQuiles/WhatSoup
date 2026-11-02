@@ -14,7 +14,7 @@ import { type Clock, systemClock } from '../../lib/clock.ts';
 import { escapeSqlLikePattern } from '../../lib/sql-like.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from '../../core/jid-constants.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
 import { applyOutboundIdentityGuard } from '../../core/outbound-identity/guard.ts';
@@ -542,9 +542,8 @@ function makeForwardMessage(db: Database, getSock: () => ExtendedBaileysSocket |
 // star_message (all scope: global)
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
-  {
+const makeChatManagementSockConfigs = (clock: Clock) => [
+  defineSockTool({
     name: 'archive_chat',
     description: 'Archive or unarchive a WhatsApp chat (global).',
     schema: z.object({
@@ -557,8 +556,8 @@ const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
       await sock.chatModify({ archive, lastMessages: [] }, jid);
       return { success: true, jid, archive };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'pin_chat',
     description: 'Pin or unpin a WhatsApp chat (global).',
     schema: z.object({
@@ -571,8 +570,8 @@ const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
       await sock.chatModify({ pin }, jid);
       return { success: true, jid, pin };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'mute_chat',
     description: 'Mute or unmute a WhatsApp chat (global). Provide until (unix seconds) for timed mute.',
     schema: z.object({
@@ -593,8 +592,8 @@ const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
 
       return { success: true, jid, mute };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'mark_messages_read',
     description:
       'Mark WhatsApp messages as read (send blue ticks) for the given JID (global).',
@@ -615,8 +614,8 @@ const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
       await sock.readMessages(keys);
       return { success: true, jid, count: message_ids.length };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'star_message',
     description: 'Star or unstar WhatsApp messages (global).',
     schema: z.object({
@@ -632,7 +631,7 @@ const makeChatManagementSockConfigs = (clock: Clock): SockToolConfig<any>[] => [
       await sock.star(jid, messages, star);
       return { success: true, jid, count: message_ids.length, star };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

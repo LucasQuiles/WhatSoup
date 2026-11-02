@@ -3,15 +3,15 @@ import {
   ZodArray,
   ZodBoolean,
   ZodDefault,
-  ZodEffects,
   ZodEnum,
   ZodNullable,
   ZodNumber,
   ZodObject,
   ZodOptional,
+  ZodPipe,
   ZodRecord,
   ZodString,
-  ZodType,
+  ZodTransform,
 } from 'zod';
 import { toConversationKey, GLOBAL_CONVERSATION_KEY } from '../core/conversation-key.ts';
 import { createChildLogger } from '../logger.ts';
@@ -137,14 +137,18 @@ export const ADMIN_REQUIRED_DENIAL = (name: string): string =>
 // ---------------------------------------------------------------------------
 
 type JsonSchema = Record<string, unknown>;
+type ZodSchema = z.core.SomeType;
 
-function withZodDescription(schema: ZodType, jsonSchema: JsonSchema): JsonSchema {
-  return schema.description
-    ? { ...jsonSchema, description: schema.description }
+function withZodDescription(schema: ZodSchema, jsonSchema: JsonSchema): JsonSchema {
+  const description = 'description' in schema && typeof schema.description === 'string'
+    ? schema.description
+    : undefined;
+  return description
+    ? { ...jsonSchema, description }
     : jsonSchema;
 }
 
-function zodToJsonSchema(schema: ZodType): JsonSchema {
+function zodToJsonSchema(schema: ZodSchema): JsonSchema {
   if (schema instanceof ZodString) {
     return withZodDescription(schema, { type: 'string' });
   }
@@ -162,13 +166,14 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
     return withZodDescription(schema, zodToJsonSchema(schema.unwrap()));
   }
 
-  if (schema instanceof ZodEffects) {
-    // .refine() / .superRefine() / .transform() / .preprocess() wrap the schema in ZodEffects.
-    // The MCP input contract is the INNER shape; refinements are enforced at call time by
-    // registry.call()'s parse. Falling through to the `{}` fallback here made a single
-    // refine-wrapped tool (list_trigger_runs, #3227) invalidate the whole tools/list for
-    // strict MCP clients (any tool whose inputSchema.type !== "object" invalidates the list).
-    return withZodDescription(schema, zodToJsonSchema(schema.innerType()));
+  if (schema instanceof ZodPipe) {
+    // Zod 4 represents transforms and preprocessors as ZodPipe. The MCP input
+    // contract is the side that accepts caller parameters: a transform/codec
+    // takes its input from `in`, while a preprocessor exposes its validated
+    // shape on `out` after its input transform runs. Refinements remain on the
+    // original schema and are enforced by registry.call()'s safeParse.
+    const inputSchema = schema.in instanceof ZodTransform ? schema.out : schema.in;
+    return withZodDescription(schema, zodToJsonSchema(inputSchema));
   }
 
   if (schema instanceof ZodDefault) {
@@ -189,7 +194,7 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
   if (schema instanceof ZodEnum) {
     return withZodDescription(schema, {
       type: 'string',
-      enum: schema.options as string[],
+      enum: schema.options,
     });
   }
 
@@ -198,11 +203,10 @@ function zodToJsonSchema(schema: ZodType): JsonSchema {
   }
 
   if (schema instanceof ZodObject) {
-    const shape = schema.shape as Record<string, ZodType>;
     const properties: Record<string, JsonSchema> = {};
     const required: string[] = [];
 
-    for (const [key, fieldSchema] of Object.entries(shape)) {
+    for (const [key, fieldSchema] of Object.entries(schema.shape)) {
       properties[key] = zodToJsonSchema(fieldSchema);
       if (!(fieldSchema instanceof ZodOptional)) {
         required.push(key);

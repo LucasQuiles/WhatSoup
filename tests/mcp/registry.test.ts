@@ -666,7 +666,7 @@ describe('ToolRegistry', () => {
   it('converts ZodRecord to JSON Schema object', () => {
     registry.register(
       makeTool({
-        schema: z.object({ metadata: z.record(z.unknown()) }),
+        schema: z.object({ metadata: z.record(z.string(), z.unknown()) }),
       }),
     );
     const tools = registry.listTools(makeSession());

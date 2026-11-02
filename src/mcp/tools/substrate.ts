@@ -208,7 +208,7 @@ export function registerSubstrateTools(
       }),
       report_chat: z.string(),
       terminal_at: z.number().int().positive().optional(),
-      metadata: z.record(z.unknown()).optional(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
     }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -256,7 +256,7 @@ export function registerSubstrateTools(
       // kind is retained internally (types/SPEC_REGISTRY) only for legacy
       // fail-closed handling of rows persisted before removal.
       source: z.enum(['poll.email','poll.url','poll.file','poll.sqlite','poll.pinecone','event.message']),
-      criteria: z.record(z.unknown()),
+      criteria: z.record(z.string(), z.unknown()),
       interval_seconds: z.number().int().positive().optional(),
       ttl_hours: z.number().positive().optional(),
       report_chat: z.string(),
@@ -377,7 +377,7 @@ export function registerSubstrateTools(
       confidence: z.number().min(0).max(1),
       source_message_pk: z.number().int().positive().optional(),
       supersedes_observation_id: z.number().int().positive().optional(),
-      metadata: z.record(z.unknown()).optional(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
     }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
@@ -480,7 +480,7 @@ export function registerSubstrateTools(
         body: z.string().optional(),
         due_at: z.number().int().positive().optional(),
         priority: z.number().int().min(-2).max(2).optional(),
-        metadata: z.record(z.unknown()).optional(),
+        metadata: z.record(z.string(), z.unknown()).optional(),
       }),
     }),
     handler: async (raw, session) => {
@@ -530,7 +530,7 @@ export function registerSubstrateTools(
     description: 'Promote status=proposed bead to active. Admin only.',
     scope: 'global', targetMode: 'caller-supplied', replayPolicy: 'unsafe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
-    schema: z.object({ id: z.number().int().positive(), overrides: z.record(z.unknown()).optional() }),
+    schema: z.object({ id: z.number().int().positive(), overrides: z.record(z.string(), z.unknown()).optional() }),
     handler: async (raw, session) => {
       assertAdmin(deps, session);
       const p = raw as { id: number; overrides?: Record<string, unknown> };

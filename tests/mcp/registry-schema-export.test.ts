@@ -27,6 +27,8 @@ describe('ToolRegistry.listTools inputSchema export', () => {
       .refine((p) => p.a != null || p.b != null, { message: 'a or b' })],
     ['superRefine', z.object({ a: z.string() }).superRefine(() => undefined)],
     ['transform', z.object({ a: z.string() }).transform((p) => ({ ...p, seen: true }))],
+    ['preprocess', z.preprocess((p) => p, z.object({ a: z.string() }))],
+    ['pipe', z.object({ a: z.string() }).pipe(z.object({ a: z.string() }))],
     ['default', z.object({ a: z.string() }).default({ a: 'x' })],
     ['nullable', z.object({ a: z.string() }).nullable()],
     ['plain', z.object({ a: z.string(), b: z.number().optional() })],
@@ -48,6 +50,35 @@ describe('ToolRegistry.listTools inputSchema export', () => {
     registry.register(declare('probe_required', z.object({ must: z.string(), may: z.string().optional() })
       .refine(() => true)));
     const [listed] = registry.listTools(globalSession);
+    expect(listed.inputSchema.required).toEqual(['must']);
+  });
+
+  it('exports the validated object shape after preprocessing', () => {
+    const registry = new ToolRegistry();
+    registry.register(declare('probe_preprocess_required', z.preprocess(
+      (input) => input,
+      z.object({ must: z.string(), may: z.number().optional() }),
+    )));
+    const [listed] = registry.listTools(globalSession);
+    expect(listed.inputSchema.type).toBe('object');
+    expect(listed.inputSchema.properties).toEqual({
+      must: { type: 'string' },
+      may: { type: 'number' },
+    });
+    expect(listed.inputSchema.required).toEqual(['must']);
+  });
+
+  it('exports the caller input shape before a pipe strips optional fields', () => {
+    const registry = new ToolRegistry();
+    registry.register(declare('probe_pipe_input', z.object({
+      must: z.string(),
+      may: z.number().optional(),
+    }).pipe(z.object({ must: z.string() }))));
+    const [listed] = registry.listTools(globalSession);
+    expect(listed.inputSchema.properties).toEqual({
+      must: { type: 'string' },
+      may: { type: 'number' },
+    });
     expect(listed.inputSchema.required).toEqual(['must']);
   });
 

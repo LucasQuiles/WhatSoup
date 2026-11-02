@@ -7,7 +7,7 @@ import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { resetEnrichmentErrors } from '../../core/messages.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { config } from '../../config.ts';
 import { createChildLogger } from '../../logger.ts';
 import { SqliteIdentityStore } from '../../core/outbound-identity/store.ts';
@@ -23,7 +23,7 @@ const log = createChildLogger('advanced-tools');
 const RelayMessageOptsSchema = z.object({
   messageId: z.string().optional().describe('Custom message ID'),
   participant: z.string().optional().describe('Participant JID (for group messages)'),
-  additionalAttributes: z.record(z.string()).optional().describe('Extra attributes to attach'),
+  additionalAttributes: z.record(z.string(), z.string()).optional().describe('Extra attributes to attach'),
   useUserDevicesCache: z.boolean().optional().describe('Whether to use the user-devices cache'),
 });
 
@@ -52,10 +52,9 @@ const WAPatchName = z.enum([
 // Sock tool configs
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const advancedConfigs: SockToolConfig<any>[] = [
+const advancedConfigs = [
   // --- Global scope tools ---
-  {
+  defineSockTool({
     name: 'create_call_link',
     description: 'Create a WhatsApp call link for audio or video calls (global).',
     schema: z.object({
@@ -68,7 +67,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
     call: async ({ type, event, timeoutMs }, sock) => {
       return sock.createCallLink(type, event, timeoutMs);
     },
-  },
+  }),
   // QR-067: share_phone_number / request_phone_number / send_product_message were
   // sock-only configs that called sock.sendMessage(jid) DIRECTLY with a
   // caller-supplied jid — bypassing the outbound identity guard (anti-exfil
@@ -76,7 +75,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
   // etc.), mirroring relay_message/forward_message, so egress to a cold/unknown
   // target is floored. They are also marked scope:'global' (their documented
   // intent) so a chat-scoped sandbox session can no longer call them.
-  {
+  defineSockTool({
     name: 'request_pairing_code',
     description: 'Request a pairing code for linking a device by phone number (global).',
     schema: z.object({
@@ -89,8 +88,8 @@ const advancedConfigs: SockToolConfig<any>[] = [
       const code = await sock.requestPairingCode(phoneNumber, customCode);
       return { pairingCode: code };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_bots_list',
     description: 'Retrieve the list of available WhatsApp bots (global).',
     schema: z.object({}),
@@ -100,10 +99,10 @@ const advancedConfigs: SockToolConfig<any>[] = [
       const bots = await sock.getBotListV2();
       return { bots };
     },
-  },
+  }),
 
   // --- Chat scope tools (injected targetMode) ---
-  {
+  defineSockTool({
     name: 'send_button_reply',
     description: 'Send a button reply message to a WhatsApp chat (chat scope).',
     schema: z.object({
@@ -122,8 +121,8 @@ const advancedConfigs: SockToolConfig<any>[] = [
       } as any);
       return { sent: true, chatJid, id };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'send_list_reply',
     description: 'Send a list reply message (selected list item) to a WhatsApp chat (chat scope).',
     schema: z.object({
@@ -146,8 +145,8 @@ const advancedConfigs: SockToolConfig<any>[] = [
       } as any);
       return { sent: true, chatJid, selectedRowId };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'send_limit_sharing',
     description: 'Send a limit-sharing message to a WhatsApp chat, restricting content forwarding (chat scope).',
     schema: z.object({
@@ -161,10 +160,10 @@ const advancedConfigs: SockToolConfig<any>[] = [
       await sock.sendMessage(chatJid, { limitSharing: true } as any);
       return { sent: true, chatJid };
     },
-  },
+  }),
 
   // --- Low-level / protocol (global) ---
-  {
+  defineSockTool({
     name: 'logout',
     description:
       'WARNING: This will log out the WhatsApp session. You will need to re-authenticate. Disconnects the current WhatsApp session and invalidates credentials (global).',
@@ -200,8 +199,8 @@ const advancedConfigs: SockToolConfig<any>[] = [
       await sock.logout(msg);
       return { loggedOut: true };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'resync_app_state',
     description: 'Resync one or more WhatsApp app-state collections (global).',
     schema: z.object({
@@ -222,7 +221,7 @@ const advancedConfigs: SockToolConfig<any>[] = [
       await sock.resyncAppState(collections, isInitialSync);
       return { synced: true, collections };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------
@@ -315,7 +314,7 @@ function makeSendProductMessage(getSock: () => ExtendedBaileysSocket | null, db?
 
 const RelayMessageSchema = z.object({
   jid: z.string().describe('Recipient JID'),
-  proto: z.record(z.unknown()).describe('Raw protobuf message as a JSON object'),
+  proto: z.record(z.string(), z.unknown()).describe('Raw protobuf message as a JSON object'),
   opts: RelayMessageOptsSchema.optional().describe('Optional relay options'),
 });
 
@@ -358,7 +357,7 @@ function makeRelayMessage(
       log.warn({ jid, protoKeys: Object.keys(proto), payloadSize }, 'relay_message invoked');
       // The relay schema is intentionally looser than Baileys' message/options
       // types (this is a low-level passthrough); cast to the socket's parameter
-      // types, mirroring the prior SockToolConfig<any> erasure.
+      // types, mirroring the prior heterogeneous registration boundary.
       const result = await sock.relayMessage(
         jid,
         proto as Parameters<ExtendedBaileysSocket['relayMessage']>[1],

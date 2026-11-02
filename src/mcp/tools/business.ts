@@ -5,15 +5,14 @@ import { z } from 'zod';
 import type { ToolDeclaration } from '../types.ts';
 import type { ExtendedBaileysSocket } from '../types.ts';
 import { validateBase64Image } from '../../core/base64.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const CATALOG_LIMIT_MAX = 100;
 const CatalogLimitSchema = z.number().int().positive().max(CATALOG_LIMIT_MAX);
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const businessConfigs: SockToolConfig<any>[] = [
-  {
+const businessConfigs = [
+  defineSockTool({
     name: 'get_business_profile',
     description: 'Get the WhatsApp Business profile for a contact JID (global).',
     schema: z.object({
@@ -24,8 +23,8 @@ const businessConfigs: SockToolConfig<any>[] = [
     call: async ({ jid }, sock) => {
       return sock.getBusinessProfile(jid);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_business_profile',
     description:
       'Update the WhatsApp Business profile fields (category, description, email, website, address) (global).',
@@ -42,8 +41,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       await sock.updateBussinesProfile(args);
       return { success: true };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_cover_photo',
     description:
       'Update the WhatsApp Business cover photo. Provide the image as a base64 string (global).',
@@ -58,8 +57,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       await sock.updateCoverPhoto(buffer);
       return { success: true };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'remove_cover_photo',
     description: 'Remove a WhatsApp Business cover photo by asset ID (global).',
     schema: z.object({
@@ -71,8 +70,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       await sock.removeCoverPhoto(id);
       return { success: true, id };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_catalog',
     description: 'Get the product catalog for a WhatsApp Business account (global).',
     schema: z.object({
@@ -89,8 +88,8 @@ const businessConfigs: SockToolConfig<any>[] = [
         cursor: args.cursor,
       });
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_collections',
     description: 'Get product collections for a WhatsApp Business account (global).',
     schema: z.object({
@@ -102,8 +101,8 @@ const businessConfigs: SockToolConfig<any>[] = [
     call: async ({ jid, limit }, sock) => {
       return sock.getCollections(jid, limit);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'product_create',
     description: 'Create a new product in the WhatsApp Business catalog (global).',
     schema: z.object({
@@ -122,8 +121,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zod-parsed args are a superset of ProductCreate; expires 2026-12-31
       return sock.productCreate(args as any);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'product_update',
     description:
       'Update an existing product in the WhatsApp Business catalog by product ID (global).',
@@ -144,8 +143,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- zod-parsed update is a superset of ProductUpdate; expires 2026-12-31
       return sock.productUpdate(productId, update as any);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'product_delete',
     description: 'Delete one or more products from the WhatsApp Business catalog (global).',
     schema: z.object({
@@ -157,8 +156,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       const result = await sock.productDelete(productIds);
       return result ?? { success: true, deleted: productIds.length };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_order_details',
     description: 'Fetch details for a WhatsApp order by order ID and token (global).',
     schema: z.object({
@@ -170,8 +169,8 @@ const businessConfigs: SockToolConfig<any>[] = [
     call: async ({ orderId, tokenBase64 }, sock) => {
       return sock.getOrderDetails(orderId, tokenBase64);
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'add_or_edit_quick_reply',
     description:
       'Add or edit a quick reply shortcut for the WhatsApp Business account (global).',
@@ -187,8 +186,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       await sock.addOrEditQuickReply(quickReply);
       return { success: true, shortcut: quickReply.shortcut };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'remove_quick_reply',
     description: 'Remove a quick reply shortcut by its timestamp identifier (global).',
     schema: z.object({
@@ -200,8 +199,8 @@ const businessConfigs: SockToolConfig<any>[] = [
       await sock.removeQuickReply(timestamp);
       return { success: true, timestamp };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'manage_labels',
     description: [
       'Manage WhatsApp Business labels. Actions:',
@@ -292,7 +291,7 @@ const businessConfigs: SockToolConfig<any>[] = [
         }
       }
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

@@ -7,18 +7,44 @@ import type { ExtendedBaileysSocket } from '../types.ts';
 import type { Database } from '../../core/database.ts';
 import { createChildLogger } from '../../logger.ts';
 import { validateBase64Image } from '../../core/base64.ts';
-import { type SockToolConfig, registerSockTools } from './sock-tool-factory.ts';
+import { defineSockTool, registerSockTools } from './sock-tool-factory.ts';
 import { EXTERNAL_EFFECT_CONTRACT_VERSION } from '../external-effect.ts';
 
 const log = createChildLogger('profile');
+
+const stdPrivacy = ['all', 'contacts', 'contact_blacklist', 'none'] as const;
+
+const strictPrivacyValues = {
+  last_seen: stdPrivacy,
+  profile_picture: stdPrivacy,
+  status: stdPrivacy,
+  online: ['all', 'match_last_seen'],
+  groups_add: ['all', 'contacts', 'contact_blacklist'],
+  read_receipts: ['all', 'none'],
+  call: ['all', 'known'],
+  messages: ['all', 'contacts'],
+} as const;
+
+function validatedValue<T extends string>(
+  value: string,
+  setting: string,
+  allowed: readonly T[],
+): T {
+  const matched = allowed.find((candidate) => candidate === value);
+  if (matched === undefined) {
+    throw new Error(
+      `Invalid value "${value}" for setting "${setting}". Valid values: ${allowed.join(', ')}`,
+    );
+  }
+  return matched;
+}
 
 // ---------------------------------------------------------------------------
 // Factory configs for the 13 standard sock-pattern tools
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- configs have heterogeneous ZodRawShape types; shared array requires any; expires 2026-12-31
-const profileConfigs: SockToolConfig<any>[] = [
-  {
+const profileConfigs = [
+  defineSockTool({
     name: 'get_profile_picture',
     description:
       'Get the profile picture URL for a WhatsApp contact or group JID (global).',
@@ -32,8 +58,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       const url = await sock.profilePictureUrl(jid, type);
       return { jid, url: url ?? null };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_contact_status',
     description: "Fetch a WhatsApp contact's status message (global).",
     schema: z.object({
@@ -53,8 +79,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       const status = first?.status?.status ?? first?.status ?? null;
       return { jid, status };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'check_whatsapp',
     description:
       'Check which phone numbers are registered on WhatsApp (global). Returns JID for each registered number.',
@@ -67,8 +93,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       const results = await sock.onWhatsApp(...phone_numbers);
       return { results: results ?? [] };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'block_contact',
     description: 'Block or unblock a WhatsApp contact (global).',
     schema: z.object({
@@ -81,8 +107,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.updateBlockStatus(jid, action);
       return { success: true, jid, action };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_profile_picture',
     description: 'Update the profile picture for a JID (own account or group). Content is base64-encoded image data (global).',
     schema: z.object({
@@ -97,8 +123,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.updateProfilePicture(jid, buffer);
       return { success: true, jid };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'remove_profile_picture',
     description: 'Remove the profile picture for a JID (own account or group) (global).',
     schema: z.object({
@@ -110,8 +136,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.removeProfilePicture(jid);
       return { success: true, jid };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_profile_status',
     description: "Update your own WhatsApp profile status (about/bio text) (global).",
     schema: z.object({
@@ -123,8 +149,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.updateProfileStatus(status);
       return { success: true, status };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_profile_name',
     description: 'Update your own WhatsApp display name (global).',
     schema: z.object({
@@ -136,8 +162,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.updateProfileName(name);
       return { success: true, name };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'update_privacy_settings',
     description:
       'Update a specific WhatsApp privacy setting. Use setting to specify which privacy option and value for the new setting (global).',
@@ -181,45 +207,24 @@ const profileConfigs: SockToolConfig<any>[] = [
     replayPolicy: 'safe',
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     call: async ({ setting, value }, sock) => {
-      // Per-setting value validation (strict enum settings only).
-      // link_previews and default_disappearing accept free-form values and are not validated here.
-      const stdPrivacy = ['all', 'contacts', 'contact_blacklist', 'none'] as const;
-      const strictValidValues: Record<string, readonly string[]> = {
-        last_seen: stdPrivacy,
-        profile_picture: stdPrivacy,
-        status: stdPrivacy,
-        online: ['all', 'match_last_seen'],
-        groups_add: ['all', 'contacts', 'contact_blacklist'],
-        read_receipts: ['all', 'none'],
-        call: ['all', 'known'],
-        messages: ['all', 'contacts'],
-      };
-
-      const allowed = strictValidValues[setting];
-      if (allowed && !allowed.includes(value)) {
-        throw new Error(
-          `Invalid value "${value}" for setting "${setting}". Valid values: ${allowed.join(', ')}`,
-        );
-      }
-
       // Baileys exposes individual privacy methods, not a unified updatePrivacySettings
       switch (setting) {
-        case 'last_seen': await sock.updateLastSeenPrivacy(value); break;
-        case 'online': await sock.updateOnlinePrivacy(value); break;
-        case 'profile_picture': await sock.updateProfilePicturePrivacy(value); break;
-        case 'status': await sock.updateStatusPrivacy(value); break;
-        case 'read_receipts': await sock.updateReadReceiptsPrivacy(value); break;
-        case 'groups_add': await sock.updateGroupsAddPrivacy(value); break;
-        case 'call': await sock.updateCallPrivacy(value); break;
-        case 'messages': await sock.updateMessagesPrivacy(value); break;
+        case 'last_seen': await sock.updateLastSeenPrivacy(validatedValue(value, setting, strictPrivacyValues.last_seen)); break;
+        case 'online': await sock.updateOnlinePrivacy(validatedValue(value, setting, strictPrivacyValues.online)); break;
+        case 'profile_picture': await sock.updateProfilePicturePrivacy(validatedValue(value, setting, strictPrivacyValues.profile_picture)); break;
+        case 'status': await sock.updateStatusPrivacy(validatedValue(value, setting, strictPrivacyValues.status)); break;
+        case 'read_receipts': await sock.updateReadReceiptsPrivacy(validatedValue(value, setting, strictPrivacyValues.read_receipts)); break;
+        case 'groups_add': await sock.updateGroupsAddPrivacy(validatedValue(value, setting, strictPrivacyValues.groups_add)); break;
+        case 'call': await sock.updateCallPrivacy(validatedValue(value, setting, strictPrivacyValues.call)); break;
+        case 'messages': await sock.updateMessagesPrivacy(validatedValue(value, setting, strictPrivacyValues.messages)); break;
         case 'link_previews': await sock.updateDisableLinkPreviewsPrivacy(value === 'true' || value === '1'); break;
         case 'default_disappearing': await sock.updateDefaultDisappearingMode(parseInt(value, 10) || 0); break;
         default: throw new Error(`Unknown privacy setting: ${setting}`);
       }
       return { success: true, setting, value };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'get_privacy_settings',
     description: 'Fetch all current WhatsApp privacy settings (global).',
     schema: z.object({}),
@@ -229,8 +234,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       const settings = await sock.fetchPrivacySettings();
       return { settings: settings ?? null };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'add_or_edit_contact',
     description: 'Add a new contact or edit an existing contact in the WhatsApp address book (global).',
     schema: z.object({
@@ -252,8 +257,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.addOrEditContact(jid, contactAction);
       return { success: true, jid };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'remove_contact',
     description: 'Remove a contact from the WhatsApp address book (global).',
     schema: z.object({
@@ -265,8 +270,8 @@ const profileConfigs: SockToolConfig<any>[] = [
       await sock.removeContact(jid);
       return { success: true, jid };
     },
-  },
-  {
+  }),
+  defineSockTool({
     name: 'fetch_disappearing_duration',
     description: 'Fetch the disappearing message duration for one or more JIDs (global).',
     schema: z.object({
@@ -278,7 +283,7 @@ const profileConfigs: SockToolConfig<any>[] = [
       const result = await sock.fetchDisappearingDuration(...jids);
       return { result: result ?? null };
     },
-  },
+  }),
 ];
 
 // ---------------------------------------------------------------------------

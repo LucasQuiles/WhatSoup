@@ -358,6 +358,39 @@ describe('profile tools', () => {
     });
 
     it.each([
+      ['last_seen', 'invalid', 'all, contacts, contact_blacklist, none'],
+      ['online', 'invalid', 'all, match_last_seen'],
+      ['profile_picture', 'invalid', 'all, contacts, contact_blacklist, none'],
+      ['status', 'invalid', 'all, contacts, contact_blacklist, none'],
+      ['read_receipts', 'invalid', 'all, none'],
+      ['groups_add', 'invalid', 'all, contacts, contact_blacklist'],
+      ['call', 'invalid', 'all, known'],
+      ['messages', 'invalid', 'all, contacts'],
+    ] as const)('rejects invalid %s value without socket dispatch', async (setting, value, allowed) => {
+      const result = await registry.call(
+        'update_privacy_settings',
+        { setting, value },
+        globalSession(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe(
+        `Tool "update_privacy_settings" failed: Invalid value "${value}" for setting "${setting}". Valid values: ${allowed}`,
+      );
+      for (const dispatch of [
+        mockSock.updateLastSeenPrivacy,
+        mockSock.updateOnlinePrivacy,
+        mockSock.updateProfilePicturePrivacy,
+        mockSock.updateStatusPrivacy,
+        mockSock.updateReadReceiptsPrivacy,
+        mockSock.updateGroupsAddPrivacy,
+        mockSock.updateCallPrivacy,
+        mockSock.updateMessagesPrivacy,
+      ]) {
+        expect(dispatch).not.toHaveBeenCalled();
+      }
+    });
+
+    it.each([
       'last_seen', 'online', 'profile_picture', 'status',
       'read_receipts', 'groups_add', 'call', 'messages',
     ] as const)('accepts setting "%s"', async (setting) => {
