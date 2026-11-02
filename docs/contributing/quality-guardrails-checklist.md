@@ -145,13 +145,16 @@ metadata identifies one of those branches. New conflict instances and
 prunable/detached/locked worktrees block only in that scope. New gone-upstream branches and stashes block
 only when their branch is in scope. Stash branches come from `WIP on` or `On`
 reflog subjects, accepting only valid names that match a current local branch.
-Detached, unparseable, and unmatched subjects have unknown branches and remain advisory. The guard retains the branch
+Detached, unparseable, and unmatched subjects have unknown branches and remain advisory. A subject written by hand
+with `git stash store -m` is taken at its word: this is a housekeeping check for cooperating agents, not a security
+boundary, and it cannot tell such a subject from a real one. The guard retains the branch
 without exposing the subject. Scope comparisons use unambiguous local branch
 names while baseline and finding identities retain the existing short names.
 Pre-push runs status only on scoped worktrees. Other lanes' conflicts, dirty files,
 and untracked files are not reported; pre-commit and `snapshot` still report them.
-Topology and refs remain repository-wide: prunable, locked, detached, gone-upstream,
-and stash findings outside scope appear as `other_lane_critical_debt` advisories.
+Topology and refs remain repository-wide: new prunable, locked, detached, gone-upstream,
+and stash findings outside scope appear as `other_lane_critical_debt` advisories. Findings already in the
+baseline are accepted debt and produce no reason, in or out of scope; `snapshot` still lists them.
 Human output prints up to ten `BLOCK git-estate: <kind> <location>` lines for scoped
 findings and ten `WARN` lines for advisory findings, with remainder counts.
 JSON preserves all new critical IDs and separates `blockingFindingIds` and
@@ -215,8 +218,9 @@ Remote branch refs in the latter list retain their full ref names. Scoped drift
 uses `scopedRacingWorktrees` and `scopedRacingBranches`, with bounded `BLOCK` locations.
 The first status pass uses the first topology's scope; the second uses the union
 of both topologies. Operation branches are read from the common Git directory
-before status scanning, even for missing worktree folders. Failed attribution
-blocks because scope cannot be proven; absent operation metadata means no operation.
+before status scanning, even for missing worktree folders. Failed attribution, including
+unreadable metadata or metadata git would not have written, blocks because scope cannot be
+proven; absent metadata means no operation, and a recorded detached operation has no branch.
 Pre-commit keeps its existing repository-wide warnings and never blocks. In that
 phase, `blockingFindingIds` lists all actionable findings, `advisoryFindingIds`
 is empty, and `blocked` is always false. Worktree status scans use a four-worker

@@ -195,10 +195,14 @@ function readOperationBranch(gitDir: string): string | null {
   for (const file of ['rebase-merge/head-name', 'rebase-apply/head-name', 'BISECT_START']) {
     try {
       const value = readFileSync(path.join(gitDir, file), 'utf8').trim();
-      const branch = value.startsWith('refs/heads/') ? value.slice('refs/heads/'.length) : value;
-      // A detached bisect start records an object ID, not a branch.
-      const detachedBisect = file === 'BISECT_START' && isFullObjectId(value);
-      return isValidBranchName(branch) && !detachedBisect ? branch : null;
+      const bisect = file === 'BISECT_START';
+      // Git records a detached operation as an object ID (bisect) or this marker (rebase).
+      if (bisect ? isFullObjectId(value) : value === 'detached HEAD') return null;
+      let branch = value;
+      if (!bisect) branch = value.startsWith('refs/heads/') ? value.slice('refs/heads/'.length) : '';
+      if (isValidBranchName(branch)) return branch;
+      // Anything else leaves scope unproven; the caller reports it without the file's text.
+      throw new GitEstateError('operation_branch_attribution_failed', 'invalid operation metadata');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;

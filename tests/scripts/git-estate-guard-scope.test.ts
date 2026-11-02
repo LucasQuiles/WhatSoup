@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { classifyRacing, parseStashes } from '../../scripts/git-estate-guard.ts';
 import type { EstateScanCapture, EstateSnapshot } from '../../scripts/lib/git-estate-model.ts';
@@ -162,6 +162,53 @@ describe('round 3 scan scope and diagnostics', () => {
       kind: 'operation_branch_attribution_failed', worktree: other,
     }));
     expect(doc.decision.blockingReasons).toContain('scan_incomplete');
+  });
+
+  function detachedWithOperationMetadata(file: string, value: string): { repo: string; other: string } {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['branch', 'feat']);
+    git(repo, ['worktree', 'add', '--detach', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const gitDir = git(other, ['rev-parse', '--absolute-git-dir']);
+    mkdirSync(dirname(join(gitDir, file)), { recursive: true });
+    writeFileSync(join(gitDir, file), value);
+    return { repo, other };
+  }
+
+  it.each([
+    ['rebase-merge/head-name', ''],
+    ['rebase-merge/head-name', 'not a ref\n'],
+    ['rebase-merge/head-name', 'refs/remotes/origin/feat\n'],
+    ['rebase-merge/head-name', 'feat\n'],
+    ['rebase-apply/head-name', 'refs/tags/feat\n'],
+    ['BISECT_START', ''],
+    ['BISECT_START', 'not a ref\n'],
+  ])('blocks malformed operation metadata in %s: %j', (file, value) => {
+    const { repo, other } = detachedWithOperationMetadata(file, value);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(result.status, result.stderr).toBe(2);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.errors).toContainEqual(expect.objectContaining({
+      kind: 'operation_branch_attribution_failed', worktree: other,
+    }));
+    expect(doc.decision.blockingReasons).toContain('scan_incomplete');
+  });
+
+  it.each([
+    ['rebase-merge/head-name', 'detached HEAD\n', null],
+    ['rebase-apply/head-name', 'detached HEAD\n', null],
+    ['BISECT_START', `${'a'.repeat(40)}\n`, null],
+    ['rebase-merge/head-name', 'refs/heads/feat\n', 'feat'],
+    ['rebase-apply/head-name', 'refs/heads/feat\n', 'feat'],
+    ['BISECT_START', 'feat\n', 'feat'],
+  ])('accepts what git writes to %s: %j', (file, value, operationBranch) => {
+    const { repo, other } = detachedWithOperationMetadata(file, value);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(result.status, result.stderr).toBe(0);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.errors).toEqual([]);
+    expect(doc.snapshot!.worktrees.find(({ path }) => path === other)!.operationBranch).toBe(operationBranch);
   });
 
   it.each(['relative', 'missing'] as const)('F9 resolves a %s admin gitdir entry', (kind) => {
