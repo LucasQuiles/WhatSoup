@@ -52,7 +52,10 @@ export function registerMessagingTools(registry: any, z: any): void {
 `);
   writeFixtureFile(fixture, 'src/mcp/registry.ts', `
 function withZodDescription(schema: any, jsonSchema: Record<string, unknown>): Record<string, unknown> {
-  return schema.description ? { ...jsonSchema, description: schema.description } : jsonSchema;
+  const description = 'description' in schema && typeof schema.description === 'string'
+    ? schema.description
+    : undefined;
+  return description ? { ...jsonSchema, description } : jsonSchema;
 }
 
 function zodToJsonSchema(schema: any): Record<string, unknown> {
@@ -232,6 +235,23 @@ describe('agent decision polls guard', () => {
 
     expect(result.ok).toBe(false);
     expect(result.findings).toEqual(expect.arrayContaining([expect.stringContaining(rule)]));
+  });
+
+  it('rejects a registry description binding detached from the Zod schema value', () => {
+    const fixture = makeCompleteFixture();
+    replaceFixtureText(
+      fixture,
+      'src/mcp/registry.ts',
+      '? schema.description\n    : undefined;',
+      "? 'detached description'\n    : undefined;",
+    );
+
+    const result = checkAgentDecisionPolls(fixture);
+
+    expect(result.ok).toBe(false);
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.stringContaining('decision-polls.registry-description'),
+    ]));
   });
 
   it.each(['AGENTS.md', 'CLAUDE.md'])('requires decision guidance in %s even when the other entry point has it', (file) => {
