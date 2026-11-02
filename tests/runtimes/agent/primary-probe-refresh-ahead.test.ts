@@ -1,8 +1,9 @@
 // Refresh-ahead wiring into the killable non-turn `claude` probes: the
 // primary-model probe, the account-identity probe and the diagnostic bundle's
-// auth-status probe. The refresh-ahead child runs before the probe's budget is
-// armed, so a slow refresh can never make the probe time out, and it is never
-// killed. The probes' own kill waits while the CLI's refresh lock is held.
+// auth-status probe. The refresh-ahead child runs before the default probe budget
+// is armed, so a slow refresh cannot make the probe time out, and it is never
+// killed. A caller's cancellation or explicit deadline ends only the wait for it.
+// The probes' own kill waits while the CLI's refresh lock is held.
 // Fake children and credentials; owner claims use a private temporary directory.
 import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -244,6 +245,116 @@ describe('primary-model probe: refresh-ahead runs before the probe budget', () =
     );
     expect(result).toMatchObject({ status: 'timeout', reason: 'caller-pre-aborted' });
     expect(probe.spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it('a caller that cancels mid-wait returns at once and the refresh child keeps running', async () => {
+    const refresh = spawnRecorder();
+    const probe = spawnRecorder();
+    const controller = new AbortController();
+    let settled = false;
+    const result = probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: (binary, env) => refreshClaudeLoginAhead(binary, env, {
+          platform: 'linux',
+          readFileStore: () => null,
+          spawnImpl: refresh.spawnImpl,
+          ...fixtureProcessIdentity,
+          log: quietLog,
+        }),
+      })),
+      { signal: controller.signal },
+    );
+    void result.then(() => { settled = true; });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refresh.spawnImpl).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    await expect(result).resolves.toMatchObject({ status: 'timeout', reason: 'caller-pre-aborted' });
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+    expect(refresh.children[0]!.kill).not.toHaveBeenCalled();
+    refresh.children[0]!.emit('close', 0, null);
+  });
+
+  it('an explicit deadline ends the wait, not the refresh, and no probe starts', async () => {
+    const refresh = spawnRecorder();
+    const probe = spawnRecorder();
+    let settled = false;
+    const result = probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      createPrimaryModelProbeAdapters(undefined, adapterDeps(probe.spawnImpl, {
+        refreshClaudeLoginAhead: (binary, env) => refreshClaudeLoginAhead(binary, env, {
+          platform: 'linux',
+          readFileStore: () => null,
+          spawnImpl: refresh.spawnImpl,
+          ...fixtureProcessIdentity,
+          log: quietLog,
+        }),
+      })),
+      { timeoutMs: 5_000 },
+    );
+    void result.then(() => { settled = true; });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settled).toBe(true);
+    await expect(result).resolves.toMatchObject({ status: 'timeout', reason: 'deadline-prepare' });
+    expect(probe.spawnImpl).not.toHaveBeenCalled();
+    expect(refresh.children[0]!.kill).not.toHaveBeenCalled();
+    refresh.children[0]!.emit('close', 0, null);
+  });
+
+  it('an explicit deadline is not rebased: the probe gets only what preparation left', async () => {
+    let finishPreparation!: () => void;
+    const prepareBinaryModel = vi.fn(() => new Promise<void>((resolve) => { finishPreparation = resolve; }));
+    const probeBinaryModel = vi.fn((_target: unknown, signal?: AbortSignal) => new Promise<{ status: 'timeout' }>((resolve) => {
+      signal!.addEventListener('abort', () => resolve({ status: 'timeout' }));
+    }));
+    let settled = false;
+    const result = probePrimaryModelUsability(
+      { provider: 'claude-cli', model: null },
+      { prepareBinaryModel, probeBinaryModel },
+      { timeoutMs: 5_000 },
+    );
+    void result.then(() => { settled = true; });
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    finishPreparation();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(probeBinaryModel).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    await expect(result).resolves.toMatchObject({ status: 'timeout', reason: 'deadline-unreported' });
+  });
+
+  it('an abandoned preparation that later rejects stays handled', async () => {
+    let rejectPreparation!: (error: Error) => void;
+    const prepareBinaryModel = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectPreparation = reject; }));
+    const probeBinaryModel = vi.fn(async () => ({ status: 'ok' as const }));
+    const controller = new AbortController();
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const result = probePrimaryModelUsability(
+        { provider: 'claude-cli', model: null },
+        { prepareBinaryModel, probeBinaryModel },
+        { signal: controller.signal },
+      );
+      controller.abort();
+      await expect(result).resolves.toMatchObject({ status: 'timeout', reason: 'caller-pre-aborted' });
+      rejectPreparation(new Error('late preparation failure'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(probeBinaryModel).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
   });
 
   it('is not run for a provider other than claude-cli', async () => {

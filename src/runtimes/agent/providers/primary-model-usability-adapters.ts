@@ -331,8 +331,9 @@ export function createPrimaryModelProbeAdapters(
 /**
  * claude-cli only: run the refresh-ahead child with the probe child's env, so
  * a due token refresh happens in a child nothing kills rather than in the
- * probe (see claude-refresh-ahead.ts). The usability probe awaits this before
- * it arms its deadline. Never rejects.
+ * probe (see claude-refresh-ahead.ts). The usability probe waits for this before
+ * it arms its deadline, and a caller's signal or explicit deadline ends only that
+ * wait; the child keeps running. Never rejects.
  */
 async function prepareCliModelProbe(
   target: { provider: string; model: string | null },

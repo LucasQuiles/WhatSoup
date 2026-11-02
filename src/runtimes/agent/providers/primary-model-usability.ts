@@ -82,9 +82,10 @@ export type PrimaryModelProbeStage =
 export type PrimaryModelProbeStageReporter = (stage: PrimaryModelProbeStage) => void;
 
 export interface PrimaryModelProbeAdapters {
-  // Uncancellable preparation run BEFORE the probe's deadline is armed (the
-  // claude-cli refresh-ahead, see claude-refresh-ahead.ts): its time is never
-  // charged to the probe budget and nothing aborts it. Must never reject.
+  // Preparation run BEFORE the probe's deadline is armed (the claude-cli
+  // refresh-ahead, see claude-refresh-ahead.ts). Nothing aborts it and the default
+  // probe budget is never charged for it. A caller's signal or explicit timeoutMs
+  // ends only the wait: the work keeps running. Must never reject.
   // Resolving { defer } means the probe must not run now (a refresh-ahead
   // child is still running); the result is an inconclusive 'unknown'.
   prepareBinaryModel?: (target: { provider: string; model: string | null }) => Promise<void | { defer: string }>;
@@ -123,6 +124,7 @@ export const REFRESH_AHEAD_FAILED = 'refresh-failed';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const TIMEOUT = Symbol('primary-model-probe-timeout');
 const PROBE_THROW = Symbol('primary-model-probe-throw');
+const PREPARATION_DEADLINE = Symbol('primary-model-preparation-deadline');
 
 // A cancelled probe. reason is one of: 'caller-pre-aborted',
 // 'deadline-nonpositive', or '<cause>-<stage>' where cause is 'deadline' or
@@ -157,18 +159,24 @@ export async function probePrimaryModelUsability(
     if (!adapters.probeBinaryModel) {
       return result(target, model, 'unknown', 'binary-model-probe-unavailable');
     }
-    if (adapters.prepareBinaryModel && !options.signal?.aborted) {
-      let prepared: void | { defer: string } = undefined;
-      try {
-        prepared = await adapters.prepareBinaryModel({ provider, model });
-      } catch { /* deliberately: preparation is fail-open by contract; the probe runs exactly as it would without it */ }
+    let probeBudgetMs = timeoutMs;
+    if (adapters.prepareBinaryModel && !options.signal?.aborted && timeoutMs > 0) {
+      const startedAt = performance.now();
+      const prepared = await waitForPreparation(
+        () => adapters.prepareBinaryModel!({ provider, model }),
+        options.timeoutMs,
+        options.signal,
+      );
+      if (prepared === PREPARATION_DEADLINE) return result(target, model, 'timeout', 'deadline-prepare');
       // A caller that cancelled meanwhile gets its cancellation outcome below
       // (caller-pre-aborted), not the deferral.
       if (prepared && prepared.defer && !options.signal?.aborted) return result(target, model, 'unknown', prepared.defer);
+      // An explicit deadline covers preparation, so it is not rebased here.
+      if (options.timeoutMs !== undefined) probeBudgetMs = options.timeoutMs - (performance.now() - startedAt);
     }
     const probe = await withCancellationDeadline(
       (signal, onStage) => adapters.probeBinaryModel!({ provider, model }, signal, onStage),
-      timeoutMs,
+      probeBudgetMs,
       options.signal,
     );
     if (isProbeTimeout(probe)) return result(target, model, 'timeout', probe.reason);
@@ -267,6 +275,35 @@ function probeTimeout(reason: string): ProbeTimeout {
 
 function isProbeTimeout(value: unknown): value is ProbeTimeout {
   return typeof value === 'object' && value !== null && (value as ProbeTimeout).kind === TIMEOUT;
+}
+
+/**
+ * Wait for preparation, or until the caller stops waiting. No signal reaches the
+ * preparation: the refresh child it protects keeps running after the wait ends,
+ * and later callers join it. A throw or late rejection stays fail-open.
+ */
+async function waitForPreparation(
+  prepare: () => Promise<void | { defer: string }>,
+  explicitDeadlineMs: number | undefined,
+  callerSignal: AbortSignal | undefined,
+): Promise<void | { defer: string } | typeof PREPARATION_DEADLINE> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCallerAbort: (() => void) | undefined;
+  const stopped = new Promise<void | typeof PREPARATION_DEADLINE>((resolve) => {
+    onCallerAbort = () => resolve();
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+    if (explicitDeadlineMs !== undefined) {
+      timer = setTimeout(() => resolve(PREPARATION_DEADLINE), explicitDeadlineMs);
+      timer.unref?.();
+    }
+  });
+  try {
+    const preparation = (async () => prepare())().catch(() => undefined);
+    return await Promise.race([preparation, stopped]);
+  } finally {
+    clearTimeout(timer);
+    if (onCallerAbort) callerSignal?.removeEventListener('abort', onCallerAbort);
+  }
 }
 
 async function withCancellationDeadline<T>(
