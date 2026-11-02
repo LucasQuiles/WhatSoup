@@ -1627,6 +1627,127 @@ recovery-unverified path instead of closing on proof. And the health-check event
 `source=daily-health`, so it refreshes daily-health liveness: a host with no profile never
 shows cadence-stale, although it raises this critical alert every UTC day.
 
+## OPERATIONAL — Bot memory inventory (`expectBotMemory`)
+
+Daily health can check each instance's Pinecone memory. The check is off by default; a
+health profile turns it on with `"expectBotMemory": true`, and the next daily run reads
+it. It covers every instance whose `~/.config/whatsoup/instances/<name>/config.json` has a
+non-empty `memory.pinecone` block, under the home of the user that runs daily health
+(the same scope as the instance DB inventory). Per instance it makes three reads:
+
+1. `memory.readiness` from the instance's privileged `/health` body, with the instance's
+   health token. A 503 body is read too; a redirect is refused. Readiness counts only
+   under the health probe's own rules: the diagnostic projection (`classify_projection`
+   in `lib/health_reader.py`) reached with an accepted token, whose `instance.name` is
+   this instance. A public, rejected (401/403), memory-only or other-instance body leaves
+   readiness unobserved.
+2. One control-plane describe of the configured index (`memory.pinecone.index`, default
+   `whatsapp-bot`).
+3. One `describe_index_stats` call on that index's host, for the record count.
+
+Reads 2 and 3 use the instance's own Pinecone key. It is resolved in the runtime lookup
+order (`provider_credential_value`: the WhatSoup credential file, then the keychain or
+`secret-tool`, last the opencode auth file) with the job's own `PINECONE_API_KEY` left out
+of the resolver's input, as the bot launcher leaves it out (the job's environment itself is
+unchanged; see below). The launcher does not read the opencode
+auth file; a key found only there means the bot itself has none, and its readiness line
+already fails. Both calls are read-only and reach only the key's own project. The
+key stays in memory and never appears in a line. It goes to `api.pinecone.io`, and to the
+index's data host only when that host is a `pinecone.io` name inside the guarded
+project; redirects are refused. This is a scoped exception to the probe rule that
+provider credentials stay excluded. The project guard is resolved as the runtime
+resolves it (`resolvePineconeProjectGuard` in `src/lib/pinecone-project-guard.ts`):
+the configured `projectId`/`expectedHostSuffix` first, otherwise the operator project
+for the operator instance (config `name`, trimmed and lower-cased; the checker keeps a
+copy of the runtime constants, and a parity test keeps the copies equal). With no guard,
+the key is never resolved or sent. An instance that names its own `apiKeyEnv` (anything
+other than `PINECONE_API_KEY`) is not probed, because that variable exists only in its
+launcher. `memory.pinecone.apiKeyService` does not change the lookup: `resolveMemoryConfig`
+(`src/config.ts`) drops it, so the runtime keys the instance the normal way. The job's own
+`PINECONE_API_KEY` is excluded from the lookup, as the bot launcher excludes it; it is not
+removed from the job's environment, which the system keychain helpers inherit.
+
+| Condition | Evidence line | Daily-health event |
+|---|---|---|
+| healthy | `bot_memory <instance>: readiness=ready index=<name> field_map=text protection=<value> records=<n>` | none |
+| readiness is not `ready` | `FAIL bot_memory <instance>: readiness=<state> failure_code=<code>` | critical, plus a per-instance event |
+| index not found (404), and readiness is not `ready` | `FAIL bot_memory <instance>: index_missing index=<name>` | critical, plus a per-instance event |
+| index host fails the runtime's project guard (`expectedHostSuffix` suffix, `-<projectId>.` in the host), and readiness is not `ready` | `FAIL bot_memory <instance>: wrong_project …` | critical, plus a per-instance event |
+| either finding above while readiness is `ready`, or unreadable | the same line as `WARN`, ending `job_key_differs (readiness=ready)` or `unconfirmed (readiness unreadable)` | warning |
+| no project guard: neither `projectId` nor `expectedHostSuffix` configured, and not the operator instance | `FAIL bot_memory <instance>: project_guard_missing …`; evidence line ends `index_not_probed=project_guard_missing` | critical, plus a per-instance event |
+| index in the configured project, and `embed.field_map` is not `{"text": "text"}` | `FAIL bot_memory <instance>: field_map=…` (a small map of strings as written, anything else as `<type size=n>`; the line ends with the reason: every memory save fails) | critical, plus a per-instance event |
+| `/health` readiness unobserved | `WARN bot_memory <instance>: readiness_unreadable http=… why=…`, where `why` is `no_health_token`, `no_health_port`, `redirect_refused`, `unparsed_body`, `health_token_rejected` (401/403 or the public body), `not_diagnostic`, `health_identity_missing`, `health_identity_mismatch`, `no_memory_readiness`, `deadline_exceeded` or a transport error name | warning |
+| index read rejected, unreachable or past its deadline (401, 403, 5xx, network; `http=None` when no status arrived) | `WARN bot_memory <instance>: index_unreadable http=…` | warning |
+| record-count read (`describe_index_stats`) rejected, unreachable or past its deadline | `WARN bot_memory <instance>: stats_unreadable http=…`; evidence shows `records=unknown` | warning |
+| index host passes the configured guard but is not a Pinecone data host | evidence line ends `records=unknown stats_not_probed=host_not_pinecone`; the key is not sent | none |
+| no key visible to the job | evidence line ends `index_not_probed=key_not_visible` | none |
+| deletion protection off, or zero records | shown in the evidence line only | none |
+| an instance folder or `config.json` that is a symbolic link, is not this user's, is writable by group or others, is not a regular file, has more than one hard link, cannot be opened without following a link, or has a name outside `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` | `WARN bot_memory <instance>: config_refused reason=symlink\|foreign_owner\|writable_by_others\|not_regular\|multiple_links\|unopenable\|unsafe_name`; nothing is probed and no token is sent for it | warning |
+| the instances folder itself is a symbolic link, is not this user's, or is writable by group or others | `WARN bot_memory_inventory: instances_refused reason=symlink\|foreign_owner\|writable_by_others`; no instance is read | warning, never a per-instance event |
+| the profile opts in but `~/.config/whatsoup/instances` is missing or cannot be opened without following a link | `WARN bot_memory_inventory: instances_unobserved reason=missing\|unreadable` | warning, never a per-instance event |
+| an instance config larger than the per-config limit | `WARN bot_memory <instance>: config_skipped size=… limit=… (not parsed)`; later instances still run | warning |
+| an inventory-wide limit is reached (see Limits) | `WARN bot_memory_inventory: truncated limit=<limit> instances_reported=<n>`, once, after the lines already produced | warning, never a per-instance event |
+
+`bot_memory` is an instance-scoped FAIL prefix, so each FAIL also queues a per-instance
+critical event. The runtime's own readiness, made with the bot's key, already reports
+`index_missing` and `project_mismatch`. When it says `ready`, the same finding through
+the job's key means the job resolved a different key, so that line is only a warning.
+Readiness never checks the field map. The field-map rule follows the writer: `toPineconeRecord`
+(`src/runtimes/chat/providers/pinecone.ts`) puts the record text in the field `text`, and
+an integrated index embeds only the field its map names, so any other mapping fails every
+save. Protection off and zero records are normal states (a new bot has no records yet;
+protection is an operator setting), so they are evidence only.
+
+Limits: the readiness read is a second `/health` request beside the existing health
+probe. The project guard comes from the instance config and the operator default only:
+the runtime's environment fallbacks (`PINECONE_PROJECT_ID`, `PINECONE_EXPECTED_HOST_SUFFIX`,
+`PINECONE_INDEX`) live in the bot's own environment and are not visible to this job. An
+instance that relies on an environment guard therefore gets `project_guard_missing`
+here; set the guard in its config. The checker also refuses an instance whose config
+`name` is empty, which the runtime runs unguarded. Each read is bounded by its timeout
+(`HEALTH_PROBE_TIMEOUT_SECONDS` for `/health`, `BOT_MEMORY_TIMEOUT_SECONDS` for each
+Pinecone call). The whole inventory is bounded too (`BotMemoryBudget`): at most
+`BOT_MEMORY_MAX_ENTRIES` entries discovered in the instances folder
+(`instance_entry_limit`; a larger folder is not read at all, so the result never depends on
+directory order), at most `BOT_MEMORY_MAX_CONFIGS` configs scanned (`config_count_limit`),
+`BOT_MEMORY_MAX_SECONDS` of wall time (`wall_time_limit`, checked before each step), and at most `BOT_MEMORY_MAX_LINES` lines
+and `BOT_MEMORY_MAX_OUTPUT_BYTES` bytes of output, the truncation line included
+(`output_line_limit`, `output_byte_limit`; one line and
+`BOT_MEMORY_TRUNCATION_RESERVE_BYTES` bytes stay reserved for it). An instance's lines
+enter whole or not at all. A socket timeout bounds each receive, not a whole read, so each
+network step (the readiness read and each Pinecone call) also runs under an absolute
+deadline: its own timeout, cut to the time left in the inventory (`bot_memory_call`). A peer
+that keeps sending bytes slowly cannot hold a step past it. A step past its deadline is
+abandoned (its daemon thread ends with its socket timeout or with the process) and reports
+`readiness_unreadable … why=deadline_exceeded`, `index_unreadable http=None` or
+`stats_unreadable http=None`. The key lookup runs keychain subprocesses, each bounded by
+its own timeout (at most 3 s per candidate service), and is the only step that can carry
+the run past `BOT_MEMORY_MAX_SECONDS`.
+
+The `healthPort` read from a config receives that instance's bearer token, so configs are
+read without following links: each folder and `config.json` is classified by `lstat`, then
+opened with `O_NOFOLLOW` relative to its checked parent (a swap in between fails the open),
+and must be this user's own, not writable by group or others, and, for the file, a regular
+file with one hard link. Readable by others is accepted. The read is capped at
+`BOT_MEMORY_CONFIG_MAX_BYTES` + 1 bytes from that one descriptor: a config whose size or
+bytes read exceed `BOT_MEMORY_CONFIG_MAX_BYTES` gets one
+`WARN bot_memory <instance>: config_skipped size=… limit=… (not parsed)` line (`size` is
+the file size, or the limit + 1 when the file grew during the read), and the inventory
+continues with the next instance. The instances root is `~/.config/whatsoup/instances`, as
+for the checker's other instance inventories; a root under a non-default `XDG_CONFIG_HOME`
+is not followed, and an opted-in host without the default root reports
+`instances_unobserved`. Residual: the token itself still comes from the shared
+`instance_health_token` reader (environment, then `tokens.env` in that same checked folder,
+following a link there); a plant by this same user is outside this threat model, as for the
+legacy receipt repair. A host whose token lives only in the scoped `whatsoup-health-token`
+keychain entry (the post-migration state with `tokens.env` retired) reports
+`readiness_unreadable … why=no_health_token`, as the health probe reports
+`health_token_missing` there. A config or `/health` body that cannot be
+parsed, deep nesting included, never stops the run: the config is skipped (the instance
+config inventory reports it as invalid JSON) and the body leaves readiness unobserved.
+Body-supplied readiness values and the deletion-protection value are rendered as
+bounded tokens.
+
 ## OPERATIONAL — Manual daily-health validation
 
 Do not wait for the randomized systemd timer when validating a deploy or close-out fix.

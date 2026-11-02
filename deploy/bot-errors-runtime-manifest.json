@@ -167,7 +167,7 @@
     },
     {
       "path": "deploy/scripts/bot-errors-health-check.py",
-      "sha256": "faa0ee99d90b1cf28210371393aad3718d06ee56d44aa2719da825cc3f2498b9",
+      "sha256": "959ccd7266a42e62932fa1cca95ca8de68f3948b0d9b04ba0b4abc58cb4a605c",
       "mustContain": [
         "critical_file_problem",
         "mustContain",
@@ -189,6 +189,8 @@
         "active_process_fallback",
         "instance_db_inventory",
         "zero_byte_db",
+        "bot_memory_inventory",
+        "expectBotMemory",
         "auth_bond_restore_canary=failed reason=auth_tree_contains_symlink",
         "primary_phone_verifications_path",
         "primary_phone_unknown_severity",

@@ -34,6 +34,7 @@ INSTANCE_FAIL_PREFIXES = {
     "profile_coverage",
     "profile_coverage_service",
     "tree_provenance",
+    "bot_memory",
 }
 
 INFRA_FAIL_PREFIXES = {"disk", "dns", "rustdesk", "clock"}
@@ -57,6 +58,7 @@ SAFE_CRITICAL_ASSET_KEYS = {
 SAFE_EVIDENCE_CATEGORIES = {
     *INSTANCE_FAIL_PREFIXES,
     *INFRA_FAIL_PREFIXES,
+    "bot_memory_inventory",
     "config",
     "machine",
     "plugin_coverage",

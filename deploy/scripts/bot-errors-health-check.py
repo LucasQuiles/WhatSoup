@@ -21,9 +21,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from typing import Any, Literal, NamedTuple
+from typing import Any, Callable, Iterator, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -2891,6 +2893,7 @@ _INSTANCE_FAIL_PREFIXES = {
     "profile_coverage",
     "profile_coverage_service",
     "tree_provenance",
+    "bot_memory",
 }
 
 # Infrastructure-class daily-health FAIL categories: host-environment problems
@@ -4235,6 +4238,508 @@ def probe_health(port: int, expected_name: str | None = None) -> str:
         return f"FAIL {url} {exc.reason}"
     except Exception as exc:
         return f"FAIL {url} {exc}"
+
+
+# Bot memory inventory (owner rulings 2026-11-01). A real memory defect pages
+# BOT ERRORS as a per-instance FAIL; deletion protection off and zero saved
+# records are evidence only. The inventory may use each instance's OWN Pinecone
+# key for two read-only calls to that instance's own project (describe index,
+# index stats): a scoped exception to the "provider credentials stay excluded"
+# probe envelope above. The key is resolved in the runtime lookup order
+# (provider_credential_value), held in memory and never written to a line.
+# Off unless the health profile sets expectBotMemory.
+BOT_MEMORY_TEXT_FIELD = {"text": "text"}  # toPineconeRecord writes `text` (src/runtimes/chat/providers/pinecone.ts)
+BOT_MEMORY_DEFAULT_INDEX = "whatsapp-bot"
+BOT_MEMORY_TIMEOUT_SECONDS = 6
+BOT_MEMORY_BODY_LIMIT = 4 * 1024 * 1024
+BOT_MEMORY_TOKEN_CHARS = 64
+BOT_MEMORY_FIELD_MAP_ENTRIES = 4
+PINECONE_CONTROL_URL = "https://api.pinecone.io"
+PINECONE_API_VERSION = "2025-10"
+PINECONE_DATA_HOST_RE = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.pinecone\.io")
+# Copies of OPERATOR_INSTANCE_NAME and OPERATOR_PINECONE_PROJECT_ID in
+# src/lib/pinecone-project-guard.ts; a parity test keeps them equal.
+BOT_MEMORY_OPERATOR_INSTANCE = "q"
+BOT_MEMORY_OPERATOR_PROJECT_ID = "o6fsxb8"
+# Inventory-wide allowances. Each network step runs under an absolute deadline
+# cut to the time left (bot_memory_call), so only the key lookup, whose keychain
+# subprocesses each have their own timeout, can carry the wall time past
+# BOT_MEMORY_MAX_SECONDS.
+BOT_MEMORY_MAX_ENTRIES = 256
+BOT_MEMORY_MAX_CONFIGS = 64
+BOT_MEMORY_CONFIG_MAX_BYTES = 1024 * 1024
+BOT_MEMORY_MAX_LINES = 320
+BOT_MEMORY_MAX_OUTPUT_BYTES = 64 * 1024
+BOT_MEMORY_MAX_SECONDS = 120.0
+# Held back from the line and byte allowances for the one truncation line: a
+# fixed limit name plus an instance count bounded by BOT_MEMORY_MAX_ENTRIES.
+BOT_MEMORY_TRUNCATION_RESERVE_BYTES = 128
+# Entry names reach the report verbatim, so a name outside this set is refused.
+BOT_MEMORY_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+class BotMemoryLimit(ValueError):
+    """The bot-memory inventory exhausted an inventory-wide allowance."""
+
+
+class BotMemoryBudget:
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self.deadline = clock() + BOT_MEMORY_MAX_SECONDS
+        self.configs_remaining = BOT_MEMORY_MAX_CONFIGS
+        self.lines_remaining = BOT_MEMORY_MAX_LINES - 1
+        self.output_remaining = BOT_MEMORY_MAX_OUTPUT_BYTES - BOT_MEMORY_TRUNCATION_RESERVE_BYTES
+        self.instances = 0
+        self.lines: list[str] = []
+
+    def require_time(self) -> None:
+        if self.clock() >= self.deadline:
+            raise BotMemoryLimit("wall_time_limit")
+
+    def step_seconds(self, timeout: float) -> float:
+        """A step's absolute deadline: its own timeout, cut to the time left."""
+        return max(0.0, min(timeout, self.deadline - self.clock()))
+
+    def take_config(self) -> None:
+        self.require_time()
+        if self.configs_remaining <= 0:
+            raise BotMemoryLimit("config_count_limit")
+        self.configs_remaining -= 1
+
+    def append_lines(self, lines: list[str]) -> None:
+        """Lines enter whole or not at all."""
+        size = sum(len(line.encode("utf-8")) + 1 for line in lines)
+        if len(lines) > self.lines_remaining:
+            raise BotMemoryLimit("output_line_limit")
+        if size > self.output_remaining:
+            raise BotMemoryLimit("output_byte_limit")
+        self.lines_remaining -= len(lines)
+        self.output_remaining -= size
+        self.lines.extend(lines)
+
+    def append_instance(self, lines: list[str]) -> None:
+        self.append_lines(lines)
+        self.instances += 1
+
+
+def bot_memory_call(step: Callable[..., Any], args: tuple[Any, ...], seconds: float, on_deadline: Any) -> Any:
+    """step(*args) under an absolute deadline.
+
+    A socket timeout bounds each receive, not a whole read, so a peer that keeps
+    sending bytes could hold a read far past it. The step runs in a daemon
+    thread; past the deadline its result is abandoned (the thread ends with its
+    socket timeout or with the process) and on_deadline stands in. An error the
+    step raises is raised here. With no time left the step never starts.
+    """
+    if seconds <= 0:
+        return on_deadline
+    outcome: list[tuple[bool, Any]] = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, step(*args)))
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller below
+            outcome.append((False, exc))
+
+    worker = threading.Thread(target=run, name="bot-memory-step", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if not outcome:
+        return on_deadline
+    ok, value = outcome[0]
+    if not ok:
+        raise value
+    return value
+
+
+def bot_memory_token(value: Any) -> Any:
+    """A body-supplied value as one bounded evidence token; scalars pass through."""
+    if isinstance(value, str):
+        return redact_evidence_string(value, BOT_MEMORY_TOKEN_CHARS)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def bot_memory_field_map_text(field_map: Any) -> str:
+    """Bounded, non-recursive rendering; the check only judges equality with `text`."""
+    if (isinstance(field_map, dict) and len(field_map) <= BOT_MEMORY_FIELD_MAP_ENTRIES
+            and all(isinstance(key, str) and isinstance(value, str)
+                    and len(key) + len(value) <= BOT_MEMORY_TOKEN_CHARS for key, value in field_map.items())):
+        # Index metadata is body-supplied: every string is redacted like the other evidence tokens.
+        return repr({bot_memory_token(key): bot_memory_token(value) for key, value in field_map.items()})
+    if field_map is None:
+        return "None"
+    size = f" size={len(field_map)}" if isinstance(field_map, (dict, list, str)) else ""
+    return f"<{type(field_map).__name__}{size}>"
+
+
+def bot_memory_private_refusal(node: os.stat_result) -> str | None:
+    """Why another user could have planted or rewritten this node, or None.
+
+    Readable by others is accepted (fleet folders were 755 until recently);
+    writable by group or others is not.
+    """
+    if node.st_uid != os.getuid():
+        return "foreign_owner"
+    if stat.S_IMODE(node.st_mode) & 0o022:
+        return "writable_by_others"
+    return None
+
+
+def bot_memory_read_bytes(fd: int, limit: int) -> bytes:
+    """At most `limit` bytes from one descriptor."""
+    chunks: list[bytes] = []
+    remaining = limit
+    while remaining:
+        chunk = os.read(fd, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def bot_memory_read_config(root_fd: int, name: str) -> tuple[str, Any]:
+    """One instance's config.json, read without following any link.
+
+    ("ok", bytes), ("absent", None), ("oversized", size) or ("refused", reason).
+    Each node is classified by lstat, then opened with O_NOFOLLOW relative to
+    its checked parent, so a swap in between fails the open instead of
+    redirecting it. The read is capped by the bytes taken from that descriptor,
+    not by the earlier size check. The refusal reason never comes from errno:
+    darwin and Linux report a refused link differently.
+    """
+    try:
+        entry = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return "absent", None
+    if stat.S_ISLNK(entry.st_mode):
+        return "refused", "symlink"
+    if not stat.S_ISDIR(entry.st_mode):
+        return "absent", None
+    no_follow = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        dir_fd = os.open(name, no_follow | os.O_DIRECTORY, dir_fd=root_fd)
+    except OSError:
+        return "refused", "unopenable"
+    try:
+        reason = bot_memory_private_refusal(os.fstat(dir_fd))
+        if reason:
+            return "refused", reason
+        try:
+            leaf = os.stat("config.json", dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return "absent", None
+        except OSError:
+            return "refused", "unopenable"
+        if stat.S_ISLNK(leaf.st_mode):
+            return "refused", "symlink"
+        try:
+            # O_NONBLOCK so a FIFO fails the regular-file check instead of blocking the open.
+            fd = os.open("config.json", no_follow | os.O_NONBLOCK, dir_fd=dir_fd)
+        except OSError:
+            return "refused", "unopenable"
+        try:
+            node = os.fstat(fd)
+            if not stat.S_ISREG(node.st_mode):
+                return "refused", "not_regular"
+            reason = bot_memory_private_refusal(node)
+            if reason:
+                return "refused", reason
+            if node.st_nlink != 1:
+                return "refused", "multiple_links"
+            if node.st_size > BOT_MEMORY_CONFIG_MAX_BYTES:
+                return "oversized", node.st_size
+            data = bot_memory_read_bytes(fd, BOT_MEMORY_CONFIG_MAX_BYTES + 1)
+            if len(data) > BOT_MEMORY_CONFIG_MAX_BYTES:
+                return "oversized", len(data)
+            return "ok", data
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+
+
+def bot_memory_configs(home: Path, budget: BotMemoryBudget) -> Iterator[tuple[str, dict[str, str], int | None]]:
+    """(instance, settings, healthPort) for every instance that configures memory.
+
+    settings holds the memory.pinecone strings plus the config `name`, which the
+    runtime resolves its project guard by (botName in src/config.ts). The
+    healthPort chosen here receives the instance's bearer token, so every
+    folder and config must be this user's own and writable by no one else.
+    """
+    root = home / ".config/whatsoup/instances"
+    try:
+        if stat.S_ISLNK(os.lstat(root).st_mode):
+            budget.append_lines(["WARN bot_memory_inventory: instances_refused reason=symlink"])
+            return
+        root_fd = os.open(root, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        # Opted in but nothing to observe is a result, not silence.
+        budget.append_lines(["WARN bot_memory_inventory: instances_unobserved reason=missing"])
+        return
+    except OSError:
+        budget.append_lines(["WARN bot_memory_inventory: instances_unobserved reason=unreadable"])
+        return
+    try:
+        reason = bot_memory_private_refusal(os.fstat(root_fd))
+        if reason:
+            budget.append_lines([f"WARN bot_memory_inventory: instances_refused reason={reason}"])
+            return
+        # Discovery itself is bounded: a damaged or hostile folder must not cost
+        # unbounded time or memory before the config allowance applies.
+        names: list[str] = []
+        with os.scandir(root_fd) as entries:
+            for item in entries:
+                if len(names) >= BOT_MEMORY_MAX_ENTRIES:
+                    raise BotMemoryLimit("instance_entry_limit")
+                names.append(item.name)
+        for name in sorted(names):
+            budget.require_time()
+            status, value = bot_memory_read_config(root_fd, name)
+            if status == "absent":
+                continue
+            budget.take_config()
+            if not BOT_MEMORY_SAFE_NAME_RE.fullmatch(name):
+                budget.append_instance([f"WARN bot_memory {safe_segment(name)}: config_refused reason=unsafe_name"])
+                continue
+            if status == "refused":
+                budget.append_instance([f"WARN bot_memory {name}: config_refused reason={value}"])
+                continue
+            if status == "oversized":
+                # One oversized file must not hide every instance after it.
+                budget.append_instance([f"WARN bot_memory {name}: config_skipped size={value} "
+                                        f"limit={BOT_MEMORY_CONFIG_MAX_BYTES} (not parsed)"])
+                continue
+            try:
+                config = json.loads(value.decode("utf-8"))
+            except (ValueError, RecursionError):  # the instance config inventory reports it
+                continue
+            memory = config.get("memory") if isinstance(config, dict) else None
+            pinecone = memory.get("pinecone") if isinstance(memory, dict) else None
+            if not isinstance(pinecone, dict) or not pinecone:
+                continue
+            settings = {key: value for key, value in pinecone.items()
+                        if key in ("projectId", "expectedHostSuffix", "index", "apiKeyEnv")
+                        and isinstance(value, str)}
+            if isinstance(config.get("name"), str):
+                settings["name"] = config["name"]
+            port = config.get("healthPort")
+            yield name, settings, port if isinstance(port, int) else None
+    finally:
+        os.close(root_fd)
+
+
+def bot_memory_readiness(instance: str, port: int | None) -> dict[str, Any]:
+    """memory.readiness from the instance's privileged /health body."""
+    token = instance_health_token(instance)
+    if not token or port is None:
+        return {"state": None, "http": None, "why": "no_health_token" if not token else "no_health_port"}
+    req = Request(f"http://127.0.0.1:{port}/health", method="GET", headers={"Authorization": f"Bearer {token}"})
+    try:
+        try:
+            with urlopen(req, timeout=HEALTH_PROBE_TIMEOUT_SECONDS) as response:
+                code, raw = response.status, response.read(BOT_MEMORY_BODY_LIMIT)
+        except HTTPError as exc:  # an unhealthy instance answers 503 with the same privileged body
+            if 300 <= exc.code < 400:
+                exc.close()
+                return {"state": None, "http": exc.code, "why": "redirect_refused"}
+            code, raw = exc.code, exc.read(BOT_MEMORY_BODY_LIMIT)
+    except Exception as exc:  # the daily report must survive any probe failure
+        return {"state": None, "http": None, "why": type(exc).__name__}
+    try:
+        body = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, RecursionError):
+        return {"state": None, "http": code, "why": "unparsed_body"}
+    # Readiness is a body field, so it obeys the health probe's authority and
+    # identity rules (health_probe_details): only the diagnostic projection,
+    # reached with an accepted token, of this very instance.
+    if code in (401, 403) or is_public_envelope(body):
+        return {"state": None, "http": code, "why": "health_token_rejected"}
+    if classify_projection(body, token_sent=True) != "diagnostic":
+        return {"state": None, "http": code, "why": "not_diagnostic"}
+    instance_meta = body.get("instance") if isinstance(body.get("instance"), dict) else {}
+    name = instance_meta.get("name") if isinstance(instance_meta.get("name"), str) else None
+    if name != instance:
+        return {"state": None, "http": code, "why": "health_identity_mismatch" if name else "health_identity_missing"}
+    memory = body.get("memory")
+    readiness = memory.get("readiness") if isinstance(memory, dict) else None
+    if isinstance(readiness, dict) and isinstance(readiness.get("state"), str):
+        return {"state": bot_memory_token(readiness["state"]), "http": code,
+                "failure_code": bot_memory_token(readiness.get("failure_code"))}
+    if isinstance(readiness, str):
+        return {"state": bot_memory_token(readiness), "http": code, "failure_code": None}
+    return {"state": None, "http": code, "why": "no_memory_readiness"}
+
+
+def _pinecone_read(key: str, url: str, method: str = "GET") -> tuple[int | None, Any]:
+    req = Request(url, method=method, data=b"{}" if method == "POST" else None,
+                  headers={"Api-Key": key, "X-Pinecone-Api-Version": PINECONE_API_VERSION,
+                           "Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=BOT_MEMORY_TIMEOUT_SECONDS) as response:
+            return response.status, json.loads(response.read(BOT_MEMORY_BODY_LIMIT) or b"null")
+    except HTTPError as exc:  # redirects are refused, so the key never leaves this host
+        exc.close()
+        return exc.code, None
+    except Exception:  # the daily report must survive any probe failure
+        return None, None
+
+
+def pinecone_describe_index(key: str, index: str) -> dict[str, Any]:
+    """Read-only control-plane describe of one index in the key's own project."""
+    code, body = _pinecone_read(key, f"{PINECONE_CONTROL_URL}/indexes/{quote(index, safe='')}")
+    if code != 200 or not isinstance(body, dict):
+        return {"http": code}
+    embed = body.get("embed") if isinstance(body.get("embed"), dict) else {}
+    return {"http": code, "host": body.get("host"), "field_map": embed.get("field_map"),
+            "model": embed.get("model"), "deletion_protection": bot_memory_token(body.get("deletion_protection"))}
+
+
+def pinecone_index_stats(key: str, host: str) -> dict[str, Any]:
+    """Read-only data-plane record count of one index."""
+    code, body = _pinecone_read(key, f"https://{host}/describe_index_stats", "POST")
+    records = body.get("totalVectorCount") if isinstance(body, dict) else None
+    return {"http": code, "records": records if isinstance(records, int) else None}
+
+
+def bot_memory_project_guard(bot_name: Any, cfg: dict[str, str]) -> tuple[dict[str, str], str]:
+    """resolvePineconeProjectGuard (src/lib/pinecone-project-guard.ts): (guard, source).
+
+    The configured guard wins; otherwise the operator instance, by its config
+    `name` trimmed and lower-cased, is held to the operator project; otherwise
+    there is no guard. The runtime's PINECONE_PROJECT_ID and
+    PINECONE_EXPECTED_HOST_SUFFIX fallbacks live in the bot's own environment,
+    which this job cannot see.
+    """
+    configured = {key: cfg[key] for key in ("projectId", "expectedHostSuffix") if cfg.get(key)}
+    if configured:
+        return configured, "config"
+    if isinstance(bot_name, str) and bot_name.strip().lower() == BOT_MEMORY_OPERATOR_INSTANCE:
+        return {"projectId": BOT_MEMORY_OPERATOR_PROJECT_ID}, "operator_default"
+    return {}, "none"
+
+
+def bot_memory_host_in_project(host: str, guard: dict[str, str]) -> bool:
+    """matchesPineconeProjectGuard (src/lib/pinecone-project-guard.ts) applied to an index host.
+
+    Unlike the runtime, no guard fails closed: the key goes nowhere unguarded.
+    """
+    if not guard or not host:
+        return False
+    suffix, project = guard.get("expectedHostSuffix"), guard.get("projectId")
+    if suffix and not host.endswith(suffix):
+        return False
+    return not (project and f"-{project}." not in host)
+
+
+def bot_memory_lines(
+    instance: str,
+    cfg: dict[str, str],
+    readiness: dict[str, Any] | None,
+    index: dict[str, Any] | None,
+    stats: dict[str, Any] | None,
+    key_resolved: bool,
+) -> list[str]:
+    """Verdict for one instance: FAIL/WARN lines first, then one evidence line."""
+    index_name = cfg.get("index") or BOT_MEMORY_DEFAULT_INDEX
+    readiness = readiness or {}
+    state = readiness.get("state")
+    flagged: list[str] = []
+    if state is None:
+        flagged.append(f"WARN bot_memory {instance}: readiness_unreadable http={readiness.get('http')} why={readiness.get('why')}")
+    elif state != "ready":
+        flagged.append(f"FAIL bot_memory {instance}: readiness={state} failure_code={readiness.get('failure_code')}")
+    # The bot's own readiness already reports index_missing and project_mismatch
+    # with the bot's key. With readiness=ready, the same finding through this
+    # job's key means the job resolved a different key, not a bot defect.
+    if state == "ready":
+        level, note = "WARN", " job_key_differs (readiness=ready)"
+    elif state is None:
+        level, note = "WARN", " unconfirmed (readiness unreadable)"
+    else:
+        level, note = "FAIL", ""
+    evidence = [f"readiness={state}", f"index={index_name}"]
+    guard, guard_source = bot_memory_project_guard(cfg.get("name"), cfg)
+    if guard_source == "none":
+        flagged.append(f"FAIL bot_memory {instance}: project_guard_missing (memory.pinecone sets neither "
+                       "projectId nor expectedHostSuffix; the key is not sent)")
+        evidence.append("index_not_probed=project_guard_missing")
+    elif not key_resolved:
+        evidence.append("index_not_probed=key_not_visible")
+    elif not index or index.get("http") != 200:
+        code = (index or {}).get("http")
+        if code == 404:
+            flagged.append(f"{level} bot_memory {instance}: index_missing index={index_name}{note}")
+        else:
+            flagged.append(f"WARN bot_memory {instance}: index_unreadable http={code}")
+        evidence.append(f"index_http={code}")
+    else:
+        host = index.get("host")
+        in_project = bot_memory_host_in_project(host if isinstance(host, str) else "", guard)
+        if not in_project:
+            flagged.append(f"{level} bot_memory {instance}: wrong_project index host is outside the configured project{note}")
+        field_map = index.get("field_map")
+        # Readiness never checks the field map, so a wrong map on the bot's own index always fails.
+        if in_project and field_map != BOT_MEMORY_TEXT_FIELD:
+            flagged.append(f"FAIL bot_memory {instance}: field_map={bot_memory_field_map_text(field_map)} "
+                           "(WhatSoup writes `text`; every memory save fails)")
+        records = (stats or {}).get("records") if (stats or {}).get("http") == 200 else "unknown"
+        if stats is not None and stats.get("http") != 200:
+            flagged.append(f"WARN bot_memory {instance}: stats_unreadable http={stats.get('http')}")
+        evidence += [f"field_map={'text' if field_map == BOT_MEMORY_TEXT_FIELD else 'other'}",
+                     f"protection={index.get('deletion_protection')}", f"records={records}"]
+        if in_project and stats is None and not PINECONE_DATA_HOST_RE.fullmatch(host):
+            # The guard accepted the host, but the key goes only to a Pinecone data host.
+            evidence.append("stats_not_probed=host_not_pinecone")
+    return flagged + [f"bot_memory {instance}: " + " ".join(evidence)]
+
+
+def bot_memory_inventory(profile: dict[str, Any], budget: BotMemoryBudget | None = None) -> list[str]:
+    if not profile_bool(profile, "expectBotMemory", False):
+        return []
+    budget = budget or BotMemoryBudget()
+    try:
+        _bot_memory_inventory(budget)
+    except BotMemoryLimit as exc:
+        # The instances already reported stand; the one truncation line names no
+        # instance and fits the line and bytes the budget held back for it.
+        budget.lines.append(f"WARN bot_memory_inventory: truncated limit={exc} instances_reported={budget.instances}")
+    return budget.lines
+
+
+def _bot_memory_inventory(budget: BotMemoryBudget) -> None:
+    env_key = service_env_var("pinecone")
+    # The bot launcher unsets PINECONE_API_KEY before its own lookup, so this
+    # job's environment must not stand in for the bot's key either.
+    source_env = {name: value for name, value in os.environ.items() if name != env_key}
+    for instance, cfg, port in bot_memory_configs(Path.home(), budget):
+        readiness = bot_memory_call(bot_memory_readiness, (instance, port),
+                                    budget.step_seconds(HEALTH_PROBE_TIMEOUT_SECONDS),
+                                    {"state": None, "http": None, "why": "deadline_exceeded"})
+        guard, _source = bot_memory_project_guard(cfg.get("name"), cfg)
+        key = None
+        # Without a project guard the key is never resolved, so it cannot be
+        # sent. A per-instance key variable (apiKeyEnv) lives only in that
+        # launcher's environment. memory.pinecone.apiKeyService changes nothing:
+        # resolveMemoryConfig (src/config.ts) drops it, so the runtime ignores it.
+        if guard and cfg.get("apiKeyEnv") in (None, env_key):
+            budget.require_time()
+            key = provider_credential_value("pinecone", BOT_MEMORY_TIMEOUT_SECONDS, source_env)
+        index = stats = None
+        if key:
+            budget.require_time()
+            index = bot_memory_call(pinecone_describe_index, (key, cfg.get("index") or BOT_MEMORY_DEFAULT_INDEX),
+                                    budget.step_seconds(BOT_MEMORY_TIMEOUT_SECONDS), {"http": None})
+            host = index.get("host") if index.get("http") == 200 else None
+            # The key goes only to a Pinecone data host inside the guarded project.
+            if (isinstance(host, str) and PINECONE_DATA_HOST_RE.fullmatch(host)
+                    and bot_memory_host_in_project(host, guard)):
+                budget.require_time()
+                stats = bot_memory_call(pinecone_index_stats, (key, host),
+                                        budget.step_seconds(BOT_MEMORY_TIMEOUT_SECONDS), {"http": None, "records": None})
+        budget.append_instance(bot_memory_lines(instance, cfg, readiness, index, stats, bool(key)))
 
 
 def provider_probe_enabled(profile: dict[str, Any], item: dict[str, Any]) -> bool:
@@ -9664,6 +10169,7 @@ def daily() -> int:
         *credential_metadata(profile),
         *disk_inventory(),
         *instance_db_inventory(),
+        *bot_memory_inventory(profile),
         *clock_inventory(),
         *tool_lines,
         *tool_extra_lines,

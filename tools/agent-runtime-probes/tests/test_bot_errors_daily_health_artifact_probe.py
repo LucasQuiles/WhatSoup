@@ -481,6 +481,19 @@ def test_instance_reference_counts_real_instance_name_without_hashing_it():
     assert has_instance_reference_from_fail_line("FAIL health ana-bot:") is True
 
 
+def test_bot_memory_failures_keep_their_category_and_instance():
+    # The health check scopes bot_memory FAIL lines to an instance (_INSTANCE_FAIL_PREFIXES).
+    line = "FAIL bot_memory ana-bot: readiness=degraded failure_code=upsert_failed"
+    assert normalize_category(line) == "bot_memory"
+    assert has_instance_reference_from_fail_line(line) is True
+
+
+def test_the_bot_memory_inventory_warning_keeps_its_category_without_an_instance():
+    line = "WARN bot_memory_inventory: truncated limit=output_line_limit instances_reported=2"
+    assert normalize_category(line) == "bot_memory_inventory"
+    assert has_instance_reference_from_fail_line(line) is False
+
+
 # --------------------------------------------------------------------------
 # classify_runtime_manifest_line: every fail sub-class + hash/summary/other
 # --------------------------------------------------------------------------
