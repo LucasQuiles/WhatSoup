@@ -29,10 +29,10 @@ export type Inventory = z.infer<typeof InventorySchema>;
 
 export const DeploymentRoleSchema = z.object({
   runtime_type: z.enum(['chat', 'agent', 'passive']).optional(),
-  provider_env: z.record(z.enum(['required', 'forbidden', 'optional'])).optional(),
+  provider_env: z.record(z.string(), z.enum(['required', 'forbidden', 'optional'])).optional(),
   enabled_plugins_max: z.number().int().nonnegative().optional(),
   enabled_plugins: z.array(z.string().min(1)).optional(),
-  access_mode: z.record(z.union([z.boolean(), z.string()])).optional(),
+  access_mode: z.record(z.string(), z.union([z.boolean(), z.string()])).optional(),
   mcp_tool_set: z.array(z.string().min(1)).optional(),
 }).strict();
 export type DeploymentRole = z.infer<typeof DeploymentRoleSchema>;
@@ -83,9 +83,9 @@ export type MuteConstraints = z.infer<typeof MuteConstraintsSchema>;
 export const PolicySchema = z.object({
   extends: ProfileNameSchema,
   inventory: InventorySchema,
-  domains: z.record(Domain, DomainPolicySchema).default({}),
-  deployment_roles: z.record(DeploymentRoleSchema),
-  actions: z.record(ActionSchema),
+  domains: z.partialRecord(Domain, DomainPolicySchema).default({}),
+  deployment_roles: z.record(z.string(), DeploymentRoleSchema),
+  actions: z.record(z.string(), ActionSchema),
   transport: TransportSchema,
   mute_constraints: MuteConstraintsSchema,
 }).strict();

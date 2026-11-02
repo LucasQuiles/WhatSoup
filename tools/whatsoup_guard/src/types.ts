@@ -26,7 +26,7 @@ export const EventSchema = z.object({
   severity: Severity.optional(),
   fingerprint: z.string().length(64).optional(),
   correlation_id: z.string().min(1).optional(),
-  payload: z.record(z.unknown()),
+  payload: z.record(z.string(), z.unknown()),
   alerted_to: z.enum(['whatsoup', 'local_notification', 'local_log', 'external_push', 'none']).optional(),
 }).strict();
 export type Event = z.infer<typeof EventSchema>;
@@ -46,7 +46,7 @@ export const ProbeDocSchema = z.object({
   probe_id: z.string(),
   scope_id: z.string(),
   captured_at: z.string(),
-  fields: z.record(z.unknown()),
+  fields: z.record(z.string(), z.unknown()),
 }).strict();
 export type ProbeDoc = z.infer<typeof ProbeDocSchema>;
 
