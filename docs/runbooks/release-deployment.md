@@ -254,6 +254,17 @@ roots must remain deployment-owned and writers must be serialized through
 activation; later execution needs its own controls. This check does not
 establish a generic rollback-to-consumer association.
 
+`--apply` and `reconcile-launchd-restart-policy --apply` serialize on
+`~/.local/state/whatsoup/release-activation.lock`, one lock per HOME. A held lock
+refuses before any backup or live change, and the failure names the lock. A holder
+that died in the current boot is reclaimed by the next run. A recycled holder pid
+or an unreadable lock keeps refusing: confirm no activation or reconcile is
+running, then remove the file. Immediately before the switch, activation refuses
+unless the wrapper target and every installed plist still match the plan. Before
+reporting `activated` it confirms they still match what it installed; a mismatch
+there fails the activation. A rollback restores nothing over state from another
+writer, which ends as `rollback-unverified` for the operator to resolve.
+
 `release:activate` remains macOS launchd only. On every other platform, its
 existing platform precondition refuses before activation work; this consumer
 check supplies no portable replacement.

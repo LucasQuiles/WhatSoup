@@ -1,9 +1,15 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   parseReconcileLaunchdRestartPolicyArgs,
+  reconcileUnderActivationLock,
   runReconcileLaunchdRestartPolicy,
   type ReconcileLaunchdRestartPolicyDependencies,
 } from '../../scripts/reconcile-launchd-restart-policy.ts';
+import { acquireActivationLock, activationLockPath } from '../../scripts/lib/release-activation/lock.ts';
+import { releaseProcessLock } from '../../src/lib/process-lock.ts';
 import { LaunchdReconcileRefusedError, type LaunchdReconcileResult } from '../../src/fleet/platform.ts';
 import { LaunchdRenderConfigError } from '../../src/lib/launchd-service-config.ts';
 
@@ -22,6 +28,50 @@ function reconcileResult(overrides: Partial<LaunchdReconcileResult> = {}): Launc
     ...overrides,
   };
 }
+
+describe('reconcileUnderActivationLock', () => {
+  const APPLY = { dryRun: false, dropNonGovernedEnv: false };
+
+  function withHome(body: (home: string) => Promise<void>): () => Promise<void> {
+    return async () => {
+      const home = mkdtempSync(path.join(tmpdir(), 'reconcile-activation-lock-'));
+      try {
+        await body(home);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    };
+  }
+
+  it('refuses an apply while the lock is held, without reconciling', withHome(async (home) => {
+    const holder = acquireActivationLock(home);
+    const reconcile = mockReconcile();
+    await expect(reconcileUnderActivationLock('agent-one', APPLY, reconcile, home))
+      .rejects.toBeInstanceOf(LaunchdReconcileRefusedError);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(releaseProcessLock(holder)).toBe(true);
+  }));
+
+  it('holds the lock through an apply and releases it afterwards', withHome(async (home) => {
+    const reconcile = mockReconcile();
+    reconcile.mockImplementation(async () => {
+      expect(existsSync(activationLockPath(home))).toBe(true);
+      return reconcileResult({ dryRun: false });
+    });
+    await reconcileUnderActivationLock('agent-one', APPLY, reconcile, home);
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(existsSync(activationLockPath(home))).toBe(false);
+  }));
+
+  it('lets a dry run through while the lock is held', withHome(async (home) => {
+    const holder = acquireActivationLock(home);
+    const reconcile = mockReconcile();
+    reconcile.mockResolvedValue(reconcileResult());
+    await reconcileUnderActivationLock('agent-one', { dryRun: true, dropNonGovernedEnv: false }, reconcile, home);
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(releaseProcessLock(holder)).toBe(true);
+  }));
+});
 
 async function runWith(
   argv: string[],

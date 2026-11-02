@@ -40,6 +40,7 @@ import {
 import { resolveLaunchdReleaseSelection } from '../launchd-release-selector.ts';
 import { backupSqliteConsistent } from '../sqlite-consistent-backup.ts';
 import { readSchemaMigrationLevel } from '../sqlite-schema-level.ts';
+import { type ProcessLockHandle, releaseProcessLock } from '../../../src/lib/process-lock.ts';
 import {
   type ActivationHost,
   classifyAuthenticatedHealth,
@@ -48,10 +49,12 @@ import {
   type RecordedHealth,
 } from './host.ts';
 import { type Binding, type BindingEvidence, type ProcessSample, resolveBinding } from './invariants.ts';
+import { acquireActivationLock } from './lock.ts';
 import {
   type ActivationContext,
   bootstrapEntrypointFor,
   countRenderDriftLines,
+  plistDigest,
   readBotErrorsHealthConsumer,
   recheckCandidateRefreshRollbackFence,
   recheckRollbackRefreshFenceTarget,
@@ -474,6 +477,30 @@ interface SchemaLevelCheck {
   changed: boolean;
 }
 
+type ActivationSide = 'previous' | 'activated';
+
+/**
+ * Why the live wrapper symlink or a plist is not on one of the named sides of
+ * this activation; null when all are. The lock stops other activations and
+ * reconciles, and this catches any writer that changed the state regardless.
+ */
+function foreignWriterFailure(context: ActivationContext, sides: readonly ActivationSide[]): string | null {
+  const { args } = context;
+  try {
+    const targets = sides.map((side) => wrapperTargetFor(side === 'previous' ? args.expectCurrent : args.release));
+    if (!targets.includes(readlinkSync(context.wrapperLink))) return 'wrapper symlink changed outside this activation';
+    for (const entry of context.staged) {
+      const digests = sides.map((side) => (side === 'previous' ? entry.installedSha256 : plistDigest(entry.staged!)));
+      if (!digests.includes(plistDigest(readFileSync(entry.plistPath, 'utf8')))) {
+        return `${entry.label}: installed plist changed outside this activation`;
+      }
+    }
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 function checkSchemaLevel(dbPath: string, before: number): SchemaLevelCheck {
   try {
     const after = readSchemaMigrationLevel(dbPath);
@@ -501,6 +528,16 @@ async function rollback(
   if (!beforeStopFence.ok) {
     return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: 'before-instance-stop' };
   }
+  // A failed switch can stop partway, so either side of each file is still this
+  // run's own. Anything else is another writer's state, which a restore would overwrite.
+  const foreignWriter = (step: string): boolean => {
+    const foreign = foreignWriterFailure(context, ['previous', 'activated']);
+    steps.push(foreign === null ? { step, ok: true } : { step, ok: false, detail: foreign });
+    return foreign !== null;
+  };
+  if (foreignWriter('recheck-live-identity-before-instance-stop')) {
+    return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: null };
+  }
   const attempt = async (step: string, action: () => Promise<string | null> | string | null): Promise<void> => {
     try {
       const failure = await action();
@@ -510,7 +547,7 @@ async function rollback(
     }
   };
   await attempt(`stop:${context.instanceLabel}`, () => stopLabel(host, context, context.instanceLabel));
-  if (!steps[1]!.ok) return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: null };
+  if (!steps.at(-1)!.ok) return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: null };
   const recheck = checkSchemaLevel(context.dbPath, schemaBefore);
   steps.push({
     step: 'recheck-schema-level',
@@ -522,6 +559,9 @@ async function rollback(
   steps.push({ step: 'recheck-refresh-rollback-fence-after-instance-stop', ok: afterStopFence.ok, detail: afterStopFence.detail });
   if (!afterStopFence.ok) {
     return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: 'after-instance-stop' };
+  }
+  if (foreignWriter('recheck-live-identity-before-restore')) {
+    return { steps, verified: false, observation: null, blocked: null, refreshFenceBlockedAt: null };
   }
   await attempt('restore-symlink', () => {
     repointSymlink(context.wrapperLink, readFileSync(path.join(backupPath, 'symlink.before'), 'utf8'));
@@ -554,11 +594,39 @@ async function rollback(
 }
 
 /**
- * Execute an activation whose context already passed every precondition.
+ * Execute an activation whose context already passed every precondition, as the
+ * only writer of this user's launchd state. A held lock refuses before any
+ * effect, including the backup directory.
+ */
+export async function applyActivation(host: ActivationHost, context: ActivationContext): Promise<ApplyOutcome> {
+  let lock: ProcessLockHandle;
+  try {
+    lock = acquireActivationLock(context.home);
+  } catch (error) {
+    const failure = error instanceof Error ? error.message : String(error);
+    return {
+      outcome: 'refused',
+      backupPath: null,
+      steps: [{ step: 'acquire-activation-lock', ok: false, detail: failure }],
+      failure,
+      verification: null,
+      schemaMigration: { before: null, after: null, afterError: null, blockedAt: null },
+      rollback: null,
+    };
+  }
+  try {
+    return await applyHoldingLock(host, context);
+  } finally {
+    // A lock that cannot be removed names this pid, so the next run reclaims it once this process exits.
+    try { releaseProcessLock(lock); } catch { /* the outcome stands */ }
+  }
+}
+
+/**
  * The only effects before the switch are writes inside the new backup
  * directory; a failure there is a refusal with no live change.
  */
-export async function applyActivation(host: ActivationHost, context: ActivationContext): Promise<ApplyOutcome> {
+async function applyHoldingLock(host: ActivationHost, context: ActivationContext): Promise<ApplyOutcome> {
   const steps: StepRecord[] = [];
   const { args } = context;
   const backupPath = path.join(
@@ -634,6 +702,12 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
         return refuse('BOT ERRORS health consumer changed or no longer satisfies the selector capability', backupPath);
       }
     }
+    // No await from here to the last plist write: nothing else in this process runs in between.
+    const beforeSwitch = foreignWriterFailure(context, ['previous']);
+    steps.push(beforeSwitch === null
+      ? { step: 'recheck-live-identity-before-switch', ok: true }
+      : { step: 'recheck-live-identity-before-switch', ok: false, detail: beforeSwitch });
+    if (beforeSwitch !== null) return refuse(beforeSwitch, backupPath);
     repointSymlink(context.wrapperLink, wrapperTargetFor(args.release));
     steps.push({ step: 'switch-symlink', ok: true });
     for (const entry of context.staged) writePlist(entry.plistPath, entry.staged!);
@@ -669,6 +743,13 @@ export async function applyActivation(host: ActivationHost, context: ActivationC
     const auxFailure = await verifyAuxDefinitions(host, context, args.release, args.expectCurrent);
     steps.push(auxFailure === null ? { step: 'verify-aux', ok: true } : { step: 'verify-aux', ok: false, detail: auxFailure });
     failure = auxFailure;
+  }
+  if (failure === null) {
+    const finalIdentity = foreignWriterFailure(context, ['activated']);
+    steps.push(finalIdentity === null
+      ? { step: 'verify-live-identity', ok: true }
+      : { step: 'verify-live-identity', ok: false, detail: finalIdentity });
+    failure = finalIdentity;
   }
 
   if (failure === null) {

@@ -27,6 +27,7 @@ import {
   validateReleaseManifestFile,
 } from '../../release-snapshot-plan.ts';
 import { type ActivationHost, resolveInstanceHealthToken } from './host.ts';
+import { activationLockPath } from './lock.ts';
 
 /** How an auxiliary job's plist is re-rendered from inside the new release. */
 export type AuxRenderer = 'setup-timer' | 'release-drift';
@@ -61,6 +62,8 @@ export interface StagedPlist {
   role: 'instance' | 'aux';
   renderer: 'instance-edit' | AuxRenderer;
   plistPath: string;
+  /** Digest of the installed plist the plan read: the staged render was built from these bytes. */
+  installedSha256: string;
   /** Rendered bytes; null when rendering failed (a precondition records why). */
   staged: string | null;
   /** Human-readable edits for the instance plist; empty for aux renders. */
@@ -178,6 +181,11 @@ function readManifestCommit(releaseRoot: string): {
 
 function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** Digest of plist text, for comparing installed plists without keeping their credentials. */
+export function plistDigest(text: string): string {
+  return sha256(Buffer.from(text, 'utf8'));
 }
 
 function positiveInteger(value: unknown): number | null {
@@ -794,6 +802,7 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
       role: 'instance',
       renderer: 'instance-edit',
       plistPath: instancePlistPath,
+      installedSha256: plistDigest(instanceInstalled!),
       staged: stagedInstance.staged,
       edits: stagedInstance.edits,
       renderDriftLines: stagedInstance.staged === null
@@ -839,6 +848,7 @@ export async function buildActivationContext(host: ActivationHost, args: Activat
       role: 'aux',
       renderer: spec.renderer,
       plistPath,
+      installedSha256: plistDigest(installed!),
       staged: stagedOk ? rendered.staged : null,
       edits: [],
       renderDriftLines: stagedOk ? countRenderDriftLines(installed!, rendered.staged!, args.expectCurrent, args.release) : null,
@@ -893,6 +903,7 @@ export function describeActions(context: ActivationContext): Array<Record<string
   const { args } = context;
   const labels = context.staged.map((entry) => entry.label);
   return [
+    { step: 'acquire-activation-lock', path: activationLockPath(context.home), onHeld: 'refuse with no change' },
     { step: 'create-backup-dir', path: args.backupDir === null ? null : path.join(args.backupDir, 'activation-<commit12>-<utc>'), mode: '0700' },
     { step: 'backup-database', from: context.dbPath, to: '<backup>/bot.db', verify: 'PRAGMA quick_check = ok', mode: '0600' },
     { step: 'record-schema-level', from: '<backup>/bot.db', read: 'MAX(version) FROM schema_migrations' },
@@ -911,6 +922,7 @@ export function describeActions(context: ActivationContext): Array<Record<string
       targetCapabilityAtPlan: context.refreshRollbackFence.targetCapability,
       targetCompatibleAtPlan: context.refreshRollbackFence.targetCompatibleAtPlan,
     },
+    { step: 'recheck-live-identity-before-switch', link: context.wrapperLink, expect: wrapperTargetFor(args.expectCurrent), plists: 'plan-time digests' },
     { step: 'switch-symlink', link: context.wrapperLink, target: wrapperTargetFor(args.release), atomic: true },
     { step: 'install-plists', labels, dir: context.launchAgentsDir, atomic: true },
     ...labels.map((label) => ({
