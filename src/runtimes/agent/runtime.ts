@@ -366,14 +366,10 @@ import {
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
-import {
-  canaryStoreProvisioned,
-  readProviderCanaryAdmission,
-} from './provider-canary-proof.ts';
+import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
 import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
 import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
-import { probePrimaryModelUsability } from './providers/primary-model-usability.ts';
-import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
+import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import {
   buildRuntimePrimaryProbeServiceContext,
   createRuntimePrimaryProbeAdapters,
@@ -9798,7 +9794,6 @@ export class AgentRuntime implements Runtime {
       ? fallbackEntry.model
       : this.model;
   }
-
 
   private probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
