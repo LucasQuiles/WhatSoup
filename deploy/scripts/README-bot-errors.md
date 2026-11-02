@@ -1661,8 +1661,10 @@ for the operator instance (config `name`, trimmed and lower-cased; the checker k
 copy of the runtime constants, and a parity test keeps the copies equal). With no guard,
 the key is never resolved or sent. An instance that names its own `apiKeyEnv` (anything
 other than `PINECONE_API_KEY`) is not probed, because that variable exists only in its
-launcher. Nor is one that names an `apiKeyService` other than `pinecone`, because that
-keyring item may hold a different key.
+launcher. `memory.pinecone.apiKeyService` does not change the lookup: `resolveMemoryConfig`
+(`src/config.ts`) drops it, so the runtime keys the instance the normal way. The job's own
+`PINECONE_API_KEY` is excluded from the lookup, as the bot launcher excludes it; it is not
+removed from the job's environment, which the system keychain helpers inherit.
 
 | Condition | Evidence line | Daily-health event |
 |---|---|---|
@@ -1680,7 +1682,8 @@ keyring item may hold a different key.
 | no key visible to the job | evidence line ends `index_not_probed=key_not_visible` | none |
 | deletion protection off, or zero records | shown in the evidence line only | none |
 | an instance folder or `config.json` that is a symbolic link, is not this user's, is writable by group or others, is not a regular file, has more than one hard link, cannot be opened without following a link, or has a name outside `[A-Za-z0-9][A-Za-z0-9._-]{0,63}` | `WARN bot_memory <instance>: config_refused reason=symlink\|foreign_owner\|writable_by_others\|not_regular\|multiple_links\|unopenable\|unsafe_name`; nothing is probed and no token is sent for it | warning |
-| the instances folder itself is not this user's or is writable by group or others | `WARN bot_memory_inventory: instances_refused reason=foreign_owner\|writable_by_others`; no instance is read | warning, never a per-instance event |
+| the instances folder itself is a symbolic link, is not this user's, or is writable by group or others | `WARN bot_memory_inventory: instances_refused reason=symlink\|foreign_owner\|writable_by_others`; no instance is read | warning, never a per-instance event |
+| the profile opts in but `~/.config/whatsoup/instances` is missing or cannot be opened without following a link | `WARN bot_memory_inventory: instances_unobserved reason=missing\|unreadable` | warning, never a per-instance event |
 | an instance config larger than the per-config limit | `WARN bot_memory <instance>: config_skipped size=… limit=… (not parsed)`; later instances still run | warning |
 | an inventory-wide limit is reached (see Limits) | `WARN bot_memory_inventory: truncated limit=<limit> instances_reported=<n>`, once, after the lines already produced | warning, never a per-instance event |
 
@@ -1729,10 +1732,16 @@ file with one hard link. Readable by others is accepted. The read is capped at
 bytes read exceed `BOT_MEMORY_CONFIG_MAX_BYTES` gets one
 `WARN bot_memory <instance>: config_skipped size=… limit=… (not parsed)` line (`size` is
 the file size, or the limit + 1 when the file grew during the read), and the inventory
-continues with the next instance. Residual: the token itself still comes from the shared
-`instance_health_token` reader, which reads `tokens.env` in that same checked folder and
-follows a link there; a plant by this same user is outside this threat model, as for the
-legacy receipt repair. A config or `/health` body that cannot be
+continues with the next instance. The instances root is `~/.config/whatsoup/instances`, as
+for the checker's other instance inventories; a root under a non-default `XDG_CONFIG_HOME`
+is not followed, and an opted-in host without the default root reports
+`instances_unobserved`. Residual: the token itself still comes from the shared
+`instance_health_token` reader (environment, then `tokens.env` in that same checked folder,
+following a link there); a plant by this same user is outside this threat model, as for the
+legacy receipt repair. A host whose token lives only in the scoped `whatsoup-health-token`
+keychain entry (the post-migration state with `tokens.env` retired) reports
+`readiness_unreadable … why=no_health_token`, as the health probe reports
+`health_token_missing` there. A config or `/health` body that cannot be
 parsed, deep nesting included, never stops the run: the config is skipped (the instance
 config inventory reports it as invalid JSON) and the body leaves readiness unobserved.
 Body-supplied readiness values and the deletion-protection value are rendered as

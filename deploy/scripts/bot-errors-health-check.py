@@ -4329,8 +4329,10 @@ def bot_memory_call(step: Callable[..., Any], args: tuple[Any, ...], seconds: fl
     sending bytes could hold a read far past it. The step runs in a daemon
     thread; past the deadline its result is abandoned (the thread ends with its
     socket timeout or with the process) and on_deadline stands in. An error the
-    step raises is raised here.
+    step raises is raised here. With no time left the step never starts.
     """
+    if seconds <= 0:
+        return on_deadline
     outcome: list[tuple[bool, Any]] = []
 
     def run() -> None:
@@ -4364,7 +4366,8 @@ def bot_memory_field_map_text(field_map: Any) -> str:
     if (isinstance(field_map, dict) and len(field_map) <= BOT_MEMORY_FIELD_MAP_ENTRIES
             and all(isinstance(key, str) and isinstance(value, str)
                     and len(key) + len(value) <= BOT_MEMORY_TOKEN_CHARS for key, value in field_map.items())):
-        return repr(field_map)
+        # Index metadata is body-supplied: every string is redacted like the other evidence tokens.
+        return repr({bot_memory_token(key): bot_memory_token(value) for key, value in field_map.items()})
     if field_map is None:
         return "None"
     size = f" size={len(field_map)}" if isinstance(field_map, (dict, list, str)) else ""
@@ -4466,9 +4469,18 @@ def bot_memory_configs(home: Path, budget: BotMemoryBudget) -> Iterator[tuple[st
     healthPort chosen here receives the instance's bearer token, so every
     folder and config must be this user's own and writable by no one else.
     """
+    root = home / ".config/whatsoup/instances"
     try:
-        root_fd = os.open(home / ".config/whatsoup/instances", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY)
+        if stat.S_ISLNK(os.lstat(root).st_mode):
+            budget.append_lines(["WARN bot_memory_inventory: instances_refused reason=symlink"])
+            return
+        root_fd = os.open(root, os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        # Opted in but nothing to observe is a result, not silence.
+        budget.append_lines(["WARN bot_memory_inventory: instances_unobserved reason=missing"])
+        return
     except OSError:
+        budget.append_lines(["WARN bot_memory_inventory: instances_unobserved reason=unreadable"])
         return
     try:
         reason = bot_memory_private_refusal(os.fstat(root_fd))
@@ -4509,7 +4521,7 @@ def bot_memory_configs(home: Path, budget: BotMemoryBudget) -> Iterator[tuple[st
             if not isinstance(pinecone, dict) or not pinecone:
                 continue
             settings = {key: value for key, value in pinecone.items()
-                        if key in ("projectId", "expectedHostSuffix", "index", "apiKeyEnv", "apiKeyService")
+                        if key in ("projectId", "expectedHostSuffix", "index", "apiKeyEnv")
                         and isinstance(value, str)}
             if isinstance(config.get("name"), str):
                 settings["name"] = config["name"]
@@ -4710,9 +4722,9 @@ def _bot_memory_inventory(budget: BotMemoryBudget) -> None:
         key = None
         # Without a project guard the key is never resolved, so it cannot be
         # sent. A per-instance key variable (apiKeyEnv) lives only in that
-        # launcher's environment, and another keyring service (apiKeyService)
-        # may hold a different key than the one this lookup finds.
-        if guard and cfg.get("apiKeyEnv") in (None, env_key) and cfg.get("apiKeyService") in (None, "pinecone"):
+        # launcher's environment. memory.pinecone.apiKeyService changes nothing:
+        # resolveMemoryConfig (src/config.ts) drops it, so the runtime ignores it.
+        if guard and cfg.get("apiKeyEnv") in (None, env_key):
             budget.require_time()
             key = provider_credential_value("pinecone", BOT_MEMORY_TIMEOUT_SECONDS, source_env)
         index = stats = None

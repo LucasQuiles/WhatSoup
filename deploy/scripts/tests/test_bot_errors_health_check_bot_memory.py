@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 import threading
 import time
+from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
@@ -261,17 +262,14 @@ def test_instance_with_its_own_key_variable_is_not_probed(tmp_path, monkeypatch)
         "bot_memory bot-b: readiness=ready index=whatsapp-bot index_not_probed=key_not_visible"]
 
 
-def test_instance_with_another_keyring_service_is_not_probed(tmp_path, monkeypatch) -> None:
+def test_a_memory_key_service_setting_does_not_stop_the_probe(tmp_path, monkeypatch) -> None:
+    # resolveMemoryConfig (src/config.ts) drops memory.pinecone.apiKeyService, so the
+    # runtime keys this instance the normal way and the inventory must probe it too.
     monkeypatch.setenv("HOME", str(tmp_path))
     _home_with_instance(tmp_path, "bot-c", dict(CFG, apiKeyService="other-pinecone"))
-    monkeypatch.setattr(_mod, "bot_memory_readiness", lambda name, port: READY)
-
-    def boom(*_args, **_kwargs):
-        raise AssertionError("a key under another keyring service may differ from the job's lookup")
-    monkeypatch.setattr(_mod, "provider_credential_value", boom)
-    monkeypatch.setattr(_mod, "pinecone_describe_index", boom)
-    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
-        "bot_memory bot-c: readiness=ready index=whatsapp-bot index_not_probed=key_not_visible"]
+    seen = _stub_probes(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [_healthy("bot-c")]
+    assert seen["credential"] == 1 and seen["describe"] == ["whatsapp-bot"]
 
 
 def _stub_probes(monkeypatch, host=INDEX["host"], readiness=READY) -> dict:
@@ -570,6 +568,13 @@ def test_a_step_error_surfaces_instead_of_hiding_behind_the_deadline() -> None:
         _mod.bot_memory_call(step, (), 5.0, "late")
 
 
+def test_a_step_with_no_time_left_never_starts(monkeypatch) -> None:
+    def no_thread(*_args, **_kwargs):
+        raise AssertionError("no step may start once its deadline has passed")
+    monkeypatch.setattr(_mod, "threading", SimpleNamespace(Thread=no_thread))
+    assert _mod.bot_memory_call(lambda: None, (), 0.0, "late") == "late"
+
+
 def test_a_step_deadline_is_cut_to_the_time_left_in_the_inventory() -> None:
     now = [0.0]
     budget = _mod.BotMemoryBudget(clock=lambda: now[0])
@@ -680,6 +685,15 @@ def test_field_map_rendering_is_bounded() -> None:
         assert [line for line in lines if line.startswith("FAIL ")] == [
             f"FAIL bot_memory bot-a: field_map={rendered} (WhatSoup writes `text`; every memory save fails)"]
         assert lines[-1].endswith("field_map=other protection=enabled records=3")
+
+
+def test_field_map_strings_are_redacted_before_they_reach_evidence() -> None:
+    secret_shaped = "ghp_" + "C" * 36  # synthetic, a shape the shared redactor masks
+    lines = _lines(index=dict(INDEX, field_map={"text": secret_shaped}))
+    assert not any(secret_shaped in line for line in lines)
+    assert [line for line in lines if line.startswith("FAIL ")] == [
+        "FAIL bot_memory bot-a: field_map={'text': '[REDACTED_GITHUB_TOKEN]'} "
+        "(WhatSoup writes `text`; every memory save fails)"]
 
 
 def test_wall_time_is_bounded(tmp_path, monkeypatch) -> None:
@@ -853,6 +867,47 @@ def test_an_instances_root_others_can_write_is_refused_whole(tmp_path, monkeypat
     assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
         "WARN bot_memory_inventory: instances_refused reason=writable_by_others"]
     assert asked == [] and seen["describe"] == []
+
+
+def test_an_opted_in_host_without_an_instances_folder_says_so(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        "WARN bot_memory_inventory: instances_unobserved reason=missing"]
+
+
+def test_a_symlinked_instances_root_is_refused_whole(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "bot-a").mkdir(parents=True)
+    (elsewhere / "bot-a" / "config.json").write_text(json.dumps({"healthPort": 9999, "memory": {"pinecone": CFG}}))
+    (tmp_path / ".config/whatsoup").mkdir(parents=True)
+    (tmp_path / ".config/whatsoup/instances").symlink_to(elsewhere, target_is_directory=True)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        "WARN bot_memory_inventory: instances_refused reason=symlink"]
+    assert asked == []
+
+
+def test_an_instances_root_swapped_for_a_symlink_after_its_check_is_not_followed(tmp_path, monkeypatch) -> None:
+    _inventory_home(tmp_path, monkeypatch, [])
+    decoy = tmp_path / "decoy"
+    (decoy / "bot-a").mkdir(parents=True)
+    (decoy / "bot-a" / "config.json").write_text(json.dumps({"healthPort": 9999, "memory": {"pinecone": CFG}}))
+    root = tmp_path / ".config/whatsoup/instances"
+    root.parent.mkdir(parents=True)
+    root.symlink_to(decoy, target_is_directory=True)
+    real_lstat = os.lstat
+
+    def lstat_before_swap(path, *args, **kwargs):
+        # The check still sees a folder; the link appears before the open.
+        if Path(path) == root:
+            return real_lstat(decoy)
+        return real_lstat(path, *args, **kwargs)
+    monkeypatch.setattr(os, "lstat", lstat_before_swap)
+    asked = _track_readiness(monkeypatch)
+    assert _mod.bot_memory_inventory({"expectBotMemory": True}) == [
+        "WARN bot_memory_inventory: instances_unobserved reason=unreadable"]
+    assert asked == []
 
 
 def test_an_instances_root_owned_by_another_user_is_refused_whole(tmp_path, monkeypatch) -> None:
