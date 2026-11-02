@@ -333,6 +333,7 @@ headroom above every enforced V8 threshold.
 - `pre-push-alignment.test.ts`
 - `pre-push-guard.test.ts`
 - `git-estate-guard.test.ts`
+- `git-estate-guard-scope.test.ts`
 - `doc-drift-check.test.ts`
 - `public-surface-drift-check.test.ts`
 - `drift-skip-ci-gating.test.ts`

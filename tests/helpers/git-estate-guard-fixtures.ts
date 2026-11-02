@@ -5,8 +5,238 @@ import {
   readFileSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect } from 'vitest';
+import { trackTmpDirs } from './tmp-dir.ts';
+
+export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+export const script = resolve(repoRoot, 'scripts/git-estate-guard.ts');
+export const tmp = trackTmpDirs('');
+// #3488: the guard's default git budget (5 s) is tighter than vitest's 10 s
+// test timeout, so a git starved under host load failed as an exit-2
+// assertion. Give every guard subprocess a budget above the test timeout so
+// starvation surfaces as a runner timeout. Cases that need a tighter budget
+// still override it through `extraEnv`.
+const SUITE_GIT_TIMEOUT_MS = '20000';
+// #3561: the status-timeout cases shrink the ONE budget every guard git call
+// shares (gitTimeoutMs, scripts/git-estate-guard.ts:100-113, used by runGit and
+// runGitAsync), so it must still cover each real setup call under gate load.
+// 300 ms did not: a setup call died first and the snapshot became scan_failed.
+export const STATUS_TIMEOUT_GIT_BUDGET_MS = 3_000;
+export const STATUS_PROBE_HANG_SECONDS = 30;
+const STATUS_XY_CHARACTERS = ['.', 'M', 'T', 'A', 'D', 'R', 'C'] as const;
+export const ALL_TRACKED_XY = STATUS_XY_CHARACTERS.flatMap((indexStatus) =>
+  STATUS_XY_CHARACTERS.map((worktreeStatus) => `${indexStatus}${worktreeStatus}`)
+);
+export const EXPECTED_ORDINARY_XY = new Set([
+  '.M', '.T', '.A', '.D',
+  'M.', 'MM', 'MT', 'MD',
+  'T.', 'TM', 'TT', 'TD',
+  'A.', 'AM', 'AT', 'AD',
+  'D.',
+]);
+export const EXPECTED_RENAME_XY = new Set([
+  'R.', 'RM', 'RT', 'RD',
+  'C.', 'CM', 'CT', 'CD',
+  '.R', '.C',
+]);
+export const EXPECTED_UNMERGED_XY = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']);
+export const INVALID_RENAME_XY = [
+  'RR', 'RC', 'CR', 'CC',
+  'MR', 'MC', 'TR', 'TC', 'AR', 'AC',
+] as const;
+
+interface CliResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export interface SnapshotDocument {
+  schemaVersion: 1;
+  command: 'snapshot';
+  exitCode: number;
+  snapshot: {
+    statusScope: 'pusher' | 'repository';
+    commonDir: string;
+    baselinePath: string;
+    snapshotHash: string;
+    incomplete: boolean;
+    racing: boolean;
+    worktrees: Array<{
+      path: string;
+      head: string | null;
+      primary: boolean;
+      detached: boolean;
+      operationBranch: string | null;
+      locked: boolean;
+      prunable: boolean;
+      status: {
+        branchOid: string | null;
+        tracked: Array<{ path: string; xy: string }>;
+        untracked: string[];
+        conflicts: Array<{
+          path: string;
+          xy: string;
+          stageOids: [string, string, string];
+        }>;
+      } | null;
+    }>;
+    branches: Array<{
+      name: string;
+      scopeName: string;
+      oid: string;
+      upstream: string | null;
+      ahead: number;
+      behind: number;
+      gone: boolean;
+    }>;
+    stashes: Array<{ oid: string; parents: string[]; branch: string | null }>;
+    findings: Array<{ id: string; kind: string; worktree?: string; branch?: string }>;
+    errors: Array<{ kind: string; message: string; worktree?: string }>;
+  };
+}
+
+export interface GuardDocument {
+  schemaVersion: 1;
+  command: 'guard';
+  phase: 'pre-commit' | 'pre-push';
+  exitCode: number;
+  baseline: { state: 'valid' | 'missing' | 'malformed'; path: string };
+  decision: {
+    blocked: boolean;
+    newConflictIds: string[];
+    newCriticalFindingIds: string[];
+    blockingFindingIds: string[];
+    advisoryFindingIds: string[];
+    scopedRacing: boolean;
+    scopedRacingWorktrees: string[];
+    scopedRacingBranches: string[];
+    advisoryRacingWorktrees: string[];
+    advisoryRacingBranches: string[];
+    reasons: string[];
+    blockingReasons: string[];
+    advisoryReasons: string[];
+    countGrowth: { worktrees: number; branches: number };
+    newWorktreeIds: string[];
+    newBranchIds: string[];
+    exemptedWorktreeIds: string[];
+    exemptedBranchIds: string[];
+    warningCounts: Record<string, number>;
+  };
+  snapshot: SnapshotDocument['snapshot'] | null;
+}
+
+export interface BaselineWriteDocument {
+  schemaVersion: 1;
+  command: 'baseline';
+  action: 'write';
+  exitCode: number;
+  baseline: {
+    path: string;
+    snapshotHash: string;
+    findingCount: number;
+    worktreeCount: number;
+    branchCount: number;
+  } | null;
+}
+
+export interface BaselineAcceptStashDocument {
+  schemaVersion: 1;
+  command: 'baseline';
+  action: 'accept-stash';
+  exitCode: number;
+  baseline: BaselineWriteDocument['baseline'];
+  acceptedStash?: {
+    oid: string;
+    findingId: string;
+    parentCount: number;
+  };
+  admission?: {
+    reason: string;
+    reasonSha256: string;
+  };
+}
+
+export function run(
+  cwd: string,
+  args: string[],
+  extraEnv: NodeJS.ProcessEnv = {},
+): CliResult {
+  const proc = spawnSync(
+    process.execPath,
+    ['--disable-warning=ExperimentalWarning', '--experimental-strip-types', script, ...args],
+    {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        WHATSOUP_GIT_ESTATE_GIT_TIMEOUT_MS: SUITE_GIT_TIMEOUT_MS,
+        ...extraEnv,
+      },
+      maxBuffer: 16 * 1024 * 1024,
+    },
+  );
+  return {
+    status: proc.status,
+    stdout: proc.stdout ?? '',
+    stderr: proc.stderr ?? '',
+  };
+}
+
+export function git(cwd: string, args: string[], expectedStatus = 0): string {
+  const proc = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Estate Test',
+      GIT_AUTHOR_EMAIL: 'estate@example.test',
+      GIT_COMMITTER_NAME: 'Estate Test',
+      GIT_COMMITTER_EMAIL: 'estate@example.test',
+    },
+  });
+  expect(proc.status, proc.stderr).toBe(expectedStatus);
+  return proc.stdout.trim();
+}
+
+export function initRepo(objectFormat: 'sha1' | 'sha256' = 'sha1'): { root: string; repo: string } {
+  const root = tmp.make('whatsoup-git-estate');
+  const repo = join(root, 'repo');
+  mkdirSync(repo);
+  git(repo, ['init', `--object-format=${objectFormat}`, '--initial-branch=main']);
+  writeFileSync(join(repo, 'tracked.txt'), 'base\n');
+  git(repo, ['add', 'tracked.txt']);
+  git(repo, ['commit', '-m', 'base']);
+  return { root, repo };
+}
+
+export function snapshot(repo: string): SnapshotDocument {
+  const result = run(repo, ['snapshot', '--json']);
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as SnapshotDocument;
+}
+
+export function expectOnlyNarrowBaselineFieldsChanged(
+  beforeRaw: string,
+  afterRaw: string,
+  addedFindingId: string,
+): void {
+  const before = JSON.parse(beforeRaw) as Record<string, unknown>;
+  const after = JSON.parse(afterRaw) as Record<string, unknown>;
+  const expected = {
+    ...before,
+    findingIds: [...(before['findingIds'] as string[]), addedFindingId].sort(),
+    snapshotHash: after['snapshotHash'],
+    payloadHash: after['payloadHash'],
+  };
+  expect(after).toEqual(expected);
+  // The normal writer is canonical, so this also checks literal preservation
+  // of every unselected baseline field rather than only semantic equality.
+  expect(afterRaw).toBe(`${JSON.stringify(expected)}\n`);
+}
+
 
 export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
