@@ -579,14 +579,14 @@ describe('createPrimaryModelProbeAdapters', () => {
       adapters,
       { signal: controller.signal },
     );
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(gate.snapshot()).toMatchObject({
-      active: true,
-      activeWorkKind: 'probe',
-      activePhase: 'executing',
-      progressAgeMs: 0,
-      pending: 0,
+    await vi.waitFor(() => {
+      expect(gate.snapshot()).toMatchObject({
+        active: true,
+        activeWorkKind: 'probe',
+        activePhase: 'executing',
+        progressAgeMs: 0,
+        pending: 0,
+      });
     });
 
     now = 20_010;
