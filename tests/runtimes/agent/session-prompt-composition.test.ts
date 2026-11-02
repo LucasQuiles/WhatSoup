@@ -1,9 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { SessionManager } from '../../../src/runtimes/agent/session.ts';
+import { SessionManager, __provider_switch_for_test } from '../../../src/runtimes/agent/session.ts';
+import { AnthropicApiProvider } from '../../../src/runtimes/agent/providers/anthropic-api.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
 import { trackTmpDirs } from '../../helpers/tmp-dir.ts';
@@ -223,5 +224,70 @@ describe('SessionManager system prompt composition', () => {
     });
 
     expect(smNoCallback.buildSystemPrompt()).toBe(smNullCallback.buildSystemPrompt());
+  });
+});
+
+// The runtime decides whether a session gets memory guidance (see
+// memory-guidance-runtime.test.ts); these cases pin that a supplied block
+// reaches the model on both prompt paths: the claude-cli argument and the
+// anthropic-api request body.
+describe('SessionManager memory guidance block', () => {
+  const MEMORY_MARKER = 'MEMORY-GUIDANCE-MARKER-4c1e';
+  const originalApiKey = process.env['ANTHROPIC_API_KEY'];
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalApiKey === undefined) delete process.env['ANTHROPIC_API_KEY'];
+    else process.env['ANTHROPIC_API_KEY'] = originalApiKey;
+  });
+
+  function sessionFor(provider: 'claude-cli' | 'anthropic-api', block?: () => string | null): SessionManager {
+    return new SessionManager({
+      db: makeDb(),
+      messenger: makeMessenger(),
+      chatJid: CHAT_JID,
+      onEvent: () => undefined,
+      instanceName: 'mybot',
+      cwd: '/mock/home',
+      configSystemPrompt: 'Configured instruction.',
+      provider,
+      ...(block ? { memoryGuidanceBlock: block } : {}),
+    });
+  }
+
+  it('claude-cli: the block reaches --append-system-prompt ahead of the configured prompt', () => {
+    const prompt = sessionFor('claude-cli', () => MEMORY_MARKER).buildSystemPrompt();
+    const args = __provider_switch_for_test.getProviderArgs('claude-cli', prompt, '/mock/home', undefined, 'model', []);
+    const appended = args[args.indexOf('--append-system-prompt') + 1] ?? '';
+
+    expect(appended).toContain(MEMORY_MARKER);
+    expect(appended.indexOf(MEMORY_MARKER)).toBeLessThan(appended.indexOf('Configured instruction.'));
+  });
+
+  it('anthropic-api: the block reaches the request system field', async () => {
+    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error('socket hang up'));
+    vi.stubGlobal('fetch', fetchMock);
+    const provider = new AnthropicApiProvider();
+    await provider.initialize({
+      cwd: '/tmp',
+      systemPrompt: sessionFor('anthropic-api', () => MEMORY_MARKER).buildSystemPrompt(),
+      instanceName: 'mybot',
+      onEvent: () => undefined,
+      onCrash: () => undefined,
+    });
+
+    await provider.sendTurn({ role: 'user', conversationKey: 'memory-guidance', parts: [{ kind: 'text', text: 'hello' }] });
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)) as { system: string };
+    expect(body.system).toContain(MEMORY_MARKER);
+  });
+
+  it('keeps the prompt byte-identical when the block is absent or null', () => {
+    for (const provider of ['claude-cli', 'anthropic-api'] as const) {
+      const absent = sessionFor(provider).buildSystemPrompt();
+      expect(sessionFor(provider, () => null).buildSystemPrompt()).toBe(absent);
+      expect(absent).not.toContain('memory_write');
+    }
   });
 });
