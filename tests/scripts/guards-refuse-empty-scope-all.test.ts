@@ -117,6 +117,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'bot-errors-runtime-manifest': { class: 'probe-nonzero', reason: 'reads cwd runtime manifest; absent -> non-zero', probe: { via: 'cwd' } },
   'bot-errors-critical-surface': { class: 'probe-nonzero', reason: 'reads cwd surface files; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'node-pin-consistency': { class: 'probe-nonzero', reason: 'reads cwd .nvmrc/package.json pins; ENOENT -> non-zero', probe: { via: 'cwd' } },
+  'python-dependency-lock': { class: 'probe-nonzero', reason: 'reads cwd lock policy and declared lock artifacts; a missing policy is a blocking violation', probe: { via: 'cwd' } },
   'instance-config': { class: 'probe-nonzero', reason: 'reads cwd instance config; absent -> non-zero (crashes ungracefully — non-vacuous but future cleanup)', probe: { via: 'cwd' } },
   'service-units': { class: 'probe-nonzero', reason: 'reads cwd service definitions; ENOENT -> non-zero', probe: { via: 'cwd' } },
   'claude-settings': { class: 'probe-nonzero', reason: 'reads cwd .claude/settings.json; absent -> drift non-zero', probe: { via: 'cwd' } },

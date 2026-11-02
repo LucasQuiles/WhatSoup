@@ -109,6 +109,7 @@ describe('classifyDrift — path classification', () => {
     // at config load, so drifting it is policy drift (and never falls through to UNKNOWN).
     ['policy/media-retention.json', 'POLICY_OR_WORKFLOW'],
     ['package-lock.json', 'DEPENDENCY'],
+    ['requirements/python/quality-cpython313-linux-x64.txt', 'DEPENDENCY'],
     ['.nvmrc', 'DEPENDENCY'],
     ['src/lib/phone.ts', 'SHARED_RUNTIME'],
     ['src/core/database.ts', 'SHARED_RUNTIME'],

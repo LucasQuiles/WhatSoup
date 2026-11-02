@@ -147,6 +147,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:public-surface-drift',
       'npm run guard:work-index',
       'npm run guard:node-pin-consistency',
+      'npm run guard:python-dependency-lock',
       'npm run guard:source-runtime-drift',
       'npm run guard:fleet-bot-hardening-parity',
       'npm run guard:bot-errors-runtime-manifest',
@@ -185,6 +186,7 @@ const CHAIN_REQUIREMENTS: ChainRequirement[] = [
       'npm run guard:work-index',
       'npm run guard:doc-tally',
       'npm run guard:node-pin-consistency',
+      'npm run guard:python-dependency-lock',
       'npm run guard:source-runtime-drift',
       'npm run guard:arc-binding-drift',
       'npm run guard:fleet-bot-hardening-parity',
@@ -1029,13 +1031,13 @@ function qualityCiLanePartitionFailures(text: string): string[] {
     'r.outcome !== "pass"',
   ]);
   requireNamedStep(compat, 'Install compatibility host dependencies', 'quality (25.x)', [
-    'bash deploy/scripts/install-host-dependencies.sh --profile quality --node-policy compatibility --apply --yes --json',
-    '>> "$GITHUB_PATH"',
+    'bash deploy/scripts/install-host-dependencies.sh --profile compatibility --node-policy compatibility --apply --yes --json',
   ]);
   requireNamedStep(compat, 'Host dependency profile (compatibility-only)', 'quality (25.x)', [
     'set -o pipefail',
-    'bash deploy/scripts/whatsoup-host-doctor.sh --profile quality --node-policy compatibility --json',
+    'bash deploy/scripts/whatsoup-host-doctor.sh --profile compatibility --node-policy compatibility --json',
     'tee "$RUNNER_TEMP/whatsoup-doctor-compatibility.json"',
+    'r.profile !== "compatibility"',
     'r.outcome !== "compatibility_only"',
   ]);
 
@@ -1069,12 +1071,48 @@ function qualityCiLanePartitionFailures(text: string): string[] {
       }
     }
   }
-  const compatibilityText = collectStringValues(compatibility).join('\n');
+  const migrationSetups = [
+    { id: 'legacy-python', name: 'Setup legacy CPython for migration regression', version: '3.12' },
+    { id: 'locked-python', name: 'Setup CPython 3.13.16', version: '3.13.16' },
+  ];
+  const allowedPythonSetups = compat.filter((step) => migrationSetups.some((expected) =>
+    step.id === expected.id && step.name === expected.name
+    && step.uses === 'actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065'
+    && Object.keys(step).sort().join(',') === 'id,name,uses,with'
+    && Object.keys(asRecord(step.with) ?? {}).join(',') === 'python-version'
+    && asRecord(step.with)?.['python-version'] === expected.version));
+  const bindings = compat.filter((step) => step.name === 'Bind migration regression interpreters');
+  const binding = bindings[0];
+  const bindingEnv = asRecord(binding?.env) ?? {};
+  const bindingRun = [
+    'echo "WHATSOUP_TEST_LEGACY_PYTHON=$LEGACY_PYTHON" >> "$GITHUB_ENV"',
+    'echo "WHATSOUP_TEST_LOCKED_PYTHON=$LOCKED_PYTHON" >> "$GITHUB_ENV"',
+  ].join('\n');
+  const legacyIndex = compat.findIndex((step) => step.id === 'legacy-python');
+  const lockedIndex = compat.findIndex((step) => step.id === 'locked-python');
+  const bindingIndex = compat.findIndex((step) => step === binding);
+  const testIndex = compat.findIndex((step) => step.run === 'npm test -- --pool=forks');
+  if (allowedPythonSetups.length !== 2 || new Set(allowedPythonSetups.map((step) => step.id)).size !== 2
+    || compat.filter((step) => typeof step.uses === 'string' && step.uses.startsWith('actions/setup-python')).length !== 2
+    || bindings.length !== 1 || Object.keys(binding ?? {}).sort().join(',') !== 'env,name,run'
+    || Object.keys(bindingEnv).sort().join(',') !== 'LEGACY_PYTHON,LOCKED_PYTHON'
+    || bindingEnv.LEGACY_PYTHON !== '${{ steps.legacy-python.outputs.python-path }}'
+    || bindingEnv.LOCKED_PYTHON !== '${{ steps.locked-python.outputs.python-path }}'
+    || typeof binding?.run !== 'string' || binding.run.trim() !== bindingRun
+    || !(legacyIndex >= 0 && lockedIndex > legacyIndex && bindingIndex > lockedIndex && testIndex > bindingIndex)) {
+    failures.push('quality (25.x) Python migration prerequisites must be exactly the two pinned setups and bindings');
+  }
+  const compatibilityText = collectStringValues({
+    ...compatibility,
+    steps: compat.filter((step) => !allowedPythonSetups.includes(step)),
+  }).join('\n');
   for (const forbidden of [
     'coverage:check',
     'guard:',
     'playwright',
     'setup-python',
+    'python -m pytest',
+    'python3 -m pytest',
     'test-integrity',
     'ci-disk-reclaim',
   ]) {

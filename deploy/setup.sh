@@ -287,10 +287,10 @@ if [ "${1:-}" = "--reconcile" ]; then
 fi
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   cat <<'USAGE'
-Usage: deploy/setup.sh [--profile <runtime|quality|release>] [--install-host-dependencies] [--yes]
+Usage: deploy/setup.sh [--profile <runtime|compatibility|quality|release>] [--install-host-dependencies] [--yes]
        deploy/setup.sh [--check | --remove-timers | --reconcile [--check]]
 
-  --profile PROFILE  Validate the runtime, quality, or release capability profile.
+  --profile PROFILE  Validate the runtime, compatibility, quality, or release capability profile.
   --install-host-dependencies
                      Apply the explicit host package plan before setup.
   --yes              Confirm the host package plan non-interactively; valid only
@@ -337,7 +337,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$profile" in
-  runtime|quality|release) ;;
+  runtime|compatibility|quality|release) ;;
   *) echo "Unsupported setup profile: $profile" >&2; exit 2 ;;
 esac
 if [ "$assume_yes" -eq 1 ] && [ "$install_host_dependencies" -ne 1 ]; then

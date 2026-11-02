@@ -6,7 +6,7 @@ type FsModule = typeof nodeFs;
 const FAKE_PYTHON = '/fake/venv/bin/python3';
 const FAKE_WHISPER_CLI = '/fake/bin/whisper-cli';
 const FAKE_MODEL = '/fake/model.bin';
-const FAKE_FASTER_MODEL = 'large-v3-turbo';
+const FAKE_FASTER_MODEL = '/fake/faster-whisper-model';
 
 const {
   runCommandMock,
@@ -15,7 +15,7 @@ const {
   existsSyncMock,
 } = vi.hoisted(() => {
   process.env.WHATSOUP_FASTER_WHISPER_PYTHON = '/fake/venv/bin/python3';
-  process.env.WHATSOUP_FASTER_WHISPER_MODEL = 'large-v3-turbo';
+  process.env.WHATSOUP_FASTER_WHISPER_MODEL = '/fake/faster-whisper-model';
   process.env.WHATSOUP_WHISPER_CPP_BIN = '/fake/bin/whisper-cli';
   process.env.WHATSOUP_WHISPER_CPP_MODEL = '/fake/model.bin';
   return {
@@ -37,6 +37,7 @@ vi.mock('node:fs', async (importOriginal: () => Promise<FsModule>) => {
   return {
     ...actual,
     existsSync: (path: string) => existsSyncMock(path),
+    statSync: (path: string) => ({ isFile: () => existsSyncMock(path) }),
   };
 });
 
@@ -76,6 +77,35 @@ afterEach(() => {
 });
 
 describe('transcribeWithFasterWhisper', () => {
+  beforeEach(() => {
+    runCommandMock.mockResolvedValueOnce({ stdout: 'cpython:3.13.16\n' });
+  });
+
+  it.each(['cpython:3.12.12', 'cpython:3.13.15', 'cpython:3.13.17', 'pypy:3.13.16', '', 'unexpected output'])(
+    'rejects runtime identity %j before normalization and model execution',
+    async (identity) => {
+      existsSyncMock.mockReturnValue(true);
+      runCommandMock.mockReset().mockResolvedValueOnce({ stdout: identity });
+
+      await expect(transcribeWithFasterWhisper(audioBuffer, 'audio/ogg'))
+        .rejects.toThrow('CPython 3.13.16 is required');
+      expect(withNormalizedAudioFileMock).not.toHaveBeenCalled();
+      expect(runCommandMock).toHaveBeenCalledTimes(1);
+      expect(runCommandMock).toHaveBeenCalledWith(
+        FAKE_PYTHON, ['-I', '-c', expect.stringContaining('sys.implementation.name')], 5_000,
+      );
+    },
+  );
+
+  it('propagates a failed runtime probe without normalizing audio', async () => {
+    existsSyncMock.mockReturnValue(true);
+    runCommandMock.mockReset().mockRejectedValueOnce(new Error('Command timed out after 5000ms'));
+    await expect(transcribeWithFasterWhisper(audioBuffer, 'audio/ogg'))
+      .rejects.toThrow('Command timed out after 5000ms');
+    expect(withNormalizedAudioFileMock).not.toHaveBeenCalled();
+    expect(runCommandMock).toHaveBeenCalledTimes(1);
+  });
+
   it('throws when no python binary is resolvable (env unset, venv missing)', async () => {
     delete process.env.WHATSOUP_FASTER_WHISPER_PYTHON;
     existsSyncMock.mockReturnValue(false);
@@ -103,15 +133,16 @@ describe('transcribeWithFasterWhisper', () => {
       'audio/ogg',
       expect.any(Function),
     );
-    expect(runCommandMock).toHaveBeenCalledTimes(1);
-    const [bin, args, timeout] = runCommandMock.mock.calls[0] as [string, string[], number];
+    expect(runCommandMock).toHaveBeenCalledTimes(2);
+    const [bin, args, timeout] = runCommandMock.mock.calls[1] as [string, string[], number];
     expect(bin).toBe(FAKE_PYTHON);
     expect(args).toEqual([
+      '-I',
       expect.stringMatching(/scripts\/transcribe-faster-whisper\.py$/),
       '--input',
       '/tmp/normalized.wav',
       '--model',
-      'large-v3-turbo',
+      FAKE_FASTER_MODEL,
       '--model-dir',
       expect.stringContaining('/.local/share/whatsoup/models/faster-whisper'),
     ]);
@@ -142,8 +173,8 @@ describe('transcribeWithFasterWhisper', () => {
     );
   });
 
-  it('honors WHATSOUP_FASTER_WHISPER_MODEL env override on cold module load', async () => {
-    process.env.WHATSOUP_FASTER_WHISPER_MODEL = 'tiny.en';
+  it('honors a local WHATSOUP_FASTER_WHISPER_MODEL override on cold module load', async () => {
+    process.env.WHATSOUP_FASTER_WHISPER_MODEL = '/custom/faster-whisper-model';
     existsSyncMock.mockReturnValue(true);
     runCommandMock.mockResolvedValueOnce({ stdout: JSON.stringify({ text: 'x' }) });
 
@@ -153,13 +184,14 @@ describe('transcribeWithFasterWhisper', () => {
     );
 
     await expect(transcribeWithOverride(audioBuffer, 'audio/ogg')).resolves.toBe('x');
-    const [, args] = runCommandMock.mock.calls[0] as [string, string[], number];
+    const [, args] = runCommandMock.mock.calls[1] as [string, string[], number];
     expect(args).toEqual([
+      '-I',
       expect.stringMatching(/scripts\/transcribe-faster-whisper\.py$/),
       '--input',
       '/tmp/normalized.wav',
       '--model',
-      'tiny.en',
+      '/custom/faster-whisper-model',
       '--model-dir',
       expect.stringContaining('/.local/share/whatsoup/models/faster-whisper'),
     ]);
@@ -167,7 +199,7 @@ describe('transcribeWithFasterWhisper', () => {
 });
 
 describe('fasterWhisperProvider', () => {
-  it('reports availability when both python and script exist', () => {
+  it('reports availability when python, script and required model files exist', () => {
     existsSyncMock.mockReturnValue(true);
     expect(fasterWhisperProvider.isAvailable()).toBe(true);
   });
@@ -181,6 +213,21 @@ describe('fasterWhisperProvider', () => {
   it('reports unavailable when script is missing', () => {
     existsSyncMock.mockImplementation((p: string) => p === FAKE_PYTHON);
     expect(fasterWhisperProvider.isAvailable()).toBe(false);
+  });
+
+  it('reports unavailable when the configured local model is missing', () => {
+    existsSyncMock.mockImplementation((path: string) => path === FAKE_PYTHON || path.endsWith('transcribe-faster-whisper.py'));
+    expect(fasterWhisperProvider.isAvailable()).toBe(false);
+  });
+
+  it('does not treat an unpinned model name as a local override', async () => {
+    process.env.WHATSOUP_FASTER_WHISPER_MODEL = 'tiny.en';
+    existsSyncMock.mockReturnValue(true);
+    vi.resetModules();
+    const { fasterWhisperProvider: provider } = await import(
+      '../../../../../src/runtimes/chat/providers/transcription/faster-whisper.ts'
+    );
+    expect(provider.isAvailable()).toBe(false);
   });
 
   it('has the documented provider name', () => {

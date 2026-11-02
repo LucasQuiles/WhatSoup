@@ -1,12 +1,15 @@
 import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_MODEL_PATH as FASTER_WHISPER_DEFAULT_MODEL_PATH,
   SCRIPT_PATH as FASTER_WHISPER_SCRIPT_PATH,
   VENV_ROOT as FASTER_WHISPER_VENV_ROOT,
   fasterWhisperProvider,
   resolvePython,
+  transcribeWithFasterWhisper,
 } from '../../../../src/runtimes/chat/providers/transcription/faster-whisper.ts';
 import { resolveBinaryPath } from '../../../../src/runtimes/chat/providers/transcription/local-audio.ts';
 import {
@@ -17,6 +20,7 @@ import {
 import { transcribeAudio } from '../../../../src/runtimes/chat/providers/whisper.ts';
 
 const FIXTURE_PATH = join(process.cwd(), 'tests/fixtures/audio/hello.ogg');
+const requireLockedRuntime = process.env.WHATSOUP_REQUIRE_LOCKED_TRANSCRIPTION === '1';
 
 // Ask each provider whether it can actually run instead of re-deriving its
 // requirements here. Commit 24b812377 (#2897) fixed the previous version of this
@@ -43,18 +47,10 @@ const FIXTURE_PATH = join(process.cwd(), 'tests/fixtures/audio/hello.ogg');
 // entry this test can therefore skip here while the network provider would in fact
 // have transcribed the fixture. Neutralizing the keychain is a separate change.
 //
-// KNOWN ASYMMETRY, deliberate and NOT compensated for here: faster-whisper's
-// isAvailable() checks python + wrapper script but no model, because it downloads
-// models on demand. So a TRUE predicate still permits a run-and-fail: a host with
-// the venv but no cached model and no network reaches the assertion and fails on
-// FALLBACK_TEXT, exactly as whisper.cpp did before this change.
-//
-// Under this harness that is not a corner case, it is EVERY run. faster-whisper.ts
-// derives MODEL_DIR from homedir() and passes it as --model-dir, and the setup file
-// rewrites HOME to a fresh mkdtemp, so the download root is a new empty directory
-// every time and the cache is always cold. Any host whose venv really does have
-// faster_whisper installed must therefore fetch a model inside runCommand's 30s
-// budget on every single run. Fixing that belongs in the provider, not in this test.
+// Faster-whisper availability requires the selected local model directory as well
+// as the interpreter and wrapper. The fresh HOME used by vitest therefore makes it
+// unavailable instead of causing a production-model download during a test. The
+// locked smoke lane explicitly supplies its verified tiny model directory.
 const whisperCppUsable = whisperCppProvider.isAvailable();
 const fasterWhisperUsable = fasterWhisperProvider.isAvailable();
 
@@ -65,7 +61,7 @@ const fasterWhisperUsable = fasterWhisperProvider.isAvailable();
 const ffmpegPath = resolveBinaryPath('ffmpeg');
 const hasLocalProvider = Boolean(ffmpegPath) && (whisperCppUsable || fasterWhisperUsable);
 
-if (!hasLocalProvider) {
+if (!hasLocalProvider && !requireLockedRuntime) {
   // Loud skip reason. Each half of each provider is reported separately, because
   // "provider unusable" alone cannot tell a missing binary from a missing model and
   // those need different fixes. The halves come from the providers' own resolvers,
@@ -91,17 +87,30 @@ if (!hasLocalProvider) {
     + '\n    model  ($WHATSOUP_WHISPER_CPP_MODEL, else the default in whisper-cpp.ts)'
     + `\n      resolved to ${WHISPER_CPP_MODEL} — ${existsSync(WHISPER_CPP_MODEL) ? 'present' : 'MISSING'}`
     + `\n  faster-whisper = ${fasterWhisperUsable ? 'usable' : 'NOT USABLE'}`
-    + `\n    python ($WHATSOUP_FASTER_WHISPER_PYTHON, else ${FASTER_WHISPER_VENV_ROOT}/bin/{python3.12,python3,python}) = ${pythonPath ?? 'NOT FOUND'}`
-    + `\n    wrapper script ${FASTER_WHISPER_SCRIPT_PATH} — ${existsSync(FASTER_WHISPER_SCRIPT_PATH) ? 'present' : 'MISSING'}`,
+    + `\n    python ($WHATSOUP_FASTER_WHISPER_PYTHON, else ${FASTER_WHISPER_VENV_ROOT}/bin/{python3.13,python3,python}) = ${pythonPath ?? 'NOT FOUND'}`
+    + `\n    wrapper script ${FASTER_WHISPER_SCRIPT_PATH} — ${existsSync(FASTER_WHISPER_SCRIPT_PATH) ? 'present' : 'MISSING'}`
+    + `\n    model ($WHATSOUP_FASTER_WHISPER_MODEL, else ${FASTER_WHISPER_DEFAULT_MODEL_PATH}) = ${existsSync(process.env.WHATSOUP_FASTER_WHISPER_MODEL ?? FASTER_WHISPER_DEFAULT_MODEL_PATH) ? 'present' : 'MISSING'}`,
   );
 }
 
 describe('transcription integration', () => {
   // @skip-env requires a usable local transcription provider and the real audio fixture.
-  it.skipIf(!hasLocalProvider || !existsSync(FIXTURE_PATH))('transcribes a real audio fixture through the shared chain', async () => {
+  it.skipIf(!requireLockedRuntime && (!hasLocalProvider || !existsSync(FIXTURE_PATH)))('transcribes a real audio fixture through the selected local path', async () => {
     delete process.env.OPENAI_API_KEY;
+    if (requireLockedRuntime) {
+      const python = process.env.WHATSOUP_FASTER_WHISPER_PYTHON;
+      const model = process.env.WHATSOUP_FASTER_WHISPER_MODEL;
+      expect(python, 'the required lane must select its locked venv explicitly').toBeTruthy();
+      expect(model && existsSync(model), 'the required lane must provide its pinned local model').toBe(true);
+      expect(ffmpegPath, 'the required lane must provide ffmpeg').toBeTruthy();
+      const runtime = spawnSync(python!, ['-I', '-c', 'import sys; print(f"{sys.implementation.name}:{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")'], { encoding: 'utf8', timeout: 5_000 });
+      expect(runtime.status, runtime.stderr).toBe(0);
+      expect(runtime.stdout.trim()).toBe('cpython:3.13.16');
+    }
     const buffer = await readFile(FIXTURE_PATH);
-    const result = await transcribeAudio(buffer, 'audio/ogg');
+    const result = requireLockedRuntime
+      ? await transcribeWithFasterWhisper(buffer, 'audio/ogg')
+      : await transcribeAudio(buffer, 'audio/ogg');
     expect(result).toMatch(/hello.*test/i);
   }, 30_000);
 });

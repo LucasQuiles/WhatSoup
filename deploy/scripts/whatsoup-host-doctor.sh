@@ -10,7 +10,7 @@ export WHATSOUP_CAPABILITY_ROOT
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: deploy/scripts/whatsoup-host-doctor.sh --profile <runtime|quality|release> [--node-policy <exact|compatibility>] [--json]
+Usage: deploy/scripts/whatsoup-host-doctor.sh --profile <runtime|compatibility|quality|release> [--node-policy <exact|compatibility>] [--json]
 USAGE
 }
 
@@ -51,7 +51,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$profile" in
-  runtime|quality|release) ;;
+  runtime|compatibility|quality|release) ;;
   *) usage; exit 2 ;;
 esac
 case "$node_policy" in

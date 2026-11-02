@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "implementation": "cpython",
+    "version": "3.13.16"
+  },
+  "indexUrl": "https://pypi.org/simple",
+  "locks": {
+    "quality": {
+      "linux-x64": "requirements/python/quality-cpython313-linux-x64.txt",
+      "linux-arm64": "requirements/python/quality-cpython313-linux-arm64.txt",
+      "darwin-x64": "requirements/python/quality-cpython313-darwin-x64.txt",
+      "darwin-arm64": "requirements/python/quality-cpython313-darwin-arm64.txt"
+    },
+    "transcription": {
+      "linux-x64": "requirements/python/transcription-cpython313-linux-x64.txt",
+      "linux-arm64": "requirements/python/transcription-cpython313-linux-arm64.txt",
+      "darwin-x64": "requirements/python/transcription-cpython313-darwin-x64.txt",
+      "darwin-arm64": "requirements/python/transcription-cpython313-darwin-arm64.txt"
+    }
+  }
+}
