@@ -898,8 +898,14 @@ async function scanWorktreeStatuses(
       let operationBranch: string | null = null;
       try {
         // A failed status must not erase a known operation branch from scope.
-        const gitDir = worktree.detached ? resolveWorktreeGitDir(worktree.path) : null;
-        operationBranch = worktree.detached ? readOperationBranch(gitDir!) : null;
+        let gitDir: string | null = null;
+        try {
+          gitDir = worktree.detached ? resolveWorktreeGitDir(worktree.path) : null;
+          operationBranch = worktree.detached ? readOperationBranch(gitDir!) : null;
+        } catch (error) {
+          // Keep the status failure when operation metadata is unavailable.
+          if (result.status === 0) throw error;
+        }
         if (result.status !== 0) {
           return {
             capture,
@@ -1088,7 +1094,7 @@ function changedCaptureKeys(start: Record<string, string>, end: Record<string, s
     .filter((key) => start[key] !== end[key]);
 }
 
-function classifyRacing(
+export function classifyRacing(
   snapshot: EstateSnapshot,
   scopedWorktreePaths: ReadonlySet<string>,
   scopedBranchNames: ReadonlySet<string>,
@@ -1123,6 +1129,10 @@ function classifyRacing(
   for (const branch of changedBranches) {
     if (scopedBranchNames.has(branch)) scopedRacing = true;
     else advisoryRacingBranches.add(branch);
+  }
+  if (!scopedRacing && advisoryRacingWorktrees.size === 0 && advisoryRacingBranches.size === 0) {
+    // Unattributed drift cannot be proven out of scope.
+    scopedRacing = true;
   }
   return {
     scopedRacing,

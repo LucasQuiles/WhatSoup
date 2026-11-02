@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  classifyRacing,
   isFullObjectId,
   main as runGitEstateGuard,
   parseBranches,
@@ -19,6 +20,7 @@ import {
   parseStatus,
   parseWorktreePorcelain,
 } from '../../scripts/git-estate-guard.ts';
+import type { EstateScanCapture, EstateSnapshot } from '../../scripts/lib/git-estate-model.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   baselineChangeEnvironment,
@@ -264,6 +266,52 @@ function expectOnlyNarrowBaselineFieldsChanged(
 
 
 describe('scoped consistency and attribution', () => {
+  it('blocks unattributed racing while preserving out-of-scope status advisories', () => {
+    const root = tmp.make('whatsoup-racing');
+    const other = join(root, 'other');
+    const capture: EstateScanCapture = {
+      commonDir: join(root, '.git'),
+      worktrees: [],
+      statusHashes: { [other]: 'unchanged' },
+      branchHashes: {},
+      refHashes: {},
+      stashHash: 'unchanged',
+    };
+    const racingSnapshot: EstateSnapshot = {
+      schemaVersion: 1,
+      commonDir: capture.commonDir,
+      baselinePath: join(capture.commonDir, 'whatsoup', 'git-estate-baseline.v2.json'),
+      invokingWorktreePath: join(root, 'invoking'),
+      topologyFingerprintStart: 'before',
+      topologyFingerprintEnd: 'after',
+      statusFingerprintStart: 'unchanged',
+      statusFingerprintEnd: 'unchanged',
+      consistencyStart: capture,
+      consistencyEnd: capture,
+      incomplete: true,
+      racing: true,
+      worktrees: [],
+      branches: [],
+      stashes: [],
+      findings: [],
+      errors: [],
+      snapshotHash: 'snapshot',
+    };
+    expect(classifyRacing({
+      ...racingSnapshot,
+      consistencyEnd: { ...capture, statusHashes: { [other]: 'changed' } },
+    }, new Set(), new Set())).toEqual({
+      scopedRacing: false,
+      advisoryRacingWorktrees: [other],
+      advisoryRacingBranches: [],
+    });
+    expect(classifyRacing(racingSnapshot, new Set(), new Set())).toEqual({
+      scopedRacing: true,
+      advisoryRacingWorktrees: [],
+      advisoryRacingBranches: [],
+    });
+  });
+
   it.each([
     ['main', 2],
     ['other', 0],
@@ -574,6 +622,38 @@ describe('scoped consistency and attribution', () => {
 });
 
 describe('git-estate guard', () => {
+  it('reports the status failure for a missing detached out-of-scope worktree', () => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other-worktree');
+    const otherHead = git(repo, ['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'other commit']);
+    git(repo, ['worktree', 'add', '--detach', other, otherHead]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    rmSync(other, { recursive: true, force: true });
+
+    const result = run(repo, [
+      'guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/main', '--json',
+    ]);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(result.status, result.stderr).toBe(0);
+    expect(doc.snapshot).toMatchObject({ incomplete: true, racing: false });
+    expect(doc.snapshot!.worktrees.find(({ path }) => path === other)).toMatchObject({
+      head: otherHead,
+      detached: true,
+      operationBranch: null,
+      status: null,
+    });
+    expect(doc.decision.blockingReasons).toEqual([]);
+    expect(doc.decision.advisoryReasons).toContain('other_worktree_scan_incomplete');
+    expect(doc.decision.advisoryScanErrorWorktrees).toEqual([other]);
+    expect(doc.snapshot!.errors).toEqual([
+      expect.objectContaining({
+        kind: 'worktree_status_failed',
+        worktree: other,
+        message: expect.stringMatching(/status scan failed .* \(exit \d+\)/),
+      }),
+    ]);
+  });
+
   it.each([
     ['other branch', 'main', 0],
     ['pushed branch', 'other', 2],
