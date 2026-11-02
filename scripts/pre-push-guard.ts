@@ -120,7 +120,10 @@ export function classifyPrePushInput(input: string): PushDecision {
 
 export function commandsForDecision(decision: PushDecision): string[] {
   if (decision === 'release') return ['verify:release'];
-  if (decision === 'branch') return ['verify:push:branch'];
+  // A branch push keeps the checks that must run before disclosure. The heavy
+  // tests run in the required hosted checks, which block merge and cover more.
+  // `verify:push:branch` stays the complete local gate for a person to run.
+  if (decision === 'branch') return ['verify:push:fast'];
   return [];
 }
 
@@ -249,7 +252,10 @@ export function runPrePushGuard(
   }
 
   const decision = classifyPrePushInput(input);
-  const commands = commandsForDecision(decision);
+  // With no readable ref updates the destination is unknown and could be main, so
+  // this case keeps the complete gate rather than the branch tier.
+  const refsUnknown = nonBlankLines(input).length === 0;
+  const commands = refsUnknown ? ['verify:push:branch'] : commandsForDecision(decision);
 
   if (commands.length === 0) {
     console.error(
@@ -265,7 +271,7 @@ export function runPrePushGuard(
     return decision;
   }
 
-  if (nonBlankLines(input).length === 0) {
+  if (refsUnknown) {
     console.error(
       'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
     );
@@ -284,7 +290,10 @@ export function runPrePushGuard(
       })
     : null;
 
-  dependencies.assertConsoleDependencies(cwd);
+  // Only the complete gates build the console; the branch tier does not need it.
+  if (refsUnknown || decision === 'release') {
+    dependencies.assertConsoleDependencies(cwd);
+  }
 
   for (const script of commands) {
     console.error(`pre-push guard: running npm run ${script}`);

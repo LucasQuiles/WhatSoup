@@ -8,7 +8,9 @@ The canonical complete pre-merge local gate is:
 npm run verify:push:branch
 ```
 
-Resolution / fix / merge-preparation work **MUST** run it before pushing.
+Resolution / fix / merge-preparation work **MUST** run it before pushing. The
+installed hook no longer runs it for a branch push: the hook runs the disclosure
+checks in `verify:push:fast`, and the required hosted checks block merge.
 Running a symbol-referencing vitest subset (e.g. `npm test -- <a-few>.test.ts`)
 is **NOT** sufficient and does not substitute for the full gate.
 

@@ -5,6 +5,7 @@ import {
   BRANCH_STEPS,
   CI_ONLY_GUARDS,
   CURATED_TEST_PATHS,
+  FAST_PUSH_STEPS,
   NEUTRALIZED_SKIP_VARS,
   RELEASE_STEPS,
 } from '../../scripts/push-gate.ts';
@@ -107,6 +108,30 @@ describe('push-gate manifest registry (#2224)', () => {
     );
   });
 
+  it('the fast push tier keeps the disclosure checks and builds nothing', () => {
+    expect(pkg.scripts['verify:push:fast']).toBe(
+      'bash scripts/run-with-pinned-node.sh scripts/push-gate.ts fast',
+    );
+    expect(FAST_PUSH_STEPS.map((step) => step.name)).toEqual([
+      'guard:repo:branch-diff',
+      'guard:repo:commit-authors',
+      'guard:publication:all',
+      'push-gate-scope',
+    ]);
+    for (const step of FAST_PUSH_STEPS) {
+      expect(step.cmd, `${step.name} must not build or run a suite`).not.toMatch(/npm test|typecheck|--prefix console|vitest|pytest/);
+      if (step.name.startsWith('guard:')) expect(allGuardScripts).toContain(step.name);
+    }
+    expect(FAST_PUSH_STEPS[FAST_PUSH_STEPS.length - 1].cmd).toBe('bash scripts/print-push-gate-scope.sh fast');
+  });
+
+  it('the heavy checks the fast tier omits stay in the complete gate', () => {
+    const branchNames = BRANCH_STEPS.map((step) => step.name);
+    for (const name of ['typecheck:all', 'curated-tests', 'verify:console-design', 'console-build', 'test:deployment-qualification']) {
+      expect(branchNames).toContain(name);
+    }
+  });
+
   it('keeps deployment qualification in both local lanes and the Quality workflow', () => {
     const expectedCommand = 'npm run test:deployment-qualification';
     for (const steps of [BRANCH_STEPS, RELEASE_STEPS]) {
@@ -185,7 +210,7 @@ describe('push-gate manifest registry (#2224)', () => {
     // A cmd containing shell metacharacters would silently change semantics
     // when tokenized — so it must fail review here instead.
     const shellMetachar = /["';|&$`<>()\\{}[\]\n]/;
-    for (const step of [...BRANCH_STEPS, ...RELEASE_STEPS]) {
+    for (const step of [...BRANCH_STEPS, ...RELEASE_STEPS, ...FAST_PUSH_STEPS]) {
       expect(
         shellMetachar.test(step.cmd),
         `${step.name}: '${step.cmd}' needs a shell — rewrite as plain argv tokens`,

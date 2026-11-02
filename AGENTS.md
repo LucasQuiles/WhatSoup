@@ -37,8 +37,10 @@ Update a runbook in the same PR when a change resolves its documented gap.
 Search affected runbooks for claims such as “not wired”, “TODO” or “not implemented”;
 read each match in context. Stale claims about shipped behavior block release.
 
-Local push checks cover a curated subset of CI. Both `verify:push:branch` and
-`verify:release` use [the gate manifest](scripts/push-gate.ts); its
+Local push checks cover a curated subset of CI. The hook runs `verify:push:fast`
+for a branch push: disclosure checks only. `verify:push:branch` is the complete
+local gate, run by hand, and `verify:release` covers `main` and tags. All three use
+[the gate manifest](scripts/push-gate.ts); its
 [registry test](tests/scripts/push-gate-manifest.test.ts) protects membership.
 CI's `coverage:check` runs the full suite. A green push hook alone is insufficient.
 

@@ -99,7 +99,7 @@ describe('pre-push guard classifier', () => {
     );
 
     expect(decision).toBe('branch');
-    expect(commandsForDecision(decision)).toEqual(['verify:push:branch']);
+    expect(commandsForDecision(decision)).toEqual(['verify:push:fast']);
   });
 
   it('uses release verification when any pushed ref needs release treatment', () => {
@@ -149,9 +149,8 @@ describe('pre-push guard classifier', () => {
     expect(commandsForDecision(decision)).not.toEqual([]);
   });
 
-  it('routes empty stdin to branch verification (fail closed)', () => {
+  it('classifies empty stdin as a branch update; the runtime tests below prove it keeps the complete gate', () => {
     expect(classifyPrePushInput('')).toBe('branch');
-    expect(commandsForDecision(classifyPrePushInput(''))).toEqual(['verify:push:branch']);
   });
   it('accepts exact 64-character SHA-256 object IDs', () => {
     expect(classifyPrePushLine(
@@ -261,6 +260,34 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     });
   });
 
+  // A delete-only push is proved by the metadata test below. Each shape here carries at
+  // least one content update, and the strictest destination decides the tier.
+  it.each([
+    ['two branches', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/b ${'b'.repeat(40)} refs/heads/b ${ZERO_SHA}`, 'branch', 'run verify:push:fast', 0],
+    ['a branch and a delete', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/old ${ZERO_SHA} refs/heads/old ${'b'.repeat(40)}`, 'branch', 'run verify:push:fast', 0],
+    ['a forced branch update', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${'b'.repeat(40)}`, 'branch', 'run verify:push:fast', 0],
+    ['a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'b'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+    ['a delete and main', `refs/heads/old ${ZERO_SHA} refs/heads/old ${'b'.repeat(40)}\nrefs/heads/main ${'a'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+    ['a version tag', `refs/tags/v1.2.3 ${'a'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+    ['a branch and a version tag', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/tags/v1.2.3 ${'b'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+  ])('takes the strictest tier for %s', (_shape, input, expectedDecision, expectedCall, consoleChecks) => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let checked = 0;
+      try {
+        expect(runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => { checked += 1; },
+        })).toBe(expectedDecision);
+        const calls = readFileSync(callsLog, 'utf8').trim().split('\n');
+        expect(calls[0]).toContain('run guard:git-estate -- guard --phase pre-push');
+        expect(calls.slice(1)).toEqual([expectedCall]);
+        expect(checked).toBe(consoleChecks);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it('maps a symbolic HEAD push to its branch destination for lane exemption', () => {
     withStubNpm((callsLog) => {
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -274,7 +301,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         ).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -318,37 +345,43 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
 
       expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-        'run verify:push:branch',
+        'run verify:push:fast',
       ]);
       expect(events).toEqual([
         `before:origin:git@github.com:LucasQuiles/WhatSoup.git:${'a'.repeat(40)}`,
-        'console',
         'after',
       ]);
     });
   });
 
-  it('fails before branch and release verification when required console executables are missing', () => {
-    for (const [input, expectedEstateCall] of [
-      [
-        `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
-        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-      ],
-      [
-        'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
+  it('fails before release verification when required console executables are missing', () => {
+    withStubNpm((callsLog, root) => {
+      expect(() =>
+        runPrePushGuard(
+          'refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ec3ac431eb1811aeb7fa9851d658b27ae724cbb5',
+          root,
+        ),
+      ).toThrow(/missing required console executables: eslint, tsc, vite.*npm ci --prefix console/);
+      // The estate gate now runs before the console-dependency check, so the
+      // call log is no longer empty — it must contain ONLY the estate-gate
+      // invocation (the failed console check never reaches npm at all).
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe(
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
-      ],
-    ]) {
-      withStubNpm((callsLog, root) => {
-        expect(() => runPrePushGuard(input, root)).toThrow(
-          /missing required console executables: eslint, tsc, vite.*npm ci --prefix console/,
-        );
-        // The estate gate now runs before the console-dependency check, so the
-        // call log is no longer empty — it must contain ONLY the estate-gate
-        // invocation (the failed console check never reaches npm at all).
-        expect(readFileSync(callsLog, 'utf8').trim()).toBe(expectedEstateCall);
-      });
-    }
+      );
+    });
+  });
+
+  it('a branch push reaches the fast tier without console executables, which it does not use', () => {
+    withStubNpm((callsLog, root) => {
+      runPrePushGuard(
+        `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`,
+        root,
+      );
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        'run verify:push:fast',
+      ]);
+    });
   });
 
   const withConsoleTreeFixture = (
@@ -458,9 +491,9 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     }
   };
 
-  it('fails closed before the composite when all bins exist but the console dependency tree is broken', () => {
+  it('fails closed before the release composite when all bins exist but the console dependency tree is broken', () => {
     withConsoleTreeFixture('broken', (root, callsLog, lifecycleMarker) => {
-      const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
+      const input = `refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ${ZERO_SHA}`;
 
       expect(() => runPrePushGuard(input, root)).toThrowError(
         new Error(
@@ -469,22 +502,45 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
       );
       // The estate gate now runs before the console-dependency check, so the
       // call log is no longer empty — it must contain ONLY the estate-gate
-      // invocation (the broken tree throws before verify:push:branch runs).
+      // invocation (the broken tree throws before verify:release runs).
       expect(readFileSync(callsLog, 'utf8').trim()).toBe(
-        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
       );
       expect(existsSync(lifecycleMarker)).toBe(false);
     });
   });
 
-  it('validates a complete console tree offline without lifecycle scripts before running the composite', () => {
-    withConsoleTreeFixture('valid', (root, callsLog, lifecycleMarker) => {
+  it('fails closed on a broken console tree when the ref updates are unreadable', () => {
+    withConsoleTreeFixture('broken', (root, callsLog) => {
+      expect(() => runPrePushGuard('', root)).toThrowError(
+        new Error(
+          'pre-push guard: console dependency tree is incomplete or invalid; run npm ci --prefix console before pushing',
+        ),
+      );
+      expect(readFileSync(callsLog, 'utf8').trim()).toBe('run guard:git-estate -- guard --phase pre-push');
+    });
+  });
+
+  it('a broken console tree does not stop a branch push, which builds nothing', () => {
+    withConsoleTreeFixture('broken', (root, callsLog) => {
       const input = `refs/heads/feature/example 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/feature/example ${ZERO_SHA}`;
 
       expect(runPrePushGuard(input, root)).toBe('branch');
       expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
         'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-        'run verify:push:branch',
+        'run verify:push:fast',
+      ]);
+    });
+  });
+
+  it('validates a complete console tree offline without lifecycle scripts before running the release composite', () => {
+    withConsoleTreeFixture('valid', (root, callsLog, lifecycleMarker) => {
+      const input = `refs/heads/main 8d739e7582b068387411a1d89acca11e3fd31aa4 refs/heads/main ${ZERO_SHA}`;
+
+      expect(runPrePushGuard(input, root)).toBe('release');
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
+        'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/main',
+        'run verify:release',
       ]);
       expect(existsSync(lifecycleMarker)).toBe(false);
     });
@@ -567,7 +623,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -587,7 +643,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         expect(decision).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -646,7 +702,7 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         })).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/feature/sha256',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
       } finally {
         spy.mockRestore();
@@ -1121,6 +1177,9 @@ describe('verify chain composition (push-gate manifest)', () => {
     expect(pushGateScope).toContain('manual npm run verify:push:branch bypasses ref classification');
     expect(pushGateScope).toContain('installed hook invokes pre-push-guard.ts');
     expect(pushGateScope).toContain('delete-only runs design metadata checks only');
+    expect(pushGateScope).toContain('branch -> verify:push:fast');
+    expect(pushGateScope).toContain('no readable refs -> this chain');
+    expect(pushGateScope).toContain('verify:push:fast scope');
   });
 
   it('design guard fixture lane covers the scanner contracts used by console design verification', () => {
@@ -1713,9 +1772,9 @@ describe('pre-push guard — preservation pushes to the preserve mirror', () => 
         )).toBe('branch');
         expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toEqual([
           'run guard:git-estate -- guard --phase pre-push --push-local-ref refs/heads/fix/example',
-          'run verify:push:branch',
+          'run verify:push:fast',
         ]);
-        expect(events).toEqual(['before', 'console', 'after']);
+        expect(events).toEqual(['before', 'after']);
       } finally {
         spy.mockRestore();
       }
