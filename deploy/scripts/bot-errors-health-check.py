@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Iterator, Literal, NamedTuple
 from urllib.error import HTTPError, URLError
@@ -4260,8 +4261,10 @@ PINECONE_DATA_HOST_RE = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.pinecone\.io")
 # src/lib/pinecone-project-guard.ts; a parity test keeps them equal.
 BOT_MEMORY_OPERATOR_INSTANCE = "q"
 BOT_MEMORY_OPERATOR_PROJECT_ID = "o6fsxb8"
-# Inventory-wide allowances. Each network step is bounded by its own timeout,
-# so the wall time can overrun BOT_MEMORY_MAX_SECONDS by at most one step.
+# Inventory-wide allowances. Each network step runs under an absolute deadline
+# cut to the time left (bot_memory_call), so only the key lookup, whose keychain
+# subprocesses each have their own timeout, can carry the wall time past
+# BOT_MEMORY_MAX_SECONDS.
 BOT_MEMORY_MAX_ENTRIES = 256
 BOT_MEMORY_MAX_CONFIGS = 64
 BOT_MEMORY_CONFIG_MAX_BYTES = 1024 * 1024
@@ -4293,6 +4296,10 @@ class BotMemoryBudget:
         if self.clock() >= self.deadline:
             raise BotMemoryLimit("wall_time_limit")
 
+    def step_seconds(self, timeout: float) -> float:
+        """A step's absolute deadline: its own timeout, cut to the time left."""
+        return max(0.0, min(timeout, self.deadline - self.clock()))
+
     def take_config(self) -> None:
         self.require_time()
         if self.configs_remaining <= 0:
@@ -4313,6 +4320,34 @@ class BotMemoryBudget:
     def append_instance(self, lines: list[str]) -> None:
         self.append_lines(lines)
         self.instances += 1
+
+
+def bot_memory_call(step: Callable[..., Any], args: tuple[Any, ...], seconds: float, on_deadline: Any) -> Any:
+    """step(*args) under an absolute deadline.
+
+    A socket timeout bounds each receive, not a whole read, so a peer that keeps
+    sending bytes could hold a read far past it. The step runs in a daemon
+    thread; past the deadline its result is abandoned (the thread ends with its
+    socket timeout or with the process) and on_deadline stands in. An error the
+    step raises is raised here.
+    """
+    outcome: list[tuple[bool, Any]] = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, step(*args)))
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller below
+            outcome.append((False, exc))
+
+    worker = threading.Thread(target=run, name="bot-memory-step", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if not outcome:
+        return on_deadline
+    ok, value = outcome[0]
+    if not ok:
+        raise value
+    return value
 
 
 def bot_memory_token(value: Any) -> Any:
@@ -4668,7 +4703,9 @@ def _bot_memory_inventory(budget: BotMemoryBudget) -> None:
     # job's environment must not stand in for the bot's key either.
     source_env = {name: value for name, value in os.environ.items() if name != env_key}
     for instance, cfg, port in bot_memory_configs(Path.home(), budget):
-        readiness = bot_memory_readiness(instance, port)
+        readiness = bot_memory_call(bot_memory_readiness, (instance, port),
+                                    budget.step_seconds(HEALTH_PROBE_TIMEOUT_SECONDS),
+                                    {"state": None, "http": None, "why": "deadline_exceeded"})
         guard, _source = bot_memory_project_guard(cfg.get("name"), cfg)
         key = None
         # Without a project guard the key is never resolved, so it cannot be
@@ -4681,13 +4718,15 @@ def _bot_memory_inventory(budget: BotMemoryBudget) -> None:
         index = stats = None
         if key:
             budget.require_time()
-            index = pinecone_describe_index(key, cfg.get("index") or BOT_MEMORY_DEFAULT_INDEX)
+            index = bot_memory_call(pinecone_describe_index, (key, cfg.get("index") or BOT_MEMORY_DEFAULT_INDEX),
+                                    budget.step_seconds(BOT_MEMORY_TIMEOUT_SECONDS), {"http": None})
             host = index.get("host") if index.get("http") == 200 else None
             # The key goes only to a Pinecone data host inside the guarded project.
             if (isinstance(host, str) and PINECONE_DATA_HOST_RE.fullmatch(host)
                     and bot_memory_host_in_project(host, guard)):
                 budget.require_time()
-                stats = pinecone_index_stats(key, host)
+                stats = bot_memory_call(pinecone_index_stats, (key, host),
+                                        budget.step_seconds(BOT_MEMORY_TIMEOUT_SECONDS), {"http": None, "records": None})
         budget.append_instance(bot_memory_lines(instance, cfg, readiness, index, stats, bool(key)))
 
 

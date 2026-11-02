@@ -1673,9 +1673,9 @@ keyring item may hold a different key.
 | either finding above while readiness is `ready`, or unreadable | the same line as `WARN`, ending `job_key_differs (readiness=ready)` or `unconfirmed (readiness unreadable)` | warning |
 | no project guard: neither `projectId` nor `expectedHostSuffix` configured, and not the operator instance | `FAIL bot_memory <instance>: project_guard_missing …`; evidence line ends `index_not_probed=project_guard_missing` | critical, plus a per-instance event |
 | index in the configured project, and `embed.field_map` is not `{"text": "text"}` | `FAIL bot_memory <instance>: field_map=…` (a small map of strings as written, anything else as `<type size=n>`; the line ends with the reason: every memory save fails) | critical, plus a per-instance event |
-| `/health` readiness unobserved | `WARN bot_memory <instance>: readiness_unreadable http=… why=…`, where `why` is `no_health_token`, `no_health_port`, `redirect_refused`, `unparsed_body`, `health_token_rejected` (401/403 or the public body), `not_diagnostic`, `health_identity_missing`, `health_identity_mismatch`, `no_memory_readiness` or a transport error name | warning |
-| index read rejected or unreachable (401, 403, 5xx, network) | `WARN bot_memory <instance>: index_unreadable http=…` | warning |
-| record-count read (`describe_index_stats`) rejected or unreachable | `WARN bot_memory <instance>: stats_unreadable http=…`; evidence shows `records=unknown` | warning |
+| `/health` readiness unobserved | `WARN bot_memory <instance>: readiness_unreadable http=… why=…`, where `why` is `no_health_token`, `no_health_port`, `redirect_refused`, `unparsed_body`, `health_token_rejected` (401/403 or the public body), `not_diagnostic`, `health_identity_missing`, `health_identity_mismatch`, `no_memory_readiness`, `deadline_exceeded` or a transport error name | warning |
+| index read rejected, unreachable or past its deadline (401, 403, 5xx, network; `http=None` when no status arrived) | `WARN bot_memory <instance>: index_unreadable http=…` | warning |
+| record-count read (`describe_index_stats`) rejected, unreachable or past its deadline | `WARN bot_memory <instance>: stats_unreadable http=…`; evidence shows `records=unknown` | warning |
 | index host passes the configured guard but is not a Pinecone data host | evidence line ends `records=unknown stats_not_probed=host_not_pinecone`; the key is not sent | none |
 | no key visible to the job | evidence line ends `index_not_probed=key_not_visible` | none |
 | deletion protection off, or zero records | shown in the evidence line only | none |
@@ -1706,12 +1706,19 @@ Pinecone call). The whole inventory is bounded too (`BotMemoryBudget`): at most
 `BOT_MEMORY_MAX_ENTRIES` entries discovered in the instances folder
 (`instance_entry_limit`; a larger folder is not read at all, so the result never depends on
 directory order), at most `BOT_MEMORY_MAX_CONFIGS` configs scanned (`config_count_limit`),
-`BOT_MEMORY_MAX_SECONDS` of wall time (`wall_time_limit`, checked before each step, so a
-run can overrun by at most one step's timeout), and at most `BOT_MEMORY_MAX_LINES` lines
+`BOT_MEMORY_MAX_SECONDS` of wall time (`wall_time_limit`, checked before each step), and at most `BOT_MEMORY_MAX_LINES` lines
 and `BOT_MEMORY_MAX_OUTPUT_BYTES` bytes of output, the truncation line included
 (`output_line_limit`, `output_byte_limit`; one line and
 `BOT_MEMORY_TRUNCATION_RESERVE_BYTES` bytes stay reserved for it). An instance's lines
-enter whole or not at all.
+enter whole or not at all. A socket timeout bounds each receive, not a whole read, so each
+network step (the readiness read and each Pinecone call) also runs under an absolute
+deadline: its own timeout, cut to the time left in the inventory (`bot_memory_call`). A peer
+that keeps sending bytes slowly cannot hold a step past it. A step past its deadline is
+abandoned (its daemon thread ends with its socket timeout or with the process) and reports
+`readiness_unreadable … why=deadline_exceeded`, `index_unreadable http=None` or
+`stats_unreadable http=None`. The key lookup runs keychain subprocesses, each bounded by
+its own timeout (at most 3 s per candidate service), and is the only step that can carry
+the run past `BOT_MEMORY_MAX_SECONDS`.
 
 The `healthPort` read from a config receives that instance's bearer token, so configs are
 read without following links: each folder and `config.json` is classified by `lstat`, then

@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 from urllib.error import HTTPError
 
 import pytest
@@ -478,6 +479,105 @@ def test_readiness_refuses_a_real_redirect_without_forwarding_the_token(monkeypa
     assert capture.requests == []
     assert source.requests == [("/health", "Bearer health-token-value")]
     assert readiness == {"state": None, "http": status, "why": "redirect_refused"}
+
+
+class _DripHandler(BaseHTTPRequestHandler):
+    """Announces a large body, then sends one byte every 50 ms for 3 s: never idle long enough to time out."""
+
+    def log_message(self, *_args) -> None:
+        return
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "100000")
+        self.end_headers()
+        stop = time.monotonic() + 3.0
+        try:
+            while time.monotonic() < stop:
+                self.wfile.write(b" ")
+                self.wfile.flush()
+                time.sleep(0.05)
+        except OSError:
+            return
+
+
+def test_a_drip_fed_readiness_body_cannot_hold_the_inventory_past_its_deadline(tmp_path, monkeypatch) -> None:
+    real_readiness = _mod.bot_memory_readiness
+    monkeypatch.setattr(_mod, "HEALTH_PROBE_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _stub_probes(monkeypatch)
+    monkeypatch.setattr(_mod, "bot_memory_readiness", real_readiness)
+    monkeypatch.setattr(_mod, "instance_health_token", lambda name: "health-token-value")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _DripHandler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        _home_with_instance(tmp_path, "bot-a", CFG, healthPort=server.server_port)
+        started = time.monotonic()
+        lines = _mod.bot_memory_inventory({"expectBotMemory": True})
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+    # Each byte arrives inside the socket timeout; only the step's absolute deadline ends the read.
+    assert elapsed < 2.5
+    assert lines[0] == "WARN bot_memory bot-a: readiness_unreadable http=None why=deadline_exceeded"
+
+
+def _stalled(release: threading.Event, value: dict):
+    def call(*_args):
+        release.wait(10)
+        return value
+    return call
+
+
+def test_a_stalled_index_read_cannot_hold_the_inventory_past_its_deadline(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_mod, "BOT_MEMORY_TIMEOUT_SECONDS", 0.2)
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    release = threading.Event()
+    monkeypatch.setattr(_mod, "pinecone_describe_index", _stalled(release, dict(INDEX)))
+    try:
+        started = time.monotonic()
+        lines = _mod.bot_memory_inventory({"expectBotMemory": True})
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert elapsed < 2.0
+    assert "WARN bot_memory bot-a: index_unreadable http=None" in lines
+
+
+def test_a_stalled_record_count_read_cannot_hold_the_inventory_past_its_deadline(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(_mod, "BOT_MEMORY_TIMEOUT_SECONDS", 0.2)
+    _inventory_home(tmp_path, monkeypatch, ["bot-a"])
+    release = threading.Event()
+    monkeypatch.setattr(_mod, "pinecone_index_stats", _stalled(release, dict(STATS)))
+    try:
+        started = time.monotonic()
+        lines = _mod.bot_memory_inventory({"expectBotMemory": True})
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert elapsed < 2.0
+    assert "WARN bot_memory bot-a: stats_unreadable http=None" in lines
+
+
+def test_a_step_error_surfaces_instead_of_hiding_behind_the_deadline() -> None:
+    def step():
+        raise AssertionError("must surface")
+    with pytest.raises(AssertionError, match="must surface"):
+        _mod.bot_memory_call(step, (), 5.0, "late")
+
+
+def test_a_step_deadline_is_cut_to_the_time_left_in_the_inventory() -> None:
+    now = [0.0]
+    budget = _mod.BotMemoryBudget(clock=lambda: now[0])
+    assert budget.step_seconds(30.0) == 30.0
+    now[0] = _mod.BOT_MEMORY_MAX_SECONDS - 10.0
+    assert budget.step_seconds(30.0) == 10.0
+    now[0] = _mod.BOT_MEMORY_MAX_SECONDS + 5.0
+    assert budget.step_seconds(30.0) == 0.0
 
 
 def test_a_deeply_nested_readiness_body_is_unparsed_not_a_crash(monkeypatch) -> None:
