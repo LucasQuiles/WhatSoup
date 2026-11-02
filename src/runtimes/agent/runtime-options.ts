@@ -6,6 +6,7 @@ import type { listModelCatalog } from './providers/binary-preflight.ts';
 import type { ServiceRestarter } from './self-restart.ts';
 import type { M365BridgeBinding } from '../../core/m365-bridge-policy.ts';
 import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
+import type { MemoryReadinessSnapshot } from './memory-guidance.ts';
 
 export interface SandboxPolicy {
   allowedPaths: string[];
@@ -55,6 +56,12 @@ export interface AgentRuntimeOptions {
   autoCompactInputTokens?: number;
   /** Typed per-instance handoff policy. Absent preserves legacy environment behavior. */
   handoffDistill?: TypedHandoffDistillConfig;
+  /**
+   * The startup Pinecone readiness observation (main.ts). The memory guidance
+   * prompt block (memory-guidance.ts) needs it to show memory usable: ready,
+   * or failed only transiently. Absent = not usable.
+   */
+  memoryReadiness?: MemoryReadinessSnapshot;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */
   replyGuaranteeTimeoutMs?: number;
   /**

@@ -309,6 +309,12 @@ export interface SessionManagerOptions {
    */
   degradedCapabilitiesBlock?: () => string | null;
   routingSystemBlock?: () => string | null;
+  /**
+   * Long-term memory guidance (memory-guidance.ts), supplied by the runtime
+   * only when memory was ready at startup and memory_write is listed for this
+   * session. Absent or null keeps the prompt byte-identical.
+   */
+  memoryGuidanceBlock?: () => string | null;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
   egressProxyPort?: number;
   /** Shared process-lifetime gate for providers whose local state store is single-writer. */
@@ -718,6 +724,7 @@ export class SessionManager {
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
+  private readonly memoryGuidanceBlock: (() => string | null) | undefined;
   private readonly egressProxyPort: number | undefined;
   private readonly providerExecutionGate: ProviderExecutionGate | undefined;
   private readonly providerMcpConfigArgs: readonly string[];
@@ -940,6 +947,7 @@ export class SessionManager {
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
+    this.memoryGuidanceBlock = opts.memoryGuidanceBlock;
     this.egressProxyPort = opts.egressProxyPort;
     this.providerExecutionGate = opts.providerExecutionGate;
     this.providerMcpConfigArgs = opts.providerMcpConfigArgs ?? [];
@@ -1226,6 +1234,11 @@ export class SessionManager {
     const routingBlock = this.routingSystemBlock?.();
     if (routingBlock) {
       sources.push(routingBlock);
+    }
+
+    const memoryBlock = this.memoryGuidanceBlock?.();
+    if (memoryBlock) {
+      sources.push(memoryBlock);
     }
 
     if (this.configSystemPrompt) {

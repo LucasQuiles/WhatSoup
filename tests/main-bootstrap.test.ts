@@ -971,6 +971,22 @@ describe('main bootstrap', () => {
     expect(h.sendTracked).not.toHaveBeenCalled();
   });
 
+  it('hands the agent runtime the startup readiness observation, not a ready flag', async () => {
+    const h = await importMainWithMocks({
+      instanceConfig: { name: 'q', type: 'agent', agentOptions: {} },
+      pineconeState: 'index_missing',
+    });
+
+    expect(h.AgentRuntime).toHaveBeenCalledWith(
+      h.db,
+      h.connection,
+      'q',
+      expect.objectContaining({
+        memoryReadiness: expect.objectContaining({ state: 'index_missing', evidenceCoverage: 'provider_response' }),
+      }),
+    );
+  });
+
   it('reaches the controller strict-readiness seam for a structural agent-runtime stub', async () => {
     const h = await importMainWithMocks({
       instanceConfig: {
@@ -1013,6 +1029,7 @@ describe('main bootstrap', () => {
         allowM365Mutations: false,
         autoCompactInputTokens: 123,
         turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 7 },
+        memoryReadiness: expect.objectContaining({ state: 'ready', evidenceCoverage: 'provider_response' }),
       }),
     );
     expect(h.resolveLatestPluginDir).toHaveBeenCalledWith(expect.stringMatching(/\/plugins\/one$/));
