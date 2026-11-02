@@ -238,6 +238,7 @@ esac
 set -euo pipefail
 PATH="${binDir}:$PATH"
 HOME="${homeDir}"
+USER=fixture-user
 XDG_CONFIG_HOME="$HOME/.config"
 XDG_CONFIG="$XDG_CONFIG_HOME"
 INSTANCE=fixture-bot

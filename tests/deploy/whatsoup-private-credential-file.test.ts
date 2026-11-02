@@ -153,6 +153,7 @@ describe('deploy/whatsoup unscoped credential precedence', () => {
     fs.writeFileSync(script, `#!/usr/bin/env bash
 set -u
 PATH=${JSON.stringify(bin)}:"$PATH"
+USER=fixture-user
 export LOOKUP_LOG=${JSON.stringify(logPath)}
 unset PINECONE_API_KEY
 NODE=${JSON.stringify(node)}
