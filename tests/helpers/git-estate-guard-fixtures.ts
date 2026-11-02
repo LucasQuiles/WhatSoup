@@ -12,6 +12,48 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
 }
 
+// The second topology call follows all first-pass status calls, so mutations
+// here exercise real Git captures without scheduling races or production hooks.
+export function betweenScansEnvironment(
+  root: string,
+  change: string,
+  statusOverride = '',
+): { env: NodeJS.ProcessEnv; marker: string } {
+  const resolvedGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' });
+  expect(resolvedGit.status, resolvedGit.stderr).toBe(0);
+  const bin = join(root, `between-scans-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(bin);
+  const first = join(bin, 'first');
+  const marker = join(bin, 'changed');
+  const wrapper = join(bin, 'git');
+  writeFileSync(wrapper, `#!/bin/sh
+set -eu
+real_git=${shellQuote(resolvedGit.stdout.trim())}
+worktree_path="$3"
+is_topology=0
+is_status=0
+for arg in "$@"; do
+  if [ "$arg" = "worktree" ]; then is_topology=1; fi
+  if [ "$arg" = "status" ]; then is_status=1; fi
+done
+if [ "$is_topology" -eq 1 ]; then
+  if [ -e ${shellQuote(first)} ] && [ ! -e ${shellQuote(marker)} ]; then
+    : > ${shellQuote(marker)}
+${change}
+  fi
+  : > ${shellQuote(first)}
+fi
+scan_pass=1
+if [ -e ${shellQuote(marker)} ]; then scan_pass=2; fi
+if [ "$is_status" -eq 1 ]; then
+${statusOverride || '  :'}
+fi
+exec "$real_git" "$@"
+`);
+  chmodSync(wrapper, 0o755);
+  return { env: { PATH: `${bin}:${process.env['PATH'] ?? ''}` }, marker };
+}
+
 export function statusRaceEnvironment(
   root: string,
   target: string,

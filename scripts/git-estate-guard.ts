@@ -34,6 +34,7 @@ import {
   type BaselineReceipt,
   type EstateBranch,
   type EstateFinding,
+  type EstateScanCapture,
   type EstateSnapshot,
   type EstateSnapshotWithoutHash,
   type EstateStash,
@@ -80,8 +81,9 @@ const MAX_STASH_CLOSURE_OBJECTS = 100_000;
  * repair. Critical debt blocks only for the invoking worktree, its branch,
  * pushed local branches, and worktrees checking out those branches. Stashes
  * with unknown branches and debt outside that scope remain visible advisories.
- * Status failures outside that scope are advisory too; global scan failures,
- * racing scans, and invalid baselines still block. Pre-commit stays warn-only.
+ * Status failures and drift outside that scope are advisory too. Scoped drift,
+ * stash or common-directory drift, global scan failures, and invalid baselines
+ * still block. Pre-commit stays warn-only.
  *
  * Estate growth remains advisory because its baseline identity difference is
  * repository-wide; retiring unrelated work cannot offset another lane's growth.
@@ -91,6 +93,7 @@ const ADVISORY_REASONS = new Set([
   'other_lane_conflicts',
   'other_lane_critical_debt',
   'other_worktree_scan_incomplete',
+  'other_worktree_scan_racing',
 ]);
 
 function cleanGitEnvironment(): NodeJS.ProcessEnv {
@@ -499,9 +502,7 @@ const OPERATION_ANCHORS = [
   'sequencer/head',
 ] as const;
 
-function readConflictOperationInstance(
-  worktreePath: string,
-): { marker: string | null; reliable: boolean } {
+function resolveWorktreeGitDir(worktreePath: string): string {
   const gitDirRaw = requireGit(
     worktreePath,
     ['rev-parse', '--path-format=absolute', '--git-dir'],
@@ -510,7 +511,28 @@ function readConflictOperationInstance(
   if (!path.isAbsolute(gitDirRaw)) {
     throw new GitEstateError('git_dir_invalid', 'worktree git directory is not absolute');
   }
-  const gitDir = path.normalize(gitDirRaw);
+  return path.normalize(gitDirRaw);
+}
+
+function readOperationBranch(gitDir: string): string | null {
+  for (const file of ['rebase-merge/head-name', 'rebase-apply/head-name', 'BISECT_START']) {
+    try {
+      const value = readFileSync(path.join(gitDir, file), 'utf8').trim();
+      const branch = value.startsWith('refs/heads/') ? value.slice('refs/heads/'.length) : value;
+      // A detached bisect start records an object ID, not a branch.
+      const detachedBisect = file === 'BISECT_START' && isFullObjectId(value);
+      return isValidBranchName(branch) && !detachedBisect ? branch : null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+  }
+  return null;
+}
+
+function readConflictOperationInstance(
+  gitDir: string,
+): { marker: string | null; reliable: boolean } {
   for (const anchor of OPERATION_ANCHORS) {
     const anchorPath = path.join(gitDir, anchor);
     try {
@@ -554,7 +576,7 @@ export function parseBranches(raw: string): EstateBranch[] {
   const branches: EstateBranch[] = [];
   for (const line of raw.split('\n')) {
     if (!line) continue;
-    const [name = '', oid = '', upstreamValue = '', trackValue = ''] = line.split('\0');
+    const [name = '', oid = '', upstreamValue = '', trackValue = '', scopeName = ''] = line.split('\0');
     if (!name || !isFullObjectId(oid)) {
       throw new GitEstateError('branch_parse_failed', 'invalid local branch record');
     }
@@ -564,6 +586,7 @@ export function parseBranches(raw: string): EstateBranch[] {
     const behind = Number(/\bbehind (\d+)\b/.exec(track)?.[1] ?? 0);
     branches.push({
       name,
+      scopeName: scopeName || name,
       oid,
       upstream: upstreamValue || null,
       ahead,
@@ -572,6 +595,17 @@ export function parseBranches(raw: string): EstateBranch[] {
     });
   }
   return branches.sort((a, b) => compareText(a.name, b.name));
+}
+
+function isValidBranchName(name: string): boolean {
+  return name.length > 0
+    && name !== '@'
+    && !/[\s\x00-\x1f\x7f:~^?*\[\\]/.test(name)
+    && !name.includes('..')
+    && !name.includes('@{')
+    && !name.startsWith('-')
+    && !name.endsWith('.')
+    && name.split('/').every((part) => part !== '' && !part.startsWith('.') && !part.endsWith('.lock'));
 }
 
 export function parseStashes(raw: string): EstateStash[] {
@@ -587,7 +621,7 @@ export function parseStashes(raw: string): EstateStash[] {
       throw new GitEstateError('stash_parse_failed', 'invalid stash parent identity');
     }
     const branch = /^(?:WIP on|On) (.+?): /.exec(subject)?.[1];
-    stashes.push({ oid, parents, branch: branch && branch !== '(no branch)' ? branch : null });
+    stashes.push({ oid, parents, branch: branch && isValidBranchName(branch) ? branch : null });
   }
   stashes.sort((a, b) => compareText(a.oid, b.oid));
   return stashes;
@@ -613,6 +647,8 @@ interface CommonCapture {
   worktrees: WorktreePorcelain[];
   branches: EstateBranch[];
   stashes: EstateStash[];
+  refHashes: Record<string, string>;
+  stashHash: string;
 }
 
 function resolveCommonDir(cwd: string): string {
@@ -638,7 +674,7 @@ function captureCommonState(cwd: string): CommonCapture {
     cwd,
     [
       'for-each-ref',
-      '--format=%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00',
+      '--format=%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(refname:lstrip=2)%00',
       'refs/heads',
     ],
     'local branch scan',
@@ -667,6 +703,10 @@ function captureCommonState(cwd: string): CommonCapture {
     worktrees: parseWorktreePorcelain(worktreeRaw),
     branches: parseBranches(branchRaw),
     stashes: stash.stashes,
+    refHashes: Object.fromEntries(refRaw.split('\n').filter(Boolean).map((line) => [
+      line.split('\0')[0]!, sha256(line),
+    ])),
+    stashHash: sha256(stash.raw),
   };
 }
 
@@ -792,6 +832,7 @@ function buildFindings(
 
 interface WorktreeStatusScan {
   fingerprint: string;
+  statusHashes: Record<string, string>;
   worktrees: EstateWorktree[];
   errors: ScanError[];
 }
@@ -854,25 +895,30 @@ async function scanWorktreeStatuses(
         stdout: result.stdout,
         error: result.error ?? null,
       };
-      if (result.status !== 0) {
-        return {
-          capture,
-          worktree: {
-            ...worktree,
-            primary: worktree.path === primaryPath,
-            status: null,
-          } satisfies EstateWorktree,
-          error: {
-            kind: 'worktree_status_failed',
-            message: `status scan failed for one registered worktree (exit ${String(result.status)})`,
-            worktree: worktree.path,
-          } satisfies ScanError,
-        };
-      }
+      let operationBranch: string | null = null;
       try {
+        // A failed status must not erase a known operation branch from scope.
+        const gitDir = worktree.detached ? resolveWorktreeGitDir(worktree.path) : null;
+        operationBranch = worktree.detached ? readOperationBranch(gitDir!) : null;
+        if (result.status !== 0) {
+          return {
+            capture,
+            worktree: {
+              ...worktree,
+              operationBranch,
+              primary: worktree.path === primaryPath,
+              status: null,
+            } satisfies EstateWorktree,
+            error: {
+              kind: 'worktree_status_failed',
+              message: `status scan failed for one registered worktree (exit ${String(result.status)})`,
+              worktree: worktree.path,
+            } satisfies ScanError,
+          };
+        }
         const parsedStatus = parseStatus(result.stdout);
         if (parsedStatus.conflicts.length > 0) {
-          const operation = readConflictOperationInstance(worktree.path);
+          const operation = readConflictOperationInstance(gitDir ?? resolveWorktreeGitDir(worktree.path));
           parsedStatus.conflictOperationMarker = operation.marker;
           parsedStatus.conflictOperationReliable = operation.reliable;
         }
@@ -880,6 +926,7 @@ async function scanWorktreeStatuses(
           capture,
           worktree: {
             ...worktree,
+            operationBranch,
             primary: worktree.path === primaryPath,
             status: parsedStatus,
           } satisfies EstateWorktree,
@@ -890,6 +937,7 @@ async function scanWorktreeStatuses(
           capture,
           worktree: {
             ...worktree,
+            operationBranch,
             primary: worktree.path === primaryPath,
             status: null,
           } satisfies EstateWorktree,
@@ -902,27 +950,37 @@ async function scanWorktreeStatuses(
       }
     },
   );
-  const captures: Array<{
-    path: string;
-    status: number | null;
-    stdout: string;
-    error: string | null;
-  }> = results.map(({ capture }) => capture);
+  const statusHashes = Object.fromEntries(results.map(({ capture, worktree }) => [
+    worktree.path,
+    sha256(stableJson({
+      capture,
+      operationBranch: worktree.operationBranch,
+      marker: worktree.status?.conflictOperationMarker ?? null,
+      reliable: worktree.status?.conflictOperationReliable ?? false,
+    })),
+  ]));
   const estateWorktrees = results.map(({ worktree }) => worktree);
   const errors: ScanError[] = results
     .map(({ error }) => error)
     .filter((error): error is ScanError => error !== null);
   return {
-    fingerprint: sha256(stableJson({
-      captures,
-      operationInstances: estateWorktrees.map(({ path: worktreePath, status }) => ({
-        path: worktreePath,
-        marker: status?.conflictOperationMarker ?? null,
-        reliable: status?.conflictOperationReliable ?? false,
-      })),
-    })),
+    fingerprint: sha256(stableJson(statusHashes)),
+    statusHashes,
     worktrees: estateWorktrees,
     errors,
+  };
+}
+
+function consistencyCapture(common: CommonCapture, status: WorktreeStatusScan): EstateScanCapture {
+  return {
+    commonDir: common.commonDir,
+    worktrees: status.worktrees.map(({ status: _status, primary: _primary, ...topology }) => topology),
+    statusHashes: status.statusHashes,
+    branchHashes: Object.fromEntries(common.branches.map((branch) => [
+      branch.scopeName, sha256(stableJson(branch)),
+    ])),
+    refHashes: common.refHashes,
+    stashHash: common.stashHash,
   };
 }
 
@@ -952,6 +1010,8 @@ async function collectSnapshot(
   const primaryPath = start.worktrees[0]!.path;
   const initialStatus = await scanWorktreeStatuses(start.worktrees, primaryPath);
   const errors = [...initialStatus.errors];
+  const consistencyStart = consistencyCapture(start, initialStatus);
+  let consistencyEnd: EstateScanCapture | null = null;
   let endFingerprint = start.fingerprint;
   let endStatusFingerprint = initialStatus.fingerprint;
   let racing = false;
@@ -960,6 +1020,7 @@ async function collectSnapshot(
       const end = captureCommonState(cwd);
       endFingerprint = end.fingerprint;
       const finalStatus = await scanWorktreeStatuses(end.worktrees, primaryPath);
+      consistencyEnd = consistencyCapture(end, finalStatus);
       endStatusFingerprint = finalStatus.fingerprint;
       const initialFailedPaths = new Set(
         initialStatus.errors.map(({ worktree }) => worktree).filter(Boolean),
@@ -994,6 +1055,8 @@ async function collectSnapshot(
     topologyFingerprintEnd: endFingerprint,
     statusFingerprintStart: initialStatus.fingerprint,
     statusFingerprintEnd: endStatusFingerprint,
+    consistencyStart,
+    consistencyEnd,
     incomplete: errors.length > 0 || racing,
     racing,
     worktrees: initialStatus.worktrees,
@@ -1018,6 +1081,54 @@ function warningCounts(findings: EstateFinding[]): Record<string, number> {
   return Object.fromEntries(
     Object.entries(counts).sort(([a], [b]) => compareText(a, b)),
   );
+}
+
+function changedCaptureKeys(start: Record<string, string>, end: Record<string, string>): string[] {
+  return [...new Set([...Object.keys(start), ...Object.keys(end)])]
+    .filter((key) => start[key] !== end[key]);
+}
+
+function classifyRacing(
+  snapshot: EstateSnapshot,
+  scopedWorktreePaths: ReadonlySet<string>,
+  scopedBranchNames: ReadonlySet<string>,
+): Pick<GuardDecision, 'scopedRacing' | 'advisoryRacingWorktrees' | 'advisoryRacingBranches'> {
+  const start = snapshot.consistencyStart;
+  const end = snapshot.consistencyEnd;
+  if (!snapshot.racing || end === null) {
+    return {
+      scopedRacing: snapshot.racing,
+      advisoryRacingWorktrees: [],
+      advisoryRacingBranches: [],
+    };
+  }
+  let scopedRacing = start.commonDir !== end.commonDir || start.stashHash !== end.stashHash;
+  const advisoryRacingWorktrees = new Set<string>();
+  const advisoryRacingBranches = new Set<string>();
+  const topologyHashes = (capture: EstateScanCapture): Record<string, string> => Object.fromEntries(
+    capture.worktrees.map((worktree) => [worktree.path, sha256(stableJson(worktree))]),
+  );
+  for (const worktree of new Set([
+    ...changedCaptureKeys(start.statusHashes, end.statusHashes),
+    ...changedCaptureKeys(topologyHashes(start), topologyHashes(end)),
+  ])) {
+    if (scopedWorktreePaths.has(worktree)) scopedRacing = true;
+    else advisoryRacingWorktrees.add(worktree);
+  }
+  const changedBranches = new Set(changedCaptureKeys(start.branchHashes, end.branchHashes));
+  for (const ref of changedCaptureKeys(start.refHashes, end.refHashes)) {
+    if (ref === 'refs/stash') scopedRacing = true;
+    else changedBranches.add(ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref);
+  }
+  for (const branch of changedBranches) {
+    if (scopedBranchNames.has(branch)) scopedRacing = true;
+    else advisoryRacingBranches.add(branch);
+  }
+  return {
+    scopedRacing,
+    advisoryRacingWorktrees: [...advisoryRacingWorktrees].sort(compareText),
+    advisoryRacingBranches: [...advisoryRacingBranches].sort(compareText),
+  };
 }
 
 function decideGuard(
@@ -1066,8 +1177,9 @@ function decideGuard(
   const invokingWorktreeId = invokingWorktree
     ? worktreeId(invokingWorktree.path)
     : null;
-  const invokingBranchId = invokingWorktree?.branch
-    ? branchId(invokingWorktree.branch)
+  const invokingBranch = snapshot.branches.find(({ scopeName }) => scopeName === invokingWorktree?.branch);
+  const invokingBranchId = invokingBranch
+    ? branchId(invokingBranch.name)
     : null;
   const invokingBranchName = invokingWorktree?.branch ?? null;
   const pushedBranchNames = new Set(
@@ -1075,15 +1187,30 @@ function decideGuard(
   );
   const scopedBranchNames = new Set(pushedBranchNames);
   if (invokingBranchName !== null) scopedBranchNames.add(invokingBranchName);
+  // Both passes matter: leaving or entering a pushed branch must not hide drift.
+  const capturedWorktrees = [
+    ...snapshot.consistencyStart.worktrees,
+    ...(snapshot.consistencyEnd?.worktrees ?? []),
+  ];
   const scopedWorktreePaths = new Set([
     snapshot.invokingWorktreePath,
-    ...snapshot.worktrees
-      .filter(({ branch }) => branch !== null && scopedBranchNames.has(branch))
+    ...capturedWorktrees
+      .filter(({ branch, operationBranch }) =>
+        (branch !== null && scopedBranchNames.has(branch))
+        || (operationBranch !== null && scopedBranchNames.has(operationBranch))
+      )
       .map(({ path: worktreePath }) => worktreePath),
   ]);
+  const racingDecision = classifyRacing(snapshot, scopedWorktreePaths, scopedBranchNames);
   const findingIsInScope = (finding: EstateFinding): boolean => {
+    // Pre-commit reports all actionable IDs as blockingFindingIds, with an empty
+    // advisoryFindingIds list; the phase still always returns blocked=false.
     if (phase === 'pre-commit') return true;
-    if (finding.kind === 'stash' || finding.kind === 'branch_gone') {
+    if (finding.kind === 'branch_gone') {
+      const branch = snapshot.branches.find(({ name }) => name === finding.branch);
+      return branch !== undefined && scopedBranchNames.has(branch.scopeName);
+    }
+    if (finding.kind === 'stash') {
       return finding.branch !== undefined && scopedBranchNames.has(finding.branch);
     }
     return finding.worktree !== undefined && scopedWorktreePaths.has(finding.worktree);
@@ -1132,11 +1259,14 @@ function decideGuard(
   const reasons: string[] = [];
   if (baseline.state !== 'valid') reasons.push(`baseline_${baseline.state}`);
   if (snapshot.incomplete && (
-    snapshot.racing || snapshot.errors.length === 0
+    racingDecision.scopedRacing || (!snapshot.racing && snapshot.errors.length === 0)
     || snapshot.errors.some((error) => !scanErrorIsAdvisory(error))
   )) reasons.push('scan_incomplete');
   if (advisoryScanErrorWorktrees.length > 0) reasons.push('other_worktree_scan_incomplete');
-  if (snapshot.racing) reasons.push('scan_racing');
+  if (racingDecision.scopedRacing) reasons.push('scan_racing');
+  if (racingDecision.advisoryRacingWorktrees.length > 0 || racingDecision.advisoryRacingBranches.length > 0) {
+    reasons.push('other_worktree_scan_racing');
+  }
   if (blockingFindings.some(({ kind }) => kind === 'conflict')) reasons.push('new_conflicts');
   if (blockingFindings.some(({ kind }) => kind !== 'conflict')) {
     reasons.push('new_critical_housekeeping_debt');
@@ -1155,6 +1285,7 @@ function decideGuard(
     blockingFindingIds,
     advisoryFindingIds,
     advisoryScanErrorWorktrees,
+    ...racingDecision,
     countGrowth,
     newWorktreeIds,
     newBranchIds,
@@ -1244,6 +1375,22 @@ function printHumanGuard(
     }
     if (findings.length > 10) {
       process.stdout.write(`WARN git-estate: ${findings.length - 10} more advisory findings; use --json for all\n`);
+    }
+  }
+  const racingLocations = [
+    ...decision.advisoryRacingWorktrees.map((worktree) => `worktree=${JSON.stringify(worktree)}`),
+    ...decision.advisoryRacingBranches.map((branch) => `branch=${JSON.stringify(branch)}`),
+  ];
+  if (racingLocations.length > 0) {
+    process.stdout.write(
+      `WARN git-estate other_worktree_scan_racing: worktrees=${decision.advisoryRacingWorktrees.length} ` +
+      `branches=${decision.advisoryRacingBranches.length}\n`,
+    );
+    for (const location of racingLocations.slice(0, 10)) {
+      process.stdout.write(`WARN git-estate: racing ${location}\n`);
+    }
+    if (racingLocations.length > 10) {
+      process.stdout.write(`WARN git-estate: ${racingLocations.length - 10} more racing locations; use --json for all\n`);
     }
   }
 }
@@ -1433,6 +1580,9 @@ async function runGuardCommand(
         blockingFindingIds: [],
         advisoryFindingIds: [],
         advisoryScanErrorWorktrees: [],
+        scopedRacing: false,
+        advisoryRacingWorktrees: [],
+        advisoryRacingBranches: [],
         countGrowth: { worktrees: 0, branches: 0 },
         newWorktreeIds: [],
         newBranchIds: [],

@@ -140,11 +140,14 @@ update—including delete-only pushes—it evaluates the Git-estate scan and
 compares it with the machine-local baseline under the repository's common Git
 directory. Its blocking scope contains the invoking worktree, its checked-out
 branch, every pushed local branch, and every registered worktree checking out
-one of those branches. New conflict instances and prunable/detached/locked
-worktrees block only in that scope. New gone-upstream branches and stashes block
+one of those branches, including detached worktrees whose rebase or bisect
+metadata identifies one of those branches. New conflict instances and
+prunable/detached/locked worktrees block only in that scope. New gone-upstream branches and stashes block
 only when their branch is in scope. Stash branches come from `WIP on` or `On`
-reflog subjects; detached and unparseable subjects have unknown branches and
-remain advisory. The guard retains the branch without exposing the subject.
+reflog subjects, accepting only valid branch-name syntax. Detached and unparseable
+subjects have unknown branches and remain advisory. The guard retains the branch
+without exposing the subject. Scope comparisons use unambiguous local branch
+names while baseline and finding identities retain the existing short names.
 Other-lane debt stays visible through `other_lane_conflicts` and
 `other_lane_critical_debt`, with counts and up to ten finding locations in human
 output. JSON preserves all new critical IDs and adds `blockingFindingIds`,
@@ -189,12 +192,25 @@ a retryable **INCONCLUSIVE** result: fetch and rebase or merge the latest main,
 rerun the gate, then push. The hook never rebases, stashes, or rewrites work.
 
 Missing or malformed baselines, malformed ref input, global scan failures,
-in-scope worktree status failures, and racing scans are **INCONCLUSIVE** and fail
-closed. Status failures outside the blocking scope report
+in-scope worktree status failures, and racing within the pusher's scope are
+**INCONCLUSIVE** and fail closed. Each verified snapshot records both passes in
+`consistencyStart` and `consistencyEnd`: worktree topology and operation branches,
+per-worktree status hashes, branch and ref hashes, the common directory, and a
+stash capture hash. `snapshot.racing` still means any drift across the repository;
+`decision.scopedRacing` determines whether that drift blocks a push. Status or
+topology drift blocks for worktrees in scope in either pass. Changes to scoped
+branch refs, the stash ref or capture, the common directory, or a failed final
+topology rescan also block. Other worktree or branch drift reports
+`other_worktree_scan_racing`, with `advisoryRacingWorktrees` and
+`advisoryRacingBranches` in JSON and bounded locations in human warnings.
+Remote branch refs in the latter list retain their full ref names.
+Status failures outside the blocking scope report
 `other_worktree_scan_incomplete` without blocking, including malformed status
 porcelain and timeouts. The snapshot still records those scans as incomplete.
-Pre-commit keeps its existing repository-wide warnings and never blocks. Worktree
-status scans use a four-worker bounded pool and every Git subprocess has a
+Pre-commit keeps its existing repository-wide warnings and never blocks. In that
+phase, `blockingFindingIds` lists all actionable findings, `advisoryFindingIds`
+is empty, and `blocked` is always false. Worktree status scans use a four-worker
+bounded pool and every Git subprocess has a
 bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
 missing upstreams, and ahead/behind/diverged branches remain explicit warnings
 so an unrelated in-flight lane is visible but does not become a working
@@ -269,7 +285,7 @@ guards that `verify:push:branch` runs. Spelled out:
 
 | Guard | Command | Purpose | Also in CI (`quality.yml`)? |
 |---|---|---|---|
-| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash identity and branch, and conflict-instance identity. Block invalid baselines, global or in-scope scan failures, racing scans, and new critical debt in the pusher's scope described above. Report other-lane debt, unknown-branch stashes, other-worktree status failures, and estate growth as advisories. | no (local estate only) |
+| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash identity and branch, and conflict-instance identity. Block invalid baselines, global or in-scope scan failures, scoped racing, and new critical debt in the pusher's scope described above. Report other-lane debt, unknown-branch stashes, other-worktree status failures or drift, unrelated branch drift, and estate growth as advisories. | no (local estate only) |
 | Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |

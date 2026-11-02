@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -21,6 +22,7 @@ import {
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   baselineChangeEnvironment,
+  betweenScansEnvironment,
   finalClosureBaselineChangeEnvironment,
   gitCallLogEnvironment,
   gitInspectionFailureEnvironment,
@@ -93,6 +95,7 @@ interface SnapshotDocument {
       head: string | null;
       primary: boolean;
       detached: boolean;
+      operationBranch: string | null;
       locked: boolean;
       prunable: boolean;
       status: {
@@ -108,6 +111,7 @@ interface SnapshotDocument {
     }>;
     branches: Array<{
       name: string;
+      scopeName: string;
       oid: string;
       upstream: string | null;
       ahead: number;
@@ -133,6 +137,9 @@ interface GuardDocument {
     blockingFindingIds: string[];
     advisoryFindingIds: string[];
     advisoryScanErrorWorktrees: string[];
+    scopedRacing: boolean;
+    advisoryRacingWorktrees: string[];
+    advisoryRacingBranches: string[];
     reasons: string[];
     blockingReasons: string[];
     advisoryReasons: string[];
@@ -255,6 +262,316 @@ function expectOnlyNarrowBaselineFieldsChanged(
   expect(afterRaw).toBe(`${JSON.stringify(expected)}\n`);
 }
 
+
+describe('scoped consistency and attribution', () => {
+  it.each([
+    ['main', 2],
+    ['other', 0],
+  ] as const)('scopes status drift in %s between passes', (branch, exitCode) => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['worktree', 'add', '-b', 'other', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const target = branch === 'main' ? repo : other;
+    const change = `printf 'changed\\n' > ${shellQuote(join(target, 'new.txt'))}`;
+    const race = betweenScansEnvironment(root, change);
+    const args = ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/main'];
+    const result = run(repo, [...args, '--json'], race.env);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(existsSync(race.marker)).toBe(true);
+    expect(doc.snapshot).toMatchObject({ racing: true, incomplete: true });
+    expect(doc.snapshot!.errors).toEqual([]);
+    expect(existsSync(join(target, 'new.txt'))).toBe(true);
+    expect(result.status, result.stderr).toBe(exitCode);
+    expect(doc.decision.blockingReasons).toEqual(exitCode === 2 ? ['scan_incomplete', 'scan_racing'] : []);
+    if (exitCode === 0) {
+      expect(doc.decision.scopedRacing).toBe(false);
+      expect(doc.decision.advisoryRacingWorktrees).toEqual([other]);
+      expect(doc.decision.advisoryReasons).toContain('other_worktree_scan_racing');
+      rmSync(join(target, 'new.txt'));
+      const humanRace = betweenScansEnvironment(root, change);
+      const human = run(repo, args, humanRace.env);
+      expect(existsSync(humanRace.marker)).toBe(true);
+      expect(human.status, human.stderr).toBe(0);
+      expect(human.stdout).toContain('WARN');
+      expect(human.stdout).toContain('other_worktree_scan_racing');
+      expect(human.stdout).toContain(JSON.stringify(other));
+    }
+  });
+
+  it.each([['feat', 2], ['other', 0]] as const)(
+    'scopes branch ref drift on %s without a worktree between passes', (branch, exitCode) => {
+      const { root, repo } = initRepo();
+      git(repo, ['branch', branch]);
+      const next = git(repo, ['commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'next']);
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      const race = betweenScansEnvironment(root,
+        `"$real_git" -C ${shellQuote(repo)} update-ref refs/heads/${branch} ${next}`);
+      const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/feat', '--json'], race.env);
+      const doc = JSON.parse(result.stdout) as GuardDocument;
+      expect(existsSync(race.marker)).toBe(true);
+      expect(doc.snapshot!.racing).toBe(true);
+      expect(doc.snapshot!.errors).toEqual([]);
+      expect(git(repo, ['rev-parse', `refs/heads/${branch}`])).toBe(next);
+      expect(result.status, result.stderr).toBe(exitCode);
+      if (exitCode === 0) {
+        expect(doc.decision.scopedRacing).toBe(false);
+        expect(doc.decision.advisoryRacingBranches).toEqual(['other']);
+      }
+      expect(doc.decision.reasons).toContain(exitCode === 2 ? 'scan_racing' : 'other_worktree_scan_racing');
+    },
+  );
+
+  it.each([['other', 0], ['feat', 2]] as const)(
+    'scopes a worktree on %s appearing between passes', (branch, exitCode) => {
+      const { root, repo } = initRepo();
+      const added = join(root, 'added');
+      git(repo, ['branch', branch]);
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      const race = betweenScansEnvironment(root,
+        `"$real_git" -C ${shellQuote(repo)} worktree add ${shellQuote(added)} ${branch} >/dev/null 2>&1`);
+      const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/feat', '--json'], race.env);
+      const doc = JSON.parse(result.stdout) as GuardDocument;
+      expect(existsSync(race.marker)).toBe(true);
+      expect(doc.snapshot!.racing).toBe(true);
+      expect(doc.snapshot!.errors).toEqual([]);
+      expect(existsSync(added)).toBe(true);
+      expect(result.status, result.stderr).toBe(exitCode);
+      if (exitCode === 0) expect(doc.decision.advisoryRacingWorktrees).toEqual([added]);
+      expect(doc.decision.reasons).toContain(exitCode === 2 ? 'scan_racing' : 'other_worktree_scan_racing');
+    },
+  );
+
+  it('blocks when a worktree leaves a pushed branch between passes', () => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['worktree', 'add', '-b', 'feat', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const race = betweenScansEnvironment(root,
+      `"$real_git" -C ${shellQuote(other)} switch --detach >/dev/null 2>&1`);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/feat', '--json'], race.env);
+    expect(existsSync(race.marker)).toBe(true);
+    expect(result.status, result.stderr).toBe(2);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.errors).toEqual([]);
+    expect(git(other, ['symbolic-ref', '--quiet', 'HEAD'], 1)).toBe('');
+    expect(doc.decision.reasons).toContain('scan_racing');
+  });
+
+  it('blocks a stash ref change between passes', () => {
+    const { root, repo } = initRepo();
+    writeFileSync(join(repo, 'tracked.txt'), 'stash content\n');
+    const oid = git(repo, ['stash', 'create']);
+    expect(oid).toMatch(/^[0-9a-f]{40}$/);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const race = betweenScansEnvironment(root,
+      `"$real_git" -C ${shellQuote(repo)} stash store -m 'On other: stored' ${oid}`);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--json'], race.env);
+    expect(existsSync(race.marker)).toBe(true);
+    expect(result.status, result.stderr).toBe(2);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.errors).toEqual([]);
+    expect(git(repo, ['rev-parse', 'refs/stash'])).toBe(oid);
+    expect(doc.decision.reasons).toContain('scan_racing');
+  });
+
+  it.each([['other', 0], ['main', 2]] as const)(
+    'scopes a status rescan failure in %s', (branch, exitCode) => {
+      const { root, repo } = initRepo();
+      const other = join(root, 'other');
+      git(repo, ['worktree', 'add', '-b', 'other', other]);
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      const target = branch === 'main' ? repo : other;
+      const race = betweenScansEnvironment(root, ':',
+        `if [ "$scan_pass" -eq 2 ] && [ "$worktree_path" = ${shellQuote(target)} ]; then exit 71; fi`);
+      const result = run(repo, ['guard', '--phase', 'pre-push', '--json'], race.env);
+      const doc = JSON.parse(result.stdout) as GuardDocument;
+      expect(doc.snapshot!.errors).toEqual([
+        expect.objectContaining({ kind: 'worktree_status_rescan_failed', worktree: target }),
+      ]);
+      expect(result.status, result.stderr).toBe(exitCode);
+      expect(doc.decision.advisoryScanErrorWorktrees).toEqual(exitCode === 0 ? [target] : []);
+      expect(doc.decision.reasons).toContain(exitCode === 0 ? 'other_worktree_scan_racing' : 'scan_racing');
+    },
+  );
+
+  it.each(['in-scope', 'global'] as const)('blocks an out-of-scope error mixed with an %s error', (kind) => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['worktree', 'add', '-b', 'other', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    const race = betweenScansEnvironment(root, kind === 'global' ? 'exit 71' : ':',
+      kind === 'in-scope' ? 'exit 71' : `if [ "$worktree_path" = ${shellQuote(other)} ]; then exit 71; fi`);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--json'], race.env);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(result.status, result.stderr).toBe(2);
+    expect(doc.decision.advisoryScanErrorWorktrees).toEqual([other]);
+    expect(doc.decision.blockingReasons).toContain('scan_incomplete');
+    expect(doc.snapshot!.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'worktree_status_failed', worktree: other }),
+      expect.objectContaining(kind === 'global'
+        ? { kind: 'topology_rescan_failed' }
+        : { kind: 'worktree_status_failed', worktree: repo }),
+    ]));
+  });
+
+  it('blocks a gone invoking branch with a colliding tag without changing identity', () => {
+    const { repo } = initRepo();
+    git(repo, ['switch', '-c', 'release-1']);
+    git(repo, ['branch', 'upstream']);
+    git(repo, ['tag', 'release-1']);
+    git(repo, ['config', 'branch.release-1.remote', '.']);
+    git(repo, ['config', 'branch.release-1.merge', 'refs/heads/upstream']);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(repo, ['branch', '-d', 'upstream']);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/release-1', '--json']);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    const branch = doc.snapshot!.branches.find(({ name }) => name === 'heads/release-1')!;
+    const finding = doc.snapshot!.findings.find(({ kind }) => kind === 'branch_gone')!;
+    expect(branch).toMatchObject({ name: 'heads/release-1', gone: true });
+    const digest = createHash('sha256').update(`branch_gone\0${branch.name}\0${branch.upstream}`).digest('hex').slice(0, 24);
+    expect(finding).toMatchObject({ branch: 'heads/release-1', id: `branch_gone:${digest}` });
+    expect(result.status, result.stderr).toBe(2);
+    expect(branch.scopeName).toBe('release-1');
+    expect(doc.decision.blockingFindingIds).toContain(finding.id);
+    expect(doc.decision.advisoryFindingIds).not.toContain(finding.id);
+    expect(doc.decision.newBranchIds).toEqual([]);
+  });
+
+  it.each([
+    'customer acme renewal notes', 'main:SECRET', 'bad\tname', 'bad\x01name',
+    'bad~name', 'bad^name', 'bad?name', 'bad*name', 'bad[name', 'bad\\name',
+    'bad..name', 'bad@{name', '-bad', '/bad', 'bad/', 'bad.', 'bad.lock',
+    'bad//name', '.bad', 'bad/.name', 'bad.lock/name', '@',
+  ])('discards invalid stash branch syntax %j', (branch) => {
+    expect(parseStashes(`${'a'.repeat(40)}\0${'b'.repeat(40)}\0On ${branch}: x\0\n`)).toEqual([
+      { oid: 'a'.repeat(40), parents: ['b'.repeat(40)], branch: null },
+    ]);
+  });
+
+  it.each([
+    ['customer acme renewal notes', 'json'],
+    ['customer acme renewal notes', 'human'],
+    ['main:SECRET', 'json'],
+    ['main:SECRET', 'human'],
+  ] as const)(
+    'keeps malformed stash branch %s out of %s output', (branch, format) => {
+      const { repo } = initRepo();
+      expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+      writeFileSync(join(repo, 'tracked.txt'), 'stash content\n');
+      const oid = git(repo, ['stash', 'create']);
+      git(repo, ['stash', 'store', '-m', `On ${branch}: x`, oid]);
+      const args = ['guard', '--phase', 'pre-push'];
+      const result = run(repo, format === 'json' ? [...args, '--json'] : args);
+      expect(result.stdout).not.toContain(branch);
+      expect(result.status, result.stderr).toBe(0);
+      if (format === 'json') {
+        const doc = JSON.parse(result.stdout) as GuardDocument;
+        expect(doc.snapshot!.stashes).toEqual([expect.objectContaining({ oid, branch: null })]);
+        expect(doc.decision.advisoryFindingIds).toHaveLength(1);
+      } else {
+        expect(result.stdout).toContain('branch="(unknown)"');
+      }
+    },
+  );
+
+  it.each([
+    ['--merge', false],
+    ['--apply', false],
+    ['--merge', true],
+  ] as const)('keeps the pushed branch in scope during a conflicted rebase %s (statusFailure=%s)', (backend, statusFailure) => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['worktree', 'add', '-b', 'feat', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    for (const [cwd, content] of [[repo, 'main'], [other, 'feat']] as const) {
+      writeFileSync(join(cwd, 'tracked.txt'), `${content}\n`);
+      git(cwd, ['commit', '-am', 'conflicting change']);
+    }
+    git(other, ['rebase', backend, 'main'], 1);
+    const env = statusFailure ? betweenScansEnvironment(root, ':',
+      `if [ "$worktree_path" = ${shellQuote(other)} ]; then exit 71; fi`).env : {};
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/feat', '--json'], env);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.worktrees.find(({ path }) => path === other)).toMatchObject({ detached: true });
+    expect(result.status, result.stderr).toBe(2);
+    expect(doc.snapshot!.worktrees.find(({ path }) => path === other)!.operationBranch).toBe('feat');
+    if (statusFailure) {
+      expect(doc.snapshot!.errors).toEqual([
+        expect.objectContaining({ kind: 'worktree_status_failed', worktree: other }),
+      ]);
+      expect(doc.decision.blockingReasons).toContain('scan_incomplete');
+      expect(doc.decision.advisoryScanErrorWorktrees).toEqual([]);
+    } else {
+      const conflict = doc.snapshot!.findings.find(({ kind }) => kind === 'conflict')!;
+      expect(conflict).toMatchObject({ worktree: other });
+      expect(doc.decision.blockingFindingIds).toContain(conflict.id);
+      expect(doc.decision.reasons).toContain('new_conflicts');
+    }
+  });
+
+  it('keeps the pushed branch in scope during bisect', () => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['worktree', 'add', '-b', 'feat', other]);
+    const base = git(other, ['rev-parse', 'HEAD']);
+    for (let i = 0; i < 3; i += 1) git(other, ['commit', '--allow-empty', '-m', `step ${i}`]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(other, ['bisect', 'start']);
+    git(other, ['bisect', 'bad']);
+    git(other, ['bisect', 'good', base]);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/feat', '--json']);
+    expect(result.status, result.stderr).toBe(2);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.worktrees.find(({ path }) => path === other)).toMatchObject({ detached: true, operationBranch: 'feat' });
+    const finding = doc.snapshot!.findings.find(({ kind }) => kind === 'detached')!;
+    expect(doc.decision.blockingFindingIds).toContain(finding.id);
+  });
+
+  it('blocks debt on the second pushed ref', () => {
+    const { root, repo } = initRepo();
+    const other = join(root, 'other');
+    git(repo, ['worktree', 'add', '-b', 'second', other]);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(repo, ['worktree', 'lock', other]);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--push-local-ref', 'refs/heads/main', '--push-local-ref', 'refs/heads/second', '--json']);
+    expect(result.status, result.stderr).toBe(2);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.decision.blockingFindingIds).toEqual([doc.snapshot!.findings.find(({ kind }) => kind === 'locked')!.id]);
+  });
+
+  it('bounds eleven advisory findings to ten location lines and a remainder', () => {
+    const { repo } = initRepo();
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    for (let i = 0; i < 11; i += 1) {
+      git(repo, ['branch', `other-${i}`]);
+      git(repo, ['config', `branch.other-${i}.remote`, '.']);
+      git(repo, ['config', `branch.other-${i}.merge`, 'refs/heads/missing']);
+    }
+    const result = run(repo, ['guard', '--phase', 'pre-push']);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.split('\n').filter((line) => line.includes('branch_gone branch='))).toHaveLength(10);
+    expect(result.stdout).toContain('1 more');
+  });
+
+  it('blocks a conflict in a detached invoking worktree by path', () => {
+    const { repo } = initRepo();
+    git(repo, ['switch', '-c', 'other']);
+    writeFileSync(join(repo, 'tracked.txt'), 'other\n');
+    git(repo, ['commit', '-am', 'other change']);
+    git(repo, ['switch', '--detach', 'main']);
+    writeFileSync(join(repo, 'tracked.txt'), 'detached\n');
+    git(repo, ['commit', '-am', 'detached change']);
+    expect(run(repo, ['baseline', 'write', '--json']).status).toBe(0);
+    git(repo, ['merge', 'other'], 1);
+    const result = run(repo, ['guard', '--phase', 'pre-push', '--json']);
+    expect(result.status, result.stderr).toBe(2);
+    const doc = JSON.parse(result.stdout) as GuardDocument;
+    expect(doc.snapshot!.worktrees[0]!.detached).toBe(true);
+    expect(doc.decision.reasons).toContain('new_conflicts');
+    expect(doc.decision.blockingFindingIds).toContain(doc.snapshot!.findings.find(({ kind }) => kind === 'conflict')!.id);
+  });
+});
 
 describe('git-estate guard', () => {
   it.each([

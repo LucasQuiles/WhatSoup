@@ -57,12 +57,15 @@ export interface WorktreeStatus {
 }
 
 export interface EstateWorktree extends WorktreePorcelain {
+  operationBranch: string | null;
   primary: boolean;
   status: WorktreeStatus | null;
 }
 
 export interface EstateBranch {
   name: string;
+  /** Unambiguous local name; `name` retains its existing baseline identity. */
+  scopeName: string;
   oid: string;
   upstream: string | null;
   ahead: number;
@@ -107,6 +110,15 @@ export interface ScanError {
   worktree?: string;
 }
 
+export interface EstateScanCapture {
+  commonDir: string;
+  worktrees: Array<WorktreePorcelain & { operationBranch: string | null }>;
+  statusHashes: Record<string, string>;
+  branchHashes: Record<string, string>;
+  refHashes: Record<string, string>;
+  stashHash: string;
+}
+
 export interface EstateSnapshotWithoutHash {
   schemaVersion: 1;
   commonDir: string;
@@ -116,6 +128,8 @@ export interface EstateSnapshotWithoutHash {
   topologyFingerprintEnd: string;
   statusFingerprintStart: string;
   statusFingerprintEnd: string;
+  consistencyStart: EstateScanCapture;
+  consistencyEnd: EstateScanCapture | null;
   incomplete: boolean;
   racing: boolean;
   worktrees: EstateWorktree[];
@@ -161,9 +175,14 @@ export interface GuardDecision {
   blocked: boolean;
   newConflictIds: string[];
   newCriticalFindingIds: string[];
+  /** Pre-commit lists all actionable findings here but always has blocked=false. */
   blockingFindingIds: string[];
+  /** Empty in pre-commit, which retains repository-wide finding warnings. */
   advisoryFindingIds: string[];
   advisoryScanErrorWorktrees: string[];
+  scopedRacing: boolean;
+  advisoryRacingWorktrees: string[];
+  advisoryRacingBranches: string[];
   countGrowth: {
     worktrees: number;
     branches: number;
