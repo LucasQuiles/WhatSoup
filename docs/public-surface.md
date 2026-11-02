@@ -405,7 +405,8 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.verify-console-browser` | `npm run verify:console-browser` | `package.json` | stable | active | Shared browser proof chain (`test:browser` + `test:browser:motion`) used by release/tag gates |
 | `cli:npm.verify-semantic` | `npm run verify:semantic` | `package.json` | beta | active | Manual enforcement adapter for semantic quality; not composed into required gates until a separately approved promotion |
 | `cli:npm.verify-semantic-shadow` | `npm run verify:semantic:shadow` | `package.json` | beta | active | Local/CI shadow adapter; emits findings and may retain a would-block receipt decision while exiting zero |
-| `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Composite verifier run before pushing a branch |
+| `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Complete local gate, run by hand before merge work; the pre-push hook uses it only when the pushed refs are unreadable |
+| `cli:npm.verify-push-fast` | `npm run verify:push:fast` | `package.json` | stable | active | Branch-push tier run by the pre-push hook: branch-diff repo hygiene, commit authors and the publication scan of the tree; builds nothing and runs no tests |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 | `cli:npm.verify-publish` | `npm run verify:publish` | `package.json` | beta | active | Strict public-publication prep gate; expected to fail until `PRIVATE-ARCHIVE` rows are removed, sanitized, or reclassified |
 
