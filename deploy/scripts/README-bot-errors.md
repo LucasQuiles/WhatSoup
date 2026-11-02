@@ -1647,8 +1647,9 @@ non-empty `memory.pinecone` block, under the home of the user that runs daily he
 
 Reads 2 and 3 use the instance's own Pinecone key. It is resolved in the runtime lookup
 order (`provider_credential_value`: the WhatSoup credential file, then the keychain or
-`secret-tool`, last the opencode auth file) with `PINECONE_API_KEY` removed from the
-job's environment, as the bot launcher removes it. The launcher does not read the opencode
+`secret-tool`, last the opencode auth file) with the job's own `PINECONE_API_KEY` left out
+of the resolver's input, as the bot launcher leaves it out (the job's environment itself is
+unchanged; see below). The launcher does not read the opencode
 auth file; a key found only there means the bot itself has none, and its readiness line
 already fails. Both calls are read-only and reach only the key's own project. The
 key stays in memory and never appears in a line. It goes to `api.pinecone.io`, and to the
