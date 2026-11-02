@@ -73,6 +73,7 @@ export interface EstateBranch {
 export interface EstateStash {
   oid: string;
   parents: string[];
+  branch: string | null;
 }
 
 export interface EstateFinding {
@@ -160,6 +161,9 @@ export interface GuardDecision {
   blocked: boolean;
   newConflictIds: string[];
   newCriticalFindingIds: string[];
+  blockingFindingIds: string[];
+  advisoryFindingIds: string[];
+  advisoryScanErrorWorktrees: string[];
   countGrowth: {
     worktrees: number;
     branches: number;

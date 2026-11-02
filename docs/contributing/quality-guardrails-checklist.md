@@ -105,7 +105,7 @@ identity without printing filenames or stash subjects. The commit-time scan is
 one estate-wide capture and is warn-only so an unrelated lane cannot block a
 local checkpoint; incomplete scans and estate growth remain visible warnings.
 Pre-push retains two independent captures for race detection and applies the
-same estate evaluation fail-closed.
+pusher scope described below when deciding which findings block.
 
 The hook also reads the invoking worktree's atomic writer lease. Free or valid
 held state is reported without prompting the agent. A stale, malformed, or
@@ -136,11 +136,20 @@ timeouts, or remove gate stages. The runner still excludes the four skip
 variables listed in `NEUTRALIZED_SKIP_VARS`.
 
 Pre-push routes through `scripts/pre-push-guard.ts`. Before classifying any ref
-update—including delete-only pushes—it requires a complete Git-estate scan and
+update—including delete-only pushes—it evaluates the Git-estate scan and
 compares it with the machine-local baseline under the repository's common Git
-directory. It blocks newly introduced conflict instances, prunable/detached/
-locked worktrees, stashes, gone-upstream branches, and new critical housekeeping
-debt. New registered worktree or local-branch identities are reported as
+directory. Its blocking scope contains the invoking worktree, its checked-out
+branch, every pushed local branch, and every registered worktree checking out
+one of those branches. New conflict instances and prunable/detached/locked
+worktrees block only in that scope. New gone-upstream branches and stashes block
+only when their branch is in scope. Stash branches come from `WIP on` or `On`
+reflog subjects; detached and unparseable subjects have unknown branches and
+remain advisory. The guard retains the branch without exposing the subject.
+Other-lane debt stays visible through `other_lane_conflicts` and
+`other_lane_critical_debt`, with counts and up to ten finding locations in human
+output. JSON preserves all new critical IDs and adds `blockingFindingIds`,
+`advisoryFindingIds`, and `advisoryScanErrorWorktrees`.
+New registered worktree or local-branch identities are reported as
 **advisory only** and never block, in either phase — the current invoking
 worktree identity and its checked-out branch identity are still evaluated
 independently and exempted only when that exact branch appears in a non-delete
@@ -179,8 +188,12 @@ remote, `HEAD`, worktree cleanliness, and live `main`. A mid-run main advance is
 a retryable **INCONCLUSIVE** result: fetch and rebase or merge the latest main,
 rerun the gate, then push. The hook never rebases, stashes, or rewrites work.
 
-Missing or malformed baselines, malformed ref input or porcelain, Git command timeouts,
-and racing or incomplete scans are **INCONCLUSIVE** and fail closed. Worktree
+Missing or malformed baselines, malformed ref input, global scan failures,
+in-scope worktree status failures, and racing scans are **INCONCLUSIVE** and fail
+closed. Status failures outside the blocking scope report
+`other_worktree_scan_incomplete` without blocking, including malformed status
+porcelain and timeouts. The snapshot still records those scans as incomplete.
+Pre-commit keeps its existing repository-wide warnings and never blocks. Worktree
 status scans use a four-worker bounded pool and every Git subprocess has a
 bounded timeout. Inherited critical debt, dirty worktrees, untracked files,
 missing upstreams, and ahead/behind/diverged branches remain explicit warnings
@@ -256,7 +269,7 @@ guards that `verify:push:branch` runs. Spelled out:
 
 | Guard | Command | Purpose | Also in CI (`quality.yml`)? |
 |---|---|---|---|
-| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash object identity, and conflict-instance identity; fail closed on malformed porcelain, timeouts, incomplete/racing scans, invalid v2 local baselines, new conflicts, and new critical housekeeping debt; new worktree/branch identities are reported advisory-only and never block — the ratchet is repo-global while several agents work the repo concurrently, so growth is routinely caused by an agent other than the pusher, who cannot clear it (growth is an ID set difference; retiring unrelated work does not offset it). | no (local estate only) |
+| Git estate awareness | `npm run guard:git-estate -- guard --phase pre-push` | Snapshot all linked worktrees twice plus branch/upstream state, stash identity and branch, and conflict-instance identity. Block invalid baselines, global or in-scope scan failures, racing scans, and new critical debt in the pusher's scope described above. Report other-lane debt, unknown-branch stashes, other-worktree status failures, and estate growth as advisories. | no (local estate only) |
 | Service unit validity | `npm run guard:service-units` | Validate launchd plists / systemd units (label == filename stem, no bare/`env` node, no unexpanded `${VAR}`, node-pin match, absolute well-formed paths, valid plist structure). | yes |
 | Instance config integrity | `npm run guard:instance-config` | Verify instance `config.json` files for memory-config integrity (non-empty `memory.pinecone.expectedHostSuffix`, no UUID-shaped `projectId` host trap) and per-host health-port map integrity. | yes |
 | Fail-closed gate | `npm run guard:fail-closed-gate` | Reject fail-open shell gate shapes: a probe that substitutes a sentinel on failure (`\|\| echo "000"`, `\|\| true`) then gates only on success, and the `grep -c ... \|\| echo 0` double-zero shape. | yes |

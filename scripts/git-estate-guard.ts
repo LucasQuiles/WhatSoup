@@ -76,22 +76,22 @@ const MAX_STASH_CLOSURE_OBJECTS = 100_000;
 /**
  * Reasons that are reported but never block a push.
  *
- * `estate_count_growth` is advisory because the ratchet is repo-global while the
- * repo is worked by several agents at once. Measured 2026-07-26: this guard
- * blocked a push whose entire recorded growth — 5 of 5 new worktrees and 6 of 8
- * new branches — belonged to a *different* agent working the same repo. Growth
- * is an ID SET DIFFERENCE against the baseline, so retiring unrelated work
- * cannot offset it (deleting 27 branches, 77 -> 67, moved countGrowth by zero).
- * The pushing agent's only remedy was a global accept-all (`baseline write`),
- * which simultaneously launders every co-agent's conflicts, stashes, locks,
- * and gone branches into the new floor. A gate whose sole remedy is to disarm
- * the gate is not a gate.
+ * A shared repository can contain worktrees that the pusher cannot retire or
+ * repair. Critical debt blocks only for the invoking worktree, its branch,
+ * pushed local branches, and worktrees checking out those branches. Stashes
+ * with unknown branches and debt outside that scope remain visible advisories.
+ * Status failures outside that scope are advisory too; global scan failures,
+ * racing scans, and invalid baselines still block. Pre-commit stays warn-only.
  *
- * Integrity reasons stay blocking: a corrupt baseline, an incomplete or racing
- * scan, new conflicts, and new critical housekeeping debt all describe a repo
- * state the pusher CAN act on.
+ * Estate growth remains advisory because its baseline identity difference is
+ * repository-wide; retiring unrelated work cannot offset another lane's growth.
  */
-const ADVISORY_REASONS = new Set(['estate_count_growth']);
+const ADVISORY_REASONS = new Set([
+  'estate_count_growth',
+  'other_lane_conflicts',
+  'other_lane_critical_debt',
+  'other_worktree_scan_incomplete',
+]);
 
 function cleanGitEnvironment(): NodeJS.ProcessEnv {
   return { ...cleanGitEnv(), GIT_OPTIONAL_LOCKS: '0' };
@@ -578,7 +578,7 @@ export function parseStashes(raw: string): EstateStash[] {
   const stashes: EstateStash[] = [];
   for (const line of raw.split('\n')) {
     if (!line) continue;
-    const [oid = '', parentsValue = ''] = line.split('\0');
+    const [oid = '', parentsValue = '', subject = ''] = line.split('\0');
     if (!isFullObjectId(oid)) {
       throw new GitEstateError('stash_parse_failed', 'invalid stash object identity');
     }
@@ -586,7 +586,8 @@ export function parseStashes(raw: string): EstateStash[] {
     if (!parents.every(isFullObjectId)) {
       throw new GitEstateError('stash_parse_failed', 'invalid stash parent identity');
     }
-    stashes.push({ oid, parents });
+    const branch = /^(?:WIP on|On) (.+?): /.exec(subject)?.[1];
+    stashes.push({ oid, parents, branch: branch && branch !== '(no branch)' ? branch : null });
   }
   stashes.sort((a, b) => compareText(a.oid, b.oid));
   return stashes;
@@ -600,7 +601,7 @@ function readStashes(cwd: string): { raw: string; stashes: EstateStash[] } {
   }
   const raw = requireGit(
     cwd,
-    ['reflog', 'show', '--format=%H%x00%P%x00', 'refs/stash'],
+    ['reflog', 'show', '--format=%H%x00%P%x00%gs%x00', 'refs/stash'],
     'stash identity scan',
   );
   return { raw, stashes: parseStashes(raw) };
@@ -782,6 +783,7 @@ function buildFindings(
       id: findingId('stash', stash.oid),
       kind: 'stash',
       oid: stash.oid,
+      branch: stash.branch ?? undefined,
     });
   }
   findings.sort((a, b) => compareText(a.id, b.id));
@@ -1071,6 +1073,36 @@ function decideGuard(
   const pushedBranchNames = new Set(
     pushLocalRefs.map((ref) => ref.slice('refs/heads/'.length)),
   );
+  const scopedBranchNames = new Set(pushedBranchNames);
+  if (invokingBranchName !== null) scopedBranchNames.add(invokingBranchName);
+  const scopedWorktreePaths = new Set([
+    snapshot.invokingWorktreePath,
+    ...snapshot.worktrees
+      .filter(({ branch }) => branch !== null && scopedBranchNames.has(branch))
+      .map(({ path: worktreePath }) => worktreePath),
+  ]);
+  const findingIsInScope = (finding: EstateFinding): boolean => {
+    if (phase === 'pre-commit') return true;
+    if (finding.kind === 'stash' || finding.kind === 'branch_gone') {
+      return finding.branch !== undefined && scopedBranchNames.has(finding.branch);
+    }
+    return finding.worktree !== undefined && scopedWorktreePaths.has(finding.worktree);
+  };
+  // Unreliable conflicts remain actionable even if their ID was baselined.
+  // Preserve the original ID lists and classify their union for the decision.
+  const actionableIds = new Set([...newConflictIds, ...newCriticalFindingIds]);
+  const actionableFindings = snapshot.findings.filter(({ id }) => actionableIds.has(id));
+  const blockingFindings = actionableFindings.filter(findingIsInScope);
+  const advisoryFindings = actionableFindings.filter((finding) => !findingIsInScope(finding));
+  const blockingFindingIds = blockingFindings.map(({ id }) => id).sort(compareText);
+  const advisoryFindingIds = advisoryFindings.map(({ id }) => id).sort(compareText);
+  const scanErrorIsAdvisory = (error: ScanError): boolean => phase === 'pre-push'
+    && (error.kind === 'worktree_status_failed' || error.kind === 'worktree_status_rescan_failed')
+    && error.worktree !== undefined
+    && !scopedWorktreePaths.has(error.worktree);
+  const advisoryScanErrorWorktrees = [...new Set(
+    snapshot.errors.filter(scanErrorIsAdvisory).map(({ worktree }) => worktree!),
+  )].sort(compareText);
   const exactInvokingBranchIsPushed = invokingBranchName !== null
     && pushedBranchNames.has(invokingBranchName);
   const exemptedWorktreeIds = (
@@ -1099,12 +1131,18 @@ function decideGuard(
   };
   const reasons: string[] = [];
   if (baseline.state !== 'valid') reasons.push(`baseline_${baseline.state}`);
-  if (snapshot.incomplete) reasons.push('scan_incomplete');
+  if (snapshot.incomplete && (
+    snapshot.racing || snapshot.errors.length === 0
+    || snapshot.errors.some((error) => !scanErrorIsAdvisory(error))
+  )) reasons.push('scan_incomplete');
+  if (advisoryScanErrorWorktrees.length > 0) reasons.push('other_worktree_scan_incomplete');
   if (snapshot.racing) reasons.push('scan_racing');
-  if (newConflictIds.length > 0) reasons.push('new_conflicts');
-  if (newCriticalFindingIds.some((id) => !newConflictIds.includes(id))) {
+  if (blockingFindings.some(({ kind }) => kind === 'conflict')) reasons.push('new_conflicts');
+  if (blockingFindings.some(({ kind }) => kind !== 'conflict')) {
     reasons.push('new_critical_housekeeping_debt');
   }
+  if (advisoryFindings.some(({ kind }) => kind === 'conflict')) reasons.push('other_lane_conflicts');
+  if (advisoryFindings.some(({ kind }) => kind !== 'conflict')) reasons.push('other_lane_critical_debt');
   if (countGrowth.worktrees > 0 || countGrowth.branches > 0) {
     reasons.push('estate_count_growth');
   }
@@ -1114,6 +1152,9 @@ function decideGuard(
     blocked: phase === 'pre-push' && blockingReasons.length > 0,
     newConflictIds,
     newCriticalFindingIds,
+    blockingFindingIds,
+    advisoryFindingIds,
+    advisoryScanErrorWorktrees,
     countGrowth,
     newWorktreeIds,
     newBranchIds,
@@ -1188,6 +1229,23 @@ function printHumanGuard(
         : '') +
       '\n',
   );
+  if (decision.advisoryFindingIds.length > 0 || decision.advisoryScanErrorWorktrees.length > 0) {
+    const advisoryIds = new Set(decision.advisoryFindingIds);
+    const findings = snapshot.findings.filter(({ id }) => advisoryIds.has(id));
+    process.stdout.write(
+      `WARN git-estate other lanes: findings=${findings.length} ` +
+      `scan-error-worktrees=${decision.advisoryScanErrorWorktrees.length}\n`,
+    );
+    for (const finding of findings.slice(0, 10)) {
+      const location = finding.worktree !== undefined
+        ? `worktree=${JSON.stringify(finding.worktree)}`
+        : `branch=${JSON.stringify(finding.branch ?? '(unknown)')}`;
+      process.stdout.write(`WARN git-estate: ${finding.kind} ${location}\n`);
+    }
+    if (findings.length > 10) {
+      process.stdout.write(`WARN git-estate: ${findings.length - 10} more advisory findings; use --json for all\n`);
+    }
+  }
 }
 
 function diagnostic(message: string): void {
@@ -1372,6 +1430,9 @@ async function runGuardCommand(
         blocked: phase === 'pre-push',
         newConflictIds: [],
         newCriticalFindingIds: [],
+        blockingFindingIds: [],
+        advisoryFindingIds: [],
+        advisoryScanErrorWorktrees: [],
         countGrowth: { worktrees: 0, branches: 0 },
         newWorktreeIds: [],
         newBranchIds: [],
