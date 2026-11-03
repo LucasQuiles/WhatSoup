@@ -472,12 +472,12 @@ describe('publication guard branch-diff mode', () => {
   });
 
   it.each([
-    ['commits', { commits: 0 }, 'commits 1 is over the limit of 0'],
-    ['patchBytes', { patchBytes: 10 }, 'patchBytes'],
-    ['addedLines', { addedLines: 5 }, 'addedLines 6 is over the limit of 5'],
-    ['baseBlobs', { baseBlobs: 0 }, 'baseBlobs 1 is over the limit of 0'],
-    ['baseBytes', { baseBytes: 1 }, 'baseBytes'],
-  ] as const)('is INCONCLUSIVE, not a pass, when %s passes its limit', (_key, override, expected) => {
+    ['commits', { commits: 0 }, 'commits 1 is over the limit of 0', { patchBytes: 0, addedLines: 0, baseBlobs: 0 }],
+    ['patchBytes', { patchBytes: 10 }, 'patchBytes', { addedLines: 0, baseBlobs: 0 }],
+    ['addedLines', { addedLines: 5 }, 'addedLines 6 is over the limit of 5', { baseBlobs: 0 }],
+    ['baseBlobs', { baseBlobs: 0 }, 'baseBlobs 1 is over the limit of 0', { baseBlobs: 1 }],
+    ['baseBytes', { baseBytes: 1 }, 'baseBytes', { baseBlobs: 1 }],
+  ] as const)('is INCONCLUSIVE, not a pass, when %s passes its limit, and reads nothing after the stop', (_key, override, expected, unread) => {
     const repo = branchRepo();
     // On the base: a literal line, so the branch's copy of it needs a base read.
     commitExactFile(repo, 'src/old.ts', `// ${privatePath}\n`, 'published earlier');
@@ -491,6 +491,7 @@ describe('publication guard branch-diff mode', () => {
     });
     const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, ...override });
     expect('inconclusive' in stopped && stopped.inconclusive).toContain(expected);
+    expect(stopped.used).toMatchObject(unread);
   });
 });
 
