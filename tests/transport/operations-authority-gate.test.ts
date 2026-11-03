@@ -55,6 +55,38 @@ function fakeSocket() {
   };
 }
 
+const SNAPSHOT_MAX_DEPTH = 64;
+const SNAPSHOT_MAX_NODES = 10_000;
+const SNAPSHOT_MAX_KEYS_PER_OBJECT = 1_024;
+const SNAPSHOT_MAX_KEY_BYTES = 4_096;
+const SNAPSHOT_MAX_BINARY_BYTES = 50 * 1024 * 1024;
+const SNAPSHOT_MAX_ENCODED_BYTES = 75 * 1024 * 1024;
+
+function nestedSnapshot(depth: number): Record<string, unknown> {
+  let value: Record<string, unknown> = { text: 'approved' };
+  for (let index = 0; index < depth; index += 1) value = { child: value };
+  return value;
+}
+
+function wideSnapshot(keys: number): Record<string, unknown> {
+  return Object.fromEntries(Array.from({ length: keys }, (_value, index) => [`field${index}`, index]));
+}
+
+function approvedWhatsappOperation(content: unknown, options?: Record<string, unknown>) {
+  return {
+    id: 'operation-bounded',
+    accountId: 'pilot-account',
+    action: 'whatsapp.send',
+    payload: {
+      recipient: '15551230000@s.whatsapp.net',
+      content,
+      ...(options === undefined ? {} : { options }),
+    },
+    digest: 'sha256:bounded',
+    state: 'approved',
+  };
+}
+
 describe('freezeOutboundContent', () => {
   it('copies attachment bytes for both the approval snapshot and the wire payload', () => {
     // Break caught: mutating a caller-owned Buffer after admission changes the delivered attachment.
@@ -106,6 +138,80 @@ describe('freezeOutboundContent', () => {
     expect(send).not.toHaveBeenCalled();
     expect(() => freezeOutboundContent({ contextInfo: options })).toThrow(/prototype/i);
     expect(() => freezeOutboundOptions(options)).toThrow();
+  });
+
+  it('accepts snapshot structures at the depth, node, object-key, and key-byte limits', () => {
+    expect(() => freezeOutboundContent(nestedSnapshot(SNAPSHOT_MAX_DEPTH))).not.toThrow();
+    expect(() => freezeOutboundContent(Array.from({ length: SNAPSHOT_MAX_NODES - 1 }, () => null))).not.toThrow();
+    expect(() => freezeOutboundContent(wideSnapshot(SNAPSHOT_MAX_KEYS_PER_OBJECT))).not.toThrow();
+    expect(() => freezeOutboundContent({ ['k'.repeat(SNAPSHOT_MAX_KEY_BYTES)]: 'approved' })).not.toThrow();
+  });
+
+  it('rejects snapshot structures beyond the depth, node, object-key, and key-byte limits', () => {
+    expect(() => freezeOutboundContent(nestedSnapshot(SNAPSHOT_MAX_DEPTH + 1))).toThrow(/depth/i);
+    expect(() => freezeOutboundContent(Array.from({ length: SNAPSHOT_MAX_NODES }, () => null))).toThrow(/nodes/i);
+    expect(() => freezeOutboundContent(wideSnapshot(SNAPSHOT_MAX_KEYS_PER_OBJECT + 1))).toThrow(/keys/i);
+    expect(() => freezeOutboundContent({ ['k'.repeat(SNAPSHOT_MAX_KEY_BYTES + 1)]: 'approved' })).toThrow(/key/i);
+  });
+
+  it('accounts for JSON escaping and lone surrogates before accepting metadata at the encoded-byte boundary', () => {
+    // {"text":"..."} contributes 11 bytes outside six-byte JSON escapes.
+    const maximumControlCharacters = Math.floor((SNAPSHOT_MAX_ENCODED_BYTES - 11) / 6);
+    expect(() => freezeOutboundContent({ text: '\0'.repeat(maximumControlCharacters - 1) })).not.toThrow();
+    const atBoundaryText = '\0'.repeat(maximumControlCharacters - 1) + '\ud800'
+      + 'x'.repeat(SNAPSHOT_MAX_ENCODED_BYTES - 11 - (maximumControlCharacters * 6));
+    const atBoundary = freezeOutboundContent({ text: atBoundaryText });
+    expect(Buffer.byteLength(JSON.stringify(atBoundary.approvalContent))).toBe(SNAPSHOT_MAX_ENCODED_BYTES);
+    expect(() => freezeOutboundContent({ text: `${atBoundaryText}x` }))
+      .toThrow(/encoded bytes/i);
+  });
+
+  it('accepts binary payloads below and at the provider media limit', () => {
+    for (const size of [SNAPSHOT_MAX_BINARY_BYTES - 1, SNAPSHOT_MAX_BINARY_BYTES]) {
+      const frozen = freezeOutboundContent({ document: Buffer.alloc(size) });
+      expect((frozen.wireContent as { document: Buffer }).document).toHaveLength(size);
+    }
+  });
+
+  it('rejects oversized binary and cyclic outbound content before authority admission or provider submission', async () => {
+    const authority = acceptingAuthority();
+    const socket = fakeSocket();
+    const providerSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    await expect(socket.sendMessage('owner@s.whatsapp.net', {
+      document: Buffer.alloc(SNAPSHOT_MAX_BINARY_BYTES + 1),
+    })).rejects.toThrow(/binary/i);
+    const cyclic: Record<string, unknown> = { text: 'blocked' };
+    cyclic['self'] = cyclic;
+    await expect(socket.sendMessage('owner@s.whatsapp.net', cyclic)).rejects.toThrow(/cycle/i);
+
+    expect(authority.admit).not.toHaveBeenCalled();
+    expect(providerSend).not.toHaveBeenCalled();
+  });
+
+  it('rejects binary spread across content and options before authority admission or provider submission', async () => {
+    const authority = acceptingAuthority();
+    const socket = fakeSocket();
+    const providerSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    await expect(socket.sendMessage(
+      'owner@s.whatsapp.net',
+      { document: Buffer.alloc(SNAPSHOT_MAX_BINARY_BYTES / 2) },
+      { quoted: Buffer.alloc((SNAPSHOT_MAX_BINARY_BYTES / 2) + 1) },
+    )).rejects.toThrow(/binary/i);
+
+    expect(authority.admit).not.toHaveBeenCalled();
+    expect(providerSend).not.toHaveBeenCalled();
   });
 });
 
@@ -495,6 +601,47 @@ describe('protected review delivery and retry', () => {
     });
     expect((seen[0]?.content as { document: Buffer }).document.toString()).toBe('hello');
     expect(seen[0]?.options).toEqual({ timestamp: 1_700_000_000 });
+  });
+
+  it('rejects malformed, non-finite, cyclic, deep, wide, and oversized authority snapshots before any provider submission', async () => {
+    const malformedBinary = { $binary: 'not-base64' };
+    const cyclic: Record<string, unknown> = { text: 'blocked' };
+    cyclic['self'] = cyclic;
+    const oversizedBinary = { $binary: 'A'.repeat((Math.ceil(SNAPSHOT_MAX_BINARY_BYTES / 3) * 4) + 4) };
+    const invalidContents: unknown[] = [
+      malformedBinary,
+      Number.POSITIVE_INFINITY,
+      cyclic,
+      nestedSnapshot(SNAPSHOT_MAX_DEPTH + 1),
+      wideSnapshot(SNAPSHOT_MAX_KEYS_PER_OBJECT + 1),
+      oversizedBinary,
+    ];
+
+    for (const content of invalidContents) {
+      const send = vi.fn(async () => undefined);
+      await expect(retryApprovedWhatsappOperations({
+        accountId: 'pilot-account',
+        inboundEventId: 'inbound-approve',
+        operations: [approvedWhatsappOperation(content)],
+        send,
+      })).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+      expect(send).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rejects an aggregate approved snapshot across content and options before any provider submission', async () => {
+    const send = vi.fn(async () => undefined);
+    const half = SNAPSHOT_MAX_BINARY_BYTES / 2;
+    await expect(retryApprovedWhatsappOperations({
+      accountId: 'pilot-account',
+      inboundEventId: 'inbound-approve',
+      operations: [approvedWhatsappOperation(
+        { document: { $binary: Buffer.alloc(half).toString('base64') } },
+        { quoted: { $binary: Buffer.alloc(half + 1).toString('base64') } },
+      )],
+      send,
+    })).rejects.toThrow(/binary/i);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('sends only the authority-created approved control receipt for a paused event', async () => {

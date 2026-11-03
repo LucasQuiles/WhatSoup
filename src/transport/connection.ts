@@ -3324,7 +3324,9 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.contactsDir.observe(parsed.senderJid, parsed.senderName);
 
         if (this.onMessage) {
-          if (this.operationsAuthority) {
+          // Outbound echoes retain their storage/correlation path. They are
+          // transport output and cannot establish a human approval context.
+          if (this.operationsAuthority && !parsed.isFromMe) {
             this.dispatchTrustedInbound(parsed);
             continue;
           }

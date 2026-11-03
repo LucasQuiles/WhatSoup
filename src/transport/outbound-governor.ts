@@ -28,6 +28,7 @@
  */
 import { OutboundRateLimiter } from './outbound-rate-limiter.ts';
 import { WhatSoupError } from '../errors.ts';
+import { assertTransportSendActive, observeTransportSubmission, runWithTransportSendDeadline } from './send-deadline.ts';
 import {
   OUTBOUND_GOVERNOR_SHED_LOG,
 } from '../core/outbound-governor-shed.ts';
@@ -156,9 +157,11 @@ export class OutboundGovernor {
     // 1. Per-destination pacing (depth floods) — short window, self-heals fast.
     const perDest = await this.perDest.acquireBounded(dest, this.maxWaitMs);
     if (perDest.capped) return 'pace-per-dest';
+    assertTransportSendActive();
     // 2. Aggregate per-bot pacing (breadth floods, F2) — short window.
     const glob = await this.global.acquireBounded(GLOBAL_BUCKET_KEY, this.maxWaitMs);
     if (glob.capped) return 'pace-global';
+    assertTransportSendActive();
     // 3. Catastrophe ceiling LAST — reserves only for a send that cleared pacing,
     //    so the long window never counts a shed bystander's attempts.
     if (!this.ceiling.tryAcquireSync(dest)) return 'ceiling';
@@ -218,7 +221,7 @@ export function wrapWithOutboundGovernor<S extends object>(
   const original = s.sendMessage;
   const realSend = original.bind(s);
 
-  const governed = async function governedSendMessage(
+  const send = async function sendMessageWithinDeadline(
     jid: string,
     content: unknown,
     ...rest: unknown[]
@@ -246,6 +249,7 @@ export function wrapWithOutboundGovernor<S extends object>(
       }
     }
     if (!opts.authorityGate) return realSend(jid, outbound, ...rest);
+    assertTransportSendActive();
     if (rest.length > 1) {
       throw new TransportAuthorityUnavailableError(
         'outbound send has unsupported provider arguments while transport authority is enabled',
@@ -263,9 +267,10 @@ export function wrapWithOutboundGovernor<S extends object>(
       ...(options === undefined ? {} : { options }),
     });
     try {
-      const result = dispatch.options === undefined
-        ? await realSend(jid, dispatch.content)
-        : await realSend(jid, dispatch.content, dispatch.options);
+      assertTransportSendActive();
+      const result = await observeTransportSubmission(Promise.resolve(dispatch.options === undefined
+        ? realSend(jid, dispatch.content)
+        : realSend(jid, dispatch.content, dispatch.options)));
       await opts.authorityGate.recordReceipt({
         attemptId: dispatch.attemptId,
         state: 'provider_accepted',
@@ -286,6 +291,11 @@ export function wrapWithOutboundGovernor<S extends object>(
       throw err;
     }
   };
+
+  const governed = (jid: string, content: unknown, ...rest: unknown[]): Promise<unknown> =>
+    opts.authorityGate
+      ? runWithTransportSendDeadline(() => send(jid, content, ...rest))
+      : send(jid, content, ...rest);
 
   // Transparent wrapper: copy the underlying fn's own-property descriptors onto
   // the override. In production the real Baileys `sendMessage` carries nothing

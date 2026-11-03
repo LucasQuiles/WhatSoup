@@ -31,6 +31,7 @@ import { errorMessage } from './lib/error-message.ts';
 import { validateModelRoleValue } from './lib/model-resolver.ts';
 import { MS_PER_SECOND, MS_PER_MINUTE, MS_PER_HOUR } from './lib/time-units.ts';
 import { ConfigValidationError } from './lib/startup-error.ts';
+import { validateTransportAuthorityConfig } from './core/transport-authority-config-validation.ts';
 import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
 import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
@@ -1300,6 +1301,12 @@ function resolveTransportAuthorityConfig(): {
   if (serviceUid === workerUid) {
     throw new ConfigValidationError('transportAuthority.serviceUid and transportAuthority.workerUid must be distinct');
   }
+  // Direct INSTANCE_CONFIG consumers must pass the same activation admission
+  // as fleet CREATE/PATCH and the instance loader.
+  const admissionError = validateTransportAuthorityConfig(
+    { ...instance, transportAuthority: transportAuthoritySection }, resolvedTransport,
+  );
+  if (admissionError) throw new ConfigValidationError(admissionError.message);
   return {
     enabled: true,
     baseUrl,

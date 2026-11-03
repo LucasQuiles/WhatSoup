@@ -29,6 +29,175 @@ export interface FrozenOutboundOptions {
 const MEDIA_KEYS = new Set(['image', 'video', 'audio', 'document', 'sticker']);
 const inboundContext = new AsyncLocalStorage<TransportInboundContext>();
 
+// The media tool accepts files up to 50 MiB. Keep the operation snapshot at
+// that provider boundary while reserving enough encoded space for base64 and
+// metadata before any transport copy or decode is allocated.
+const SNAPSHOT_MAX_DEPTH = 64;
+const SNAPSHOT_MAX_NODES = 10_000;
+const SNAPSHOT_MAX_KEYS_PER_OBJECT = 1_024;
+const SNAPSHOT_MAX_KEY_BYTES = 4_096;
+const SNAPSHOT_MAX_BINARY_BYTES = 50 * 1024 * 1024;
+const SNAPSHOT_MAX_ENCODED_BYTES = 75 * 1024 * 1024;
+
+interface SnapshotBudget {
+  nodes: number;
+  binaryBytes: number;
+  encodedBytes: number;
+}
+
+function createSnapshotBudget(): SnapshotBudget {
+  return { nodes: 0, binaryBytes: 0, encodedBytes: 0 };
+}
+
+function snapshotLimit(message: string): TransportAuthorityUnavailableError {
+  return new TransportAuthorityUnavailableError(message);
+}
+
+function reserveSnapshotNode(budget: SnapshotBudget, label: string): void {
+  budget.nodes += 1;
+  if (budget.nodes > SNAPSHOT_MAX_NODES) {
+    throw snapshotLimit(`${label} exceeds snapshot maximum nodes`);
+  }
+}
+
+function reserveSnapshotBytes(budget: SnapshotBudget, bytes: number, label: string): void {
+  budget.encodedBytes += bytes;
+  if (budget.encodedBytes > SNAPSHOT_MAX_ENCODED_BYTES) {
+    throw snapshotLimit(`${label} exceeds snapshot maximum encoded bytes`);
+  }
+}
+
+function base64EncodedBytes(byteLength: number): number {
+  return Math.ceil(byteLength / 3) * 4;
+}
+
+function reserveSnapshotBinary(budget: SnapshotBudget, byteLength: number, label: string): void {
+  budget.binaryBytes += byteLength;
+  if (budget.binaryBytes > SNAPSHOT_MAX_BINARY_BYTES) {
+    throw snapshotLimit(`${label} exceeds snapshot maximum binary bytes`);
+  }
+  reserveSnapshotBytes(budget, base64EncodedBytes(byteLength) + 2, label);
+}
+
+function jsonStringBytes(value: string): number {
+  let bytes = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    if (codePoint <= 0x1f) {
+      bytes += codePoint === 0x08 || codePoint === 0x09 || codePoint === 0x0a
+        || codePoint === 0x0c || codePoint === 0x0d ? 2 : 6;
+    } else if (codePoint === 0x22 || codePoint === 0x5c) {
+      bytes += 2;
+    } else if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+      if (index + 1 < value.length) {
+        const trailing = value.charCodeAt(index + 1);
+        if (trailing >= 0xdc00 && trailing <= 0xdfff) {
+          bytes += 4;
+          index += 1;
+          continue;
+        }
+      }
+      bytes += 6;
+    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+      bytes += 6;
+    } else if (codePoint <= 0x7f) {
+      bytes += 1;
+    } else if (codePoint <= 0x7ff) {
+      bytes += 2;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function reserveSnapshotString(budget: SnapshotBudget, value: string, label: string): void {
+  reserveSnapshotBytes(budget, jsonStringBytes(value), label);
+}
+
+function assertSnapshotDepth(depth: number, label: string): void {
+  if (depth > SNAPSHOT_MAX_DEPTH) {
+    throw snapshotLimit(`${label} exceeds snapshot maximum depth`);
+  }
+}
+
+function boundedObjectKeys(value: Record<string, unknown>, label: string): string[] {
+  const keys: string[] = [];
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    if (keys.length >= SNAPSHOT_MAX_KEYS_PER_OBJECT) {
+      throw snapshotLimit(`${label} exceeds snapshot maximum keys per object`);
+    }
+    if (jsonStringBytes(key) - 2 > SNAPSHOT_MAX_KEY_BYTES) {
+      throw snapshotLimit(`${label} contains a key exceeding the snapshot maximum key bytes`);
+    }
+    keys.push(key);
+  }
+  return keys;
+}
+
+function reserveSnapshotContainer(budget: SnapshotBudget, label: string): void {
+  reserveSnapshotBytes(budget, 2, label);
+}
+
+function reserveSnapshotObjectKey(
+  budget: SnapshotBudget,
+  key: string,
+  position: number,
+  label: string,
+): void {
+  reserveSnapshotString(budget, key, label);
+  reserveSnapshotBytes(budget, position === 0 ? 1 : 2, label);
+}
+
+function reserveSnapshotArrayItem(budget: SnapshotBudget, position: number, label: string): void {
+  if (position > 0) reserveSnapshotBytes(budget, 1, label);
+}
+
+function assertBase64LengthWithinBudget(value: string, budget: SnapshotBudget, label: string): void {
+  if (value.length > base64EncodedBytes(SNAPSHOT_MAX_BINARY_BYTES - budget.binaryBytes)) {
+    throw snapshotLimit(`${label} exceeds snapshot maximum binary bytes`);
+  }
+  if (value.length + 2 > SNAPSHOT_MAX_ENCODED_BYTES - budget.encodedBytes) {
+    throw snapshotLimit(`${label} exceeds snapshot maximum encoded bytes`);
+  }
+}
+
+function base64Value(charCode: number): number {
+  if (charCode >= 65 && charCode <= 90) return charCode - 65;
+  if (charCode >= 97 && charCode <= 122) return charCode - 71;
+  if (charCode >= 48 && charCode <= 57) return charCode + 4;
+  if (charCode === 43) return 62;
+  if (charCode === 47) return 63;
+  return -1;
+}
+
+function canonicalBase64DecodedBytes(value: string): number | null {
+  if (value.length % 4 !== 0) return null;
+  let firstPadding = value.length;
+  for (let index = 0; index < value.length; index += 1) {
+    const charCode = value.charCodeAt(index);
+    if (charCode === 61) {
+      firstPadding = index;
+      break;
+    }
+    if (base64Value(charCode) < 0) return null;
+  }
+  const padding = value.length - firstPadding;
+  if (padding > 2) return null;
+  for (let index = firstPadding; index < value.length; index += 1) {
+    if (value.charCodeAt(index) !== 61) return null;
+  }
+  if (padding === 1 && firstPadding % 4 !== 3) return null;
+  if (padding === 2 && firstPadding % 4 !== 2) return null;
+  if (padding > 0) {
+    const finalData = base64Value(value.charCodeAt(firstPadding - 1));
+    if ((padding === 1 && (finalData & 0b11) !== 0)
+      || (padding === 2 && (finalData & 0b1111) !== 0)) return null;
+  }
+  return (value.length / 4) * 3 - padding;
+}
+
 export function withTransportInboundContext<T>(
   context: TransportInboundContext,
   work: () => T,
@@ -166,28 +335,86 @@ export function renderTransportReviewCard(review: TransportReview): string {
   ].join('\n');
 }
 
-function fromApprovedSnapshot(value: unknown): unknown {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') {
+function fromApprovedSnapshot(
+  value: unknown,
+  budget: SnapshotBudget,
+  visited: WeakSet<object>,
+  depth: number,
+): unknown {
+  if (value !== null && typeof value === 'object' && visited.has(value)) {
+    throw new TransportAuthorityUnavailableError('approved operation snapshot contains a cycle');
+  }
+  reserveSnapshotNode(budget, 'approved operation snapshot');
+  if (value === null) {
+    reserveSnapshotBytes(budget, 4, 'approved operation snapshot');
     return value;
   }
-  if (Array.isArray(value)) return value.map(fromApprovedSnapshot);
-  if (value === undefined || typeof value !== 'object' || !isPlainObject(value)) {
+  if (typeof value === 'string') {
+    reserveSnapshotString(budget, value, 'approved operation snapshot');
+    return value;
+  }
+  if (typeof value === 'boolean') {
+    reserveSnapshotBytes(budget, value ? 4 : 5, 'approved operation snapshot');
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new TransportAuthorityUnavailableError('approved operation snapshot has a non-finite number');
+    }
+    reserveSnapshotBytes(budget, String(value).length, 'approved operation snapshot');
+    return value;
+  }
+  if (Array.isArray(value)) {
+    assertSnapshotDepth(depth, 'approved operation snapshot');
+    reserveSnapshotContainer(budget, 'approved operation snapshot');
+    visited.add(value);
+    try {
+      const restored: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        reserveSnapshotArrayItem(budget, index, 'approved operation snapshot');
+        restored.push(fromApprovedSnapshot(value[index], budget, visited, depth + 1));
+      }
+      return restored;
+    } finally {
+      visited.delete(value);
+    }
+  }
+  if (typeof value !== 'object' || !isPlainObject(value)) {
     throw new TransportAuthorityUnavailableError('approved operation content is not a JSON payload');
   }
-  const entries = Object.entries(value);
-  if (entries.length === 1 && entries[0]?.[0] === '$binary') {
-    const encoded = entries[0][1];
-    if (typeof encoded !== 'string'
-      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
-      throw new TransportAuthorityUnavailableError('approved operation binary payload is malformed');
+
+  assertSnapshotDepth(depth, 'approved operation snapshot');
+  reserveSnapshotContainer(budget, 'approved operation snapshot');
+  visited.add(value);
+  try {
+    const keys = boundedObjectKeys(value, 'approved operation snapshot');
+    if (keys.length === 1 && keys[0] === '$binary') {
+      const encoded = value['$binary'];
+      if (typeof encoded !== 'string') {
+        throw new TransportAuthorityUnavailableError('approved operation binary payload is malformed');
+      }
+      reserveSnapshotObjectKey(budget, '$binary', 0, 'approved operation snapshot');
+      assertBase64LengthWithinBudget(encoded, budget, 'approved operation binary payload');
+      const decodedBytes = canonicalBase64DecodedBytes(encoded);
+      if (decodedBytes === null) {
+        throw new TransportAuthorityUnavailableError('approved operation binary payload is malformed');
+      }
+      reserveSnapshotBinary(budget, decodedBytes, 'approved operation binary payload');
+      return Buffer.from(encoded, 'base64');
     }
-    const bytes = Buffer.from(encoded, 'base64');
-    if (bytes.toString('base64') !== encoded) {
-      throw new TransportAuthorityUnavailableError('approved operation binary payload is malformed');
+
+    const restored: Record<string, unknown> = {};
+    for (const [position, key] of keys.entries()) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        throw new TransportAuthorityUnavailableError('approved operation snapshot contains a reserved prototype key');
+      }
+      reserveSnapshotObjectKey(budget, key, position, 'approved operation snapshot');
+      restored[key] = fromApprovedSnapshot(value[key], budget, visited, depth + 1);
     }
-    return bytes;
+    return restored;
+  } finally {
+    visited.delete(value);
   }
-  return Object.fromEntries(entries.map(([key, child]) => [key, fromApprovedSnapshot(child)]));
 }
 
 export async function retryApprovedWhatsappOperations(input: {
@@ -218,9 +445,10 @@ function whatsappDispatchPayload(operation: TransportOperation): {
   if (typeof recipient !== 'string' || recipient.length === 0 || !Object.hasOwn(operation.payload, 'content')) {
     throw new TransportAuthorityUnavailableError('approved WhatsApp operation payload is malformed');
   }
+  const budget = createSnapshotBudget();
   let options: Record<string, unknown> | undefined;
   if (Object.hasOwn(operation.payload, 'options')) {
-    const restored = fromApprovedSnapshot(operation.payload['options']);
+    const restored = fromApprovedSnapshot(operation.payload['options'], budget, new WeakSet<object>(), 0);
     if (restored === null || typeof restored !== 'object' || Array.isArray(restored) || !isPlainObject(restored)) {
       throw new TransportAuthorityUnavailableError('approved WhatsApp operation options are malformed');
     }
@@ -228,7 +456,7 @@ function whatsappDispatchPayload(operation: TransportOperation): {
   }
   return {
     recipient,
-    content: fromApprovedSnapshot(operation.payload['content']),
+    content: fromApprovedSnapshot(operation.payload['content'], budget, new WeakSet<object>(), 0),
     ...(options === undefined ? {} : { options }),
   };
 }
@@ -275,15 +503,29 @@ function byteCopy(value: Uint8Array): Buffer {
   return Buffer.from(value);
 }
 
-function freezeValue(value: unknown, visited: WeakSet<object>, mediaValue: boolean): FrozenOutboundContent {
+function freezeValue(
+  value: unknown,
+  visited: WeakSet<object>,
+  mediaValue: boolean,
+  budget: SnapshotBudget,
+  depth: number,
+): FrozenOutboundContent {
+  if (value !== null && typeof value === 'object' && visited.has(value)) {
+    throw new TransportAuthorityUnavailableError('outbound content contains a cycle');
+  }
+  reserveSnapshotNode(budget, 'outbound content');
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    if (typeof value === 'string') reserveSnapshotString(budget, value, 'outbound content');
+    else reserveSnapshotBytes(budget, value === false ? 5 : 4, 'outbound content');
     return { approvalContent: value, wireContent: value };
   }
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new TransportAuthorityUnavailableError('outbound content has a non-finite number');
+    reserveSnapshotBytes(budget, String(value).length, 'outbound content');
     return { approvalContent: value, wireContent: value };
   }
   if (typeof value === 'undefined') {
+    reserveSnapshotBytes(budget, 4, 'outbound content');
     return { approvalContent: undefined, wireContent: undefined };
   }
   if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') {
@@ -296,6 +538,9 @@ function freezeValue(value: unknown, visited: WeakSet<object>, mediaValue: boole
     throw new TransportAuthorityUnavailableError('stream-backed outbound content cannot be approved without frozen bytes');
   }
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    reserveSnapshotContainer(budget, 'outbound content');
+    reserveSnapshotObjectKey(budget, '$binary', 0, 'outbound content');
+    reserveSnapshotBinary(budget, value.byteLength, 'outbound content');
     const copy = byteCopy(value);
     return {
       approvalContent: { $binary: copy.toString('base64') },
@@ -303,46 +548,60 @@ function freezeValue(value: unknown, visited: WeakSet<object>, mediaValue: boole
     };
   }
   if (Array.isArray(value)) {
-    if (visited.has(value)) throw new TransportAuthorityUnavailableError('outbound content contains a cycle');
+    assertSnapshotDepth(depth, 'outbound content');
+    reserveSnapshotContainer(budget, 'outbound content');
     visited.add(value);
-    const approval: unknown[] = [];
-    const wire: unknown[] = [];
-    for (const item of value) {
-      const frozen = freezeValue(item, visited, false);
-      approval.push(frozen.approvalContent);
-      wire.push(frozen.wireContent);
+    try {
+      const approval: unknown[] = [];
+      const wire: unknown[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        reserveSnapshotArrayItem(budget, index, 'outbound content');
+        const frozen = freezeValue(value[index], visited, false, budget, depth + 1);
+        approval.push(frozen.approvalContent);
+        wire.push(frozen.wireContent);
+      }
+      return { approvalContent: approval, wireContent: wire };
+    } finally {
+      visited.delete(value);
     }
-    visited.delete(value);
-    return { approvalContent: approval, wireContent: wire };
   }
   if (typeof value !== 'object' || !isPlainObject(value)) {
     throw new TransportAuthorityUnavailableError('outbound content has an unsupported object type');
   }
-  if (visited.has(value)) throw new TransportAuthorityUnavailableError('outbound content contains a cycle');
-  if (Object.keys(value).length === 1 && Object.hasOwn(value, '$binary')) {
-    throw new TransportAuthorityUnavailableError('outbound content uses the reserved binary snapshot representation');
-  }
+  assertSnapshotDepth(depth, 'outbound content');
+  reserveSnapshotContainer(budget, 'outbound content');
   if (mediaValue && Object.hasOwn(value, 'url')) {
     throw new TransportAuthorityUnavailableError('URL-backed outbound content cannot be approved without frozen bytes');
   }
 
   visited.add(value);
-  const approval: Record<string, unknown> = {};
-  const wire: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-      throw new TransportAuthorityUnavailableError('outbound content contains a reserved prototype key');
+  try {
+    const keys = boundedObjectKeys(value, 'outbound content');
+    if (keys.length === 1 && keys[0] === '$binary') {
+      throw new TransportAuthorityUnavailableError('outbound content uses the reserved binary snapshot representation');
     }
-    if (typeof child === 'undefined') continue;
-    if (MEDIA_KEYS.has(key) && typeof child === 'string') {
-      throw new TransportAuthorityUnavailableError('path-backed outbound attachment cannot be approved without frozen bytes');
+    const approval: Record<string, unknown> = {};
+    const wire: Record<string, unknown> = {};
+    let emittedProperties = 0;
+    for (const key of keys) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        throw new TransportAuthorityUnavailableError('outbound content contains a reserved prototype key');
+      }
+      const child = value[key];
+      if (typeof child === 'undefined') continue;
+      reserveSnapshotObjectKey(budget, key, emittedProperties, 'outbound content');
+      emittedProperties += 1;
+      if (MEDIA_KEYS.has(key) && typeof child === 'string') {
+        throw new TransportAuthorityUnavailableError('path-backed outbound attachment cannot be approved without frozen bytes');
+      }
+      const frozen = freezeValue(child, visited, mediaValue || MEDIA_KEYS.has(key), budget, depth + 1);
+      approval[key] = frozen.approvalContent;
+      wire[key] = frozen.wireContent;
     }
-    const frozen = freezeValue(child, visited, mediaValue || MEDIA_KEYS.has(key));
-    approval[key] = frozen.approvalContent;
-    wire[key] = frozen.wireContent;
+    return { approvalContent: approval, wireContent: wire };
+  } finally {
+    visited.delete(value);
   }
-  visited.delete(value);
-  return { approvalContent: approval, wireContent: wire };
 }
 
 /**
@@ -351,7 +610,7 @@ function freezeValue(value: unknown, visited: WeakSet<object>, mediaValue: boole
  * before admission because their eventual bytes cannot be truthfully approved.
  */
 export function freezeOutboundContent(content: unknown): FrozenOutboundContent {
-  return freezeValue(content, new WeakSet<object>(), false);
+  return freezeValue(content, new WeakSet<object>(), false, createSnapshotBudget(), 0);
 }
 
 /**
@@ -361,10 +620,14 @@ export function freezeOutboundContent(content: unknown): FrozenOutboundContent {
  * authority representation and a separately copied provider representation.
  */
 export function freezeOutboundOptions(options: unknown): FrozenOutboundOptions {
+  return freezeOutboundOptionsWithBudget(options, createSnapshotBudget());
+}
+
+function freezeOutboundOptionsWithBudget(options: unknown, budget: SnapshotBudget): FrozenOutboundOptions {
   if (options === null || typeof options !== 'object' || Array.isArray(options) || !isPlainObject(options)) {
     throw new TransportAuthorityUnavailableError('outbound send options must be a plain JSON object');
   }
-  const frozen = freezeValue(options, new WeakSet<object>(), false);
+  const frozen = freezeValue(options, new WeakSet<object>(), false, budget, 0);
   const { approvalContent: approvalOptions, wireContent: wireOptions } = frozen;
   if (approvalOptions === null || typeof approvalOptions !== 'object'
     || wireOptions === null || typeof wireOptions !== 'object'
@@ -396,8 +659,9 @@ export class FinalTransportAuthorityGate implements OutboundAuthorityGate {
   }
 
   async admit(input: { recipient: string; content: unknown; options?: unknown }): Promise<AuthorityDispatch> {
-    const frozen = freezeOutboundContent(input.content);
-    const options = input.options === undefined ? undefined : freezeOutboundOptions(input.options);
+    const budget = createSnapshotBudget();
+    const frozen = freezeValue(input.content, new WeakSet<object>(), false, budget, 0);
+    const options = input.options === undefined ? undefined : freezeOutboundOptionsWithBudget(input.options, budget);
     const activeInbound = getTransportInboundContext();
     const admission = await this.authority.admit({
       recipient: input.recipient,

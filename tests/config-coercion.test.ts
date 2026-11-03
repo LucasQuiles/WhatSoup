@@ -246,6 +246,25 @@ describe('cast-sweep families (#2295 slice 3)', () => {
 });
 
 describe('transport authority pilot configuration', () => {
+  it('rejects direct startup configuration that bypassed shared activation admission', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      type: 'agent',
+      transportAuthority: {
+        enabled: true, baseUrl: 'https://authority.example', accountId: 'pilot-account',
+        credentialFile: '/var/db/whatsoup/authority.bearer', serviceUid: 501, workerUid: 502,
+      },
+      agentOptions: { providerProcessIsolation: {
+        controllerUid: 501, controllerGid: 20, workerUid: 502, workerGid: 502,
+        launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+        launcherSha256: 'a'.repeat(64), policyPath: '/etc/whatsoup/agent-isolation.policy',
+        policySha256: 'b'.repeat(64), homeDir: '/var/lib/whatsoup-agent',
+        configHome: '/var/lib/whatsoup-agent/.config', dataHome: '/var/lib/whatsoup-agent/.local/share',
+        protectedPaths: ['/var/db/whatsoup/authority.bearer'], readinessMode: 'disabled',
+      } },
+    }));
+    await expect(import('../src/config.ts')).rejects.toThrow(/not qualified/);
+  });
+
   it('rejects enabled authority without every protected-service attestation field', async () => {
     // Break caught: enabled authority silently starts without a protected client
     // and leaves the final socket gate absent or permanently misconfigured.
@@ -258,9 +277,8 @@ describe('transport authority pilot configuration', () => {
     );
   });
 
-  it('keeps the protected-client factory inputs explicit when authority is enabled', async () => {
-    // Break caught: a later config refactor drops the worker UID distinction or
-    // credential path that the service-principal factory must verify.
+  it('rejects complete credential fields without qualified process isolation', async () => {
+    // Credential metadata alone cannot qualify the process isolation boundary.
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
       transportAuthority: {
         enabled: true,
@@ -272,15 +290,7 @@ describe('transport authority pilot configuration', () => {
       },
     }));
 
-    const { config } = await import('../src/config.ts');
-    expect(config.transportAuthority).toEqual({
-      enabled: true,
-      baseUrl: 'https://authority.example',
-      accountId: 'pilot-account',
-      credentialFile: '/var/db/whatsoup/authority.bearer',
-      serviceUid: 501,
-      workerUid: 502,
-    });
+    await expect(import('../src/config.ts')).rejects.toThrow(/requires an agent runtime with providerProcessIsolation/);
   });
 
   it.each([
@@ -311,7 +321,7 @@ describe('transport authority pilot configuration', () => {
     'https://authority.example',
     'http://127.0.0.1:8080',
     'http://[::1]:8080',
-  ])('allows trusted authority URL %s at startup', async (baseUrl) => {
+  ])('still requires isolation admission for trusted authority URL %s', async (baseUrl) => {
     process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
       transportAuthority: {
         enabled: true,
@@ -323,8 +333,7 @@ describe('transport authority pilot configuration', () => {
       },
     }));
 
-    const { config } = await import('../src/config.ts');
-    expect(config.transportAuthority.baseUrl).toBe(baseUrl);
+    await expect(import('../src/config.ts')).rejects.toThrow(/requires an agent runtime with providerProcessIsolation/);
   });
 
   it('rejects root process-isolation identities at startup', async () => {

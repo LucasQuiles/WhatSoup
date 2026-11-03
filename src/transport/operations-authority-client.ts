@@ -2,8 +2,23 @@ import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, re
 import { isAbsolute } from 'node:path';
 import { parseTransportAuthorityUrl, TRANSPORT_AUTHORITY_URL_REQUIREMENT } from '../lib/authority-url.ts';
 import { isRecord } from '../lib/type-guards.ts';
+import { currentTransportSendSignal } from './send-deadline.ts';
 
 export const TRANSPORT_AUTHORITY_ADAPTER_VERSION = 1;
+
+const AUTHORITY_REQUEST_TIMEOUT_MS = 5_000;
+// An authority operation can carry the established 50 MiB media payload as
+// base64 (~66.7 MiB) plus snapshot metadata. Agent365 still has a separate
+// 1 MiB request cap, so activation needs positive parity proof before media
+// operations can use this envelope end to end.
+const AUTHORITY_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
+// The snapshot gate accepts depth 64 and 10,000 nodes. Leave room for the
+// response envelope while stopping JSON.parse from creating a hostile graph.
+const AUTHORITY_RESPONSE_MAX_DEPTH = 128;
+const AUTHORITY_RESPONSE_MAX_CONTAINERS = 100_000;
+// A byte limit alone permits an unbounded number of tiny chunks. This leaves
+// ample room for ordinary streaming while bounding retained chunk objects.
+const AUTHORITY_RESPONSE_MAX_CHUNKS = 100_000;
 
 export interface TransportInboundContext {
   inbound_event_id: string;
@@ -135,8 +150,8 @@ export interface OperationsAuthorityPort {
 export class TransportAuthorityUnavailableError extends Error {
   readonly code = 'TRANSPORT_AUTHORITY_UNAVAILABLE';
 
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'TransportAuthorityUnavailableError';
   }
 }
@@ -167,6 +182,119 @@ function nonEmptyString(value: unknown): value is string {
 
 function stringArray(value: unknown): string[] | null {
   return Array.isArray(value) && value.every(nonEmptyString) ? value : null;
+}
+
+function abortError(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error('transport authority request aborted');
+}
+
+/**
+ * An injected fetch can ignore AbortSignal. Continue observing its late
+ * settlement while the caller fails at the authority request deadline.
+ */
+function awaitWithAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = signal.aborted;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      reject(abortError(signal));
+    };
+    if (!settled) signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+    if (settled) reject(abortError(signal));
+  });
+}
+
+function assertAuthorityJsonStructure(body: Buffer): void {
+  let depth = 0;
+  let containers = 0;
+  let inString = false;
+  let escaped = false;
+  for (const byte of body) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (byte === 0x5c) escaped = true;
+      else if (byte === 0x22) inString = false;
+      continue;
+    }
+    if (byte === 0x22) {
+      inString = true;
+      continue;
+    }
+    if (byte === 0x7b || byte === 0x5b) {
+      depth += 1;
+      containers += 1;
+      if (depth > AUTHORITY_RESPONSE_MAX_DEPTH || containers > AUTHORITY_RESPONSE_MAX_CONTAINERS) {
+        throw new RangeError('transport authority response JSON structure exceeds limit');
+      }
+      continue;
+    }
+    if (byte === 0x7d || byte === 0x5d) depth -= 1;
+  }
+}
+
+function cancellationFailure(error: unknown): TransportAuthorityUnavailableError {
+  return new TransportAuthorityUnavailableError(
+    'transport authority response cancellation failed',
+    { cause: error },
+  );
+}
+
+async function readAuthorityJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  if (!response.body) throw new SyntaxError('transport authority response has no body');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let chunkCount = 0;
+  let complete = false;
+  try {
+    for (;;) {
+      const { done, value } = await awaitWithAbort(reader.read(), signal);
+      if (done) {
+        complete = true;
+        break;
+      }
+      chunkCount += 1;
+      if (chunkCount > AUTHORITY_RESPONSE_MAX_CHUNKS) {
+        throw new RangeError('transport authority response exceeds chunk limit');
+      }
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > AUTHORITY_RESPONSE_MAX_BYTES) {
+        throw new RangeError('transport authority response exceeds byte limit');
+      }
+      chunks.push(value);
+    }
+    if (signal.aborted) throw abortError(signal);
+    const body = Buffer.concat(chunks, total);
+    assertAuthorityJsonStructure(body);
+    return JSON.parse(body.toString('utf8')) as unknown;
+  } finally {
+    let cancelError: unknown;
+    if (!complete) {
+      try {
+        await reader.cancel();
+      } catch (error) {
+        cancelError = error;
+      }
+    }
+    reader.releaseLock();
+    if (cancelError !== undefined) throw cancellationFailure(cancelError);
+  }
 }
 
 function mailPreview(value: unknown, deskUrl: string): MailSendPreview | null {
@@ -356,7 +484,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
         ? {}
         : { context: { inbound_event_id: input.context.inbound_event_id } }),
       ...(input.operationId === undefined ? {} : { operation_id: input.operationId }),
-    }, true);
+    }, currentTransportSendSignal());
 
     if (response.status === 409
       && isRecord(response.body)
@@ -384,7 +512,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
       account_id: this.options.accountId,
       state: input.state,
       ...(input.providerId === undefined ? {} : { provider_id: input.providerId }),
-    }, true);
+    });
     const operation = transportOperation(response.body, this.deskUrl);
     if (response.status < 200 || response.status >= 300
       || operation === null
@@ -405,7 +533,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
       conversation: input.conversation,
       received_at: input.receivedAt,
       ...(input.text === undefined ? {} : { text: input.text }),
-    }, true);
+    });
     if (response.status < 200 || response.status >= 300) {
       throw new TransportAuthorityUnavailableError('transport authority inbound registration was not accepted');
     }
@@ -420,7 +548,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
     const response = await this.post('/operations/transport/close', {
       account_id: this.options.accountId,
       event_id: input.eventId,
-    }, true);
+    });
     if (response.status < 200 || response.status >= 300
       || !isRecord(response.body)
       || response.body['closed'] !== true) {
@@ -436,7 +564,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
       digests: input.digests,
       challenge: input.challenge,
       approve: input.approve ?? true,
-    }, true);
+    });
     const operations = transportOperations(response.body, this.deskUrl);
     const expectedState = (input.approve ?? true) ? 'approved' : 'cancelled';
     const expected = new Map(input.operationIds.map((id, index) => [id, input.digests[index]]));
@@ -454,7 +582,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
     const response = await this.post('/operations/transport/pause', {
       account_id: this.options.accountId,
       event_id: input.eventId,
-    }, true);
+    });
     if (response.status < 200 || response.status >= 300
       || !isRecord(response.body)
       || response.body['paused'] !== true
@@ -465,32 +593,56 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
     }
   }
 
-  private async post(path: string, body: Record<string, unknown>, parseBody: boolean): Promise<{ status: number; body: unknown }> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(new URL(path, this.baseUrl), {
+  private async post(
+    path: string,
+    body: Record<string, unknown>,
+    deadlineSignal?: AbortSignal,
+  ): Promise<{ status: number; body: unknown }> {
+    if (deadlineSignal?.aborted) {
+      throw new TransportAuthorityUnavailableError('transport authority request failed');
+    }
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(() => timeoutController.abort(), AUTHORITY_REQUEST_TIMEOUT_MS);
+    timeout.unref?.();
+    const signal = deadlineSignal === undefined
+      ? timeoutController.signal
+      : AbortSignal.any([timeoutController.signal, deadlineSignal]);
+    const request = (async () => {
+      const response = await this.fetchImpl(new URL(path, this.baseUrl), {
         method: 'POST',
         headers: {
           authorization: `Bearer ${this.options.bearerToken}`,
           'content-type': 'application/json',
         },
         body: JSON.stringify(body),
+        redirect: 'error',
+        signal,
       });
-    } catch {
-      throw new TransportAuthorityUnavailableError('transport authority request failed');
-    }
-
-    if (!parseBody) return { status: response.status, body: null };
-    let parsed: unknown;
-    try {
-      parsed = await response.json();
-    } catch {
-      if (response.status >= 200 && response.status < 300) {
-        throw new TransportAuthorityUnavailableError('transport authority response is not JSON');
+      if (signal.aborted) {
+        await response.body?.cancel();
+        throw abortError(signal);
       }
-      parsed = null;
+
+      let parsed: unknown;
+      try {
+        parsed = await readAuthorityJson(response, signal);
+      } catch (error) {
+        if (error instanceof TransportAuthorityUnavailableError) throw error;
+        if (response.status >= 200 && response.status < 300) {
+          throw new TransportAuthorityUnavailableError('transport authority response is not JSON');
+        }
+        parsed = null;
+      }
+      return { status: response.status, body: parsed };
+    })();
+    try {
+      return await awaitWithAbort(request, signal);
+    } catch (error) {
+      if (error instanceof TransportAuthorityUnavailableError) throw error;
+      throw new TransportAuthorityUnavailableError('transport authority request failed');
+    } finally {
+      clearTimeout(timeout);
     }
-    return { status: response.status, body: parsed };
   }
 }
 

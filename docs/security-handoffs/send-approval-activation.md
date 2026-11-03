@@ -20,6 +20,13 @@ The authority service, not the agent, owns review challenges, human decisions,
 pause state, dispatch transitions, and provider-effect receipts. Agents never
 receive a reusable authority bearer or approval endpoint.
 
+The enabled final seam gives pacing and admission one 30-second send budget.
+Expired admission cannot start a provider call. A provider call already in
+flight has an unknown outcome on timeout; its late result cannot automatically
+overwrite that hold. Outbound echoes retain normal storage and correlation but
+never establish human approval context. Direct startup configuration now uses
+the same activation admission as the instance loader and fleet mutations.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
@@ -42,6 +49,11 @@ receive a reusable authority bearer or approval endpoint.
 5. Keep authority activation refused until all requirements above have
    independently demonstrated the desired behavior. The refusal is intentional
    and must not be weakened to make a pilot appear available.
+6. Qualify large-media request and review parity. WhatSoup's existing media
+   limit is 50 MiB, while the current Agent365 middleware rejects ordinary
+   requests declaring more than 1 MiB. Bounded snapshot allocation does not
+   prove those larger operations work end to end. Rejected operations must
+   remain visible and must never be truncated or submitted without review.
 
 ## Acceptance evidence
 
