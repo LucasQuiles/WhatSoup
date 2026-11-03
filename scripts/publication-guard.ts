@@ -36,7 +36,7 @@ import {
 import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
-import { branchDiffBaseRef, parseUnifiedDiffAddedLines } from './repo-hygiene-guard.ts';
+import { baseRefFileLines, branchDiffBaseRef, parseUnifiedDiffAddedLines } from './repo-hygiene-guard.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
 
@@ -607,24 +607,29 @@ function validateAll(cwd: string): GuardIssue[] {
 /**
  * The private-literal scan over what a branch adds relative to its base, for the
  * push hook: at push time the index is clean, so the staged scan sees nothing.
- * Reads every non-merge commit as well as the final diff, because a push discloses
- * intermediate commits; the final diff covers merge conflict resolutions.
+ * A push discloses every commit, so this reads each commit's patch, merges
+ * included and diffed against each parent. Every line the branch's final diff
+ * adds is added by one of those patches, so no separate final diff is read.
+ * `--diff-merges=separate` is explicit because `log.diffMerges` can make `-m`
+ * print a combined diff, which this parser does not read. Diffing a
+ * merge against a parent re-exposes the other side's lines, so a line
+ * byte-identical to a line of the same file on the base is skipped, the rule the
+ * repo-hygiene branch scan uses: such content is already published, and a new
+ * literal cannot already be on the base.
  */
 function validateBranchDiff(cwd: string, baseRef: string): GuardIssue[] {
   const mergeBase = git(['merge-base', baseRef, 'HEAD'], cwd).trim();
   const range = `${mergeBase}..HEAD`;
-  const addedByFile = new Map<string, string[]>();
-  for (const diff of [
-    git(['log', '--format=', '--no-merges', '--unified=0', '--no-ext-diff', range], cwd),
-    git(['diff', '--unified=0', '--no-ext-diff', range], cwd),
-  ]) {
-    for (const added of parseUnifiedDiffAddedLines(diff)) {
-      const filePath = normalizeRepoPath(added.filePath);
-      if (!isTextCandidate(filePath)) continue;
-      addedByFile.set(filePath, [...(addedByFile.get(filePath) ?? []), added.text]);
-    }
+  const baseLines = new Map<string, Set<string>>();
+  const addedByFile = new Map<string, Set<string>>();
+  const patches = git(['log', '--format=', '--diff-merges=separate', '--unified=0', '--no-ext-diff', range], cwd);
+  for (const added of parseUnifiedDiffAddedLines(patches)) {
+    const filePath = normalizeRepoPath(added.filePath);
+    if (!isTextCandidate(filePath)) continue;
+    if (baseRefFileLines(cwd, baseRef, added.filePath, baseLines).has(added.text)) continue;
+    addedByFile.set(filePath, (addedByFile.get(filePath) ?? new Set()).add(added.text));
   }
-  return [...addedByFile].flatMap(([filePath, lines]) => scanTextForPrivateLiterals(filePath, lines.join('\n')));
+  return [...addedByFile].flatMap(([filePath, lines]) => scanTextForPrivateLiterals(filePath, [...lines].join('\n')));
 }
 
 function validateRelease(cwd: string): GuardIssue[] {

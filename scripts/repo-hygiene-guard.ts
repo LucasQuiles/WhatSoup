@@ -476,7 +476,7 @@ function branchCommitShas(cwd: string, mergeBase: string): string[] {
 // Used by the branch-history scan to skip matches byte-identical to already-published
 // content. Returns an empty set when the file is absent at the base (every line is then
 // genuinely branch-new and must be scanned).
-function baseRefFileLines(
+export function baseRefFileLines(
   cwd: string,
   baseRef: string,
   filePath: string,

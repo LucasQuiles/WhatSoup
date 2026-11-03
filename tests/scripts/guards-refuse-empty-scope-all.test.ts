@@ -162,6 +162,7 @@ const SCOPE_MAP: Record<string, ScopeEntry> = {
   'publication:all': { class: 'skip-alias', reason: 'alias -> guard:publication (all mode floored + tested this session)' },
   'publication:release': { class: 'skip-alias', reason: 'alias -> guard:publication (release mode floored + tested in publication-guard.test.ts)' },
   'publication:staged': { class: 'skip-alias', reason: 'alias -> guard:publication (staged is diff-scoped; empty index legitimately clean)' },
+  'publication:branch-diff': { class: 'skip-alias', reason: 'alias -> guard:publication --branch-diff (branch-diff-scoped; an empty branch diff is legitimately clean). Its no-base refusal is probed in MODE_PROBES below' },
   'publication:write': {
     class: 'skip-alias',
     reason:
@@ -308,6 +309,7 @@ describe('fixed-artifact guards fail closed (never certify) an empty tree', () =
 const MODE_PROBES = [
   { label: 'repo --release-hygiene', script: 'scripts/repo-hygiene-guard.ts', args: ['--release-hygiene'] },
   { label: 'publication --release', script: 'scripts/publication-guard.ts', args: ['--release'] },
+  { label: 'publication --branch-diff', script: 'scripts/publication-guard.ts', args: ['--branch-diff'] },
 ] as const;
 
 describe('multi-mode guards refuse an empty tree in their whole-tree modes', () => {

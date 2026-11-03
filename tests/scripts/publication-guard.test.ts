@@ -311,7 +311,7 @@ describe('publication guard branch-diff mode', () => {
     expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
   });
 
-  it('flags a literal introduced only by a merge commit, which the per-commit read skips', () => {
+  it('flags a literal that a merge resolution adds', () => {
     const repo = branchRepo();
     const branch = gitOutput(repo, ['branch', '--show-current']);
     git(repo, ['checkout', '-b', 'side']);
@@ -325,6 +325,38 @@ describe('publication guard branch-diff mode', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+  });
+
+  it('flags a literal a merge commit adds that a later commit removes, so neither the final diff nor a non-merge commit shows it', () => {
+    const repo = branchRepo();
+    const branch = gitOutput(repo, ['branch', '--show-current']);
+    git(repo, ['checkout', '-b', 'side']);
+    commitExactFile(repo, 'src/side.ts', '// side\n', 'side work');
+    git(repo, ['checkout', branch]);
+    commitExactFile(repo, 'src/main.ts', '// main\n', 'branch work');
+    git(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+    writeFileSync(join(repo, 'src/side.ts'), `// ${privatePath}\n`);
+    git(repo, ['add', 'src/side.ts']);
+    git(repo, ['commit', '-m', 'merge side']);
+    commitExactFile(repo, 'src/side.ts', '// side\n', 'remove literal');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(gitOutput(repo, ['diff', `${gitOutput(repo, ['merge-base', 'origin/main', 'HEAD'])}..HEAD`])).not.toContain('workspace');
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+  });
+
+  it('does not flag base content a merge from the base brings in', () => {
+    const repo = branchRepo();
+    const branch = gitOutput(repo, ['branch', '--show-current']);
+    commitExactFile(repo, 'src/work.ts', '// work\n', 'branch work');
+    git(repo, ['checkout', '-b', 'mainline', 'origin/main']);
+    commitExactFile(repo, 'src/old.ts', `// ${privatePath}\n`, 'already on main');
+    git(repo, ['update-ref', 'refs/remotes/origin/main', gitOutput(repo, ['rev-parse', 'HEAD'])]);
+    git(repo, ['checkout', branch]);
+    git(repo, ['merge', '--no-ff', '-m', 'merge main', 'origin/main']);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
   });
 
   it('passes clean branch commits and does not flag a literal already on the base', () => {
