@@ -71,7 +71,80 @@ describe('TurnQueue', () => {
     expect(settled).toHaveBeenCalledTimes(1);
   });
 
-  it('settles a throwing rejection and releases the turn for a fresh trusted admission', async () => {
+  it('waits for asynchronous rejection finalization before settling', async () => {
+    const finalization = deferred();
+    const settled = vi.fn();
+    const queue = new TurnQueue({
+      maxDepth: 0,
+      onReject: async () => finalization.promise,
+    });
+
+    expect(queue.enqueue(makeTurn({ onSettled: settled }))).toBe(false);
+    expect(settled).not.toHaveBeenCalled();
+
+    finalization.resolve();
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(1));
+  });
+
+  it('halts without settling when asynchronous rejection finalization fails', async () => {
+    const rejection = new Error('durable rejection finalization failed');
+    let rejectFinalization!: (error: Error) => void;
+    const finalization = new Promise<void>((_resolve, reject) => {
+      rejectFinalization = reject;
+    });
+    const settled = vi.fn();
+    const queue = new TurnQueue({
+      maxDepth: 0,
+      onReject: async () => finalization,
+    });
+
+    expect(queue.enqueue(makeTurn({ onSettled: settled }))).toBe(false);
+    rejectFinalization(rejection);
+
+    await vi.waitFor(() => expect(queue.isHalted).toBe(true));
+    expect(settled).not.toHaveBeenCalled();
+    await expect(queue.idle()).rejects.toBe(rejection);
+  });
+
+  it('contains a throwing halt callback after asynchronous rejection finalization fails', async () => {
+    const rejection = new Error('durable rejection finalization failed');
+    const haltError = new Error('halt callback failed');
+    let rejectFinalization!: (error: Error) => void;
+    const finalization = new Promise<void>((_resolve, reject) => {
+      rejectFinalization = reject;
+    });
+    const settled = vi.fn();
+    const queue = new TurnQueue({
+      maxDepth: 0,
+      onReject: async () => finalization,
+      onHalt: () => { throw haltError; },
+    });
+
+    expect(queue.enqueue(makeTurn({ onSettled: settled }))).toBe(false);
+    rejectFinalization(rejection);
+
+    await vi.waitFor(() => expect(queue.isHalted).toBe(true));
+    expect(settled).not.toHaveBeenCalled();
+    await expect(queue.idle()).rejects.toBe(rejection);
+  });
+
+  it('contains a throwing settlement callback after asynchronous rejection finalization', async () => {
+    const settled = vi.fn(() => { throw new Error('settlement callback failed'); });
+    const finalization = deferred();
+    const turn = makeTurn({ onSettled: settled });
+    const queue = new TurnQueue({
+      maxDepth: 0,
+      onReject: async () => finalization.promise,
+    });
+
+    expect(queue.enqueue(turn)).toBe(false);
+    finalization.resolve();
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(1));
+
+    expect(new TurnQueue().enqueue(turn)).toBe(true);
+  });
+
+  it('halts a throwing rejection without settling or releasing the exact admission', () => {
     const rejectionError = new Error('rejection callback failed');
     const settled = vi.fn();
     const turn = makeTurn({ text: 'reused-after-reject', chatJid: 'reused@s.whatsapp.net', onSettled: settled });
@@ -82,47 +155,10 @@ describe('TurnQueue', () => {
       },
     });
 
-    await expect(registerTrustedInbound({
-      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
-      closeInbound: vi.fn(async () => undefined),
-    }, {
-      eventId: 'A',
-      sender: 'a@s.whatsapp.net',
-      conversation: 'reused@s.whatsapp.net',
-      receivedAt: '2026-11-03T00:00:00.000Z',
-      content: 'rejected',
-    }, () => rejectedQueue.enqueue(turn))).rejects.toThrow(rejectionError);
-    expect(settled).toHaveBeenCalledTimes(1);
-
-    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
-      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
-    );
-    const replacementQueue = new TurnQueue();
-    const gate = new FinalTransportAuthorityGate({
-      admit: admitted,
-      recordReceipt: vi.fn(async () => undefined),
-    });
-    await registerTrustedInbound({
-      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
-      closeInbound: vi.fn(async () => undefined),
-    }, {
-      eventId: 'B',
-      sender: 'b@s.whatsapp.net',
-      conversation: 'reused@s.whatsapp.net',
-      receivedAt: '2026-11-03T00:00:00.000Z',
-      content: 'fresh',
-    }, () => {
-      expect(replacementQueue.enqueue(turn)).toBe(true);
-    });
-    replacementQueue.setProcessor(async (queued) => {
-      await gate.admit({ recipient: queued.chatJid, content: { text: queued.text } });
-    });
-    await replacementQueue.idle();
-
-    expect(admitted).toHaveBeenCalledWith(expect.objectContaining({
-      recipient: 'reused@s.whatsapp.net', context: { inbound_event_id: 'B' },
-    }));
-    expect(settled).toHaveBeenCalledTimes(2);
+    expect(() => rejectedQueue.enqueue(turn)).toThrow(rejectionError);
+    expect(rejectedQueue.isHalted).toBe(true);
+    expect(settled).not.toHaveBeenCalled();
+    expect(new TurnQueue().enqueue(turn)).toBe(false);
   });
 
   it('keeps each queued trusted inbound context through admission, finalization, and settlement', async () => {

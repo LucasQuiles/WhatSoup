@@ -27,6 +27,14 @@ export interface FrozenOutboundOptions {
 }
 
 const MEDIA_KEYS = new Set(['image', 'video', 'audio', 'document', 'sticker']);
+const TEXT_SEMANTIC_KEYS = new Set(['text', 'mentions', 'linkPreview', 'viewOnce', 'contextInfo']);
+const MEDIA_SEMANTIC_KEYS: Record<string, ReadonlySet<string>> = {
+  image: new Set(['image', 'caption', 'mimetype', 'viewOnce']),
+  document: new Set(['document', 'fileName', 'mimetype', 'caption']),
+  audio: new Set(['audio', 'mimetype', 'ptt', 'seconds']),
+  video: new Set(['video', 'caption', 'mimetype', 'ptv', 'gifPlayback', 'viewOnce']),
+  sticker: new Set(['sticker', 'mimetype', 'isAnimated']),
+};
 
 // The media tool accepts files up to 50 MiB. Keep the operation snapshot at
 // that provider boundary while reserving enough encoded space for base64 and
@@ -478,6 +486,101 @@ function isPlainObject(value: object): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
+function hasOnlySemanticKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isInlineBinary(value: unknown): value is Buffer | Uint8Array {
+  return Buffer.isBuffer(value) || value instanceof Uint8Array;
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function isOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function isKnownReplyContext(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !isPlainObject(value)) return false;
+  if (!hasOnlySemanticKeys(value, new Set(['stanzaId', 'participant', 'quotedMessage']))) return false;
+  if (typeof value['stanzaId'] !== 'string' || typeof value['participant'] !== 'string') return false;
+  const quotedMessage = value['quotedMessage'];
+  return quotedMessage !== null
+    && typeof quotedMessage === 'object'
+    && !Array.isArray(quotedMessage)
+    && isPlainObject(quotedMessage)
+    && hasOnlySemanticKeys(quotedMessage, new Set(['conversation']))
+    && typeof quotedMessage['conversation'] === 'string';
+}
+
+function isKnownTextContent(content: Record<string, unknown>): boolean {
+  return typeof content['text'] === 'string'
+    && hasOnlySemanticKeys(content, TEXT_SEMANTIC_KEYS)
+    && (content['mentions'] === undefined
+      || (Array.isArray(content['mentions']) && content['mentions'].every((mention) => typeof mention === 'string')))
+    && (content['linkPreview'] === undefined || content['linkPreview'] === null)
+    && isOptionalBoolean(content['viewOnce'])
+    && isKnownReplyContext(content['contextInfo']);
+}
+
+function isKnownMediaContent(content: Record<string, unknown>): boolean {
+  const mediaKeys = Object.keys(MEDIA_SEMANTIC_KEYS)
+    .filter((key) => content[key] !== undefined);
+  if (mediaKeys.length !== 1) return false;
+  const mediaKey = mediaKeys[0]!;
+  const allowedKeys = MEDIA_SEMANTIC_KEYS[mediaKey]!;
+  if (!hasOnlySemanticKeys(content, allowedKeys) || !isInlineBinary(content[mediaKey])) return false;
+  switch (mediaKey) {
+    case 'image':
+      return isOptionalString(content['caption'])
+        && isOptionalString(content['mimetype'])
+        && isOptionalBoolean(content['viewOnce']);
+    case 'document':
+      return typeof content['fileName'] === 'string'
+        && isOptionalString(content['mimetype'])
+        && isOptionalString(content['caption']);
+    case 'audio':
+      return isOptionalString(content['mimetype'])
+        && isOptionalBoolean(content['ptt'])
+        && (content['seconds'] === undefined
+          || (typeof content['seconds'] === 'number' && Number.isFinite(content['seconds'])));
+    case 'video':
+      return isOptionalString(content['caption'])
+        && isOptionalString(content['mimetype'])
+        && isOptionalBoolean(content['ptv'])
+        && isOptionalBoolean(content['gifPlayback'])
+        && isOptionalBoolean(content['viewOnce']);
+    case 'sticker':
+      return isOptionalString(content['mimetype']) && isOptionalBoolean(content['isAnimated']);
+    default:
+      return false;
+  }
+}
+
+function isKnownReplyOptions(options: unknown): boolean {
+  if (options === undefined) return true;
+  if (options === null || typeof options !== 'object' || Array.isArray(options) || !isPlainObject(options)) return false;
+  return hasOnlySemanticKeys(options, new Set(['messageId']))
+    && (options['messageId'] === undefined
+      || (typeof options['messageId'] === 'string' && options['messageId'].length > 0));
+}
+
+function assertKnownOutboundSemantics(content: unknown, options: unknown): void {
+  const knownContent = content !== null
+    && typeof content === 'object'
+    && !Array.isArray(content)
+    && isPlainObject(content)
+    && (isKnownTextContent(content) || isKnownMediaContent(content));
+  if (!knownContent || !isKnownReplyOptions(options)) {
+    throw new TransportAuthorityUnavailableError(
+      'transport authority semantic adapter is required for this outbound payload or options',
+    );
+  }
+}
+
 function isStream(value: unknown): boolean {
   return value !== null
     && typeof value === 'object'
@@ -651,6 +754,7 @@ export class FinalTransportAuthorityGate implements OutboundAuthorityGate {
     const budget = createSnapshotBudget();
     const frozen = freezeValue(input.content, new WeakSet<object>(), false, budget, 0);
     const options = input.options === undefined ? undefined : freezeOutboundOptionsWithBudget(input.options, budget);
+    assertKnownOutboundSemantics(frozen.wireContent, options?.wireOptions);
     const activeInbound = getTransportInboundContext();
     const admission = await this.authority.admit({
       recipient: input.recipient,

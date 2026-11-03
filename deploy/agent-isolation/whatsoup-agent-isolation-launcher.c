@@ -12,6 +12,10 @@
  * and accepts only its nonce-bound receipt emitted after this protected
  * launcher verifies the post-drop kernel identity. An unprivileged controller
  * cannot generally read the worker's /proc/<pid>/environ after the UID drop.
+ * Before exec, this launcher also verifies the policy-selected provider file
+ * and each parent directory. The policy records paths rather than provider
+ * digests, so direct invocation has this ownership boundary but no digest pin;
+ * the controller's normal admission separately verifies the provider digest.
  */
 #define _GNU_SOURCE
 
@@ -205,6 +209,16 @@ static bool command_is_allowed(const struct policy *policy, const char *command)
     if (strcmp(policy->allowed_binaries[i], command) == 0) return true;
   }
   return false;
+}
+
+static void require_secure_provider_binary(const char *path) {
+  struct stat metadata;
+  if (!absolute_path(path) || lstat(path, &metadata) != 0 || S_ISLNK(metadata.st_mode)
+      || !S_ISREG(metadata.st_mode) || metadata.st_uid != 0 || (metadata.st_mode & 0022) != 0
+      || (metadata.st_mode & 06000) != 0 || (metadata.st_mode & 0111) == 0) {
+    fail("provider binary must be a root-owned, non-writable regular executable");
+  }
+  require_secure_parent_directories(path, "provider binary parent directories are not root-owned and non-writable");
 }
 
 static void require_private_worker_directory(const char *path, const struct policy *policy) {
@@ -411,6 +425,7 @@ int main(int argc, char **argv) {
   read_policy(argv[2], &policy);
   if (getuid() != policy.controller_uid || getgid() != policy.controller_gid) fail("caller is not the configured controller identity");
   if (!command_is_allowed(&policy, argv[command_index])) fail("provider binary is not allowed by policy");
+  require_secure_provider_binary(argv[command_index]);
   validate_inherited_environment();
   rebuild_environment(&policy);
   require_private_worker_directory(policy.home_dir, &policy);

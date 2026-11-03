@@ -76,6 +76,19 @@ const CONTROL_KEYS = [
 
 export type OutboundClass = 'text' | 'media' | 'control';
 
+/**
+ * A final authority admission has reached an unknown terminal state, so
+ * callers must not replay the logical send locally.
+ */
+export class TransportAuthorityProviderOutcomeUnknownError extends Error {
+  readonly code = 'TRANSPORT_AUTHORITY_PROVIDER_OUTCOME_UNKNOWN';
+
+  constructor(cause: unknown) {
+    super('provider outcome is unknown after transport authority admission', { cause });
+    this.name = 'TransportAuthorityProviderOutcomeUnknownError';
+  }
+}
+
 function hasKey(content: Record<string, unknown>, keys: readonly string[]): boolean {
   for (const k of keys) {
     if (content[k] !== undefined) return true;
@@ -267,6 +280,9 @@ export function wrapWithOutboundGovernor<S extends object>(
       ...(options === undefined ? {} : { options }),
     });
     try {
+      // Admission has durably allocated a dispatching attempt. If the deadline
+      // expired while waiting for it, close that attempt as unknown without
+      // starting a provider call rather than leaving it dispatching forever.
       assertTransportSendActive();
       const result = await observeTransportSubmission(Promise.resolve(dispatch.options === undefined
         ? realSend(jid, dispatch.content)
@@ -283,12 +299,14 @@ export function wrapWithOutboundGovernor<S extends object>(
       try {
         await opts.authorityGate.recordReceipt({ attemptId: dispatch.attemptId, state: 'unknown' });
       } catch (receiptError) {
-        throw new AggregateError(
-          [err, receiptError],
-          'provider outcome is ambiguous and the authority unknown receipt failed',
+        throw new TransportAuthorityProviderOutcomeUnknownError(
+          new AggregateError(
+            [err, receiptError],
+            'provider outcome is ambiguous and the authority unknown receipt failed',
+          ),
         );
       }
-      throw err;
+      throw new TransportAuthorityProviderOutcomeUnknownError(err);
     }
   };
 

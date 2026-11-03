@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync, chownSync, closeSync, lstatSync, mkdirSync, mkdtempSync,
-  openSync, readFileSync, rmdirSync, rmSync, writeFileSync,
+  openSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -71,17 +71,31 @@ if (mode === '--watchdog') {
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   process.exitCode = result.status;
+} else if (mode === '--binary-reader') {
+  assert.equal(process.geteuid(), 0, 'The C binary validator needs root to inspect every negative path');
+  const result = spawnSync('/policy-reader', ['--binary', process.argv[3]], {
+    env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 3_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  process.exitCode = result.status;
 } else {
   const sourceRoot = process.argv[2];
   assert.ok(sourceRoot, 'Pass the source root explicitly');
   await test('root-owned controller-readable policy preserves the real filesystem boundary', () => {
     const directory = mkdtempSync(join(tmpdir(), 'policy-permissions-'));
     const failures = [];
+    let nonRootProviderParent;
     try {
       chmodSync(directory, 0o755);
       const launcherPath = join(directory, 'inert-launcher');
       writeFileSync(launcherPath, 'inert fixture; never execute\n', { mode: 0o600 });
       chmodSync(launcherPath, 0o4755);
+      const providerPath = join(directory, 'inert-provider');
+      writeFileSync(providerPath, 'inert fixture; never execute\n', { mode: 0o755 });
+      chmodSync(providerPath, 0o755);
       const policyPath = join(directory, 'policy');
       const protectedPath = join(directory, 'protected-fixture');
       writeFileSync(protectedPath, 'fake credential; never a real secret\n', { mode: 0o600 });
@@ -95,7 +109,7 @@ if (mode === '--watchdog') {
         `worker_uid=${workerUid}`, `worker_gid=${workerGid}`,
         `home_dir=${workerDirectories[0]}`, `config_home=${workerDirectories[1]}`,
         `data_home=${workerDirectories[2]}`, `protected_path=${protectedPath}`,
-        `allowed_binary=${launcherPath}`, '',
+        `allowed_binary=${providerPath}`, '',
       ].join('\n'), { mode: 0o600 });
       const config = {
         controllerUid, controllerGid, workerUid, workerGid,
@@ -124,6 +138,14 @@ if (mode === '--watchdog') {
       function controller(candidate = config) {
         return child(['--controller', sourceRoot, JSON.stringify(candidate)]);
       }
+      function binaryReader(path) {
+        return child(['--binary-reader', path]);
+      }
+      function expectBinaryDenied(path, label) {
+        const denied = binaryReader(path);
+        assert.equal(denied.status, 126, `unexpected selected-binary admission for ${label}`);
+        assert.match(denied.stderr, /whatsoup-agent-isolation-launcher: provider binary/);
+      }
       for (const [uid, gid] of [[controllerUid, controllerGid], [workerUid, workerGid]]) {
         const timed = spawnSync(process.execPath, [script, '--watchdog', String(uid), String(gid)], {
           env: { PATH: '/usr/local/bin:/usr/bin:/bin', TMPDIR: tmpdir() },
@@ -151,6 +173,61 @@ if (mode === '--watchdog') {
       assert.deepEqual(JSON.parse(worker.stdout), {
         uid: workerUid, gid: workerGid, groups: [workerGid], read: 'denied', write: 'denied',
       });
+      const binaryAccepted = binaryReader(providerPath);
+      assert.equal(binaryAccepted.status, 0, binaryAccepted.stderr);
+
+      expectBinaryDenied(launcherPath, 'setuid selected binary');
+
+      const selectedBinaryDirectory = join(directory, 'selected-binary-fixtures');
+      mkdirSync(selectedBinaryDirectory, { mode: 0o755 });
+      const selectedBinary = join(selectedBinaryDirectory, 'provider');
+      writeFileSync(selectedBinary, 'inert fixture; never execute\n', { mode: 0o755 });
+      chmodSync(selectedBinary, 0o755);
+      const binarySymlink = join(selectedBinaryDirectory, 'provider-symlink');
+      symlinkSync(selectedBinary, binarySymlink);
+      expectBinaryDenied(binarySymlink, 'symlink selected binary');
+
+      const nonRootBinary = join(selectedBinaryDirectory, 'provider-non-root');
+      writeFileSync(nonRootBinary, 'inert fixture; never execute\n', { mode: 0o755 });
+      chmodSync(nonRootBinary, 0o755);
+      chownSync(nonRootBinary, controllerUid, controllerGid);
+      expectBinaryDenied(nonRootBinary, 'non-root selected binary');
+
+      const groupWritableBinary = join(selectedBinaryDirectory, 'provider-group-writable');
+      writeFileSync(groupWritableBinary, 'inert fixture; never execute\n', { mode: 0o775 });
+      chmodSync(groupWritableBinary, 0o775);
+      expectBinaryDenied(groupWritableBinary, 'group-writable selected binary');
+
+      const nonExecutableBinary = join(selectedBinaryDirectory, 'provider-non-executable');
+      writeFileSync(nonExecutableBinary, 'inert fixture; never execute\n', { mode: 0o644 });
+      chmodSync(nonExecutableBinary, 0o644);
+      expectBinaryDenied(nonExecutableBinary, 'non-executable selected binary');
+
+      const writableParent = join(directory, 'writable-provider-parent');
+      mkdirSync(writableParent, { mode: 0o777 });
+      chmodSync(writableParent, 0o777);
+      const writableParentBinary = join(writableParent, 'provider');
+      writeFileSync(writableParentBinary, 'inert fixture; never execute\n', { mode: 0o755 });
+      chmodSync(writableParentBinary, 0o755);
+      expectBinaryDenied(writableParentBinary, 'group/other-writable parent directory');
+
+      const symlinkParentTarget = join(directory, 'provider-parent-target');
+      mkdirSync(symlinkParentTarget, { mode: 0o755 });
+      const symlinkParentBinary = join(symlinkParentTarget, 'provider');
+      writeFileSync(symlinkParentBinary, 'inert fixture; never execute\n', { mode: 0o755 });
+      chmodSync(symlinkParentBinary, 0o755);
+      const symlinkParent = join(directory, 'provider-parent-symlink');
+      symlinkSync(symlinkParentTarget, symlinkParent);
+      expectBinaryDenied(join(symlinkParent, 'provider'), 'symlink parent directory');
+
+      nonRootProviderParent = join(directory, 'non-root-provider-parent');
+      mkdirSync(nonRootProviderParent, { mode: 0o755 });
+      const nonRootParentBinary = join(nonRootProviderParent, 'provider');
+      writeFileSync(nonRootParentBinary, 'inert fixture; never execute\n', { mode: 0o755 });
+      chmodSync(nonRootParentBinary, 0o755);
+      chownSync(nonRootProviderParent, controllerUid, controllerGid);
+      expectBinaryDenied(nonRootParentBinary, 'non-root parent directory');
+
       for (const [owner, group, permissions] of [
         [0, controllerGid, 0o600], [0, 0, 0o640], [controllerUid, controllerGid, 0o640],
         [0, controllerGid, 0o660], [0, controllerGid, 0o644], [0, controllerGid, 0o2640],
@@ -175,6 +252,13 @@ if (mode === '--watchdog') {
     } catch (error) {
       failures.push(error);
     } finally {
+      if (nonRootProviderParent !== undefined) {
+        try {
+          chownSync(nonRootProviderParent, 0, 0);
+        } catch (error) {
+          if (error.code !== 'ENOENT') failures.push(error);
+        }
+      }
       // Root has no DAC override here. Unlink the empty private directories
       // through their root-owned parent without traversing worker permissions.
       for (const name of ['home', 'config', 'data']) {

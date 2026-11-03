@@ -65,4 +65,23 @@ describe('Linux agent-process isolation launcher artifact', () => {
     expect(source).toContain('write_receipt(receipt_fd, nonce, &policy)');
     expect(source).toContain('FD_CLOEXEC');
   });
+
+  it('validates the policy-selected provider binary before dropping the controller identity', () => {
+    const source = readFileSync(launcherSource, 'utf8');
+    const policyMembership = source.indexOf('if (!command_is_allowed(&policy, argv[command_index]))');
+    const binaryValidation = source.indexOf('require_secure_provider_binary(argv[command_index]);');
+    const gidDrop = source.indexOf('setresgid(policy.worker_gid, policy.worker_gid, policy.worker_gid)');
+
+    expect(source).toContain('static void require_secure_provider_binary(const char *path)');
+    expect(source).toContain('lstat(path, &metadata)');
+    expect(source).toContain('!S_ISREG(metadata.st_mode)');
+    expect(source).toContain('metadata.st_uid != 0');
+    expect(source).toContain('(metadata.st_mode & 0022) != 0');
+    expect(source).toContain('(metadata.st_mode & 06000) != 0');
+    expect(source).toContain('(metadata.st_mode & 0111) == 0');
+    expect(source).toContain('require_secure_parent_directories(path, "provider binary parent directories are not root-owned and non-writable")');
+    expect(policyMembership).toBeGreaterThan(0);
+    expect(binaryValidation).toBeGreaterThan(policyMembership);
+    expect(gidDrop).toBeGreaterThan(binaryValidation);
+  });
 });

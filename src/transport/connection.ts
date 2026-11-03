@@ -78,7 +78,11 @@ import { jidPattern } from '../lib/redaction-patterns.ts';
 import { baileysVersionLabel, resolveBaileysVersion } from './baileys-version.ts';
 import { PollVoteDecryptor } from './poll-vote-decryptor.ts';
 import { HistorySyncWatch } from './history-sync-watch.ts';
-import { OutboundGovernor, wrapWithOutboundGovernor } from './outbound-governor.ts';
+import {
+  OutboundGovernor,
+  TransportAuthorityProviderOutcomeUnknownError,
+  wrapWithOutboundGovernor,
+} from './outbound-governor.ts';
 import type { OutboundBannerClassifier } from './outbound-content-egress.ts';
 import {
   FailClosedTransportAuthorityGate,
@@ -1359,7 +1363,12 @@ export class ConnectionManager extends EventEmitter implements Messenger {
         this.scheduleSettledAuthBondSnapshot('outbound-send-settled');
         return { waMessageId: result?.key?.id ?? null };
       } catch (err) {
-        if (attempt > 0 || !canReplayMediaSend(media) || !isBaileysEncryptedTmpEnoent(err)) {
+        if (
+          err instanceof TransportAuthorityProviderOutcomeUnknownError
+          || attempt > 0
+          || !canReplayMediaSend(media)
+          || !isBaileysEncryptedTmpEnoent(err)
+        ) {
           throw err;
         }
         this.log.warn(

@@ -7,6 +7,7 @@ import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { GuardMode, IdentityStore } from '../../core/outbound-identity/types.ts';
 import { fromSignalJid, toSignalJid } from '../../core/jid-constants.ts';
 import { createChildLogger } from '../../logger.ts';
+import { dispatchInboundMessage } from '../inbound-dispatch.ts';
 import { clearAlertSourceChecked, emitAlertChecked } from '../../lib/emit-alert.ts';
 import type { ConnectionStateSnapshot, WhatsAppSocket } from '../connection.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
@@ -106,12 +107,12 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (message) => {
       this.retryPendingUnregisteredClear();
-      void Promise.resolve(this.onMessage?.(
-        contractToIncoming(
-          message,
-          this.adapter.isGroupConversation(message.conversation),
-        ),
-      )).catch(() => undefined);
+      dispatchInboundMessage(
+        () => this.onMessage?.(contractToIncoming(
+          message, this.adapter.isGroupConversation(message.conversation),
+        )),
+        (err) => this.log.error({ err, messageId: message.ref.id }, 'inbound message handler failed'),
+      );
     });
 
     this.errorSubscription?.dispose();

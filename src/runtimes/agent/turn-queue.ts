@@ -54,9 +54,13 @@ export type TurnRejectReason =
   | 'queue_full'
   | 'scope_blocked_recovery';
 
+type TurnRejectHandler =
+  | ((turn: QueuedTurn, reason: TurnRejectReason) => void)
+  | ((turn: QueuedTurn, reason: TurnRejectReason) => Promise<void>);
+
 export interface TurnQueueOpts {
   maxDepth?: number;
-  onReject?: (turn: QueuedTurn, reason: TurnRejectReason) => void;
+  onReject?: TurnRejectHandler;
   onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
   onHalt?: () => void;
 }
@@ -79,7 +83,7 @@ export class TurnQueue {
   private halted = false;
   private haltError: unknown;
   private readonly maxDepth: number;
-  private readonly onReject?: (turn: QueuedTurn, reason: TurnRejectReason) => void;
+  private readonly onReject?: TurnRejectHandler;
   private readonly onProcessorError?: (turn: QueuedTurn, error: unknown) => void | Promise<void>;
   private readonly onHalt?: () => void;
 
@@ -316,11 +320,39 @@ export class TurnQueue {
   private rejectAndSettle(turn: QueuedTurn, reason: TurnRejectReason): void {
     this.runInQueuedAsyncContext(turn, () => {
       try {
-        this.onReject?.(turn, reason);
-      } finally {
+        const finalization = this.onReject?.(turn, reason);
+        const completion = finalization as Promise<void> | undefined;
+        if (completion && typeof completion.then === 'function') {
+          void completion.then(
+            () => this.runInQueuedAsyncContext(turn, () => this.settle(turn)),
+            (error: unknown) => this.runInQueuedAsyncContext(
+              turn,
+              () => this.haltRejectedFinalization(turn, reason, error),
+            ),
+          ).catch((error: unknown) => this.haltRejectedFinalization(turn, reason, error));
+          return;
+        }
         this.settle(turn);
+      } catch (error) {
+        this.haltRejectedFinalization(turn, reason, error);
+        throw error;
       }
     });
+  }
+
+  private haltRejectedFinalization(turn: QueuedTurn, reason: TurnRejectReason, error: unknown): void {
+    try {
+      this.halt(error);
+    } catch (haltError) {
+      log.error(
+        { err: haltError, finalizationError: error, chatJid: turn.chatJid, reason },
+        'turn rejection finalization failed and queue halt callback threw',
+      );
+    }
+    log.error(
+      { err: error, chatJid: turn.chatJid, reason },
+      'turn rejection finalization failed — queue halted without settlement',
+    );
   }
 
   private async processQueuedTurn(turn: QueuedTurn): Promise<boolean> {

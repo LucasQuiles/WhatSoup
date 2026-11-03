@@ -9,6 +9,7 @@ import {
 } from '../../../src/runtimes/agent/runtime-turn-context.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import { TurnQueue, type QueuedTurn } from '../../../src/runtimes/agent/turn-queue.ts';
+import type { FinalizeRuntimeTurnResult } from '../../../src/runtimes/agent/turn-finalizer.ts';
 import {
   ensureStandbyNoticeSchema,
   peekStandbyNotice,
@@ -73,6 +74,14 @@ function queuedTurn(runtimeContext: RuntimeTurnContext): QueuedTurn {
   };
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 /** The coordinator's rebuilt-queue resume, reached through a cast the base coordinator also satisfies. */
 type Resume = { resumeRuntimeTurnOnRebuiltQueue?: (queue: unknown, context: unknown) => void };
 
@@ -87,6 +96,85 @@ afterEach(() => {
 });
 
 describe('runtime terminal coordinator integration', () => {
+  it('holds a rejected turn authority until its durable finalization completes', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { shared: true });
+      state.durability = durabilityMock();
+      const runtimeContext = context('shared', '15550190101', 101, 'turn-rejected-authority');
+      const settled = vi.fn();
+      const turn = { ...queuedTurn(runtimeContext), onSettled: settled };
+      const finalization = deferred<FinalizeRuntimeTurnResult>();
+      const coordinator = state.runtimeTurnCoordinator as typeof state.runtimeTurnCoordinator & {
+        finalizeUndispatchedRuntimeTurn(context: RuntimeTurnContext): Promise<FinalizeRuntimeTurnResult>;
+      };
+      const finalize = vi.spyOn(coordinator, 'finalizeUndispatchedRuntimeTurn')
+        .mockReturnValue(finalization.promise);
+      const queue = new TurnQueue({
+        maxDepth: 0,
+        onReject: (rejected, reason) => coordinator.finalizeRejectedRuntimeTurn(rejected, reason),
+      });
+
+      expect(queue.enqueue(turn)).toBe(false);
+
+      expect(finalize).toHaveBeenCalledWith(
+        runtimeContext,
+        undefined,
+        { kind: 'admission_rejected', class: 'queue_full' },
+      );
+      expect(settled).not.toHaveBeenCalled();
+
+      finalization.resolve({ kind: 'reclaimed_by_sweep', identity: runtimeContext.identity, affectedScope: {
+        scope: runtimeContext.identity.scope,
+        conversationKey: runtimeContext.identity.conversationKey,
+      }, mayAdvance: true });
+      await coordinator.awaitRejectedRuntimeTurnFinalizations();
+
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(1));
+    } finally {
+      db.close();
+    }
+  });
+
+  it('holds a shutdown-detached turn authority until durable finalization completes', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState(db, { shared: true });
+      state.durability = durabilityMock();
+      const runtimeContext = context('shared', '15550190102', 102, 'turn-shutdown-authority');
+      const settled = vi.fn();
+      const turn = { ...queuedTurn(runtimeContext), onSettled: settled };
+      const runtimeState = state as typeof state & { turnQueue: TurnQueue };
+      const queue = new TurnQueue();
+      runtimeState.turnQueue = queue;
+      expect(queue.enqueue(turn)).toBe(true);
+      const finalization = deferred<FinalizeRuntimeTurnResult>();
+      const coordinator = state.runtimeTurnCoordinator as typeof state.runtimeTurnCoordinator & {
+        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<void>;
+        finalizeUndispatchedRuntimeTurn(context: RuntimeTurnContext): Promise<FinalizeRuntimeTurnResult>;
+      };
+      const finalize = vi.spyOn(coordinator, 'finalizeUndispatchedRuntimeTurn')
+        .mockReturnValue(finalization.promise);
+
+      const shutdown = coordinator.finalizeActiveRuntimeTurnsForShutdown(Date.now() + 1_000);
+
+      await vi.waitFor(() => expect(finalize).toHaveBeenCalledWith(runtimeContext));
+      expect(settled).not.toHaveBeenCalled();
+
+      finalization.resolve({ kind: 'reclaimed_by_sweep', identity: runtimeContext.identity, affectedScope: {
+        scope: runtimeContext.identity.scope,
+        conversationKey: runtimeContext.identity.conversationKey,
+      }, mayAdvance: true });
+      await expect(shutdown).resolves.toBeUndefined();
+
+      expect(settled).toHaveBeenCalledTimes(1);
+    } finally {
+      db.close();
+    }
+  });
+
   it('rethrows the original shared outbound failure and blocks later shared admission', async () => {
     const db = new Database(':memory:');
     db.open();

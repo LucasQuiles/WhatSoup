@@ -15,6 +15,7 @@
 import { REQUIRES_WHATSAPP_DETAIL, UnsupportedTransportOperationError } from '../unsupported-operation.ts';
 import { EventEmitter } from 'node:events';
 import { createChildLogger } from '../../logger.ts';
+import { dispatchInboundMessage } from '../inbound-dispatch.ts';
 import { isNonEmptyString } from '../../lib/type-guards.ts';
 import type { InboundMessage as ContractInboundMessage } from '../contract/events.ts';
 import type { RuntimeConnection } from '../runtime-connection.ts';
@@ -139,9 +140,10 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     // deliver each message twice.
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (msg: ContractInboundMessage) => {
-      if (this.onMessage !== null) {
-        void Promise.resolve(this.onMessage(contractToIncoming(msg, this.adapter.isGroupConversation(msg.conversation)))).catch(() => undefined);
-      }
+      dispatchInboundMessage(
+        () => this.onMessage?.(contractToIncoming(msg, this.adapter.isGroupConversation(msg.conversation))),
+        (err) => this.log.error({ err, messageId: msg.ref.id }, 'inbound message handler failed'),
+      );
     });
 
     // Surface background transport errors (poll failures, auth-stop) in the

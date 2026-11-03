@@ -12,7 +12,11 @@ import {
   sendFixedControlReceipt,
   withTransportInboundContext,
 } from '../../src/transport/operations-authority-gate.ts';
-import { OutboundGovernor, wrapWithOutboundGovernor } from '../../src/transport/outbound-governor.ts';
+import {
+  OutboundGovernor,
+  TransportAuthorityProviderOutcomeUnknownError,
+  wrapWithOutboundGovernor,
+} from '../../src/transport/outbound-governor.ts';
 import type {
   TransportAdmission,
   TransportAdmissionInput,
@@ -276,7 +280,7 @@ describe('FinalTransportAuthorityGate at the final socket seam', () => {
     expect(socket.sendMessage.mock.calls).toHaveLength(1);
   });
 
-  it('surfaces both a provider failure and a failed unknown receipt without retrying', async () => {
+  it('marks a provider failure with a failed unknown receipt as an authority-admitted ambiguous outcome', async () => {
     // Break caught: failure to persist an ambiguous outcome is swallowed, making
     // an authority dispatch appear observable when neither outcome is reliable.
     const providerFailure = new Error('provider disconnected');
@@ -301,15 +305,123 @@ describe('FinalTransportAuthorityGate at the final socket seam', () => {
       thrown = err;
     }
 
-    expect(thrown).toBeInstanceOf(AggregateError);
-    expect((thrown as AggregateError).errors).toEqual([providerFailure, receiptFailure]);
+    expect(thrown).toMatchObject({
+      name: 'TransportAuthorityProviderOutcomeUnknownError',
+      code: 'TRANSPORT_AUTHORITY_PROVIDER_OUTCOME_UNKNOWN',
+      cause: expect.objectContaining({
+        errors: [providerFailure, receiptFailure],
+      }),
+    });
     expect(realSend).toHaveBeenCalledTimes(1);
     expect(authority.recordReceipt).toHaveBeenCalledTimes(1);
     expect(authority.recordReceipt).toHaveBeenCalledWith({ attemptId: 'attempt-1', state: 'unknown' });
   });
 
-  it('gates media and control sends even though pacing does not apply to them', async () => {
-    // Break caught: a media/control path bypasses the universal authority boundary.
+  it('marks a failed accepted receipt as an authority-admitted ambiguous outcome', async () => {
+    // Break caught: a provider success followed by an authority receipt failure
+    // escaped as the original error and let internal callers retry it.
+    const acceptedReceiptFailure = new Error('accepted receipt unavailable');
+    const authority = acceptingAuthority();
+    authority.recordReceipt.mockRejectedValueOnce(acceptedReceiptFailure);
+    const socket = fakeSocket();
+    const realSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    let thrown: unknown;
+    try {
+      await withTransportInboundContext({ inbound_event_id: 'inbound-accepted-receipt-failure' }, async () => {
+        await socket.sendMessage('15551230000@s.whatsapp.net', { text: 'reply' });
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(TransportAuthorityProviderOutcomeUnknownError);
+    expect(thrown).toMatchObject({ cause: acceptedReceiptFailure });
+    expect(realSend).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenNthCalledWith(1, {
+      attemptId: 'attempt-1',
+      state: 'provider_accepted',
+      providerId: 'provider-1',
+    });
+    expect(authority.recordReceipt).toHaveBeenNthCalledWith(2, { attemptId: 'attempt-1', state: 'unknown' });
+  });
+
+  it('preserves both receipt failures after a provider success as an ambiguous outcome', async () => {
+    // Break caught: a failed fallback receipt hides that the accepted receipt
+    // already failed, preventing the caller from seeing the reconciliation gap.
+    const acceptedReceiptFailure = new Error('accepted receipt unavailable');
+    const unknownReceiptFailure = new Error('unknown receipt unavailable');
+    const authority = acceptingAuthority();
+    authority.recordReceipt
+      .mockRejectedValueOnce(acceptedReceiptFailure)
+      .mockRejectedValueOnce(unknownReceiptFailure);
+    const socket = fakeSocket();
+    const realSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    let thrown: unknown;
+    try {
+      await withTransportInboundContext({ inbound_event_id: 'inbound-double-receipt-failure' }, async () => {
+        await socket.sendMessage('15551230000@s.whatsapp.net', { text: 'reply' });
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(TransportAuthorityProviderOutcomeUnknownError);
+    expect(thrown).toMatchObject({
+      cause: expect.objectContaining({ errors: [acceptedReceiptFailure, unknownReceiptFailure] }),
+    });
+    expect(realSend).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenCalledTimes(2);
+  });
+
+  it('marks a synchronous provider throw as an authority-admitted ambiguous outcome', async () => {
+    // Break caught: Promise.resolve(realSend(...)) evaluates its argument first,
+    // so a synchronous provider throw could escape the no-retry outcome type.
+    const providerFailure = new Error('provider threw synchronously');
+    const authority = acceptingAuthority();
+    const socket = fakeSocket();
+    socket.sendMessage.mockImplementation(() => {
+      throw providerFailure;
+    });
+    const realSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    let thrown: unknown;
+    try {
+      await withTransportInboundContext({ inbound_event_id: 'inbound-sync-failure' }, async () => {
+        await socket.sendMessage('15551230000@s.whatsapp.net', { text: 'reply' });
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(TransportAuthorityProviderOutcomeUnknownError);
+    expect(thrown).toMatchObject({
+      name: 'TransportAuthorityProviderOutcomeUnknownError',
+      code: 'TRANSPORT_AUTHORITY_PROVIDER_OUTCOME_UNKNOWN',
+      cause: providerFailure,
+    });
+    expect(realSend).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenCalledWith({ attemptId: 'attempt-1', state: 'unknown' });
+  });
+
+  it('admits known frozen media semantics at the final authority boundary', async () => {
+    // Break caught: the semantic hold accidentally disables ordinary media replies.
     const authority = acceptingAuthority();
     const gate = new FinalTransportAuthorityGate(authority);
     const socket = fakeSocket();
@@ -321,44 +433,74 @@ describe('FinalTransportAuthorityGate at the final socket seam', () => {
 
     await withTransportInboundContext({ inbound_event_id: 'inbound-1' }, async () => {
       await socket.sendMessage('15551230000@s.whatsapp.net', { image: Buffer.from('image') });
-      await socket.sendMessage('15551230000@s.whatsapp.net', { react: { text: '👍' } });
     });
 
-    expect(authority.admit).toHaveBeenCalledTimes(2);
-    expect(authority.recordReceipt).toHaveBeenCalledTimes(2);
+    expect(authority.admit).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenCalledTimes(1);
   });
 
-  it('binds the status audience and options to the authority snapshot before the provider call', async () => {
-    // Break caught: post_status sends recipient data in Baileys' third argument,
-    // which must not remain an unreviewed mutable passthrough after admission.
+  it('admits a known reply with its stable provider message ID option', async () => {
+    // Break caught: a semantic hold rejects the ordinary message-id option used
+    // to make a provider retry idempotent.
     const authority = acceptingAuthority();
     const gate = new FinalTransportAuthorityGate(authority);
     const socket = fakeSocket();
-    const options = { statusJidList: ['15551230000@s.whatsapp.net'], font: 2 };
-    authority.admit.mockImplementationOnce(async (input) => {
-      options.statusJidList.push('15551239999@s.whatsapp.net');
-      return { attemptId: 'attempt-status', payloadDigest: 'sha256:status' };
-    });
     wrapWithOutboundGovernor(socket, {
       governor: permissiveGovernor(),
       resolveDest: (jid) => jid,
       authorityGate: gate,
     });
 
-    await withTransportInboundContext({ inbound_event_id: 'inbound-status' }, async () => {
-      await socket.sendMessage('status@broadcast', { text: 'approved status' }, options);
+    await withTransportInboundContext({ inbound_event_id: 'inbound-1' }, async () => {
+      await socket.sendMessage('15551230000@s.whatsapp.net', { text: 'reply' }, { messageId: 'provider-1' });
     });
 
-    expect(authority.admit).toHaveBeenCalledWith({
-      recipient: 'status@broadcast',
-      content: { text: 'approved status' },
-      options: { statusJidList: ['15551230000@s.whatsapp.net'], font: 2 },
-      context: { inbound_event_id: 'inbound-status' },
+    expect(authority.admit).toHaveBeenCalledWith(expect.objectContaining({
+      options: { messageId: 'provider-1' },
+    }));
+    expect(socket.sendMessage).toHaveBeenCalledWith(
+      '15551230000@s.whatsapp.net',
+      { text: 'reply' },
+      { messageId: 'provider-1' },
+    );
+  });
+
+  it('holds unsupported raw payloads and audience options before admission even with an explicit operation', async () => {
+    // Break caught: raw MCP payloads borrow ordinary reply or released-operation
+    // authority despite having no deterministic semantic review adapter.
+    const authority = acceptingAuthority();
+    const gate = new FinalTransportAuthorityGate(authority);
+    const socket = fakeSocket();
+    const providerSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: gate,
     });
-    expect(socket.sendMessage).toHaveBeenCalledWith('status@broadcast', { text: 'approved status' }, {
-      statusJidList: ['15551230000@s.whatsapp.net'],
-      font: 2,
+
+    await withTransportInboundContext({
+      inbound_event_id: 'inbound-operation',
+      operation_id: 'released-operation',
+    }, async () => {
+      for (const content of [
+        { sharePhoneNumber: true },
+        { requestPhoneNumber: true },
+        { product: { productId: 'catalog-1' } },
+        { groupInvite: { groupJid: 'group@g.us', inviteCode: 'code' } },
+        { react: { text: '👍' } },
+      ]) {
+        await expect(socket.sendMessage('15551230000@s.whatsapp.net', content))
+          .rejects.toThrow(/semantic adapter/i);
+      }
+      await expect(socket.sendMessage(
+        'status@broadcast',
+        { text: 'status must be held' },
+        { statusJidList: ['15551239999@s.whatsapp.net'] },
+      )).rejects.toThrow(/semantic adapter/i);
     });
+
+    expect(authority.admit).not.toHaveBeenCalled();
+    expect(providerSend).not.toHaveBeenCalled();
   });
 
   it('blocks raw protobuf relay while the authority cannot review its semantics', async () => {

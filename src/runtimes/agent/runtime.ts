@@ -2752,9 +2752,9 @@ export class AgentRuntime implements Runtime {
     const turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
       onReject: (turn, reason) => {
-        this.finalizeRejectedRuntimeTurn(turn, reason);
         log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
           'turn rejected — agent queue full');
+        return this.finalizeRejectedRuntimeTurn(turn, reason);
       },
       onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
     });
@@ -5582,8 +5582,8 @@ export class AgentRuntime implements Runtime {
     return admitted;
   }
 
-  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
-    this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
+  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): Promise<void> {
+    return this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
   }
 
   private finalizePerChatProcessorError(

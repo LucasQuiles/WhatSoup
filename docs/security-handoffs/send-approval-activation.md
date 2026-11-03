@@ -27,11 +27,24 @@ overwrite that hold. Outbound echoes retain normal storage and correlation but
 never establish human approval context. Direct startup configuration now uses
 the same activation admission as the instance loader and fleet mutations.
 
+The final seam accepts only the implemented text and frozen-media semantics.
+Unsupported controls, raw structures, and audience-changing provider options
+require a semantic adapter even when an explicit operation is present. An
+ambiguous provider result cannot enter the media or status helper's local
+retry loop. Failure to record the unknown receipt preserves that same hold.
+
+Signal, iMessage, and SMS bridges report synchronous conversion/handler failures
+and asynchronous handler rejections through their local structured logger.
+They do not replay the inbound message after a handler failure.
+
 Queued turns retain the inbound context captured at admission through processing,
 error finalization, and settlement. Outbound chunks and buffered updates retain
 their own immutable context. Batching separates different inbound events and
 approved operations; an unbound item explicitly clears ambient authority. These
 queue checks do not establish provider callback ownership or platform isolation.
+Admission rejection and shutdown finalize durable state before releasing inbound
+authority. A thrown finalization halts the queue and retains the inbound completion;
+the existing degraded-scope contract requires operator recovery or restart.
 
 Session-scoped provider events without verified turn identity remain unbound and
 enter human review. Verified per-turn callbacks retain their admitted context;
@@ -64,6 +77,11 @@ provenance. The complete frozen audio remains available for exact approval.
    identity write access. The Linux CI fixture checks real ownership and
    group permissions in a network-disabled container; it does not qualify
    the setuid launcher, descendant cleanup, or a production host.
+   The C launcher also checks the selected provider file and its ancestors for
+   root ownership and safe modes before dropping identity. Its policy contains
+   paths, not provider digests; TypeScript's normal launch path separately pins
+   the digest. The fixture exercises the actual C validator without executing
+   the privileged launcher or a provider.
 5. Keep authority activation refused until all requirements above have
    independently demonstrated the desired behavior. The refusal is intentional
    and must not be weakened to make a pilot appear available.
