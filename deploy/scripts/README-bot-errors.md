@@ -1567,6 +1567,13 @@ policy choice. Set it in the bot host's private profile, not in a tracked profil
 the private copy in step with tracked profile changes. The daily evidence line
 `profile: role=… path=…` shows which profile file a run used.
 
+Remote-desktop settings (`expectRustDesk`, `rustDeskCommand`, `expectedRustDeskId`,
+`rustDeskService`, `rustDeskServiceScope`, `rustDeskDirectPort`, `rustDeskRendezvous`)
+are host configuration, so they go only in a host's private profile. A tracked profile
+does not carry them. When you copy or update a private profile from a tracked one, keep
+these keys. Without `expectRustDesk: true` the remote-desktop checks do not run, and no
+evidence line reports that they were left out.
+
 At runtime the health check and the heartbeat watchdog resolve the profile through
 `deploy/scripts/lib/fleet_config.py`, in this order: `BOT_ERRORS_HEALTH_PROFILE_JSON`
 (health check only), `BOT_ERRORS_HEALTH_PROFILE`, `~/.config/whatsoup/health-profile.json`,
