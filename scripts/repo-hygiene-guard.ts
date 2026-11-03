@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TextDecoder, types as utilTypes } from 'node:util';
 import {
+  cleanGitEnv,
   DISCLOSURE_PATCH_FLAGS,
   git,
   isDocumentationEmailFixture,
@@ -196,6 +197,68 @@ export function unquoteGitPath(raw: string): string {
 
 export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   return [...iterateUnifiedDiffAddedLines(diff)];
+}
+
+/**
+ * Binary formats whose added lines the repo-hygiene line scans skip. The patches
+ * are read with --text, so every file's bytes reach those scans, and the bytes of a
+ * real image match loose rules (an internal-label or email shape): main's
+ * screenshots did, 58 times over 60 days of history. A file is skipped only when
+ * its blob at that revision is the format its name says: the extension (any case)
+ * is listed, the blob starts with that format's signature, and it holds a NUL in
+ * its first 8000 bytes, Git's own content test for binary. Attributes are never
+ * read, so a `-diff` or `binary` rule, a NUL in a source file, and a text file
+ * renamed to an image name are all still scanned. A skipped file is what main
+ * did not scan either: a real image's bytes, including any text in its metadata
+ * (PNG text chunks, for example), and a file built to pass all three checks.
+ * The table holds the binary types main tracks (.png, .woff2); a new type
+ * fails closed (its lines are scanned) until it is added here.
+ */
+const VERIFIED_BINARY_FORMATS: ReadonlyArray<{ extension: string; signature: readonly number[] }> = [
+  { extension: '.png', signature: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { extension: '.woff2', signature: [0x77, 0x4f, 0x46, 0x32] }, // "wOF2"
+];
+
+const GIT_BINARY_PROBE_BYTES = 8000;
+
+function verifiedBinaryFormat(filePath: string): (typeof VERIFIED_BINARY_FORMATS)[number] | undefined {
+  const extension = path.extname(filePath).toLowerCase();
+  return VERIFIED_BINARY_FORMATS.find((entry) => entry.extension === extension);
+}
+
+function isFormatBlob(format: (typeof VERIFIED_BINARY_FORMATS)[number], blob: Uint8Array): boolean {
+  if (!format.signature.every((byte, index) => blob[index] === byte)) return false;
+  return blob.subarray(0, GIT_BINARY_PROBE_BYTES).includes(0);
+}
+
+/** The blob at `<revision>:<path>` (revision '' is the index), or an empty buffer when it cannot be read. */
+function readRevisionBlob(cwd: string, revision: string, filePath: string): Buffer {
+  try {
+    return execFileSync('git', ['cat-file', 'blob', `${revision}:${filePath}`], {
+      cwd,
+      env: cleanGitEnv(),
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
+  } catch {
+    return Buffer.alloc(0); // unreadable: not verified, so its lines are scanned
+  }
+}
+
+/** The added lines without those of files whose blob at `revision` is a verified binary format. */
+export function withoutVerifiedBinaryLines(cwd: string, revision: string, lines: AddedLine[]): AddedLine[] {
+  const verdicts = new Map<string, boolean>();
+  return lines.filter((line) => {
+    const filePath = normalizeRepoPath(line.filePath);
+    let binary = verdicts.get(filePath);
+    if (binary === undefined) {
+      const format = verifiedBinaryFormat(filePath);
+      binary = format !== undefined && isFormatBlob(format, readRevisionBlob(cwd, revision, filePath));
+      verdicts.set(filePath, binary);
+    }
+    return !binary;
+  });
 }
 
 /**
@@ -483,7 +546,7 @@ export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
       ['show', '--format=', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '-m', sha],
       cwd,
     );
-    for (const line of parseUnifiedDiffAddedLines(diff)) {
+    for (const line of withoutVerifiedBinaryLines(cwd, sha, parseUnifiedDiffAddedLines(diff))) {
       const filePath = normalizeRepoPath(line.filePath);
       if (isFixtureFile(filePath)) continue;
       for (const pattern of secretPatterns) {
@@ -552,7 +615,7 @@ function scanBranchCommitSecretLines(
   const issues: GuardIssue[] = [];
   const diff = git(['show', '--format=', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '-m', sha], cwd);
 
-  for (const line of parseUnifiedDiffAddedLines(diff)) {
+  for (const line of withoutVerifiedBinaryLines(cwd, sha, parseUnifiedDiffAddedLines(diff))) {
     const filePath = normalizeRepoPath(line.filePath);
     if (isFixtureFile(filePath)) continue;
     // Correctness (not a detection weakening): a line byte-identical to the base ref
@@ -756,7 +819,7 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
       'branch-sensitive-artifact',
       'Runtime credential, database, key, workspace, or scratch artifact must not be committed in the branch diff.',
     ),
-    ...scanAddedLines(parseUnifiedDiffAddedLines(diff)),
+    ...scanAddedLines(withoutVerifiedBinaryLines(cwd, 'HEAD', parseUnifiedDiffAddedLines(diff))),
   ];
   const finalSensitiveArtifactPaths = new Set(
     finalDiffIssues
@@ -2090,7 +2153,7 @@ export function run(argv: string[] = process.argv.slice(2), cwd: string = proces
           ? scanBranchDiff(cwd, args.baseRef)
           : [
               ...scanStagedSensitiveArtifacts(cwd),
-              ...scanAddedLines(parseUnifiedDiffAddedLines(stagedDiff(cwd))),
+              ...scanAddedLines(withoutVerifiedBinaryLines(cwd, '', parseUnifiedDiffAddedLines(stagedDiff(cwd)))),
             ];
 
   if (issues.length > 0) {

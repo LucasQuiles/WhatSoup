@@ -353,7 +353,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-repo` | `npm run guard:repo` | `package.json` | stable | active | Repo hygiene guard (default mode) |
 | `cli:npm.guard-repo-release-hygiene` | `npm run guard:repo:release-hygiene` | `package.json` | stable | active | Repo hygiene guard over the release-hygiene file set |
 | `cli:npm.guard-repo-staged` | `npm run guard:repo:staged` | `package.json` | stable | active | Repo hygiene guard over the staged diff |
-| `cli:npm.guard-repo-branch-diff` | `npm run guard:repo:branch-diff` | `package.json` | stable | active | Repo hygiene guard over the branch/base diff |
+| `cli:npm.guard-repo-branch-diff` | `npm run guard:repo:branch-diff` | `package.json` | stable | active | Repo hygiene guard over the branch/base diff. The repo hygiene scans read files Git takes as binary as text; only a blob verified as `.png` or `.woff2` (listed extension, format signature, a NUL in its first 8000 bytes) is skipped, as main skipped real images. In the push hook the base is the live main the hook read from the pushed remote (`WHATSOUP_PUSH_BASE_OID`) |
 | `cli:npm.guard-repo-commit-msg` | `npm run guard:repo:commit-msg` | `package.json` | stable | active | Repo hygiene guard over commit-msg input |
 | `cli:npm.guard-repo-commit-authors` | `npm run guard:repo:commit-authors` | `package.json` | stable | active | Repo hygiene guard over branch-range commit authors |
 | `cli:npm.guard-harness-maintenance` | `npm run guard:harness-maintenance` | `package.json` | internal | active | Validate harness-maintenance manifest and npm cooldown gates |
