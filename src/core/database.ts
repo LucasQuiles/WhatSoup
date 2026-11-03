@@ -851,6 +851,7 @@ const MIGRATIONS: Map<number, MigrationFn> = new Map([
   [64, runMigration64],
   [65, runMigration65],
   [66, runMigration66],
+  [67, runMigration67],
 ]);
 
 if (Math.max(...MIGRATIONS.keys()) !== CURRENT_SCHEMA_MIGRATION) {
@@ -1288,6 +1289,12 @@ function runMigration65(db: DatabaseSync): void {
 
 function runMigration66(db: DatabaseSync): void {
   runMigration66Impl(db);
+}
+
+function runMigration67(): void {
+  // The ledger fences binaries whose terminal/resume readers only understand
+  // WhatsApp delivery identities. No rows or DDL need rewriting for this
+  // expanded data contract; older binaries must refuse the migrated file.
 }
 
 function runMigration60(db: DatabaseSync): void {

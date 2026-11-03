@@ -5,7 +5,7 @@ import {
   ADMISSION_REJECT_CLASSES,
   admissionRejectInboundFailureClass,
 } from './inbound-failure-class.ts';
-import { parseWhatsAppDeliveryNamespace } from './jid-constants.ts';
+import { parseDeliveryNamespace } from './jid-constants.ts';
 import {
   TURN_RECOVERY_MAX_ID_BYTES,
   validateBoundedRequired,
@@ -45,9 +45,9 @@ export interface SessionCheckpointFields {
 }
 
 function requireDeliveryNamespace(deliveryJid: string): string {
-  const namespace = parseWhatsAppDeliveryNamespace(deliveryJid);
+  const namespace = parseDeliveryNamespace(deliveryJid);
   if (namespace === null) {
-    throw new Error('Turn identity requires a canonical WhatsApp delivery JID namespace');
+    throw new Error('Turn identity requires a canonical supported delivery JID namespace');
   }
   return namespace;
 }

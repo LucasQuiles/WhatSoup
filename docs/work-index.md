@@ -18,15 +18,15 @@ The **Inconsistencies** section lists missing or stale index entries compared wi
 scoped markdown files currently on disk.
 
 **Repo:** `WhatSoup`
-**Total entries:** 133
+**Total entries:** 134
 
 ## Totals
 
 | Dimension | Breakdown |
 |---|---|
-| Kind | doc=1, handoff=8, plan=66, review=4, spec=53, state=1 |
-| Status | active=33, closed=4, completed=38, deferred=7, pending=16, unknown=35 |
-| Status source | body-marker=111, fallback=21, state-md-status=1 |
+| Kind | doc=1, handoff=8, plan=66, review=4, spec=54, state=1 |
+| Status | active=34, closed=4, completed=38, deferred=7, pending=16, unknown=35 |
+| Status source | body-marker=112, fallback=21, state-md-status=1 |
 
 ## Inconsistencies
 
@@ -34,7 +34,7 @@ scoped markdown files currently on disk.
 
 ## Synthesis
 
-### Active (33)
+### Active (34)
 
 | Path | Kind | Topic | Status source |
 |------|------|-------|---------------|
@@ -66,6 +66,7 @@ scoped markdown files currently on disk.
 | `docs/superpowers/specs/2026-08-03-watchdog-auth-required-contract-design.md` | spec | watchdog-auth-required-contract-design | body-marker |
 | `docs/superpowers/specs/2026-08-14-outbound-queue-quiescence-containment-design.md` | spec | outbound-queue-quiescence-containment-design | body-marker |
 | `docs/superpowers/specs/2026-08-16-recovery-blocked-follower-lifecycle-design.md` | spec | recovery-blocked-follower-lifecycle-design | body-marker |
+| `docs/superpowers/specs/2026-11-03-terminal-transport-identity.md` | spec | terminal-transport-identity | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/design.md` | spec | design | body-marker |
 | `docs/superpowers/specs/kill-session-transactional-cancellation/requirements.md` | spec | requirements | body-marker |
 | `docs/superpowers/specs/provider-event-lifecycle/design.md` | spec | design | body-marker |
@@ -251,7 +252,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/reviews/2026-07-09-wall-to-wall-audit-pr-briefs.md` | review | completed | body-marker | wall-to-wall-audit-pr-briefs | 2026-07-10 |  |
 | `docs/superpowers/reviews/2026-07-24-r13-r15-tech-debt-review-map.md` | review | completed | body-marker | r13-r15-tech-debt-review-map | 2026-07-24 |  |
 
-### docs/superpowers/specs  _(47 entries)_
+### docs/superpowers/specs  _(48 entries)_
 
 | Path | Kind | Status | Source | Topic | Last Mod | Supersedes |
 |------|------|--------|--------|-------|----------|------------|
@@ -302,6 +303,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | unknown | body-marker | fleet-lifecycle-observability-standard-design | 2026-08-27 |  |
 | `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | unknown | fallback | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |  |
+| `docs/superpowers/specs/2026-11-03-terminal-transport-identity.md` | spec | active | body-marker | terminal-transport-identity | 2026-11-03 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -322,4 +324,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-10-25T04:26:35Z from commit `8b7526fd7a101b71900d24dcd2845b77e99669d4`
+- Generated at 2026-11-03T06:16:59Z from commit `26e44cc8bd72e7c1b209edbada6291e07ed77f03`

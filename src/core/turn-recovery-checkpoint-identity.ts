@@ -5,17 +5,18 @@
  * statement records that identity in the same transaction.
  *
  * It requires the stored outgoing message for the op's exact conversation and
- * delivery chat, and exactly one outbound op claiming that WhatsApp message.
+ * delivery chat, and exactly one outbound op claiming that provider message.
  * The checkpoint must still end at that inbound and delivery, in a live session
  * for the conversation, with no active turn and no newer completed identity.
- * Otherwise it changes nothing. Bind the outbound op ID.
+ * Otherwise it changes nothing. Bind the validated delivery namespace and
+ * outbound op ID from the exact recovery settlement witness.
  */
 export function promoteEchoedCheckpointIdentitySql(validRecoveryJobFrom: string): string {
   return `
     UPDATE session_checkpoints AS checkpoint
     SET completed_inbound_seq = proof.inbound_seq,
         completed_delivery_jid = proof.delivery_jid,
-        completed_delivery_namespace = substr(proof.delivery_jid, instr(proof.delivery_jid, '@') + 1),
+        completed_delivery_namespace = ?,
         completed_scope = proof.scope,
         completed_logical_turn_id = proof.logical_turn_id,
         completed_manager_id = proof.manager_id,
