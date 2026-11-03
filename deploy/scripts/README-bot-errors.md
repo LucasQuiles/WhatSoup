@@ -391,9 +391,26 @@ completeness of arbitrary imported historical state.
 Current aggregate evidence is also checked before recovery. A failure attributed
 to the same target vetoes its `daily-health-fail` recovery even when a healthy
 probe appears elsewhere in the report. The producer and dispatcher share failure
-membership and target attribution; unrelated targets, warnings and unattributed
-infrastructure failures do not veto that target. Source-specific recovery, such
-as `instance_unreachable`, retains its existing proof rules.
+membership and target attribution; unrelated targets and unattributed
+infrastructure failures do not veto that target.
+
+A diagnostic observation with the target's exact identity also vetoes both
+generic and source-specific recovery when it explicitly contradicts a required
+healthy field, reports nonpositive credential size, or carries an auth/physical
+risk marker. This includes diagnostic warnings. Missing fields and malformed
+numeric size add no new veto. Public, unobserved, or differently identified
+observations also add no new veto; none replaces the existing positive recovery
+proof. Markers must be separate tokens.
+
+The producer's credential-write grace remains compatible: an in-flight marker
+with invalid bond status, existing credentials and an empty/invalid-JSON issue
+exempts only bond status and size from this new veto. Other contradictions still
+hold recovery. The grace sample cannot establish recovery itself. A wipe during
+that grace remains indistinguishable from a write without later evidence.
+
+This rule only removes recovery candidates; it does not resolve endpoint
+ownership or sample ordering. A healthy observation plus an unauthenticated
+timeout still permits source-specific recovery under existing proof rules.
 
 This check reads the full received evidence, independently of shortened display
 text. It cannot detect a contradiction already omitted from incoming evidence;
