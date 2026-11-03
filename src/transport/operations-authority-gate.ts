@@ -538,6 +538,7 @@ function freezeValue(
     throw new TransportAuthorityUnavailableError('stream-backed outbound content cannot be approved without frozen bytes');
   }
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    assertSnapshotDepth(depth, 'outbound content');
     reserveSnapshotContainer(budget, 'outbound content');
     reserveSnapshotObjectKey(budget, '$binary', 0, 'outbound content');
     reserveSnapshotBinary(budget, value.byteLength, 'outbound content');

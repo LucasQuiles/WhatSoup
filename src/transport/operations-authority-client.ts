@@ -16,6 +16,10 @@ const AUTHORITY_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
 // response envelope while stopping JSON.parse from creating a hostile graph.
 const AUTHORITY_RESPONSE_MAX_DEPTH = 128;
 const AUTHORITY_RESPONSE_MAX_CONTAINERS = 100_000;
+// Count lexical JSON tokens instead of literal bytes: a gate-valid 10,000-node
+// snapshot may contain long finite numbers, while flat graphs stay bounded.
+// This matches the 100,000-container ceiling for a scalar admission snapshot.
+const AUTHORITY_RESPONSE_MAX_JSON_TOKENS = 200_017;
 // A byte limit alone permits an unbounded number of tiny chunks. This leaves
 // ample room for ordinary streaming while bounding retained chunk objects.
 const AUTHORITY_RESPONSE_MAX_CHUNKS = 100_000;
@@ -222,8 +226,16 @@ function awaitWithAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 function assertAuthorityJsonStructure(body: Buffer): void {
   let depth = 0;
   let containers = 0;
+  let jsonTokens = 0;
   let inString = false;
+  let inScalar = false;
   let escaped = false;
+  const countToken = () => {
+    jsonTokens += 1;
+    if (jsonTokens > AUTHORITY_RESPONSE_MAX_JSON_TOKENS) {
+      throw new RangeError('transport authority response JSON token count exceeds limit');
+    }
+  };
   for (const byte of body) {
     if (inString) {
       if (escaped) escaped = false;
@@ -232,8 +244,17 @@ function assertAuthorityJsonStructure(body: Buffer): void {
       continue;
     }
     if (byte === 0x22) {
+      countToken();
       inString = true;
       continue;
+    }
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20) {
+      inScalar = false;
+      continue;
+    }
+    if (byte === 0x7b || byte === 0x5b || byte === 0x7d || byte === 0x5d || byte === 0x2c || byte === 0x3a) {
+      countToken();
+      inScalar = false;
     }
     if (byte === 0x7b || byte === 0x5b) {
       depth += 1;
@@ -243,7 +264,15 @@ function assertAuthorityJsonStructure(body: Buffer): void {
       }
       continue;
     }
-    if (byte === 0x7d || byte === 0x5d) depth -= 1;
+    if (byte === 0x7d || byte === 0x5d) {
+      depth -= 1;
+      continue;
+    }
+    if (byte === 0x2c || byte === 0x3a) continue;
+    if (!inScalar) {
+      countToken();
+      inScalar = true;
+    }
   }
 }
 
@@ -285,14 +314,20 @@ async function readAuthorityJson(response: Response, signal: AbortSignal): Promi
     return JSON.parse(body.toString('utf8')) as unknown;
   } finally {
     let cancelError: unknown;
+    let cancellation: Promise<void> | undefined;
     if (!complete) {
       try {
-        await reader.cancel();
+        cancellation = awaitWithAbort(reader.cancel(), signal).then(
+          () => {},
+          (error) => { cancelError = error; },
+        );
       } catch (error) {
         cancelError = error;
       }
     }
+    chunks.length = 0;
     reader.releaseLock();
+    if (cancellation !== undefined) await cancellation;
     if (cancelError !== undefined) throw cancellationFailure(cancelError);
   }
 }

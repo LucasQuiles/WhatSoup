@@ -343,6 +343,42 @@ describe('OperationsAuthorityClient HTTP boundaries', () => {
       .rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
   });
 
+  it.each([
+    ['scalar array', `[${'0,'.repeat(100_000)}0]`],
+    ['object members', `{${Array.from({ length: 100_001 }, (_unused, index) => `"member_${index}":0`).join(',')}}`],
+  ])('rejects %s that exceeds the response JSON token budget before parsing', async (_kind, snapshot) => {
+    // Break caught: a flat response graph can avoid container/depth limits,
+    // parse successfully, and be ignored by admission after allocating many
+    // scalar values or object members.
+    const fetch = vi.fn(async () => new Response(`{"attempt_id":"attempt-http-boundary","payload_digest":"sha256:http-boundary","state":"dispatching","snapshot":${snapshot}}`));
+    const client = new OperationsAuthorityClient({
+      baseUrl: 'https://authority.example/',
+      accountId: 'pilot-account',
+      bearerToken: 'test-only-transport-token',
+      fetch,
+    });
+
+    await expect(client.admit({ recipient: '15551230000@s.whatsapp.net', content: { text: 'fake-only' } }))
+      .rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+  });
+
+  it('accepts a ten-thousand-node snapshot with long finite numbers', async () => {
+    // Break caught: the preflight treats literal byte length as graph size and
+    // rejects a snapshot the 10,000-node gate permits before JSON.parse.
+    const finiteNumber = '-1.7976931348623157e+308';
+    const snapshot = `[${Array.from({ length: 9_999 }, () => finiteNumber).join(',')}]`;
+    const fetch = vi.fn(async () => new Response(`{"attempt_id":"attempt-http-boundary","payload_digest":"sha256:http-boundary","state":"dispatching","snapshot":${snapshot}}`));
+    const client = new OperationsAuthorityClient({
+      baseUrl: 'https://authority.example/',
+      accountId: 'pilot-account',
+      bearerToken: 'test-only-transport-token',
+      fetch,
+    });
+
+    await expect(client.admit({ recipient: '15551230000@s.whatsapp.net', content: { text: 'fake-only' } }))
+      .resolves.toEqual({ attemptId: 'attempt-http-boundary', payloadDigest: 'sha256:http-boundary' });
+  });
+
   it('accepts a bounded-depth response with a one-megabyte binary snapshot string', async () => {
     // Break caught: structural scanning treats quoted binary data as JSON
     // containers and rejects payload capacity the operation envelope permits.
@@ -399,6 +435,53 @@ describe('OperationsAuthorityClient HTTP boundaries', () => {
       expect(outcome).toBeInstanceOf(TransportAuthorityUnavailableError);
       expect(requestSignal?.aborted).toBe(true);
       expect(reader.cancel).toHaveBeenCalledOnce();
+      resolveLateRead?.({ done: true, value: undefined });
+      await Promise.resolve();
+      expect(reader.read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases a stalled reader when response cancellation never settles', async () => {
+    // Break caught: an injected cancel() ignores the timed-out request and
+    // retains the buffered response chunks and reader lock indefinitely.
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    let resolveLateRead: ((result: ReadableStreamReadResult<Uint8Array>) => void) | undefined;
+    const reader = {
+      read: vi.fn()
+        .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode('{"attempt_id":"partial"') })
+        .mockImplementationOnce(() => new Promise<ReadableStreamReadResult<Uint8Array>>((resolve) => {
+          resolveLateRead = resolve;
+        })),
+      cancel: vi.fn(() => new Promise<void>(() => {})),
+      releaseLock: vi.fn(),
+    };
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return {
+        status: 200,
+        body: { getReader: () => reader },
+      } as unknown as Response;
+    });
+    const client = new OperationsAuthorityClient({
+      baseUrl: 'https://authority.example/',
+      accountId: 'pilot-account',
+      bearerToken: 'test-only-transport-token',
+      fetch,
+    });
+
+    try {
+      const admission = client.admit({ recipient: '15551230000@s.whatsapp.net', content: { text: 'fake-only' } });
+      const outcomePromise = admission.then(() => 'resolved', (error) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const outcome = await Promise.race([outcomePromise, Promise.resolve('still-pending')]);
+
+      expect(outcome).toBeInstanceOf(TransportAuthorityUnavailableError);
+      expect(requestSignal?.aborted).toBe(true);
+      expect(reader.cancel).toHaveBeenCalledOnce();
+      expect(reader.releaseLock).toHaveBeenCalledOnce();
       resolveLateRead?.({ done: true, value: undefined });
       await Promise.resolve();
       expect(reader.read).toHaveBeenCalledTimes(2);

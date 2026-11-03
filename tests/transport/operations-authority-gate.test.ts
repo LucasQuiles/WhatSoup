@@ -68,6 +68,12 @@ function nestedSnapshot(depth: number): Record<string, unknown> {
   return value;
 }
 
+function nestedBinaryContent(depth: number): unknown {
+  let value: unknown = Buffer.from('approved');
+  for (let index = 0; index < depth; index += 1) value = { child: value };
+  return value;
+}
+
 function wideSnapshot(keys: number): Record<string, unknown> {
   return Object.fromEntries(Array.from({ length: keys }, (_value, index) => [`field${index}`, index]));
 }
@@ -152,6 +158,32 @@ describe('freezeOutboundContent', () => {
     expect(() => freezeOutboundContent(Array.from({ length: SNAPSHOT_MAX_NODES }, () => null))).toThrow(/nodes/i);
     expect(() => freezeOutboundContent(wideSnapshot(SNAPSHOT_MAX_KEYS_PER_OBJECT + 1))).toThrow(/keys/i);
     expect(() => freezeOutboundContent({ ['k'.repeat(SNAPSHOT_MAX_KEY_BYTES + 1)]: 'approved' })).toThrow(/key/i);
+  });
+
+  it('keeps the binary depth boundary symmetric with approved replay and blocks one deeper before send', async () => {
+    const accepted = freezeOutboundContent(nestedBinaryContent(SNAPSHOT_MAX_DEPTH));
+    const replay = vi.fn(async () => undefined);
+    await retryApprovedWhatsappOperations({
+      accountId: 'pilot-account',
+      inboundEventId: 'inbound-approve',
+      operations: [approvedWhatsappOperation(accepted.approvalContent)],
+      send: replay,
+    });
+    expect(replay).toHaveBeenCalledOnce();
+
+    const authority = acceptingAuthority();
+    const socket = fakeSocket();
+    const providerSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    await expect(socket.sendMessage('owner@s.whatsapp.net', nestedBinaryContent(SNAPSHOT_MAX_DEPTH + 1)))
+      .rejects.toThrow(/depth/i);
+    expect(authority.admit).not.toHaveBeenCalled();
+    expect(providerSend).not.toHaveBeenCalled();
   });
 
   it('accounts for JSON escaping and lone surrogates before accepting metadata at the encoded-byte boundary', () => {
