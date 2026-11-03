@@ -21,6 +21,7 @@ import {
   parseUnifiedDiffAddedLines,
   projectedFileSecretFixtureFiles,
   projectedFileSecretPatternCodes,
+  readCommitAuthors,
   run,
   scanAddedLines,
   scanBranchDiff,
@@ -228,6 +229,56 @@ describe('repo hygiene guard', () => {
       ['assets/three.png', otherBlob],
       ['assets/four.png', undefined],
     ]);
+  });
+
+  it('reads an added line whose own text starts with ++ as content while its hunk lasts, not as a file header', () => {
+    const lines = parseUnifiedDiffAddedLines([
+      '+++ b/src/a.ts',
+      '@@ -0,0 +1,2 @@',
+      '+++ b/src/fake.ts',
+      '+second',
+      '+++ b/src/next.ts',
+      '@@ -0,0 +1 @@',
+      '+++ third',
+      '',
+    ].join('\n'));
+
+    expect(lines.map((line) => [line.filePath, line.line, line.text])).toEqual([
+      ['src/a.ts', 1, '++ b/src/fake.ts'],
+      ['src/a.ts', 2, 'second'],
+      ['src/next.ts', 1, '++ third'],
+    ]);
+  });
+
+  it('flags a ++ line when staged, in the final diff, and in branch and advisory history', () => {
+    const repo = makeBranchRepo();
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'plus.ts'), "++ export const phone = '+447123456789';\n");
+    git(repo, ['add', 'src/plus.ts']);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(run(['--staged'], repo).map((issue) => issue.code)).toEqual(['operator-phone']);
+    git(repo, ['commit', '-m', 'test: a ++ line']);
+    expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    writeFileSync(join(repo, 'src', 'plus.ts'), '// clean\n');
+    commitAll(repo, 'test: remove the ++ line');
+    expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    expect(scanCommitHistory(repo, 5).map((issue) => issue.code)).toContain('operator-phone');
+  });
+
+  it('prints a file name with a newline or a terminal escape escaped', () => {
+    const repo = makeBranchRepo();
+    const filePath = 'src/a\nb\u001b[2K.ts';
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, filePath), "export const phone = '+447123456789';\n");
+    git(repo, ['add', filePath]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(run(['--staged'], repo).map((issue) => issue.filePath)).toEqual([filePath]);
+    const printed = error.mock.calls.map((call) => String(call[0]));
+    expect(printed.filter((line) => /[\u0000-\u001f\u007f-\u009f]/.test(line))).toEqual([]);
+    expect(printed.join('\n')).toContain('src/a\\nb\\x1b[2K.ts:1 operator-phone:');
   });
 
   it('splits lines as /\\r?\\n/ does: a CR goes only before a LF, and a last line needs no newline', () => {
@@ -1197,6 +1248,39 @@ The migrated group was 1203631234567890@g.us.
 
       expect(() => scanBranchDiff(repo, 'origin/main')).toThrow(`--base origin/main is not the live push base ${liveBase}`);
       expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
+
+    // A candidate commit with a placeholder author, and a local origin/main advanced to it.
+    const repoWithBaseHoldingTheCandidate = () => {
+      const repo = makeBranchRepo();
+      const liveBase = gitOutput(repo, ['rev-parse', 'main']);
+      writeFileSync(join(repo, 'note.txt'), 'candidate\n');
+      git(repo, ['add', 'note.txt']);
+      git(repo, ['-c', 'user.name=WhatSoup Test', '-c', 'user.email=ci@example.invalid', 'commit', '-m', 'chore: candidate']);
+      git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      return { repo, liveBase };
+    };
+
+    it('reads commit authors from the live push base, not a local origin/main advanced to the candidate', () => {
+      const { repo, liveBase } = repoWithBaseHoldingTheCandidate();
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      expect(readCommitAuthors(repo)).toEqual([]);
+      expect(run(['--commit-authors'], repo)).toEqual([]);
+      vi.stubEnv(PUSH_BASE_OID_ENV, liveBase);
+      expect(readCommitAuthors(repo).map((commit) => commit.subject)).toEqual(['chore: candidate']);
+      expect(run(['--commit-authors'], repo).map((issue) => issue.code)).toEqual(['placeholder-commit-author']);
+    });
+
+    it.each([
+      ['a GITHUB_BASE_REF that names another commit', (liveBase: string) => { vi.stubEnv(PUSH_BASE_OID_ENV, liveBase); vi.stubEnv('GITHUB_BASE_REF', 'main'); }, 'GITHUB_BASE_REF origin/main is not the live push base'],
+      ['an abbreviated live push base', (liveBase: string) => { vi.stubEnv(PUSH_BASE_OID_ENV, liveBase.slice(0, 12)); }, `${PUSH_BASE_OID_ENV} is not a full id of a commit`],
+    ])('refuses the commit-author scan for %s', (_label, setUp, refusal) => {
+      const { repo, liveBase } = repoWithBaseHoldingTheCandidate();
+      setUp(liveBase);
+
+      expect(() => readCommitAuthors(repo)).toThrow(refusal);
     });
   });
 

@@ -11,7 +11,8 @@ import {
   isTextCandidate,
   listStagedFiles,
   normalizeRepoPath,
-  readStagedAddedLines,
+  printableText,
+  readStagedAddedLinesResult,
   readStagedFileContentResult,
   isDocumentationEmailFixture,
   isGitHubSshTransportPrincipal,
@@ -38,7 +39,7 @@ import {
 import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
-import { branchDiffBaseRef } from './repo-hygiene-guard.ts';
+import { branchDiffBaseRef, parseUnifiedDiffAddedLines } from './repo-hygiene-guard.ts';
 import {
   BRANCH_SCAN_LIMITS,
   isPublicationFixtureExempt,
@@ -461,15 +462,10 @@ export function validatePublicationAudit(
   return issues;
 }
 
-function stagedAddedText(cwd: string, filePath: string): string {
-  const lines: string[] = [];
-
-  for (const diffLine of readStagedAddedLines(cwd, filePath).split(/\r?\n/)) {
-    if (diffLine.startsWith('+++') || diffLine.startsWith('---')) continue;
-    if (diffLine.startsWith('+')) lines.push(diffLine.slice(1));
-  }
-
-  return lines.join('\n');
+/** The staged lines a path adds, by the shared hunk-aware parser (so `++…` content is kept), or why the read failed. */
+function stagedAddedText(cwd: string, filePath: string): { ok: true; text: string } | { ok: false; error: string } {
+  const read = readStagedAddedLinesResult(cwd, filePath);
+  return read.ok ? { ok: true, text: parseUnifiedDiffAddedLines(read.diff).map((line) => line.text).join('\n') } : read;
 }
 
 function listTrackedInternalDocs(cwd: string): string[] {
@@ -572,10 +568,14 @@ function validateStaged(cwd: string): GuardIssue[] {
   const isVerifiedBinary = createVerifiedBinaryCheck(cwd);
   for (const filePath of staged) {
     if (isPublicationFixtureExempt(filePath) || isVerifiedBinary(filePath, `:${filePath}`)) continue;
-    const addedText = stagedAddedText(cwd, filePath);
-    issues.push(...scanTextForPrivateLiterals(filePath, addedText));
+    const added = stagedAddedText(cwd, filePath);
+    if (!added.ok) {
+      issues.push({ severity: 'error', code: 'staged-diff-unread', filePath, message: `Not scanned: ${added.error}. A staged file the scan cannot read in full is refused.` });
+      continue;
+    }
+    issues.push(...scanTextForPrivateLiterals(filePath, added.text));
     if (path.extname(filePath) === '.md') {
-      issues.push(...findMissingMarkdownRefs(filePath, addedText, (ref) => existsSync(path.join(cwd, ref))));
+      issues.push(...findMissingMarkdownRefs(filePath, added.text, (ref) => existsSync(path.join(cwd, ref))));
     }
   }
 
@@ -657,7 +657,7 @@ function validateRelease(cwd: string): GuardIssue[] {
 function printIssues(issues: GuardIssue[]): void {
   for (const issue of issues) {
     const location = issue.filePath ? `${issue.filePath}:${issue.line ?? 1}` : 'publication-guard:1';
-    console.error(`${location} ${issue.severity} ${issue.code}: ${issue.message}`);
+    console.error(printableText(`${location} ${issue.severity} ${issue.code}: ${issue.message}`));
   }
 }
 

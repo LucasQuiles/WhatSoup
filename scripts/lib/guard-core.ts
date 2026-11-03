@@ -943,8 +943,17 @@ export function gitList(args: string[], cwd: string): string[] {
     .map(normalizeRepoPath);
 }
 
+/**
+ * Staged paths, raw. With `-z` Git prints each name as it is, NUL-terminated;
+ * without it Git C-quotes a name holding a control character, a double quote, a
+ * backslash or a non-ASCII byte, and the quoted form names no file, so a staged
+ * read of it finds nothing.
+ */
 export function listStagedFiles(cwd: string, diffFilter: string): string[] {
-  return gitList(['diff', '--cached', '--name-only', `--diff-filter=${diffFilter}`], cwd);
+  return git(['diff', '--cached', '--name-only', '-z', `--diff-filter=${diffFilter}`], cwd)
+    .split('\0')
+    .filter(Boolean)
+    .map(normalizeRepoPath);
 }
 
 /**
@@ -1037,19 +1046,67 @@ export function createVerifiedBinaryCheck(
  */
 export const PUSH_BASE_OID_ENV = 'WHATSOUP_PUSH_BASE_OID';
 
-export function readStagedAddedLines(cwd: string, filePath: string): string {
+export type StagedDiffReadResult = { ok: true; diff: string } | { ok: false; error: string };
+
+/** The largest staged patch of one path the staged scans read. */
+export const STAGED_DIFF_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * The staged patch of one path, read with the disclosure flags. A git error, a
+ * timeout or a patch over `maxBytes` is a failed read with its cause, never an
+ * empty patch: a disclosure scan must not pass a file it could not read.
+ */
+export function readStagedAddedLinesResult(
+  cwd: string,
+  filePath: string,
+  maxBytes: number = STAGED_DIFF_MAX_BYTES,
+): StagedDiffReadResult {
   try {
-    return execFileSync('git', ['diff', '--cached', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '--', filePath], {
+    const diff = execFileSync('git', ['diff', '--cached', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '--', filePath], {
       cwd,
       encoding: 'utf8',
       env: cleanGitEnv(),
-      maxBuffer: 20 * 1024 * 1024,
+      maxBuffer: maxBytes,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30_000,
     });
-  } catch {
-    return '';
+    return { ok: true, diff };
+  } catch (error) {
+    const { code, status } = error as { code?: unknown; status?: unknown };
+    if (code === 'ENOBUFS') return { ok: false, error: `the staged diff is over ${maxBytes} bytes` };
+    if (code === 'ETIMEDOUT') return { ok: false, error: 'the staged diff read timed out' };
+    if (typeof code === 'string') return { ok: false, error: `git could not run (${code})` };
+    return { ok: false, error: `git exited ${String(status ?? 'without a status')}` };
   }
+}
+
+/**
+ * Compatibility wrapper for callers that treat a failed read as no added lines
+ * (the design-system hygiene guard, unchanged). Disclosure scans use
+ * readStagedAddedLinesResult.
+ */
+export function readStagedAddedLines(cwd: string, filePath: string): string {
+  const result = readStagedAddedLinesResult(cwd, filePath);
+  return result.ok ? result.diff : '';
+}
+
+// C0 and C1 controls, DEL, the bidirectional marks, overrides and isolates, and the
+// line and paragraph separators.
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const NAMED_ESCAPES: Readonly<Record<string, string>> = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+
+/**
+ * `text` with every control character escaped, for a guard's printed lines: a file
+ * name, commit subject or audit row cannot then move the cursor, clear a line or
+ * start a new one. Printing only; issue objects keep the real text.
+ */
+export function printableText(text: string): string {
+  return text.replace(UNPRINTABLE, (char) => {
+    const named = NAMED_ESCAPES[char];
+    if (named) return named;
+    const code = char.charCodeAt(0);
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
 }
 
 function errorText(error: unknown): string {

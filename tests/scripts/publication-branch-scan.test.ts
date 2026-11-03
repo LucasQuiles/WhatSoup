@@ -6,7 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PNG_SIGNATURE, seededBinary } from '../helpers/seeded-binary.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-import { cleanGitEnv, createVerifiedBinaryCheck, PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
+import {
+  cleanGitEnv,
+  createVerifiedBinaryCheck,
+  printableText,
+  PUSH_BASE_OID_ENV,
+  readStagedAddedLinesResult,
+} from '../../scripts/lib/guard-core.ts';
 import { BRANCH_SCAN_LIMITS, isPublicationFixtureExempt, scanBranchRange } from '../../scripts/lib/publication-branch-scan.ts';
 import { runPublicationGuard, validateBranchDiff } from '../../scripts/publication-guard.ts';
 
@@ -60,6 +66,19 @@ function branchRepo(): { repo: string; baseOid: string } {
   const baseOid = commitFile(repo, 'note.txt', 'public-safe\n', 'base');
   git(repo, ['update-ref', 'refs/remotes/origin/main', baseOid]);
   return { repo, baseOid };
+}
+
+/** Put a git on PATH that runs `action` for the calls `condition` matches and the real git otherwise. */
+function fakeGit(repo: string, condition: string, action = 'exec sleep 5'): void {
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8', env: cleanGitEnv() }).trim();
+  const binDir = join(repo, 'fake-bin');
+  mkdirSync(binDir);
+  writeFileSync(join(binDir, 'git'), `#!/usr/bin/env bash
+if [[ ${condition} ]]; then ${action}; fi
+exec '${realGit.replaceAll("'", "'\\''")}' "$@"
+`);
+  chmodSync(join(binDir, 'git'), 0o755);
+  vi.stubEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`);
 }
 
 const twentyLines = Array.from({ length: 20 }, (_, i) => `// line ${i}\n`).join('');
@@ -118,6 +137,7 @@ describe('publication scans — which paths they read', () => {
     ['an unlisted extension', 'assets/data.dat'],
     ['a text file in a fixture area', 'tools/agent-runtime-probes/probe.ts'],
     ['a fixture source file', 'scripts/repo-hygiene-guard.ts'],
+    ['a name Git quotes (non-ASCII)', 'src/caf\u00e9.py'],
   ])('flags a workspace path in %s when staged, in the branch diff, and from history after removal', (_label, filePath) => {
     const { repo } = branchRepo();
     stageFile(repo, filePath, homeLine);
@@ -181,6 +201,62 @@ describe('publication scans — which paths they read', () => {
   });
 });
 
+describe('publication scans — the staged read and the printed lines', () => {
+  const homeLine = `# ${privatePath}\n`;
+
+  it('refuses a staged file whose diff git cannot read, rather than passing it unscanned', () => {
+    const { repo } = branchRepo();
+    stageFile(repo, 'src/note.ts', homeLine);
+    fakeGit(repo, '"$1" == "diff" && "$2" == "--cached" && "$3" == "--unified=0"', 'exit 1');
+
+    expect(guardRun(repo, '--staged')).toEqual({ code: 1, paths: ['src/note.ts'], codes: ['staged-diff-unread'] });
+  });
+
+  it('reads a staged diff over its size limit as a failed read, never an empty one', () => {
+    const { repo } = branchRepo();
+    stageFile(repo, 'src/note.ts', homeLine.repeat(8));
+
+    expect(readStagedAddedLinesResult(repo, 'src/note.ts', 64)).toEqual({ ok: false, error: 'the staged diff is over 64 bytes' });
+    const read = readStagedAddedLinesResult(repo, 'src/note.ts');
+    expect(read.ok && read.diff).toContain(`+${homeLine.trim()}`);
+  });
+
+  it('scans an added line whose own text starts with ++, which its patch line shows as +++, when staged and in the branch diff', () => {
+    const { repo } = branchRepo();
+    stageFile(repo, 'src/plus.ts', `++ ${privatePath}\n`);
+    const flagged = { code: 1, paths: ['src/plus.ts'], codes: ['local-home-path'] };
+
+    expect(guardRun(repo, '--staged')).toEqual(flagged);
+    git(repo, ['commit', '-m', 'add a ++ line']);
+    expect(guardRun(repo, '--branch-diff')).toEqual(flagged);
+  });
+
+  it('prints a file name with a newline or a terminal escape escaped, at both publication scans', () => {
+    const { repo } = branchRepo();
+    const filePath = 'src/a\nb\u001b[2K.ts';
+    stageFile(repo, filePath, homeLine);
+    const printed = (mode: '--staged' | '--branch-diff') => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      expect(runPublicationGuard([mode], repo)).toBe(1);
+      const lines = error.mock.calls.map((call) => String(call[0]));
+      vi.restoreAllMocks();
+      return lines;
+    };
+
+    for (const mode of ['--staged', '--branch-diff'] as const) {
+      const lines = printed(mode);
+      expect(lines.filter((line) => /[\u0000-\u001f\u007f-\u009f]/.test(line))).toEqual([]);
+      expect(lines.join('\n')).toContain('src/a\\nb\\x1b[2K.ts:1 error local-home-path:');
+      if (mode === '--staged') git(repo, ['commit', '-m', 'add literal under a control-character name']);
+    }
+  });
+
+  it('escapes control characters, bidirectional overrides and line separators, and keeps other text', () => {
+    expect(printableText('a\tb\nc\rd\u001b[2K\u007f\u0085\u202e\u2028 caf\u00e9 \\ ok')).toBe('a\\tb\\nc\\rd\\x1b[2K\\x7f\\x85\\u202e\\u2028 caf\u00e9 \\ ok');
+  });
+});
+
 describe('publication branch scan — line and time limits', () => {
   it('stops part way through the patch when the added-line limit is passed, and scans no line after the stop', () => {
     const { repo } = branchRepo();
@@ -214,23 +290,10 @@ describe('publication branch scan — line and time limits', () => {
     expect(scanned).toHaveLength(3);
   });
 
-  /** Put a git on PATH that sleeps for the reads `hangs` matches and runs the real git otherwise. */
-  const hangGitReads = (repo: string, hangs: string) => {
-    const realGit = execFileSync('which', ['git'], { encoding: 'utf8', env: cleanGitEnv() }).trim();
-    const binDir = join(repo, 'fake-bin');
-    mkdirSync(binDir);
-    writeFileSync(join(binDir, 'git'), `#!/usr/bin/env bash
-if [[ ${hangs} ]]; then exec sleep 5; fi
-exec '${realGit.replaceAll("'", "'\\''")}' "$@"
-`);
-    chmodSync(join(binDir, 'git'), 0o755);
-    vi.stubEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`);
-  };
-
   it('gives a git read only the time left, so a hung read is INCONCLUSIVE within the limit', () => {
     const { repo } = branchRepo();
     commitFile(repo, 'src/note.ts', '// clean\n', 'clean work');
-    hangGitReads(repo, '"$1" == "log"');
+    fakeGit(repo, '"$1" == "log"');
     const started = Date.now();
 
     const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, milliseconds: 1_000 });
@@ -239,11 +302,15 @@ exec '${realGit.replaceAll("'", "'\\''")}' "$@"
     expect(Date.now() - started).toBeLessThan(4_000);
   });
 
-  it('gives a blob read for the verified-binary check only the time left, and is INCONCLUSIVE when it runs out', () => {
+  it('gives a blob read for the verified-binary check only the time left, and is INCONCLUSIVE when it runs out on the last added line', () => {
     const { repo } = branchRepo();
-    // A small verified PNG: signature, a header length that starts with a NUL, nothing a rule matches.
-    commitFile(repo, 'assets/dot.png', Buffer.concat([Buffer.from(PNG_SIGNATURE), Buffer.from([0, 0, 0, 0x0d]), Buffer.from('IHDR\n')]), 'image');
-    hangGitReads(repo, '"$1" == "cat-file" && "$2" == "blob"');
+    // A small verified PNG on the base; the branch changes only its last line, so the
+    // blob read comes on the patch's one added line, after which only the final limit
+    // check can stop the scan.
+    const image = (tail: string) => Buffer.concat([Buffer.from(PNG_SIGNATURE), Buffer.from([0, 0, 0, 0x0d]), Buffer.from(`IHDR\n${tail}\n`)]);
+    git(repo, ['update-ref', 'refs/remotes/origin/main', commitFile(repo, 'assets/dot.png', image('old'), 'image')]);
+    commitFile(repo, 'assets/dot.png', image('new'), 'image edit');
+    fakeGit(repo, '"$1" == "cat-file" && "$2" == "blob"');
     const started = Date.now();
 
     const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, milliseconds: 1_000 });

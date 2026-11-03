@@ -13,6 +13,7 @@ import {
   isOperationalProtocolToken,
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
+  printableText,
   PUSH_BASE_OID_ENV,
 } from './lib/guard-core.ts';
 import {
@@ -211,11 +212,14 @@ export function withoutVerifiedBinaryLines(cwd: string, lines: AddedLine[]): Add
  * The added lines of a unified diff, one at a time and without splitting the
  * whole patch first, so a caller with a line limit can stop part way through.
  * Each line carries its file's new blob id from the `index` header, when the
- * patch has one.
+ * patch has one. Inside a hunk an added line is content while the hunk header's
+ * new-side count lasts (a missing count is 1), so a line whose own text starts
+ * with `++ ` (`+++ ` in the patch) is scanned, not taken for a file header.
  */
 export function* iterateUnifiedDiffAddedLines(diff: string): Generator<AddedLine> {
   let filePath: string | null = null;
   let nextLine = 0;
+  let newLinesLeft = 0;
   let blob: string | undefined;
 
   for (let start = 0; start <= diff.length;) {
@@ -226,10 +230,19 @@ export function* iterateUnifiedDiffAddedLines(diff: string): Generator<AddedLine
       ? diff.slice(start, end - 1)
       : diff.slice(start, end);
     start = end + 1;
+    if (newLinesLeft > 0 && rawLine.startsWith('+')) {
+      newLinesLeft -= 1;
+      if (filePath && nextLine !== 0) {
+        yield blob ? { filePath, line: nextLine, text: rawLine.slice(1), blob } : { filePath, line: nextLine, text: rawLine.slice(1) };
+      }
+      nextLine += 1;
+      continue;
+    }
     // Any file header (`diff --git`, or a combined `diff --cc`/`diff --combined`)
     // ends the last file's blob, so a blob id never carries over to the next file.
     if (rawLine.startsWith('diff ')) {
       blob = undefined;
+      newLinesLeft = 0;
       continue;
     }
     const index = /^index [0-9a-f]+\.\.([0-9a-f]+)(?: |$)/.exec(rawLine);
@@ -243,9 +256,10 @@ export function* iterateUnifiedDiffAddedLines(diff: string): Generator<AddedLine
       continue;
     }
 
-    const hunk = rawLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunk = rawLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
     if (hunk) {
       nextLine = Number(hunk[1]);
+      newLinesLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
       continue;
     }
 
@@ -255,6 +269,7 @@ export function* iterateUnifiedDiffAddedLines(diff: string): Generator<AddedLine
       nextLine += 1;
     } else if (rawLine.startsWith(' ')) {
       nextLine += 1;
+      if (newLinesLeft > 0) newLinesLeft -= 1;
     }
   }
 }
@@ -830,10 +845,20 @@ function commitAuthorBaseRef(cwd: string): string | null {
   return null;
 }
 
+const COMMIT_AUTHOR_LOG_FORMAT = '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e';
+
 export function readCommitAuthors(cwd: string): CommitAuthor[] {
+  // In the push hook the range starts at the live main pre-push-guard proved, as the
+  // branch scans' range does (branchDiffBaseRef, which also refuses a GITHUB_BASE_REF
+  // naming another commit). A local origin/main is not consulted then: one advanced to
+  // the candidate would empty the range, and the live main already holds merged commits.
+  if (process.env[PUSH_BASE_OID_ENV]?.trim()) {
+    const pushBase = branchDiffBaseRef(cwd);
+    return parseCommitAuthorLog(git(['log', COMMIT_AUTHOR_LOG_FORMAT, `${pushBase}..HEAD`], cwd));
+  }
   const baseRef = commitAuthorBaseRef(cwd);
   if (!baseRef) {
-    const log = git(['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', '-1', 'HEAD'], cwd);
+    const log = git(['log', COMMIT_AUTHOR_LOG_FORMAT, '-1', 'HEAD'], cwd);
     return parseCommitAuthorLog(log);
   }
   // Exclude commits already reachable from origin/main.  This matters when the
@@ -850,7 +875,7 @@ export function readCommitAuthors(cwd: string): CommitAuthor[] {
   // generated trailer automatically.
   const excludeArgs = gitRefExists(cwd, 'origin/main') ? ['--not', 'origin/main'] : [];
   const log = git(
-    ['log', '--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e', `${baseRef}..HEAD`, ...excludeArgs],
+    ['log', COMMIT_AUTHOR_LOG_FORMAT, `${baseRef}..HEAD`, ...excludeArgs],
     cwd,
   );
   return parseCommitAuthorLog(log);
@@ -2031,7 +2056,7 @@ function printIssues(issues: GuardIssue[]): void {
     const location = issue.filePath
       ? `${issue.filePath}:${issue.line ?? 1}`
       : `commit-msg:${issue.line ?? 1}`;
-    console.error(`${location} ${issue.code}: ${issue.message}`);
+    console.error(printableText(`${location} ${issue.code}: ${issue.message}`));
   }
 }
 
