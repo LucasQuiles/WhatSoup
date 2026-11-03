@@ -111,7 +111,7 @@ const BOT_ERRORS_HEALTH_LABEL = 'com.bot-errors.health';
 const BOT_ERRORS_RUNTIME_MANIFEST = 'deploy/bot-errors-runtime-manifest.json';
 const BOT_ERRORS_HEALTH_RUNNER = 'deploy/scripts/bot-errors-runner.py';
 const BOT_ERRORS_HEALTH_CHECKER = 'deploy/scripts/bot-errors-health-check.py';
-const BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES = 256 * 1024;
+export const BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES = 256 * 1024;
 const BOT_ERRORS_HEALTH_CONSUMER_OPEN_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
 interface BotErrorsHealthConsumer {
   root: string; capability: number; manifestSha256: string; runnerSha256: string; checkerSha256: string;
