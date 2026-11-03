@@ -250,3 +250,29 @@ script, wrapper, launchd, directory, and generated-workspace policy surfaces.
 Missing managed-policy candidates are omitted by default and included only with
 `--include-missing`. Add new paths deliberately with a source class and
 redaction posture.
+
+
+## Historical unverified closures in J1 inventory
+
+The additive `metrics.incident_inventory.historical_unverified_autoclose` object
+reports retained `staleAutocloseHistory` diagnostics. These are historical unverified
+closures, not current unresolved failures. The dispatcher owns and prunes this state;
+the collector only reads it. Treat the counts as gauges: do not diff them between
+bundles or add them to the open-incident count.
+
+- `count` counts stored history entries, including malformed entries.
+- `daily_health_fail_count` counts object entries whose source begins with
+  `daily-health-fail:`. It does not prove a bounded hold-cap closure.
+- `oldest_age_days` uses the oldest positive integer `closedAt` at or before the
+  frozen interval end. Boolean, missing, nonpositive and noninteger timestamps
+  contribute to `rows_skipped`, as do nonobject entries. Future timestamps contribute
+  to `future_count` and are excluded from age. If no timestamp qualifies, age is null.
+- An absent history field means an empty history. A present nonobject history sets
+  `history_malformed` and leaves counts and age null. Missing or unreadable state
+  still fails the entire section; it is never reported as zero.
+
+The output has fixed fields and includes no history keys or evidence. Ages compare
+the dispatcher clock with the collector interval end; clock skew remains a limit.
+Backfill runs the same section and uses the forensics-copy time as its age endpoint.
+The collector does not infer the configured retention period or prune old entries,
+so a reported age can exceed the default retention window.

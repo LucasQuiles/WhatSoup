@@ -196,6 +196,27 @@ def is_int(v): return isinstance(v, int) and not isinstance(v, bool)
 d = json.load(open(os.path.join(S, "incident-state.json")))
 oi = d.get("openIncidents") if isinstance(d.get("openIncidents"), dict) else {}
 fs = d.get("flapState") if isinstance(d.get("flapState"), dict) else {}
+# History is a retained diagnostic gauge, not a count of unresolved conditions.
+history = d.get("staleAutocloseHistory", {})
+historical = {"count": None, "daily_health_fail_count": None, "oldest_age_days": None,
+              "rows_skipped": None, "future_count": None, "history_malformed": not isinstance(history, dict)}
+if isinstance(history, dict):
+    historical.update(count=len(history), daily_health_fail_count=0, rows_skipped=0, future_count=0)
+    oldest = None
+    for v in history.values():
+        if not isinstance(v, dict):
+            historical["rows_skipped"] += 1; continue
+        source = v.get("source")
+        if isinstance(source, str) and source.startswith("daily-health-fail:"):
+            historical["daily_health_fail_count"] += 1
+        closed = v.get("closedAt")
+        if not is_int(closed) or closed <= 0:
+            historical["rows_skipped"] += 1; continue
+        if closed > EN:
+            historical["future_count"] += 1; continue
+        oldest = closed if oldest is None else min(oldest, closed)
+    if oldest is not None:
+        historical["oldest_age_days"] = round((EN - oldest) / 86400, 1)
 status = {}; ages = []; items = []; sup = 0; ren = 0; skipped = 0
 for k, v in oi.items():
     if not isinstance(v, dict):
@@ -241,6 +262,7 @@ for k, v in fs.items():
     flap.append({"key": str(k)[:120], "cumulative": cc, "trips_in_window": inwin, "window_complete": complete})
 flap.sort(key=lambda r: (-r["cumulative"], r["key"]))
 out = {"open": len(oi), "rows_skipped": skipped, "status": status, "age_days_p50": pct(ages, 0.5), "age_days_p90": pct(ages, 0.9), "age_days_max": pct(ages, 1.0),
+       "historical_unverified_autoclose": historical,
        "suppressed_total": sup, "renotify_total": ren, "top_suppressed": items[:TOP_N],
        "flap_keys": len(fs), "flap_trip_unit": unit, "flap_cumulative_retained_total": cumulative_total,
        "flap_trips_in_window_lower_bound": (sum(f["trips_in_window"] or 0 for f in flap) if scale else None),
