@@ -123,6 +123,38 @@ describe('FinalTransportAuthorityGate at the final socket seam', () => {
     expect(socket.sendMessage.mock.calls).toHaveLength(1);
   });
 
+  it('surfaces both a provider failure and a failed unknown receipt without retrying', async () => {
+    // Break caught: failure to persist an ambiguous outcome is swallowed, making
+    // an authority dispatch appear observable when neither outcome is reliable.
+    const providerFailure = new Error('provider disconnected');
+    const receiptFailure = new Error('authority unavailable');
+    const authority = acceptingAuthority();
+    authority.recordReceipt.mockRejectedValueOnce(receiptFailure);
+    const socket = fakeSocket();
+    socket.sendMessage.mockRejectedValue(providerFailure);
+    const realSend = socket.sendMessage;
+    wrapWithOutboundGovernor(socket, {
+      governor: permissiveGovernor(),
+      resolveDest: (jid) => jid,
+      authorityGate: new FinalTransportAuthorityGate(authority),
+    });
+
+    let thrown: unknown;
+    try {
+      await withTransportInboundContext({ inbound_event_id: 'inbound-failed-receipt' }, async () => {
+        await socket.sendMessage('15551230000@s.whatsapp.net', { text: 'reply' });
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([providerFailure, receiptFailure]);
+    expect(realSend).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenCalledTimes(1);
+    expect(authority.recordReceipt).toHaveBeenCalledWith({ attemptId: 'attempt-1', state: 'unknown' });
+  });
+
   it('gates media and control sends even though pacing does not apply to them', async () => {
     // Break caught: a media/control path bypasses the universal authority boundary.
     const authority = acceptingAuthority();

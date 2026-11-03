@@ -277,9 +277,11 @@ export function wrapWithOutboundGovernor<S extends object>(
       // ambiguous. The authority owns reconciliation; this seam never retries.
       try {
         await opts.authorityGate.recordReceipt({ attemptId: dispatch.attemptId, state: 'unknown' });
-      } catch {
-        // The original failure still reaches the caller. Leaving the authority
-        // dispatching is conservative when even the unknown receipt cannot land.
+      } catch (receiptError) {
+        throw new AggregateError(
+          [err, receiptError],
+          'provider outcome is ambiguous and the authority unknown receipt failed',
+        );
       }
       throw err;
     }
@@ -307,11 +309,6 @@ export function wrapWithOutboundGovernor<S extends object>(
         'raw relayMessage is unavailable while transport authority is enabled',
       );
     };
-    try {
-      Object.defineProperties(blockedRelay, Object.getOwnPropertyDescriptors(s.relayMessage));
-    } catch {
-      // best-effort only; the block itself is the authority boundary
-    }
     s.relayMessage = blockedRelay;
   }
   return sock;
