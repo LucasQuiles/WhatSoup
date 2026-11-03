@@ -163,7 +163,7 @@ class TestDailySummarySeverity:
 
     def test_rustdesk_only_failure_is_warning(self):
         """RustDesk-only failure -> warning (infra-class)."""
-        failures = ["FAIL rustdesk: id=999999999 expected_id=1076834574"]
+        failures = ["FAIL rustdesk: id=999999999 expected_id=1234567890"]
         assert daily_summary_severity(failures, []) == "warning"
 
 
