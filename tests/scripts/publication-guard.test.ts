@@ -134,6 +134,7 @@ exec ${shellQuote(realGit)} "$@"
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 function makeRepo(docText: string, classification: 'PUBLIC' | 'PRIVATE-ARCHIVE'): string {
@@ -251,6 +252,25 @@ describe('publication guard staged mode', () => {
     git(repo, ['add', publicDoc]);
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
+    expect(runPublicationGuard(['--staged'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('github-token');
+  });
+
+  it('fails when staged private literals sit in a file a -diff attribute marks as binary', () => {
+    const repo = makeRepo('Public-safe release note.\n', 'PUBLIC');
+    writeFileSync(join(repo, '.gitattributes'), '*.md -diff\n');
+    git(repo, ['add', '.gitattributes']);
+    git(repo, [
+      '-c', 'user.email=guard-test@users.noreply.github.com', '-c', 'user.name=Guard Test', '-c', 'commit.gpgsign=false',
+      'commit', '-m', 'base',
+    ]);
+    const publicDoc = 'docs/public-note.md';
+    const token = ['ghp_', 'abcdefghijklmnop'].join('');
+    writeFileSync(join(repo, publicDoc), `token: ${token}\n`);
+    git(repo, ['add', publicDoc]);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(gitOutput(repo, ['diff', '--cached', '--', publicDoc])).toContain('Binary files');
     expect(runPublicationGuard(['--staged'], repo)).toBe(1);
     expect(error.mock.calls.join('\n')).toContain('github-token');
   });
@@ -503,6 +523,7 @@ describe('publication guard branch-diff limits', () => {
       addedLines: 2_000_000,
       baseBlobs: MAX_EXACT_BLOB_COUNT,
       baseBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
+      milliseconds: 60_000,
     });
   });
 

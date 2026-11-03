@@ -3,6 +3,7 @@ import { accessSync, constants, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { PUSH_BASE_OID_ENV } from './lib/guard-core.ts';
 import {
   classifyPushRemote,
   isPreserveMirrorUrl,
@@ -295,12 +296,24 @@ export function runPrePushGuard(
     dependencies.assertConsoleDependencies(cwd);
   }
 
-  for (const script of commands) {
-    console.error(`pre-push guard: running npm run ${script}`);
-    // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
-    // run for minutes — 600s bounds a hang without tripping real steps. The 30s
-    // default used elsewhere in this series is for fast single git/gh invocations.
-    execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
+  // The branch scans compare with the live main the alignment check just read from
+  // the pushed remote, never with a local tracking ref or a value left in the
+  // caller's environment. The steps inherit this process's environment, so the
+  // value is set for them here and the caller's value is put back after.
+  const callerBase = process.env[PUSH_BASE_OID_ENV];
+  if (alignmentReceipt) process.env[PUSH_BASE_OID_ENV] = alignmentReceipt.remoteMainOid;
+  else delete process.env[PUSH_BASE_OID_ENV];
+  try {
+    for (const script of commands) {
+      console.error(`pre-push guard: running npm run ${script}`);
+      // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
+      // run for minutes — 600s bounds a hang without tripping real steps. The 30s
+      // default used elsewhere in this series is for fast single git/gh invocations.
+      execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
+    }
+  } finally {
+    if (callerBase === undefined) delete process.env[PUSH_BASE_OID_ENV];
+    else process.env[PUSH_BASE_OID_ENV] = callerBase;
   }
 
   if (alignmentReceipt) {

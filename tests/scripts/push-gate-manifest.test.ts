@@ -237,6 +237,19 @@ describe('push-gate manifest registry (#2224)', () => {
     }
   });
 
+  it('passes the live push base through to the branch-diff steps', async () => {
+    const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
+    const { PUSH_BASE_OID_ENV } = await import('../../scripts/lib/guard-core.ts');
+    const priorValue = process.env[PUSH_BASE_OID_ENV];
+    process.env[PUSH_BASE_OID_ENV] = 'b'.repeat(40);
+    try {
+      expect(pushGateChildEnv()[PUSH_BASE_OID_ENV]).toBe('b'.repeat(40));
+    } finally {
+      if (priorValue === undefined) delete process.env[PUSH_BASE_OID_ENV];
+      else process.env[PUSH_BASE_OID_ENV] = priorValue;
+    }
+  });
+
   it('every env var a gate step reads survives the child allowlist', async () => {
     const { pushGateChildEnv } = await import('../../scripts/push-gate.ts');
     const source = readFileSync('scripts/full-suite-battery.ts', 'utf8');

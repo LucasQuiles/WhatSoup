@@ -5,12 +5,14 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { TextDecoder, types as utilTypes } from 'node:util';
 import {
+  DISCLOSURE_PATCH_FLAGS,
   git,
   isDocumentationEmailFixture,
   isGitHubSshTransportPrincipal,
   isOperationalProtocolToken,
   normalizeRepoPath,
   operationalReleaseHygieneFiles,
+  PUSH_BASE_OID_ENV,
 } from './lib/guard-core.ts';
 import {
   ExactGitInputError,
@@ -193,11 +195,25 @@ export function unquoteGitPath(raw: string): string {
 }
 
 export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
-  const addedLines: AddedLine[] = [];
+  return [...iterateUnifiedDiffAddedLines(diff)];
+}
+
+/**
+ * The added lines of a unified diff, one at a time and without splitting the
+ * whole patch first, so a caller with a line limit can stop part way through.
+ */
+export function* iterateUnifiedDiffAddedLines(diff: string): Generator<AddedLine> {
   let filePath: string | null = null;
   let nextLine = 0;
 
-  for (const rawLine of diff.split(/\r?\n/)) {
+  for (let start = 0; start <= diff.length;) {
+    const newline = diff.indexOf('\n', start);
+    const end = newline === -1 ? diff.length : newline;
+    // The same lines as split(/\r?\n/): a CR is dropped only before a LF.
+    const rawLine = newline !== -1 && end > start && diff.charCodeAt(end - 1) === 0x0d
+      ? diff.slice(start, end - 1)
+      : diff.slice(start, end);
+    start = end + 1;
     if (rawLine.startsWith('+++ ')) {
       const candidate = unquoteGitPath(rawLine.slice(4).trim());
       filePath = candidate === '/dev/null' ? null : stripDiffPath(candidate);
@@ -212,16 +228,13 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
 
     if (!filePath || nextLine === 0) continue;
     if (rawLine.startsWith('+')) {
-      addedLines.push({ filePath, line: nextLine, text: rawLine.slice(1) });
+      yield { filePath, line: nextLine, text: rawLine.slice(1) };
       nextLine += 1;
     } else if (rawLine.startsWith(' ')) {
       nextLine += 1;
     }
   }
-
-  return addedLines;
 }
-
 
 function isInertMarkdownPath(filePath: string): boolean {
   return /\.(?:md|markdown)$/i.test(filePath);
@@ -349,7 +362,7 @@ export function scanCommitMessage(message: string): GuardIssue[] {
 }
 
 function stagedDiff(cwd: string): string {
-  return git(['diff', '--cached', '--unified=0', '--no-ext-diff'], cwd);
+  return git(['diff', '--cached', '--unified=0', ...DISCLOSURE_PATCH_FLAGS], cwd);
 }
 
 function stagedFilePaths(cwd: string): string[] {
@@ -467,7 +480,7 @@ export function scanCommitHistory(cwd: string, depth: number): GuardIssue[] {
   for (const sha of shas) {
     // --unified=0, no-ext-diff for added lines only; -m flattens merge diffs.
     const diff = git(
-      ['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha],
+      ['show', '--format=', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '-m', sha],
       cwd,
     );
     for (const line of parseUnifiedDiffAddedLines(diff)) {
@@ -504,22 +517,24 @@ export function baseRefFileLines(
   baseRef: string,
   filePath: string,
   cache: Map<string, Set<string>>,
+  timeout?: number,
 ): Set<string> {
   const cached = cache.get(filePath);
   if (cached) return cached;
   let lines = new Set<string>();
   // ls-tree is quiet for paths absent at the base (empty output, no stderr), so a
   // branch-new file never emits a `fatal: path ... not in <base>` line. Only read the
-  // blob when the path exists at the base.
+  // blob when the path exists at the base. A failed or timed-out read leaves the set
+  // empty, so every line of the file is scanned: a failure can only add findings.
   let existsAtBase = false;
   try {
-    existsAtBase = git(['ls-tree', baseRef, '--', filePath], cwd).trim() !== '';
+    existsAtBase = git(['ls-tree', baseRef, '--', filePath], cwd, timeout).trim() !== '';
   } catch {
     existsAtBase = false;
   }
   if (existsAtBase) {
     try {
-      lines = new Set(git(['show', `${baseRef}:${filePath}`], cwd).split(/\r?\n/));
+      lines = new Set(git(['show', `${baseRef}:${filePath}`], cwd, timeout).split(/\r?\n/));
     } catch {
       lines = new Set();
     }
@@ -535,7 +550,7 @@ function scanBranchCommitSecretLines(
   baseLineCache?: Map<string, Set<string>>,
 ): GuardIssue[] {
   const issues: GuardIssue[] = [];
-  const diff = git(['show', '--format=', '--unified=0', '--no-ext-diff', '-m', sha], cwd);
+  const diff = git(['show', '--format=', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '-m', sha], cwd);
 
   for (const line of parseUnifiedDiffAddedLines(diff)) {
     const filePath = normalizeRepoPath(line.filePath);
@@ -651,8 +666,43 @@ function gitRefExists(cwd: string, ref: string): boolean {
   }
 }
 
+const FULL_OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function commitOid(cwd: string, ref: string): string | null {
+  try {
+    return git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], cwd).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The base a branch scan compares with. In the push hook it is the live main that
+ * pre-push-guard proved (PUSH_BASE_OID_ENV), and nothing else: a local tracking ref
+ * can be stale, set by hand, or belong to a remote other than the one pushed to,
+ * and a base that already holds a line hides it as published. origin/main is not
+ * consulted then, and a --base or GITHUB_BASE_REF naming another commit is refused.
+ */
 export function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | null {
   const explicitBaseRef = requestedBaseRef?.trim();
+  const githubBaseRef = process.env.GITHUB_BASE_REF?.trim();
+  const pushBaseOid = process.env[PUSH_BASE_OID_ENV]?.trim();
+  if (pushBaseOid) {
+    if (!FULL_OBJECT_ID.test(pushBaseOid) || commitOid(cwd, pushBaseOid) !== pushBaseOid) {
+      throw new Error(`${PUSH_BASE_OID_ENV} is not a full id of a commit in this repository: ${pushBaseOid}`);
+    }
+    const overrides: [string, string | undefined][] = [
+      ['--base', explicitBaseRef],
+      ['GITHUB_BASE_REF', githubBaseRef ? `origin/${githubBaseRef}` : undefined],
+    ];
+    for (const [source, ref] of overrides) {
+      if (ref && commitOid(cwd, ref) !== pushBaseOid) {
+        throw new Error(`${source} ${ref} is not the live push base ${pushBaseOid}; refusing to scan against it`);
+      }
+    }
+    return pushBaseOid;
+  }
+
   if (explicitBaseRef) {
     if (!gitRefExists(cwd, explicitBaseRef)) {
       throw new Error(`--base ref does not exist: ${explicitBaseRef}`);
@@ -660,7 +710,6 @@ export function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): strin
     return explicitBaseRef;
   }
 
-  const githubBaseRef = process.env.GITHUB_BASE_REF?.trim();
   if (githubBaseRef && gitRefExists(cwd, `origin/${githubBaseRef}`)) {
     return `origin/${githubBaseRef}`;
   }
@@ -699,7 +748,7 @@ export function scanBranchDiff(cwd: string, requestedBaseRef?: string): GuardIss
     .split(/\r?\n/)
     .filter(Boolean)
     .map(normalizeRepoPath);
-  const diff = git(['diff', '--unified=0', '--no-ext-diff', `${mergeBase}..HEAD`], cwd);
+  const diff = git(['diff', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, `${mergeBase}..HEAD`], cwd);
 
   const finalDiffIssues = [
     ...sensitiveArtifactIssues(

@@ -4,10 +4,10 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
+import { cleanGitEnv, PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
 import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
 import {
@@ -23,6 +23,7 @@ import {
   run,
   scanAddedLines,
   scanBranchDiff,
+  scanCommitHistory,
   scanCommitMessage,
   scanCommitAuthors,
   scanContentLines,
@@ -190,6 +191,13 @@ describe('repo hygiene guard', () => {
     ].join('\n'));
 
     expect(lines.map((line) => line.filePath)).toEqual(['src/a\tb.ts', 'src/caf\u00e9.ts', 'src/q"u\\o.ts']);
+  });
+
+  it('splits lines as /\\r?\\n/ does: a CR goes only before a LF, and a last line needs no newline', () => {
+    const diff = '+++ b/src/a.ts\r\n@@ -0,0 +1,4 @@\r\n+first\r\n+second\r\r\n+\r\n+last\r';
+
+    expect(parseUnifiedDiffAddedLines(diff).map((line) => line.text)).toEqual(['first', 'second\r', '', 'last\r']);
+    expect(parseUnifiedDiffAddedLines(diff).map((line) => line.line)).toEqual([1, 2, 3, 4]);
   });
 
   it('flags focused tests and real-shaped group identifiers in staged added lines', () => {
@@ -969,6 +977,97 @@ The migrated group was 1203631234567890@g.us.
 
     expect(issues.map((issue) => issue.code)).toEqual(['branch-history-sensitive-artifact']);
     expect(issues[0].message).toContain('branch history');
+  });
+
+  describe('lines in a file Git would print as a binary difference', () => {
+    const phoneLine = "export const phone = '+447123456789';\n";
+    const secretLine = 'WEBHOOK_SECRET=a3f1c9d2e84b076f5a192c3e7d408b1f\n';
+    const binaryMarkedRepo = () => {
+      const repo = makeBranchRepo();
+      writeFileSync(join(repo, '.gitattributes'), '*.ts -diff\n');
+      commitAll(repo, 'test: mark sources as binary');
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      return repo;
+    };
+
+    it('flags a line the final branch diff adds, not only through the history scan', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'leak.ts'), phoneLine);
+      commitAll(repo, 'test: binary-marked branch fixture');
+
+      expect(gitOutput(repo, ['diff', 'main..HEAD', '--', 'src/leak.ts'])).toContain('Binary files');
+      const issues = scanBranchDiff(repo, 'main');
+      expect(issues.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(issues[0].message).not.toContain('[branch history');
+    });
+
+    it('flags a secret-shaped line added and removed within the branch', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'transient.ts'), secretLine);
+      commitAll(repo, 'test: binary-marked transient fixture');
+      git(repo, ['rm', 'src/transient.ts']);
+      git(repo, ['commit', '-m', 'test: remove binary-marked transient fixture']);
+
+      const issues = scanBranchDiff(repo, 'main');
+      expect(issues.map((issue) => issue.code)).toEqual(['secret-assignment']);
+      expect(issues[0].message).toContain('[branch history');
+    });
+
+    it('flags a staged line', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'leak.ts'), phoneLine);
+      git(repo, ['add', 'src/leak.ts']);
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      expect(gitOutput(repo, ['diff', '--cached', '--', 'src/leak.ts'])).toContain('Binary files');
+      expect(run(['--staged'], repo).map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
+
+    it('flags a secret-shaped line in the advisory history scan', () => {
+      const repo = binaryMarkedRepo();
+      writeFileSync(join(repo, 'src', 'transient.ts'), secretLine);
+      commitAll(repo, 'test: binary-marked history fixture');
+
+      expect(scanCommitHistory(repo, 5).map((issue) => issue.code)).toEqual(['secret-assignment']);
+    });
+  });
+
+  describe('branch-diff base in the push hook', () => {
+    // Hosted CI sets GITHUB_BASE_REF for the whole job; each case sets what it needs.
+    beforeEach(() => {
+      vi.stubEnv('GITHUB_BASE_REF', '');
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    // origin/main stands for any local base that already holds the branch's line.
+    const repoWithBaseHoldingTheLine = () => {
+      const repo = makeBranchRepo();
+      const liveBase = gitOutput(repo, ['rev-parse', 'main']);
+      mkdirSync(join(repo, 'src'), { recursive: true });
+      writeFileSync(join(repo, 'src', 'leak.ts'), "export const phone = '+447123456789';\n");
+      commitAll(repo, 'test: branch leak fixture');
+      git(repo, ['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+      return { repo, liveBase };
+    };
+
+    it('compares with the live push base, not a local base that already holds the line', () => {
+      const { repo, liveBase } = repoWithBaseHoldingTheLine();
+
+      expect(scanBranchDiff(repo)).toEqual([]);
+      vi.stubEnv(PUSH_BASE_OID_ENV, liveBase);
+      expect(scanBranchDiff(repo).map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
+
+    it('refuses a --base that names another commit than the live push base', () => {
+      const { repo, liveBase } = repoWithBaseHoldingTheLine();
+      vi.stubEnv(PUSH_BASE_OID_ENV, liveBase);
+
+      expect(() => scanBranchDiff(repo, 'origin/main')).toThrow(`--base origin/main is not the live push base ${liveBase}`);
+      expect(scanBranchDiff(repo, 'main').map((issue) => issue.code)).toEqual(['operator-phone']);
+    });
   });
 
   // Subprocess-heavy fixture repos brush the global 10s budget under host

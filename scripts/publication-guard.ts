@@ -16,6 +16,7 @@ import {
   isGitHubSshTransportPrincipal,
   isOperationalProtocolToken,
   operationalReleaseHygieneFiles,
+  PUSH_BASE_OID_ENV,
 } from './lib/guard-core.ts';
 import {
   ExactGitInputError,
@@ -622,8 +623,9 @@ export function validateBranchDiff(
   baseRef: string,
   limits: Readonly<BranchScanLimits> = BRANCH_SCAN_LIMITS,
   head = 'HEAD',
+  now: () => number = Date.now,
 ): BranchDiffResult<GuardIssue> {
-  return scanBranchRange(cwd, baseRef, scanTextForPrivateLiterals, limits, head);
+  return scanBranchRange(cwd, baseRef, scanTextForPrivateLiterals, limits, head, now);
 }
 
 function validateRelease(cwd: string): GuardIssue[] {
@@ -740,7 +742,15 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     }
   }
 
-  const branchBase = args.mode === 'branch-diff' ? branchDiffBaseRef(cwd) : null;
+  let branchBase: string | null = null;
+  if (args.mode === 'branch-diff') {
+    try {
+      branchBase = branchDiffBaseRef(cwd);
+    } catch (err) {
+      console.error(`publication-guard: INCONCLUSIVE — ${(err as Error).message}`);
+      return 2;
+    }
+  }
   if (args.mode === 'branch-diff' && branchBase === null) {
     console.error('publication-guard: INCONCLUSIVE — no base ref to compare this branch with; fetch origin/main.');
     return 2;
@@ -789,11 +799,12 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
       console.log('  scope: lines this branch adds relative to its base, in every commit — history lines already on the base are NOT flagged');
       // The counts show the scan read something; a zero-commit range is a push of the base itself.
       const { used } = branchResult;
+      console.log(`  base: ${branchBase}${process.env[PUSH_BASE_OID_ENV] ? ' (the live push base)' : ''}`);
       console.log(
         `  read: ${used.commits} commits, ${used.patchBytes} patch bytes, ${used.addedLines} added lines, ` +
-          `${used.baseBlobs} base files (${used.baseBytes} bytes); limits ${BRANCH_SCAN_LIMITS.commits} / ` +
-          `${BRANCH_SCAN_LIMITS.patchBytes} / ${BRANCH_SCAN_LIMITS.addedLines} / ${BRANCH_SCAN_LIMITS.baseBlobs} / ` +
-          `${BRANCH_SCAN_LIMITS.baseBytes}`,
+          `${used.baseBlobs} base files (${used.baseBytes} bytes) in ${used.milliseconds} ms; limits ` +
+          `${BRANCH_SCAN_LIMITS.commits} / ${BRANCH_SCAN_LIMITS.patchBytes} / ${BRANCH_SCAN_LIMITS.addedLines} / ` +
+          `${BRANCH_SCAN_LIMITS.baseBlobs} / ${BRANCH_SCAN_LIMITS.baseBytes} / ${BRANCH_SCAN_LIMITS.milliseconds} ms`,
       );
     }
   }

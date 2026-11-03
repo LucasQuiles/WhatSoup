@@ -28,6 +28,7 @@ import {
   pushGateGuards as pushGateGuardsOf,
 } from '../helpers/gate-membership.ts';
 import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
+import { PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
@@ -352,6 +353,50 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         'after',
       ]);
     });
+  });
+
+  it('passes the live main from the alignment check to the gate steps, replacing an inherited value', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'whatsoup-pre-push-guard-base-'));
+    const bin = resolve(root, 'bin');
+    const callsLog = resolve(root, 'npm-calls.log');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(resolve(bin, 'npm'), [
+      '#!/bin/sh',
+      `printf "%s base=%s\\n" "$*" "\${${PUSH_BASE_OID_ENV}-unset}" >> "${callsLog}"`,
+      'exit 0',
+      '',
+    ].join('\n'));
+    chmodSync(resolve(bin, 'npm'), 0o755);
+    vi.stubEnv('PATH', `${bin}:${process.env['PATH'] ?? ''}`);
+    vi.stubEnv(PUSH_BASE_OID_ENV, 'c'.repeat(40));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const receipt = {
+      schemaVersion: 1 as const,
+      remoteName: 'upstream',
+      remoteUrlDigest: 'd'.repeat(64),
+      candidateOid: 'a'.repeat(40),
+      headOid: 'a'.repeat(40),
+      remoteMainOid: 'b'.repeat(40),
+    };
+    const input = `refs/heads/feature/example ${'a'.repeat(40)} refs/heads/feature/example ${ZERO_SHA}`;
+    try {
+      runPrePushGuard(input, repoRoot, {
+        assertConsoleDependencies: () => {},
+        verifyAlignmentBefore: () => receipt,
+        verifyAlignmentAfter: () => {},
+      }, { remoteName: 'upstream', remoteUrl: 'git@github.com:LucasQuiles/WhatSoup.git' });
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toContain(`run verify:push:fast base=${'b'.repeat(40)}`);
+      expect(process.env[PUSH_BASE_OID_ENV]).toBe('c'.repeat(40));
+
+      writeFileSync(callsLog, '');
+      runPrePushGuard(input, repoRoot, { assertConsoleDependencies: () => {} });
+      expect(readFileSync(callsLog, 'utf8').trim().split('\n')).toContain('run verify:push:fast base=unset');
+      expect(process.env[PUSH_BASE_OID_ENV]).toBe('c'.repeat(40));
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('fails before release verification when required console executables are missing', () => {

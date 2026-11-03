@@ -947,9 +947,26 @@ export function listStagedFiles(cwd: string, diffFilter: string): string[] {
   return gitList(['diff', '--cached', '--name-only', `--diff-filter=${diffFilter}`], cwd);
 }
 
+/**
+ * Flags for every patch a disclosure scan reads. Git prints only "Binary files ...
+ * differ" for a file it takes as binary, so without `--text` a branch-controlled
+ * `.gitattributes` rule (`-diff`, `binary`) or a NUL byte in a file's first 8000
+ * bytes hides every line that file adds. The other flags pin the output against
+ * user config: an external diff or a textconv driver rewrites the text, and
+ * `color.ui=always` hides the `+` markers.
+ */
+export const DISCLOSURE_PATCH_FLAGS = ['--text', '--no-ext-diff', '--no-textconv', '--no-color'] as const;
+
+/**
+ * The live main the push hook proved. pre-push-guard reads it from the pushed
+ * remote's configured URL and passes it to the gate steps, so a branch scan
+ * compares with what is public rather than with a local tracking ref.
+ */
+export const PUSH_BASE_OID_ENV = 'WHATSOUP_PUSH_BASE_OID';
+
 export function readStagedAddedLines(cwd: string, filePath: string): string {
   try {
-    return execFileSync('git', ['diff', '--cached', '--unified=0', '--', filePath], {
+    return execFileSync('git', ['diff', '--cached', '--unified=0', ...DISCLOSURE_PATCH_FLAGS, '--', filePath], {
       cwd,
       encoding: 'utf8',
       env: cleanGitEnv(),
