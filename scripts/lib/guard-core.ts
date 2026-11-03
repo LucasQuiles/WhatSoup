@@ -989,18 +989,18 @@ function isFormatBlob(format: (typeof VERIFIED_BINARY_FORMATS)[number], blob: Ui
   return blob.subarray(0, GIT_BINARY_PROBE_BYTES).includes(0);
 }
 
-/** The blob `blobSpec` names, or an empty buffer when it cannot be read as a blob. */
-function readBlob(cwd: string, blobSpec: string): Buffer {
+/** The blob `blobSpec` names, or an empty buffer when it cannot be read as a blob in time. */
+function readBlob(cwd: string, blobSpec: string, timeout: number): Buffer {
   try {
     return execFileSync('git', ['cat-file', 'blob', blobSpec], {
       cwd,
       env: cleanGitEnv(),
       maxBuffer: 64 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 30_000,
+      timeout,
     });
   } catch {
-    return Buffer.alloc(0); // unreadable, or not a blob (a submodule commit): scanned
+    return Buffer.alloc(0); // unreadable, too slow, or not a blob (a submodule commit): scanned
   }
 }
 
@@ -1008,9 +1008,13 @@ function readBlob(cwd: string, blobSpec: string): Buffer {
  * The one test every disclosure scan uses to skip a file's added lines. `blobSpec`
  * names the file's new content: the blob id from the patch's `index` line, or
  * `:<path>` for the staged copy. Without one, the file is scanned. Verdicts are
- * cached per blob for the life of the returned function.
+ * cached per blob for the life of the returned function. `timeout` gives each blob
+ * read its time in milliseconds; a scan with a time limit passes the time it has left.
  */
-export function createVerifiedBinaryCheck(cwd: string): (filePath: string, blobSpec: string | undefined) => boolean {
+export function createVerifiedBinaryCheck(
+  cwd: string,
+  timeout: () => number = () => 30_000,
+): (filePath: string, blobSpec: string | undefined) => boolean {
   const verdicts = new Map<string, boolean>();
   return (filePath, blobSpec) => {
     if (!blobSpec) return false;
@@ -1019,7 +1023,7 @@ export function createVerifiedBinaryCheck(cwd: string): (filePath: string, blobS
     const key = `${format.extension}\0${blobSpec}`;
     let verdict = verdicts.get(key);
     if (verdict === undefined) {
-      verdict = isFormatBlob(format, readBlob(cwd, blobSpec));
+      verdict = isFormatBlob(format, readBlob(cwd, blobSpec, timeout()));
       verdicts.set(key, verdict);
     }
     return verdict;

@@ -120,7 +120,7 @@ export function scanBranchRange<Issue extends { line?: number }>(
     const patchStop = overLimit();
     if (patchStop) return patchStop;
 
-    const isVerifiedBinary = createVerifiedBinaryCheck(cwd);
+    const isVerifiedBinary = createVerifiedBinaryCheck(cwd, timeLeft);
     const matches = new Map<string, { filePath: string; line: number; text: string; found: Issue[] }>();
     for (const added of iterateUnifiedDiffAddedLines(patches)) {
       used.addedLines += 1;
@@ -133,6 +133,9 @@ export function scanBranchRange<Issue extends { line?: number }>(
       const found = scanLine(filePath, added.text);
       if (found.length > 0) matches.set(key, { filePath, line: added.line, text: added.text, found });
     }
+    // A blob read on the last line can use the time left, so check once more.
+    const loopStop = overLimit();
+    if (loopStop) return loopStop;
 
     const baseLines = new Map<string, Set<string>>();
     const issues: Issue[] = [];

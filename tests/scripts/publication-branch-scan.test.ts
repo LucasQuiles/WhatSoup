@@ -214,23 +214,41 @@ describe('publication branch scan — line and time limits', () => {
     expect(scanned).toHaveLength(3);
   });
 
-  it('gives a git read only the time left, so a hung read is INCONCLUSIVE within the limit', () => {
-    const { repo } = branchRepo();
-    commitFile(repo, 'src/note.ts', '// clean\n', 'clean work');
+  /** Put a git on PATH that sleeps for the reads `hangs` matches and runs the real git otherwise. */
+  const hangGitReads = (repo: string, hangs: string) => {
     const realGit = execFileSync('which', ['git'], { encoding: 'utf8', env: cleanGitEnv() }).trim();
     const binDir = join(repo, 'fake-bin');
     mkdirSync(binDir);
     writeFileSync(join(binDir, 'git'), `#!/usr/bin/env bash
-if [[ "$1" == "log" ]]; then exec sleep 5; fi
+if [[ ${hangs} ]]; then exec sleep 5; fi
 exec '${realGit.replaceAll("'", "'\\''")}' "$@"
 `);
     chmodSync(join(binDir, 'git'), 0o755);
     vi.stubEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`);
+  };
+
+  it('gives a git read only the time left, so a hung read is INCONCLUSIVE within the limit', () => {
+    const { repo } = branchRepo();
+    commitFile(repo, 'src/note.ts', '// clean\n', 'clean work');
+    hangGitReads(repo, '"$1" == "log"');
     const started = Date.now();
 
     const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, milliseconds: 1_000 });
 
     expect('inconclusive' in stopped && stopped.inconclusive).toContain('a git read failed');
+    expect(Date.now() - started).toBeLessThan(4_000);
+  });
+
+  it('gives a blob read for the verified-binary check only the time left, and is INCONCLUSIVE when it runs out', () => {
+    const { repo } = branchRepo();
+    // A small verified PNG: signature, a header length that starts with a NUL, nothing a rule matches.
+    commitFile(repo, 'assets/dot.png', Buffer.concat([Buffer.from(PNG_SIGNATURE), Buffer.from([0, 0, 0, 0x0d]), Buffer.from('IHDR\n')]), 'image');
+    hangGitReads(repo, '"$1" == "cat-file" && "$2" == "blob"');
+    const started = Date.now();
+
+    const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, milliseconds: 1_000 });
+
+    expect('inconclusive' in stopped && stopped.inconclusive).toMatch(/^milliseconds \d+ is over the limit of 1000$/);
     expect(Date.now() - started).toBeLessThan(4_000);
   });
 });
