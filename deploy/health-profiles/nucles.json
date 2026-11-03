@@ -13,12 +13,6 @@
   "expectRuntimeManifest": true,
   "sourceUpdateAccessMode": "enforce",
   "expectPrimaryPhoneVerification": true,
-  "expectRustDesk": true,
-  "rustDeskCommand": "/usr/bin/rustdesk",
-  "rustDeskService": "rustdesk.service",
-  "rustDeskServiceScope": "system",
-  "rustDeskDirectPort": 21118,
-  "rustDeskRendezvous": "rs-ny.rustdesk.com:21116",
   "requiredCredentialFiles": [
     "bot-errors.env",
     "fleet-tokens.json",
