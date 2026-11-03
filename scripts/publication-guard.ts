@@ -20,8 +20,6 @@ import {
 import {
   ExactGitInputError,
   MAX_EXACT_ADDED_LINE_BUDGET_V1,
-  MAX_EXACT_ADDED_LINE_COUNT,
-  MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
   MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
   MAX_EXACT_AGGREGATE_BLOB_BYTES,
   MAX_EXACT_BLOB_COUNT,
@@ -608,7 +606,7 @@ function validateAll(cwd: string): GuardIssue[] {
   return issues;
 }
 
-type BranchDiffResult = { issues: GuardIssue[] } | { inconclusive: string };
+export type BranchDiffResult = { issues: GuardIssue[]; used: BranchScanLimits } | { inconclusive: string };
 
 export interface BranchScanLimits {
   commits: number;
@@ -618,11 +616,19 @@ export interface BranchScanLimits {
   baseBytes: number;
 }
 
-/** The shared exact-input limits (git-input-core.ts), applied to the branch scan's own reads. */
+/**
+ * Limits on the branch scan's reads. Commit, base-blob and base-byte limits are the
+ * shared exact-input constants (git-input-core.ts). The patch and added-line limits
+ * are not: the exact-range patch limits (16 MiB, 100,000 lines) would refuse real PRs.
+ * Over the last 200 PR ranges merged to main (measured 2026-11-03), the largest was
+ * 353,042 added lines in 18.8 MB of patches (PR #3224), scanned in under 1 s. The
+ * patch limit is the git() output ceiling, so a larger patch fails its read first;
+ * the added-line limit leaves about five times that PR's count.
+ */
 export const BRANCH_SCAN_LIMITS: Readonly<BranchScanLimits> = Object.freeze({
   commits: MAX_EXACT_COMMIT_COUNT,
-  patchBytes: MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
-  addedLines: MAX_EXACT_ADDED_LINE_COUNT,
+  patchBytes: 64 * 1024 * 1024,
+  addedLines: 2_000_000,
   baseBlobs: MAX_EXACT_BLOB_COUNT,
   baseBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
 });
@@ -660,11 +666,13 @@ function baseBlobByteCount(cwd: string, baseRef: string, filePath: string): numb
  * base is skipped, the rule the repo-hygiene branch scan uses: such content is
  * already published. Only matching lines need that base read. Reads stop at
  * BRANCH_SCAN_LIMITS; a stop or a failed read is INCONCLUSIVE, never a pass.
+ * `head` defaults to HEAD; naming a commit scans a range without checking it out.
  */
-function validateBranchDiff(
+export function validateBranchDiff(
   cwd: string,
   baseRef: string,
   limits: Readonly<BranchScanLimits> = BRANCH_SCAN_LIMITS,
+  head = 'HEAD',
 ): BranchDiffResult {
   const used: BranchScanLimits = { commits: 0, patchBytes: 0, addedLines: 0, baseBlobs: 0, baseBytes: 0 };
   const overLimit = (): BranchDiffResult | null => {
@@ -672,8 +680,8 @@ function validateBranchDiff(
     return key === null ? null : { inconclusive: `${key} ${used[key]} is over the limit of ${limits[key]}` };
   };
   try {
-    const mergeBase = git(['merge-base', baseRef, 'HEAD'], cwd).trim();
-    const range = `${mergeBase}..HEAD`;
+    const mergeBase = git(['merge-base', baseRef, head], cwd).trim();
+    const range = `${mergeBase}..${head}`;
     used.commits = Number(git(['rev-list', '--count', range], cwd).trim());
     const commitStop = overLimit();
     if (commitStop) return commitStop;
@@ -710,7 +718,7 @@ function validateBranchDiff(
       if (baseRefFileLines(cwd, baseRef, match.filePath, baseLines).has(match.text)) continue;
       issues.push(...match.found.map((issue) => ({ ...issue, line: match.line })));
     }
-    return { issues };
+    return { issues, used };
   } catch (error) {
     return { inconclusive: `a git read failed: ${String((error as Error).message).split('\n')[0]}` };
   }
@@ -875,8 +883,16 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     if (args.mode === 'staged') {
       console.log('  scope: staged added lines only — pre-existing repo content is NOT scanned');
     }
-    if (args.mode === 'branch-diff') {
+    if (args.mode === 'branch-diff' && branchResult !== null && 'used' in branchResult) {
       console.log('  scope: lines this branch adds relative to its base, in every commit — history lines already on the base are NOT flagged');
+      // The counts show the scan read something; a zero-commit range is a push of the base itself.
+      const { used } = branchResult;
+      console.log(
+        `  read: ${used.commits} commits, ${used.patchBytes} patch bytes, ${used.addedLines} added lines, ` +
+          `${used.baseBlobs} base files (${used.baseBytes} bytes); limits ${BRANCH_SCAN_LIMITS.commits} / ` +
+          `${BRANCH_SCAN_LIMITS.patchBytes} / ${BRANCH_SCAN_LIMITS.addedLines} / ${BRANCH_SCAN_LIMITS.baseBlobs} / ` +
+          `${BRANCH_SCAN_LIMITS.baseBytes}`,
+      );
     }
   }
   return 0;

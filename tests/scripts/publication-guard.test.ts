@@ -8,8 +8,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
-  MAX_EXACT_ADDED_LINE_COUNT,
-  MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
   MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
   MAX_EXACT_AGGREGATE_BLOB_BYTES,
   MAX_EXACT_BLOB_COUNT,
@@ -30,6 +28,7 @@ import {
   BRANCH_SCAN_LIMITS,
   branchScanOverLimit,
   type BranchScanLimits,
+  validateBranchDiff,
   publicationPolicyProjectionCoverage,
   runPublicationGuard,
   scanTextForPrivateLiterals,
@@ -375,6 +374,7 @@ describe('publication guard branch-diff mode', () => {
 
     expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
     expect(log.mock.calls.join('\n')).toContain('scope: lines this branch adds');
+    expect(log.mock.calls.join('\n')).toMatch(/read: 1 commits, [1-9]\d* patch bytes, 1 added lines, 0 base files/);
   });
 
   it('is INCONCLUSIVE (exit 2) rather than a pass when no base ref can be resolved', () => {
@@ -450,29 +450,56 @@ describe('publication guard branch-diff mode', () => {
     expect(error.mock.calls.join('\n')).toContain('a git read failed');
   });
 
-  it('passes when HEAD is the base, as on a push to main', () => {
+  it('scans a named commit range without checking it out', () => {
     const repo = branchRepo();
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const literalOid = commitExactFile(repo, 'src/note.ts', `// ${privatePath}\n`, 'add literal');
+    git(repo, ['checkout', '--detach', 'origin/main']);
 
-    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
+    const atHead = validateBranchDiff(repo, 'origin/main');
+    const named = validateBranchDiff(repo, 'origin/main', BRANCH_SCAN_LIMITS, literalOid);
+
+    expect(atHead).toMatchObject({ issues: [], used: { commits: 0 } });
+    expect(named).toMatchObject({ used: { commits: 1, addedLines: 1 } });
+    expect('issues' in named && named.issues.map((issue) => issue.code)).toEqual(['local-home-path']);
   });
 
-  it('is INCONCLUSIVE (exit 2), not a pass, when the branch adds more lines than the limit', () => {
+  it('passes when HEAD is the base, as on a push to main', () => {
     const repo = branchRepo();
-    commitExactFile(repo, 'src/bulk.txt', 'x\n'.repeat(MAX_EXACT_ADDED_LINE_COUNT + 1), 'bulk');
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
-    expect(error.mock.calls.join('\n')).toContain(`addedLines ${MAX_EXACT_ADDED_LINE_COUNT + 1} is over the limit`);
-  }, 30_000);
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
+    expect(log.mock.calls.join('\n')).toContain('read: 0 commits, 0 patch bytes, 0 added lines');
+  });
+
+  it.each([
+    ['commits', { commits: 0 }, 'commits 1 is over the limit of 0'],
+    ['patchBytes', { patchBytes: 10 }, 'patchBytes'],
+    ['addedLines', { addedLines: 5 }, 'addedLines 6 is over the limit of 5'],
+    ['baseBlobs', { baseBlobs: 0 }, 'baseBlobs 1 is over the limit of 0'],
+    ['baseBytes', { baseBytes: 1 }, 'baseBytes'],
+  ] as const)('is INCONCLUSIVE, not a pass, when %s passes its limit', (_key, override, expected) => {
+    const repo = branchRepo();
+    // On the base: a literal line, so the branch's copy of it needs a base read.
+    commitExactFile(repo, 'src/old.ts', `// ${privatePath}\n`, 'published earlier');
+    git(repo, ['update-ref', 'refs/remotes/origin/main', gitOutput(repo, ['rev-parse', 'HEAD'])]);
+    // The first line stays as context; the six after it are added, the last a copy of the base literal.
+    commitExactFile(repo, 'src/old.ts', `// ${privatePath}\n// a\n// b\n// c\n// d\n// e\n// ${privatePath}\n`, 'six added lines');
+
+    expect(validateBranchDiff(repo, 'origin/main')).toMatchObject({
+      issues: [],
+      used: { commits: 1, addedLines: 6, baseBlobs: 1 },
+    });
+    const stopped = validateBranchDiff(repo, 'origin/main', { ...BRANCH_SCAN_LIMITS, ...override });
+    expect('inconclusive' in stopped && stopped.inconclusive).toContain(expected);
+  });
 });
 
 describe('publication guard branch-diff limits', () => {
-  it('takes every limit from the shared exact-input constants', () => {
+  it('keeps the shared exact-input limits for commits and base reads, and sized limits for patches', () => {
     expect(BRANCH_SCAN_LIMITS).toEqual({
       commits: MAX_EXACT_COMMIT_COUNT,
-      patchBytes: MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
-      addedLines: MAX_EXACT_ADDED_LINE_COUNT,
+      patchBytes: 64 * 1024 * 1024,
+      addedLines: 2_000_000,
       baseBlobs: MAX_EXACT_BLOB_COUNT,
       baseBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
     });
