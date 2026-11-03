@@ -185,8 +185,8 @@ session, outbound queue, FIFO identity, and reply-guarantee ownership remain att
 fails visibly instead of clearing the evidence needed for diagnosis or retry.
 
 Process shutdown then closes refresh-ahead admission and waits for tracked Claude
-refresh children to emit `close`. It retains this wait after the ten-minute caller
-hard cap. The wait ends two seconds before the shared ten-second shutdown deadline
+refresh children to emit `close`. It retains this wait after a child passes its
+ten-minute hard cap (`REFRESH_AHEAD_HARD_CAP_MS`). The wait ends two seconds before the shared ten-second shutdown deadline
 to leave time for transport and log cleanup. A pending child makes shutdown
 incomplete; the wait never signals the child or releases its credential-store claim.
 Fatal exceptions and rejected promises use that same shutdown watchdog.
