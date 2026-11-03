@@ -252,7 +252,7 @@ import {
 import {
   decideProviderEventAdmission,
   systemPurposeAllowsOutput,
-  type ProviderEventOwner,
+  resolveProviderEventOwner,
 } from './runtime-event-admission.ts';
 import {
   handleProviderFailureResult as handleProviderFailureResultWithPort,
@@ -6626,39 +6626,6 @@ export class AgentRuntime implements Runtime {
     this.bindActiveGlobalMcpConversation(chatJid);
   }
 
-  /**
-   * Handle events from a per_chat session — routes to that chat's outbound queue.
-   * Resolves queue and session locally from the mapKey to avoid mutating shared
-   * instance fields that another concurrent chat could overwrite.
-   */
-  private resolveProviderEventOwner(
-    event: AgentEvent,
-    logicalOwnerMatches: boolean,
-    systemTurn: PendingSystemTurnSnapshot | null,
-  ): { owner: ProviderEventOwner; systemTurn: PendingSystemTurnSnapshot | null } {
-    if (systemTurn) {
-      const systemOwner: ProviderEventOwner = {
-        kind: 'system_request',
-        purpose: systemTurn.purpose,
-      };
-      const systemDecision = decideProviderEventAdmission(event, systemOwner);
-      if (
-        event.type === 'result'
-        || !logicalOwnerMatches
-        || (event.type === 'compact_boundary' && systemDecision.admit)
-      ) {
-        return { owner: systemOwner, systemTurn };
-      }
-    }
-    if (logicalOwnerMatches) {
-      return { owner: { kind: 'logical_turn' }, systemTurn: null };
-    }
-    if (event.type === 'init') {
-      return { owner: { kind: 'session_accounting' }, systemTurn: null };
-    }
-    return { owner: { kind: 'none' }, systemTurn: null };
-  }
-
   private rejectProviderEvent(
     eventType: AgentEvent['type'],
     runtimeScope: 'per_chat' | 'singleton_shared',
@@ -7101,7 +7068,7 @@ export class AgentRuntime implements Runtime {
       && systemTurn.owner.managerId === managerId
       && systemTurn.owner.generation === generationOwner.generation
       && systemTurn.owner.toolScopeKey === toolScopeKey;
-    const resolved = this.resolveProviderEventOwner(
+    const resolved = resolveProviderEventOwner(
       event,
       logicalOwnerMatches,
       systemOwnerMatches ? systemTurn : null,
@@ -7178,6 +7145,16 @@ export class AgentRuntime implements Runtime {
     }
     const conversationKey = toConversationKey(queue.targetChatJid);
     const inboundSeq = this.perChatInboundSeqQueue.get(mapKey)?.[0];
+    if (
+      resolved.owner.kind === 'system_request'
+      && resolved.owner.purpose === 'respawn_continuation'
+      && runtimeContext !== null
+      && !runtimeOwnerMatches
+    ) {
+      // A crash flush can still be draining old chunks after the replacement
+      // generation starts. New output must not become that crashed turn's proof.
+      queue.detachTurnEvidence(runtimeContext.identity.logicalTurnId);
+    }
     this.handleEventWithContext(
       event,
       queue,
@@ -12161,7 +12138,7 @@ export class AgentRuntime implements Runtime {
       && systemTurn.owner.managerId === managerId
       && systemTurn.owner.generation === 1
       && systemTurn.owner.toolScopeKey === GLOBAL_TOOL_SCOPE_KEY;
-    const resolved = this.resolveProviderEventOwner(
+    const resolved = resolveProviderEventOwner(
       event,
       logicalOwnerMatches,
       systemOwnerMatches ? systemTurn : null,

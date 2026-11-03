@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import {
   decideProviderEventAdmission,
+  resolveProviderEventOwner,
   type ProviderEventOwner,
 } from '../../../src/runtimes/agent/runtime-event-admission.ts';
 import type { SystemTurnPurpose } from '../../../src/runtimes/agent/pending-system-result-tracker.ts';
@@ -26,6 +27,23 @@ const owner = (kind: ProviderEventOwner['kind']): ProviderEventOwner => {
 };
 
 describe('decideProviderEventAdmission', () => {
+  it.each(['poll_answer_continuation', 'proactive_resume_continuation', 'respawn_continuation'] as const)(
+    'preserves matching logical output and system-result precedence for %s',
+    (purpose) => {
+      const systemTurn = {
+        lease: { id: 1, scopeKey: 'chat' }, purpose,
+        owner: { managerId: 'manager', generation: 2, toolScopeKey: 'chat#2' }, blocking: true,
+      };
+      const text: AgentEvent = { type: 'assistant_text', text: 'answer' };
+      expect(resolveProviderEventOwner(text, true, systemTurn))
+        .toEqual({ owner: { kind: 'logical_turn' }, systemTurn: null });
+      expect(resolveProviderEventOwner(text, false, systemTurn))
+        .toEqual({ owner: { kind: 'system_request', purpose }, systemTurn });
+      expect(resolveProviderEventOwner({ type: 'result', text: 'answer' }, true, systemTurn))
+        .toEqual({ owner: { kind: 'system_request', purpose }, systemTurn });
+    },
+  );
+
   it('rejects every effect-bearing event without an owner', () => {
     for (const event of effectEvents) {
       expect(decideProviderEventAdmission(event, owner('none'))).toMatchObject({ admit: false });
