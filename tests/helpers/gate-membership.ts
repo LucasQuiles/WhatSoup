@@ -117,6 +117,10 @@ export const CI_EXEMPT_PUSH_GATE_GUARDS: Readonly<
     backedBy: 'tests/scripts/fault-taxonomy-source-coverage-guard.test.ts',
     why: 'its "passes on the live tree" test executes the exact guard script as a subprocess against REPO_ROOT in the full CI suite.',
   },
+  'guard:publication:branch-diff': {
+    backedBy: 'tests/scripts/publication-guard.test.ts',
+    why: 'runs the scan on fixture repos in the full suite. The scan of a real branch runs only in the push gates; no hosted step runs it.',
+  },
   'guard:publication:staged': {
     backedBy: null,
     why: 'quality.yml runs guard:publication:all (--all), which scans every tracked doc and is a strict superset of the --staged subset. No test backs this; the CI step does.',

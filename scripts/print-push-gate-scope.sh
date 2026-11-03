@@ -20,7 +20,8 @@ if [ "${1:-}" = "fast" ]; then
   cat <<'SCOPE'
 
 verify:push:fast scope: green covers ONLY the disclosure checks:
-  coverage: branch-diff repo hygiene + commit authors + publication scan of the tree
+  coverage: branch-diff repo hygiene + commit authors + publication audit table +
+            private-literal scan of the lines this branch adds
             (tests, typecheck and console build NOT run here; the required hosted
             checks run them and block merge; npm run verify:push:branch runs the
             complete local gate)

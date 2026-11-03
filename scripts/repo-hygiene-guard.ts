@@ -628,7 +628,7 @@ function gitRefExists(cwd: string, ref: string): boolean {
   }
 }
 
-function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | null {
+export function branchDiffBaseRef(cwd: string, requestedBaseRef?: string): string | null {
   const explicitBaseRef = requestedBaseRef?.trim();
   if (explicitBaseRef) {
     if (!gitRefExists(cwd, explicitBaseRef)) {

@@ -324,6 +324,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.guard-pr-metadata` | `npm run guard:pr-metadata` | `package.json` | stable | active | Validate a PR body from stdin, a local file, or the authoritative pull-request event against explicit marker-delimited closing directives and the exact candidate commit range; exits 0 pass/warn, 1 policy violation, 2 incomplete input; receipts contain only bounded codes and PR/issue numbers |
 | `cli:npm.guard-publication` | `npm run guard:publication` | `package.json` | stable | active | Publication audit guard (default mode) |
 | `cli:npm.guard-publication-all` | `npm run guard:publication:all` | `package.json` | stable | active | Verify tracked internal docs are represented in `docs/publication-audit.md` |
+| `cli:npm.guard-publication-branch-diff` | `npm run guard:publication:branch-diff` | `package.json` | stable | active | Scan the lines a branch adds relative to its base, in every non-merge commit and the final diff, for private literals. Exit 2 when no base ref resolves |
 | `cli:npm.guard-publication-release` | `npm run guard:publication:release` | `package.json` | stable | active | Verify tracked internal docs are public-clean before publication |
 | `cli:npm.guard-publication-staged` | `npm run guard:publication:staged` | `package.json` | stable | active | Publication audit guard for pre-commit use |
 | `cli:npm.guard-publication-write` | `npm run guard:publication:write` | `package.json` | stable | active | Rewrite `docs/publication-audit.md` into canonical form (writer, not a validator) |
@@ -406,7 +407,7 @@ scripts are public; build/test scripts are internal.
 | `cli:npm.verify-semantic` | `npm run verify:semantic` | `package.json` | beta | active | Manual enforcement adapter for semantic quality; not composed into required gates until a separately approved promotion |
 | `cli:npm.verify-semantic-shadow` | `npm run verify:semantic:shadow` | `package.json` | beta | active | Local/CI shadow adapter; emits findings and may retain a would-block receipt decision while exiting zero |
 | `cli:npm.verify-push-branch` | `npm run verify:push:branch` | `package.json` | stable | active | Complete local gate, run by hand before merge work; the pre-push hook uses it only when the pushed refs are unreadable |
-| `cli:npm.verify-push-fast` | `npm run verify:push:fast` | `package.json` | stable | active | Branch-push tier run by the pre-push hook: branch-diff repo hygiene, commit authors and the publication scan of the tree; builds nothing and runs no tests |
+| `cli:npm.verify-push-fast` | `npm run verify:push:fast` | `package.json` | stable | active | Branch-push tier run by the pre-push hook: branch-diff repo hygiene, commit authors, the publication audit table and a private-literal scan of the lines the branch adds; builds nothing and runs no tests |
 | `cli:npm.verify-release` | `npm run verify:release` | `package.json` | beta | active | Release-readiness verifier; surface still settling |
 | `cli:npm.verify-publish` | `npm run verify:publish` | `package.json` | beta | active | Strict public-publication prep gate; expected to fail until `PRIVATE-ARCHIVE` rows are removed, sanitized, or reclassified |
 

@@ -41,6 +41,7 @@
     "guard:pr-metadata": "bash scripts/run-with-pinned-node.sh scripts/pr-metadata-guard.ts",
     "guard:publication": "bash scripts/run-with-pinned-node.sh scripts/publication-guard.ts",
     "guard:publication:all": "npm run guard:publication -- --all",
+    "guard:publication:branch-diff": "npm run guard:publication -- --branch-diff",
     "guard:publication:release": "npm run guard:publication -- --release",
     "guard:publication:staged": "npm run guard:publication -- --staged",
     "guard:publication:write": "npm run guard:publication -- --write",

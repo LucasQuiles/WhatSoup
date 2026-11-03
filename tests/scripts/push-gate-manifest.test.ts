@@ -116,6 +116,7 @@ describe('push-gate manifest registry (#2224)', () => {
       'guard:repo:branch-diff',
       'guard:repo:commit-authors',
       'guard:publication:all',
+      'guard:publication:branch-diff',
       'push-gate-scope',
     ]);
     for (const step of FAST_PUSH_STEPS) {

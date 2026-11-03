@@ -36,11 +36,12 @@ import {
 import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
+import { branchDiffBaseRef, parseUnifiedDiffAddedLines } from './repo-hygiene-guard.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
 
 export type PublicationClass = 'PUBLIC' | 'PRIVATE-ARCHIVE' | 'SANITIZE' | 'DELETE';
-export type PublicationMode = 'all' | 'release' | 'staged';
+export type PublicationMode = 'all' | 'branch-diff' | 'release' | 'staged';
 export type GuardSeverity = 'error' | 'warning';
 
 export interface AuditRow {
@@ -242,6 +243,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.mode = 'release';
     } else if (arg === '--staged') {
       args.mode = 'staged';
+    } else if (arg === '--branch-diff') {
+      args.mode = 'branch-diff';
     } else if (arg === '--json') {
       args.json = true;
     } else if (arg === '--write') {
@@ -601,6 +604,29 @@ function validateAll(cwd: string): GuardIssue[] {
   return issues;
 }
 
+/**
+ * The private-literal scan over what a branch adds relative to its base, for the
+ * push hook: at push time the index is clean, so the staged scan sees nothing.
+ * Reads every non-merge commit as well as the final diff, because a push discloses
+ * intermediate commits; the final diff covers merge conflict resolutions.
+ */
+function validateBranchDiff(cwd: string, baseRef: string): GuardIssue[] {
+  const mergeBase = git(['merge-base', baseRef, 'HEAD'], cwd).trim();
+  const range = `${mergeBase}..HEAD`;
+  const addedByFile = new Map<string, string[]>();
+  for (const diff of [
+    git(['log', '--format=', '--no-merges', '--unified=0', '--no-ext-diff', range], cwd),
+    git(['diff', '--unified=0', '--no-ext-diff', range], cwd),
+  ]) {
+    for (const added of parseUnifiedDiffAddedLines(diff)) {
+      const filePath = normalizeRepoPath(added.filePath);
+      if (!isTextCandidate(filePath)) continue;
+      addedByFile.set(filePath, [...(addedByFile.get(filePath) ?? []), added.text]);
+    }
+  }
+  return [...addedByFile].flatMap(([filePath, lines]) => scanTextForPrivateLiterals(filePath, lines.join('\n')));
+}
+
 function validateRelease(cwd: string): GuardIssue[] {
   const issues = validateAll(cwd);
   const parsed = loadAudit(cwd);
@@ -657,6 +683,8 @@ function printHelp(): void {
 Checks:
   --all      Validate tracked publication audit state.
   --staged   Validate the same deterministic publication audit state before commit.
+  --branch-diff
+             Scan the lines this branch adds relative to its base for private literals.
   --release  Require every tracked internal doc to be PUBLIC-clean before publication.
   --json     Print machine-readable results.
   --write    Rewrite docs/publication-audit.md into canonical form (does NOT validate).
@@ -701,7 +729,7 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
   // and "0 issues over 0 files" must not read as a pass. Gated on mode: `staged` scans the
   // commit's ADDED lines, where an empty set is legitimate (committing with nothing staged is
   // normal, and .husky/pre-commit runs guard:publication:staged), so it is deliberately exempt.
-  if (args.mode !== 'staged') {
+  if (args.mode !== 'staged' && args.mode !== 'branch-diff') {
     const trackedCount = git(['ls-files'], cwd).split(/\r?\n/).filter(Boolean).length;
     if (trackedCount === 0) {
       console.error(
@@ -712,8 +740,16 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     }
   }
 
+  const branchBase = args.mode === 'branch-diff' ? branchDiffBaseRef(cwd) : null;
+  if (args.mode === 'branch-diff' && branchBase === null) {
+    console.error('publication-guard: INCONCLUSIVE — no base ref to compare this branch with; fetch origin/main.');
+    return 2;
+  }
+
   const issues =
-    args.mode === 'staged'
+    branchBase !== null
+      ? validateBranchDiff(cwd, branchBase)
+      : args.mode === 'staged'
       ? validateStaged(cwd)
       : args.mode === 'release'
         ? validateRelease(cwd)
@@ -739,6 +775,9 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     // invisible here — "guard clean" must not be read as "repo clean".
     if (args.mode === 'staged') {
       console.log('  scope: staged added lines only — pre-existing repo content is NOT scanned');
+    }
+    if (args.mode === 'branch-diff') {
+      console.log('  scope: lines this branch adds relative to its base — content already on the base is NOT scanned');
     }
   }
   return 0;

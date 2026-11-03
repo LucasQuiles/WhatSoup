@@ -281,6 +281,72 @@ describe('publication guard staged mode', () => {
   });
 });
 
+describe('publication guard branch-diff mode', () => {
+  // Built at run time so this test file does not itself carry the literal.
+  const privatePath = ['~', 'workspace', 'notes'].join('/');
+
+  const branchRepo = () => {
+    const { repo, baseOid } = makeExactRangeRepo();
+    git(repo, ['update-ref', 'refs/remotes/origin/main', baseOid]);
+    return repo;
+  };
+
+  it('flags a committed private literal that the staged scan cannot see on a clean index', () => {
+    const repo = branchRepo();
+    commitExactFile(repo, 'src/note.ts', `// ${privatePath}\n`, 'add literal');
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--staged'], repo)).toBe(0);
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('local-home-path');
+  });
+
+  it('flags a literal added in one branch commit and removed in a later one, because a push discloses both', () => {
+    const repo = branchRepo();
+    commitExactFile(repo, 'src/note.ts', `// ${privatePath}\n`, 'add literal');
+    commitExactFile(repo, 'src/note.ts', '// clean\n', 'remove literal');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+  });
+
+  it('flags a literal introduced only by a merge commit, which the per-commit read skips', () => {
+    const repo = branchRepo();
+    const branch = gitOutput(repo, ['branch', '--show-current']);
+    git(repo, ['checkout', '-b', 'side']);
+    commitExactFile(repo, 'src/side.ts', '// side\n', 'side work');
+    git(repo, ['checkout', branch]);
+    commitExactFile(repo, 'src/main.ts', '// main\n', 'branch work');
+    git(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+    writeFileSync(join(repo, 'src/side.ts'), `// ${privatePath}\n`);
+    git(repo, ['add', 'src/side.ts']);
+    git(repo, ['commit', '-m', 'merge side']);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+  });
+
+  it('passes clean branch commits and does not flag a literal already on the base', () => {
+    const repo = branchRepo();
+    commitExactFile(repo, 'src/old.ts', `// ${privatePath}\n`, 'published earlier');
+    git(repo, ['update-ref', 'refs/remotes/origin/main', gitOutput(repo, ['rev-parse', 'HEAD'])]);
+    commitExactFile(repo, 'src/new.ts', 'export const clean = true;\n', 'clean work');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
+    expect(log.mock.calls.join('\n')).toContain('scope: lines this branch adds');
+  });
+
+  it('is INCONCLUSIVE (exit 2) rather than a pass when no base ref can be resolved', () => {
+    const { repo } = makeExactRangeRepo();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
+    expect(error.mock.calls.join('\n')).toContain('INCONCLUSIVE');
+  });
+});
+
 describe('publication guard root classification', () => {
   it('classifies docs/runbooks/ files as internal', () => {
     expect(isInternalPublicationPath('docs/runbooks/objective-tracking.md')).toBe(true);

@@ -157,6 +157,7 @@ export const FAST_PUSH_STEPS: readonly GateStep[] = [
   guard('guard:repo:branch-diff'),
   guard('guard:repo:commit-authors'),
   guard('guard:publication:all'),
+  guard('guard:publication:branch-diff'),
   step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh fast'),
 ];
 
@@ -165,6 +166,7 @@ export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:repo:branch-diff'),
   guard('guard:repo:commit-authors'),
   guard('guard:publication:staged'),
+  guard('guard:publication:branch-diff'),
   guard('guard:doc-drift'),
   guard('guard:public-surface-drift'),
   guard('guard:work-index'),
