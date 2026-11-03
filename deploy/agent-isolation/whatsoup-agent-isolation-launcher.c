@@ -59,7 +59,7 @@ struct policy {
 
 extern char **environ;
 
-static void fail(const char *message) {
+static _Noreturn void fail(const char *message) {
   dprintf(STDERR_FILENO, "whatsoup-agent-isolation-launcher: %s\n", message);
   _exit(126);
 }
