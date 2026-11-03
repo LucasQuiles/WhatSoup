@@ -497,6 +497,17 @@ describe('FinalTransportAuthorityGate at the final socket seam', () => {
         { text: 'status must be held' },
         { statusJidList: ['15551239999@s.whatsapp.net'] },
       )).rejects.toThrow(/semantic adapter/i);
+      await expect(socket.sendMessage(
+        '15551230000@s.whatsapp.net',
+        { text: 'unsupported nested options' },
+        { quoted: { id: 'opaque-provider-message' } },
+      )).rejects.toThrow(/semantic adapter/i);
+      await expect(Reflect.apply(socket.sendMessage, socket, [
+        '15551230000@s.whatsapp.net',
+        { text: 'surplus provider argument' },
+        { messageId: 'known-option' },
+        { statusJidList: ['15551239999@s.whatsapp.net'] },
+      ])).rejects.toThrow(/unsupported provider arguments/i);
     });
 
     expect(authority.admit).not.toHaveBeenCalled();

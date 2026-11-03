@@ -269,10 +269,8 @@ export function wrapWithOutboundGovernor<S extends object>(
       );
     }
 
-    // Baileys has one provider-visible options object. In particular, status
-    // sends carry their actual audience in `statusJidList` here, so this exact
-    // object is frozen, admitted, and reconstructed instead of being forwarded
-    // after an approval that saw only `status@broadcast`.
+    // Provider options can change the audience. The final gate freezes known
+    // semantics and holds unsupported options before authority admission.
     const options = rest[0];
     const dispatch = await opts.authorityGate.admit({
       recipient: jid,
