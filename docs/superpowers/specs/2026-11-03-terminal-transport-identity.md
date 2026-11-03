@@ -53,6 +53,8 @@ different retention policy proposed in #3666. Contact-approval group routing in
 - Provider acceptance remains distinct from stored echo and turn completion.
 - Migration 67 only advances the supported data contract in the migration ledger.
   Existing future-schema rejection prevents ceiling-66 writers from opening it.
+  The changed schema version also invalidates D5 capability attestation bindings;
+  rollout must requalify them through the existing attestation procedure.
 
 Account identity remains an instance/database boundary. This does not add a channel
 column or enable several accounts to share a database. A configuration/account
