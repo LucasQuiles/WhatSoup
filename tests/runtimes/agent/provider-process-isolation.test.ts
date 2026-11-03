@@ -170,6 +170,20 @@ describe('provider process isolation', () => {
     expect(() => verifyIsolatedProviderProcess(31337, isolation, controllerDeps())).not.toThrow();
   });
 
+  it('rejects a non-Linux kernel verifier without reading /proc', () => {
+    const procReads: string[] = [];
+    const deps = controllerDeps({
+      platform: 'darwin' as NodeJS.Platform,
+      readFile: (path: string) => {
+        if (path.startsWith('/proc/')) procReads.push(path);
+        throw new Error(`unexpected read ${path}`);
+      },
+    });
+
+    expect(() => verifyIsolatedProviderProcess(31337, isolation, deps)).toThrow('Linux-only');
+    expect(procReads).toEqual([]);
+  });
+
   it('rejects an inherited supplementary group even when the child claims the expected UID and GID', () => {
     const deps = controllerDeps({
       readFile: (path: string) => {

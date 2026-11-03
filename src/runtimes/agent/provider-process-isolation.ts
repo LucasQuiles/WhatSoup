@@ -409,11 +409,16 @@ export function verifyIsolatedProviderProcess(
   if (!Number.isSafeInteger(pid) || pid <= 0) error('process isolation child PID is invalid');
   let status: string;
   let environmentContents: Buffer;
-  try {
-    status = deps.readFile(`/proc/${pid}/status`).toString('utf8');
-    environmentContents = deps.readFile(`/proc/${pid}/environ`);
-  } catch {
-    error('process isolation kernel proof is unavailable');
+  const platform = deps.platform ?? process.platform;
+  if (platform === 'linux') {
+    try {
+      status = deps.readFile(`/proc/${pid}/status`).toString('utf8');
+      environmentContents = deps.readFile(`/proc/${pid}/environ`);
+    } catch {
+      error('process isolation kernel proof is unavailable');
+    }
+  } else {
+    error('process isolation is Linux-only; kernel proof is unavailable');
   }
   for (const [label, expected] of [
     ['Uid', config.workerUid],
