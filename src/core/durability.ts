@@ -1348,7 +1348,7 @@ export class DurabilityEngine {
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
       getMessageByWaMessageId: prepare(
-        `SELECT pk FROM messages WHERE message_id = ?`,
+        `SELECT pk FROM messages WHERE message_id = ? AND is_from_me = 1`,
       ),
       resetMaybeSentWithWaToPending: prepare(
         `UPDATE outbound_ops

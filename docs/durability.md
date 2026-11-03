@@ -251,13 +251,15 @@ This one-time startup pass is an immediate history/corroboration reconciliation 
 
 For each `maybe_sent` op (including those promoted in Step 1):
 
-- **Has `wa_message_id`**: query `messages` table for a matching `message_id`.
-  - Found: `markEchoed()` — the message was delivered and stored by normal ingest. This also completes the linked inbound event if the op is terminal.
+- **Has `wa_message_id`**: query `messages` for the matching `message_id` with `is_from_me = 1`. Peer-authored rows cannot confirm an outbound send, even if their IDs match. Startup and live reconciliation share this check, including stored self-authored history.
+  - Found: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
   - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe`: `markQuarantined()`.
-- **No `wa_message_id`** (send never reached WhatsApp): the message was definitely not delivered.
+- **No `wa_message_id`**: no provider receipt was recorded; delivery remains unconfirmed.
   - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe`: `markQuarantined()`.
+
+Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship cannot confirm recovery and follows the existing missing-evidence replay policy. Qualify adapter history behavior before rollout.
 
 > The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
