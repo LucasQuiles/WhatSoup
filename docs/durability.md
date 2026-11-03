@@ -251,15 +251,16 @@ This one-time startup pass is an immediate history/corroboration reconciliation 
 
 For each `maybe_sent` op (including those promoted in Step 1):
 
-- **Has `wa_message_id`**: query `messages` for the matching `message_id` with `is_from_me = 1`. Peer-authored rows cannot confirm an outbound send, even if their IDs match. Startup and live reconciliation share this check, including stored self-authored history.
-  - Found: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
+- **Has `wa_message_id`**: query `messages` for the matching `message_id` and its persisted authorship. Startup and live reconciliation share this check, including stored history.
+  - Found with `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and cannot authorize automatic replay. Existing delivery-risk quarantine review and retention apply.
+  - Found with `is_from_me = 1`: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
   - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe`: `markQuarantined()`.
 - **No `wa_message_id`**: no provider receipt was recorded; delivery remains unconfirmed.
   - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe`: `markQuarantined()`.
 
-Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship cannot confirm recovery and follows the existing missing-evidence replay policy. Qualify adapter history behavior before rollout.
+Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
 > The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
