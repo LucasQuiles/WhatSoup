@@ -16,6 +16,10 @@ const admission = vi.hoisted(() => ({
   },
 }));
 
+const processIsolation = vi.hoisted(() => ({
+  launch: vi.fn(),
+}));
+
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 vi.mock('node:os', () => ({ homedir: vi.fn(() => '/mock/home'), userInfo: vi.fn(() => ({ username: 'test' })) }));
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
@@ -38,6 +42,9 @@ vi.mock('../../../src/runtimes/agent/host-work-admission.ts', () => ({
   HostWorkAdmissionError: admission.error,
   HostWorkAdmissionCleanupError: admission.cleanupError,
   spawnHostWorkAdmitted: admission.spawn,
+}));
+vi.mock('../../../src/runtimes/agent/provider-process-isolation.ts', () => ({
+  launchIsolatedProviderProcess: processIsolation.launch,
 }));
 vi.mock('../../../src/lib/keyring.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/lib/keyring.ts')>();
@@ -97,6 +104,16 @@ function makeSession(provider = 'claude-cli', extra: Partial<SessionManagerOptio
   });
 }
 
+function verifiedCanaryAdmission() {
+  return () => ({
+    allowed: true,
+    required: true,
+    resolvedPath: '/verified/provider',
+    binarySha256: 'a'.repeat(64),
+    proxyScriptSha256: 'b'.repeat(64),
+  });
+}
+
 function admitPersistentChild(child: ReturnType<typeof makeChild>): void {
   admission.spawn.mockImplementationOnce((options: { onSpawned?: (value: typeof child) => void }) => {
     options.onSpawned?.(child);
@@ -109,6 +126,118 @@ describe('SessionManager host work admission', () => {
     vi.clearAllMocks();
     admission.spawn.mockReset();
     admission.enabled.mockReturnValue(true);
+    processIsolation.launch.mockReset();
+  });
+
+  it('routes spawn-per-turn providers through the checked UID/GID launcher instead of the host-admission or direct-spawn path', async () => {
+    const child = makeChild();
+    processIsolation.launch.mockResolvedValueOnce(child);
+    const isolation = {
+      controllerUid: 501,
+      controllerGid: 20,
+      workerUid: 502,
+      workerGid: 502,
+      launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+      launcherSha256: 'a'.repeat(64),
+      policyPath: '/etc/whatsoup/agent-isolation.policy',
+      policySha256: 'b'.repeat(64),
+      homeDir: '/var/lib/whatsoup-agent',
+      configHome: '/var/lib/whatsoup-agent/.config',
+      dataHome: '/var/lib/whatsoup-agent/.local/share',
+      protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+    } as const;
+    const session = makeSession('opencode-cli', {
+      providerProcessIsolation: isolation,
+      providerCanaryAdmission: verifiedCanaryAdmission(),
+    });
+
+    await session.spawnSession();
+    await session.sendTurnAtProviderBoundary('hello');
+
+    expect(processIsolation.launch).toHaveBeenCalledWith(expect.objectContaining({
+      isolation,
+      binary: '/verified/provider',
+      expectedBinarySha256: 'a'.repeat(64),
+      env: expect.objectContaining({ HOME: expect.any(String), PATH: expect.any(String) }),
+    }));
+    expect(admission.spawn).not.toHaveBeenCalled();
+  });
+
+  it('routes persistent providers through the same checked UID/GID launcher', async () => {
+    const child = makeChild();
+    processIsolation.launch.mockResolvedValueOnce(child);
+    const session = makeSession('claude-cli', {
+      providerProcessIsolation: {
+        controllerUid: 501,
+        controllerGid: 20,
+        workerUid: 502,
+        workerGid: 502,
+        launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+        launcherSha256: 'a'.repeat(64),
+        policyPath: '/etc/whatsoup/agent-isolation.policy',
+        policySha256: 'b'.repeat(64),
+        homeDir: '/var/lib/whatsoup-agent',
+        configHome: '/var/lib/whatsoup-agent/.config',
+        dataHome: '/var/lib/whatsoup-agent/.local/share',
+        protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+      },
+      providerCanaryAdmission: verifiedCanaryAdmission(),
+    });
+
+    await session.spawnSession();
+    await session.sendTurn('hello');
+
+    expect(processIsolation.launch).toHaveBeenCalledOnce();
+    expect(admission.spawn).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to host admission when the isolation launcher rejects a provider start', async () => {
+    processIsolation.launch.mockRejectedValueOnce(new Error('kernel proof failed'));
+    const session = makeSession('opencode-cli', {
+      providerProcessIsolation: {
+        controllerUid: 501,
+        controllerGid: 20,
+        workerUid: 502,
+        workerGid: 502,
+        launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+        launcherSha256: 'a'.repeat(64),
+        policyPath: '/etc/whatsoup/agent-isolation.policy',
+        policySha256: 'b'.repeat(64),
+        homeDir: '/var/lib/whatsoup-agent',
+        configHome: '/var/lib/whatsoup-agent/.config',
+        dataHome: '/var/lib/whatsoup-agent/.local/share',
+        protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+      },
+      providerCanaryAdmission: verifiedCanaryAdmission(),
+    });
+
+    await session.spawnSession();
+    await expect(session.sendTurnAtProviderBoundary('hello')).rejects.toThrow('kernel proof failed');
+    expect(admission.spawn).not.toHaveBeenCalled();
+  });
+
+  it('blocks isolated CLI startup before a bare provider name can reach the launcher', async () => {
+    const session = makeSession('opencode-cli', {
+      providerProcessIsolation: {
+        controllerUid: 501,
+        controllerGid: 20,
+        workerUid: 502,
+        workerGid: 502,
+        launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+        launcherSha256: 'a'.repeat(64),
+        policyPath: '/etc/whatsoup/agent-isolation.policy',
+        policySha256: 'b'.repeat(64),
+        homeDir: '/var/lib/whatsoup-agent',
+        configHome: '/var/lib/whatsoup-agent/.config',
+        dataHome: '/var/lib/whatsoup-agent/.local/share',
+        protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+      },
+    });
+
+    await session.spawnSession();
+    await expect(session.sendTurnAtProviderBoundary('hello')).rejects.toThrow('PROVIDER_PROCESS_ISOLATION_CANARY_REQUIRED');
+    expect(processIsolation.launch).not.toHaveBeenCalled();
+    expect(admission.spawn).not.toHaveBeenCalled();
   });
 
   it('keeps a spawn-per-turn boundary unpublished until the wrapper admits the child', async () => {

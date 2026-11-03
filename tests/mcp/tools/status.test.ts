@@ -8,6 +8,8 @@ import { ToolRegistry } from '../../helpers/resolved-tool-registry.ts';
 import { registerStatusTools } from '../../../src/mcp/tools/status.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import type { WhatsAppSocket } from '../../../src/transport/connection.ts';
+import { wrapWithOutboundGovernor } from '../../../src/transport/outbound-governor.ts';
+import type { OutboundAuthorityGate } from '../../../src/transport/operations-authority-gate.ts';
 
 const STATUS_JID = 'status@broadcast';
 const ALICE_JID = 'alice-status@s.whatsapp.net';
@@ -262,6 +264,48 @@ describe('status tools', () => {
     expect(mockSock.sendMessage).toHaveBeenCalledTimes(2);
     const body = JSON.parse(result.content[0].text) as { messageId: string | null };
     expect(body.messageId).toBe('status-msg-2');
+  });
+
+  it('post_status does not replay an authority-admitted encrypted-tmp failure after provider submission', async () => {
+    insertContact(db, CARA_JID, 'Cara');
+    const providerTmpError = Object.assign(
+      new Error('ENOENT: no such file or directory, open /tmp/image123-enc'),
+      { code: 'ENOENT', path: '/tmp/image123-enc' },
+    );
+    let providerEffects = 0;
+    const providerSend = vi.mocked(mockSock.sendMessage);
+    providerSend.mockImplementationOnce(async () => {
+      // This counter models an accepted provider submission before the local
+      // upload error is reported. A retry would create a duplicate status.
+      providerEffects += 1;
+      throw providerTmpError;
+    });
+    const authorityGate: OutboundAuthorityGate = {
+      admit: vi.fn(async (input) => ({
+        attemptId: 'status-unknown-1',
+        payloadDigest: 'sha256:status',
+        content: input.content,
+        ...(input.options === undefined ? {} : { options: input.options as Record<string, unknown> }),
+      })),
+      recordReceipt: vi.fn(async () => undefined),
+    };
+    wrapWithOutboundGovernor(mockSock, {
+      resolveDest: (jid) => jid,
+      authorityGate,
+    });
+
+    const filePath = join(scratchDir, 'photo.jpg');
+    writeFileSync(filePath, Buffer.from('fake-image'));
+    const result = await registry.call(
+      'post_status',
+      { filePath, caption: 'look at this' },
+      globalSession(scratchDir),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(providerEffects).toBe(1);
+    expect(providerSend).toHaveBeenCalledTimes(1);
+    expect(authorityGate.recordReceipt).toHaveBeenCalledWith({ attemptId: 'status-unknown-1', state: 'unknown' });
   });
 
   it('post_status does not retry text or generic media send failures', async () => {
