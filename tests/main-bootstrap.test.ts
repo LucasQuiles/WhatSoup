@@ -39,6 +39,7 @@ class FakeConnection extends EventEmitter {
   getConnectionState = vi.fn(() => ({ connected: true, state: 'connected' }));
   getSocket = vi.fn(() => null);
   setIdentityStore = vi.fn();
+  setOperationsAuthorityClient = vi.fn();
 }
 
 function runtimeStub() {
@@ -78,6 +79,7 @@ async function importMainWithMocks(options: {
   messageCount?: number;
   grantReconcileError?: Error;
   expectStartupFailure?: boolean;
+  transportAuthority?: boolean;
 } = {}) {
   vi.resetModules();
   vi.useFakeTimers();
@@ -204,6 +206,23 @@ async function importMainWithMocks(options: {
     capabilityGrantGroups: {
       camera: { capabilities: ['camera.snap', 'camera.clip'] },
     },
+    transportAuthority: options.transportAuthority
+      ? {
+          enabled: true,
+          baseUrl: 'https://authority.example',
+          accountId: 'pilot-account',
+          credentialFile: '/var/db/whatsoup/authority.bearer',
+          serviceUid: 501,
+          workerUid: 502,
+        }
+      : {
+          enabled: false,
+          baseUrl: null,
+          accountId: null,
+          credentialFile: null,
+          serviceUid: null,
+          workerUid: null,
+        },
   };
 
   const Database = vi.fn(function () {
@@ -272,6 +291,13 @@ async function importMainWithMocks(options: {
     execFileSync: vi.fn(),
     existsSync: vi.fn((path: string) => existingPaths.has(path)),
     createConnection: vi.fn(() => connection),
+    createProtectedOperationsAuthorityClient: vi.fn(() => ({
+      admit: vi.fn(),
+      recordReceipt: vi.fn(),
+      registerInbound: vi.fn(),
+      recordDecision: vi.fn(),
+      pause: vi.fn(),
+    })),
     resolveLatestPluginDir: vi.fn((dir: string) => `${dir}-latest`),
     resolveAgentModel: vi.fn(() => 'claude-sonnet'),
     PineconeMemory: vi.fn(function () {}),
@@ -405,6 +431,9 @@ async function importMainWithMocks(options: {
     execFileSync: mocks.execFileSync,
   }));
   vi.doMock('../src/transport/factory.ts', () => ({ createConnection: mocks.createConnection }));
+  vi.doMock('../src/transport/operations-authority-client.ts', () => ({
+    createProtectedOperationsAuthorityClient: mocks.createProtectedOperationsAuthorityClient,
+  }));
   vi.doMock('../src/runtimes/chat/runtime.ts', () => ({ ChatRuntime }));
   vi.doMock('../src/runtimes/agent/runtime.ts', () => ({ AgentRuntime }));
   vi.doMock('../src/lib/capability-grant.ts', () => ({
@@ -561,6 +590,25 @@ describe('main bootstrap', () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.resetModules();
+  });
+
+  it('qualifies and wires the protected authority client before transport connection', async () => {
+    // Break caught: enabled pilot config constructs a client but leaves the
+    // socket seam in its initial fail-closed state or connects first.
+    const h = await importMainWithMocks({ transportAuthority: true });
+
+    expect(h.createProtectedOperationsAuthorityClient).toHaveBeenCalledWith({
+      baseUrl: 'https://authority.example',
+      accountId: 'pilot-account',
+      credentialFile: '/var/db/whatsoup/authority.bearer',
+      serviceUid: 501,
+      workerUid: 502,
+    });
+    expect(h.connection.setOperationsAuthorityClient).toHaveBeenCalledWith(
+      h.createProtectedOperationsAuthorityClient.mock.results[0]?.value,
+    );
+    expect(h.connection.setOperationsAuthorityClient.mock.invocationCallOrder[0])
+      .toBeLessThan(h.connection.connect.mock.invocationCallOrder[0]!);
   });
 
   it('boots the default chat runtime and wires recovery, health, timers, and connection handlers', async () => {

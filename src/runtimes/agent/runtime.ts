@@ -348,6 +348,7 @@ import {
 } from './auto-respawn-policy.ts';
 import type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
 export type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
+import type { ProviderProcessIsolationConfig } from './provider-process-isolation.ts';
 import {
   deriveModelUsable,
   MODEL_USABILITY_FRESHNESS_MS,
@@ -703,6 +704,7 @@ export class AgentRuntime implements Runtime {
   private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
   private readonly autoCompactInputTokens: number | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
@@ -2108,6 +2110,17 @@ export class AgentRuntime implements Runtime {
   /** Exact-source teardowns for terminal results that could not be safely attributed. */
   private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
+  /**
+   * Ingest-owned completion leases keyed by the authenticated inbound message.
+   * `handleMessage` still returns after queue admission for its established
+   * callers; protected transport ingress separately awaits this promise until
+   * the exact queued turn reaches a terminal outcome.
+   */
+  private readonly inboundTurnCompletions = new Map<string, {
+    adopted: boolean;
+    completion: Promise<void>;
+    settle: () => void;
+  }>();
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
@@ -2715,6 +2728,7 @@ export class AgentRuntime implements Runtime {
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
+    this.providerProcessIsolation = options?.providerProcessIsolation;
     this.autoCompactInputTokens =
       typeof options?.autoCompactInputTokens === 'number' &&
       Number.isFinite(options.autoCompactInputTokens) &&
@@ -4693,13 +4707,56 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  beginInboundTurnCompletion(messageId: string): void {
+    if (this.inboundTurnCompletions.has(messageId)) return;
+    let resolved = false;
+    let resolve!: () => void;
+    const completion = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.inboundTurnCompletions.set(messageId, {
+      adopted: false,
+      completion,
+      settle: () => {
+        if (resolved) return;
+        resolved = true;
+        resolve();
+      },
+    });
+  }
+
+  async awaitInboundTurnCompletion(messageId: string): Promise<void> {
+    const pending = this.inboundTurnCompletions.get(messageId);
+    if (!pending) return;
+    try {
+      await pending.completion;
+    } finally {
+      if (this.inboundTurnCompletions.get(messageId) === pending) {
+        this.inboundTurnCompletions.delete(messageId);
+      }
+    }
+  }
+
+  private bindInboundTurnCompletion(messageId: string): (() => void) | undefined {
+    const pending = this.inboundTurnCompletions.get(messageId);
+    if (!pending) return undefined;
+    pending.adopted = true;
+    return pending.settle;
+  }
+
+  private settleInboundTurnCompletion(messageId: string): void {
+    this.inboundTurnCompletions.get(messageId)?.settle();
+  }
+
   handleMessage(msg: IncomingMessage): Promise<void> {
     try {
       this.db.assertWritableCompatibility();
     } catch (err) {
+      this.settleInboundTurnCompletion(msg.messageId);
       return Promise.reject(err);
     }
     if (this.shutdownRequested) {
+      this.settleInboundTurnCompletion(msg.messageId);
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
     const initialClassification = msg.content === null
@@ -4722,6 +4779,8 @@ export class AgentRuntime implements Runtime {
     }
     void processing.finally(() => {
       this.activeMessageHandlers.delete(processing);
+      const pending = this.inboundTurnCompletions.get(msg.messageId);
+      if (pending && !pending.adopted) pending.settle();
       if (tracksRouteRecycle) {
         this.routeRecycleLifecycle.untrackRouteCommand(processing);
       }
@@ -5436,6 +5495,7 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
+      const onSettled = this.bindInboundTurnCompletion(msg.messageId);
       this.runtimeTurnCoordinator.enqueueSharedRuntimeTurn({
         sourceMessageId: msg.messageId,
         receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5450,6 +5510,7 @@ export class AgentRuntime implements Runtime {
         purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
+        ...(onSettled === undefined ? {} : { onSettled }),
       });
     } else if (this.sessionScope === 'per_chat') {
       const mapKey = perChatMapKey!;
@@ -5457,7 +5518,11 @@ export class AgentRuntime implements Runtime {
       // Image coalescing: batch rapid image sends into a single turn.
       // For coalesced images, defer seq/state setup until flush time — only
       // the representative turn gets a seq entry, preventing desync.
-      if (msg.contentType === 'image') {
+      // A coalesced batch has several authenticated inbound contexts but only
+      // one later provider turn. Under transport authority, keep each media
+      // event as an exact queued turn so its reply grant and lease cannot be
+      // inherited from whichever image happened to arm the coalesce timer.
+      if (msg.contentType === 'image' && !config.transportAuthority?.enabled) {
         await this.coalesceImageTurn(mapKey, chatJid, text, msg);
       } else {
         // Flush any pending image buffer first (text message after images = done uploading).
@@ -5486,6 +5551,7 @@ export class AgentRuntime implements Runtime {
           mapKey,
         });
 
+        const onSettled = this.bindInboundTurnCompletion(msg.messageId);
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
           receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5500,6 +5566,7 @@ export class AgentRuntime implements Runtime {
           purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
+          ...(onSettled === undefined ? {} : { onSettled }),
         });
       }
     } else {
@@ -10558,6 +10625,7 @@ export class AgentRuntime implements Runtime {
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
+      providerProcessIsolation: this.providerProcessIsolation,
       providerMcpConfigArgs: this.globalMcpSocketPath
         ? buildProviderMcpConfigArgs(
             sessionProvider,

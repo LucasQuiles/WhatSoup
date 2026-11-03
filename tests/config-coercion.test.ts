@@ -245,6 +245,158 @@ describe('cast-sweep families (#2295 slice 3)', () => {
   });
 });
 
+describe('transport authority pilot configuration', () => {
+  it('rejects enabled authority without every protected-service attestation field', async () => {
+    // Break caught: enabled authority silently starts without a protected client
+    // and leaves the final socket gate absent or permanently misconfigured.
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transportAuthority: { enabled: true, accountId: 'pilot-account' },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /transportAuthority\.baseUrl is required when transportAuthority\.enabled is true/,
+    );
+  });
+
+  it('keeps the protected-client factory inputs explicit when authority is enabled', async () => {
+    // Break caught: a later config refactor drops the worker UID distinction or
+    // credential path that the service-principal factory must verify.
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transportAuthority: {
+        enabled: true,
+        baseUrl: 'https://authority.example',
+        accountId: 'pilot-account',
+        credentialFile: '/var/db/whatsoup/authority.bearer',
+        serviceUid: 501,
+        workerUid: 502,
+      },
+    }));
+
+    const { config } = await import('../src/config.ts');
+    expect(config.transportAuthority).toEqual({
+      enabled: true,
+      baseUrl: 'https://authority.example',
+      accountId: 'pilot-account',
+      credentialFile: '/var/db/whatsoup/authority.bearer',
+      serviceUid: 501,
+      workerUid: 502,
+    });
+  });
+
+  it.each([
+    'http://authority.example',
+    'http://localhost:8080',
+    'http://127.1:8080',
+    'https://operator:secret@authority.example',
+    'https://authority.example/?unexpected=query',
+    'https://authority.example/#unexpected-fragment',
+  ])('rejects unsafe authority URL %s at startup', async (baseUrl) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transportAuthority: {
+        enabled: true,
+        baseUrl,
+        accountId: 'pilot-account',
+        credentialFile: '/var/db/whatsoup/authority.bearer',
+        serviceUid: 501,
+        workerUid: 502,
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /transportAuthority\.baseUrl must use HTTPS or literal loopback HTTP/,
+    );
+  });
+
+  it.each([
+    'https://authority.example',
+    'http://127.0.0.1:8080',
+    'http://[::1]:8080',
+  ])('allows trusted authority URL %s at startup', async (baseUrl) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transportAuthority: {
+        enabled: true,
+        baseUrl,
+        accountId: 'pilot-account',
+        credentialFile: '/var/db/whatsoup/authority.bearer',
+        serviceUid: 501,
+        workerUid: 502,
+      },
+    }));
+
+    const { config } = await import('../src/config.ts');
+    expect(config.transportAuthority.baseUrl).toBe(baseUrl);
+  });
+
+  it('rejects root process-isolation identities at startup', async () => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      agentOptions: {
+        providerProcessIsolation: {
+          controllerUid: 0,
+          controllerGid: 20,
+          workerUid: 502,
+          workerGid: 502,
+          launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+          launcherSha256: 'a'.repeat(64),
+          policyPath: '/etc/whatsoup/agent-isolation.policy',
+          policySha256: 'b'.repeat(64),
+          homeDir: '/var/lib/whatsoup-agent',
+          configHome: '/var/lib/whatsoup-agent/.config',
+          dataHome: '/var/lib/whatsoup-agent/.local/share',
+          protectedPaths: ['/var/db/whatsoup/authority.bearer'],
+          readinessMode: 'disabled',
+        },
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /agentOptions\.providerProcessIsolation\.controllerUid must be a positive non-root integer/,
+    );
+  });
+
+  it.each(['serviceUid', 'workerUid'] as const)('rejects root authority %s at startup', async (field) => {
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transportAuthority: {
+        enabled: true,
+        baseUrl: 'https://authority.example',
+        accountId: 'pilot-account',
+        credentialFile: '/var/db/whatsoup/authority.bearer',
+        serviceUid: 501,
+        workerUid: 502,
+        [field]: 0,
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      new RegExp(`transportAuthority\\.${field} must be a positive non-root integer when transportAuthority\\.enabled is true`),
+    );
+  });
+
+  it('rejects authority on an adapter without the final Baileys socket seam', async () => {
+    // Break caught: enabled authority is constructed but cannot gate every
+    // provider send because the selected adapter has no installed final seam.
+    process.env.INSTANCE_CONFIG = JSON.stringify(makeInstanceConfig({
+      transport: 'signal',
+      signalConfig: {
+        account: 'ops-line',
+        phoneNumber: '+15551234567',
+        socketPath: '/tmp/whatsoup-signal.sock',
+      },
+      transportAuthority: {
+        enabled: true,
+        baseUrl: 'https://authority.example',
+        accountId: 'pilot-account',
+        credentialFile: '/var/db/whatsoup/authority.bearer',
+        serviceUid: 501,
+        workerUid: 502,
+      },
+    }));
+
+    await expect(import('../src/config.ts')).rejects.toThrow(
+      /transportAuthority requires transport "baileys"/,
+    );
+  });
+});
+
 describe('path absoluteness + env port range (#2295 M5/M7/M8)', () => {
   it('rejects a relative WHATSOUP_*_DIR override', async () => {
     process.env.WHATSOUP_DATA_DIR = 'relative/data';

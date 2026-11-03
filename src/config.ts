@@ -6,6 +6,7 @@ import { normalizePhoneE164, normalizePhoneE164Wire } from './lib/phone.ts';
 import { asRecord, isNonEmptyString } from './lib/type-guards.ts';
 import { migrateLegacyMemoryConfig } from './config-memory-migration.ts';
 import { resolveConfiguredAccountScope } from './transport/coordination-lease.ts';
+import { parseTransportAuthorityUrl, TRANSPORT_AUTHORITY_URL_REQUIREMENT } from './lib/authority-url.ts';
 import type { Profile } from './core/profiles.ts';
 import { DEFAULT_BIND_ADDRESS } from './fleet/constants.ts';
 import { VALID_ACCESS_MODES, VALID_GROUP_SENDER_POLICIES, type AccessMode, type GroupSenderPolicy } from './instance-loader.ts';
@@ -33,6 +34,7 @@ import { ConfigValidationError } from './lib/startup-error.ts';
 import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/instance-config-shape.ts';
 import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
+import type { ProviderProcessIsolationConfig } from './runtimes/agent/provider-process-isolation.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -1175,6 +1177,7 @@ const resolvedTranscriptionOptions = configSection(instance?.transcriptionOption
 // Nested config sections, validated once here: a SET-but-non-object section
 // fails loud instead of every field inside it silently reading undefined.
 const outboundGovernorSection = configSection(instance?.outboundGovernor, 'outboundGovernor');
+const transportAuthoritySection = configSection(instance?.transportAuthority, 'transportAuthority');
 const restartLoopGuardSection = configSection(instance?.restartLoopGuard, 'restartLoopGuard');
 const operationTrackerSection = configSection(instance?.operationTracker, 'operationTracker');
 const pollResolutionSection = configSection(instance?.pollResolution, 'pollResolution');
@@ -1221,6 +1224,150 @@ function configCapabilityObligations() {
     );
   }
 }
+
+function requiredTransportAuthorityString(
+  section: Record<string, unknown>,
+  field: 'baseUrl' | 'accountId' | 'credentialFile',
+): string {
+  const value = optionalString(section[field], `transportAuthority.${field}`);
+  if (value === undefined) {
+    throw new ConfigValidationError(
+      `transportAuthority.${field} is required when transportAuthority.enabled is true`,
+    );
+  }
+  return value;
+}
+
+function requiredTransportAuthorityUid(
+  section: Record<string, unknown>,
+  field: 'serviceUid' | 'workerUid',
+): number {
+  const value = optionalFiniteNumber(section[field], `transportAuthority.${field}`);
+  if (value === undefined || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ConfigValidationError(
+      `transportAuthority.${field} must be a positive non-root integer when transportAuthority.enabled is true`,
+    );
+  }
+  return value;
+}
+
+function resolveTransportAuthorityConfig(): {
+  enabled: false;
+  baseUrl: null;
+  accountId: null;
+  credentialFile: null;
+  serviceUid: null;
+  workerUid: null;
+} | {
+  enabled: true;
+  baseUrl: string;
+  accountId: string;
+  credentialFile: string;
+  serviceUid: number;
+  workerUid: number;
+} {
+  const enabled = optionalBoolean(transportAuthoritySection?.enabled, 'transportAuthority.enabled') ?? false;
+  if (!enabled) {
+    return {
+      enabled: false,
+      baseUrl: null,
+      accountId: null,
+      credentialFile: null,
+      serviceUid: null,
+      workerUid: null,
+    };
+  }
+  if (resolvedTransport !== 'baileys') {
+    throw new ConfigValidationError('transportAuthority requires transport "baileys"');
+  }
+  if (transportAuthoritySection === undefined) {
+    throw new ConfigValidationError('transportAuthority must be configured when transportAuthority.enabled is true');
+  }
+  const baseUrl = requiredTransportAuthorityString(transportAuthoritySection, 'baseUrl');
+  if (parseTransportAuthorityUrl(baseUrl) === null) {
+    throw new ConfigValidationError(`transportAuthority.baseUrl ${TRANSPORT_AUTHORITY_URL_REQUIREMENT}`);
+  }
+  const credentialFile = requiredTransportAuthorityString(transportAuthoritySection, 'credentialFile');
+  if (!isAbsolute(credentialFile)) {
+    throw new ConfigValidationError('transportAuthority.credentialFile must be an absolute path');
+  }
+  const serviceUid = requiredTransportAuthorityUid(transportAuthoritySection, 'serviceUid');
+  const workerUid = requiredTransportAuthorityUid(transportAuthoritySection, 'workerUid');
+  if (serviceUid === workerUid) {
+    throw new ConfigValidationError('transportAuthority.serviceUid and transportAuthority.workerUid must be distinct');
+  }
+  return {
+    enabled: true,
+    baseUrl,
+    accountId: requiredTransportAuthorityString(transportAuthoritySection, 'accountId'),
+    credentialFile,
+    serviceUid,
+    workerUid,
+  };
+}
+
+function requiredProviderIsolationId(
+  section: Record<string, unknown>,
+  field: 'controllerUid' | 'controllerGid' | 'workerUid' | 'workerGid',
+): number {
+  const value = optionalFiniteNumber(section[field], `agentOptions.providerProcessIsolation.${field}`);
+  if (value === undefined || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ConfigValidationError(`agentOptions.providerProcessIsolation.${field} must be a positive non-root integer`);
+  }
+  return value;
+}
+
+function requiredProviderIsolationDigest(
+  section: Record<string, unknown>,
+  field: 'launcherSha256' | 'policySha256',
+): string {
+  const value = optionalString(section[field], `agentOptions.providerProcessIsolation.${field}`);
+  if (value === undefined || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new ConfigValidationError(`agentOptions.providerProcessIsolation.${field} must be a lowercase SHA-256 digest`);
+  }
+  return value;
+}
+
+function resolveProviderProcessIsolationConfig(): ProviderProcessIsolationConfig | null {
+  const field = 'agentOptions.providerProcessIsolation';
+  const section = configSection(resolvedAgentOptions['providerProcessIsolation'], field);
+  if (section === undefined) return null;
+  const controllerUid = requiredProviderIsolationId(section, 'controllerUid');
+  const controllerGid = requiredProviderIsolationId(section, 'controllerGid');
+  const workerUid = requiredProviderIsolationId(section, 'workerUid');
+  const workerGid = requiredProviderIsolationId(section, 'workerGid');
+  if (controllerUid === workerUid || controllerGid === workerGid) {
+    throw new ConfigValidationError(`${field} requires distinct controller and worker UID/GID values`);
+  }
+  const protectedPaths = section['protectedPaths'];
+  if (!Array.isArray(protectedPaths) || protectedPaths.length === 0 || protectedPaths.some((path) => !isNonEmptyString(path) || !isAbsolute(path))) {
+    throw new ConfigValidationError(`${field}.protectedPaths must be a non-empty array of absolute paths`);
+  }
+  if (new Set(protectedPaths).size !== protectedPaths.length) {
+    throw new ConfigValidationError(`${field}.protectedPaths must not repeat a protected path`);
+  }
+  const resolvedProtectedPaths = protectedPaths as string[];
+  if (section['readinessMode'] !== 'disabled') {
+    throw new ConfigValidationError(`${field}.readinessMode must be "disabled" until readiness probes use the isolated launch boundary`);
+  }
+  return {
+    controllerUid,
+    controllerGid,
+    workerUid,
+    workerGid,
+    launcherPath: requireAbsolutePathString(section['launcherPath'], `${field}.launcherPath`),
+    launcherSha256: requiredProviderIsolationDigest(section, 'launcherSha256'),
+    policyPath: requireAbsolutePathString(section['policyPath'], `${field}.policyPath`),
+    policySha256: requiredProviderIsolationDigest(section, 'policySha256'),
+    homeDir: requireAbsolutePathString(section['homeDir'], `${field}.homeDir`),
+    configHome: requireAbsolutePathString(section['configHome'], `${field}.configHome`),
+    dataHome: requireAbsolutePathString(section['dataHome'], `${field}.dataHome`),
+    protectedPaths: resolvedProtectedPaths,
+  };
+}
+
+const resolvedTransportAuthority = resolveTransportAuthorityConfig();
+const resolvedProviderProcessIsolation = resolveProviderProcessIsolationConfig();
 
 export const config = {
   clientOutputPolicies: parsedClientOutputPolicies.registry,
@@ -1316,6 +1463,11 @@ export const config = {
     globalMaxPerWindow: optionalFiniteNumber(outboundGovernorSection?.globalMaxPerWindow, 'outboundGovernor.globalMaxPerWindow') ?? 40,
     globalWindowMs: optionalFiniteNumber(outboundGovernorSection?.globalWindowMs, 'outboundGovernor.globalWindowMs') ?? 3 * MS_PER_SECOND,
   },
+
+  // Pilot-only final send authority. Disabled is backward-compatible; enabled
+  // requires all protected service-principal inputs and fails closed if factory
+  // qualification later fails during bootstrap.
+  transportAuthority: resolvedTransportAuthority,
 
   // Enrichment
   enrichmentIntervalMs: resolvedMemory.enrichment.intervalMs,
@@ -1585,6 +1737,7 @@ export const config = {
   agentProviderBoundaryMode: isProviderBoundaryMode(resolvedAgentOptions['providerBoundaryMode'])
     ? resolvedAgentOptions['providerBoundaryMode']
     : 'shadow',
+  providerProcessIsolation: resolvedProviderProcessIsolation,
 
   // Chat OpenAI provider endpoint/key override — read from
   // chatOptions.openaiProviderConfig (QR-218 PR-2). Undefined (the default)

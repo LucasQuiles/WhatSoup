@@ -133,6 +133,15 @@ interface InstanceConfig {
   imessageConfig?: ImessageConfig;
   // Signal transport config — present only when transport === 'signal'
   signalConfig?: SignalConfig;
+  /** Pilot final Baileys send authority; validated at startup from raw config. */
+  transportAuthority?: {
+    enabled?: boolean;
+    baseUrl?: string;
+    accountId?: string;
+    credentialFile?: string;
+    serviceUid?: number;
+    workerUid?: number;
+  };
   // Governed launchd service render options (config-owned CLAUDE_CONFIG_DIR +
   // PATH prepend) and the ratified account-identity digest. Validated on every
   // path (create/patch/load) by validateLaunchdServiceConfig /

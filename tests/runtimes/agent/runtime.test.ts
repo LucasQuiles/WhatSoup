@@ -1060,6 +1060,31 @@ describe('AgentRuntime', () => {
     });
   });
 
+  it('forwards one required process-isolation contract to every created session', async () => {
+    const isolation = {
+      controllerUid: 501,
+      controllerGid: 20,
+      workerUid: 502,
+      workerGid: 502,
+      launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
+      launcherSha256: 'a'.repeat(64),
+      policyPath: '/etc/whatsoup/agent-isolation.policy',
+      policySha256: 'b'.repeat(64),
+      homeDir: '/var/lib/whatsoup-agent',
+      configHome: '/var/lib/whatsoup-agent/.config',
+      dataHome: '/var/lib/whatsoup-agent/.local/share',
+      protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
+    } as const;
+    const db = makeDb();
+    const { messenger } = makeMessenger();
+    const runtime = new AgentRuntime(db, messenger, 'test', { providerProcessIsolation: isolation });
+
+    await runtime.start();
+    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
+
+    expect(capturedSessionManagerOptsRef.current).toMatchObject({ providerProcessIsolation: isolation });
+  });
+
   it('auto-compacts silently and advances baseline only after compact_boundary', async () => {
     const db = makeDb();
     const { messenger } = makeMessenger();

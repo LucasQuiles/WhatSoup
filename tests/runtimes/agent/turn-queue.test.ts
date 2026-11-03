@@ -31,6 +31,39 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('TurnQueue', () => {
+  it('settles a turn only after its processor and error finalizer finish', async () => {
+    // Break caught: protected inbound leases close at queue admission or before
+    // an error path has reached its terminal finalizer.
+    const processorRelease = deferred();
+    const finalizerRelease = deferred();
+    const settled = vi.fn();
+    const finalizer = vi.fn(async () => finalizerRelease.promise);
+    const queue = new TurnQueue({ onProcessorError: finalizer });
+    queue.setProcessor(async () => {
+      await processorRelease.promise;
+      throw new Error('provider failed');
+    });
+    queue.enqueue(makeTurn({ onSettled: settled }));
+
+    await vi.waitFor(() => expect(queue.isProcessing).toBe(true));
+    expect(settled).not.toHaveBeenCalled();
+    processorRelease.resolve();
+    await vi.waitFor(() => expect(finalizer).toHaveBeenCalledTimes(1));
+    expect(settled).not.toHaveBeenCalled();
+    finalizerRelease.resolve();
+    await queue.idle();
+    expect(settled).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles an admission rejection immediately', () => {
+    // Break caught: a queue-full/cancelled turn retains an authority lease even
+    // though it can no longer produce a provider reply.
+    const settled = vi.fn();
+    const queue = new TurnQueue({ maxDepth: 0 });
+    expect(queue.enqueue(makeTurn({ onSettled: settled }))).toBe(false);
+    expect(settled).toHaveBeenCalledTimes(1);
+  });
+
   // @check CHK-062
 // @traces REQ-012.AC-01
   it('processes turns one at a time (FIFO)', async () => {

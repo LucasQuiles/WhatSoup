@@ -1320,6 +1320,7 @@ async finalizeActiveRuntimeTurnsForShutdown(
 
   const pending: Promise<FinalizeRuntimeTurnResult>[] = [];
   const queueUndispatched = (turn: QueuedTurn): void => {
+    this.settleQueuedTurn(turn);
     if (!turn.runtimeContext) {
       if (turn.inboundSeq !== undefined) {
         pending.push(Promise.reject(
@@ -1589,6 +1590,11 @@ async terminalizeGlobalTurnForReset(
       ))),
     );
   }
+  for (const detached of detachedFinalizations) {
+    if (detached.settledIndex === null || settled[detached.settledIndex]?.status === 'fulfilled') {
+      this.settleQueuedTurn(detached.turn);
+    }
+  }
   state.resolveTerminalization(transaction);
   return transaction;
 }
@@ -1798,6 +1804,11 @@ async terminalizePerChatTurnQueueForKill(
         detached.settledIndex === null ? [] : [detached.settledIndex]
       ))),
     );
+  }
+  for (const detached of detachedFinalizations) {
+    if (detached.settledIndex === null || settled[detached.settledIndex]?.status === 'fulfilled') {
+      this.settleQueuedTurn(detached.turn);
+    }
   }
   state.resolveTerminalization(transaction);
   return transaction;
@@ -2256,8 +2267,12 @@ finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
     if (turn.inboundSeq !== undefined) {
       throw new Error('Journaled queue rejection has no immutable runtime turn context');
     }
+    this.settleQueuedTurn(turn);
     return;
   }
+  // Admission rejection has no provider turn or reply to await. Release the
+  // authority lease now; durability finalization continues independently.
+  this.settleQueuedTurn(turn);
   // #1750: carry the distinct rejection reason into the admission outcome so it
   // lands as a distinct durable failure_class; absent stays legacy 'unknown'.
   const attemptOutcome: AttemptOutcome = reason === undefined
@@ -2282,6 +2297,14 @@ finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
       this.rejectedTurnFinalizations.delete(tracked);
     });
   this.rejectedTurnFinalizations.add(tracked);
+}
+
+private settleQueuedTurn(turn: QueuedTurn): void {
+  try {
+    turn.onSettled?.();
+  } catch (err) {
+    log.warn({ err, chatJid: turn.chatJid }, 'runtime turn settlement callback threw');
+  }
 }
 
 async finalizeUndispatchedRuntimeTurn(

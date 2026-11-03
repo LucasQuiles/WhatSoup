@@ -1064,6 +1064,27 @@ The unified database retention sweep removes terminal rows older than 30 days an
 
 Authenticated `GET /health` exposes aggregate-only `outbound_sends`, `tool_durability`, and `retention.database` blocks. A failed database observation reports `readable: false` and null counts rather than manufacturing zero. No receipt, destination, provider ID, or error prose appears in these blocks.
 
+### `transportAuthority` pilot
+
+`transportAuthority` enables the Agent365 operation-authority check at the final Baileys `sendMessage` seam. It is opt-in and disabled by default. Enabling it changes outbound behavior: normal replies inherit their destination only from the protected current inbound turn; outgoing work without that binding is staged by Agent365 for human review. Every media, poll, raw, control, fleet, health, and scheduler send reaches the same final gate after content redaction and attachment-byte freezing.
+
+```json
+"transportAuthority": {
+  "enabled": true,
+  "baseUrl": "https://authority.example.internal",
+  "accountId": "pilot-account",
+  "credentialFile": "/var/db/whatsoup/transport-authority.bearer",
+  "serviceUid": 501,
+  "workerUid": 502
+}
+```
+
+All fields are required when `enabled` is `true`. `credentialFile` must be absolute, owned by `serviceUid`, a regular non-symlink file, and mode `0600`; startup rechecks the opened file to reject replacement races. The bearer is read only into the transport service client and is never copied into environment variables or agent tools. `serviceUid` must match the running transport process and differ from the declared `workerUid`. A protected launcher must actually run every agent worker and descendant with the declared worker identity; this configuration attests the required separation but does not itself perform an OS account switch. Qualification for a pilot requires a separate live launcher proof before cutover.
+
+Activation remains deliberately blocked until the requirements in the [send-approval activation handoff](security-handoffs/send-approval-activation.md) are met. The current launcher prototype is Linux-specific and does not qualify a macOS pilot.
+
+An unavailable file, wrong owner or mode, a symlink, a mismatched service UID, identical service/worker UIDs, a missing client, a malformed authority response, or an authority request failure stops the send before the provider call. The authority records inbound events before the conversation queue receives them. `/stop`, `/review`, `/approve`, and `/reject` are parsed from that stored authenticated inbound text by Agent365, never by the model. A persisted stop can send only the one-use fixed `whatsapp.control_receipt` returned by the authority for that exact inbound event; the client has no local acknowledgement template or general paused-account exemption. Review cards are rendered directly from authority JSON on the authenticated turn. An approved stored WhatsApp operation is retried with its `operation_id` at the admission envelope's top level; the reply context remains only the inbound event ID.
+
 ### `memory`
 
 `memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.

@@ -98,7 +98,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
   botLid: string | null = null;
 
   /** Consumer: main.ts:333 (createIngestHandler wires this); ingest.ts:138 */
-  onMessage: ((msg: IncomingMessage) => void) | null = null;
+  onMessage: ((msg: IncomingMessage) => void | Promise<void>) | null = null;
 
   /** Consumer: main.ts:745/754/757 */
   readonly contactsDir = new ContactsDirectory();
@@ -140,7 +140,7 @@ export class ImessageConnection extends EventEmitter implements RuntimeConnectio
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (msg: ContractInboundMessage) => {
       if (this.onMessage !== null) {
-        this.onMessage(contractToIncoming(msg, this.adapter.isGroupConversation(msg.conversation)));
+        void Promise.resolve(this.onMessage(contractToIncoming(msg, this.adapter.isGroupConversation(msg.conversation)))).catch(() => undefined);
       }
     });
 

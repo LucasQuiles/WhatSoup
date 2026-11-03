@@ -2,6 +2,7 @@
 import type { TurnRecoveryCatchupReconcileOptions } from '../../core/turn-recovery-catchup-config.ts';
 import type { fetchAnthropicModelIdsWithStatus } from '../../lib/model-advisor.ts';
 import type { AccountIdentityVerifyFn } from './account-identity-verifier.ts';
+import type { ProviderProcessIsolationConfig } from './provider-process-isolation.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import type { ServiceRestarter } from './self-restart.ts';
 
@@ -47,6 +48,8 @@ export interface AgentRuntimeOptions {
   enabledPlugins?: Record<string, boolean>;
   /** Per-instance opt-in for propagating ALLOW_M365_MUTATIONS when fail-closed mode is enabled. */
   allowM365Mutations?: boolean;
+  /** Required Linux launcher contract for every CLI provider child, including fallback sessions. */
+  providerProcessIsolation?: ProviderProcessIsolationConfig;
   /** Automatically run a silent /compact after this many input tokens since the last compact. */
   autoCompactInputTokens?: number;
   /** Reply Guarantee timeout override for tests and tightly controlled deployments. */

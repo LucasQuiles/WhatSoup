@@ -16,6 +16,10 @@ vi.mock('../../src/config.ts', () => ({
     healthPort: 9090,
     autoTyping: 'off',
     generateHighQualityLinkPreview: false,
+    transportAuthority: {
+      enabled: true,
+      accountId: 'pilot-account',
+    },
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
@@ -102,6 +106,249 @@ afterEach(() => {
 });
 
 describe('ConnectionManager — messages.upsert dispatch', () => {
+  it('delivers a server-rendered review card through the final authority seam without invoking the runtime', async () => {
+    // Break caught: a model receives /review and can alter the selected held work or its recipient.
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const authority = {
+      registerInbound: vi.fn(async () => ({
+        kind: 'review' as const,
+        review: {
+          challenge: 'challenge-1',
+          items: [{ id: 'operation-1', digest: 'sha256:payload' }],
+          previews: [{
+            id: 'operation-1',
+            accountId: 'pilot-account',
+            action: 'whatsapp.send',
+            payload: { recipient: '15551234567@s.whatsapp.net', content: { text: 'held reply' } },
+            digest: 'sha256:payload',
+            state: 'held',
+          }],
+          expiresAt: '2026-11-02T15:00:00.000Z',
+        },
+      })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async () => ({ attemptId: 'attempt-card', payloadDigest: 'sha256:card' })),
+      recordReceipt: vi.fn(async () => undefined),
+      recordDecision: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    const onMessage = vi.fn();
+    manager.onMessage = onMessage;
+
+    await manager.connect();
+    emit(openEvent());
+    emit({
+      'messages.upsert': {
+        type: 'notify',
+        messages: [makeTextMessage({ id: 'review-command', remoteJid: '15551234567@s.whatsapp.net', text: '/review operation-1' })],
+      },
+    });
+
+    await vi.waitFor(() => expect(authority.recordReceipt).toHaveBeenCalledTimes(1));
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(authority.registerInbound).toHaveBeenCalledWith(expect.objectContaining({ text: '/review operation-1' }));
+    expect(authority.admit).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: '15551234567@s.whatsapp.net',
+      context: { inbound_event_id: 'review-command' },
+    }));
+    expect(mockSock.sendMessage).toHaveBeenCalledWith('15551234567@s.whatsapp.net', expect.objectContaining({
+      text: expect.stringContaining('/approve challenge-1 operation-1'),
+    }));
+  });
+
+  it('retries only an authority-dispatched WhatsApp operation on a protected approval command', async () => {
+    // Break caught: approval text is parsed locally or released payload is sent outside the final gate.
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const authority = {
+      registerInbound: vi.fn(async () => ({
+        kind: 'decision' as const,
+        operations: [{
+          id: 'operation-1',
+          accountId: 'pilot-account',
+          action: 'whatsapp.send',
+          payload: {
+            recipient: '15551230000@s.whatsapp.net',
+            content: { text: 'released reply' },
+            options: { timestamp: 1_700_000_000 },
+          },
+          digest: 'sha256:payload',
+          state: 'approved',
+        }],
+      })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async () => ({ attemptId: 'attempt-retry', payloadDigest: 'sha256:retry' })),
+      recordReceipt: vi.fn(async () => undefined),
+      recordDecision: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    const onMessage = vi.fn();
+    manager.onMessage = onMessage;
+
+    await manager.connect();
+    emit(openEvent());
+    emit({
+      'messages.upsert': {
+        type: 'notify',
+        messages: [makeTextMessage({ id: 'approve-command', remoteJid: '15551234567@s.whatsapp.net', text: '/approve challenge-1 operation-1' })],
+      },
+    });
+
+    await vi.waitFor(() => expect(authority.recordReceipt).toHaveBeenCalledTimes(1));
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(authority.admit).toHaveBeenCalledWith({
+      recipient: '15551230000@s.whatsapp.net',
+      content: { text: 'released reply' },
+      options: { timestamp: 1_700_000_000 },
+      context: { inbound_event_id: 'approve-command' },
+      operationId: 'operation-1',
+    });
+    expect(mockSock.sendMessage).toHaveBeenCalledWith(
+      '15551230000@s.whatsapp.net',
+      { text: 'released reply' },
+      { timestamp: 1_700_000_000 },
+    );
+  });
+
+  it('sends only the authority-created fixed receipt after the authority persists /stop', async () => {
+    // Break caught: a paused account sends a local acknowledgement through a
+    // normal reply grant instead of its one-use server-issued receipt.
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const authority = {
+      registerInbound: vi.fn(async () => ({
+        kind: 'paused' as const,
+        receipt: {
+          id: 'receipt-stop',
+          accountId: 'pilot-account',
+          action: 'whatsapp.control_receipt',
+          payload: { recipient: '15551234567@s.whatsapp.net', content: { text: 'Notifications paused.' } },
+          digest: 'sha256:receipt',
+          state: 'approved',
+        },
+      })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async () => ({ attemptId: 'stop-receipt', payloadDigest: 'sha256:stop-receipt' })),
+      recordReceipt: vi.fn(async () => undefined),
+      recordDecision: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    const onMessage = vi.fn();
+    manager.onMessage = onMessage;
+
+    await manager.connect();
+    emit(openEvent());
+    emit({
+      'messages.upsert': {
+        type: 'notify',
+        messages: [makeTextMessage({ id: 'stop-command', remoteJid: '15551234567@s.whatsapp.net', text: '/stop' })],
+      },
+    });
+
+    await vi.waitFor(() => expect(authority.recordReceipt).toHaveBeenCalledTimes(1));
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(authority.admit).toHaveBeenCalledWith({
+      recipient: '15551234567@s.whatsapp.net',
+      content: { text: 'Notifications paused.' },
+      context: { inbound_event_id: 'stop-command' },
+      operationId: 'receipt-stop',
+    });
+    expect(mockSock.sendMessage).toHaveBeenCalledWith('15551234567@s.whatsapp.net', { text: 'Notifications paused.' });
+  });
+
+  it('retries only server-created approved WhatsApp automation before the normal inbound turn', async () => {
+    // Break caught: agent text can manufacture automation facts, or an approved
+    // mail operation is incorrectly pushed through the WhatsApp socket.
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const onMessage = vi.fn();
+    const authority = {
+      registerInbound: vi.fn(async () => ({
+        kind: 'inbound' as const,
+        automationOperations: [
+          {
+            id: 'auto-whatsapp-1', accountId: 'pilot-account', action: 'whatsapp.send',
+            payload: { recipient: '15551230000@s.whatsapp.net', content: { text: 'server automation' } },
+            digest: 'sha256:auto', state: 'approved',
+          },
+          {
+            id: 'auto-mail-1', accountId: 'pilot-account', action: 'mail.send',
+            payload: { subject: 'executor only' }, digest: 'sha256:mail', state: 'approved',
+          },
+        ],
+        automationHolds: [{ ruleId: 'rule-hold-1', reason: 'needs_review' }],
+      })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async () => ({ attemptId: 'attempt-auto', payloadDigest: 'sha256:auto' })),
+      recordReceipt: vi.fn(async () => undefined),
+      recordDecision: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    manager.onMessage = onMessage;
+
+    await manager.connect();
+    emit(openEvent());
+    emit({
+      'messages.upsert': {
+        type: 'notify',
+        messages: [makeTextMessage({ id: 'inbound-auto', remoteJid: '15551234567@s.whatsapp.net', text: 'trigger' })],
+      },
+    });
+
+    await vi.waitFor(() => expect(authority.recordReceipt).toHaveBeenCalledTimes(1));
+    expect(authority.admit).toHaveBeenCalledWith({
+      recipient: '15551230000@s.whatsapp.net',
+      content: { text: 'server automation' },
+      context: { inbound_event_id: 'inbound-auto' },
+      operationId: 'auto-whatsapp-1',
+    });
+    expect(mockSock.sendMessage).toHaveBeenCalledWith('15551230000@s.whatsapp.net', { text: 'server automation' });
+    expect(onMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps an authority inbound lease open until the asynchronous ingest turn settles', async () => {
+    // Break caught: treating queue admission as completion lets a later queued
+    // reply lose its only authenticated inbound binding.
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    let resolveTurn!: () => void;
+    const onMessage = vi.fn(() => new Promise<void>((resolve) => { resolveTurn = resolve; }));
+    const authority = {
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async () => ({ attemptId: 'unused', payloadDigest: 'sha256:unused' })),
+      recordReceipt: vi.fn(async () => undefined),
+      recordDecision: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    manager.onMessage = onMessage;
+
+    await manager.connect();
+    emit(openEvent());
+    emit({
+      'messages.upsert': {
+        type: 'notify',
+        messages: [makeTextMessage({ id: 'lease-turn', remoteJid: '15551234567@s.whatsapp.net', text: 'wait' })],
+      },
+    });
+
+    await vi.waitFor(() => expect(onMessage).toHaveBeenCalledTimes(1));
+    expect(authority.closeInbound).not.toHaveBeenCalled();
+    resolveTurn();
+    await vi.waitFor(() => expect(authority.closeInbound).toHaveBeenCalledWith({ eventId: 'lease-turn' }));
+  });
+
   it('invokes onMessage when a parseable notify message arrives', async () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);

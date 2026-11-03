@@ -8,6 +8,7 @@ import { cleanupOldRateLimits, cleanupOldAttempts } from './runtimes/chat/rate-l
 import { getMessagesBySender, getMessageCount, getUnprocessedCount } from './core/messages.ts';
 import { processHistoryBatch, type HistoryInput } from './core/history-sync.ts';
 import { createConnection } from './transport/factory.ts';
+import { createProtectedOperationsAuthorityClient } from './transport/operations-authority-client.ts';
 import { classifyStreamedProviderFailure } from './runtimes/agent/failure-taxonomy.ts';
 import type { RuntimeConnection } from './transport/runtime-connection.ts';
 import { isFullyConnected } from './transport/runtime-connection.ts';
@@ -461,6 +462,22 @@ strictStartupConnectionReady = (): boolean => isFullyConnected(connectionManager
 // outbound governor. main.ts is the composition root (may import runtimes);
 // transport receives the classifier via DI so it need not import runtimes.
 connectionManager.setOutboundContentClassifier?.(classifyStreamedProviderFailure);
+if (config.transportAuthority?.enabled) {
+  const installAuthority = connectionManager.setOperationsAuthorityClient;
+  if (typeof installAuthority !== 'function') {
+    throw new Error('transport authority is enabled but the selected connection has no final authority seam');
+  }
+  // The bearer is read only by this transport-service process after strict
+  // owner/mode/UID checks. Agent workers never receive it through env or tools.
+  const authority = createProtectedOperationsAuthorityClient({
+    baseUrl: config.transportAuthority.baseUrl,
+    accountId: config.transportAuthority.accountId,
+    credentialFile: config.transportAuthority.credentialFile,
+    serviceUid: config.transportAuthority.serviceUid,
+    workerUid: config.transportAuthority.workerUid,
+  });
+  installAuthority.call(connectionManager, authority);
+}
 
 // 5. Runtime — selected by instance type
 let runtime: Runtime;
@@ -492,6 +509,7 @@ if (instanceType === 'agent') {
   const agentModel = resolveAgentModel(instanceConfig);
   runtime = new AgentRuntime(db, connectionManager, config.botName, {
     shared: agentOpts?.sessionScope === 'shared',
+    providerProcessIsolation: config.providerProcessIsolation ?? undefined,
     sessionScope: agentOpts?.sessionScope as 'single' | 'shared' | 'per_chat' | undefined,
     cwd: cwdResolved,
     configSystemPrompt: instanceConfig?.systemPrompt as string | undefined,

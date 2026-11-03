@@ -57,7 +57,7 @@ function contractToIncoming(message: ContractInboundMessage, isGroup: boolean): 
 export class SignalConnection extends EventEmitter implements RuntimeConnection {
   botJid: string | null = null;
   botLid: string | null = null;
-  onMessage: ((message: IncomingMessage) => void) | null = null;
+  onMessage: ((message: IncomingMessage) => void | Promise<void>) | null = null;
   readonly contactsDir = new ContactsDirectory();
   readonly presenceCache = new PresenceCache();
 
@@ -106,12 +106,12 @@ export class SignalConnection extends EventEmitter implements RuntimeConnection 
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (message) => {
       this.retryPendingUnregisteredClear();
-      this.onMessage?.(
+      void Promise.resolve(this.onMessage?.(
         contractToIncoming(
           message,
           this.adapter.isGroupConversation(message.conversation),
         ),
-      );
+      )).catch(() => undefined);
     });
 
     this.errorSubscription?.dispose();

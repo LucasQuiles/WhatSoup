@@ -28,6 +28,8 @@ export interface QueuedTurn {
   runtimeContext?: RuntimeTurnContext;
   /** durability: inbound_events.seq for this turn — threaded to outbound ops */
   inboundSeq?: number;
+  /** Called after this exact turn reaches a terminal queue outcome. */
+  onSettled?: () => void;
 }
 
 /**
@@ -86,17 +88,20 @@ export class TurnQueue {
     if (!this.accepting) {
       log.warn({ chatJid: turn.chatJid }, 'turn rejected — queue admissions are closed');
       this.onReject?.(turn, 'queue_closed');
+      this.settle(turn);
       return false;
     }
     if (this.halted) {
       log.error({ chatJid: turn.chatJid }, 'turn rejected — queue is halted after finalization failure');
       this.onReject?.(turn, 'queue_halted');
+      this.settle(turn);
       return false;
     }
     if (this.queue.length >= this.maxDepth) {
       log.warn({ chatJid: turn.chatJid, maxDepth: this.maxDepth, pending: this.queue.length },
         'turn rejected — queue depth cap reached');
       this.onReject?.(turn, 'queue_full');
+      this.settle(turn);
       return false;
     }
     this.queue.push(turn);
@@ -277,6 +282,7 @@ export class TurnQueue {
           }
         } finally {
           if (this.active === turn) this.active = null;
+          this.settle(turn);
         }
       }
     } finally {
@@ -289,5 +295,13 @@ export class TurnQueue {
     this.halted = true;
     this.haltError = error;
     this.onHalt?.();
+  }
+
+  private settle(turn: QueuedTurn): void {
+    try {
+      turn.onSettled?.();
+    } catch (err) {
+      log.warn({ err, chatJid: turn.chatJid }, 'turn settlement callback threw');
+    }
   }
 }

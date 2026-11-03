@@ -118,7 +118,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
   botLid: string | null = null;
 
   /** Consumer: main.ts:333 (createIngestHandler wires this); ingest.ts:138 */
-  onMessage: ((msg: IncomingMessage) => void) | null = null;
+  onMessage: ((msg: IncomingMessage) => void | Promise<void>) | null = null;
 
   /** Consumer: main.ts:745/754/757; mcp/tools/messaging.ts (but MCP is chat-only) */
   readonly contactsDir = new ContactsDirectory();
@@ -173,7 +173,7 @@ export class TwilioConnection extends EventEmitter implements RuntimeConnection 
     this.messageSubscription?.dispose();
     this.messageSubscription = this.adapter.on('message', (msg: ContractInboundMessage) => {
       if (this.onMessage !== null) {
-        this.onMessage(contractToIncoming(msg));
+        void Promise.resolve(this.onMessage(contractToIncoming(msg))).catch(() => undefined);
       }
     });
 
