@@ -7,6 +7,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { SignalAdapter } from '../../../src/transport/signal/adapter.ts';
 import { SignalConnection } from '../../../src/transport/signal/connection-bridge.ts';
+import { TransientProviderError } from '../../../src/transport/contract/errors.ts';
 import { MockSignalPort, makeSignalConfig } from './mock-port.ts';
 
 const emitAlert = vi.hoisted(() => vi.fn(() => true));
@@ -212,18 +213,23 @@ describe('signal_cli_unregistered recovery authority (#2394)', () => {
   it('a transient poll failure retains a valid pending recovery handoff', async () => {
     const port = new MockSignalPort();
     const { adapter, connection } = makeConnection(port);
+    const errors: unknown[] = [];
+    const subscription = adapter.on('error', (error) => errors.push(error));
     try {
       clearAlertSource.mockReturnValueOnce(false);
       await connection.connect();
       vi.spyOn(port, 'listInboundSince').mockRejectedValueOnce(
-        Object.assign(new Error('receive unavailable'), { code: 'ECONNREFUSED' }),
+        Object.assign(new Error('receive unavailable'), { status: 503 }),
       );
       await adapter.pollOnce();
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(TransientProviderError);
       expect(adapter.state().state).toBe('connected');
       await connection.sendMessage('+15559990000@signal', 'activity');
       expect(unregisteredClears()).toHaveLength(2);
       expect(unregisteredAlerts()).toHaveLength(0);
     } finally {
+      subscription.dispose();
       await connection.shutdown();
     }
   });
