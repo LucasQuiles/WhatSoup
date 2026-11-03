@@ -1,5 +1,6 @@
-import { EventEmitter, once } from 'node:events';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { ChildProcess, spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -84,13 +85,27 @@ function controllerDeps(overrides: Record<string, unknown> = {}) {
 }
 
 function fakeChild() {
-  const child = new EventEmitter() as EventEmitter & {
-    pid: number;
-    stdio: Array<EventEmitter | null>;
-  };
-  child.pid = 31337;
-  child.stdio = [new EventEmitter(), new EventEmitter(), new EventEmitter(), new EventEmitter()];
-  return child;
+  const child = new ChildProcess();
+  const receipt = new PassThrough();
+  const stdio: ChildProcess['stdio'] = [
+    new PassThrough(),
+    new PassThrough(),
+    new PassThrough(),
+    receipt,
+    null,
+  ];
+  Object.defineProperties(child, {
+    pid: { configurable: true, value: 31337 },
+    stdio: { configurable: true, value: stdio },
+  });
+  return Object.assign(child, {
+    hideReceipt: () => {
+      Object.defineProperty(child, 'stdio', {
+        configurable: true,
+        value: [stdio[0], stdio[1], stdio[2], null, stdio[4]],
+      });
+    },
+  });
 }
 
 describe('provider process isolation', () => {
@@ -294,7 +309,7 @@ describe('provider process isolation', () => {
 
   it('terminates and reaps its process group when the launcher omits its receipt fd', async () => {
     const child = fakeChild();
-    child.stdio[3] = null;
+    child.hideReceipt();
     const signals: NodeJS.Signals[] = [];
     const result = launchIsolatedProviderProcess({
       binary: '/usr/bin/fake-provider',

@@ -13,6 +13,11 @@ import {
   withTransportInboundContext,
 } from '../../src/transport/operations-authority-gate.ts';
 import { OutboundGovernor, wrapWithOutboundGovernor } from '../../src/transport/outbound-governor.ts';
+import type {
+  TransportAdmission,
+  TransportAdmissionInput,
+  TransportReceiptInput,
+} from '../../src/transport/operations-authority-client.ts';
 
 function permissiveGovernor() {
   return new OutboundGovernor({
@@ -28,15 +33,25 @@ function permissiveGovernor() {
 
 function acceptingAuthority() {
   return {
-    admit: vi.fn(async () => ({ attemptId: 'attempt-1', payloadDigest: 'sha256:payload' })),
-    recordReceipt: vi.fn(async () => undefined),
+    admit: vi.fn<(input: TransportAdmissionInput) => Promise<TransportAdmission>>(
+      async () => ({ attemptId: 'attempt-1', payloadDigest: 'sha256:payload' }),
+    ),
+    recordReceipt: vi.fn<(input: TransportReceiptInput) => Promise<void>>(async () => undefined),
   };
 }
 
 function fakeSocket() {
   return {
-    sendMessage: vi.fn(async (_jid: string, content: unknown) => ({ key: { id: 'provider-1' }, content })),
-    relayMessage: vi.fn(async () => 'provider-relay-1'),
+    sendMessage: vi.fn<(
+      jid: string,
+      content: unknown,
+      options?: unknown,
+    ) => Promise<{ key: { id: string }; content: unknown }>>(
+      async (_jid, content, _options) => ({ key: { id: 'provider-1' }, content }),
+    ),
+    relayMessage: vi.fn<(jid: string, content: unknown, options: unknown) => Promise<string>>(
+      async (_jid, _content, _options) => 'provider-relay-1',
+    ),
   };
 }
 
