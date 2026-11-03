@@ -56,3 +56,13 @@ export function promoteEchoedCheckpointIdentitySql(validRecoveryJobFrom: string)
            OR checkpoint.completed_inbound_seq < proof.inbound_seq)
   `;
 }
+
+export function echoedTurnRecoverySettlementSql(validRecoveryJobFrom: string): string {
+  return `
+    SELECT j.id AS job_id, j.state, i.seq AS inbound_seq,
+           i.processing_status, i.terminal_reason,
+           o.status AS outbound_status, t.delivery_jid
+    ${validRecoveryJobFrom}
+    WHERE o.id = ?
+  `;
+}

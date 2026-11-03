@@ -54,7 +54,10 @@ different retention policy proposed in #3666. Contact-approval group routing in
 - Migration 67 only advances the supported data contract in the migration ledger.
   Existing future-schema rejection prevents ceiling-66 writers from opening it.
   The changed schema version also invalidates D5 capability attestation bindings;
-  rollout must requalify them through the existing attestation procedure.
+  rollout must requalify them through the existing attestation procedure. Group-drain
+  approvals bind that digest too: fresh attestation alone does not renew an already
+  consumed approval. Qualify its supported operator transition before rollout;
+  never rewrite approval digests to transfer authority.
 
 Account identity remains an instance/database boundary. This does not add a channel
 column or enable several accounts to share a database. A configuration/account

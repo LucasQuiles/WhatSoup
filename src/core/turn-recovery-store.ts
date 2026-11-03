@@ -9,7 +9,7 @@ import {
 } from './delivery-corroboration-sql.ts';
 import { OPEN_RECOVERIES_CTE_SQL } from './open-recoveries-sql.ts';
 import { syntheticSourceMessageIdSql } from './synthetic-turn-source.ts';
-import { promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
+import { echoedTurnRecoverySettlementSql, promoteEchoedCheckpointIdentitySql } from './turn-recovery-checkpoint-identity.ts';
 import { parseDeliveryNamespace } from './jid-constants.ts';
 
 export const TURN_RECOVERY_MAX_ID_BYTES = 2048;
@@ -706,13 +706,7 @@ export class TurnRecoveryStore {
         ${VALID_RECOVERY_JOB_FROM}
         WHERE j.id = ?
       `),
-      getEchoedTurnRecoverySettlement: prepare(`
-        SELECT j.id AS job_id, j.state, i.seq AS inbound_seq,
-               i.processing_status, i.terminal_reason,
-               o.status AS outbound_status, t.delivery_jid
-        ${VALID_RECOVERY_JOB_FROM}
-        WHERE o.id = ?
-      `),
+      getEchoedTurnRecoverySettlement: prepare(echoedTurnRecoverySettlementSql(VALID_RECOVERY_JOB_FROM)),
       completeEchoedTurnRecoveryInbound: prepare(`
         UPDATE inbound_events
         SET processing_status = 'complete',
