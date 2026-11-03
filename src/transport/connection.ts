@@ -605,6 +605,7 @@ export declare interface ConnectionManager {
 // ---------------------------------------------------------------------------
 
 export class ConnectionManager extends EventEmitter implements Messenger {
+  readonly requestedIdIsProviderId = true;
   private sock: WhatsAppSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
