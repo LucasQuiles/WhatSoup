@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 # ---------------------------------------------------------------------------
 # Module loader (mirrors test_bot_errors_collector_backoff.py)
@@ -381,39 +382,57 @@ def test_health_probe_cannot_clear_other_failure_domains(recovery_case, other_fa
     assert key in state["openIncidents"]
 
 
-@pytest.mark.parametrize("failure", [
-    "FAIL config line-a: health_port_authority_drift profile=9094 live=9093",
-    "config line-a: invalid JSON required extra.json: malformed",
-    "health line-a: FAIL 503 unavailable",
-    "FAIL socket line-a: absent",
-])
-@pytest.mark.parametrize("failure_first", [False, True])
-def test_current_target_failure_vetoes_only_its_daily_health_key(
-    recovery_case, failure, failure_first,
-):
-    dispatcher, state, key, recovery, _ = recovery_case()
+def test_current_target_failure_vetoes_only_its_daily_health_key(recovery_case):
+    dispatcher, seed_state, key, seed_recovery, _ = recovery_case()
     other = key.replace("line-a", "line-b")
-    state["openIncidents"][other] = deepcopy(state["openIncidents"][key])
-    state["openIncidents"][other]["lastEvidence"] = "health line-b: FAIL status=unhealthy"
-    health_lines = recovery["evidence"] + "\n" + recovery["evidence"].replace("line-a", "line-b")
-    recovery["evidence"] = (
-        failure + "\n" + health_lines if failure_first else health_lines + "\n" + failure
+    seed_state["openIncidents"][other] = deepcopy(seed_state["openIncidents"][key])
+    seed_state["openIncidents"][other]["lastEvidence"] = "health line-b: FAIL status=unhealthy"
+
+    @settings(database=None, deadline=None, max_examples=40, derandomize=True)
+    @given(
+        failure=st.sampled_from([
+            "FAIL config line-a: health_port_authority_drift profile=9094 live=9093",
+            "config line-a: invalid JSON required extra.json: malformed",
+            "health line-a: FAIL 503 unavailable",
+            "FAIL socket line-a: absent",
+        ]),
+        failure_first=st.booleans(),
+        separator=st.sampled_from(["\n", "\r\n"]),
     )
-    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [other]
-    assert dispatcher.close_recovered_daily_health_incidents(recovery, state) == [other]
-    assert key in state["openIncidents"] and other not in state["openIncidents"]
+    @example(failure="config line-a: invalid JSON required extra.json: malformed",
+             failure_first=False, separator="\n")
+    def check(failure, failure_first, separator):
+        state, recovery = deepcopy(seed_state), deepcopy(seed_recovery)
+        health_lines = recovery["evidence"] + separator + recovery["evidence"].replace("line-a", "line-b")
+        recovery["evidence"] = (
+            failure + separator + health_lines if failure_first else health_lines + separator + failure
+        )
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [other]
+        assert dispatcher.close_recovered_daily_health_incidents(recovery, state) == [other]
+        assert key in state["openIncidents"] and other not in state["openIncidents"]
+
+    check()
 
 
-@pytest.mark.parametrize("line", [
-    "health line-a: WARN 200 health_token_missing",
-    "FAIL disk: low space",
-    "config /fixture/config.json: invalid JSON",
-    "FAIL config line-b: absent",
-])
-def test_unattributed_or_unrelated_lines_do_not_veto_recovery(recovery_case, line):
-    dispatcher, state, key, recovery, _ = recovery_case()
-    recovery["evidence"] += "\n" + line
-    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [key]
+def test_unattributed_or_unrelated_lines_do_not_veto_recovery(recovery_case):
+    dispatcher, seed_state, key, seed_recovery, _ = recovery_case()
+
+    @settings(database=None, deadline=None, derandomize=True)
+    @given(line=st.sampled_from([
+        "health line-a: WARN 200 health_token_missing",
+        "FAIL disk: low space",
+        "config /fixture/config.json: invalid JSON",
+        "FAIL config line-b: absent",
+    ]), line_first=st.booleans())
+    @example(line="health line-a: WARN 200 health_token_missing", line_first=False)
+    def check(line, line_first):
+        state, recovery = deepcopy(seed_state), deepcopy(seed_recovery)
+        recovery["evidence"] = (
+            line + "\n" + recovery["evidence"] if line_first else recovery["evidence"] + "\n" + line
+        )
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [key]
+
+    check()
 
 
 def test_current_config_failure_preserves_source_specific_recovery(recovery_case):
