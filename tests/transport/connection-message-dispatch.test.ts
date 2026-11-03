@@ -206,7 +206,7 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
           payload: {
             recipient: '15551230000@s.whatsapp.net',
             content: { text: 'released reply' },
-            options: { timestamp: 1_700_000_000 },
+            options: { messageId: 'released-reply-1' },
           },
           digest: 'sha256:payload',
           state: 'approved',
@@ -237,15 +237,71 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     expect(authority.admit).toHaveBeenCalledWith({
       recipient: '15551230000@s.whatsapp.net',
       content: { text: 'released reply' },
-      options: { timestamp: 1_700_000_000 },
+      options: { messageId: 'released-reply-1' },
       context: { inbound_event_id: 'approve-command' },
       operationId: 'operation-1',
     });
     expect(mockSock.sendMessage).toHaveBeenCalledWith(
       '15551230000@s.whatsapp.net',
       { text: 'released reply' },
-      { timestamp: 1_700_000_000 },
+      { messageId: 'released-reply-1' },
     );
+  });
+
+  it('holds an authority-approved operation with unsupported provider options before final admission', async () => {
+    // Break caught: an authority-created operation with opaque provider options
+    // inherits an operation grant despite lacking a deterministic semantic adapter.
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const authority = {
+      registerInbound: vi.fn(async () => ({
+        kind: 'decision' as const,
+        operations: [{
+          id: 'operation-with-unsupported-option',
+          accountId: 'pilot-account',
+          action: 'whatsapp.send',
+          payload: {
+            recipient: '15551230000@s.whatsapp.net',
+            content: { text: 'released reply' },
+            options: { timestamp: 1_700_000_000 },
+          },
+          digest: 'sha256:payload',
+          state: 'approved',
+        }],
+      })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async () => ({ attemptId: 'must-not-admit', payloadDigest: 'must-not-admit' })),
+      recordReceipt: vi.fn(async () => undefined),
+      recordDecision: vi.fn(async () => undefined),
+      pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    const onMessage = vi.fn();
+    manager.onMessage = onMessage;
+
+    await manager.connect();
+    emit(openEvent());
+    emit({
+      'messages.upsert': {
+        type: 'notify',
+        messages: [makeTextMessage({
+          id: 'approve-with-unsupported-option',
+          remoteJid: '15551234567@s.whatsapp.net',
+          text: '/approve challenge-1 operation-with-unsupported-option',
+        })],
+      },
+    });
+
+    // Lease close proves the protected dispatch callback reached the final
+    // semantic seam and settled, rather than observing zero calls too early.
+    await vi.waitFor(() => expect(authority.closeInbound).toHaveBeenCalledWith({
+      eventId: 'approve-with-unsupported-option',
+    }));
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(authority.admit).not.toHaveBeenCalled();
+    expect(authority.recordReceipt).not.toHaveBeenCalled();
+    expect(mockSock.sendMessage).not.toHaveBeenCalled();
   });
 
   it('sends only the authority-created fixed receipt after the authority persists /stop', async () => {
