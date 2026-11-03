@@ -136,7 +136,7 @@ if (mode === '--watchdog') {
       }
       policy(0, controllerGid, 0o640);
       const accepted = controller();
-      assert.equal(accepted.status, 0, accepted.stderr);
+      assert(accepted.status === 0, accepted.stderr);
       assert.deepEqual(JSON.parse(accepted.stdout), {
         uid: controllerUid, gid: controllerGid, groups: [controllerGid], digest: config.policySha256,
       });
