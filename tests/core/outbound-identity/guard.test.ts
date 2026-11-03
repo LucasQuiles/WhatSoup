@@ -78,6 +78,15 @@ describe('assertOutboundIdentity — plain phone jid', () => {
 });
 
 describe('assertOutboundIdentity — group classification', () => {
+  it('requires group approval for iMessage even when the direct-target store says warm', () => {
+    const jid = 'iMessage;+;chat-example@imessage';
+    const opts = { caller: 'mcp', mode: 'enforce' } as const;
+    expect(assertOutboundIdentity(jid, opts, fakeStore({ isWarm: () => true, isApprovedGroup: () => false })))
+      .toMatchObject({ verdict: 'block', code: 'UNKNOWN_GROUP' });
+    expect(assertOutboundIdentity(jid, opts, fakeStore({ isWarm: () => false, isApprovedGroup: () => true })))
+      .toEqual({ verdict: 'allow' });
+  });
+
   it('known group → allow', () => {
     const store = fakeStore({ isApprovedGroup: () => true });
     const d = assertOutboundIdentity('1111111000000001@g.us', { caller: 'mcp', mode: 'enforce' }, store);

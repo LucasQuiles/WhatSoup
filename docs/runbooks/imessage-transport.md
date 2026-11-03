@@ -120,6 +120,37 @@ Both backends use **config-only auth** (matches the Twilio precedent — no
 - **Message ids:** provider GUIDs (BlueBubbles) or stringified `chat.db`
   ROWIDs (imsg), surfaced as `MessageRef.id`.
 
+### Shared group policy
+
+The shared `isGroupJid` predicate recognizes canonical
+`iMessage;+;<provider-id>@imessage` group JIDs using the same address validator
+as the adapter. Direct phone/email addresses and `iMessage;-;` direct GUIDs
+are not groups. This applies the existing policies across consumers:
+
+- Approval previews go to the configured admin's direct chat, even when the
+  newest stored admin message came from a group ([#3566](https://github.com/LucasQuiles/WhatSoup/issues/3566)).
+- Chat-attributed memory uses the [group recall policy](../configuration.md#memory-recall-scope):
+  shared records and the verified speaker's own records in that group.
+  `knowledge_search` excludes untagged and other-chat memories; chat-runtime
+  recall excludes another member's private records
+  ([#3847](https://github.com/LucasQuiles/WhatSoup/issues/3847)).
+- Outbound identity checks use explicit group approval; a warm direct-target
+  record does not authorize a group. Group JIDs cannot be trusted DM peers.
+
+The iMessage bridge exposes no Baileys socket, so the current memory membership
+reader cannot prove an owner-and-bots group. The shared identity resolver also
+does not currently resolve iMessage admin identities for memory exceptions.
+Such groups remain restricted; do not broaden recall to work around missing
+identity evidence. Operator-instance and explicit shared-workflow policies
+retain their existing behavior. Document namespaces and entity-mode context
+have separate retrieval semantics and are not qualified by this group fix.
+
+This classifier does not enable GUID checkpoint resume or change group-session
+lifetime ([#3844](https://github.com/LucasQuiles/WhatSoup/issues/3844),
+[#3666](https://github.com/LucasQuiles/WhatSoup/issues/3666)). Both backends must
+preserve the canonical GUID and member sender identity. Local adapter/consumer
+tests do not prove a deployed backend's payloads or live memory contents.
+
 ## Capabilities (v1)
 
 | Feature | State |

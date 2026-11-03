@@ -369,6 +369,7 @@ describe('internalPeerJids validation', () => {
 
   it.each([
     ['group JID', [groupPeer]],
+    ['iMessage group JID', ['iMessage;+;chat-example@imessage']],
     ['spoofable SMS JID', [smsPeer]],
     ['blank JID', ['']],
     ['duplicate JID', [whatsappPeer, whatsappPeer]],

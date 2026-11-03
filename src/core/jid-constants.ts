@@ -5,7 +5,7 @@
 // Every JID parsing/normalization operation should live here or delegate here.
 // Do NOT reimplement .split('@')[0] or .endsWith('@lid') inline — use these.
 
-import { assertNeverTransport, isSignalGroupAddress, type TransportId } from './transport-refs.ts';
+import { assertNeverTransport, isImessageGroupAddress, isSignalGroupAddress, type TransportId } from './transport-refs.ts';
 
 // ── Domain constants ────────────────────────────────────────────────────────
 
@@ -151,7 +151,8 @@ export function isPnJid(jid: string | null | undefined): boolean {
 /** Check if a raw JID (not a conversation key) is a group JID. */
 export function isGroupJid(jid: string): boolean {
   return jid.endsWith(JID_GROUP)
-    || (jid.endsWith(JID_SIGNAL) && isSignalGroupAddress(fromSignalJid(jid)));
+    || (jid.endsWith(JID_SIGNAL) && isSignalGroupAddress(fromSignalJid(jid)))
+    || (jid.endsWith(JID_IMESSAGE) && isImessageGroupAddress(fromImessageJid(jid)));
 }
 
 /** WhatsApp status-broadcast pseudo-chat: every contact's status posts share this JID. */

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { loadContext, loadContextDetailed } from '../../../src/runtimes/chat/context.ts';
+import { chatRecallBoundary } from '../../../src/core/memory-scope.ts';
 import type { SearchResult, MemoryRecord, EntitySearchResult } from '../../../src/runtimes/chat/providers/pinecone.ts';
 
 vi.mock('../../../src/config.ts', () => ({
@@ -504,6 +505,38 @@ describe('loadContext', () => {
     expect(result).not.toContain('Background knowledge:');
     expect(result).toContain('Things you (Loops) have said about yourself before');
     expect(result).toContain('Loops likes electronic music');
+  });
+
+  it.each([
+    ['iMessage;+;chat-example@imessage', false, false, false],
+    ['+15550000002@imessage', false, false, true],
+    ['iMessage;+;chat-example@imessage', true, false, true],
+    ['iMessage;+;chat-example@imessage', false, true, true],
+  ] as const)('composes recall policy with context for %s (operator=%s, shared=%s)', async (chatJid, operatorInstance, shared, allowOther) => {
+    const senderJid = '+15550000002@imessage';
+    const records = [
+      makeResult('own', 'own group fact'),
+      makeResult('other', 'other member private fact'),
+      makeResult('shared', 'shared group context'),
+    ];
+    for (const record of records) record.record.chatJid = chatJid;
+    records[0]!.record.senderJid = senderJid;
+    records[1]!.record.senderJid = '+15550000003@imessage';
+    records[2]!.record.memoryType = 'group_context';
+    const foreign = makeResult('foreign', 'sender direct-chat secret');
+    foreign.record.chatJid = '+15550000004@imessage';
+    const pinecone = makeMockPinecone(records, [foreign]);
+    const boundary = chatRecallBoundary({
+      chatJid, senderJid, operatorInstance, adminPhones: new Set(),
+      sharedWorkflowGroups: shared ? [chatJid] : [],
+    });
+
+    const result = await loadContextDetailed(pinecone as any, chatJid, senderJid, 'query', undefined, boundary);
+
+    expect(result.text).toContain('own group fact');
+    expect(result.text).toContain('shared group context');
+    expect(result.text.includes('other member private fact')).toBe(allowOther);
+    expect(result.text.includes('sender direct-chat secret')).toBe(operatorInstance);
   });
 
   it('holds the sender leg to this group when it may not cross chats, matching both key spellings', async () => {
