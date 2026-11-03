@@ -1,6 +1,7 @@
 import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { parseTransportAuthorityUrl, TRANSPORT_AUTHORITY_URL_REQUIREMENT } from '../lib/authority-url.ts';
+import { isRecord } from '../lib/type-guards.ts';
 
 export const TRANSPORT_AUTHORITY_ADAPTER_VERSION = 1;
 
@@ -158,12 +159,6 @@ export interface OperationsAuthorityClientOptions {
   accountId: string;
   bearerToken: string;
   fetch?: AuthorityFetch;
-}
-
-type JsonRecord = Record<string, unknown>;
-
-function isRecord(value: unknown): value is JsonRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -470,7 +465,7 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
     }
   }
 
-  private async post(path: string, body: JsonRecord, parseBody: boolean): Promise<{ status: number; body: unknown }> {
+  private async post(path: string, body: Record<string, unknown>, parseBody: boolean): Promise<{ status: number; body: unknown }> {
     let response: Response;
     try {
       response = await this.fetchImpl(new URL(path, this.baseUrl), {
