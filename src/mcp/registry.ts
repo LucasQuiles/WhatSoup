@@ -54,6 +54,32 @@ export type {
 
 const log = createChildLogger('ToolRegistry');
 
+const TRANSPORT_ERROR_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ENOTCONN',
+  'ETIMEDOUT',
+]);
+const CERTIFICATE_ERROR_CODES = new Set([
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+]);
+
+function isTransportOrProtocolError(err: unknown, message: string): boolean {
+  const code = typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string'
+    ? err.code
+    : null;
+  if (code !== null && (
+    TRANSPORT_ERROR_CODES.has(code)
+    || CERTIFICATE_ERROR_CODES.has(code)
+    || /^ERR_(?:TLS|SSL)_[A-Z0-9_]+$/.test(code)
+  )) return true;
+  return /\b(?:ECONNRESET|EPIPE|ENOTCONN|ETIMEDOUT)\b|socket hang up|\bERR_(?:TLS|SSL)_[A-Z0-9_]+\b|\bTLS(?:\s*v?\d+(?:\.\d+)?)?\s+(?:alert|handshake)\b|\b(?:TLS|SSL) routines\b|self[- ]signed certificate|certificate (?:has expired|verify failed)|unable to verify (?:the )?(?:first )?certificate|Hostname\/IP does not match certificate/i.test(message);
+}
+
 // ---------------------------------------------------------------------------
 // Conversation-bound eligibility (per-chat actor sockets)
 // ---------------------------------------------------------------------------
@@ -950,7 +976,7 @@ export class ToolRegistry {
         }
         // Sanitize transport/protocol errors but keep application-level errors readable.
         // Raw stack traces, socket internals, and TLS details must never reach the agent.
-        const safeMessage = /ECONNRESET|EPIPE|ENOTCONN|ETIMEDOUT|TLS|certificate|socket hang up/i.test(message)
+        const safeMessage = isTransportOrProtocolError(err, message)
           ? `Tool "${name}" failed: connection error — try again`
           : `Tool "${name}" failed: ${message}`;
         return {

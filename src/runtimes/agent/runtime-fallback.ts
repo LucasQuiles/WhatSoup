@@ -75,6 +75,7 @@ import { createPrimaryModelProbeAdapters } from './providers/primary-model-usabi
 import {
   primaryModelUsabilityRequiresAlert,
   probePrimaryModelUsability,
+  type PrimaryProbeServiceContext,
   type PrimaryModelUsabilityResult,
 } from './providers/primary-model-usability.ts';
 import { fallbackRequiresPrimaryProbe, isProviderFallbackReason } from './runtime-presentation.ts';
@@ -227,6 +228,9 @@ export interface RuntimeFallbackPort {
   /** Explicit instance policy, if configured; absence preserves legacy env health. */
   readonly handoffDistill: TypedHandoffDistillConfig | undefined;
   readonly providerExecutionGate: ProviderExecutionGate;
+  /** Optional for older hand-built coordinator fixtures; production supplies it. */
+  readonly primaryProbeServiceContext?: PrimaryProbeServiceContext | null;
+  currentPrimaryProbeServiceContext?: () => PrimaryProbeServiceContext | null;
   readonly controlSession: SessionManager | null;
   readonly fallbackWindow: FallbackWindowState;
   readonly fallbackMetrics: FallbackWindowMetrics;
@@ -2204,7 +2208,20 @@ export class RuntimeFallbackCoordinator {
       probeInFlight: true,
     };
 
-    const adapters = createPrimaryModelProbeAdapters(this.host.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.host.agentProvider, this.host.model, this.host.cwd, this.host.egressProxy?.port, this.host.providerExecutionGate));
+    const adapters = createPrimaryModelProbeAdapters(
+      this.host.agentProviderConfig,
+      buildPrimaryProbeAdapterDeps(
+        this.host.agentProvider,
+        this.host.model,
+        this.host.cwd,
+        this.host.egressProxy?.port,
+        this.host.providerExecutionGate,
+        trigger,
+        this.host.primaryProbeServiceContext ?? undefined,
+        this.host.primaryProbeServiceContext !== undefined,
+        () => this.host.currentPrimaryProbeServiceContext?.() ?? null,
+      ),
+    );
     void Promise.resolve()
       .then(() => probePrimaryModelUsability(target, adapters))
       .then((result) => this.recordPrimaryModelUsability(result, trigger))

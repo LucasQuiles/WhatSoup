@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "activationRequirements": {
+    "rollbackTarget": {
+      "claudeRefreshOwnerV3": 3
+    }
+  },
+  "rollbackCapabilities": {
+    "claudeRefreshOwnerV3": 3
+  }
+}

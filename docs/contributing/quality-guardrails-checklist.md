@@ -96,6 +96,18 @@ resolver fallback and child-process reads, and verifies write and delete
 rejection; a sibling test pins the `PATH` order and the cleared
 `REQUIRE_OS_KEYRING` under the real configuration.
 
+The separate `portability.platform-paths-guarded` rule recognizes a narrow
+TypeScript guard: string or template occurrences inside the consequent of
+`if (process.platform === 'linux')`. It also recognizes a preceding `const`
+alias in the same block, initialized from `process.platform` or the injected
+fallback `deps.platform ?? process.platform`. Nested `else if` works the same
+way. Each occurrence must be guarded; an unguarded occurrence on the same
+line still matches. This recognition does not cross function or class bodies.
+Parse errors, any local `process` binding, unsupported conditions and unknown
+or mutable aliases retain the original substring findings. Python, shell,
+comments and the other portability rules keep their existing matching rules.
+The ratchet baseline is unchanged.
+
 ## Layer 1.5 — Local pre-commit early-drift signal (warn-only)
 
 The `.husky/pre-commit` hook first runs the deterministic

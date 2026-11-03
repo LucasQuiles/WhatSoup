@@ -26,6 +26,7 @@ const roots: string[] = [];
 interface Fixture {
   home: string;
   bin: string;
+  identityPython: string;
   ledger: string;
   env: NodeJS.ProcessEnv;
 }
@@ -132,10 +133,13 @@ function fixture(platform: 'Darwin' | 'Linux' = 'Darwin'): Fixture {
     'printf "sudo %s\\n" "$*" >> "$WHATSOUP_TEST_LEDGER"',
     '"$@"',
   ].join('\n'));
+  const identityPython = join(home, 'identity-python');
+  executable(identityPython, 'exit "${FAKE_IDENTITY_PYTHON_EXIT:-0}"');
 
   return {
     home,
     bin,
+    identityPython,
     ledger,
     env: {
       ...process.env,
@@ -152,11 +156,51 @@ function runInstaller(
   args: string[],
   input?: string,
 ): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync('/bin/bash', [installer, ...args], {
+  const script = [
+    '. "$1"',
+    'identity_candidate="$2"',
+    'whatsoup_process_identity_python_candidates() { printf "%s\\n" "$identity_candidate"; }',
+    'shift 2',
+    'whatsoup_install_host_dependencies_main "$@"',
+  ].join('\n');
+  const result = spawnSync('/bin/bash', ['-c', script, 'installer-test', installer, fx.identityPython, ...args], {
     cwd: repoRoot,
     env: fx.env,
     encoding: 'utf8',
     input,
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
+}
+
+function runInstallerAndContinueInCaller(
+  fx: Fixture,
+): { status: number | null; stdout: string; stderr: string } {
+  const script = [
+    'unset profile manager json CAP_STATUS SCRIPT_DIR caller_unset WHATSOUP_APT_UPDATE_TIMEOUT WHATSOUP_PKG_INSTALL_TIMEOUT WHATSOUP_PIP_INSTALL_TIMEOUT',
+    '. "$1"',
+    'identity_candidate="$2"',
+    'whatsoup_process_identity_python_candidates() { printf "%s\\n" "$identity_candidate"; }',
+    'whatsoup_install_host_dependencies_main --profile runtime --manager brew --json >/dev/null',
+    'main_status="$?"',
+    '[ -z "${profile+x}" ] || exit 90',
+    '[ -z "${manager+x}" ] || exit 91',
+    '[ -z "${json+x}" ] || exit 92',
+    '[ -z "${CAP_STATUS+x}" ] || exit 93',
+    '[ -z "${SCRIPT_DIR+x}" ] || exit 94',
+    '[ -z "${WHATSOUP_APT_UPDATE_TIMEOUT+x}" ] || exit 95',
+    '[ -z "${WHATSOUP_PKG_INSTALL_TIMEOUT+x}" ] || exit 96',
+    '[ -z "${WHATSOUP_PIP_INSTALL_TIMEOUT+x}" ] || exit 97',
+    '[ -n "${WHATSOUP_CAPABILITY_ROOT:-}" ] || exit 98',
+    'printf "main-status=%s caller-unset=%s\\n" "$main_status" "$caller_unset"',
+  ].join('\n');
+  const result = spawnSync('/bin/bash', ['-c', script, 'installer-test', installer, fx.identityPython], {
+    cwd: repoRoot,
+    env: fx.env,
+    encoding: 'utf8',
   });
   return {
     status: result.status,
@@ -179,6 +223,22 @@ afterEach(() => {
 });
 
 describe('explicit host dependency installer', () => {
+  it('plans Homebrew Python for the Darwin runtime identity', () => {
+    const fx = fixture();
+    const result = runInstaller(fx, ['--profile', 'runtime', '--manager', 'brew', '--json']);
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(receipt(result).packages).toEqual(['git', 'python']);
+    expect(ledger(fx)).toEqual([]);
+  });
+
+  it('leaves the sourced caller shell usable after main returns', () => {
+    const result = runInstallerAndContinueInCaller(fixture());
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toBe('main-status=0 caller-unset=\n');
+  });
+
   it('plans the complete Homebrew quality profile without mutating', () => {
     const fx = fixture();
     const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--json']);
@@ -191,7 +251,7 @@ describe('explicit host dependency installer', () => {
       platform: 'darwin',
       manager: 'brew',
       mode: 'plan',
-      packages: ['git', 'python@3.12', 'ripgrep', 'zsh', 'shellcheck'],
+      packages: ['git', 'python', 'python@3.12', 'ripgrep', 'zsh', 'shellcheck'],
     });
     expect(ledger(fx)).toEqual([]);
   });
@@ -268,7 +328,7 @@ describe('explicit host dependency installer', () => {
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(ledger(fx)).toEqual([
-      'brew install git python@3.12 ripgrep zsh shellcheck',
+      'brew install git python python@3.12 ripgrep zsh shellcheck',
       `python -m venv ${join(fx.home, 'quality-venv')}`,
       'python -m pip install pytest pytest-cov hypothesis ruff==0.15.10',
     ]);
@@ -282,7 +342,7 @@ describe('explicit host dependency installer', () => {
     const result = runInstaller(fx, ['--profile', 'quality', '--manager', 'brew', '--apply', '--yes']);
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
-    expect(ledger(fx)).toEqual(['brew install git python@3.12 ripgrep zsh shellcheck']);
+    expect(ledger(fx)).toEqual(['brew install git python python@3.12 ripgrep zsh shellcheck']);
     expect(result.stderr).toContain('Python 3.12 or newer is required');
   });
 
@@ -306,7 +366,7 @@ describe('explicit host dependency installer', () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
     expect(result.stderr).toContain('"outcome":"inconclusive"');
     expect(result.stderr).toContain('post-install doctor did not pass');
-    expect(ledger(fx)).toEqual(['brew install git']);
+    expect(ledger(fx)).toEqual(['brew install git python']);
   });
 
   it('allows the compatibility lane to install and prove a supported Node 25 runtime', () => {
