@@ -141,7 +141,9 @@ describe('runtime terminal coordinator integration', () => {
     const db = new Database(':memory:');
     db.open();
     try {
-      const { state } = makeRuntimeState(db, { shared: true });
+      const { state } = makeRuntimeState<RuntimeState & {
+        runtimeTurnSupervisor: { waitForRecovery(context: RuntimeTurnContext): Promise<void> };
+      }>(db, { shared: true });
       state.durability = durabilityMock();
       const runtimeContext = context('shared', '15550190102', 102, 'turn-shutdown-authority');
       const settled = vi.fn();
@@ -162,6 +164,10 @@ describe('runtime terminal coordinator integration', () => {
 
       await vi.waitFor(() => expect(finalize).toHaveBeenCalledWith(runtimeContext));
       expect(settled).not.toHaveBeenCalled();
+      const replacement = new TurnQueue();
+      replacement.setProcessor(async () => undefined);
+      expect(replacement.enqueue(turn)).toBe(false);
+      expect(settled).not.toHaveBeenCalled();
 
       finalization.resolve({ kind: 'reclaimed_by_sweep', identity: runtimeContext.identity, affectedScope: {
         scope: runtimeContext.identity.scope,
@@ -170,6 +176,78 @@ describe('runtime terminal coordinator integration', () => {
       await expect(shutdown).resolves.toBeUndefined();
 
       expect(settled).toHaveBeenCalledTimes(1);
+      expect(replacement.enqueue(turn)).toBe(true);
+      await replacement.idle();
+      expect(settled).toHaveBeenCalledTimes(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('settles a shutdown-detached turn only after its retained finalization recovers', async () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const { state } = makeRuntimeState<RuntimeState & {
+        runtimeTurnSupervisor: { waitForRecovery(context: RuntimeTurnContext): Promise<void> };
+      }>(db, { shared: true });
+      state.durability = durabilityMock();
+      const runtimeContext = context('shared', '15550190103', 103, 'turn-shutdown-recovery');
+      const settled = vi.fn();
+      const turn = { ...queuedTurn(runtimeContext), onSettled: settled };
+      const runtimeState = state as typeof state & { turnQueue: TurnQueue };
+      const queue = new TurnQueue();
+      runtimeState.turnQueue = queue;
+      expect(queue.enqueue(turn)).toBe(true);
+      const recovery = deferred<void>();
+      const coordinator = state.runtimeTurnCoordinator as typeof state.runtimeTurnCoordinator & {
+        finalizeActiveRuntimeTurnsForShutdown(deadlineAt?: number): Promise<void>;
+        finalizeUndispatchedRuntimeTurn(context: RuntimeTurnContext): Promise<FinalizeRuntimeTurnResult>;
+      };
+      const retained: FinalizeRuntimeTurnResult = {
+        kind: 'durable_failure_incident',
+        identity: runtimeContext.identity,
+        affectedScope: {
+          scope: runtimeContext.identity.scope,
+          conversationKey: runtimeContext.identity.conversationKey,
+        },
+        failureStage: 'terminal_finalize',
+        incidentStatus: 'durably_queued',
+        mayAdvance: false,
+        retryOwned: true,
+      };
+      const recovered: FinalizeRuntimeTurnResult = {
+        kind: 'reclaimed_by_sweep',
+        identity: runtimeContext.identity,
+        affectedScope: {
+          scope: runtimeContext.identity.scope,
+          conversationKey: runtimeContext.identity.conversationKey,
+        },
+        mayAdvance: true,
+      };
+      const finalize = vi.spyOn(coordinator, 'finalizeUndispatchedRuntimeTurn')
+        .mockResolvedValueOnce(retained)
+        .mockResolvedValueOnce(recovered);
+      const waitForRecovery = vi.spyOn(state.runtimeTurnSupervisor, 'waitForRecovery')
+        .mockReturnValue(recovery.promise);
+      const replacement = new TurnQueue();
+      replacement.setProcessor(async () => undefined);
+
+      const shutdown = coordinator.finalizeActiveRuntimeTurnsForShutdown(Date.now() + 1_000);
+
+      await vi.waitFor(() => expect(waitForRecovery).toHaveBeenCalledWith(runtimeContext));
+      expect(finalize).toHaveBeenCalledTimes(1);
+      expect(settled).not.toHaveBeenCalled();
+      expect(replacement.enqueue(turn)).toBe(false);
+
+      recovery.resolve(undefined);
+      await expect(shutdown).resolves.toBeUndefined();
+
+      expect(finalize).toHaveBeenCalledTimes(2);
+      expect(settled).toHaveBeenCalledTimes(1);
+      expect(replacement.enqueue(turn)).toBe(true);
+      await replacement.idle();
+      expect(settled).toHaveBeenCalledTimes(2);
     } finally {
       db.close();
     }

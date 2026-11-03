@@ -37,6 +37,7 @@ type QueuedAsyncContext = ReturnType<typeof AsyncLocalStorage.snapshot>;
 
 interface QueuedTurnAdmission {
   readonly context: QueuedAsyncContext;
+  readonly state: 'queued' | 'detached' | 'settling';
 }
 
 // An object can represent only one live queue admission. Context stays in the
@@ -151,8 +152,29 @@ export class TurnQueue {
     this.accepting = false;
     this.closeEpoch += 1;
     const pending = this.queue.splice(0);
-    for (const turn of pending) this.releaseQueuedTurnAdmission(turn);
+    for (const turn of pending) this.detachQueuedTurnAdmission(turn);
     return pending;
+  }
+
+  /**
+   * Settles a turn detached by this exact queue's close/halt lifecycle. Its
+   * captured admission context remains live until this point, so another queue
+   * cannot reuse the same object and release the inbound completion early.
+   */
+  settleDetachedTurn(turn: QueuedTurn): boolean {
+    const admission = this.queuedTurnAdmissions.get(turn);
+    if (admission?.state !== 'detached' || !activeQueuedTurns.has(turn)) {
+      log.error(
+        { chatJid: turn.chatJid },
+        'detached turn settlement rejected — exact queue does not own the admission',
+      );
+      return false;
+    }
+    // Consume this one completion before invoking onSettled: callbacks can
+    // synchronously re-enter and must not close the same inbound lease twice.
+    this.queuedTurnAdmissions.set(turn, Object.freeze({ ...admission, state: 'settling' }));
+    this.runInQueuedAsyncContext(turn, () => this.settle(turn));
+    return true;
   }
 
   haltAndTakePendingTurns(error: unknown): QueuedTurn[] {
@@ -302,8 +324,19 @@ export class TurnQueue {
   }
 
   private captureQueuedAsyncContext(turn: QueuedTurn): void {
-    this.queuedTurnAdmissions.set(turn, Object.freeze({ context: AsyncLocalStorage.snapshot() }));
+    this.queuedTurnAdmissions.set(turn, Object.freeze({
+      context: AsyncLocalStorage.snapshot(),
+      state: 'queued',
+    }));
     activeQueuedTurns.add(turn);
+  }
+
+  private detachQueuedTurnAdmission(turn: QueuedTurn): void {
+    const admission = this.queuedTurnAdmissions.get(turn);
+    if (!admission || admission.state !== 'queued' || !activeQueuedTurns.has(turn)) {
+      throw new Error('TurnQueue detached turn is missing its exact admission');
+    }
+    this.queuedTurnAdmissions.set(turn, Object.freeze({ ...admission, state: 'detached' }));
   }
 
   private runInQueuedAsyncContext<T>(turn: QueuedTurn, work: () => T): T {
@@ -356,8 +389,10 @@ export class TurnQueue {
   }
 
   private async processQueuedTurn(turn: QueuedTurn): Promise<boolean> {
+    let finalized = false;
     try {
       await this.processor!(turn);
+      finalized = true;
     } catch (err) {
       log.warn({ err, chatJid: turn.chatJid }, 'turn processor error — finalizing before queue advance');
       if (!this.onProcessorError) {
@@ -370,6 +405,7 @@ export class TurnQueue {
       }
       try {
         await this.onProcessorError(turn, err);
+        finalized = true;
       } catch (finalizationError) {
         this.halt(finalizationError);
         log.error(
@@ -380,7 +416,7 @@ export class TurnQueue {
       }
     } finally {
       if (this.active === turn) this.active = null;
-      this.settle(turn);
+      if (finalized) this.settle(turn);
     }
     return true;
   }

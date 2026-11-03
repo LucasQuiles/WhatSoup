@@ -43,8 +43,11 @@ their own immutable context. Batching separates different inbound events and
 approved operations; an unbound item explicitly clears ambient authority. These
 queue checks do not establish provider callback ownership or platform isolation.
 Admission rejection and shutdown finalize durable state before releasing inbound
-authority. A thrown finalization halts the queue and retains the inbound completion;
-the existing degraded-scope contract requires operator recovery or restart.
+authority. Detached turns retain their original queue ownership through finalization
+or retained recovery; another queue cannot reuse them before settlement. Reentrant
+settlement is rejected. A failed processor finalizer or thrown finalization retains
+the inbound completion; the existing degraded-scope contract requires operator
+recovery or restart.
 
 Session-scoped provider events without verified turn identity remain unbound and
 enter human review. Verified per-turn callbacks retain their admitted context;

@@ -37,6 +37,10 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function settleDetachedTurn(queue: TurnQueue, turn: QueuedTurn): boolean {
+  return queue.settleDetachedTurn(turn);
+}
+
 describe('TurnQueue', () => {
   it('settles a turn only after its processor and error finalizer finish', async () => {
     // Break caught: protected inbound leases close at queue admission or before
@@ -606,6 +610,98 @@ describe('TurnQueue', () => {
     expect(rejected).toEqual([late]);
   });
 
+  it('keeps a closed detached turn owned until its original queue settles it', async () => {
+    const settledContexts: Array<string | undefined> = [];
+    const owner = new TurnQueue();
+    const replacement = new TurnQueue();
+    replacement.setProcessor(async () => undefined);
+    const turn = makeTurn({
+      text: 'detached',
+      onSettled: () => settledContexts.push(getTransportInboundContext()?.inbound_event_id),
+    });
+    const inbound = {
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    };
+
+    await registerTrustedInbound(inbound, {
+      eventId: 'A',
+      sender: 'a@s.whatsapp.net',
+      conversation: turn.chatJid,
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'detached',
+    }, () => {
+      expect(owner.enqueue(turn)).toBe(true);
+    });
+    expect(owner.closeAndTakePendingTurns()).toEqual([turn]);
+
+    await registerTrustedInbound(inbound, {
+      eventId: 'B',
+      sender: 'b@s.whatsapp.net',
+      conversation: turn.chatJid,
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'reused before finalization',
+    }, () => {
+      expect(replacement.enqueue(turn)).toBe(false);
+    });
+    expect(settledContexts).toEqual([]);
+    expect(settleDetachedTurn(replacement, turn)).toBe(false);
+
+    expect(settleDetachedTurn(owner, turn)).toBe(true);
+    expect(settledContexts).toEqual(['A']);
+
+    await registerTrustedInbound(inbound, {
+      eventId: 'B',
+      sender: 'b@s.whatsapp.net',
+      conversation: turn.chatJid,
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'reused after finalization',
+    }, () => {
+      expect(replacement.enqueue(turn)).toBe(true);
+    });
+    await replacement.idle();
+
+    expect(settledContexts).toEqual(['A', 'B']);
+    expect(settleDetachedTurn(owner, turn)).toBe(false);
+  });
+
+  it('keeps a halted detached turn owned until its original queue settles it', async () => {
+    const owner = new TurnQueue();
+    const replacement = new TurnQueue();
+    replacement.setProcessor(async () => undefined);
+    const settled = vi.fn();
+    const turn = makeTurn({ text: 'halted-detached', onSettled: settled });
+
+    expect(owner.enqueue(turn)).toBe(true);
+    expect(owner.haltAndTakePendingTurns(new Error('outbound queue poisoned'))).toEqual([turn]);
+    expect(replacement.enqueue(turn)).toBe(false);
+    expect(settled).not.toHaveBeenCalled();
+
+    expect(settleDetachedTurn(owner, turn)).toBe(true);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(replacement.enqueue(turn)).toBe(true);
+    await replacement.idle();
+    expect(settled).toHaveBeenCalledTimes(2);
+  });
+
+  it('consumes detached settlement before invoking a reentrant settlement callback', () => {
+    const owner = new TurnQueue();
+    let reentrantAttempt: boolean | undefined;
+    const turn = makeTurn({
+      text: 'reentrant-detached',
+      onSettled: () => {
+        reentrantAttempt = settleDetachedTurn(owner, turn);
+      },
+    });
+
+    expect(owner.enqueue(turn)).toBe(true);
+    expect(owner.closeAndTakePendingTurns()).toEqual([turn]);
+    expect(settleDetachedTurn(owner, turn)).toBe(true);
+
+    expect(reentrantAttempt).toBe(false);
+    expect(settleDetachedTurn(owner, turn)).toBe(false);
+  });
+
   it('does not reopen a pre-closed queue after teardown rollback', () => {
     const rejected: Array<{ turn: QueuedTurn; reason: string }> = [];
     const queue = new TurnQueue({
@@ -833,6 +929,42 @@ describe('TurnQueue', () => {
     expect(processed).toEqual(['good-before']);
     expect(queue.pending).toBe(1);
     expect(queue.haltedError).toBe(processorError);
+  });
+
+  it('holds a processor-failure admission when no durable finalizer is installed', async () => {
+    const queue = new TurnQueue();
+    const settled = vi.fn();
+    const turn = makeTurn({ text: 'unfinalized', onSettled: settled });
+    const processorError = new Error('unfinalized processor failure');
+    queue.setProcessor(async () => {
+      throw processorError;
+    });
+
+    expect(queue.enqueue(turn)).toBe(true);
+    await expect(queue.idle()).rejects.toBe(processorError);
+
+    expect(settled).not.toHaveBeenCalled();
+    expect(new TurnQueue().enqueue(turn)).toBe(false);
+  });
+
+  it('holds a processor-failure admission when its durable finalizer rejects', async () => {
+    const finalizationFailure = new Error('durable finalization failed');
+    const queue = new TurnQueue({
+      onProcessorError: async () => {
+        throw finalizationFailure;
+      },
+    });
+    const settled = vi.fn();
+    const turn = makeTurn({ text: 'finalization-rejected', onSettled: settled });
+    queue.setProcessor(async () => {
+      throw new Error('processor failed');
+    });
+
+    expect(queue.enqueue(turn)).toBe(true);
+    await expect(queue.idle()).rejects.toBe(finalizationFailure);
+
+    expect(settled).not.toHaveBeenCalled();
+    expect(new TurnQueue().enqueue(turn)).toBe(false);
   });
 
   it('exposes content-free lifetime halt state and signals the transition exactly once', async () => {

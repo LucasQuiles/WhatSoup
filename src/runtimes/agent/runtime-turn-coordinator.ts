@@ -517,7 +517,7 @@ private containOutboundQueuePoison(scopeKey: string, error: unknown): void {
     ? this.host.perChatTurnQueues.get(scopeKey)
     : this.host.turnQueue;
   for (const pending of turnQueue?.haltAndTakePendingTurns(poisonCause) ?? []) {
-    this.finalizeRejectedRuntimeTurnAndSettle(pending, 'scope_blocked_recovery');
+    this.finalizeRejectedRuntimeTurnAndSettle(pending, 'scope_blocked_recovery', turnQueue);
   }
 }
 
@@ -1320,23 +1320,22 @@ async finalizeActiveRuntimeTurnsForShutdown(
   for (const queue of shutdownQueues) queue.preemptForShutdown?.(deadlineAt);
 
   const pending: Promise<FinalizeRuntimeTurnResult>[] = [];
-  const queueUndispatched = (turn: QueuedTurn): void => {
+  const queueUndispatched = (owner: TurnQueue, turn: QueuedTurn): void => {
     if (!turn.runtimeContext) {
       if (turn.inboundSeq !== undefined) {
         pending.push(Promise.reject(
           new Error('Journaled shutdown turn has no immutable runtime turn context'),
         ));
       } else {
-        this.settleQueuedTurn(turn);
+        this.settleDetachedQueuedTurn(owner, turn);
       }
       return;
     }
-    pending.push(this.finalizeUndispatchedRuntimeTurn(turn.runtimeContext).then((result) => {
-      if (result.kind === 'terminal' || result.mayAdvance) this.settleQueuedTurn(turn);
-      return result;
-    }));
+    pending.push(this.finalizeDetachedQueuedTurn(owner, turn));
   };
-  for (const turn of this.host.turnQueue.closeAndTakePendingTurns()) queueUndispatched(turn);
+  for (const turn of this.host.turnQueue.closeAndTakePendingTurns()) {
+    queueUndispatched(this.host.turnQueue, turn);
+  }
   const pendingSingleton = this.host.pendingSingletonRuntimeTurnContext;
   if (
     pendingSingleton
@@ -1364,7 +1363,7 @@ async finalizeActiveRuntimeTurnsForShutdown(
     }));
   }
   for (const [mapKey, runtimeQueue] of this.host.perChatTurnQueues) {
-    for (const turn of runtimeQueue.closeAndTakePendingTurns()) queueUndispatched(turn);
+    for (const turn of runtimeQueue.closeAndTakePendingTurns()) queueUndispatched(runtimeQueue, turn);
     const activeTurn = runtimeQueue.activeTurn;
     const published = this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0];
     if (
@@ -2305,11 +2304,44 @@ finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): Promis
   return finalization;
 }
 
-private finalizeRejectedRuntimeTurnAndSettle(turn: QueuedTurn, reason?: TurnRejectReason): void {
+private finalizeRejectedRuntimeTurnAndSettle(
+  turn: QueuedTurn,
+  reason?: TurnRejectReason,
+  owner?: TurnQueue,
+): void {
   void this.finalizeRejectedRuntimeTurn(turn, reason).then(
-    () => this.settleQueuedTurn(turn),
+    () => {
+      if (owner) this.settleDetachedQueuedTurn(owner, turn);
+      else this.settleQueuedTurn(turn);
+    },
     () => undefined,
-  );
+  ).catch((err: unknown) => {
+    log.error({ err, chatJid: turn.chatJid }, 'detached rejected turn could not settle after finalization');
+  });
+}
+
+private settleDetachedQueuedTurn(owner: TurnQueue, turn: QueuedTurn): void {
+  if (owner.settleDetachedTurn(turn)) return;
+  throw new Error('Detached runtime turn lost its original queue admission');
+}
+
+private async finalizeDetachedQueuedTurn(
+  owner: TurnQueue,
+  turn: QueuedTurn,
+): Promise<FinalizeRuntimeTurnResult> {
+  const context = turn.runtimeContext;
+  if (!context) {
+    throw new Error('Journaled shutdown turn has no immutable runtime turn context');
+  }
+  let result = await this.finalizeUndispatchedRuntimeTurn(context);
+  if (result.kind !== 'terminal' && !result.mayAdvance) {
+    await this.host.runtimeTurnSupervisor.waitForRecovery(context);
+    result = await this.finalizeUndispatchedRuntimeTurn(context);
+  }
+  if (result.kind === 'terminal' || result.mayAdvance) {
+    this.settleDetachedQueuedTurn(owner, turn);
+  }
+  return result;
 }
 
 private settleQueuedTurn(turn: QueuedTurn): void {
