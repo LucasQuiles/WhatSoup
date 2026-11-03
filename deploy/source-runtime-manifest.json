@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "05b46f2987b4a6b4a8afd4cb58169d5efb7d964d934030441c2c19e3be258270",
+      "sha256": "1809c0a75c44b3ba3b3ae591c9fbd7610055a3a39c43031a835e47da04b8698d",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -53,7 +53,7 @@
     },
     {
       "path": "src/transport/connection.ts",
-      "sha256": "e929e88ca91c2fb2cd20aa419f7e6cbbcb162db4c113c46b70fb30ca6491e75b",
+      "sha256": "eb3121beb073baacc36eab34b722b15f782369ab1d85354f514580e869ea3c02",
       "mustContain": [
         "decideDisconnectAction",
         "QR code received",
@@ -84,7 +84,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "75ecc59bf9a8776a5bc1bca86e11a2e0d52eb5dd14423fab67d49b3954436bd5",
+      "sha256": "4e012074dcca199c456c4fbd754a6d520c9ae57b5f6dad74f3a234d978a896f1",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",
