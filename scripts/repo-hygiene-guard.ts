@@ -211,12 +211,13 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
  * renamed to an image name are all still scanned. A skipped file is what main
  * did not scan either: a real image's bytes, including any text in its metadata
  * (PNG text chunks, for example), and a file built to pass all three checks.
- * The table holds the binary types main tracks (.png, .woff2); a new type
+ * The table holds the binary types main tracks (.png, .woff2, .ogg); a new type
  * fails closed (its lines are scanned) until it is added here.
  */
 const VERIFIED_BINARY_FORMATS: ReadonlyArray<{ extension: string; signature: readonly number[] }> = [
   { extension: '.png', signature: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
   { extension: '.woff2', signature: [0x77, 0x4f, 0x46, 0x32] }, // "wOF2"
+  { extension: '.ogg', signature: [0x4f, 0x67, 0x67, 0x53] }, // "OggS"
 ];
 
 const GIT_BINARY_PROBE_BYTES = 8000;

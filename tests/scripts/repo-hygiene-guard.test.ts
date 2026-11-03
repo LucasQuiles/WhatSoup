@@ -1042,6 +1042,7 @@ The migrated group was 1203631234567890@g.us.
     const BODY_BYTES = 524_288;
     const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
     const WOFF2_SIGNATURE = [0x77, 0x4f, 0x46, 0x32];
+    const OGG_SIGNATURE = [0x4f, 0x67, 0x67, 0x53];
     const phoneLine = "export const phone = '+447123456789';\n";
     const seededBinary = (signature: readonly number[]): Buffer => {
       const body = Buffer.alloc(BODY_BYTES);
@@ -1071,23 +1072,27 @@ The migrated group was 1203631234567890@g.us.
       mkdirSync(join(repo, 'assets'), { recursive: true });
       writeFileSync(join(repo, 'assets', 'shot.PNG'), seededBinary(PNG_SIGNATURE));
       writeFileSync(join(repo, 'assets', 'font.woff2'), seededBinary(WOFF2_SIGNATURE));
+      writeFileSync(join(repo, 'assets', 'sound.ogg'), seededBinary(OGG_SIGNATURE));
       writeFileSync(join(repo, 'assets', 'shot.dat'), seededBinary(PNG_SIGNATURE));
       git(repo, ['add', 'assets']);
 
       const staged = quietRun(['--staged'], repo);
       expect(codesFor(staged, 'assets/shot.PNG')).toEqual([]);
       expect(codesFor(staged, 'assets/font.woff2')).toEqual([]);
+      expect(codesFor(staged, 'assets/sound.ogg')).toEqual([]);
       expect(codesFor(staged, 'assets/shot.dat')).toEqual(expect.arrayContaining(['internal-workstream-label', 'personal-email']));
 
       git(repo, ['commit', '-m', 'test: binary fixtures']);
       const branch = scanBranchDiff(repo, 'main');
       expect(codesFor(branch, 'assets/shot.PNG')).toEqual([]);
       expect(codesFor(branch, 'assets/font.woff2')).toEqual([]);
+      expect(codesFor(branch, 'assets/sound.ogg')).toEqual([]);
       expect(codesFor(branch, 'assets/shot.dat')).toEqual(expect.arrayContaining(['internal-workstream-label', 'personal-email']));
 
       const history = scanCommitHistory(repo, 5);
       expect(codesFor(history, 'assets/shot.PNG')).toEqual([]);
       expect(codesFor(history, 'assets/font.woff2')).toEqual([]);
+      expect(codesFor(history, 'assets/sound.ogg')).toEqual([]);
       expect(codesFor(history, 'assets/shot.dat')).toContain('personal-email');
     });
 
