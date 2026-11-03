@@ -3353,7 +3353,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     if (!authority || !onMessage) return;
     const receivedAt = Number.isFinite(parsed.timestamp) && parsed.timestamp > 0
       ? new Date(parsed.timestamp * 1_000).toISOString()
-      : new Date().toISOString();
+      : systemClock.nowIso();
     void registerTrustedInbound(authority, {
       eventId: parsed.messageId,
       sender: parsed.senderJid,

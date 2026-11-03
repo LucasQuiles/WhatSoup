@@ -1,7 +1,7 @@
-import { chmodSync, closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, closeSync, openSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import {
   OperationsAuthorityClient,
   TransportApprovalRequiredError,
@@ -10,6 +10,7 @@ import {
 } from '../../src/transport/operations-authority-client.ts';
 
 type Call = { url: string; init: RequestInit };
+const tmpDirs = trackTmpDirs('operations-authority-client');
 
 function response(status: number, body: unknown): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -494,16 +495,9 @@ describe('OperationsAuthorityClient ingress and receipt contract', () => {
 });
 
 describe('createProtectedOperationsAuthorityClient', () => {
-  const tmpDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-  });
-
   it('rejects an enabled client when the service and worker identities are not distinct', () => {
     // Break caught: an agent worker could read the protected service credential file.
-    const dir = mkdtempSync(join(tmpdir(), 'operations-authority-client-'));
-    tmpDirs.push(dir);
+    const dir = tmpDirs.make('identities');
     const credentialFile = join(dir, 'transport.bearer');
     writeFileSync(credentialFile, 'token');
     chmodSync(credentialFile, 0o600);
@@ -521,8 +515,7 @@ describe('createProtectedOperationsAuthorityClient', () => {
 
   it('rejects a credential file that is readable by another account', () => {
     // Break caught: permissive credential-file mode leaks a reusable transport bearer.
-    const dir = mkdtempSync(join(tmpdir(), 'operations-authority-client-'));
-    tmpDirs.push(dir);
+    const dir = tmpDirs.make('permissive-mode');
     const credentialFile = join(dir, 'transport.bearer');
     writeFileSync(credentialFile, 'token');
     chmodSync(credentialFile, 0o644);
@@ -541,8 +534,7 @@ describe('createProtectedOperationsAuthorityClient', () => {
   it('constructs an operational client from a qualifying transport-service file without environment credentials', async () => {
     // Break caught: every enabled pilot is fail-closed because the concrete
     // factory cannot qualify a correctly owned, private service credential.
-    const dir = mkdtempSync(join(tmpdir(), 'operations-authority-client-'));
-    tmpDirs.push(dir);
+    const dir = tmpDirs.make('qualified-file');
     const credentialFile = join(dir, 'transport.bearer');
     writeFileSync(credentialFile, 'test-only-file-token\n');
     chmodSync(credentialFile, 0o600);
