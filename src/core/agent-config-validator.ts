@@ -22,7 +22,6 @@
 // PROVIDER_IDS is the single source of truth for agentOptions.provider —
 // see src/runtimes/agent/providers/index.ts and issue #447.
 import { homedir } from 'node:os';
-import { isAbsolute } from 'node:path';
 import { PROVIDER_IDS } from '../runtimes/agent/providers/index.ts';
 import { PROVIDER_API_KEY_SERVICES, SERVICE_ENV_MAP, isKeylessOpenCodeRoute, resolveProviderKeyService } from '../lib/provider-key-service.ts';
 import { isNonEmptyString, isRecord } from '../lib/type-guards.ts';
@@ -58,9 +57,13 @@ import {
 } from '../lib/opencode-execution-profile-contract.ts';
 import { isAuthenticatedSenderJid, isGroupJid } from './jid-constants.ts';
 import { parseClientOutputPoliciesForInstance } from './client-output-policy-config.ts';
-import { parseTransportAuthorityUrl, TRANSPORT_AUTHORITY_URL_REQUIREMENT } from '../lib/authority-url.ts';
 import { validateHandoffDistillConfig } from '../lib/handoff-distill-config.ts';
 import { validateM365BridgeAgentOptions } from './m365-bridge-policy.ts';
+import {
+  validateProviderProcessIsolationConfig,
+  validateTransportAuthorityConfig,
+} from './transport-authority-config-validation.ts';
+import { validateSignalConfig } from './signal-config-validation.ts';
 
 export const VALID_TYPES: ReadonlySet<string> = new Set(['chat', 'agent', 'passive']);
 export const ACCESS_MODES = [
@@ -1414,118 +1417,6 @@ function validateAgentOptions(
 const _TWILIO_ACCOUNT_SID_RE = /^AC[0-9a-f]{32}$/;
 
 const _TWILIO_MSG_SVC_SID_RE = /^MG[0-9a-f]{32}$/;
-const _SHA256_HEX_RE = /^[a-f0-9]{64}$/;
-const _MANAGED_PROVIDER_IDS = new Set(['openai-api', 'anthropic-api']);
-
-function validateProviderProcessIsolationConfig(
-  value: unknown,
-): ValidationError | null {
-  const field = 'agentOptions.providerProcessIsolation';
-  if (!isRecord(value)) return err(field, `${field} must be an object`);
-  for (const name of ['controllerUid', 'controllerGid', 'workerUid', 'workerGid'] as const) {
-    const id = value[name];
-    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
-      return err(`${field}.${name}`, `${field}.${name} must be a positive non-root integer`);
-    }
-  }
-  if (value['controllerUid'] === value['workerUid']) {
-    return err(`${field}.workerUid`, `${field}.controllerUid and ${field}.workerUid must be distinct`);
-  }
-  if (value['controllerGid'] === value['workerGid']) {
-    return err(`${field}.workerGid`, `${field}.controllerGid and ${field}.workerGid must be distinct`);
-  }
-  for (const name of ['launcherPath', 'policyPath', 'homeDir', 'configHome', 'dataHome'] as const) {
-    if (!isNonEmptyString(value[name]) || !isAbsolute(value[name])) {
-      return err(`${field}.${name}`, `${field}.${name} must be an absolute path`);
-    }
-  }
-  for (const name of ['launcherSha256', 'policySha256'] as const) {
-    if (typeof value[name] !== 'string' || !_SHA256_HEX_RE.test(value[name])) {
-      return err(`${field}.${name}`, `${field}.${name} must be a lowercase SHA-256 digest`);
-    }
-  }
-  if (!Array.isArray(value['protectedPaths']) || value['protectedPaths'].length === 0) {
-    return err(`${field}.protectedPaths`, `${field}.protectedPaths must be a non-empty array of absolute paths`);
-  }
-  const paths = value['protectedPaths'];
-  if (paths.some((path) => !isNonEmptyString(path) || !isAbsolute(path))) {
-    return err(`${field}.protectedPaths`, `${field}.protectedPaths must be a non-empty array of absolute paths`);
-  }
-  if (new Set(paths).size !== paths.length) {
-    return err(`${field}.protectedPaths`, `${field}.protectedPaths must not repeat a protected path`);
-  }
-  if (value['readinessMode'] !== 'disabled') {
-    return err(
-      `${field}.readinessMode`,
-      `${field}.readinessMode must be "disabled" until readiness probes use the isolated launch boundary`,
-    );
-  }
-  return null;
-}
-
-function validateAuthorityProviderQualification(
-  raw: Record<string, unknown>,
-  authority: Record<string, unknown>,
-): ValidationError | null {
-  if (raw['type'] !== 'agent' || !isRecord(raw['agentOptions'])) {
-    return err(
-      'agentOptions.providerProcessIsolation',
-      'transportAuthority.enabled requires an agent runtime with providerProcessIsolation',
-    );
-  }
-  const options = raw['agentOptions'];
-  const isolationErr = validateProviderProcessIsolationConfig(options['providerProcessIsolation']);
-  if (isolationErr) return isolationErr;
-  const isolation = options['providerProcessIsolation'] as Record<string, unknown>;
-  if (isolation['controllerUid'] !== authority['serviceUid']) {
-    return err(
-      'agentOptions.providerProcessIsolation.controllerUid',
-      'agentOptions.providerProcessIsolation.controllerUid must match transportAuthority.serviceUid',
-    );
-  }
-  if (isolation['workerUid'] !== authority['workerUid']) {
-    return err(
-      'agentOptions.providerProcessIsolation.workerUid',
-      'agentOptions.providerProcessIsolation.workerUid must match transportAuthority.workerUid',
-    );
-  }
-  const primary = options['provider'] ?? 'claude-cli';
-  if (_MANAGED_PROVIDER_IDS.has(primary as string)) {
-    return err(
-      'agentOptions.provider',
-      'transportAuthority.enabled cannot use a managed API provider until it has an isolated execution boundary',
-    );
-  }
-  const legacyFallback = options['fallbackProvider'];
-  if (_MANAGED_PROVIDER_IDS.has(legacyFallback as string)) {
-    return err(
-      'agentOptions.fallbackProvider',
-      'transportAuthority.enabled cannot use a managed API fallback until it has an isolated execution boundary',
-    );
-  }
-  if (Array.isArray(options['fallbacks'])) {
-    for (let index = 0; index < options['fallbacks'].length; index += 1) {
-      const fallback = options['fallbacks'][index];
-      if (isRecord(fallback) && _MANAGED_PROVIDER_IDS.has(fallback['provider'] as string)) {
-        return err(
-          `agentOptions.fallbacks[${index}].provider`,
-          'transportAuthority.enabled cannot use a managed API fallback until it has an isolated execution boundary',
-        );
-      }
-    }
-  }
-  if (options['fallbackDiscovery'] !== undefined) {
-    return err(
-      'agentOptions.fallbackDiscovery',
-      'transportAuthority.enabled cannot use dynamic fallback discovery until every discovered provider has an isolated execution boundary',
-    );
-  }
-  return err(
-    'agentOptions.providerProcessIsolation',
-    'transportAuthority.enabled is not qualified: the launcher does not yet have a kernel-enforced egress boundary',
-  );
-}
-
 function validateTransportConfig(
   raw: Record<string, unknown>,
 ): ValidationError | null {
@@ -1606,179 +1497,6 @@ function validateTransportConfig(
       return err('signalConfig', 'signalConfig must be an object');
     }
     return validateSignalConfig(signalConfig as Record<string, unknown>);
-  }
-
-  return null;
-}
-
-function validateTransportAuthorityConfig(
-  raw: Record<string, unknown>,
-  effectiveTransport: string,
-): ValidationError | null {
-  const authority = raw['transportAuthority'];
-  if (authority === undefined || authority === null) return null;
-  if (!isRecord(authority)) {
-    return err('transportAuthority', 'transportAuthority must be an object');
-  }
-  const enabled = authority['enabled'];
-  if (enabled !== undefined && typeof enabled !== 'boolean') {
-    return err('transportAuthority.enabled', 'transportAuthority.enabled must be a boolean');
-  }
-  if (enabled !== true) return null;
-  if (effectiveTransport !== 'baileys') {
-    return err('transportAuthority', 'transportAuthority requires transport "baileys"');
-  }
-
-  for (const field of ['baseUrl', 'accountId', 'credentialFile'] as const) {
-    if (!isNonEmptyString(authority[field])) {
-      return err(
-        `transportAuthority.${field}`,
-        `transportAuthority.${field} is required when transportAuthority.enabled is true`,
-      );
-    }
-  }
-  const baseUrl = authority['baseUrl'];
-  const credentialFile = authority['credentialFile'];
-  // The loop above already reports missing fields with their precise path;
-  // keep this narrow runtime proof for TypeScript and defensive direct calls.
-  if (typeof baseUrl !== 'string' || typeof credentialFile !== 'string') {
-    return err('transportAuthority', 'transportAuthority required fields are malformed');
-  }
-  if (parseTransportAuthorityUrl(baseUrl) === null) {
-    return err('transportAuthority.baseUrl', `transportAuthority.baseUrl ${TRANSPORT_AUTHORITY_URL_REQUIREMENT}`);
-  }
-  if (!isAbsolute(credentialFile)) {
-    return err('transportAuthority.credentialFile', 'transportAuthority.credentialFile must be an absolute path');
-  }
-
-  for (const field of ['serviceUid', 'workerUid'] as const) {
-    const value = authority[field];
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
-      return err(
-        `transportAuthority.${field}`,
-        `transportAuthority.${field} must be a positive non-root integer when transportAuthority.enabled is true`,
-      );
-    }
-  }
-  if (authority['serviceUid'] === authority['workerUid']) {
-    return err(
-      'transportAuthority.workerUid',
-      'transportAuthority.serviceUid and transportAuthority.workerUid must be distinct',
-    );
-  }
-  return validateAuthorityProviderQualification(raw, authority);
-}
-
-function validateSignalConfig(sc: Record<string, unknown>): ValidationError | null {
-  const account = sc['account'];
-  if (typeof account !== 'string' || !ACCOUNT_RE.test(account)) {
-    return err(
-      'signalConfig.account',
-      'signalConfig.account must be a non-empty lowercase alphanumeric-and-dash string starting with a letter',
-    );
-  }
-
-  const phoneNumber = sc['phoneNumber'];
-  if (typeof phoneNumber !== 'string' || !E164_RE.test(phoneNumber)) {
-    return err(
-      'signalConfig.phoneNumber',
-      'signalConfig.phoneNumber must be an E.164 number (e.g. +15559990000)',
-    );
-  }
-
-  const socketPath = sc['socketPath'];
-  if (
-    socketPath !== undefined &&
-    (typeof socketPath !== 'string' || socketPath === '' || !socketPath.startsWith('/'))
-  ) {
-    return err(
-      'signalConfig.socketPath',
-      'signalConfig.socketPath must be an absolute path when set',
-    );
-  }
-
-  const tcpPort = sc['tcpPort'];
-  if (
-    tcpPort !== undefined &&
-    (typeof tcpPort !== 'number' || !Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535)
-  ) {
-    return err(
-      'signalConfig.tcpPort',
-      'signalConfig.tcpPort must be an integer between 1 and 65535',
-    );
-  }
-  if (socketPath !== undefined && tcpPort !== undefined) {
-    return err(
-      'signalConfig',
-      'signalConfig must select exactly one of socketPath or tcpPort, not both',
-    );
-  }
-  const tcpHost = sc['tcpHost'];
-  if (tcpHost !== undefined && (typeof tcpHost !== 'string' || tcpHost === '')) {
-    return err('signalConfig.tcpHost', 'signalConfig.tcpHost must be a non-empty string');
-  }
-  if (tcpHost !== undefined && tcpPort === undefined) {
-    return err('signalConfig.tcpHost', 'signalConfig.tcpHost requires signalConfig.tcpPort');
-  }
-  if (socketPath === undefined && tcpPort === undefined) {
-    return err(
-      'signalConfig',
-      'signalConfig must select exactly one of socketPath or tcpPort',
-    );
-  }
-  if (
-    tcpHost !== undefined &&
-    tcpHost !== '127.0.0.1' &&
-    tcpHost !== '::1' &&
-    tcpHost !== 'localhost'
-  ) {
-    return err(
-      'signalConfig.tcpHost',
-      'signalConfig.tcpHost must be a loopback host because signal-cli TCP is plaintext',
-    );
-  }
-
-  const inboundMode = sc['inboundMode'];
-  if (inboundMode !== undefined && inboundMode !== 'poll') {
-    return err(
-      'signalConfig.inboundMode',
-      "signalConfig.inboundMode must be 'poll'; streaming is not implemented",
-    );
-  }
-
-  const pollIntervalMs = sc['pollIntervalMs'];
-  if (
-    pollIntervalMs !== undefined &&
-    (
-      typeof pollIntervalMs !== 'number'
-      || !Number.isInteger(pollIntervalMs)
-      || pollIntervalMs <= 0
-      || pollIntervalMs > 2_147_483_647
-    )
-  ) {
-    return err(
-      'signalConfig.pollIntervalMs',
-      'signalConfig.pollIntervalMs must be a positive 32-bit timer integer',
-    );
-  }
-
-  const rateLimit = sc['rateLimit'];
-  if (rateLimit !== undefined) {
-    if (typeof rateLimit !== 'object' || rateLimit === null || Array.isArray(rateLimit)) {
-      return err('signalConfig.rateLimit', 'signalConfig.rateLimit must be an object');
-    }
-    const messagesPerMinute = (rateLimit as Record<string, unknown>)['messagesPerMinute'];
-    if (
-      typeof messagesPerMinute !== 'number' ||
-      !Number.isInteger(messagesPerMinute) ||
-      messagesPerMinute < 1 ||
-      messagesPerMinute > 600
-    ) {
-      return err(
-        'signalConfig.rateLimit.messagesPerMinute',
-        'signalConfig.rateLimit.messagesPerMinute must be an integer between 1 and 600',
-      );
-    }
   }
 
   return null;

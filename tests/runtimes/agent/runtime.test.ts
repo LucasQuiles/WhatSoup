@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import { registerRuntimeSettingsPolicyTests } from './runtime-settings-policy.cases.ts';
+import { registerRuntimeProviderProcessIsolationTest } from './runtime-provider-process-isolation.case.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -1054,29 +1055,10 @@ describe('AgentRuntime', () => {
     });
   });
 
-  it('forwards one required process-isolation contract to every created session', async () => {
-    const isolation = {
-      controllerUid: 501,
-      controllerGid: 20,
-      workerUid: 502,
-      workerGid: 502,
-      launcherPath: '/usr/local/libexec/whatsoup-agent-isolation-launcher',
-      launcherSha256: 'a'.repeat(64),
-      policyPath: '/etc/whatsoup/agent-isolation.policy',
-      policySha256: 'b'.repeat(64),
-      homeDir: '/var/lib/whatsoup-agent',
-      configHome: '/var/lib/whatsoup-agent/.config',
-      dataHome: '/var/lib/whatsoup-agent/.local/share',
-      protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
-    } as const;
-    const db = makeDb();
-    const { messenger } = makeMessenger();
-    const runtime = new AgentRuntime(db, messenger, 'test', { providerProcessIsolation: isolation });
-
-    await runtime.start();
-    await sendAndDrain(runtime, makeMsg({ content: 'hello claude' }));
-
-    expect(capturedSessionManagerOptsRef.current).toMatchObject({ providerProcessIsolation: isolation });
+  registerRuntimeProviderProcessIsolationTest({
+    createRuntime: (isolation) => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { providerProcessIsolation: isolation }),
+    sendAndDrain: (runtime) => sendAndDrain(runtime, makeMsg({ content: 'hello claude' })),
+    capturedSessionManagerOptions: () => capturedSessionManagerOptsRef.current,
   });
 
   it('auto-compacts silently and advances baseline only after compact_boundary', async () => {
