@@ -111,7 +111,12 @@ const BOT_ERRORS_HEALTH_LABEL = 'com.bot-errors.health';
 const BOT_ERRORS_RUNTIME_MANIFEST = 'deploy/bot-errors-runtime-manifest.json';
 const BOT_ERRORS_HEALTH_RUNNER = 'deploy/scripts/bot-errors-runner.py';
 const BOT_ERRORS_HEALTH_CHECKER = 'deploy/scripts/bot-errors-health-check.py';
-export const BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES = 256 * 1024;
+/**
+ * Bounds each consumer file read. The real checker is several hundred KiB, so the
+ * cap leaves room for growth; a test keeps the repo's own consumer files under half of it.
+ */
+export const BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES = 2 * 1024 * 1024;
+const CONSUMER_FILE_OVER_CAP = 'over-cap' as const;
 const BOT_ERRORS_HEALTH_CONSUMER_OPEN_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW;
 interface BotErrorsHealthConsumer {
   root: string; capability: number; manifestSha256: string; runnerSha256: string; checkerSha256: string;
@@ -248,8 +253,11 @@ function stableConsumerDirectory(target: string): StableConsumerNode | null {
 function stableConsumerRegularFile(target: string): StableConsumerFile | null {
   try { const stat = lstatSync(target); return stat.isFile() && !stat.isSymbolicLink() ? stableConsumerFile(stat) : null; } catch { return null; }
 }
-/** Read one consumer file from a no-follow descriptor while binding its file and ancestor identities before and after. */
-function readBoundedConsumerFile(root: string, relative: string): Buffer | null {
+/**
+ * Read one consumer file from a no-follow descriptor while binding its file and ancestor identities before and after.
+ * Returns CONSUMER_FILE_OVER_CAP for a file larger than the cap, so the refusal can name that cause, and null for any other refusal.
+ */
+function readBoundedConsumerFile(root: string, relative: string): Buffer | typeof CONSUMER_FILE_OVER_CAP | null {
   if (!path.isAbsolute(root) || path.resolve(root) !== root || relative.split('/').some((part) => part === '' || part === '.' || part === '..')) return null;
   const parts = relative.split('/'), directories = [root];
   let parent = root;
@@ -257,7 +265,8 @@ function readBoundedConsumerFile(root: string, relative: string): Buffer | null 
   const beforeDirectories = directories.map(stableConsumerDirectory);
   if (beforeDirectories.some((stat) => stat === null)) return null;
   const filePath = path.join(root, relative), beforeFile = stableConsumerRegularFile(filePath);
-  if (beforeFile === null || !Number.isSafeInteger(beforeFile.size) || beforeFile.size < 0 || beforeFile.size > BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES) return null;
+  if (beforeFile === null || !Number.isSafeInteger(beforeFile.size) || beforeFile.size < 0) return null;
+  if (beforeFile.size > BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES) return CONSUMER_FILE_OVER_CAP;
   let fd: number | null = null;
   try {
     fd = openSync(filePath, BOT_ERRORS_HEALTH_CONSUMER_OPEN_FLAGS);
@@ -438,7 +447,15 @@ export async function readBotErrorsHealthConsumer(
   const manifestBytes = readBoundedConsumerFile(definition.root, BOT_ERRORS_RUNTIME_MANIFEST);
   const runnerBytes = readBoundedConsumerFile(definition.root, BOT_ERRORS_HEALTH_RUNNER);
   const checkerBytes = readBoundedConsumerFile(definition.root, BOT_ERRORS_HEALTH_CHECKER);
-  if (manifestBytes === null || runnerBytes === null || checkerBytes === null) {
+  const overCap = ([
+    [BOT_ERRORS_RUNTIME_MANIFEST, manifestBytes],
+    [BOT_ERRORS_HEALTH_RUNNER, runnerBytes],
+    [BOT_ERRORS_HEALTH_CHECKER, checkerBytes],
+  ] as const).find(([, bytes]) => bytes === CONSUMER_FILE_OVER_CAP);
+  if (overCap !== undefined) {
+    return { consumer: null, detail: `BOT ERRORS consumer file ${overCap[0]} is larger than the ${BOT_ERRORS_HEALTH_CONSUMER_MAX_BYTES}-byte read cap` };
+  }
+  if (!Buffer.isBuffer(manifestBytes) || !Buffer.isBuffer(runnerBytes) || !Buffer.isBuffer(checkerBytes)) {
     return { consumer: null, detail: 'BOT ERRORS consumer files are not regular root-bound files' };
   }
   try {
