@@ -27,6 +27,18 @@ overwrite that hold. Outbound echoes retain normal storage and correlation but
 never establish human approval context. Direct startup configuration now uses
 the same activation admission as the instance loader and fleet mutations.
 
+Queued turns retain the inbound context captured at admission through processing,
+error finalization, and settlement. Outbound chunks and buffered updates retain
+their own immutable context. Batching separates different inbound events and
+approved operations; an unbound item explicitly clears ambient authority. These
+queue checks do not establish provider callback ownership or platform isolation.
+
+Session-scoped provider events without verified turn identity remain unbound and
+enter human review. Verified per-turn callbacks retain their admitted context;
+stale callbacks cannot acquire a later turn's authority. Aggregated voice replies
+also enter review because their text accumulator does not retain per-fragment
+provenance. The complete frozen audio remains available for exact approval.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
@@ -64,6 +76,7 @@ unapproved, malformed, replayed, paused, raw, and missing-dependency paths
 produce zero provider submissions.
 
 No acceptance test may send a real message, contact a third party, read a real
-credential, or deploy a service. A production activation requires a separate
-owner decision after the protected authority dependency and host-specific
-isolation evidence are complete.
+credential, or deploy a service. Production activation requires owner authority
+and complete protected-service and host-specific isolation evidence. An existing
+owner deployment instruction satisfies authorization, but cannot replace that
+technical evidence.

@@ -1,9 +1,8 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
+import { getTransportInboundContext, withTransportInboundContext } from '../core/transport-inbound-context.ts';
 import {
   TransportAuthorityUnavailableError,
   type OperationsAuthorityPort,
   type TransportAdmission,
-  type TransportInboundContext,
   type TransportInboundResponse,
   type TransportOperation,
   type TransportReview,
@@ -11,6 +10,7 @@ import {
 } from './operations-authority-client.ts';
 
 export { TransportAuthorityUnavailableError } from './operations-authority-client.ts';
+export { getTransportInboundContext, withTransportInboundContext } from '../core/transport-inbound-context.ts';
 
 export interface FrozenOutboundContent {
   /** JSON-safe exact snapshot submitted to the authority for its immutable digest. */
@@ -27,7 +27,6 @@ export interface FrozenOutboundOptions {
 }
 
 const MEDIA_KEYS = new Set(['image', 'video', 'audio', 'document', 'sticker']);
-const inboundContext = new AsyncLocalStorage<TransportInboundContext>();
 
 // The media tool accepts files up to 50 MiB. Keep the operation snapshot at
 // that provider boundary while reserving enough encoded space for base64 and
@@ -196,17 +195,6 @@ function canonicalBase64DecodedBytes(value: string): number | null {
       || (padding === 2 && (finalData & 0b1111) !== 0)) return null;
   }
   return (value.length / 4) * 3 - padding;
-}
-
-export function withTransportInboundContext<T>(
-  context: TransportInboundContext,
-  work: () => T,
-): T {
-  return inboundContext.run(context, work);
-}
-
-export function getTransportInboundContext(): TransportInboundContext | undefined {
-  return inboundContext.getStore();
 }
 
 export interface TrustedInboundRegistration {

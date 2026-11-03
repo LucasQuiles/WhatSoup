@@ -1,9 +1,16 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, it, expect, vi } from 'vitest';
 import {
   TurnQueue,
   type QueuedTurn,
   type TurnRejectReason,
 } from '../../../src/runtimes/agent/turn-queue.ts';
+import {
+  FinalTransportAuthorityGate,
+  getTransportInboundContext,
+  registerTrustedInbound,
+} from '../../../src/transport/operations-authority-gate.ts';
+import type { TransportAdmissionInput } from '../../../src/transport/operations-authority-client.ts';
 
 vi.mock('../../../src/logger.ts', async () => (await import('../../helpers/logger-mock.ts')).loggerMock());
 
@@ -62,6 +69,380 @@ describe('TurnQueue', () => {
     const queue = new TurnQueue({ maxDepth: 0 });
     expect(queue.enqueue(makeTurn({ onSettled: settled }))).toBe(false);
     expect(settled).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a throwing rejection and releases the turn for a fresh trusted admission', async () => {
+    const rejectionError = new Error('rejection callback failed');
+    const settled = vi.fn();
+    const turn = makeTurn({ text: 'reused-after-reject', chatJid: 'reused@s.whatsapp.net', onSettled: settled });
+    const rejectedQueue = new TurnQueue({
+      maxDepth: 0,
+      onReject: () => {
+        throw rejectionError;
+      },
+    });
+
+    await expect(registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'A',
+      sender: 'a@s.whatsapp.net',
+      conversation: 'reused@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'rejected',
+    }, () => rejectedQueue.enqueue(turn))).rejects.toThrow(rejectionError);
+    expect(settled).toHaveBeenCalledTimes(1);
+
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const replacementQueue = new TurnQueue();
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'B',
+      sender: 'b@s.whatsapp.net',
+      conversation: 'reused@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'fresh',
+    }, () => {
+      expect(replacementQueue.enqueue(turn)).toBe(true);
+    });
+    replacementQueue.setProcessor(async (queued) => {
+      await gate.admit({ recipient: queued.chatJid, content: { text: queued.text } });
+    });
+    await replacementQueue.idle();
+
+    expect(admitted).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: 'reused@s.whatsapp.net', context: { inbound_event_id: 'B' },
+    }));
+    expect(settled).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps each queued trusted inbound context through admission, finalization, and settlement', async () => {
+    const firstStarted = deferred();
+    const firstRelease = deferred();
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const finalizerContexts: Array<string | undefined> = [];
+    const settledContexts: Array<string | undefined> = [];
+    const queue = new TurnQueue({
+      onProcessorError: async () => {
+        finalizerContexts.push(getTransportInboundContext()?.inbound_event_id);
+      },
+    });
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    queue.setProcessor(async (turn) => {
+      if (turn.text === 'A') {
+        firstStarted.resolve();
+        await firstRelease.promise;
+      }
+      await gate.admit({ recipient: turn.chatJid, content: { text: turn.text } });
+      if (turn.text === 'B') throw new Error('B finalization');
+    });
+
+    const inbound = {
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    };
+    const enqueueTrusted = async (eventId: string, recipient: string): Promise<void> => {
+      await registerTrustedInbound(inbound, {
+        eventId,
+        sender: `${eventId}@s.whatsapp.net`,
+        conversation: recipient,
+        receivedAt: '2026-11-03T00:00:00.000Z',
+        content: eventId,
+      }, () => {
+        expect(queue.enqueue(makeTurn({
+          text: eventId,
+          chatJid: recipient,
+          senderJid: `${eventId}@s.whatsapp.net`,
+          onSettled: () => settledContexts.push(getTransportInboundContext()?.inbound_event_id),
+        }))).toBe(true);
+      });
+    };
+
+    await enqueueTrusted('A', 'a@s.whatsapp.net');
+    await firstStarted.promise;
+    expect(inbound.closeInbound).toHaveBeenCalledWith({ eventId: 'A' });
+    await enqueueTrusted('B', 'b@s.whatsapp.net');
+    expect(inbound.closeInbound).toHaveBeenCalledWith({ eventId: 'B' });
+    firstRelease.resolve();
+    await queue.idle();
+
+    expect(admitted).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      recipient: 'a@s.whatsapp.net', context: { inbound_event_id: 'A' },
+    }));
+    expect(admitted).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      recipient: 'b@s.whatsapp.net', context: { inbound_event_id: 'B' },
+    }));
+    expect(finalizerContexts).toEqual(['B']);
+    expect(settledContexts).toEqual(['A', 'B']);
+  });
+
+  it('clears trusted inbound context for a queued synthetic turn', async () => {
+    const firstStarted = deferred();
+    const firstRelease = deferred();
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const queue = new TurnQueue();
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    queue.setProcessor(async (turn) => {
+      if (turn.text === 'trusted') {
+        firstStarted.resolve();
+        await firstRelease.promise;
+      }
+      await gate.admit({ recipient: turn.chatJid, content: { text: turn.text } });
+    });
+
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'trusted',
+      sender: 'trusted@s.whatsapp.net',
+      conversation: 'trusted@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'trusted',
+    }, () => {
+      expect(queue.enqueue(makeTurn({ text: 'trusted', chatJid: 'trusted@s.whatsapp.net' }))).toBe(true);
+    });
+    await firstStarted.promise;
+    expect(queue.enqueue(makeTurn({ text: 'synthetic', chatJid: 'synthetic@s.whatsapp.net' }))).toBe(true);
+    firstRelease.resolve();
+    await queue.idle();
+
+    expect(admitted).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      recipient: 'synthetic@s.whatsapp.net',
+    }));
+    expect(admitted.mock.calls[1]?.[0]).not.toHaveProperty('context');
+  });
+
+  it('preserves a trusted context when a deferred queue starts after teardown rollback', async () => {
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const queue = new TurnQueue();
+    const turn = makeTurn({ text: 'requeued', chatJid: 'requeued@s.whatsapp.net' });
+
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'requeued',
+      sender: 'requeued@s.whatsapp.net',
+      conversation: 'requeued@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'requeued',
+    }, () => {
+      expect(queue.enqueue(turn)).toBe(true);
+    });
+    const teardown = queue.beginTeardown();
+    expect(queue.rollbackFailedTeardown(teardown, [turn])).toBe(true);
+
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    queue.setProcessor(async (queued) => {
+      await gate.admit({ recipient: queued.chatJid, content: { text: queued.text } });
+    });
+    await queue.idle();
+
+    expect(admitted).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: 'requeued@s.whatsapp.net', context: { inbound_event_id: 'requeued' },
+    }));
+  });
+
+  it('ignores a caller-supplied stale snapshot and captures the context at admission', async () => {
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const queue = new TurnQueue();
+    let staleSnapshot!: ReturnType<typeof AsyncLocalStorage.snapshot>;
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'A',
+      sender: 'a@s.whatsapp.net',
+      conversation: 'a@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'A',
+    }, () => {
+      staleSnapshot = AsyncLocalStorage.snapshot();
+    });
+    const copiedTurn = Object.assign(
+      makeTurn({ text: 'B', chatJid: 'b@s.whatsapp.net' }),
+      { queuedAsyncContext: staleSnapshot },
+    );
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'B',
+      sender: 'b@s.whatsapp.net',
+      conversation: 'b@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'B',
+    }, () => {
+      expect(queue.enqueue(copiedTurn)).toBe(true);
+    });
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    queue.setProcessor(async (turn) => {
+      await gate.admit({ recipient: turn.chatJid, content: { text: turn.text } });
+    });
+    await queue.idle();
+
+    expect(admitted).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: 'b@s.whatsapp.net', context: { inbound_event_id: 'B' },
+    }));
+  });
+
+  it('captures a new context when a settled turn object is admitted again', async () => {
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const queue = new TurnQueue();
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    queue.setProcessor(async (turn) => {
+      await gate.admit({ recipient: turn.chatJid, content: { text: turn.text } });
+    });
+    const turn = makeTurn({ text: 'reused', chatJid: 'reused@s.whatsapp.net' });
+    const enqueueTrusted = async (eventId: string): Promise<void> => {
+      await registerTrustedInbound({
+        registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+        closeInbound: vi.fn(async () => undefined),
+      }, {
+        eventId,
+        sender: `${eventId}@s.whatsapp.net`,
+        conversation: 'reused@s.whatsapp.net',
+        receivedAt: '2026-11-03T00:00:00.000Z',
+        content: eventId,
+      }, () => {
+        expect(queue.enqueue(turn)).toBe(true);
+      });
+      await queue.idle();
+    };
+
+    await enqueueTrusted('A');
+    await enqueueTrusted('B');
+
+    expect(admitted).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      context: { inbound_event_id: 'A' },
+    }));
+    expect(admitted).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      context: { inbound_event_id: 'B' },
+    }));
+  });
+
+  it('rejects duplicate active or pending turn objects without settling the original admission', async () => {
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const firstQueue = new TurnQueue();
+    const secondQueue = new TurnQueue();
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    const turn = makeTurn({ text: 'original', chatJid: 'original@s.whatsapp.net' });
+
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'A',
+      sender: 'a@s.whatsapp.net',
+      conversation: 'original@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'original',
+    }, () => {
+      expect(firstQueue.enqueue(turn)).toBe(true);
+    });
+    await registerTrustedInbound({
+      registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+      closeInbound: vi.fn(async () => undefined),
+    }, {
+      eventId: 'B',
+      sender: 'b@s.whatsapp.net',
+      conversation: 'other@s.whatsapp.net',
+      receivedAt: '2026-11-03T00:00:00.000Z',
+      content: 'copy',
+    }, () => {
+      expect(secondQueue.enqueue(turn)).toBe(false);
+    });
+    firstQueue.setProcessor(async (queued) => {
+      await gate.admit({ recipient: queued.chatJid, content: { text: queued.text } });
+    });
+    await firstQueue.idle();
+
+    expect(admitted).toHaveBeenCalledTimes(1);
+    expect(admitted).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: 'original@s.whatsapp.net', context: { inbound_event_id: 'A' },
+    }));
+  });
+
+  it('releases terminalized partial-teardown turns for a fresh admission', async () => {
+    const admitted = vi.fn<(input: TransportAdmissionInput) => Promise<{ attemptId: string; payloadDigest: string }>>(
+      async () => ({ attemptId: 'attempt', payloadDigest: 'sha256:payload' }),
+    );
+    const queue = new TurnQueue();
+    const resolved = makeTurn({ text: 'resolved', chatJid: 'resolved@s.whatsapp.net' });
+    const unresolved = makeTurn({ text: 'unresolved', chatJid: 'unresolved@s.whatsapp.net' });
+    const enqueueTrusted = async (eventId: string, turn: QueuedTurn): Promise<void> => {
+      await registerTrustedInbound({
+        registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
+        closeInbound: vi.fn(async () => undefined),
+      }, {
+        eventId,
+        sender: `${eventId}@s.whatsapp.net`,
+        conversation: turn.chatJid,
+        receivedAt: '2026-11-03T00:00:00.000Z',
+        content: eventId,
+      }, () => {
+        expect(queue.enqueue(turn)).toBe(true);
+      });
+    };
+
+    await enqueueTrusted('A', resolved);
+    await enqueueTrusted('B', unresolved);
+    const teardown = queue.beginTeardown();
+    expect(queue.rollbackFailedTeardown(teardown, [unresolved])).toBe(true);
+    await enqueueTrusted('C', resolved);
+
+    const gate = new FinalTransportAuthorityGate({
+      admit: admitted,
+      recordReceipt: vi.fn(async () => undefined),
+    });
+    queue.setProcessor(async (turn) => {
+      await gate.admit({ recipient: turn.chatJid, content: { text: turn.text } });
+    });
+    await queue.idle();
+
+    expect(admitted).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      recipient: 'resolved@s.whatsapp.net', context: { inbound_event_id: 'C' },
+    }));
   });
 
   // @check CHK-062

@@ -1,4 +1,9 @@
 import { M365_MUTATION_DENY } from '../../core/settings-template.ts';
+import {
+  getTransportInboundContext,
+  withTransportInboundContext,
+  type TransportInboundContext,
+} from '../../core/transport-inbound-context.ts';
 import { admitHomeConfinedPath } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/session.ts
 // SessionManager owns the Claude Code child process lifecycle.
@@ -249,6 +254,12 @@ export interface ActiveProviderTurn {
   readonly identity: ProviderTurnIdentity;
   readonly generation: SessionGenerationIdentity;
   readonly providerTurnToken: number;
+}
+
+interface ProviderTurnAuthorityContext {
+  readonly providerTurnToken: number;
+  readonly generation: SessionGenerationIdentity | null;
+  readonly inboundContext: TransportInboundContext | undefined;
 }
 
 interface ShutdownKillTimerEntry {
@@ -772,6 +783,8 @@ export class SessionManager {
   private nextProviderTurnToken = 0;
   private activeProviderTurnToken: number | null = null;
   private activeProviderTurnGeneration: SessionGenerationIdentity | null = null;
+  /** Authority captured at the admitted boundary for callbacks that prove this exact turn. */
+  private activeProviderTurnAuthority: ProviderTurnAuthorityContext | null = null;
   private activeProviderTurn: ActiveProviderTurn | null = null;
   private readonly localGenerationManagerId = randomUUID();
   private localGeneration = 0;
@@ -1600,7 +1613,80 @@ export class SessionManager {
     return lines;
   }
 
-  private handleProviderEvent(event: AgentEvent): void {
+  private resolveProviderTurnAuthority(
+    providerTurnToken: number,
+    generation: SessionGenerationIdentity | null,
+  ): ProviderTurnAuthorityContext | null {
+    const authority = this.activeProviderTurnAuthority;
+    if (
+      authority === null
+      || !this.providerTurnInFlight
+      || this.activeProviderTurnToken !== providerTurnToken
+      || authority.providerTurnToken !== providerTurnToken
+      || !this.sameGeneration(this.activeProviderTurnGeneration, generation)
+      || !this.sameGeneration(authority.generation, generation)
+      || !this.isCurrentGeneration(generation)
+    ) return null;
+    return authority;
+  }
+
+  /**
+   * Session-scoped provider listeners do not carry a trustworthy turn identity.
+   * Deliver their events unbound so delayed output cannot inherit a prior inbound
+   * event or acquire a newer turn's authority.
+   */
+  private dispatchUncorrelatedProviderEvent(event: AgentEvent): void {
+    withTransportInboundContext(undefined, () => this.handleProviderEvent(event));
+  }
+
+  private dispatchProviderTurnEvent(
+    event: AgentEvent,
+    providerTurnToken: number,
+    generation: SessionGenerationIdentity | null,
+  ): void {
+    const authority = this.resolveProviderTurnAuthority(providerTurnToken, generation);
+    if (authority === null) {
+      log.debug({
+        provider: this.provider,
+        chatJid: this.chatJid,
+        providerTurnToken,
+        generation: generation?.generation ?? null,
+      }, 'provider event dropped — exact turn ownership no longer active');
+      return;
+    }
+    withTransportInboundContext(authority.inboundContext, () => this.handleProviderEvent(event, authority));
+  }
+
+  private emitProviderCrash(info: SessionCrashInfo): void {
+    withTransportInboundContext(undefined, () => this.onCrash?.(info));
+  }
+
+  /** Provider lifecycle callbacks have no inbound turn identity to preserve. */
+  private emitUserNotice(message: string, fallbackToMessenger = false): void {
+    withTransportInboundContext(undefined, () => {
+      if (this.notifyUser !== undefined) {
+        this.notifyUser(message);
+        return;
+      }
+      if (!fallbackToMessenger) return;
+      void this.messenger
+        .sendMessage(this.chatJid, message)
+        .catch((err) => log.error({ err }, 'failed to send crash notice'));
+    });
+  }
+
+  private emitResumeFailure(): void {
+    withTransportInboundContext(undefined, () => this.onResumeFailed?.());
+  }
+
+  private emitUnboundRuntimeEvent(event: AgentEvent): void {
+    withTransportInboundContext(undefined, () => this.onEvent(event));
+  }
+
+  private handleProviderEvent(
+    event: AgentEvent,
+    authority: ProviderTurnAuthorityContext | null = null,
+  ): void {
     // Debug: log all events for non-Claude providers
     if (this.provider !== 'claude-cli') {
       log.debug({ provider: this.provider, eventType: event.type, sessionId: event.type === 'init' ? event.sessionId : undefined, dbRowId: this.dbRowId }, 'handleProviderEvent');
@@ -1736,6 +1822,10 @@ export class SessionManager {
         ...event,
         providerTurnOwnerToken: activeTurn.providerTurnToken,
       };
+      authority = this.resolveProviderTurnAuthority(
+        activeTurn.providerTurnToken,
+        activeTurn.generation,
+      );
     }
 
     if (
@@ -1762,6 +1852,7 @@ export class SessionManager {
         ...event,
         providerTurnOwnerToken: providerTurnToken,
       };
+      authority = this.resolveProviderTurnAuthority(providerTurnToken, generation);
     }
 
     // Record token usage for budget tracking on result and token_usage events
@@ -1775,7 +1866,7 @@ export class SessionManager {
       }
     }
 
-    this.onEvent(event);
+    withTransportInboundContext(authority?.inboundContext, () => this.onEvent(event));
   }
 
   private quarantineNativeTurnSource(
@@ -2758,7 +2849,7 @@ export class SessionManager {
           instanceName: this.instanceName,
           onEvent: (event) => {
             if (!this.isCurrentManagedProviderSession(providerSession, managedGeneration)) return;
-            this.handleProviderEvent(event);
+            this.dispatchUncorrelatedProviderEvent(event);
           },
           onCrash: ({ exitCode, signal, provider, crashClass, stderrPreview }) => {
             if (!this.isCurrentManagedProviderSession(providerSession, managedGeneration)) {
@@ -2780,7 +2871,7 @@ export class SessionManager {
             this.managedProviderSession = null;
             this.managedProviderGeneration = null;
             this.sessionId = null;
-            this.onCrash?.({
+            this.emitProviderCrash({
               exitCode,
               signal: signal as NodeJS.Signals | null,
               sessionId: crashedSessionId,
@@ -2861,7 +2952,7 @@ export class SessionManager {
         resumeSessionId: resumeSessionId ?? null,
       }, 'spawn-per-turn session armed');
       // Emit a synthetic init event so the runtime knows the session is ready
-      this.onEvent({
+      this.emitUnboundRuntimeEvent({
         type: 'init',
         sessionId: resumeSessionId ?? `${this.provider}-${Date.now()}`,
       });
@@ -3022,7 +3113,7 @@ export class SessionManager {
         this.child = null;
         this.sessionId = null;
         log.error({ err, chatJid: this.chatJid, binary }, 'claude binary not found (ENOENT)');
-        this.notifyUser?.(`_${this.getProviderBinary()} is not installed. Check your provider configuration._`);
+        this.emitUserNotice(`_${this.getProviderBinary()} is not installed. Check your provider configuration._`);
         // Do NOT call onCrash — this is not a transient failure
         return;
       }
@@ -3031,8 +3122,8 @@ export class SessionManager {
       this.child = null;
       this.sessionId = null;
       // Notify user — without this, spawn failures are silent and the chat goes dead
-      this.notifyUser?.('_Agent failed to start — will retry on your next message._');
-      this.onCrash?.({
+      this.emitUserNotice('_Agent failed to start — will retry on your next message._');
+      this.emitProviderCrash({
         exitCode: null,
         signal: null,
         sessionId: null,
@@ -3139,7 +3230,7 @@ export class SessionManager {
             || !this.isCurrentPersistentChild(child, childGeneration)
             || this.isQuarantinedNativeTurnChild(child)
           ) return;
-          this.handleProviderEvent(event);
+          this.dispatchUncorrelatedProviderEvent(event);
           if (
             !this.active
             || !this.isCurrentPersistentChild(child, childGeneration)
@@ -3229,7 +3320,7 @@ export class SessionManager {
           for (const event of parse(line)) {
             if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
             if (this.isQuarantinedNativeTurnChild(child)) break;
-            this.handleProviderEvent(event);
+            this.dispatchUncorrelatedProviderEvent(event);
             if (!this.active || !this.isCurrentPersistentChild(child, childGeneration)) return;
             if (this.isQuarantinedNativeTurnChild(child)) break;
           }
@@ -3272,12 +3363,12 @@ export class SessionManager {
 
       if (isResumeFail) {
         // Let the runtime handle notification + fresh spawn
-        this.onResumeFailed?.();
+        this.emitResumeFailure();
       } else {
         // Allow the runtime to clean up the outbound queue (clears typing heartbeat).
         // onCrash does NOT send 'paused' — the composing indicator times out naturally,
         // acting as a soft signal to the user that the session is in trouble.
-        this.onCrash?.({
+        this.emitProviderCrash({
           exitCode: code,
           signal,
           sessionId: crashedSessionId,
@@ -3315,7 +3406,6 @@ export class SessionManager {
       ? `terminated by signal ${signal}`
       : `exited with code ${code}`;
     const msg = `Agent session ended (${reason}). Send any message to start a new session.`;
-    const chatJid = this.chatJid;
     setImmediate(() => {
       if (!this.isCurrentGeneration(generationIdentity)) return;
       const now = Date.now();
@@ -3327,13 +3417,7 @@ export class SessionManager {
         return;
       }
       this.lastCrashNotifiedAt = now;
-      if (this.notifyUser) {
-        this.notifyUser(msg);
-        return;
-      }
-      this.messenger
-        .sendMessage(chatJid, msg)
-        .catch((err) => log.error({ err }, 'failed to send crash notice'));
+      this.emitUserNotice(msg, true);
     });
   }
 
@@ -3388,6 +3472,7 @@ export class SessionManager {
     this.providerTurnInFlight = false;
     this.activeProviderTurnToken = null;
     this.activeProviderTurnGeneration = null;
+    this.activeProviderTurnAuthority = null;
     this.activeProviderTurn = null;
     this.activeCodexTurnStartRequestId = null;
     this.providerTurnTerminalResolve = null;
@@ -3491,7 +3576,7 @@ export class SessionManager {
           { sessionId: this.sessionId, pid: child.pid, toolId, toolName, reason: 'stalled_operation' },
           'stalled-operation kill fired — SIGKILL hung provider',
         );
-        this.notifyUser?.('_A tool call stalled and was terminated. Send your message again to retry._');
+        this.emitUserNotice('_A tool call stalled and was terminated. Send your message again to retry._');
         this.markIntentionalKill(child, 'SIGKILL', 'stalled_operation');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
           log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap stalled provider process tree');
@@ -3553,7 +3638,7 @@ export class SessionManager {
         if (decisionAt - this.longOpLastNoticeAt >= LONG_OP_NOTICE_MIN_INTERVAL_MS) {
           this.longOpLastNoticeAt = decisionAt;
           const minutes = Math.max(1, Math.round(decisionElapsed / 60_000));
-          this.notifyUser?.(`_Long-running step still active (~${minutes} min in) — continuing. Send /new to interrupt._`);
+          this.emitUserNotice(`_Long-running step still active (~${minutes} min in) — continuing. Send /new to interrupt._`);
         }
         args.rearm(LONG_OP_CEILING_MS - decisionElapsed);
         return;
@@ -3661,7 +3746,7 @@ export class SessionManager {
       );
       if (accepted && this.isCurrentGeneration(managedProviderGeneration)) {
         log.warn({ sessionId: this.sessionId, provider: this.provider, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled managed provider session');
-        this.notifyUser?.(terminationNotice);
+        this.emitUserNotice(terminationNotice);
       }
       return;
     }
@@ -3684,7 +3769,7 @@ export class SessionManager {
         log.warn({ sessionId: this.sessionId, pid: child.pid, reason: 'turn_watchdog' }, 'turn watchdog fired — killing stalled Claude process');
         // This notice is the ONLY user-facing message for a reap: the intent marker below
         // suppresses the generic crash notice (and the operator page) in the exit handler.
-        this.notifyUser?.(terminationNotice);
+        this.emitUserNotice(terminationNotice);
         this.markIntentionalKill(child, 'SIGKILL', 'idle_watchdog');
         void this.killChildTree(child, 'SIGKILL').catch((err) => {
           log.error({ err, pid: child.pid ?? null, chatJid: this.chatJid }, 'failed to reap watchdog provider process tree');
@@ -3737,7 +3822,7 @@ export class SessionManager {
     const errText = err instanceof Error ? `${err.name}: ${err.message}` : err === undefined ? undefined : String(err);
     const extraText = [reason, errText].filter(Boolean).join('\n');
     const fallbackClass = reason.includes('watchdog') ? 'provider_turn_watchdog' : 'managed_provider_error';
-    this.onCrash?.({
+    this.emitProviderCrash({
       exitCode: null,
       signal: null,
       sessionId: crashedSessionId,
@@ -3850,7 +3935,14 @@ export class SessionManager {
     this.providerTurnInFlight = true;
     const providerTurnToken = ++this.nextProviderTurnToken;
     this.activeProviderTurnToken = providerTurnToken;
-    this.activeProviderTurnGeneration = this.currentGenerationIdentity();
+    const currentGeneration = this.currentGenerationIdentity();
+    const providerTurnGeneration = currentGeneration === null ? null : { ...currentGeneration };
+    this.activeProviderTurnGeneration = providerTurnGeneration;
+    this.activeProviderTurnAuthority = {
+      providerTurnToken,
+      generation: providerTurnGeneration,
+      inboundContext: getTransportInboundContext(),
+    };
     this.activeProviderTurn = null;
     this.providerTurnTerminalPromise = new Promise<void>((resolve) => {
       this.providerTurnTerminalResolve = resolve;
@@ -3895,7 +3987,7 @@ export class SessionManager {
           generationIdentity,
         );
         if (accepted && this.isCurrentGeneration(generationIdentity)) {
-          this.notifyUser?.('Agent provider request failed — send any message to start a new session.');
+          this.emitUserNotice('Agent provider request failed — send any message to start a new session.');
         }
         throw err;
       } finally {
@@ -4092,7 +4184,7 @@ export class SessionManager {
         } else if (event.type === 'result') {
           sawResult = true;
         }
-        this.handleProviderEvent(event);
+        this.dispatchProviderTurnEvent(event, providerTurnToken, childGeneration);
       };
 
       // Publish the provider boundary only after its fd3 admission has resolved.
@@ -4146,15 +4238,15 @@ export class SessionManager {
           this.active = false;
           this.child = null;
           log.error({ err, chatJid: this.chatJid, provider: this.provider, binary }, 'provider binary not found (ENOENT)');
-          this.notifyUser?.(`_${this.getProviderBinary()} is not installed. Check your provider configuration._`);
+          this.emitUserNotice(`_${this.getProviderBinary()} is not installed. Check your provider configuration._`);
           // Do NOT call onCrash — this is not a transient failure
           return;
         }
         log.error({ err, chatJid: this.chatJid, provider: this.provider }, 'provider process spawn error');
         this.active = false;
         this.child = null;
-        this.notifyUser?.('_Agent failed to start — will retry on your next message._');
-        this.onCrash?.({
+        this.emitUserNotice('_Agent failed to start — will retry on your next message._');
+        this.emitProviderCrash({
           exitCode: null,
           signal: null,
           sessionId: null,
@@ -4306,8 +4398,10 @@ export class SessionManager {
         if (this.provider === 'opencode-cli') {
           deliveredTerminalResult = false;
           if (code === 0 && signal === null && pendingOpenCodeResult !== null) {
-            for (const textEvent of pendingOpenCodeText) this.handleProviderEvent(textEvent);
-            this.handleProviderEvent(pendingOpenCodeResult);
+            for (const textEvent of pendingOpenCodeText) {
+              this.dispatchProviderTurnEvent(textEvent, providerTurnToken, childGeneration);
+            }
+            this.dispatchProviderTurnEvent(pendingOpenCodeResult, providerTurnToken, childGeneration);
             deliveredTerminalResult = true;
             if (openCodeStopCandidateCount > 1) {
               log.info({
@@ -4361,7 +4455,7 @@ export class SessionManager {
           } else {
             log.warn({ exitCode: code, signal, provider: this.provider, chatJid: this.chatJid }, 'provider turn process exited with error');
           }
-          this.onCrash?.({
+          this.emitProviderCrash({
             exitCode: code,
             signal,
             sessionId: crashedSessionId,
@@ -4375,7 +4469,7 @@ export class SessionManager {
               : this.buildCrashMetadata()),
           });
           if (missingTerminalResult) {
-            this.notifyUser?.('_Agent provider ended before completing the turn. Send your message again to retry._');
+            this.emitUserNotice('_Agent provider ended before completing the turn. Send your message again to retry._');
           } else {
             this.notifyUnexpectedExit(code, signal, childGeneration);
           }

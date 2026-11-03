@@ -5,6 +5,7 @@ import {
   type CapabilityDecisionParams,
 } from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
+import { withTransportInboundContext } from '../../core/transport-inbound-context.ts';
 import type {
   DurabilityEngine,
   TurnFinalizationBookkeepingParams,
@@ -2146,8 +2147,11 @@ async applyRuntimeTurnPostEffects(
     (config.voiceReply === 'always' || postEffects.voice.inboundContentType === 'audio')
   ) {
     ledger.voiceScheduled = true;
-    // The finalized turn owns the destination, as it does for its text.
-    void this.host.sendVoiceReply(context.identity.deliveryJid, postEffects.voice.responseText);
+    // Voice text has lost per-fragment provenance. A verified terminal cannot
+    // authorize that aggregate; the frozen audio must enter human review.
+    void withTransportInboundContext(undefined, () => this.host.sendVoiceReply(
+      context.identity.deliveryJid, postEffects.voice!.responseText,
+    ));
   }
 }
 
@@ -2179,7 +2183,7 @@ flushUnownedRuntimeResult(
         config.voiceReply !== 'never' &&
         (config.voiceReply === 'always' || voice.inboundContentType === 'audio')
       ) {
-        return this.host.sendVoiceReply(voice.chatJid, voice.responseText);
+        return withTransportInboundContext(undefined, () => this.host.sendVoiceReply(voice.chatJid, voice.responseText));
       }
     })
     .catch((err) => log.error({ err }, 'flush or voice reply failed'));

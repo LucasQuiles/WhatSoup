@@ -1,6 +1,7 @@
 // src/runtimes/agent/turn-queue.ts
 // Global FIFO turn queue — serializes turns to Claude Code one at a time.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createChildLogger } from '../../logger.ts';
 import type { ContentType } from '../../core/types.ts';
 import type { RuntimeTurnContext } from './runtime-turn-context.ts';
@@ -32,6 +33,16 @@ export interface QueuedTurn {
   onSettled?: () => void;
 }
 
+type QueuedAsyncContext = ReturnType<typeof AsyncLocalStorage.snapshot>;
+
+interface QueuedTurnAdmission {
+  readonly context: QueuedAsyncContext;
+}
+
+// An object can represent only one live queue admission. Context stays in the
+// owning queue; callers cannot prepopulate or overwrite it.
+const activeQueuedTurns = new WeakSet<QueuedTurn>();
+
 /**
  * Distinct admission-rejection reasons (#1750). Threaded through onReject so
  * the finalizer can stamp a distinct failure_class rather than collapsing every
@@ -58,6 +69,7 @@ export interface TurnQueueTeardownReceipt {
 
 export class TurnQueue {
   private queue: QueuedTurn[] = [];
+  private readonly queuedTurnAdmissions = new WeakMap<QueuedTurn, QueuedTurnAdmission>();
   private processing = false;
   private active: QueuedTurn | null = null;
   private processor: ((turn: QueuedTurn) => Promise<void>) | null = null;
@@ -85,23 +97,25 @@ export class TurnQueue {
   }
 
   enqueue(turn: QueuedTurn): boolean {
+    if (activeQueuedTurns.has(turn)) {
+      log.error({ chatJid: turn.chatJid }, 'turn rejected — queued turn object already has a live admission');
+      return false;
+    }
+    this.captureQueuedAsyncContext(turn);
     if (!this.accepting) {
       log.warn({ chatJid: turn.chatJid }, 'turn rejected — queue admissions are closed');
-      this.onReject?.(turn, 'queue_closed');
-      this.settle(turn);
+      this.rejectAndSettle(turn, 'queue_closed');
       return false;
     }
     if (this.halted) {
       log.error({ chatJid: turn.chatJid }, 'turn rejected — queue is halted after finalization failure');
-      this.onReject?.(turn, 'queue_halted');
-      this.settle(turn);
+      this.rejectAndSettle(turn, 'queue_halted');
       return false;
     }
     if (this.queue.length >= this.maxDepth) {
       log.warn({ chatJid: turn.chatJid, maxDepth: this.maxDepth, pending: this.queue.length },
         'turn rejected — queue depth cap reached');
-      this.onReject?.(turn, 'queue_full');
-      this.settle(turn);
+      this.rejectAndSettle(turn, 'queue_full');
       return false;
     }
     this.queue.push(turn);
@@ -132,7 +146,9 @@ export class TurnQueue {
     }
     this.accepting = false;
     this.closeEpoch += 1;
-    return this.queue.splice(0);
+    const pending = this.queue.splice(0);
+    for (const turn of pending) this.releaseQueuedTurnAdmission(turn);
+    return pending;
   }
 
   haltAndTakePendingTurns(error: unknown): QueuedTurn[] {
@@ -163,6 +179,7 @@ export class TurnQueue {
       throw new Error('TurnQueue teardown receipt is stale or already consumed');
     }
     this.activeTeardownReceipt = null;
+    for (const turn of receipt.pending) this.releaseQueuedTurnAdmission(turn);
   }
 
   rollbackFailedTeardown(
@@ -196,6 +213,10 @@ export class TurnQueue {
       throw new Error('TurnQueue teardown rollback would duplicate an owned turn');
     }
     this.activeTeardownReceipt = null;
+    const restoredTurns = new Set(restored);
+    for (const turn of receipt.pending) {
+      if (!restoredTurns.has(turn)) this.releaseQueuedTurnAdmission(turn);
+    }
     this.queue.unshift(...restored);
 
     const reopened = (
@@ -258,32 +279,11 @@ export class TurnQueue {
       while (this.queue.length > 0) {
         const turn = this.queue.shift()!;
         this.active = turn;
-        try {
-          await this.processor(turn);
-        } catch (err) {
-          log.warn({ err, chatJid: turn.chatJid }, 'turn processor error — finalizing before queue advance');
-          if (!this.onProcessorError) {
-            this.halt(err);
-            log.error(
-              { err, chatJid: turn.chatJid },
-              'turn processor has no failure finalizer — queue halted',
-            );
-            break;
-          }
-          try {
-            await this.onProcessorError(turn, err);
-          } catch (finalizationError) {
-            this.halt(finalizationError);
-            log.error(
-              { err: finalizationError, chatJid: turn.chatJid },
-              'turn processor finalization failed — queue halted',
-            );
-            break;
-          }
-        } finally {
-          if (this.active === turn) this.active = null;
-          this.settle(turn);
-        }
+        const continueDraining = await this.runInQueuedAsyncContext(
+          turn,
+          () => this.processQueuedTurn(turn),
+        );
+        if (!continueDraining) break;
       }
     } finally {
       this.processing = false;
@@ -297,11 +297,71 @@ export class TurnQueue {
     this.onHalt?.();
   }
 
+  private captureQueuedAsyncContext(turn: QueuedTurn): void {
+    this.queuedTurnAdmissions.set(turn, Object.freeze({ context: AsyncLocalStorage.snapshot() }));
+    activeQueuedTurns.add(turn);
+  }
+
+  private runInQueuedAsyncContext<T>(turn: QueuedTurn, work: () => T): T {
+    const admission = this.queuedTurnAdmissions.get(turn);
+    if (!admission) throw new Error('Queued turn is missing its admission context');
+    return admission.context(work);
+  }
+
+  private releaseQueuedTurnAdmission(turn: QueuedTurn): void {
+    this.queuedTurnAdmissions.delete(turn);
+    activeQueuedTurns.delete(turn);
+  }
+
+  private rejectAndSettle(turn: QueuedTurn, reason: TurnRejectReason): void {
+    this.runInQueuedAsyncContext(turn, () => {
+      try {
+        this.onReject?.(turn, reason);
+      } finally {
+        this.settle(turn);
+      }
+    });
+  }
+
+  private async processQueuedTurn(turn: QueuedTurn): Promise<boolean> {
+    try {
+      await this.processor!(turn);
+    } catch (err) {
+      log.warn({ err, chatJid: turn.chatJid }, 'turn processor error — finalizing before queue advance');
+      if (!this.onProcessorError) {
+        this.halt(err);
+        log.error(
+          { err, chatJid: turn.chatJid },
+          'turn processor has no failure finalizer — queue halted',
+        );
+        return false;
+      }
+      try {
+        await this.onProcessorError(turn, err);
+      } catch (finalizationError) {
+        this.halt(finalizationError);
+        log.error(
+          { err: finalizationError, chatJid: turn.chatJid },
+          'turn processor finalization failed — queue halted',
+        );
+        return false;
+      }
+    } finally {
+      if (this.active === turn) this.active = null;
+      this.settle(turn);
+    }
+    return true;
+  }
+
   private settle(turn: QueuedTurn): void {
     try {
       turn.onSettled?.();
     } catch (err) {
       log.warn({ err, chatJid: turn.chatJid }, 'turn settlement callback threw');
+    } finally {
+      // A later admission of the same object is a new turn and must capture
+      // that admission's context instead of retaining the prior snapshot.
+      this.releaseQueuedTurnAdmission(turn);
     }
   }
 }

@@ -24,11 +24,7 @@ const AUTHORITY_RESPONSE_MAX_JSON_TOKENS = 200_017;
 // ample room for ordinary streaming while bounding retained chunk objects.
 const AUTHORITY_RESPONSE_MAX_CHUNKS = 100_000;
 
-export interface TransportInboundContext {
-  inbound_event_id: string;
-  /** Present only when authority has released this exact held operation. */
-  operation_id?: string;
-}
+export type { TransportInboundContext } from '../core/transport-inbound-context.ts';
 
 /** The authority admission API permits only the inbound event in `context`. */
 export interface TransportReplyContext {
