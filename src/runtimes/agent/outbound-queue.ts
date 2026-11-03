@@ -103,9 +103,8 @@ export interface OutboundQueueOptions {
   readonly clientOutputPolicies?: ClientOutputPolicyRegistry;
 }
 
-interface QueuedOutboundChunk {
+interface OutboundAttribution {
   readonly authorityContext: TransportInboundContext | undefined;
-  readonly text: string;
   readonly role: OutboundMessageRole;
   readonly turnId: string | undefined;
   readonly turnEvidenceEpoch: number | undefined;
@@ -114,30 +113,18 @@ interface QueuedOutboundChunk {
   readonly sourceInboundSeq: number | undefined;
 }
 
-interface BufferedStreamPart {
-  readonly authorityContext: TransportInboundContext | undefined;
+interface QueuedOutboundChunk extends OutboundAttribution {
+  readonly text: string;
+}
+
+interface BufferedStreamPart extends OutboundAttribution {
   readonly text: string;
   readonly onCommit?: () => void;
-  readonly role: OutboundMessageRole;
-  readonly turnId: string | undefined;
-  readonly turnEvidenceEpoch: number | undefined;
-  readonly chatJid: string;
-  readonly conversationKey: string;
-  readonly sourceInboundSeq: number | undefined;
 }
 
-interface BufferedToolUpdate {
-  readonly authorityContext: TransportInboundContext | undefined;
+interface BufferedToolUpdate extends OutboundAttribution {
   readonly update: ToolUpdate;
-  readonly role: OutboundMessageRole;
-  readonly turnId: string | undefined;
-  readonly turnEvidenceEpoch: number | undefined;
-  readonly chatJid: string;
-  readonly conversationKey: string;
-  readonly sourceInboundSeq: number | undefined;
 }
-
-type OutboundAttribution = Omit<QueuedOutboundChunk, 'text'>;
 
 // QR-126 chunk cap (MAX_CHUNKS) and message shaping live in whatsapp-format.ts.
 // Exported so tests can import the exact values rather than hardcoding them.
