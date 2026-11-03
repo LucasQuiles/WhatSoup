@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync, chownSync, closeSync, lstatSync, mkdirSync, mkdtempSync,
-  openSync, readFileSync, rmSync, writeFileSync,
+  openSync, readFileSync, rmdirSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +33,12 @@ function become(uid, gid) {
   assert.deepEqual(process.getgroups(), [gid]);
 }
 
-if (mode === '--controller') {
+if (mode === '--watchdog') {
+  become(Number(process.argv[3]), Number(process.argv[4]));
+  process.stdout.write(JSON.stringify({ uid: process.getuid(), gid: process.getgid() }));
+  // Self-exit bounds the negative case if the parent cannot signal this UID.
+  setTimeout(() => process.exit(73), 6_000);
+} else if (mode === '--controller') {
   become(controllerUid, controllerGid);
   const config = JSON.parse(process.argv[4]);
   const { assertProviderProcessIsolationConfig } = await import(pathToFileURL(
@@ -71,6 +76,7 @@ if (mode === '--controller') {
   assert.ok(sourceRoot, 'Pass the source root explicitly');
   await test('root-owned controller-readable policy preserves the real filesystem boundary', () => {
     const directory = mkdtempSync(join(tmpdir(), 'policy-permissions-'));
+    const failures = [];
     try {
       chmodSync(directory, 0o755);
       const launcherPath = join(directory, 'inert-launcher');
@@ -118,6 +124,16 @@ if (mode === '--controller') {
       function controller(candidate = config) {
         return child(['--controller', sourceRoot, JSON.stringify(candidate)]);
       }
+      for (const [uid, gid] of [[controllerUid, controllerGid], [workerUid, workerGid]]) {
+        const timed = spawnSync(process.execPath, [script, '--watchdog', String(uid), String(gid)], {
+          env: { PATH: '/usr/local/bin:/usr/bin:/bin', TMPDIR: tmpdir() },
+          encoding: 'utf8', timeout: 2_000,
+        });
+        assert.deepEqual(JSON.parse(timed.stdout), { uid, gid });
+        assert.equal(timed.error?.code, 'ETIMEDOUT');
+        assert.equal(timed.status, null);
+        assert.equal(timed.signal, 'SIGTERM', 'The watchdog must terminate the dropped-UID child');
+      }
       policy(0, controllerGid, 0o640);
       const accepted = controller();
       assert.equal(accepted.status, 0, accepted.stderr);
@@ -156,8 +172,25 @@ if (mode === '--controller') {
       const changed = controller({ ...config, policySha256: '0'.repeat(64) });
       assert.equal(changed.status, 1);
       assert.match(changed.stderr, /policy digest changed/);
+    } catch (error) {
+      failures.push(error);
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      // Root has no DAC override here. Unlink the empty private directories
+      // through their root-owned parent without traversing worker permissions.
+      for (const name of ['home', 'config', 'data']) {
+        try {
+          rmdirSync(join(directory, name));
+        } catch (error) {
+          if (error.code !== 'ENOENT') failures.push(error);
+        }
+      }
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch (error) {
+        failures.push(error);
+      }
     }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, 'Policy qualification and cleanup failed');
   });
 }
