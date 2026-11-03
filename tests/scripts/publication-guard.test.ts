@@ -8,8 +8,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
 import { cleanGitEnv } from '../../scripts/lib/guard-core.ts';
 import {
+  MAX_EXACT_ADDED_LINE_COUNT,
+  MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
   MAX_EXACT_ADDED_LINE_SOURCE_LINE_COUNT,
   MAX_EXACT_AGGREGATE_BLOB_BYTES,
+  MAX_EXACT_BLOB_COUNT,
+  MAX_EXACT_COMMIT_COUNT,
   MAX_EXACT_SINGLE_BLOB_BYTES,
 } from '../../scripts/lib/ci-control/git-input.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
@@ -23,6 +27,9 @@ import {
   isInternalPublicationPath,
   MAX_PUBLICATION_BASELINE_BLOB_BYTES,
   MAX_PUBLICATION_PATH_TRANSITION_BLOB_BYTES,
+  BRANCH_SCAN_LIMITS,
+  branchScanOverLimit,
+  type BranchScanLimits,
   publicationPolicyProjectionCoverage,
   runPublicationGuard,
   scanTextForPrivateLiterals,
@@ -377,6 +384,107 @@ describe('publication guard branch-diff mode', () => {
     expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
     expect(error.mock.calls.join('\n')).toContain('INCONCLUSIVE');
   });
+
+  it.each([
+    ['a tab', 'src/a\tb.ts'],
+    ['a backslash', 'src/a\\b.ts'],
+    ['a non-ASCII character', 'src/caf\u00e9.ts'],
+    ['a double quote', 'src/q"uote.ts'],
+  ])('flags a literal in a file whose name holds %s, which Git quotes in diff headers', (_label, filePath) => {
+    const repo = branchRepo();
+    commitExactFile(repo, filePath, `// ${privatePath}\n`, 'add literal under a quoted name');
+    commitExactFile(repo, filePath, '// clean\n', 'remove literal');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('local-home-path');
+  });
+
+  it('still flags a merge-added literal under user config that reshapes log output', () => {
+    const repo = branchRepo();
+    git(repo, ['config', 'color.ui', 'always']);
+    git(repo, ['config', 'log.diffMerges', 'combined']);
+    git(repo, ['config', 'diff.hide.textconv', 'true']);
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '*.ts diff=hide\n');
+    const branch = gitOutput(repo, ['branch', '--show-current']);
+    git(repo, ['checkout', '-b', 'side']);
+    commitExactFile(repo, 'src/side.ts', '// side\n', 'side work');
+    git(repo, ['checkout', branch]);
+    commitExactFile(repo, 'src/main.ts', '// main\n', 'branch work');
+    git(repo, ['merge', '--no-commit', '--no-ff', 'side']);
+    writeFileSync(join(repo, 'src/side.ts'), `// ${privatePath}\n`);
+    git(repo, ['add', 'src/side.ts']);
+    git(repo, ['commit', '-m', 'merge side']);
+    commitExactFile(repo, 'src/side.ts', '// side\n', 'remove literal');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
+    expect(error.mock.calls.join('\n')).toContain('src/side.ts');
+  });
+
+  it('does not flag base content a merge from the base brings in under diff.noprefix', () => {
+    // Without the pinned destination prefix, `+++ b/old.ts` loses its real `b/`
+    // directory, the base read misses, and published content is flagged.
+    const repo = branchRepo();
+    git(repo, ['config', 'diff.noprefix', 'true']);
+    const branch = gitOutput(repo, ['branch', '--show-current']);
+    commitExactFile(repo, 'src/work.ts', '// work\n', 'branch work');
+    git(repo, ['checkout', '-b', 'mainline', 'origin/main']);
+    commitExactFile(repo, 'b/old.ts', `// ${privatePath}\n`, 'already on main');
+    git(repo, ['update-ref', 'refs/remotes/origin/main', gitOutput(repo, ['rev-parse', 'HEAD'])]);
+    git(repo, ['checkout', branch]);
+    git(repo, ['merge', '--no-ff', '-m', 'merge main', 'origin/main']);
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
+  });
+
+  it('is INCONCLUSIVE (exit 2), not a pass, when a git read fails', () => {
+    const repo = branchRepo();
+    git(repo, ['checkout', '--orphan', 'unrelated']);
+    commitExactFile(repo, 'src/other.ts', '// unrelated history\n', 'no common ancestor with the base');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
+    expect(error.mock.calls.join('\n')).toContain('a git read failed');
+  });
+
+  it('passes when HEAD is the base, as on a push to main', () => {
+    const repo = branchRepo();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(0);
+  });
+
+  it('is INCONCLUSIVE (exit 2), not a pass, when the branch adds more lines than the limit', () => {
+    const repo = branchRepo();
+    commitExactFile(repo, 'src/bulk.txt', 'x\n'.repeat(MAX_EXACT_ADDED_LINE_COUNT + 1), 'bulk');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(runPublicationGuard(['--branch-diff'], repo)).toBe(2);
+    expect(error.mock.calls.join('\n')).toContain(`addedLines ${MAX_EXACT_ADDED_LINE_COUNT + 1} is over the limit`);
+  }, 30_000);
+});
+
+describe('publication guard branch-diff limits', () => {
+  it('takes every limit from the shared exact-input constants', () => {
+    expect(BRANCH_SCAN_LIMITS).toEqual({
+      commits: MAX_EXACT_COMMIT_COUNT,
+      patchBytes: MAX_EXACT_ADDED_LINE_PATCH_TOTAL_BYTES,
+      addedLines: MAX_EXACT_ADDED_LINE_COUNT,
+      baseBlobs: MAX_EXACT_BLOB_COUNT,
+      baseBytes: MAX_EXACT_AGGREGATE_BLOB_BYTES,
+    });
+  });
+
+  it.each(Object.keys(BRANCH_SCAN_LIMITS) as (keyof BranchScanLimits)[])(
+    'passes %s at its limit and stops one past it',
+    (key) => {
+      expect(branchScanOverLimit({ ...BRANCH_SCAN_LIMITS })).toBeNull();
+      expect(branchScanOverLimit({ ...BRANCH_SCAN_LIMITS, [key]: BRANCH_SCAN_LIMITS[key] + 1 })).toBe(key);
+    },
+  );
 });
 
 describe('publication guard root classification', () => {

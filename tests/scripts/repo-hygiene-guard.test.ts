@@ -175,6 +175,23 @@ describe('repo hygiene guard', () => {
     ]);
   });
 
+  it('decodes Git-quoted target paths, so a tab, quote or non-ASCII name keeps its real extension', () => {
+    const lines = parseUnifiedDiffAddedLines([
+      '+++ "b/src/a\\tb.ts"',
+      '@@ -0,0 +1 @@',
+      '+const first = true;',
+      '+++ "b/src/caf\\303\\251.ts"',
+      '@@ -0,0 +1 @@',
+      '+const second = true;',
+      '+++ "b/src/q\\"u\\\\o.ts"',
+      '@@ -0,0 +1 @@',
+      '+const third = true;',
+      '',
+    ].join('\n'));
+
+    expect(lines.map((line) => line.filePath)).toEqual(['src/a\tb.ts', 'src/caf\u00e9.ts', 'src/q"u\\o.ts']);
+  });
+
   it('flags focused tests and real-shaped group identifiers in staged added lines', () => {
     const issues = scanAddedLines([
       { filePath: 'tests/example.test.ts', line: 10, text: 'it.only("runs one case", () => {})' },

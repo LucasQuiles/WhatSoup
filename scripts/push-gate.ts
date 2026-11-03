@@ -146,11 +146,11 @@ export const CURATED_TEST_PATHS = [
 const guard = (name: string): GateStep => ({ name, cmd: `npm run ${name}` });
 const step = (name: string, cmd: string): GateStep => ({ name, cmd });
 
-/** verify:push:branch — exact legacy order (semantic:shadow sits mid-block). */
 /**
  * What the installed hook runs for a branch push: the checks that must pass before
- * content reaches the public remote. They take seconds and build nothing. The rest
- * of BRANCH_STEPS is backed by the required hosted checks, which block merge
+ * content reaches the public remote. They take seconds and build nothing. Each of
+ * these guards is also a named step of the quality workflow, and the rest of
+ * BRANCH_STEPS is backed by the required hosted checks, which block merge
  * (tests/scripts/pre-push-guard.test.ts keeps every push-gate guard backed there).
  */
 export const FAST_PUSH_STEPS: readonly GateStep[] = [
@@ -161,6 +161,7 @@ export const FAST_PUSH_STEPS: readonly GateStep[] = [
   step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh fast'),
 ];
 
+/** verify:push:branch — exact legacy order (semantic:shadow sits mid-block). */
 export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:repo:staged'),
   guard('guard:repo:branch-diff'),

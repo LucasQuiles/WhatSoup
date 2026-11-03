@@ -169,6 +169,29 @@ function stripDiffPath(filePath: string): string {
   return normalizeRepoPath(filePath);
 }
 
+const GIT_NAMED_ESCAPES: Readonly<Record<string, number>> = {
+  a: 0x07, b: 0x08, t: 0x09, n: 0x0a, v: 0x0b, f: 0x0c, r: 0x0d, '"': 0x22, '\\': 0x5c,
+};
+
+/**
+ * Git C-quotes a diff path that holds a control character, a double quote, a
+ * backslash or, under the default `core.quotePath`, a non-ASCII byte:
+ * `+++ "b/a\tb.ts"`. Read raw, the name keeps its quotes, so an extension check
+ * sees `.ts"` and the scan skips the file. Octal escapes are bytes of the UTF-8
+ * name, so they are decoded as bytes, not as characters.
+ */
+export function unquoteGitPath(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const parts: Buffer[] = [];
+  for (const [, escape, literal] of raw.slice(1, -1).matchAll(/\\([0-7]{3}|[\s\S])|([^\\]+)/g)) {
+    if (literal !== undefined) parts.push(Buffer.from(literal, 'utf8'));
+    else if (/^[0-7]{3}$/.test(escape!)) parts.push(Buffer.from([parseInt(escape!, 8)]));
+    else if (escape! in GIT_NAMED_ESCAPES) parts.push(Buffer.from([GIT_NAMED_ESCAPES[escape!]!]));
+    else parts.push(Buffer.from(escape!, 'utf8'));
+  }
+  return Buffer.concat(parts).toString('utf8');
+}
+
 export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
   const addedLines: AddedLine[] = [];
   let filePath: string | null = null;
@@ -176,7 +199,7 @@ export function parseUnifiedDiffAddedLines(diff: string): AddedLine[] {
 
   for (const rawLine of diff.split(/\r?\n/)) {
     if (rawLine.startsWith('+++ ')) {
-      const candidate = rawLine.slice(4).trim();
+      const candidate = unquoteGitPath(rawLine.slice(4).trim());
       filePath = candidate === '/dev/null' ? null : stripDiffPath(candidate);
       continue;
     }
