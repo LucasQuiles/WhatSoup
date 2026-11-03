@@ -169,4 +169,62 @@ describe('signal_cli_unregistered recovery authority (#2394)', () => {
     expect(unregisteredClears()).toHaveLength(1);
     await connection.shutdown();
   });
+
+  it.each(['poll', 'connect'] as const)(
+    'a new %s auth failure invalidates recovery even when the original onset is still latched',
+    async (failurePath) => {
+      const port = unregisteredPort();
+      const { adapter, connection } = makeConnection(port);
+      try {
+        await expect(connection.connect()).rejects.toThrow();
+        expect(unregisteredAlerts()).toHaveLength(1);
+
+        const verify = vi.spyOn(port, 'verifyCredentials').mockResolvedValue(undefined);
+        clearAlertSource.mockReturnValueOnce(false);
+        await connection.connect();
+        expect(unregisteredClears()).toHaveLength(1);
+
+        const authError = Object.assign(new Error('unregistered again'), { status: 401 });
+        if (failurePath === 'poll') {
+          vi.spyOn(port, 'listInboundSince').mockRejectedValueOnce(authError);
+          await adapter.pollOnce();
+          expect(adapter.state().state).toBe('auth_required');
+        } else {
+          verify.mockRejectedValueOnce(authError);
+          await expect(connection.connect()).rejects.toThrow();
+          expect(adapter.state().state).toBe('disconnected');
+        }
+
+        expect(unregisteredAlerts()).toHaveLength(1);
+        // Send acceptance is a different operation from the failed account
+        // or receive check; it cannot revive the earlier recovery proof.
+        await connection.sendMessage('+15559990000@signal', 'activity');
+        expect(unregisteredClears()).toHaveLength(1);
+
+        await connection.connect();
+        expect(unregisteredClears()).toHaveLength(2);
+      } finally {
+        await connection.shutdown();
+      }
+    },
+  );
+
+  it('a transient poll failure retains a valid pending recovery handoff', async () => {
+    const port = new MockSignalPort();
+    const { adapter, connection } = makeConnection(port);
+    try {
+      clearAlertSource.mockReturnValueOnce(false);
+      await connection.connect();
+      vi.spyOn(port, 'listInboundSince').mockRejectedValueOnce(
+        Object.assign(new Error('receive unavailable'), { code: 'ECONNREFUSED' }),
+      );
+      await adapter.pollOnce();
+      expect(adapter.state().state).toBe('connected');
+      await connection.sendMessage('+15559990000@signal', 'activity');
+      expect(unregisteredClears()).toHaveLength(2);
+      expect(unregisteredAlerts()).toHaveLength(0);
+    } finally {
+      await connection.shutdown();
+    }
+  });
 });
