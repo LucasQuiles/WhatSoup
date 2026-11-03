@@ -388,6 +388,17 @@ evidence remains open. The retained-evidence limit is shared with the incident
 writers; checking below that limit bounds clipping by current writers, not the
 completeness of arbitrary imported historical state.
 
+Current aggregate evidence is also checked before recovery. A failure attributed
+to the same target vetoes its `daily-health-fail` recovery even when a healthy
+probe appears elsewhere in the report. The producer and dispatcher share failure
+membership and target attribution; unrelated targets, warnings and unattributed
+infrastructure failures do not veto that target. Source-specific recovery, such
+as `instance_unreachable`, retains its existing proof rules.
+
+This check reads the full received evidence, independently of shortened display
+text. It cannot detect a contradiction already omitted from incoming evidence;
+completeness of imported or truncated reports remains a separate requirement.
+
 A verified health observation must follow the latest opening, event, and
 last-seen timestamps. Physical-action incidents also require the existing
 outbound-or-stability proof; an outbound receipt must follow that same latest
