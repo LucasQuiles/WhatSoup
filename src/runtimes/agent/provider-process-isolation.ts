@@ -152,7 +152,11 @@ function secureInstalledFile(
   expectedDigest: string,
   label: string,
   deps: ProviderProcessIsolationDependencies,
-  requiresSetuid = false,
+  options: {
+    readonly requiresSetuid?: boolean;
+    readonly expectedGid?: number;
+    readonly exactMode?: number;
+  } = {},
 ): void {
   let metadata: IsolationStat;
   try {
@@ -163,8 +167,14 @@ function secureInstalledFile(
   if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.uid !== 0 || (metadata.mode & 0o022) !== 0) {
     error(`process isolation ${label} is not a root-owned non-writable regular file`);
   }
+  if (
+    (options.expectedGid !== undefined && metadata.gid !== options.expectedGid)
+    || (options.exactMode !== undefined && (metadata.mode & 0o7777) !== options.exactMode)
+  ) {
+    error(`process isolation ${label} must be root-owned, controller-group-readable, and mode 0640`);
+  }
   secureRootOwnedParentDirectories(path, label, deps);
-  if (requiresSetuid && (metadata.mode & 0o4000) === 0) {
+  if (options.requiresSetuid && (metadata.mode & 0o4000) === 0) {
     error('process isolation launcher is not setuid-root');
   }
   let contents: Buffer;
@@ -290,8 +300,11 @@ export function assertProviderProcessIsolationConfig(
   for (const protectedPath of config.protectedPaths) configuredPath(protectedPath, 'protected path');
   configuredDigest(config.launcherSha256, 'launcherSha256');
   configuredDigest(config.policySha256, 'policySha256');
-  secureInstalledFile(config.launcherPath, config.launcherSha256, 'launcher', deps, true);
-  secureInstalledFile(config.policyPath, config.policySha256, 'policy', deps);
+  secureInstalledFile(config.launcherPath, config.launcherSha256, 'launcher', deps, { requiresSetuid: true });
+  secureInstalledFile(config.policyPath, config.policySha256, 'policy', deps, {
+    expectedGid: config.controllerGid,
+    exactMode: 0o640,
+  });
   secureWorkerDirectory(config.homeDir, 'homeDir', config, deps);
   secureWorkerDirectory(config.configHome, 'configHome', config, deps);
   secureWorkerDirectory(config.dataHome, 'dataHome', config, deps);

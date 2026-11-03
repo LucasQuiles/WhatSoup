@@ -5,9 +5,10 @@
  *
  * This source is an installation artifact, not a runnable development helper.
  * Production installation must copy it outside every agent-writable tree,
- * compile it, set owner root:root and mode 04755, create a separate root-owned
- * 0600 policy, record both SHA-256 values, then configure the controller with
- * those installed paths. The TypeScript controller refuses any other shape
+ * compile it, set owner root:root and mode 04755, create a separate nonsecret
+ * policy owned by root:controller-primary-group and mode 0640, record both
+ * SHA-256 values, then configure the controller with those installed paths.
+ * The TypeScript controller refuses any other shape
  * and accepts only its nonce-bound receipt emitted after this protected
  * launcher verifies the post-drop kernel identity. An unprivileged controller
  * cannot generally read the worker's /proc/<pid>/environ after the UID drop.
@@ -163,7 +164,8 @@ static void read_policy(const char *path, struct policy *policy) {
   int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) fail("policy cannot be opened safely");
   struct stat opened_metadata;
-  if (fstat(fd, &opened_metadata) != 0 || opened_metadata.st_dev != policy_metadata.st_dev || opened_metadata.st_ino != policy_metadata.st_ino) {
+  if (fstat(fd, &opened_metadata) != 0 || opened_metadata.st_dev != policy_metadata.st_dev || opened_metadata.st_ino != policy_metadata.st_ino
+      || !S_ISREG(opened_metadata.st_mode) || opened_metadata.st_uid != 0 || (opened_metadata.st_mode & 0022) != 0) {
     close(fd);
     fail("policy changed while opening");
   }
@@ -191,6 +193,9 @@ static void read_policy(const char *path, struct policy *policy) {
       || policy->home_dir[0] == '\0' || policy->config_home[0] == '\0' || policy->data_home[0] == '\0'
       || policy->protected_path_count == 0 || policy->allowed_binary_count == 0) {
     fail("policy is incomplete");
+  }
+  if (opened_metadata.st_gid != policy->controller_gid || (opened_metadata.st_mode & 07777) != 0640) {
+    fail("policy must be root-owned, controller-group-readable, and mode 0640");
   }
 }
 

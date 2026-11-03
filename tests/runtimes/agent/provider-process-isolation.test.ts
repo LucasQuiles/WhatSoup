@@ -26,10 +26,15 @@ const isolation: ProviderProcessIsolationConfig = {
   protectedPaths: ['/var/db/whatsoup/transport-authority.bearer'],
 };
 
-function stat(uid: number, mode: number, type: 'file' | 'directory' = 'file') {
+function stat(
+  uid: number,
+  mode: number,
+  type: 'file' | 'directory' = 'file',
+  gid = uid,
+) {
   return {
     uid,
-    gid: uid,
+    gid,
     mode,
     isFile: () => type === 'file',
     isDirectory: () => type === 'directory',
@@ -58,7 +63,7 @@ function controllerDeps(overrides: Record<string, unknown> = {}) {
     getgid: () => 20,
     lstat: (path: string) => {
       if (path === isolation.launcherPath) return stat(0, 0o104755);
-      if (path === isolation.policyPath) return stat(0, 0o100600);
+      if (path === isolation.policyPath) return stat(0, 0o100640, 'file', isolation.controllerGid);
       if (path === '/usr/bin/fake-provider') return stat(0, 0o100755);
       if (path === isolation.homeDir || path === isolation.configHome || path === isolation.dataHome) {
         return stat(502, 0o40700, 'directory');
@@ -179,6 +184,68 @@ describe('provider process isolation', () => {
       isolation,
       controllerDeps({ getuid: () => isolation.workerUid }),
     )).toThrow('controller UID');
+  });
+
+  it('requires the nonsecret policy to be exactly root:controllerGid 0640 before launch preparation', () => {
+    const invalidPolicies = [
+      ['a root-only policy that the controller cannot read', stat(0, 0o100600, 'file', isolation.controllerGid)],
+      ['a world-readable policy', stat(0, 0o100644, 'file', isolation.controllerGid)],
+      ['a group-writable policy', stat(0, 0o100660, 'file', isolation.controllerGid)],
+      ['an other-writable policy', stat(0, 0o100642, 'file', isolation.controllerGid)],
+      ['a policy owned by the wrong group', stat(0, 0o100640, 'file', 0)],
+      ['a policy carrying setuid', stat(0, 0o104640, 'file', isolation.controllerGid)],
+      ['a policy owned by the controller', stat(isolation.controllerUid, 0o100640, 'file', isolation.controllerGid)],
+    ] as const;
+
+    for (const [_description, policyMetadata] of invalidPolicies) {
+      let policyReadCalls = 0;
+      expect(() => prepareIsolatedProviderEnvironment(
+        { PATH: '/usr/bin' },
+        isolation,
+        controllerDeps({
+          lstat: (path: string) => path === isolation.policyPath
+            ? policyMetadata
+            : controllerDeps().lstat(path),
+          readFile: (path: string) => {
+            if (path === isolation.policyPath) policyReadCalls += 1;
+            return controllerDeps().readFile(path);
+          },
+        }),
+      )).toThrow('policy');
+      expect(policyReadCalls).toBe(0);
+    }
+  });
+
+  it('rejects a controller whose primary group does not match the policy group', () => {
+    expect(() => prepareIsolatedProviderEnvironment(
+      { PATH: '/usr/bin' },
+      isolation,
+      controllerDeps({ getgid: () => isolation.controllerGid + 1 }),
+    )).toThrow('controller GID');
+  });
+
+  it('fails an unreadable policy before it invokes the launcher', () => {
+    let spawnCalls = 0;
+    expect(() => launchIsolatedProviderProcess({
+      binary: '/usr/bin/fake-provider',
+      expectedBinarySha256: 'c'.repeat(64),
+      args: [],
+      cwd: '/srv/whatsoup/work',
+      env: { PATH: '/usr/bin' },
+      isolation,
+    }, controllerDeps({
+      readFile: (path: string) => {
+        if (path === isolation.policyPath) throw new Error('EACCES');
+        if (path === isolation.launcherPath) return Buffer.from('launcher');
+        if (path === '/usr/bin/fake-provider') return Buffer.from('provider');
+        throw new Error(`unexpected read ${path}`);
+      },
+      spawn: () => {
+        spawnCalls += 1;
+        return fakeChild();
+      },
+    }))).toThrow('policy cannot be read');
+    expect(spawnCalls).toBe(0);
   });
 
   it('accepts a fake provider workflow only after the controller verifies kernel uid, gid, groups, environment, and protected paths', () => {

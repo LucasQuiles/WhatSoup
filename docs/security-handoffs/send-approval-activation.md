@@ -58,6 +58,12 @@ provenance. The complete frozen audio remains available for exact approval.
    identities, protected credential paths, process cleanup, and raw-egress
    confinement. Do not treat a Linux source review or Linux canary as macOS
    qualification.
+   The Linux prototype policy is nonsecret configuration installed as root
+   with the controller's primary group and mode `0640`. This permits the
+   controller to verify its pinned digest without granting either runtime
+   identity write access. The Linux CI fixture checks real ownership and
+   group permissions in a network-disabled container; it does not qualify
+   the setuid launcher, descendant cleanup, or a production host.
 5. Keep authority activation refused until all requirements above have
    independently demonstrated the desired behavior. The refusal is intentional
    and must not be weakened to make a pilot appear available.

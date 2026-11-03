@@ -54,11 +54,13 @@ describe('Linux agent-process isolation launcher artifact', () => {
     expect(source).toContain('execve(argv[command_index], &argv[command_index], environ)');
   });
 
-  it('requires a root-owned policy, exact controller identity, and a controller-readable receipt fd', () => {
+  it('requires an exact root:controllerGid 0640 nonsecret policy, controller identity, and a controller-readable receipt fd', () => {
     const source = readFileSync(launcherSource, 'utf8');
 
     expect(source).toContain('policy_metadata.st_uid != 0');
     expect(source).toContain('(policy_metadata.st_mode & 0022) != 0');
+    expect(source).toContain('opened_metadata.st_gid != policy->controller_gid');
+    expect(source).toContain('(opened_metadata.st_mode & 07777) != 0640');
     expect(source).toContain('getuid() != policy.controller_uid');
     expect(source).toContain('write_receipt(receipt_fd, nonce, &policy)');
     expect(source).toContain('FD_CLOEXEC');
