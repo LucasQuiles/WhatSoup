@@ -1,3 +1,4 @@
+import { M365_MUTATION_DENY } from '../../core/settings-template.ts';
 import { admitHomeConfinedPath } from '../../lib/home-confinement.ts';
 // src/runtimes/agent/session.ts
 // SessionManager owns the Claude Code child process lifecycle.
@@ -15,6 +16,7 @@ import {
   type ProviderCheckpointRoutePolicy,
   type ProviderRoutePolicy,
 } from '../../core/provider-data-policy.ts';
+import type { M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import type { SessionContext } from '../../mcp/types.ts';
 import { toConversationKey } from '../../core/conversation-key.ts';
 import { createChildLogger } from '../../logger.ts';
@@ -65,6 +67,7 @@ import { lookupCredential, resolveProviderKeyService, SERVICE_ENV_MAP } from '..
 import { isKeylessOpenCodeRoute, PROVIDER_API_KEY_SERVICES } from '../../lib/provider-key-service.ts';
 import { resolveApiKey } from '../../lib/api-key-resolver.ts';
 import { killSessionTree } from './process-tree.ts';
+import { claudeRefreshLockGrace } from './providers/claude-refresh-ahead.ts';
 import { sha256File, type ProviderAdmission } from './provider-canary-proof.ts';
 import {
   isHostWorkAdmissionEnabled,
@@ -291,6 +294,7 @@ export interface SessionManagerOptions {
   routePolicy?: ProviderRoutePolicy;
   pluginDirs?: string[];
   allowM365Mutations?: boolean;
+  m365MutationPolicy?: M365MutationPolicy;
   provider?: string;
   providerConfig?: Record<string, unknown>;
   mcpBridge?: ProviderMcpBridge;
@@ -309,6 +313,12 @@ export interface SessionManagerOptions {
    */
   degradedCapabilitiesBlock?: () => string | null;
   routingSystemBlock?: () => string | null;
+  /**
+   * Long-term memory guidance (memory-guidance.ts), supplied by the runtime
+   * only when memory was ready at startup and memory_write is listed for this
+   * session. Absent or null keeps the prompt byte-identical.
+   */
+  memoryGuidanceBlock?: () => string | null;
   /** Egress proxy port (#1607) — forwarded into buildChildEnv's baseOpts so spawned children pick up HTTP_PROXY/HTTPS_PROXY. Undefined when the instance has no allowedEgress. */
   egressProxyPort?: number;
   /** Shared process-lifetime gate for providers whose local state store is single-writer. */
@@ -348,9 +358,12 @@ export function buildChildEnv(
     );
   }
 
+  const providerBaseOpts = provider !== 'claude-cli' && baseOpts?.m365MutationPolicy !== undefined
+    ? { ...baseOpts, includeMicrosoft365Bridge: false }
+    : baseOpts;
   const env = provider === 'opencode-cli'
-    ? buildOpenCodeBaseChildEnv(baseOpts)
-    : buildBaseChildEnv(baseOpts);
+    ? buildOpenCodeBaseChildEnv(providerBaseOpts)
+    : buildBaseChildEnv(providerBaseOpts);
 
   if (baseOpts?.providerCredentials === 'omit') return env;
 
@@ -705,6 +718,7 @@ export class SessionManager {
   private readonly routePolicy: ProviderRoutePolicy | undefined;
   private readonly pluginDirs: string[];
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
   private readonly provider: string;
   private readonly providerConfig: Record<string, unknown> | undefined;
   private readonly mcpBridge: ProviderMcpBridge | undefined;
@@ -716,6 +730,7 @@ export class SessionManager {
   private readonly handoffSystemBlock: (() => string | null) | undefined;
   private readonly degradedCapabilitiesBlock: (() => string | null) | undefined;
   private readonly routingSystemBlock: (() => string | null) | undefined;
+  private readonly memoryGuidanceBlock: (() => string | null) | undefined;
   private readonly egressProxyPort: number | undefined;
   private readonly providerExecutionGate: ProviderExecutionGate | undefined;
   private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
@@ -848,6 +863,8 @@ export class SessionManager {
     SessionGenerationIdentity | null
   >();
   private readonly childTreeMarkers = new WeakMap<ReturnType<typeof spawn>, string>();
+  /** The env each provider child was spawned with: names the claude refresh lock its kill waits on. */
+  private readonly childEnvs = new WeakMap<ReturnType<typeof spawn>, NodeJS.ProcessEnv>();
   private readonly childExecutionLeases = new WeakMap<ReturnType<typeof spawn>, ProviderExecutionLease>();
   private providerExecutionWaitAbort: AbortController | null = null;
   /** Queued host wrapper, before it has admitted its scoped provider child. */
@@ -909,6 +926,7 @@ export class SessionManager {
     this.routePolicy = opts.routePolicy;
     this.pluginDirs = opts.pluginDirs ?? [];
     this.allowM365Mutations = opts.allowM365Mutations;
+    this.m365MutationPolicy = opts.m365MutationPolicy;
     this.provider = opts.provider ?? 'claude-cli';
     // Fail-fast on unknown provider IDs (#447). The shared validator blocks
     // these at config-load time, but direct instantiation (tests, programmatic
@@ -936,6 +954,7 @@ export class SessionManager {
     this.handoffSystemBlock = opts.handoffSystemBlock;
     this.degradedCapabilitiesBlock = opts.degradedCapabilitiesBlock;
     this.routingSystemBlock = opts.routingSystemBlock;
+    this.memoryGuidanceBlock = opts.memoryGuidanceBlock;
     this.egressProxyPort = opts.egressProxyPort;
     this.providerExecutionGate = opts.providerExecutionGate;
     this.providerProcessIsolation = opts.providerProcessIsolation;
@@ -1173,7 +1192,7 @@ export class SessionManager {
 
   private getProviderArgs(systemPrompt: string, cwd: string, resumeSessionId?: string): string[] {
     const provider = this.assertKnownProvider('getProviderArgs');
-    return resolveProviderArgs(
+    const args = resolveProviderArgs(
       provider,
       systemPrompt,
       cwd,
@@ -1183,6 +1202,11 @@ export class SessionManager {
       this.providerConfig,
       this.providerMcpConfigArgs,
     );
+    // A shared workspace may retain the primary route's M365 exception.
+    if (provider === 'claude-cli' && this.m365MutationPolicy?.status === 'rejected') {
+      args.push('--disallowedTools', ...M365_MUTATION_DENY);
+    }
+    return args;
   }
 
   buildSystemPrompt(): string {
@@ -1218,6 +1242,11 @@ export class SessionManager {
     const routingBlock = this.routingSystemBlock?.();
     if (routingBlock) {
       sources.push(routingBlock);
+    }
+
+    const memoryBlock = this.memoryGuidanceBlock?.();
+    if (memoryBlock) {
+      sources.push(memoryBlock);
     }
 
     if (this.configSystemPrompt) {
@@ -1334,6 +1363,25 @@ export class SessionManager {
         : `${generation.managerId}:${generation.generation}:${randomUUID()}`;
       this.childTreeMarkers.set(child, generationMarker);
     }
+    // A claude child holding its OAuth refresh lock may be between the
+    // server's token rotation and the local save; signalling it then loses
+    // the rotated token. Wait (bounded) for the lock first; with no fresh lock
+    // the kill is not delayed at all (claude-refresh-ahead.ts).
+    const childEnv = this.childEnvs.get(child);
+    const grace = this.provider === 'claude-cli' && childEnv ? claudeRefreshLockGrace(childEnv, 'session-kill') : null;
+    if (grace !== null) {
+      const marker = generationMarker;
+      // A grace that rejects (it is documented never to) must still end in the kill.
+      return grace.catch(() => undefined).then(() => this.signalChildTree(child, signal, marker));
+    }
+    return this.signalChildTree(child, signal, generationMarker);
+  }
+
+  private signalChildTree(
+    child: ReturnType<typeof spawn>,
+    signal: NodeJS.Signals,
+    generationMarker: string,
+  ): Promise<void> {
     return killSessionTree(child, signal, {
       generationMarker,
       termGraceMs: SessionManager.SHUTDOWN_GRACE_MS,
@@ -1404,6 +1452,7 @@ export class SessionManager {
       this.provider,
       {
         allowM365Mutations: this.allowM365Mutations,
+        m365MutationPolicy: this.m365MutationPolicy,
         whatsoupInstance: this.whatsoupInstance,
         whatsoupMcpSocket: this.whatsoupMcpSocket,
         whatsoupMcpSessionToken: this.whatsoupMcpSessionToken,
@@ -1440,6 +1489,7 @@ export class SessionManager {
         env: childEnv,
       });
       this.trackChildGeneration(child, generation);
+      this.childEnvs.set(child, childEnv);
       return child;
     }
 
@@ -1475,6 +1525,7 @@ export class SessionManager {
       onSpawned: (child) => {
         pending.child = child;
         this.trackChildGeneration(child, generation);
+        this.childEnvs.set(child, env);
       },
       onAbort: async (child) => {
         await this.killChildTree(child, 'SIGTERM');
@@ -2703,6 +2754,7 @@ export class SessionManager {
           routePolicy: this.routePolicy,
           pluginDirs,
           allowM365Mutations: this.allowM365Mutations,
+          m365MutationPolicy: this.m365MutationPolicy,
           instanceName: this.instanceName,
           onEvent: (event) => {
             if (!this.isCurrentManagedProviderSession(providerSession, managedGeneration)) return;

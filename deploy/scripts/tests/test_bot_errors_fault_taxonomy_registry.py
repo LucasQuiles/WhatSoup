@@ -35,6 +35,8 @@ EXPECTED_RUNTIME_AGENT_NUMERIC_HEALTH_FIELDS = (
     "turnRecoveryBlockedUnsafeStranded",
     "turnRecoveryExhausted",
     "turnRecoveryOpenRecoveries",
+    "turnRecoveryOpenRecoveriesSynthetic",
+    "turnRecoveryScheduledTurnsLost",
     "turnRecoveryQuarantinedDelivery",
     "turnRecoveryCorruptLinks",
     "turnRecoveryOrphanTransfers",
@@ -115,6 +117,8 @@ class FaultTaxonomyRegistryTest(unittest.TestCase):
         self.assertEqual(effects["turnRecoveryCorroboratedRetained"], "diagnostic_only")
         self.assertEqual(effects["completedDeliveryIdentityBlocking"], "positive_is_risk")
         self.assertEqual(effects["completedDeliveryIdentityRetained"], "diagnostic_only")
+        self.assertEqual(effects["turnRecoveryOpenRecoveriesSynthetic"], "diagnostic_only")
+        self.assertEqual(effects["turnRecoveryScheduledTurnsLost"], "diagnostic_only")
 
     def test_recovery_debt_attention_is_non_paging_and_fleet_owned(self):
         registry = _load_registry()

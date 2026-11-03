@@ -417,6 +417,7 @@ describe('AgentRuntime — fallback transition alerts', () => {
 
     expect(queue.enqueueText).toHaveBeenCalledWith(
       '_The backup model could not continue this turn. Please try again._',
+      'status',
     );
   });
 

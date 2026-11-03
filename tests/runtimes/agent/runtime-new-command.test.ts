@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { runNewCommand } from '../../../src/runtimes/agent/runtime-new-command.ts';
+import { HandoffDistillRunner } from '../../../src/runtimes/agent/handoff-distill-runner.ts';
+import type { DistillBudgetConfig } from '../../../src/runtimes/agent/handoff-distill-gate.ts';
 
 type SessionScope = 'single' | 'shared' | 'per_chat';
 
@@ -46,6 +48,45 @@ function makeCommandHarness(options: {
 }
 
 describe('runNewCommand recovery acknowledgements', () => {
+  it('/new fences a deferred distill through the reset lifecycle before it can persist', async () => {
+    let resolve!: (outcome: { summary: string; seededArtifacts: null; tokensUsed: number }) => void;
+    const pending = new Promise<{ summary: string; seededArtifacts: null; tokensUsed: number }>((release) => {
+      resolve = release;
+    });
+    const persist = vi.fn();
+    const onSucceeded = vi.fn();
+    const config: DistillBudgetConfig = {
+      maxTokensPerWindow: 100_000,
+      maxCallsPerWindow: 10,
+      windowMs: 3_600_000,
+      failureThreshold: 3,
+      breakerCooldownMs: 60_000,
+      globalConcurrency: 1,
+    };
+    const runner = new HandoffDistillRunner({
+      config,
+      now: () => 1_000,
+      growthThreshold: 1,
+      tokenGrowth: () => 2,
+      distillFor: () => pending,
+      persist,
+      onDegraded: vi.fn(),
+      onSucceeded,
+      sourceFor: () => ({ provider: 'test-provider', model: 'test-model' }),
+    });
+    const harness = makeCommandHarness({ inFlight: false });
+    harness.args.clearHandoffLatches.mockImplementation(() => runner.invalidateConversation('test@s.whatsapp.net'));
+
+    const tick = runner.tickConversation('test@s.whatsapp.net');
+    await runNewCommand(harness.args as never);
+    resolve({ summary: 'stale after reset', seededArtifacts: null, tokensUsed: 1 });
+    await tick;
+
+    expect(harness.args.clearHandoffLatches).toHaveBeenCalledOnce();
+    expect(persist).not.toHaveBeenCalled();
+    expect(onSucceeded).not.toHaveBeenCalled();
+  });
+
   it('reports recovery pending when teardown disposition is kill', async () => {
     const harness = makeCommandHarness({ inFlight: true, disposition: 'kill' });
     await runNewCommand(harness.args as never);

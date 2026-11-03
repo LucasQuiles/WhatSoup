@@ -1,5 +1,7 @@
 # SP2: Content Completeness Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The current parser is `src/core/message-parser.ts` (re-exported by `src/transport/connection.ts`). In `src/core/messages.ts`, writes use `contentText ?? null`; the legacy content fallback is on reads, and duplicate writes upgrade history placeholders only. `transcribe_audio` delegates to the shared transcript chain in `src/mcp/tools/media.ts`; use `docs/tools.md` for its current contract. The task snippets below remain historical design evidence; preserve structured content, searchable human-readable text, idempotency and transcription requirements.
+
 **Status:** completed — shipped as SP2 bead in the `whatsapp-mcp-features` epic (Phase 1, merged 2026-04-05).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1,5 +1,7 @@
 # Duplication Register — WhatSoup Console DRY Audit
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 Input to SOUP Design System v3 (primitive -> semantic -> component token consolidation).
 
 Scope: `console/src` (React 19 + Tailwind v4), tokens and composite `c-*` classes in `console/src/index.css` (1236 lines), lint guardrails in `console/eslint.config.js` (~106 `no-restricted-syntax` selectors split between a global set at `console/eslint.config.js:76-584` and a stricter scheduled/groups ratchet at `console/eslint.config.js:586-656` applied only to the file list at `console/eslint.config.js:689-702`).

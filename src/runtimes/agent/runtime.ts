@@ -57,6 +57,7 @@ import { dequeueNextReport, emitHealReport, parseHealContext } from '../../core/
 import { allowlistedHealCrashClass, errorClassForHealEvidence } from '../../core/heal-evidence.ts';
 import { sendTracked } from '../../core/durability.ts';
 import { classifyErrorForInbound } from '../../core/inbound-failure-class.ts';
+import { scheduledJobInboundMessageId } from '../../core/synthetic-turn-source.ts';
 import { PerChatTurnFifoOwnerConflictError } from './turn-admission-errors.ts';
 import { initializeRuntimeLifecycleEmitter, runtimeLifecycleEmitter } from '../../core/observability/lifecycle-emission.ts';
 import {
@@ -124,6 +125,7 @@ import {
   getFallbackState,
 } from './fallback-state-db.ts';
 import { chatJidToWorkspace, provisionWorkspace, writeSandboxArtifacts, ensurePermissionsSettings } from '../../core/workspace.ts';
+import { resolveM365MutationPolicy, type M365MutationPolicy } from '../../core/m365-bridge-policy.ts';
 import { inspectUserClaudeSettings } from '../../core/user-claude-settings.ts';
 import { isSamePhysicalDirectory } from '../../lib/home-path.ts';
 import { classifyActiveSessions, resolveAmbiguousAgeFallback } from './session-classifier.ts';
@@ -147,6 +149,7 @@ import { markDeferredSystemTurn, requireSystemTurnProviderBoundary } from './sys
 import {
   OutboundQueue,
   type IOutboundQueue,
+  type OutboundMessageRole,
   type ToolUpdate,
   type ToolCategory,
 } from './outbound-queue.ts';
@@ -164,6 +167,7 @@ import type { ModelRouteEvent } from './route-events.ts';
 import { RuntimeRoutingCoordinator, type RuntimeRoutingPort } from './runtime-routing.ts';
 import { RuntimeFallbackCoordinator, type RuntimeFallbackPort } from './runtime-fallback.ts';
 import { emitManagedLoopDegradedNotice, isManagedLoopFallbackDegraded, managedLoopDegradedSystemBlock } from './managed-loop-disclosure.ts';
+import { memoryGuidanceSystemBlock, type MemoryReadinessSnapshot } from './memory-guidance.ts';
 import { RuntimePollBridgeCoordinator, type RuntimePollBridgePort } from './runtime-poll-bridge.ts';
 import { buildRoutingPromptContract } from './route-intent.ts';
 import { createCatalogueSnapshotCache, type CatalogueSnapshotCache } from './model-snapshot-cache.ts';
@@ -291,6 +295,7 @@ import {
 import { HandoffDistillCoordinator } from './handoff-distill-coordinator.ts';
 import { CapabilityObligationRuntime, maybeActivateCapabilityObligationRuntime, shutdownCapabilityObligationRuntimeSafely, turnCorrelationFromContexts } from './capability-obligation-runtime.ts';
 import { handoffDistillerEnabled, handoffContextEnabled, handoffDistillModel } from './handoff-distill-config.ts';
+import type { TypedHandoffDistillConfig } from '../../lib/handoff-distill-config.ts';
 import { config } from '../../config.ts';
 import type { StartupChatNotice, StartupNotificationEvent } from '../../core/startup-notification-controller.ts';
 import {
@@ -363,22 +368,23 @@ import {
 } from './streamed-provider-failure.ts';
 import { isProcessAlive, sessionUsesInProcessBridge } from './runtime-predicates.ts';
 import { canaryStoreProvisioned, readProviderCanaryAdmission } from './provider-canary-proof.ts';
-import { probeBinaryAuthStatus, type listModelCatalog } from './providers/binary-preflight.ts';
+import { probeBinaryCommand, type listModelCatalog } from './providers/binary-preflight.ts';
+import { claudeRefreshLockGrace, refreshClaudeLoginAhead } from './providers/claude-refresh-ahead.ts';
+import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import {
-  probePrimaryModelUsability,
-} from './providers/primary-model-usability.ts';
-import { createPrimaryModelProbeAdapters } from './providers/primary-model-usability-adapters.ts';
-import {
-  buildPrimaryProbeAdapterDeps,
+  buildRuntimePrimaryProbeServiceContext,
+  createRuntimePrimaryProbeAdapters,
   expectedProbeDeadlineFromDueMs,
   expectedProbeDeadlineMs,
   periodicProbeBackoffMultiple,
+  probeRuntimePrimaryProviderRecovered,
 } from './primary-readiness-probe.ts';
 import {
   MessageHandlerDrainTimeoutError,
   drainMessageHandlersForShutdown,
 } from './shutdown-message-handler-drain.ts';
 import { ensureClaudeFileStoreCredential } from './providers/claude-filestore-heal.ts';
+import { scrubbedAuthStatusEnv } from './providers/account-auth-status.ts';
 import {
   AccountIdentityVerifier,
   type AccountIdentityProbeTrigger,
@@ -705,7 +711,10 @@ export class AgentRuntime implements Runtime {
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
   private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
+  private readonly m365MutationPolicy: M365MutationPolicy | undefined;
+  private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
+  private readonly memoryReadiness: MemoryReadinessSnapshot | undefined;
   private readonly agentProvider: string;
   private readonly agentProviderConfig: Record<string, unknown> | undefined;
   private readonly agentDataPolicy: ProviderDataPolicy | null;
@@ -725,6 +734,10 @@ export class AgentRuntime implements Runtime {
    *  the /model list render + apply path added in this task. */
   private readonly catalogueSnapshot: CatalogueSnapshotCache;
   private readonly providerExecutionGate: ProviderExecutionGate;
+  /** Runtime/configuration generation for the global primary readiness proof. */
+  private readonly primaryProbeServiceGeneration = randomUUID();
+  /** Captured once after startup configuration settles; never sourced from a child. */
+  private primaryProbeServiceContext: PrimaryProbeServiceContext | null = null;
 
   // single mode: one session, one queue
   private session: SessionManager | null = null;
@@ -795,6 +808,7 @@ export class AgentRuntime implements Runtime {
   // to resolve. Initialized in the constructor (needs db + instanceName + the
   // config readers, which stay on AgentRuntime for the health/context callers).
   private readonly handoffDistill: HandoffDistillCoordinator;
+  private readonly typedHandoffDistill: TypedHandoffDistillConfig | undefined;
   private pendingRespawnTimers = new Set<ReturnType<typeof setTimeout>>();
   // Provider-fallback window lifecycle scalars (active-until / activated-at /
   // arm-reason / reset-at / recovery-probe-required / active-entry). Owned by the
@@ -2019,7 +2033,22 @@ export class AgentRuntime implements Runtime {
 
   private evictIdleSession(mapKey: string, session: SessionManager, reason: string): void {
     log.info({ chatJid: mapKey, reason, residentCount: this.chatSessions.size }, 'suspending idle agent session');
-    const childStopped = session.shutdown(true);
+    // The socket teardown barrier gates every later manager's spawn for this
+    // chat, and a rejected barrier stays rejected until restart. A suspend
+    // that failed only at its durable lifecycle step has already stopped the
+    // provider, so, as #3658 does for a pre-spawn close, the unclosed
+    // generation is retired and the barrier settles: the next message starts
+    // fresh with a notice instead of being rejected forever. An unproven stop
+    // keeps the barrier rejected, so no second provider can start.
+    const childStopped = session.shutdown(true).catch((err: unknown) => {
+      if (adoptionAfterFailedClose(err, session.getStatus()) === null || !session.retireUnclosedGeneration()) {
+        throw err;
+      }
+      log.warn(
+        { err, errorMessage: errorMessage(err), chatJid: mapKey, reason },
+        'idle session suspend failed after its provider stopped — generation retired, next message starts fresh',
+      );
+    });
     this.perChatMcpSocketManager.releaseAfter(mapKey, childStopped);
     // Remove first so a concurrent inbound message cleanly re-spawns/resumes.
     this.deleteOwnedPerChatSession(mapKey, session);
@@ -2037,8 +2066,8 @@ export class AgentRuntime implements Runtime {
     // and repopulates. Safe at this point: the safety guards already exclude a
     // chat with a pending turn or pending poll.
     this.cleanupPerChatState(mapKey, { preserveActorSocket: true });
-    void childStopped.catch((err) => {
-      log.warn({ err, chatJid: mapKey }, 'idle session shutdown failed');
+    void childStopped.catch((err: unknown) => {
+      log.warn({ err, errorMessage: errorMessage(err), chatJid: mapKey, reason }, 'idle session shutdown failed');
     });
   }
 
@@ -2594,7 +2623,7 @@ export class AgentRuntime implements Runtime {
     } else if (answer.kind === 'missing') {
       this.scheduledAnswerMissing.add(mapKey);
       log.warn({ chatJid: queue.targetChatJid }, 'scheduled job ended without a final answer');
-    } else if (queue.enqueueResultText(answer.text) !== false) {
+    } else if (queue.enqueueResultText(answer.text, 'answer') !== false) {
       this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(global ? undefined : mapKey);
       if (global) {
         this.turnHadVisibleOutput = true;
@@ -2696,11 +2725,14 @@ export class AgentRuntime implements Runtime {
       emitAlert: emitAlertChecked,
       clearAlert: clearAlertSourceChecked,
     });
+    const typedHandoffDistill = options?.handoffDistill;
+    this.typedHandoffDistill = typedHandoffDistill;
     this.handoffDistill = new HandoffDistillCoordinator({
       db,
       instanceName: this.instanceName,
-      isEnabled: () => handoffDistillerEnabled(),
-      getModel: () => handoffDistillModel(),
+      isEnabled: () => typedHandoffDistill?.enabled ?? handoffDistillerEnabled(),
+      getModel: () => typedHandoffDistill?.model ?? handoffDistillModel(),
+      getConfig: typedHandoffDistill ? () => typedHandoffDistill.config : undefined,
     });
     this.sessionScope = options?.sessionScope ?? (options?.shared ? 'shared' : 'single');
     this.shared = this.sessionScope === 'shared';
@@ -2737,8 +2769,16 @@ export class AgentRuntime implements Runtime {
         : DEFAULT_AUTO_COMPACT_INPUT_TOKENS;
     this.autoCompact = new AutoCompactController(this.autoCompactInputTokens);
     this.replyGuaranteeTimeoutMs = options?.replyGuaranteeTimeoutMs ?? DEFAULT_REPLY_GUARANTEE_TIMEOUT_MS;
+    this.memoryReadiness = options?.memoryReadiness;
     this.agentProvider = config.agentProvider;
     this.agentProviderConfig = config.agentProviderConfig;
+    this.m365MutationPolicy = resolveM365MutationPolicy({
+      instanceName: this.instanceName,
+      provider: this.agentProvider,
+      allowM365Mutations: this.allowM365Mutations,
+      enabledPlugins: this.enabledPlugins,
+      binding: options?.m365Bridge,
+    });
     this.agentDataPolicy = config.agentProviderDataPolicy ?? null;
     this.providerBoundaryMode = config.agentProviderBoundaryMode ?? 'shadow';
     const configuredFallbacks = Array.isArray(config.agentFallbacks)
@@ -2841,9 +2881,9 @@ export class AgentRuntime implements Runtime {
       set activeChatJid(value) { runtime.activeChatJid = value; },
       get operationTracker() { return runtime.operationTracker; },
       set operationTracker(value) { runtime.operationTracker = value; },
-      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      sendDirect: (chatJid, text, role) => runtime.sendDirect(chatJid, text, role),
       // F2a (#2121): the id-bearing send, used by the pin-receipt path only.
-      sendDirectWithReceipt: (chatJid, text) => runtime.sendDirectWithReceipt(chatJid, text),
+      sendDirectWithReceipt: (chatJid, text, role) => runtime.sendDirectWithReceipt(chatJid, text, role),
       resolveRouteForTurn: (chatJid, actorJid) => runtime.resolveRouteForTurn(chatJid, actorJid),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
       routeSessionProviderConfig: (route) => runtime.routeSessionProviderConfig(route),
@@ -2874,7 +2914,7 @@ export class AgentRuntime implements Runtime {
       getSession: () => runtime.session,
       getActiveChatJid: () => runtime.activeChatJid,
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
-      sendDirect: (chatJid, text, force) => runtime.sendDirect(chatJid, text, force),
+      sendDirect: (chatJid, text, role, force) => runtime.sendDirect(chatJid, text, role, force),
       abortPerChatQueue: (mapKey) => runtime.chatQueues.get(mapKey)?.abortTurn({ preserveEvidence: true }),
       terminalizePerChatTurn: (mapKey) =>
         runtime.runtimeTurnCoordinator.terminalizePerChatTurnQueueForKill(mapKey),
@@ -2979,19 +3019,32 @@ export class AgentRuntime implements Runtime {
       get lastSpawnRouteProvider() { return runtime.lastSpawnRouteProvider; },
       sessionProviderConfig: () => runtime.sessionProviderConfig(),
       resolvePerChatMapKey: (chatJid) => runtime.resolvePerChatMapKey(chatJid),
-      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      sendDirect: (chatJid, text, role) => runtime.sendDirect(chatJid, text, role),
       routablePinTargets: () => runtime.routablePinTargets(),
       isEntryCredentialed: (entry) => runtime.isEntryCredentialed(entry),
     };
   }
 
-  /**
-   * Host for the extracted fallback coordinator (runtime-fallback.ts, #1977
-   * D2) — live-getter shape. ALL fallback state stays owned here: the
-   * characterization suites bind these fields on the runtime instance, and
-   * probePrimaryProviderRecovered / deactivateProviderFallback are stub/spy
-   * seams that must observe in-cluster calls.
-   */
+  private buildPrimaryProbeServiceContext(): PrimaryProbeServiceContext {
+    return buildRuntimePrimaryProbeServiceContext(
+      this.agentProvider,
+      this.model ?? null,
+      this.primaryProbeServiceGeneration,
+      this.cwd,
+      this.agentProviderConfig,
+      this.egressProxy?.port,
+    );
+  }
+
+  private capturePrimaryProbeServiceContext(): void {
+    this.primaryProbeServiceContext = this.buildPrimaryProbeServiceContext();
+  }
+
+  private currentPrimaryProbeServiceContext(): PrimaryProbeServiceContext | null {
+    if (!this.primaryProbeServiceContext) return null;
+    return this.buildPrimaryProbeServiceContext();
+  }
+
   private createRuntimeFallbackHost(): RuntimeFallbackPort {
     const runtime = this;
     return {
@@ -3006,10 +3059,15 @@ export class AgentRuntime implements Runtime {
       get agentFallbackDiscovery() { return runtime.agentFallbackDiscovery; },
       get modelCatalogueListFn() { return runtime.modelCatalogueListFn; },
       get allowM365Mutations() { return runtime.allowM365Mutations; },
+      get m365MutationPolicy() { return runtime.m365MutationPolicy; },
+      get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get runtimeBootPerfMs() { return runtime.runtimeBootPerfMs; },
       get globalMcpSocketPath() { return runtime.globalMcpSocketPath; },
       get egressProxy() { return runtime.egressProxy; },
+      get handoffDistill() { return runtime.typedHandoffDistill; },
       get providerExecutionGate() { return runtime.providerExecutionGate; },
+      get primaryProbeServiceContext() { return runtime.primaryProbeServiceContext; },
+      currentPrimaryProbeServiceContext: () => runtime.currentPrimaryProbeServiceContext(),
       get controlSession() { return runtime.controlSession; },
       get fallbackWindow() { return runtime.fallbackWindow; },
       get fallbackMetrics() { return runtime.fallbackMetrics; },
@@ -3077,6 +3135,7 @@ export class AgentRuntime implements Runtime {
       get agentProvider() { return runtime.agentProvider; },
       get expectedAccountDigest() { return runtime.expectedAccountDigest; },
       get shutdownRequested() { return runtime.shutdownRequested; },
+      get egressProxyPort() { return runtime.egressProxy?.port; },
       get accountIdentity() { return runtime.accountIdentity; },
       set accountIdentity(value) { runtime.accountIdentity = value; },
     };
@@ -3117,7 +3176,7 @@ export class AgentRuntime implements Runtime {
       observeOutboundQueueOperation: (scopeKey, queue, operation) =>
         runtime.observeOutboundQueueOperation(scopeKey, queue, operation),
       getQueueForChat: (chatJid, mapKey) => runtime.getQueueForChat(chatJid, mapKey),
-      sendDirect: (chatJid, text) => runtime.sendDirect(chatJid, text),
+      sendDirect: (chatJid, text, role) => runtime.sendDirect(chatJid, text, role),
       deletePendingPollQuestions: (mapKey) => runtime.deletePendingPollQuestions(mapKey),
       fetchGroupAdminJids: (chatJid) => runtime.fetchGroupAdminJids(chatJid),
       markSystemTurn: (session, scopeKey, purpose, routeChatJid) =>
@@ -3950,6 +4009,20 @@ export class AgentRuntime implements Runtime {
     );
   }
 
+  /** Fence pending distillation before a privacy lifecycle removes its artifact. */
+  invalidateHandoffArtifacts(conversationKeys: readonly string[]): void {
+    for (const conversationKey of conversationKeys) {
+      this.handoffDistill.invalidateConversation(conversationKey);
+    }
+  }
+
+  getM365SettingsPolicy(): M365MutationPolicy | undefined {
+    if (this.m365MutationPolicy === undefined) return undefined;
+    // Grant reconciliation runs before startup restores a persisted fallback.
+    return this.m365SettingsPolicyReady && !this.isFallbackWindowActive
+      ? this.m365MutationPolicy : { status: 'rejected' };
+  }
+
   async start(): Promise<void> {
     // Refuse configured paths before startup writes or provider setup.
     const home = homedir();
@@ -3975,6 +4048,7 @@ export class AgentRuntime implements Runtime {
     // table unconditionally is inert when the flag is off.
     ensureHandoffArtifactSchema(this.db);
     this.fallback.restorePersistedFallbackWindow();
+    this.m365SettingsPolicyReady = true;
     // Periodic real-completion canary over the chain (no-op unless
     // WHATSOUP_FALLBACK_CANARY_MS > 0) — see fallback-canary-config.ts.
     this.fallback.startChainCanary();
@@ -4062,7 +4136,10 @@ export class AgentRuntime implements Runtime {
       const cwd = this.cwd ?? homedir();
       try {
         const claudeDir = ensureHomeConfinedDirectory(join(cwd, '.claude'), home);
-        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, { hasSandbox: !!this.sandbox });
+        ensurePermissionsSettings(claudeDir, 'agent', this.enabledPlugins, {
+          hasSandbox: !!this.sandbox,
+          m365MutationPolicy: this.getM365SettingsPolicy(),
+        });
         // User-level settings are not owned by this instance. Startup only
         // inspects for its exact hook and warns; it never repairs or normalizes
         // global hooks, permissions, or plugins.
@@ -4576,14 +4653,19 @@ export class AgentRuntime implements Runtime {
       } : null,
     });
 
-    // Heal the claude file-store credential from the keychain BEFORE the first
-    // turn can run, so a keychain-only refresh (native login) can't false-arm
-    // the provider fallback on turn 1 (the recovery probe path heals for the
-    // mid-run case). No-op off-darwin / when CLAUDE_CONFIG_DIR is unset / when
-    // the file store is already current. Fail-open by contract.
+    // Detect duplicate credential stores before serving; copying refresh tokens
+    // would leave a stale second copy available to the CLI.
     if (this.agentProvider === 'claude-cli') {
-      ensureClaudeFileStoreCredential();
+      try {
+        ensureClaudeFileStoreCredential();
+      } catch (error) {
+        log.warn({ error }, 'could not check Claude credential stores at runtime startup');
+      }
     }
+    // Capture the global primary service context once per runtime generation.
+    // It is intentionally independent of any resumed or active SessionManager;
+    // recovery must remain possible after a child fails or is retired.
+    this.capturePrimaryProbeServiceContext();
     this.fallback.schedulePrimaryModelUsabilityProbe('startup');
     this.fallback.scheduleNextPeriodicUsabilityProbe();
     this.startHealthStatsTimer();
@@ -4628,8 +4710,12 @@ export class AgentRuntime implements Runtime {
       // trigger run (and what expires a one-shot schedule), so the occurrence
       // must have a DURABLE owner before we return it. Journaling the
       // synthetic inbound first means a crash between ack and turn start
-      // leaves a journaled 'processing' row that the W2 stuck-inbound
-      // reconciler surfaces — never a silent loss behind successful history.
+      // leaves a journaled 'processing' row that crash recovery fails —
+      // never a silent loss behind successful history. A synthetic turn owes
+      // no user a reply, so recovery does not enroll it as an operator
+      // catch-up (#3754); for SCHEDULED_TURN_LOSS_WINDOW_DAYS the loss
+      // surfaces in /health as runtime.agent.turnRecoveryScheduledTurnsLost
+      // and recovery_debt.turn_recovery.scheduled_turns_lost.
       // Per the agent_turn_admission_rejected disposition, a journaled but
       // undispatched turn is surfaced for owner resend, not auto-replayed.
       if (!this.durability) {
@@ -4642,7 +4728,7 @@ export class AgentRuntime implements Runtime {
       // #2566 slice 3 — the occurrence id suffix makes the journaled inbound
       // deterministically joinable to its trigger_occurrences row (the bare
       // trigger-id + wall-clock prefix is kept for existing consumers).
-      const messageId = `agentjob-${ctx.triggerId}-${now}-occ${ctx.occurrenceId}`;
+      const messageId = scheduledJobInboundMessageId(ctx.triggerId, now, ctx.occurrenceId);
       // A mapped @lid report chat keys under the resolved phone. The synthetic
       // message carries this exact key so the turn identity cannot re-read a
       // different one: terminal finalization rejects an inbound journaled under
@@ -4948,7 +5034,7 @@ export class AgentRuntime implements Runtime {
         // Notify user of failure. #3497 H3: a scheduled job's report chat did not
         // send it; its failure stays with the durable terminal and the log above.
         if (!wedgedReclaim && msg.isSyntheticJob !== true) {
-          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?');
+          this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?', 'status');
         }
       });
     const recycleScopeKey = this.sessionScope === 'per_chat'
@@ -5076,7 +5162,7 @@ export class AgentRuntime implements Runtime {
         );
         // B21-A F4a: denial must be user-visible, never a silent drop — same
         // queue-routed send path the other local-command replies use.
-        this.sendDirect(chatJid, '_Not authorized._');
+        this.sendDirect(chatJid, '_Not authorized._', 'status');
         // B21-A F1: this return bypasses the R14 post-switch completion below,
         // so the denied inbound must be finalized HERE — same shape as the
         // 'empty_content' skip in handleMessageInner — or the row strands in
@@ -5095,7 +5181,7 @@ export class AgentRuntime implements Runtime {
             // for an unproven cancellation, so refuse until the guard clears.
             if (isStopTeardownInFlight(perChatMapKey ?? GLOBAL_TOOL_SCOPE_KEY)) {
               newRefusedForStopTeardown = true;
-              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS);
+              this.sendDirect(chatJid, NEW_ACK_REFUSED_STOP_IN_PROGRESS, 'status');
               break;
             }
             // Extracted leaf collaborator: runtime-new-command.ts owns the control flow.
@@ -5153,11 +5239,12 @@ export class AgentRuntime implements Runtime {
               },
               clearHandoffLatches: () => {
                 const resetKey = toConversationKey(chatJid);
+                this.invalidateHandoffArtifacts([resetKey]);
                 clearStandbyNotice(this.db, resetKey);
                 deleteHandoffArtifact(this.db, resetKey);
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
-              sendDirect: (text) => this.sendDirect(chatJid, text),
+              sendDirect: (text, role) => this.sendDirect(chatJid, text, role),
             });
             break;
 
@@ -5210,7 +5297,7 @@ export class AgentRuntime implements Runtime {
                 this.currentInboundSeq = undefined; this.currentTurnChatJid = null;
               },
               clearTurnHadVisibleOutput: () => { this.turnHadVisibleOutput = false; },
-              sendDirect: (text) => this.sendDirect(chatJid, text),
+              sendDirect: (text, role) => this.sendDirect(chatJid, text, role),
             });
             break;
 
@@ -5284,7 +5371,7 @@ export class AgentRuntime implements Runtime {
             } else {
               text = '_No active session._ Send a message to start one.';
             }
-            this.sendDirect(chatJid, text);
+            this.sendDirect(chatJid, text, 'status');
             break;
           }
 
@@ -5326,7 +5413,7 @@ export class AgentRuntime implements Runtime {
             const helpText = classified.args
               ? renderHelpDetail(classified.args, helpOpts)
               : renderHelp(helpOpts);
-            this.sendDirect(chatJid, helpText);
+            this.sendDirect(chatJid, helpText, 'status');
             break;
           }
 
@@ -5411,7 +5498,7 @@ export class AgentRuntime implements Runtime {
             );
             this.sendDirect(chatJid, newRefusedForStopTeardown
               ? NEW_ACK_COMPOUND_BODY_NOT_DISPATCHED
-              : STOP_ACK_COMPOUND_BODY_REFUSED);
+              : STOP_ACK_COMPOUND_BODY_REFUSED, 'status');
           } else {
             forwardAfterLocalCommand = classified.compoundBody;
           }
@@ -5419,7 +5506,7 @@ export class AgentRuntime implements Runtime {
       } catch (err) {
         if (err instanceof AgentCommandRuntimeError && err.code === 'turn_in_progress') {
           log.info({ command: classified.command, chatJid }, 'local command deferred while turn is active');
-          this.sendDirect(chatJid, '_A response is still in progress. Send /new again after it finishes._');
+          this.sendDirect(chatJid, '_A response is still in progress. Send /new again after it finishes._', 'status');
         } else {
         // Contain local-command handler faults: without this, a throwing handler
         // escapes to the turnChain catch-all, whose unguarded markInboundFailed
@@ -5427,7 +5514,7 @@ export class AgentRuntime implements Runtime {
         // The R14 completion below still runs and finalizes the row truthfully
         // (the inbound WAS a locally-handled command).
           log.error({ err, command: classified.command, chatJid }, 'local command handler failed');
-          this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?');
+          this.sendDirect(chatJid, 'Something went wrong processing that command. Try again?', 'status');
           // #2357 B1 AC4: command failed with a compound body present → retain it
           // truthfully (NOT dispatched). Running the body under failed-command
           // semantics would violate the issue's exactly-once rule. Complete the
@@ -5767,7 +5854,7 @@ export class AgentRuntime implements Runtime {
           sessionId: status.sessionId,
           pid: status.pid,
         }, 'stdin write timed out — notifying user');
-        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.');
+        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.', 'status');
         throw err;
       } else {
         throw err;
@@ -5842,7 +5929,7 @@ export class AgentRuntime implements Runtime {
         ? await lazyCheckpointAdoption(this.db, this.durability, session, toConversationKey(chatJid))
         : NO_CHECKPOINT_ADOPTION;
       if (dispatchCancelled()) return;
-      announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice));
+      announceAdoption(adoption, (notice) => this.sendDirect(chatJid, notice, 'status'));
       const spawnOwnership = effectiveMapKey !== undefined
         ? this.captureOwnedPerChatGeneration(effectiveMapKey, session)
         : null;
@@ -5882,7 +5969,7 @@ export class AgentRuntime implements Runtime {
       if (dispatchCancelled()) return;
       const spawned = await spawnForAdoption(session, adoption, (err, notice) => {
         log.warn({ err, chatJid }, 'lazy resume refused — starting fresh with a notice');
-        this.sendDirect(chatJid, notice);
+        this.sendDirect(chatJid, notice, 'status');
       });
       spawnedForTurn = true;
       // #3658: a deferred host-admission start is admitted only at a provider
@@ -5898,7 +5985,7 @@ export class AgentRuntime implements Runtime {
       // Announced only once the fresh start is admitted, so a refused start
       // never promises a continuation it cannot deliver.
       if (closeFailedNotice !== null) {
-        announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice));
+        announceAdoption(closeFailedNotice, (notice) => this.sendDirect(chatJid, notice, 'status'));
       }
       if (effectiveMapKey !== undefined && spawnOwnership !== null) {
         effectiveMapKey = await this.activateSpawnedOwnedPerChatSession(
@@ -5990,7 +6077,7 @@ export class AgentRuntime implements Runtime {
       const heldNotice = isScheduledDispatch() ? undefined : this.heldCloseFailedNotices.get(session);
       if (heldNotice !== undefined) {
         this.heldCloseFailedNotices.delete(session);
-        announceAdoption(heldNotice.adoption, (notice) => this.sendDirect(heldNotice.chatJid, notice));
+        announceAdoption(heldNotice.adoption, (notice) => this.sendDirect(heldNotice.chatJid, notice, 'status'));
       }
       beforeUserSend?.();
       // Publish actor and typing evidence only when provider execution begins.
@@ -6074,7 +6161,7 @@ export class AgentRuntime implements Runtime {
           sessionId: status.sessionId,
           pid: status.pid,
         }, 'stdin write timed out — notifying user');
-        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.');
+        this.sendDirect(chatJid, 'Agent is not responding — try /new to start a fresh session.', 'status');
         throw err;
       } else {
         throw err;
@@ -6237,7 +6324,7 @@ export class AgentRuntime implements Runtime {
           if (pendingPoll.mode === 'poll' && isLowSignalPollStatusReply(text, currentQ.options)) {
             const queue = this.getQueueForChat(pendingPoll.chatJid, mapKey);
             if (queue) {
-              queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.');
+              queue.enqueueText('I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.', 'status');
               try {
                 await this.observeOutboundQueueOperation(mapKey, queue, () => queue.flush());
               } catch (err) {
@@ -6247,6 +6334,7 @@ export class AgentRuntime implements Runtime {
               this.sendDirect(
                 pendingPoll.chatJid,
                 'I am waiting for the poll vote itself. Tap an option in the poll, or type the option label if WhatsApp does not send the vote.',
+                'status',
               );
             }
             await this.completeConsumedPerChatInbound(mapKey, 'poll_status_reply', runtimeContext, scopeRef);
@@ -6357,12 +6445,8 @@ export class AgentRuntime implements Runtime {
           this.replyGuarantee?.disarm(failedSeq);
           this.durability.markInboundFailed(failedSeq, 'session_spawn_failed');
         }
-        // Eligible-side disclosure (Slice 1): the common config is a primary
-        // routed on a `present-expired-refreshable` credential (routable because
-        // a refresh was expected) that then fails. F07 does not gate the primary,
-        // so this is where that turn gets its explanation. The note HEDGES — the
-        // failure here is not distinguishable as a refresh failure, so it names
-        // the observed classification and the likely cause without asserting it.
+        // Preserve classified failure disclosures without inferring native CLI
+        // login state from a separate plaintext credential file.
         const credNote = spawnFailureCredentialNote(
           resolveProviderCredentialState({
             provider: this.agentProvider,
@@ -6370,7 +6454,7 @@ export class AgentRuntime implements Runtime {
             providerConfig: this.agentProviderConfig,
           }),
         );
-        this.sendDirect(chatJid, credNote ?? 'Something went wrong starting a session. Try sending your message again.');
+        this.sendDirect(chatJid, credNote ?? 'Something went wrong starting a session. Try sending your message again.', 'status');
         return;
       }
       const completion: { value: RuntimeTurnCompletion | null } = { value: null };
@@ -7412,7 +7496,7 @@ export class AgentRuntime implements Runtime {
               }
             });
           } else {
-            queue.enqueueStreamingText(normalizedText);
+            queue.enqueueStreamingText(normalizedText, 'answer');
             if (markReplayUnsafe) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
             }
@@ -7482,6 +7566,7 @@ export class AgentRuntime implements Runtime {
         queue.indicateTyping();
         queue.enqueueText(
           'Context compacted — older details summarized. Restate any important context I should carry forward.',
+          'lifecycle',
         );
         break;
 
@@ -9317,8 +9402,8 @@ export class AgentRuntime implements Runtime {
   // Promise<boolean> but this method's callers (53 sites) still expect void.
   // Car-C deletes this shim and propagates the boolean to F2a consumers.
   // Tracking marker: #2981-SHIM-RUNTIME-SENDDIRECT
-  private sendDirect(chatJid: string, text: string, bypassEchoGuard = false): void {
-    void sendDirectForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  private sendDirect(chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard = false): void {
+    void sendDirectForPort(this.chatTransportHost, chatJid, text, role, bypassEchoGuard);
   }
 
   /**
@@ -9326,8 +9411,8 @@ export class AgentRuntime implements Runtime {
    * envelope so reply-threading consumers (F2a #2121) can reference the sent
    * message. The void shim above stays for the legacy fire-and-forget sites.
    */
-  sendDirectWithReceipt(chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
-    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, bypassEchoGuard);
+  sendDirectWithReceipt(chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+    return sendDirectWithReceiptForPort(this.chatTransportHost, chatJid, text, role, bypassEchoGuard);
   }
 
   // ---------------------------------------------------------------------------
@@ -9432,9 +9517,8 @@ export class AgentRuntime implements Runtime {
     // override", not provider equality alone. F07: cross-provider entries (which
     // DO carry a distinct credential) read the unified accessor
     // (eligibility projection) — replacing the old presence-only `service ?
-    // lookup : true` that treated null-service providers as always credentialed;
-    // now a cross-provider claude-cli fallback's expired-no-refresh OAuth is
-    // de-routed, while codex/gemini stay `native` → routable.
+    // lookup : true`. Native CLIs remain routable and validate their own login
+    // at spawn; unrelated credential files cannot exclude their fallback tier.
     if (entry.provider === this.agentProvider) return true;
     return isProviderRoutable(
       resolveProviderCredentialState({
@@ -9644,34 +9728,42 @@ export class AgentRuntime implements Runtime {
     return current.isEvidenceBindingCurrent(binding);
   }
 
+  private isPeriodicUsabilityProbeExpected(): boolean {
+    return this.periodicUsabilityProbeTimer !== null
+      || (this.periodicUsabilityProbeDueAt !== null && this.primaryModelUsability?.probeInFlight === true);
+  }
+
   /** The freshness window the live verdict is judged against: scheduler-derived
-   *  while the periodic probe is armed, the flat 30min otherwise. */
-  private modelUsabilityFreshnessMs(): number {
+   *  while the periodic probe is armed or in flight, the flat 30min otherwise. `checkedAt`
+   *  is the evidence's own receipt time (model usability by default). */
+  private modelUsabilityFreshnessMs(checkedAt: number | null = this.primaryModelUsability?.checkedAt ?? null): number {
     return resolveModelUsabilityFreshnessMs(
-      this.periodicUsabilityProbeTimer !== null,
+      this.isPeriodicUsabilityProbeExpected(),
       periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff),
-      {
-        nextProbeDueAt: this.periodicUsabilityProbeDueAt,
-        checkedAt: this.primaryModelUsability?.checkedAt ?? null,
-      },
+      { nextProbeDueAt: this.periodicUsabilityProbeDueAt, checkedAt },
     );
   }
 
-  /** Freshness-honest identity verdict for /health, judged against the same
-   *  window as model usability (the identity check rides the same probe). */
+  /** Freshness-honest identity verdict for /health. The deadline is the same
+   *  next probe as model usability (the identity check rides it), but the
+   *  window starts at the identity receipt: a turn success refreshes the
+   *  usability checkedAt only, and must not age the identity receipt early. */
   private accountIdentityHealth(): AccountIdentityHealth {
+    const receipt = this.accountIdentity;
     return deriveAccountIdentityHealth({
       expectedConfigured: this.expectedAccountDigest !== null,
-      verification: this.accountIdentity,
+      verification: receipt,
       armedAtMs: this.accountIdentityArmedAt,
       nowMs: systemClock.now(),
-      freshnessMs: this.modelUsabilityFreshnessMs(),
+      freshnessMs: receipt !== null && receipt.status !== 'disabled'
+        ? this.modelUsabilityFreshnessMs(receipt.checkedAt)
+        : this.modelUsabilityFreshnessMs(),
     });
   }
 
   private getTurnCapability(): RuntimeTurnCapability {
     const usability = this.primaryModelUsability;
-    const periodicProbeExpected = this.periodicUsabilityProbeTimer !== null;
+    const periodicProbeExpected = this.isPeriodicUsabilityProbeExpected();
     const backoffMultiple = periodicProbeBackoffMultiple(this.periodicUsabilityProbeBackoff);
     const modelUsableFreshnessMs = this.modelUsabilityFreshnessMs();
     const { modelUsable, modelUsableStale, modelUsableCheckedAt } =
@@ -9770,27 +9862,20 @@ export class AgentRuntime implements Runtime {
       : this.model;
   }
 
-
-  /**
-   * Probe whether the primary provider can serve again. Recovery requires a
-   * real model-usability success, not credential presence: a revoked API key or
-   * expired OAuth token can still be present in the key store while live turns
-   * continue returning auth failures. The probe is deadline-cancelled and never
-   * rejects; a timeout result waits for cancellation acknowledgement.
-   * `onEvidence` (DUR-02) gets the full result pre-resolve — see
-   * resolveFallbackRecoveryDecision for why a callback, not a field.
-   */
-  private async probePrimaryProviderRecovered(
+  private probePrimaryProviderRecovered(
     onEvidence?: (evidence: FallbackRecoveryEvidence) => void,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const target = { provider: this.agentProvider, model: this.model ?? null };
-    const adapters = createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate));
-    const result = signal
-      ? await probePrimaryModelUsability(target, adapters, { signal })
-      : await probePrimaryModelUsability(target, adapters);
-    onEvidence?.({ ...result, checkedAt: Date.now() });
-    return result.status === 'usable';
+    return probeRuntimePrimaryProviderRecovered({
+      agentProvider: this.agentProvider,
+      model: this.model,
+      agentProviderConfig: this.agentProviderConfig,
+      cwd: this.cwd,
+      egressProxy: this.egressProxy,
+      providerExecutionGate: this.providerExecutionGate,
+      primaryProbeServiceContext: this.primaryProbeServiceContext,
+      currentPrimaryProbeServiceContext: () => this.currentPrimaryProbeServiceContext(),
+    }, onEvidence, signal);
   }
 
   private handleProviderFailureResult(wf: ResponseWorkflow, ctx: ProviderFailureResultContext): void {
@@ -9833,30 +9918,26 @@ export class AgentRuntime implements Runtime {
         },
         runPrimaryModelUsability: (signal) => probePrimaryModelUsability(
           { provider: this.agentProvider, model: this.model ?? null },
-          createPrimaryModelProbeAdapters(this.agentProviderConfig, buildPrimaryProbeAdapterDeps(this.agentProvider, this.model, this.cwd, this.egressProxy?.port, this.providerExecutionGate)),
+          createRuntimePrimaryProbeAdapters(
+            this.agentProviderConfig, this.agentProvider, this.model, this.cwd,
+            this.egressProxy?.port, this.providerExecutionGate, 'diagnostic',
+            this.primaryProbeServiceContext ?? undefined,
+            () => this.currentPrimaryProbeServiceContext(),
+          ),
           { signal },
         ),
         runPrimaryRecoveryProbe: (signal) => this.probePrimaryProviderRecovered(undefined, signal),
         accountAuthDeps: {
+          egressProxyPort: this.egressProxy?.port,
           resolveKeyService: resolveProviderKeyService,
           lookupCredential,
           getProviderBinary,
-          probeBinaryAuthStatus,
+          probeBinaryAuthStatus: (binary, args, env, options) => probeBinaryCommand(binary, args, env, options),
+          refreshAhead: (binary, env) => refreshClaudeLoginAhead(binary, env),
+          terminationGrace: (env) => claudeRefreshLockGrace(env, 'diagnostic-auth-status'),
           isAuthRequiredMessage: isProviderAuthRequiredMessage,
-          // Explicit allowlist — never hand the CLI probe the full process env.
-          // CLAUDE_CONFIG_DIR is forwarded if set so the auth-status probe reads
-          // creds from the same place as the model probe + turns (launchd keychain
-          // unreadable; see RCA 2026-06-24). Omitted when unset → no change.
-          env: {
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            HOME: process.env['HOME'],
-            // env-allowed: ambient OS PATH contract for executable resolution
-            PATH: process.env['PATH'],
-            // env-allowed: child-env forward; explicit per-var allow-list, not passthrough
-            USER: process.env['USER'],
-            // env-allowed: external-tool interop; must track the env the spawned claude CLI sees
-            ...(process.env['CLAUDE_CONFIG_DIR'] ? { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] } : {}),
-          },
+          // env-allowed: shared explicit allow-list preserves the serving credential selectors
+          env: scrubbedAuthStatusEnv(process.env),
         },
       });
       void runDiagnosticBundle({ workflow: wf, probes, now })
@@ -9942,8 +10023,7 @@ export class AgentRuntime implements Runtime {
     if (collapse && this.stashHandoffNotice(queue.targetChatJid, message, now)) {
       return;
     }
-    if (hasContinuation) queue.enqueueText(message, 'lifecycle');
-    else queue.enqueueText(message);
+    queue.enqueueText(message, 'lifecycle');
   }
 
   private enqueueAutoSwitchNotice(
@@ -9964,8 +10044,8 @@ export class AgentRuntime implements Runtime {
       scheduled,
     }, 'surfaced provider auto-switch notice');
     if (scheduled) return true;
-    if (mode === 'streaming') queue.enqueueStreamingText(message);
-    else queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, message));
+    if (mode === 'streaming') queue.enqueueStreamingText(message, 'lifecycle');
+    else queue.enqueueResultText(this.withHandoffPrefix(queue.targetChatJid, message), 'lifecycle');
     return true;
   }
 
@@ -10355,7 +10435,7 @@ export class AgentRuntime implements Runtime {
     } catch (noticeError) {
       log.warn({ err: noticeError, chatJid }, 'failed to clear abandoned fallback handoff notice');
     }
-    queue.enqueueText('_The backup model could not continue this turn. Please try again._');
+    queue.enqueueText('_The backup model could not continue this turn. Please try again._', 'status');
   }
 
   private async finalizeFailedFallbackContinuation(
@@ -10454,7 +10534,7 @@ export class AgentRuntime implements Runtime {
     conversationKey: string,
     provider: string,
   ): (() => string | null) | undefined {
-    if (!handoffContextEnabled()) return undefined;
+    if (!(this.typedHandoffDistill?.contextInjection ?? handoffContextEnabled())) return undefined;
     if (seamForProvider(provider as AgentProvider) !== 'system') return undefined;
     return () => {
       // Seed the distilled handoff context only into a STAND-IN session spawned
@@ -10582,6 +10662,23 @@ export class AgentRuntime implements Runtime {
       this.singletonProviderToolSession = providerToolSession;
     }
 
+    // Provider identity alone cannot distinguish a same-provider fallback.
+    const primaryBridgeRoute = !this.isFallbackWindowActive && route.source !== 'fallback'
+      && route.provider === this.agentProvider && route.model === this.model
+      && opts.providerConfigOverride === undefined;
+    const sessionM365Policy: M365MutationPolicy | undefined = this.m365MutationPolicy === undefined
+      ? undefined
+      : primaryBridgeRoute ? this.m365MutationPolicy : { status: 'rejected' };
+
+    // Each sandbox cwd owns its settings; route changes must restore the deny
+    // floor before a fallback can reuse a workspace approved for the primary.
+    if (this.sandboxPerChat && opts.cwd) {
+      ensurePermissionsSettings(join(opts.cwd, '.claude'), 'agent', this.enabledPlugins, {
+        hasSandbox: true,
+        m365MutationPolicy: sessionM365Policy,
+      });
+    }
+
     const session = new SessionManager({
       db: this.db,
       messenger: this.messenger,
@@ -10598,7 +10695,8 @@ export class AgentRuntime implements Runtime {
       instructionsPath: this.instructionsPath,
       model: route.model,
       pluginDirs: this.pluginDirs,
-      allowM365Mutations: this.allowM365Mutations,
+      allowM365Mutations: sessionM365Policy?.status === 'rejected' ? false : this.allowM365Mutations,
+      m365MutationPolicy: sessionM365Policy,
       provider: route ? route.provider : this.effectiveProvider,
       providerConfig: opts.providerConfigOverride
         ? { ...(route ? this.routeSessionProviderConfig(route) : this.sessionProviderConfig()), ...opts.providerConfigOverride }
@@ -10622,6 +10720,10 @@ export class AgentRuntime implements Runtime {
         ? managedLoopDegradedSystemBlock
         : undefined,
       routingSystemBlock: config.nlRouting ? () => this.buildRoutingContractBlock(route ? route.provider : this.effectiveProvider) : undefined,
+      memoryGuidanceBlock: memoryGuidanceSystemBlock({
+        readiness: this.memoryReadiness, registry: this.registry, session: providerToolSession,
+        instanceName: this.instanceName, memoryIndex: config.pineconeIndex, allowedMcpTools: this.sandbox?.allowedMcpTools,
+      }),
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
@@ -11161,7 +11263,7 @@ export class AgentRuntime implements Runtime {
               processFailure.activation.fallbackModel,
             ),
             replayScheduled,
-          }));
+          }), 'lifecycle');
           void Promise.resolve(noticeQueue?.flush())
             .catch((flushErr: unknown) => {
               // A failed notice flush must not strand the replay — its own
@@ -11185,7 +11287,7 @@ export class AgentRuntime implements Runtime {
           fromCard: modelCardLabel(processFailure.fromProvider, processFailure.fromModel ?? undefined),
           toCard: null,
           replayScheduled: false,
-        }));
+        }), 'lifecycle');
       }
     }
 
@@ -11832,7 +11934,7 @@ export class AgentRuntime implements Runtime {
     // In single/shared mode, chatJid is optional (falls back to shared fields).
     const queue = chatJid ? this.getQueueForChat(chatJid) : this.queue;
     if (queue) {
-      queue.enqueueText(msg);
+      queue.enqueueText(msg, 'status');
       const scopeKey = this.sessionScope === 'per_chat' && chatJid
         ? this.resolvePerChatMapKey(chatJid)
         : GLOBAL_TOOL_SCOPE_KEY;
@@ -11904,7 +12006,7 @@ export class AgentRuntime implements Runtime {
       this.pendingStartupChatNotices.set(chatJid, { kind: 'expired_session_notice', chatJid, text });
       return;
     }
-    this.sendDirect(chatJid, text);
+    this.sendDirect(chatJid, text, 'status');
   }
 
   /**
@@ -12304,7 +12406,7 @@ export class AgentRuntime implements Runtime {
               this.currentTurnAssistantText += committedText;
             });
           } else {
-            queue.enqueueStreamingText(normalizedText);
+            queue.enqueueStreamingText(normalizedText, 'answer');
             this.turnHadVisibleOutput = true;
             if (markReplayUnsafe) {
               this.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
@@ -12372,6 +12474,7 @@ export class AgentRuntime implements Runtime {
         queue.indicateTyping();
         queue.enqueueText(
           'Context compacted — older details summarized. Restate any important context I should carry forward.',
+          'lifecycle',
         );
         this.turnHadVisibleOutput = true;
         break;

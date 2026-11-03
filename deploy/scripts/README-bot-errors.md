@@ -19,7 +19,7 @@ on the Linux collector host). This README establishes the repo as the source of 
 All `install-bot-errors-*launchd.sh` scripts read configuration from
 `~/.config/whatsoup/bot-errors.env` (overridable via `BOT_ERRORS_ENV_FILE`).
 The file is **not shell-sourced or eval'd**. Values are extracted by an
-`awk`-based `read_env_value()` helper that finds the first line matching
+`awk`-based `read_env_value()` helper that finds the last line matching
 `KEY=` at column 1 and returns the remainder verbatim:
 
 ```awk
@@ -49,7 +49,9 @@ over the hardcoded default. This is handled by `env_or_default()` in each
 installer, which checks `${!key:-}` before calling `read_env_value`.
 
 `deploy/setup.sh` uses the same `awk` pattern (named `read_env_file_value`)
-to read and patch the env file during initial setup.
+to read and patch the env file during initial setup. The Python producers read
+`BOT_ERRORS_MACHINE` from the same file with the same rules, then strip
+surrounding whitespace (see "Machine identity").
 
 ### NORMATIVE — D2 Fail-closed health-profile guard
 
@@ -298,6 +300,79 @@ quarantine metadata. Invalid write-failure breadcrumbs are quarantined before
 duplicate suppression; they cannot be replay-suppressed as if they were valid
 delivery records.
 
+### NORMATIVE — Machine identity (`BOT_ERRORS_MACHINE`)
+
+Every Python producer stamps an event's `machine` field through one helper,
+`event_machine()` in `lib/bot_errors_envelope.py`. The dispatcher keys
+incidents on `machine|instance|source`, so a host whose live hostname changes
+with its network would otherwise open a second incident for one condition, and
+a clear or maintenance window under one name would never reach the other.
+
+The first non-blank source wins, and each is read on every call:
+
+1. `BOT_ERRORS_MACHINE` in the process environment;
+2. the same key in the BOT ERRORS env file (`BOT_ERRORS_ENV_FILE`, else
+   `~/.config/whatsoup/bot-errors.env`), read with the installers' D1 rules:
+   only a regular file is read, lines end at a newline only (a lone carriage
+   return stays inside its line), comment lines are skipped, the key must start
+   at column 1, the last match wins, and the rest of the line is taken as
+   written;
+3. the live hostname exactly as `socket.gethostname()` returns it, with no case
+   folding or domain stripping, so a host that configures nothing keeps its
+   incident keys.
+
+Surrounding whitespace is dropped, and a blank value counts as unset.
+
+Set it in `~/.config/whatsoup/bot-errors.env`, only on a host whose hostname is
+not stable, and pin that host's HostName to the same string: everything still
+named by the live hostname (below) then agrees with it. Write the value
+unquoted. The file read keeps quotes as part of the name, while systemd's
+`EnvironmentFile=` strips them.
+
+- systemd units with `EnvironmentFile=` inherit this value when they start.
+  A non-blank inherited value takes precedence over the file. Restart an
+  affected running unit after changing that value; each new process reads the
+  updated environment file.
+- Every other producer reads the file on each event, once it runs a release
+  that has this rule, and then needs no restart for a change: the macOS
+  launchd agents, the GUI-session monitor's included (their installers do not
+  copy this key), the reply-guarantee drain, the release observers (their
+  emitter environment passes `HOME` but not this key) and the per-bot instance
+  watchdog. These read the default path: `BOT_ERRORS_ENV_FILE` counts only
+  where it is in the producer's own environment.
+- Three of those keep running the release they were installed from until
+  someone acts on the host. The per-bot instance watchdog runs the emitter of
+  the release it was rendered from (`render-watchdog.py`), so re-render it.
+  The reply-guarantee and release-drift-check LaunchAgents bake their install
+  root into the plist (`__WHATSOUP_REPO_ROOT__` in
+  `deploy/com.whatsoup.reply-guarantee.plist` and
+  `deploy/com.whatsoup.release-drift-check.plist`), so rebind or reinstall them
+  onto a release that has this rule. Until then, their events keep the live
+  hostname.
+- `bot-errors-maintenance.py` resolves its `--machine` default the same way, so
+  run it as the host's BOT ERRORS user or pass `--machine`.
+
+Setting or changing the value re-keys this host's incidents once. Open
+incidents under the old name are not merged or migrated: they behave like any
+incident that stops receiving events (see `BOT_ERRORS_MACHINE` in
+`docs/configuration.md`). Leave the central hub unset, because daily-health
+attributes hub-local events by matching the event machine against the hub key
+(`lib/bot_errors_daily_health.py`), and keep the hub's HostName pinned, because
+its own daily-health lookups follow its live hostname.
+
+Diagnostic host fields stay on the live hostname: the collector's
+`collectorHost`, the runner's `host=` evidence line, the selfcheck `host` and
+the sentinel `controllerHost`. Per-host profile and daily-health ledger lookups
+(`host_profile_name()`, `canonical_local_host()`) keep their own normalized
+hostname rule. Only the heartbeat watchdog's `daily_health:<host>` problem key
+for this host takes the configured name, so its alert and clear keep one key.
+
+Known gaps, not wired: the TypeScript outbox writer
+(`src/lib/bot-errors-outbox.ts`) stamps no `machine`, so its events key as
+`unknown|<instance>|<source>`; fleet silences and alert throttles
+(`src/fleet/silence-manager.ts`, `src/fleet/health-poller.ts`) are scoped by
+`os.hostname()`. Neither reads `BOT_ERRORS_MACHINE`.
+
 ### Daily-health recovery scope
 
 Per-instance failures emitted by the health checker use
@@ -499,6 +574,13 @@ coalesced metadata-only stderr at the first and power-of-two consecutive
 failures. A later successful append records one recovery receipt. Existing
 legacy JSONL is retained and classified `legacy_unversioned`; it is not
 rewritten or assigned invented correlation fields.
+
+The dispatcher's `logs/dispatch.jsonl` and the collector's `logs/collector.jsonl`
+are written through `lib/bounded_jsonl.py`: a hard byte cap
+(`BOT_ERRORS_DISPATCH_JSONL_MAX_BYTES` and `BOT_ERRORS_COLLECTOR_JSONL_MAX_BYTES`,
+each defaulting to 50 MiB) trims the file to its newest records when an append
+would pass it, and the private mode, no-follow and lock discipline stay the
+same (#2135, #3700).
 
 ### Collector capture-failure escalation: per-transition semantics
 
@@ -767,16 +849,19 @@ shipping the matching registry fails the local manifest and deployer guards.
 
 The BOT ERRORS group is written by the owner's own line, so the owner's phone
 does not notify for it. The owner critical route copies selected critical
-alerts to the owner's direct chat, sent from a **different** instance so the
+alerts, and the escalated still-open reminders of the same sources (which route
+at error when their sender sent a warning), to the owner's direct chat, sent
+from a **different** instance so the
 phone notifies, plus an e-mail through the existing fallback script. Code:
 `deploy/scripts/lib/owner_route.py`. After a group send is archived,
 `route_to_owner()` only queues the copy; `drain_owner_route_queue()` sends the
 queued copies once the cycle has sent every group alert and recorded
 `cycleCompletedAt`, so an owner copy never delays a group send. The drain
 shares one time budget, enforced end to end: the socket call receives an
-absolute deadline, and every blocking step, the handshake and each read
-included, gets only the time left. The budget therefore bounds how late the
-next cycle can start. The queue holds at most 20 copies; a cycle that fails
+absolute deadline, and each write and each socket read, the handshake's
+included, gets only the time left, however slowly the instance answers or
+reads. The budget therefore bounds how late the next cycle can start. The
+queue holds at most 20 copies; a cycle that fails
 after its sends skips the drain, and a copy arriving at a full queue is
 logged as `skippedQueueFull` and dropped (its group copy exists).
 
@@ -797,10 +882,13 @@ re-sends the group alert.
 | `BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS` | Socket send timeout, clamped to the remaining budget | `8` |
 | `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS` | Total time one cycle may spend on owner copies; the e-mail timeout (20 s) is clamped to what remains | `30` |
 
-**Policy.** A copy is sent only for a critical incident alert (never a clear)
-whose source matches a pattern, on first open or as an escalated still-open
-reminder; plain still-open renotifies are skipped. The per-key interval is
-recorded before the send, so a crash yields a missed copy, never a duplicate.
+**Policy.** A copy is sent only for an incident alert (never a clear) whose
+source matches a pattern: a critical alert on first open, or a still-open
+reminder escalated by age or repeat count, at the severity escalation gives it
+(one step above the sender's, so a warning source's reminder arrives as
+error); plain still-open renotifies are skipped. The per-key interval is
+recorded before the send, so a crash yields a missed copy, never a duplicate
+(for the one stated exception, see the credential re-page section below).
 The group copy exists either way. When deduplication cannot be established the
 copy is skipped rather than risked: an existing state file that cannot be read
 or parsed, or that holds any entry without a positive integer `lastAt`, the
@@ -810,6 +898,61 @@ State entries are kept for at least the configured interval (seven days or the
 interval, whichever is longer). Stale-incident digests are info severity and
 are never routed. The default sources exclude the
 `…_primary_model_usable_unverified` fleet probe, which flaps every 15 minutes.
+
+**Escalated reminders.** A still-open reminder escalated by age (24 h by
+default) or repeat count (72 by default) is sent one severity step above its
+sender's severity (warning to error, error to critical); an unreadable severity
+goes to critical, and escalation never lowers a severity, transient tiering
+included. The dispatcher records the sender's severity once in
+`delivery.escalatedFromSeverity`. The field survives a failed, transient, held
+and released, or crash-reclaimed retry, is kept in the dead-letter record, and
+crosses the collector relay: `relay_event` starts a fresh delivery block for the
+hub's own attempts but keeps this field and `escalatedNow` (each only with its
+type), as it keeps the event's severity. A retry that escalates again raises
+from the field, so a reminder climbs one step however often its send fails. The
+field is retained metadata, not a severity floor: a retry whose incident record
+is gone takes the first-open path, where Pattern D can restore a lower first
+severity, as it could before this change.
+
+A reminder is *escalated now* while base's copy of it would be critical because
+of the escalation. The dispatcher marks that with `delivery.escalatedNow: true`,
+set on every attempt that escalates, where base set critical, and removed
+wherever base then overwrote that severity: Pattern D's promotion and hold, and
+the awaiting-physical announcement. The check also requires a readable recorded
+severity, the `escalated=true` evidence line, and a current severity at least
+the one-step escalation of the recorded one; a severity value alone cannot say
+why the event carries it. A reminder escalated now gets the critical treatment
+base gave it: requeued at error it stays a storm candidate, its storm
+fingerprint carries critical, a digest with it as a member pages critical, and
+a Pattern D record it starts stores critical as the first severity. Every other
+event, including a retry Pattern D restored to a lower severity, is treated by
+its own severity in candidacy, fingerprint, digest and a new Pattern D record,
+as base treated it. An owner-route reminder is copied when it is escalated now
+and carries `incident_still_open=true`. The route's renotify check reads the
+first `escalated=` evidence line, as before this change, so a reminder whose
+evidence first records a non-escalated renotify (an earlier pass appended
+`escalated=false`) is skipped as `non_escalated_renotify`. Four limits: the
+fields are not defended against a planted value, since every producer writes a
+fixed fresh delivery block and a writer that can set `delivery` can set
+`severity` itself; the step is taken from the severity of the occurrence that
+triggers the reminder, not the incident's opening severity, which the incident
+record does not keep; `reset_delivery` wipes both fields, its only caller being
+the recovery of outbox-write-failure records, which producers write before any
+escalation (it is the only remaining site that wipes them; `relay_event` also
+rebuilds an existing event's delivery block, but keeps both); and requeued
+reminders escalated now that storm (the storm threshold of hosts, 3 by default,
+matching within one window) still page critical through their digest. The storm
+scan runs before the send decision, so only a reminder whose first send did not
+complete reaches it as escalated, and daily release-currency escalations land at
+a different time on each host, so that should be rare.
+
+**Rollout order.** In a fleet where collected hosts run their own dispatcher,
+deploy the hub's collector, dispatcher and `lib/owner_route.py` no later than
+any remote dispatcher. A remote that escalates one step while the hub still
+runs the earlier code loses what the earlier remote's critical reminder kept: an
+earlier hub collector drops `escalatedNow` and `escalatedFromSeverity` from the
+relayed reminder; an earlier hub owner route sends that error reminder with no
+owner copy; and an earlier hub dispatcher gives it no critical storm treatment.
 
 **Log records.** `owner_route_sent` carries booleans only (`whatsappAccepted`,
 `emailEnabled`, `emailAccepted`, `emailSkippedBudget`); `owner_route_skipped`
@@ -833,6 +976,313 @@ Then `systemctl --user daemon-reload` and restart the dispatcher. Verify with
 the `owner_route_selftest` source, which is routed by default. **Disable** by
 removing the drop-in, reloading and restarting; the code stays inert.
 
+## OPERATIONAL — Credential re-page (dead provider credential)
+
+A bot whose provider credential is dead needs a human. Before this class the
+owner heard of it once: the watchdog pages once per episode, an open incident
+re-notifies only on a new event, and the owner route has a 6 h floor. The
+dispatcher now keeps one **condition** per bot for the auth-caused sources and
+pages the owner every 4 hours until the condition ends. Code:
+`deploy/scripts/lib/credential_repage.py` (the rules; it sends nothing and
+writes no file) and the call points in `bot-errors-dispatcher.py`.
+
+It needs the owner critical route above (`BOT_ERRORS_OWNER_ROUTE_JID` and
+`BOT_ERRORS_OWNER_ROUTE_SOCKET`). With the route off the conditions are still
+kept, nothing is sent, and one `credential_repage_owner_route_disabled` record
+is logged per condition per interval. No setting narrows the member list.
+
+**Members.** Each source has one role.
+
+| Source | Role |
+|---|---|
+| `provider_credential_dead` | opens a condition at once |
+| `reauth-observe:reauth_needed_manual` | opens a condition at once |
+| `reauth-observe:credential_present_runtime_unusable` | opens it after 30 minutes |
+| `reauth-observe:account_identity_mismatch:<diagnosis>` | the role of `<diagnosis>` |
+| `reauth-observe:indeterminate_investigate`, `:public_liveness_only`, `:public_liveness_degraded` | never opens; keeps a pending or open condition alive |
+| `primary_model_unusable` | never opens; keeps a pending or open condition alive |
+| `provider_auth_required_no_fallback` | opens only beside `primary_model_unusable`; otherwise it is only named in the page |
+| `agent365-reliability-fleet_<host>_<bot>_primary_model_usable` (and `_unverified`) | never opens, never keeps alive; named in the page's e-mail |
+
+A diagnosis of the re-auth observer that this table does not name has no role.
+A condition is *latent* (only members that cannot open it), *pending* (the
+30-minute clock runs) or *open* (it pages). A latent entry changes nothing the
+dispatcher sends or logs.
+
+**Scope.** A condition is keyed `<host>|<instance>`. The emitters write
+different host strings for one bot (the runtime writes none, the watchdog its
+own host name, the re-auth observer its inventory name, the fleet probe carries
+the host in its source name), so the fleet roster decides:
+
+- the roster holds the instance name on exactly one host: that host, whatever
+  the event carried;
+- it holds the name on several hosts: the event's own host string, its first
+  label, the relay's host and that host's first label are compared with the
+  roster's hosts, and the first match wins. No match gives the event's own
+  string as its scope, and the cycle's log record counts it (`unmatchedScopes`);
+- it does not hold the name, or cannot be read: the event's own host string.
+
+A roster row with any `expected` value other than `none` counts as a host of
+its name. Unless the roster lists the name on several hosts, a pending or open
+condition is also kept alive by a member that sits in a latent entry of the
+same instance name. An unreadable roster is logged in every cycle
+(`rosterUnreadable`) and raises one group meta-alert per UTC day of delivery,
+source `credential-repage-roster-unreadable`. The alert is owed until a channel
+takes it or its UTC day ends, so it can arrive after the roster reads again: it
+names the condition in the past tense with the time it was first owed in that
+UTC day, and `rosterUnreadable` in each cycle's log shows how long it lasted.
+The page names the first opener's own host and instance, never the roster's
+label.
+
+**The page.** `<host>/<bot>: provider credential dead — human action required;
+dead for <N> h, page <K>`, to the owner's direct chat, and by e-mail with the
+list of members. When no opener is left and only a keep-alive member holds the
+condition: `<host>/<bot>: provider credential state unverified since <time>;
+primary still unusable; the re-auth observer now reports <diagnosis> — human
+action required; page <K>`. No group message carries a page.
+
+- Pages are sent after every group alert the cycle delivers from the outbox
+  and after its completion stamp, before the legacy owner copies, inside their
+  own budget of 20 s. The legacy drain then runs with its full budget, as
+  before. The class's own group meta-alerts come last (see "State and logs").
+- The 4 h floor is written to the incident state before the send. A refused
+  page is tried again in the next cycle; after three failed attempts the next
+  one waits one interval. A page that never started for lack of time costs no
+  attempt.
+- **One exception to "never a duplicate".** If the dispatcher fails after a
+  channel accepted a page (a log write that fails, for example), the attempt
+  counts as failed and the page is sent again, at most three times in one
+  interval. In the same way, a group meta-alert of the class (below) that a
+  channel took is marked by the next cycle, so it can be sent once more by a
+  restart before that cycle (each manual `--once` run is one), or when that
+  cycle fails to save its marks.
+- A group meta-alert of the class whose request left and whose answer did not
+  come counts as taken, as a held group alert does (#2424): it is not sent to
+  the group again, and it is logged as `credential_repage_meta_alert`
+  (`ambiguous`). Its e-mail is still tried, so it can reach each channel once.
+- The legacy owner copy of `provider_credential_dead` and
+  `reauth-observe:reauth_needed_manual` is dropped only when a channel accepted
+  the condition's page in that cycle or inside the last 4 hours, or when the
+  page is held on purpose (below). In every other case it goes out as before.
+- The group alert of every opener source now ends with "Human action required:
+  restore this bot's provider credential (owner). No automated remediation."
+  The other members carry that sentence while a pending or open condition
+  answers for them.
+
+**Acknowledge.** On the dispatcher host, as the dispatcher's service user:
+
+```sh
+python3 deploy/scripts/bot-errors-credential-ack.py <instance> [--machine <host>]
+```
+
+No page for that bot for 24 hours from the acknowledgement; then the pages
+resume if the condition is still open. The command reads the open condition
+from the incident state and writes that condition's own key to
+`credential-ack.json` in the state root. It refuses, and writes nothing, when
+the instance has no open condition (a pending one counts as none), when several
+open conditions carry the name and `--machine` does not select one, and when
+the incident state is missing or cannot be read. An unusable acknowledge file
+is no acknowledgement: the page goes out and says "acknowledge file
+unreadable". An acknowledgement closes nothing and silences no group alert.
+
+A maintenance window (`bot-errors-maintenance.py`) for the scope holds the page
+too, for at most 24 hours in the condition's life.
+
+**How a condition ends.** A clear of a member source removes that member. When
+no opener and no keep-alive member is left for 600 s, the condition is deleted.
+A member that returns inside those 600 s continues the same episode. There is
+no close command. To end a condition by hand, emit the clear of its member
+sources with the existing emitter for that bot; the `clearedAt` map of the
+scope is kept for 7 days so that an old copy of an alert cannot bring it back.
+Whether an alert or a clear of one source came first is decided by their
+creation times when both have one and neither was more than 1 hour ahead of
+the read when it was stored; a creation time further ahead is a wrong clock and
+counts as absent. The grace, the 30-minute promotion and the other times taken
+from events use the creation time capped at the read time; page floors and
+acknowledgement holds use the dispatcher's clock. A clear also records, as
+digests of their event ids, itself and the last alert it removed. While that
+record is the newest clear of its source in the scope and holds those digests,
+the removed alert read again after a failed send does not bring its member
+back, and the same clear read again changes nothing in its own source's
+record. A clear of `provider_credential_dead` or `primary_model_unusable` read
+again can still remove an older `provider_auth_required_no_fallback` member
+that arrived in between (limits below). An event without an id takes its
+identity from the raw text of a usable, timezone-aware creation time; an event
+with neither has none.
+A stale auto-close of the incident record does not end a condition.
+
+After a re-login one more page can follow, up to about 2 h 20 min later: the
+runtime's primary-model probe runs every 30 minutes and backs off to 2 hours,
+and the grace adds 10 minutes. A manual probe or a restart of the bot ends the
+condition sooner.
+
+Each timer pass evaluates every pending or open condition first and decides the
+age of latent entries after. A latent entry that is deleted by age in a pass
+therefore never holds a condition that opens later, whatever the order of the
+scope keys.
+
+**State and logs.** Everything is in the dispatcher's incident state:
+`credentialConditions`, `credentialConditionsQuarantine` (at most five stored
+values that failed validation), `credentialConditionsLoss`,
+`credentialConditionsAlertDays` and `credentialConditionsAlertsOwed`. A
+malformed entry is quarantined, rebuilt from
+the open incidents where one exists, paged again, and announced once per 4
+hours on both paths: a group meta-alert with source
+`credential-repage-state-lost` and an owner page that starts `BOT ERRORS:
+credential re-page state was lost for`. A fault inside the class, including
+one while its owed alerts are listed, is absorbed, logged as `passFault` and
+announced once per UTC day of delivery with source
+`credential-repage-pass-error`; the alert is owed in the state until a channel
+takes it or its UTC day ends. An owed entry whose time is not within a day of
+its own UTC day, or that names no daily alert, is malformed and dropped. A
+fault never stops a group alert, the completion stamp or a legacy owner copy.
+
+The class sends these group meta-alerts (`credential-repage-state-lost`,
+`credential-repage-pass-error`, `credential-repage-roster-unreadable`) itself,
+after the legacy owner drain and inside its own budget of 20 s, and does not
+queue them as the dispatcher's other meta-alerts are queued: a queued alert is
+an incident alert, and the incident renotify policy (6 h, then 12 h, then
+24 h) would absorb a repeat that the cadence above promises. The group send of
+one alert gets at most 8 s of the budget, so its e-mail keeps the rest; the
+8 s equal the owner route's default `BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS`
+and do not follow that setting. Each owed alert is tried at most once per
+cycle. One that the budget cuts, or that both channels refuse, is tried again
+in a later cycle and costs no attempt: a state-lost alert is owed until a
+channel takes it or the next announcement replaces it, a daily alert until a
+channel takes it or its UTC day ends. A daily alert counts for the UTC day a
+channel first took it: listed before midnight and delivered after it, it counts
+for the new day; taken by the group before midnight, it keeps that day even
+when its e-mail ends after it.
+
+Log record types start with `credential_repage_` and carry booleans and
+integers only: `credential_repage_cycle` (`unusableEvents`, `ties`,
+`unmatchedScopes`, `rosterUnreadable`, `ackUnreadable`, `passFault`; written
+only when one of them is set), `credential_repage_page` (`count`,
+`failedAttempts`, `hours`, `whatsappAccepted`, `emailEnabled`, `emailAccepted`,
+`emailSkippedBudget`), `credential_repage_owner_route_disabled` and
+`credential_repage_meta_alert` (`ambiguous`, with `metaStateLost`,
+`metaRosterUnreadable` or `metaPassFault` naming the alert; like `passFault`,
+the pass-error flag avoids "error", which the shared log projection drops from
+detail keys). A page record does not name its bot; the message does.
+
+**Limits.**
+
+- A name on exactly two hosts where one roster row is `blocked` stays a
+  duplicate: its events use the exact scope only, and an unmatched keep-alive
+  member does not hold a condition by name. When such a bot stops paging
+  early, read `unmatchedScopes`.
+- Without a readable roster, a latent keep-alive member of one bot holds every
+  pending or open condition of that instance name. That costs extra pages,
+  never a missing one.
+- When the roster changes so that a stored keep-alive member starts to hold a
+  condition by name, it holds it from the first timer pass that reads the
+  changed roster. If that condition's 600 s grace has already run out by then,
+  the condition ends, whether the roster changed before or after the 600 s
+  point, because a roster change carries no time.
+- An entry stored under the roster's host label is still reached by a clear
+  when the roster then becomes unreadable or no longer holds the name, if the
+  clear carries the machine and instance strings of the entry's first opener,
+  the entry's key names one of the clear's own host strings (its machine or its
+  relay host, or the first label of either, through the key's segment rule),
+  that entry is the only scope of the name in the incident state (a scope that
+  keeps only `clearedAt` counts), and the roster does not list the name on two
+  or more hosts. Otherwise the clear reaches its own scope only, and, once the
+  roster again holds the name on exactly one host, every entry of the name.
+  The first clear that reaches the entry this way also records itself under its
+  own key, which then counts as a second scope of the name until 7 days after
+  the last clear recorded there: the clears of the bot's other member sources
+  reach only their own scope and record themselves there too, and the entry
+  keeps those members and pages. Without a readable roster, or when the roster
+  no longer lists the name, two bots of one name whose events carry the same
+  machine and instance strings cannot be told apart: a clear from one also
+  reaches the other's entry by the strings when one of its host strings names
+  that entry's key, and in both cases the two share one key and clear each
+  other there. A runtime-only entry rebuilt after a state loss carries the
+  dispatcher's own host name, so a relayed clear of that bot does not reach it
+  by its strings.
+- A bot removed from the roster, or renamed, keeps its open condition under
+  the old name until no opener and no keep-alive member of it is left. Its
+  members are the keys of `credentialConditions.<scope>.members` of every scope
+  of that instance name: the open entry, and any latent entry of the name whose
+  keep-alive members hold it.
+  1. When the open entry has one member source, its first opener came from the
+     emitter on the bot's own host (the watchdog's `provider_credential_dead`,
+     for example), that host still runs, the entry's key names that host (by
+     its host name or the first label of it), and the open entry is the only
+     scope of the name in the incident state, emit on that host the clear of
+     that source:
+     `python3 deploy/scripts/bot-errors-emit.py --clear --instance <old name> --source <source>`.
+     The clear carries that host's string and reaches that entry.
+  2. In every other case (an entry with two or more member sources, a latent
+     entry of the name, any second scope of the name, or no running host), add
+     the old name back to the roster on exactly one host and emit the clears of
+     the member sources for every scope; the roster then makes every scope of
+     the name one bot, latent entries included. A clear stamped by another
+     host's clock removes a member only when it is newer than that member's
+     last event.
+  3. Read the incident state again. If a scope of the name still holds an
+     opener or a keep-alive member, do step 2 for it. When none does, the
+     condition ends at the first timer pass 600 s after its last member went
+     (its `emptySince`). Then remove the name from the roster again, if step 2
+     added it.
+
+  Until then, the acknowledge command holds the pages for 24 hours at a time.
+- Whether a creation time lies more than 1 hour ahead is decided when the
+  member or the clear record stores it, and is not decided again while that
+  record is the current one of its source and holds a stored digest of its
+  event; a newer event or clear that replaces the record ends that. An event of
+  which nothing is still stored, read again once its stamp is inside the hour,
+  changes from its read time to its stamp once; copies of one death with
+  different ids that cross that boundary between reads can be ordered wrongly.
+  Two events of one source without ids and with byte-identical, usable
+  creation times count as one event. An id and a creation time are hashed
+  under different prefixes, so an event with an id is never taken for one
+  without, except by a collision of the 48-bit digests. A stored digest that
+  is not an integer (a state file edited by hand) names no event: a clear with
+  a usable creation time, read again with such a record, is decided again; a
+  death read before that re-read is then removed by it, and one read after it
+  is dropped until the clock passes the clear's creation time.
+  A producer clock that runs ahead by up to 1 hour and is then set back can
+  drop one new death read inside that hour after a clear stamped on the fast
+  clock, because the death's creation time is earlier than the clear's.
+  A member alert stamped more than 1 hour ahead takes its read time, and every
+  read of it while it stays queued moves the member's last time to that read;
+  a clear, compared by read times, then stays older than the member, and the
+  condition keeps paging until a clear arrives after the alert's last read.
+- A clear remembers only the last alert it removed, and none when that alert
+  had neither an id nor a usable, timezone-aware creation time. Two queued
+  copies of one death that carry no usable creation time can therefore bring
+  one copy back, and so can such a copy removed by a clear that is not newer
+  than the stored clear.
+  No producer in this repository writes an event without a creation time.
+- A bot on a provider without a usability probe reaches this class only
+  through the watchdog or the re-auth observer.
+- A condition whose open-incident record the stale sweep already closed cannot
+  be rebuilt after a state loss; the two announcements are then its only
+  signal.
+- The incident state stores text values through the dispatcher's redaction. A
+  host written as an IPv4 address with ten or more digits, or an instance name
+  that the redaction reads as a phone number, is stored redacted, and later
+  pages of that condition carry the redacted label.
+- With class pages and the class's group meta-alerts failing, the sends after
+  the completion stamp can take up to 70 s of send budgets (20 s for the class
+  pages, 30 s for the legacy drain at its default budget, 20 s for the class's
+  group meta-alerts), plus local work, where they took 30 s. In general they
+  take up to 40 s plus `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS`, plus local
+  work; the figure bounds the sends, not the elapsed time.
+- An empty or malformed value for a setting read with `positive_env_int` stops
+  the dispatcher at import, before and after this change.
+
+**Install-time checks (with the owner).** The dispatcher's service
+user can resolve and read a roster (`BOT_ERRORS_FLEET_SENTINEL_HOSTS`, then
+`~/.config/whatsoup/bot-errors-expected-fleet.json`, then the tracked copy);
+the deployed `--max-state-age` of the health check and the daemon's interval
+leave room for 40 s plus `BOT_ERRORS_OWNER_ROUTE_BUDGET_SECONDS` of sends after
+the completion stamp (70 s at the default budget); the acknowledge
+command resolves the same state directory as the dispatcher's unit. Do not
+change the roster rows of a duplicated name while that name has an open
+condition.
+
 ## OPERATIONAL — Held ambiguous send outcomes (`outcome_unknown`)
 
 The dispatcher sends to the chat transport before it can record that the send
@@ -853,7 +1303,8 @@ event:
   `delivery_outcome_unknown_held`. It is written before the durable record is
   published, so a hold whose publication does not reach disk is retried and
   logs the line again: expect at most one duplicate line per retried hold, and
-  never a duplicate send. Once the record is on disk the line is not repeated,
+  never a duplicate send (for the one stated exception, see the credential
+  re-page section above). Once the record is on disk the line is not repeated,
   including across restarts. It is deliberately anonymous: the controller log
   projects unlisted strings away, so it carries bounded metadata (`attempts`,
   `held`) and no event id. Read `processing/` to find out which item is held;
@@ -1015,6 +1466,12 @@ write/hash failure, raw secret output, or authorization ambiguity remains a hard
   the hub's deploy path; restart collector, dispatcher, and q-loop after
   deploying long-running code.
 
+The generic script deployer refuses `deploy` and `verify` for a resolved
+`WhatSoup-health-<source12>` export root, including path aliases, before copying
+files or creating a backup. It does not establish package-pin qualification.
+Use the staged package procedure below for those roots. Emergency `rollback`
+and `rollback-lkg` remain available with their existing backup checks.
+
 The deploy contract is:
 
 1. Take a per-host backup before mutation; abort if the backup path or restore proof cannot
@@ -1022,13 +1479,16 @@ The deploy contract is:
 2. Copy the manifest-tracked bot-errors scripts, `deploy/bot-errors-runtime-manifest.json`,
    `.husky/pre-commit`, expected-fleet data, and health profiles to the running tree; abort
    on any copy error or missing payload hash.
+   The script deployer's managed set includes `write-health-package-pin.py`; its
+   normal hash verification, backup and rollback cover this operator tool too.
 3. Write a host-local runtime manifest at
    `~/.config/whatsoup/bot-errors-runtime-manifest.json` and point services at it with
    `BOT_ERRORS_RUNTIME_MANIFEST`; abort if the written manifest hash cannot be verified.
 4. On Git-backed hosts, stamp `expected_head_sha` with the host checkout's actual HEAD so
    daily health detects real runtime skew without false mismatches from dirty host trees.
    Stamp immediately after the payload copy. Abort on Git-backed hosts if `git rev-parse HEAD`
-   fails; non-Git runtime trees may report `git_head_sha: not_a_git_repository`.
+   fails. Recognized non-Git health exports use the verified package and external pin
+   procedure below; `not_a_git_repository` alone does not qualify their source binding.
 5. Activate the drift hook with `core.hooksPath=.husky` where the Git config and hooks
    directory are writable. If either path is not writable, abort unless the owner pre-accepted
    that row as a hook exception; for an accepted hook exception, run the manual drift-hook
@@ -1106,6 +1566,13 @@ policy choice. Set it in the bot host's private profile, not in a tracked profil
 `BOT_ERRORS_HEALTH_PROFILE` replaces the tracked profile; it does not overlay it. Keep
 the private copy in step with tracked profile changes. The daily evidence line
 `profile: role=… path=…` shows which profile file a run used.
+
+Remote-desktop settings (`expectRustDesk`, `rustDeskCommand`, `expectedRustDeskId`,
+`rustDeskService`, `rustDeskServiceScope`, `rustDeskDirectPort`, `rustDeskRendezvous`)
+are host configuration, so they go only in a host's private profile. A tracked profile
+does not carry them. When you copy or update a private profile from a tracked one, keep
+these keys. Without `expectRustDesk: true` the remote-desktop checks do not run, and no
+evidence line reports that they were left out.
 
 At runtime the health check and the heartbeat watchdog resolve the profile through
 `deploy/scripts/lib/fleet_config.py`, in this order: `BOT_ERRORS_HEALTH_PROFILE_JSON`
@@ -1191,6 +1658,153 @@ The expected successful shape is:
 - A stamped Git-backed runtime manifest should produce a `git_head_sha: ... expected=...
   match` evidence line. If `expected_head_sha` is unset, runtime-skew is only observable,
   not enforcing.
+
+### Credential-selector consumer-first transition
+
+When a runtime release begins forwarding `CLAUDE_SECURESTORAGE_CONFIG_DIR`, install
+and qualify the BOT ERRORS health consumer before activating that runtime producer.
+An older consumer forwards `CLAUDE_CONFIG_DIR` but not the secure-storage selector
+and can therefore check a different credential store.
+
+1. Use the existing `whatsoup-bot-errors-deploy.sh deploy <root> <staging-dir>`
+   followed by `whatsoup-bot-errors-deploy.sh verify <root>` to install the candidate
+   consumer. Require `verify` to pass the candidate runtime manifest's SHA-256 entry
+   for `deploy/scripts/bot-errors-health-check.py`. An active
+   `WhatSoup-health-<source12>` export instead stays on its separately pinned staged
+   package procedure; do not overwrite it with the generic deployer.
+2. For a configured macOS instance, first verify that the installed health
+   LaunchAgent plist `Label` and its loaded `gui/<uid>/<Label>` job agree with the
+   deployment receipt. Then kickstart that verified label with
+   `launchctl kickstart -k "gui/$(id -u)/<verified-health-label>"`; the placeholder
+   is deliberate, so do not trust a caller-provided `BOT_ERRORS_HEALTH_LABEL` shell
+   value. Require the configured health output timestamp-correlated with that
+   invocation to contain a fresh `provider_probe <instance> ... status=ok` completion.
+   The probe reads that instance's loaded `com.whatsoup.<instance>` launchd
+   environment, not the health job's parent environment. A profile with no bot or
+   zero configured instances cannot qualify this transition. On Linux or any platform
+   without an equally verified installed per-instance probe route, hold that target;
+   do not substitute a manually assembled environment or infer selector parity from
+   the health job's environment.
+3. Only after those two checks may the separately authorized runtime activation enable
+   the new `child-env.ts` producer.
+
+For rollback, restore or deactivate that producer first. Then use the existing
+`whatsoup-bot-errors-deploy.sh rollback <root> <backup-dir>` or
+`whatsoup-bot-errors-deploy.sh rollback-lkg <root>` contract for the consumer. Do
+not use the candidate's `verify` for old bytes: it resolves the candidate manifest
+hash. Verify the restored consumer with its retained prior manifest, pin, and deployer
+contract, then run the old installed provider probe. If that prior verifier is not
+retained, hold the rollback rather than relabeling hashes. Do not roll the consumer
+back first while the new producer remains active.
+
+The daily health check's `/health` and fleet API probes refuse HTTP redirects
+with `redirect_refused`. They send no second request and do not report the
+redirect target or response body. Configure the final endpoint directly so a
+redirect cannot forward its bearer credential or turn another endpoint's response
+into health evidence. Both probes bypass ambient proxies and require direct
+endpoint reachability. Fleet endpoints that previously required an ambient proxy
+must be reachable directly before these probes can qualify their health.
+
+### Read-only exported health-package validation
+
+Run `python3 -B deploy/scripts/bot-errors-health-check.py --runtime-manifest`
+from the installed package to inspect its source binding without publishing an
+event. For a staged package, `--runtime-package-pin <path>` selects an explicit
+private pin for this read-only check; it cannot redirect daily-health validation.
+The consumer rejects any default or explicit pin whose resolved path lies inside
+the runtime package, with `pin_inside_runtime_root` and exit 2.
+
+A recognized `WhatSoup-health-<source12>` export requires an external
+`health-package-pin.json` owned by `health_reporter`. Supported pin modes are
+`no-bot` and `bot-host`. The pin remains required when a matching Git repository
+contains the package directory. The health profile's `role` must equal the pin's `mode`.
+Package profiles must enable `expectRuntimeManifest`; a missing or disabled value
+fails with `profile_manifest_required` and exit 2, even when a valid pin exists.
+Ordinary non-package checkouts can still disable manifest inventory in their profile.
+An unknown or mismatched role produces `pin_mode_mismatch` and exit 2. Do not
+change a pin to make an incompatible package pass.
+
+Use `deploy/scripts/write-health-package-pin.py` from a trusted WhatSoup checkout
+to produce the pin for an already staged export. Its package descriptor has
+`source_commit` (the full lowercase Git SHA), `sha256` (the archive SHA-256), and
+`files` (a map of archive member paths to SHA-256). Obtain that descriptor through
+an independently trusted build or review channel: matching an untrusted archive
+to its own descriptor does not authenticate the source.
+
+Existing unpinned exports require the same staged procedure before enabling the
+new checker. Do not overwrite an active export with the generic deployer or run
+the new consumer before its external pin is qualified. Preserve the prior tree
+for rollback; this procedure does not authorize activation.
+
+For a package transition, keep the currently installed tree and pin intact while
+qualifying the candidate. In order:
+
+1. Verify the descriptor's provenance and safely stage the archive in a separate,
+   owner-private `WhatSoup-health-<source12>` directory (mode `0700`). The producer
+   does not extract archives. Keep exclusive ownership of staging through the
+   producer and checker steps; the pin does not freeze files or activate a snapshot.
+2. Select the intended private health profile. Both the file and its parent must be
+   owned by the invoking user and inaccessible to other users; `expectRuntimeManifest`
+   must be `true`, with role `no-bot` or `bot-host`.
+3. Create a separate private directory for the candidate pin, outside the package,
+   then run the producer with that candidate's archive, descriptor, tree and profile:
+
+   ```bash
+   python3 -B deploy/scripts/write-health-package-pin.py \
+     --package-manifest /absolute/staging/package.json \
+     --archive /absolute/staging/package.tar.gz \
+     --runtime-root /absolute/staging/WhatSoup-health-<source12> \
+     --profile /absolute/private/health-profile.json \
+     --pin-output /absolute/private/candidate/health-package-pin.json
+   ```
+
+   Replace the placeholders before running. The producer verifies the archive's
+   digest, exact regular-file membership, each member hash, and the staged tree
+   against the descriptor. Descriptor membership must equal the runtime manifest's
+   entries plus the manifest itself; the manifest excludes its own digest to avoid
+   a self-hash cycle. There are no other unlisted package members. The producer
+   also checks the runtime manifest's source and member hashes.
+   Symlinks, duplicate members, special files, traversal and mismatches are
+   refused. Tar and gzip-compressed tar are supported, bounded to 64 MiB of archive
+   and expanded tar data, 16 MiB per member, 1,024 files and 1 MiB per JSON input.
+4. Run the staged checker with the same profile and candidate pin:
+
+   ```bash
+   BOT_ERRORS_HEALTH_PROFILE=/absolute/private/health-profile.json \
+     python3 -B /absolute/staging/WhatSoup-health-<source12>/deploy/scripts/bot-errors-health-check.py \
+       --runtime-manifest \
+       --runtime-package-pin /absolute/private/candidate/health-package-pin.json
+   ```
+
+   Require exit zero, `source=package match`, and no `FAIL` or `WARN` lines. Ensure
+   `BOT_ERRORS_HEALTH_PROFILE_JSON`, `BOT_ERRORS_RUNTIME_MANIFEST_JSON` and
+   `BOT_ERRORS_RUNTIME_MANIFEST` are unset so inherited overrides cannot change this
+   check's inputs. This read-only check publishes no event.
+
+The producer writes the pin durably with mode `0600`. An identical existing pin
+is verified without rewriting it; a conflicting pin is preserved and rejected.
+Add `--verify-only` to verify an existing pin without publishing one. A transition
+uses a separate candidate pin; never relabel a role or replace the old pin just to
+make verification pass.
+Requalify any earlier staged package with the current producer before transition;
+an earlier pin alone does not prove the stricter manifest-membership contract.
+
+The checker validates the pin identity, manifest digest, full source commit,
+runtime root, listed file hashes and executing-checker binding. Package validation
+uses bounded, no-follow descriptor reads: 64 KiB for the external pin, 1 MiB for
+the manifest and 16 MiB for each listed file. Each inventory accepts at most
+1,024 listed files, reads at most 64 MiB across those files (including reads later
+rejected by identity checks), and emits at most 64 KiB of UTF-8 evidence including
+newlines. Exceeding a limit stops inventory and returns a single `FAIL` line;
+partial evidence cannot establish a package match. The pin and its immediate parent
+must be private and owned by the invoking user. Hard-linked pins and symlinked
+ancestors are refused, except for the trusted macOS `/tmp` and `/var` aliases
+that are canonicalized before traversal. Hashes and required markers use the same bytes; file or
+parent identity changes during that read are refused. The pin binds the manifest
+bytes used for inventory. This does not freeze the package across separate file observations.
+Package validation
+does not activate the candidate or qualify activation rollback, scheduled jobs or
+alert delivery. Activation follows the separately authorized deploy contract.
 
 ## OPERATIONAL — No-post runtime-skew simulation
 

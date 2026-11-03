@@ -1092,7 +1092,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
       const replayed = providerText(replacement.turnsSent[0]);
       expect(replayed).toContain('temporarily standing in for the primary model');
       expect(replayed).toContain('c19 rebind question');
-      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContain(failedReplayNotice);
       // The held head is re-bound in place: one FIFO entry, same turn and seq,
       // and the scope ref and completion other holders captured are kept.
       const contexts = lifecycle().perChatRuntimeTurnContexts.get(mapKey);
@@ -1121,8 +1121,8 @@ describe('deferred-turn admission (#3295 S2)', () => {
       await turnQueue.idle();
       await vi.waitFor(() => expect(status(seq)).toBe('complete'));
       expect(terminalRows(seq)).toEqual([{ attempt_kind: 'completed', attempt_failure_class: null }]);
-      expect(queue.enqueueResultText).toHaveBeenCalledWith(expect.stringContaining('c19 fallback answer'));
-      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      expect(queue.enqueueResultText).toHaveBeenCalledWith(expect.stringContaining('c19 fallback answer'), 'answer');
+      expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContain(failedReplayNotice);
       expect(replayedAlerts()).toBe(1);
       expect(lifecycle().runtimeTurnCoordinator.isRuntimeTurnContinuation(held)).toBe(false);
     });
@@ -1324,7 +1324,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
     function expectRefusedReplay(primary: SessionDouble, queue: QueueDouble): void {
       const replacement = sessionDoubles.find((candidate) => candidate !== primary);
       expect(replacement?.sendTurn).not.toHaveBeenCalled();
-      expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice);
+      expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice, 'status');
       expect(mockEmitAlertChecked).toHaveBeenCalledWith(
         expect.any(String),
         'runtime_provider_fallback_replay_failed',
@@ -1543,7 +1543,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
 
       replacement.failProviderTurn(new Error('c19 fallback provider exited mid-turn'));
 
-      await vi.waitFor(() => expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice));
+      await vi.waitFor(() => expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice, 'status'));
       await expect(heldCompletion.promise).resolves.toBeUndefined();
       await turnQueue.idle();
       await vi.waitFor(() => expect(status(seq)).toBe('failed'));
@@ -1608,7 +1608,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
         await vi.waitFor(() => expect(claim).toHaveBeenCalledOnce());
         // The failure path is parked on the claim; the user has not been told yet.
         expect(finalizeFailed).toHaveBeenCalledOnce();
-        expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+        expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContain(failedReplayNotice);
 
         // LID -> phone resolution lands inside that wait.
         runtime.handleJidAliasChanged(toConversationKey(lidJid), lidCanonicalJid, false);
@@ -1620,7 +1620,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
         // path finishes.
         expect(consumeHeldDeferral!()).toBe(true);
         await expect(finalizeFailed.mock.results[0]!.value).resolves.toBeUndefined();
-        expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice);
+        expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice, 'status');
         await expect(heldCompletion.promise).resolves.toBeUndefined();
         await turnQueue.idle();
         await vi.waitFor(() => expect(status(seq)).toBe('failed'));
@@ -1738,7 +1738,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
         const finalize = vi.spyOn(lifecycle().runtimeTurnCoordinator, 'finalizeRuntimeTurnContext');
         replacement.failProviderTurn(new Error('fallback provider exited mid-turn'));
         await vi.waitFor(() => expect(finalize).toHaveBeenCalled());
-        expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice);
+        expect(queue.enqueueText).toHaveBeenCalledWith(failedReplayNotice, 'status');
 
         await expectReleasedAcrossDeferredRekey({
           seq, held, queue, turnQueue, heldOutcome,
@@ -1816,7 +1816,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
       await vi.waitFor(() => expect(
         replacement.turnsSent.length > 0 || queue.enqueueText.mock.calls.some((call) => call[0] === failedReplayNotice),
       ).toBe(true));
-      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContain(failedReplayNotice);
       expect(replacement.sendTurn).toHaveBeenCalledOnce();
       // The held turn was re-bound under the live key, not re-admitted fresh
       // under the retired one.
@@ -1854,7 +1854,7 @@ describe('deferred-turn admission (#3295 S2)', () => {
         sessionDoubles.some((candidate) => candidate !== primary && candidate.turnsSent.length > 0)
         || queue.enqueueText.mock.calls.some((call) => call[0] === failedReplayNotice),
       ).toBe(true));
-      expect(queue.enqueueText).not.toHaveBeenCalledWith(failedReplayNotice);
+      expect(queue.enqueueText.mock.calls.map((c) => c[0])).not.toContain(failedReplayNotice);
       const replacement = sessionDoubles.find((candidate) => candidate !== primary)!;
       expect(replacement.sendTurn).toHaveBeenCalledOnce();
       expect((runtime as unknown as { chatSessions: Map<string, unknown> }).chatSessions.get(lidCanonicalJid))

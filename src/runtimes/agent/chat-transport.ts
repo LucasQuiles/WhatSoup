@@ -14,7 +14,7 @@
 import { createChildLogger } from '../../logger.ts';
 import type { Messenger } from '../../core/types.ts';
 import type { SessionManager } from './session.ts';
-import type { IOutboundQueue } from './outbound-queue.ts';
+import type { IOutboundQueue, OutboundMessageRole } from './outbound-queue.ts';
 import { OperationTracker, type ProgressEvent } from './operation-tracker.ts';
 import type { PerChatMcpSocketManager } from './per-chat-mcp-socket-manager.ts';
 import type { ExecutingSessionContext } from '../../mcp/types.ts';
@@ -200,7 +200,7 @@ export interface SendDirectOutcome {
   readonly messageId: string | null;
 }
 
-export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<SendDirectOutcome> {
+export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard = false): Promise<SendDirectOutcome> {
   if (bypassEchoGuard) {
     // Bypass queue entirely — direct send for admin responses
     try {
@@ -222,7 +222,7 @@ export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: st
     // Accepted = taken into queue. The actual send outcome is deferred to
     // the queue's own processing and is NOT observable here by design.
     // #2981 car-A.
-    queue.enqueueText(text);
+    queue.enqueueText(text, role);
     return { accepted: true, messageId: null };
   }
   try {
@@ -234,6 +234,6 @@ export async function sendDirectWithReceipt(port: ChatTransportPort, chatJid: st
   }
 }
 
-export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, bypassEchoGuard = false): Promise<boolean> {
-  return (await sendDirectWithReceipt(port, chatJid, text, bypassEchoGuard)).accepted;
+export async function sendDirect(port: ChatTransportPort, chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard = false): Promise<boolean> {
+  return (await sendDirectWithReceipt(port, chatJid, text, role, bypassEchoGuard)).accepted;
 }

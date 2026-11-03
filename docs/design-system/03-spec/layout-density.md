@@ -1,5 +1,7 @@
 # Layout & density — grid, surface usage, two-density model, target and reflow floors
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Sources: v2.html (locked), research-digest signals 1/2, seed-2 (24px target, 320px reflow),

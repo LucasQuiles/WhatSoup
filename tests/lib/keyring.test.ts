@@ -236,6 +236,8 @@ describe('keyring', () => {
         ['google/gemini-2.5-pro', 'google', 'GOOGLE_API_KEY'],
         ['fireworks-ai/accounts/fireworks/models/kimi-k2-instruct', 'fireworks-ai', 'FIREWORKS_API_KEY'],
         ['togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo', 'togetherai', 'TOGETHER_API_KEY'],
+        ['zai-coding-plan/synthetic-model', 'zai-coding-plan', 'ZHIPU_API_KEY'],
+        ['minimax-coding-plan/synthetic-model', 'minimax-coding-plan', 'MINIMAX_API_KEY'],
       ];
       for (const [model, service, envVar] of expected) {
         expect(resolveProviderKeyService('opencode-cli', model)).toBe(service);

@@ -155,7 +155,7 @@ function enqueueNoFallbackTerminalNotice(
     hasContinuation: false,
     bundle: null,
     formatClock: () => '',
-  }));
+  }), 'status');
 }
 
 function armingFailureLogMessage(reason: ProviderFallbackReason): string {
@@ -332,7 +332,7 @@ export function handleScopedRuntimeResult(
 // #3497: a scheduled turn's failure, fallback and handoff notices never reach
 // the chat, and never touch the chat's notice dedupe or pending handoff notice.
 const scheduled = args.scheduledTurn === true;
-const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text); };
+const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text, 'status'); };
 const wasSilentCompact = host.isSilentCompact(mapKey);
 const runtimeContext = !isSystemResult && mapKey !== undefined
   ? host.runtimeTurnCoordinator.runtimeTurnContext(mapKey)
@@ -365,7 +365,7 @@ if (config.nlRouting) {
     const flushActorJid = mapKey !== undefined ? host.pendingTurnActorJid.get(mapKey) : host.currentTurnReplayActorJid;
     const tail = host.flushRouteMarker(heldMarker, queue.targetChatJid, flushActorJid);
     if (tail) {
-      queue.enqueueStreamingText(tail);
+      queue.enqueueStreamingText(tail, 'answer');
       host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
       if (mapKey !== undefined) host.perChatTurnText.set(mapKey, (host.perChatTurnText.get(mapKey) ?? '') + tail);
     }
@@ -628,6 +628,7 @@ if (event.text && (!hasPendingPoll || terminalFailureDuringPoll)) {
     } else {
       const accepted = queue.enqueueResultText(
         scheduled ? event.text : host.withHandoffPrefix(queue.targetChatJid, event.text),
+        'answer',
       ) !== false;
       if (accepted) {
         host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe(mapKey);
@@ -904,7 +905,7 @@ export function handleProviderFailureResult(
   parseUsageLimitResetTime: (text: string) => Date | null,
 ): void {
 const { queue, session, providerText, turnHadToolWork, logChatJid, scheduled = false } = ctx;
-const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text); };
+const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text, 'status'); };
 const kind = wf.providerKind;
 // Defensive: dispatchProviderFailureResult already filters null-providerKind
 // (class-only) workflows out of the text path and routes them to the legacy
@@ -986,7 +987,7 @@ export function handleGlobalRuntimeResult(
 ): void {
   const { event, queue, tracker, extractUsageLimitResetTime } = args;
 const scheduled = args.scheduledTurn === true;
-const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text); };
+const notify = (text: string): void => { if (!scheduled) queue.enqueueText(text, 'status'); };
 const wasSilentCompact = host.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY);
 const runtimeContext = host.runtimeTurnCoordinator.runtimeTurnContext();
 const classifiedOutcome = host.runtimeTurnCoordinator.attemptOutcomeForResult(event);
@@ -1015,7 +1016,7 @@ if (config.nlRouting && host.currentTurnRouteMarkerHold !== null) {
     host.currentTurnReplayActorJid,
   );
   if (tail) {
-    queue.enqueueStreamingText(tail);
+    queue.enqueueStreamingText(tail, 'answer');
     host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();
     host.turnHadVisibleOutput = true;
     host.currentTurnAssistantText += tail;
@@ -1285,6 +1286,7 @@ if (event.text) {
     } else {
       const accepted = queue.enqueueResultText(
         scheduled ? event.text : host.withHandoffPrefix(queue.targetChatJid, event.text),
+        'answer',
       ) !== false;
       if (accepted) {
         host.runtimeTurnCoordinator.markRuntimeTurnReplayUnsafe();

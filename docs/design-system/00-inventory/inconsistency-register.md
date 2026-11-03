@@ -1,5 +1,7 @@
 # Inconsistency Register — ranked drift synthesis
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 Audit date: 2026-06-11 (branch `design/soup-rebrand`). This register synthesizes the other five inventory documents:
 `component-inventory.md`, `control-catalogue.md`, `ia-workflow-review.md`, `duplication-register.md`, `token-census.md` (all in `docs/design-system/00-inventory/`).
 

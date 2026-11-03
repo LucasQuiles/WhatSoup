@@ -73,13 +73,18 @@ interface AgentOptions {
   /** Provider-specific configuration overrides. */
   providerConfig?: Record<string, unknown>;
   /**
-   * Opt-in per-instance allowlist for the `ALLOW_M365_MUTATIONS` env var
-   * (#411). Only consulted when the `WHATSOUP_CONNECTOR_FAILCLOSED=1`
-   * env flag is set on the parent process; otherwise unconditional
-   * propagation runs and this field has no effect. See
-   * `docs/configuration.md` for the migration plan.
+   * Required alongside an account-bound m365Bridge before the runtime can
+   * grant its narrow M365 mutation exception. Without a bridge binding, this
+   * preserves the established child-environment behavior.
    */
   allowM365Mutations?: boolean;
+  m365Bridge?: {
+    tenantId: string;
+    accountId?: string;
+    accountEmail?: string;
+    origin: string;
+    profile: 'user-full-v1';
+  };
   /**
    * Capability-obligation replay activation (all-or-inert; default OFF).
    * Structurally validated at config load by

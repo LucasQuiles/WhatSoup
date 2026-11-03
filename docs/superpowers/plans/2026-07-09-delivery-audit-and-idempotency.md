@@ -1,5 +1,7 @@
 # Delivery Audit and Idempotency Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Migration slots 39 and 40 are already occupied; the current registry reaches 66. The numeric assertions and migration instructions below cannot be executed literally: allocate against `src/core/database.ts` and `src/core/database-schema-version.ts` when this work resumes. Preserve the content-free reconciliation schema, cascade/index requirements and scheduled delivery identity semantics. Twilio already maps uncertain post-handoff mutation failures to `SendAmbiguousError`, with pre-handoff failures remaining transient; verify the current adapter instead of restoring the narrower proposed snippet. Partial source coverage does not close the remaining idempotency work.
+
 **Status:** Pending implementation
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

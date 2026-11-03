@@ -4,6 +4,7 @@ import {
   validDeliveryCorroboratedSelectedOpsSql,
 } from './delivery-corroboration-sql.ts';
 import { allFromStatement } from '../lib/db-query.ts';
+import { ProbeErrorThrottle } from '../lib/probe-error-throttle.ts';
 import { CapabilityObligationStore } from './capability-obligation-store.ts';
 import { DeferredTurnStore } from './deferred-turn-store.ts';
 import type { CapabilityDecisionOutcome, CapabilityDecisionParams } from './capability-obligation-store.ts';
@@ -34,6 +35,7 @@ import { getImmediateTransactionRunner, withImmediateTransaction, withTransactio
 import {
   createRecoveryStats,
   DurabilityRecoveryEvidence,
+  NOT_SCHEDULED_TURN_LOSS_ROW_SQL,
   type RecoveryStats,
 } from './durability-recovery-evidence.ts';
 import { coerceInboundFailureClass } from './inbound-failure-class.ts';
@@ -158,6 +160,15 @@ export type {
   QuarantineCompletedDeliveryIdentityAgentSessionParams,
   QuarantineCompletedDeliveryIdentityCheckpointParams,
 } from './session-lifecycle-store.ts';
+
+/** Store supervisor counts plus the inbound-ledger loss count the engine adds. */
+export interface DurabilityTurnRecoveryCounts extends TurnRecoverySupervisorCounts {
+  /**
+   * DurabilityRecoveryEvidence.countScheduledTurnsLost (#3754); not a store
+   * count. Null when that diagnostic read failed.
+   */
+  scheduledTurnsLost?: number | null;
+}
 
 export interface CompletedDeliveryIdentityAdmissionHealth {
   unresolvedCount: number;
@@ -769,6 +780,7 @@ export class DurabilityEngine {
   private db: Database;
   private readonly statements: DurabilityStatements;
   private readonly recoveryEvidence: DurabilityRecoveryEvidence;
+  private readonly scheduledTurnsLostLog = new ProbeErrorThrottle();
   private readonly turnRecovery: TurnRecoveryStore;
   private readonly terminalRecordInboundCloser: TerminalRecordInboundCloser;
   /** D4 (capability-obligation replay): joined into C3 via applyDecisionWithinCallerTransaction. */
@@ -787,14 +799,20 @@ export class DurabilityEngine {
          )
          VALUES (?, ?, ?, ?, 'processing', COALESCE(datetime(?, 'unixepoch'), datetime('now')))`,
       ),
-      markTurnDone: prepare(`UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ?`),
+      // #3754: these three seq-keyed writers and markInboundSkipped leave a
+      // scheduled-turn loss row as recovery wrote it: the first terminal wins.
+      markTurnDone: prepare(
+        `UPDATE inbound_events SET processing_status = 'turn_done' WHERE seq = ? AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
+      ),
       markInboundComplete: prepare(
-        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
+        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?
+           AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       markInboundFailed: prepare(
         // terminal_reason stays exactly 'error' (external matcher contract); the
         // bounded, content-free failure_class column carries the driver split.
-        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?`,
+        `UPDATE inbound_events SET processing_status = 'failed', completed_at = datetime('now'), terminal_reason = 'error', failure_class = ? WHERE seq = ?
+           AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       selectInboundReclaimState: prepare(
         `SELECT processing_status, failure_class FROM inbound_events WHERE seq = ?`,
@@ -872,7 +890,8 @@ export class DurabilityEngine {
          LIMIT 1`,
       ),
       markInboundSkipped: prepare(
-        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?`,
+        `UPDATE inbound_events SET processing_status = 'complete', completed_at = datetime('now'), terminal_reason = ? WHERE seq = ?
+           AND ${NOT_SCHEDULED_TURN_LOSS_ROW_SQL}`,
       ),
       selectInboundStatus: prepare(
         `SELECT processing_status, conversation_key, chat_jid, message_id
@@ -2226,8 +2245,29 @@ export class DurabilityEngine {
     return this.turnRecovery.getNewestInboundSeqForConversation(conversationKey);
   }
 
-  getTurnRecoverySupervisorCounts(): TurnRecoverySupervisorCounts {
-    return this.turnRecovery.getTurnRecoverySupervisorCounts();
+  getTurnRecoverySupervisorCounts(): DurabilityTurnRecoveryCounts {
+    return {
+      ...this.turnRecovery.getTurnRecoverySupervisorCounts(),
+      scheduledTurnsLost: this.readScheduledTurnsLost(),
+    };
+  }
+
+  // A diagnostic count must not fail the health readers that carry it (the
+  // turn-recovery deadman, /health, the health-stats log), so a failed read
+  // reports null (#3754); the warning is throttled so a persistent fault logs
+  // O(log reads) lines, not one per read.
+  private readScheduledTurnsLost(): number | null {
+    try {
+      const count = this.recoveryEvidence.countScheduledTurnsLost();
+      this.scheduledTurnsLostLog.onSuccess('read');
+      return count;
+    } catch (err) {
+      const failures = this.scheduledTurnsLostLog.onFailure('read');
+      if (failures !== null) {
+        log.warn({ err, failures }, 'getTurnRecoverySupervisorCounts: scheduled-turns-lost count failed');
+      }
+      return null;
+    }
   }
 
   hasOutstandingTurnRecoveryForScope(

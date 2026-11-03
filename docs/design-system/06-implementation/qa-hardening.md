@@ -458,8 +458,17 @@ top-level manifest verdict is not `PASS`. Console warnings/errors, HTTP errors, 
 are summarized as non-blocking review signals because the mock dev-server path can emit expected
 backend-proxy noise; reviewers must still inspect them when accepting visual evidence.
 
-The contrast collector lives at `console/scripts/check-contrast-matrix.mjs` and writes
-`artifacts/soup-v3-follow-up/contrast-matrix.json`. It recomputes the binding token-pair rows from
+The contrast collector lives at `console/scripts/check-contrast-matrix.mjs`.
+`npm --prefix console run design:contrast` prints its JSON report without writing a file, including
+when invoked by the push, release, and CI validation chains. To save a report, invoke the collector
+directly from the repository root:
+
+```bash
+node console/scripts/check-contrast-matrix.mjs --out artifacts/soup-v3-follow-up/contrast-matrix.json
+```
+
+Passing `--out` to the npm command does not override its `--no-write` option.
+The collector recomputes the binding token-pair rows from
 `tokens.semantic.css`: ink on surfaces, accent foreground/background, focus ring, status/mode channel
 foregrounds on surfaces and own washes, plus any future `--provider-*-fg` and `--data-*-fg` /
 `--data-*-solid` tokens. Missing provider/data tokens are recorded as skipped discovery rows until the

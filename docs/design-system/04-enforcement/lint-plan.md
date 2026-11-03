@@ -1,10 +1,12 @@
 # Lint Plan — SOUP Design System v3 Enforcement (T7)
 
-Status: living enforcement registry, originally authorized by G2 (Option A conditional lock of
-"SOUP — v2 (Blend)", `docs/design-system/02-directions/decision-log.md`). Executable by a fresh
-implementation agent during driver phase P6 (enforcement), with early rules landing alongside P1/P2
-as noted per rule. Historical file:line citations were verified against the tree on 2026-06-11;
-later changelog entries record implementation deltas.
+Status: living enforcement registry, originally authorized by G2. Current
+enforcement ownership and the lifecycle table were reconciled against source
+at `59cc562bc` on 2026-10-06. The rule catalog preserves design rationale and
+entry-stage examples; its June occurrence counts and line citations are
+historical, not a current inventory. Section 6 and dated changelog entries are
+historical acceptance evidence. Current code and the scoped rule table take
+precedence for implemented behavior; unimplemented requirements remain open.
 
 ---
 
@@ -12,11 +14,12 @@ later changelog entries record implementation deltas.
 
 | Surface | Home | Mode |
 |---|---|---|
-| Design rules (TSX/TS) | `console/eslint.config.js` — flat config, `no-restricted-syntax` today (106 selectors: global set `console/eslint.config.js:76-584`, scheduled/groups ratchet `:586-656` scoped to the file list at `:689-702`) | error severity; this is the blocking wall |
-| Custom AST rules | NEW `console/eslint-rules/` local plugin (`index.mjs` exporting a `rules` map, registered in `console/eslint.config.js` via `plugins: { soup: soupPlugin }`). **Note:** no `eslint-rules/` directory exists in the repo today — the T7 brief's reference to an existing plugin is stale; P6 creates it. The existing config structure (`defineConfig` + per-file-list rule blocks, `console/eslint.config.js:658-707`) is the pattern to follow for scoping. |
-| CSS-file policy | Stylelint — **reference-only candidate** (synthesis-seed-4 precedent: custom rules, naming patterns, autofix, staged rollout). Not adopted now. Until adopted, CSS-side checks run as `rg` scripts (section 5) because `no-restricted-syntax` cannot see `console/src/index.css` (duplication-register DUP-01 "Guarded by lint? Unguarded — nothing inspects index.css"). |
-| Fitness registry | `scripts/lib/fitness/registry.ts` stays warn-only/registry-driven (taxonomy: `docs/architecture/fitness-taxonomy.md`). Design rules do NOT route through it — error-severity design rules live in `console/eslint.config.js` only. The registry may *mirror* design-debt counts for trend lines, never gate. |
-| CI/pre-push | `console/.husky/pre-commit` → `lint-staged` → `eslint --max-warnings 0` (`console/package.json:6-10`); root `.husky/pre-commit` runs the same when `console/src` TS/TSX is staged; root `.husky/pre-push` runs `scripts/pre-push-guard.ts`; `verify:release` runs `npm --prefix console ci` + `npm --prefix console run build` (root `package.json:51`). Section 5 adds the design-regression check suite to these hooks. |
+| TS/TSX selector policy | `console/eslint.config.js`, `console/eslint-rules/design-selectors.mjs` | Default config errors within its file scopes; later matching blocks must carry the full selector union |
+| Custom AST rules | `console/eslint-rules/index.mjs`, registered by the default config | Per-rule lifecycle below; shadow config separately mirrors rules at warn severity |
+| CSS policy | `console/scripts/design-regression.sh` and the token/burndown checks | Script-specific blocking set; Stylelint remains a proposal |
+| Architectural fitness | `scripts/lib/fitness/registry.ts` and `docs/architecture/fitness-taxonomy.md` | Guard-ring authority is separate from console design rules; the registry is not universally warn-only. Design rules do not gain enforcement merely by appearing in this registry. |
+| Verification | Root `verify:console-design` in `package.json`; console `design:*` scripts | Shared design chain; `scripts/push-gate.ts` and workflow files own current invocation wiring |
+| Staged lint | Root and console pre-commit hooks plus console `lint-staged` config | ESLint with `--max-warnings 0` on staged console TS/TSX |
 
 Layer ownership map (adopted from synthesis-seed-2; rules cite the layer they defend):
 
@@ -60,24 +63,24 @@ or removed.
 
 ### Per-rule lifecycle tracking table
 
-This table is the registry. P6 updates the State column in place; every change is a one-line diff.
+This table is the lifecycle registry consumed by the fixture guard. Update its rows when enforcement changes; retain every implemented or stub rule. Script-backed rows are grounded in `console/package.json`, not inferred from an absent ESLint plugin rule.
 
 | Rule id | State (current — see changelog) | Target | Owning phase | Notes |
 |---|---|---|---|---|
 | soup/no-brand-regression | shadow | global-error | P4 | flips to error the same PR as the P4 copy flip |
 | soup/no-channel-specific-copy | proposed | global-error | P4/G7 | flags generic visible "WhatsApp" copy after the multi-channel positioning lock; protocol/runtime prompts stay allowlisted |
-| soup/protected-identifiers | scoped-error | global-error | P1 | cheap, zero current violations — start strict |
-| soup/no-raw-button | scoped-error (M list) | scoped-error per dir | P2 | 24 raw buttons today (control-catalogue §1b) |
+| soup/protected-identifiers | global-error | keep | P1 | default config enables the rule console-wide |
+| soup/no-raw-button | global-error (outside primitives) | keep | P2 | Group S; primitive renderers remain exempt |
 | soup/no-raw-form-control | scoped-error (non-primitives) | scoped-error per dir | P2 | zero outside `components/primitives/**`; generated raw-form inventory remains the mechanical count authority |
-| soup/no-adhoc-modal | scoped-error (M list) | global-error | P2 | 11 surfaces to absorb (control-catalogue §9) |
+| soup/no-adhoc-modal | global-error (outside primitives) | keep | P2 | Group S; Modal owns the raw dialog/backdrop |
 | soup/no-legacy-tokens | scoped-error (primitives tier) | global-error | P2+ complete | enabled only after alias layer + primitives land |
 | soup/no-raw-color | scoped-error (already live) | global-error | P1 | exists as selectors `console/eslint.config.js:110-117,576-583`; port to soup/* + close template-literal gap. Hex-in-string selector tightened to CSS-color-valid lengths only (6/8 hex digits, or 3 hex digits containing an a–f letter); pure-decimal `#NNNN` runs (order/build numbers in copy, e.g. `#4921`) no longer false-flag — proof fixtures in `tests/console/design-lints.test.ts`. |
 | soup/no-untokenized-values | scoped-error (already live) | global-error | P1 | exists `console/eslint.config.js:157-191,227-229`; close 3 evasion shapes (DUP-08) |
 | soup/no-transition-all | global-error (already live) | keep | P5 | `console/eslint.config.js:126-128` |
-| soup/no-infinite-animation | shadow | global-error | P5 | 4 current infinite animations to disposition |
+| soup/no-infinite-animation | global-error (outside primitives, TSX selector) | keep | P5 | CSS check 13 permits only `ambient-disc`; old breathe/shimmer/typing loops are retired |
 | soup/no-focus-suppression | scoped-error (console-wide) | global-error | P2 | 0 TSX `outline-none` occurrences today; composer carve-outs retired |
 | soup/focus-visible-required | shadow | scoped-error (primitives) | P2 | primitives-first; screens inherit |
-| soup/modal-must-restore-focus | proposed | scoped-error (Modal) | P2 | enforceable once Modal primitive exists |
+| soup/modal-must-restore-focus | shadow stub | scoped-error (Modal) | P2 | No firing implementation claimed; Modal behavior also has tests |
 | soup/motion-needs-reduced-variant | shadow | global-error | P5 | 1 of ~6 animation families has a reduced variant today |
 | soup/no-literal-status-colors | global-error | global-error | P2 | Implemented 2026-06-14; flags duplicated status-keyed color maps/switches outside shared helpers |
 | soup/provider-palette-only | blocking script | scoped-error / blocking script | P4/G5 | provider identity must consume `--provider-*`; no status/mode/data/literal colours |
@@ -95,7 +98,7 @@ This table is the registry. P6 updates the State column in place; every change i
 | soup/no-raw-viewport-js | package-script fail-on-rule | scoped-error / blocking script | P4/G7 | viewport branching must route through `useBreakpoint` / `useViewportPlacement`, not local `window.innerWidth` or `matchMedia` reads |
 | soup/no-duplicate-shell | shadow (advisory) | warn-on-changed-files | P2 | heuristic; routes to duplication-register, never error |
 | soup/theme-parity (script) | CI-blocking script | CI-blocking script | P1 | not an ESLint rule; section 5 |
-| soup/icon-family | scoped-error | global-error | P1 | zero current violations (lucide-react only) |
+| soup/icon-family | global-error | keep | P1 | default config enables the rule console-wide (lucide-react only) |
 | soup/no-utility-smell | scoped-error (primitives tier) | warn-on-changed-files | P2 | G2 mandatory item 3 tripwire |
 | soup/no-format-bypass | global-error | global-error | P3 | date/time/count formatting must go through `console/src/lib` helpers |
 | soup/no-inline-dismiss-handler | global-error | global-error | P2 | document-level Escape dismissal must go through `useDismissable` |
@@ -306,9 +309,9 @@ cannot express the check).
   anyway) and any generated token TS module the P1 work introduces.
 - **Violation / valid:** `color: '#fc8181'` → `color: 'var(--crit)'` (v2 vocabulary).
 - **FP strategy:** mature — these selectors have been live with `--max-warnings 0`; known
-  legitimate escapes are documented block-scoped lint-suppression directives with reason + expiry
-  (`console/src/lib/chart-utils.ts:10,:14`; `console/src/components/QrDisplay.tsx:17`), which
-  migrate to the waiver registry (section 4).
+  legitimate escapes must carry the active waiver ID from the registry in section 4.
+  The old QrDisplay/raw-color waivers are retired; do not recreate historical
+  suppressions from the original catalog's line anchors.
 - **Autofix:** partial (exact-value → token table lookup, like the cheat sheet at
   `console/eslint.config.js:12-74`). **Phase:** P1 (re-pointed at the new token names). **Entry:**
   scoped-error (already live).
@@ -365,16 +368,17 @@ cannot express the check).
 
 - **Purpose:** the locked motion strategy allows exactly one ambient animation budget: ok-breathing
   (decision-log G2: "single ambient budget on ok-breathing, crit-blink rejected"; ambient band
-  1200-2400ms per synthesis-seed-3). Current infinite animations in CSS:
+  1200-2400ms per synthesis-seed-3). Historical infinite animations at catalog creation:
   `console/src/index.css:308` (`breathe-ring 3s … infinite`), `:328` (`typing-bounce 1.2s …
   infinite`), `:332` (`breathe 3s … infinite`), `:730` (`shimmer 1.5s infinite`).
 - **Mechanism:** TSX side — selector `Property[key.name="animation"][value.value=/infinite/]` plus
   `Literal[value=/animate-(breathe|shimmer|spin|pulse)/]` allowlist check; CSS side — section 5
   `rg` for `infinite` with an allowlist file listing the sanctioned token (the ok-breathing
   keyframe name fixed by `03-spec/motion.md`).
-- **Scope:** all TSX + CSS. **Exemptions:** the single sanctioned ok-breathing token; the loading
-  shimmer and typing indicator need explicit spec disposition at P5 (either absorbed into the
-  sanctioned set with named tokens or replaced) — until then they hold waivers with expiry.
+- **Scope:** all TSX + CSS, subject to the current lifecycle table's primitive exemption.
+  **Current CSS exemption:** `ambient-disc` only. The loading shimmer and typing
+  loops and their waivers were retired at T5 b-11; the original P5 waiver proposal
+  is historical and does not authorize either loop.
 - **Violation / valid:** new `animation: pulse 1s infinite` → use the sanctioned ambient token or
   no ambient motion.
 - **FP strategy:** allowlist by keyframe name, not by duration. **Autofix:** no. **Phase:** P5.
@@ -435,7 +439,7 @@ cannot express the check).
   P2 acceptance): trap cycles Tab, Escape closes one layer only (fixes the GroupDetailModal +
   ConfirmDialog double-close, ia-workflow-review §5.1), focus restores to invoker.
 - **Violation / valid:** Modal without restore marker → implement per `03-spec/interaction.md`.
-- **FP strategy:** n/a (presence check). **Autofix:** no. **Phase:** P2. **Entry:** proposed.
+- **FP strategy:** n/a (presence check). **Autofix:** no. **Phase:** P2. **Entry:** shadow stub; the proposed firing behavior is not implemented.
 
 ### soup/motion-needs-reduced-variant
 
@@ -779,12 +783,11 @@ cannot express the check).
   key handling for non-dismiss purposes (e.g. list navigation) compares other keys and never fires.
 - **Autofix:** no. **Phase:** P2 (lands with the hook). **Entry:** global-error.
 
-Catalog count: 22 rules (20 ESLint-side: 18 soup/* AST/selector rules + 2 presence-check custom
-rules; 2 script-side: theme-parity, motion-reduced CSS pass).
+The catalog grew after T7. The lifecycle table preserves every rule identity; `check-design-lint-fixtures.mjs` derives the implemented/stub inventory from source. Use that inventory instead of the original 22-rule planning count.
 
 ## 4. Waiver / exception policy
 
-Adopted verbatim from synthesis-seed-2 (5 mandatory fields) and extended:
+The original five-field policy below remains the minimum rationale. The implemented registry validator requires all twelve fields listed after it.
 
 Every waiver MUST carry:
 
@@ -796,7 +799,11 @@ Every waiver MUST carry:
 5. **replacement plan** — the concrete change that retires the waiver
 
 Plus two qualifiers: **safer-alternative-considered** (one line naming the alternative and why it
-was rejected) and **status: temporary | permanent**. Permanent waivers are exceptional and require
+was rejected) and **status: temporary | permanent**. The complete machine schema is
+`id`, `rule`, `owner`, `reason`, `scope`, `expiry`, `replacement_plan`,
+`safer_alternative_considered`, `status`, `expiration_phase`, `cleanup_trigger`,
+and `user_approval_required` (`console/scripts/check-waiver-sync.mjs`).
+Permanent waivers are exceptional and require
 the new-primitive/spec-change route (cutover plan §7) — "no permanent waivers" is the default
 posture; a permanent entry must cite the spec section that sanctions it.
 
@@ -807,61 +814,55 @@ Rules of engagement:
   embryo of this convention — existing block-scoped suppressions carry reason + expiry inline
   (`console/src/lib/chart-utils.ts:10` "recharts margin accepts raw pixel offsets … expires
   2026-12-31"; `console/src/components/QrDisplay.tsx:17` "margin:2 is QRCode library option …
-  expires 2026-12-31"). P6 migrates these to registry entries WVR-001/WVR-002/WVR-003.
+  expires 2026-12-31"). Current entries and retirements live in `console/eslint-waivers.yaml`; do not recreate retired entries from these historical examples.
 - The check-suite script greps for lint-suppression directives missing a `waiver:` tag and fails.
 - Documentation location: registry file below; the inline tag is a pointer, never the record.
 
 Registry file: `console/eslint-waivers.yaml` (YAML, one document, schema-checked by the suite):
 
-```yaml
-# console/eslint-waivers.yaml
-waivers:
-  - id: WVR-001
-    rule: soup/no-untokenized-values
-    owner: console-maintainer
-    reason: recharts margin prop takes raw SVG pixel offsets, not CSS lengths
-    scope:
-      - console/src/lib/chart-utils.ts
-    expiry: 2026-12-31
-    replacement_plan: wrap recharts margins in a CHART_MARGIN token adapter at P3
-    safer_alternative_considered: CSS-var indirection — rejected, recharts reads numbers pre-render
-    status: temporary
-  - id: WVR-002
-    rule: soup/no-untokenized-values
-    owner: console-maintainer
-    reason: QRCode library margin option counts cells, not px
-    scope:
-      - console/src/components/QrDisplay.tsx
-    expiry: 2026-12-31
-    replacement_plan: none needed if rule gains an option-object exemption at P6
-    safer_alternative_considered: none exists — third-party numeric API
-    status: temporary
-```
+Use `console/eslint-waivers.yaml` as the sole entry store instead of copying a
+second registry here. WVR-001 retains the Recharts numeric-margin rationale;
+WVR-002 records the exceptional permanent third-party numeric API waiver for
+QRCode cell margins. Its review date and cleanup trigger still apply. New
+entries must include all twelve fields and pass the registry-sync check.
+
 
 ## 5. Design-regression check suite
 
-Greppable checks runnable locally and in CI, packaged as `console/scripts/design-regression.sh`
-(P6). Each check prints matches and exits nonzero on unexpected hits. Exact patterns (rg, run from
-repo root):
+Run `npm --prefix console run design:regression`. The executable owner is
+`console/scripts/design-regression.sh`; use its patterns and waiver handling
+rather than independent copied `rg` commands. At this audit revision the
+blocking set is `1 2 6 8 10 11 12 13 14 15 16 17 19` (13 checks).
 
-| # | Check | Command | Expectation |
-|---|---|---|---|
-| 1 | Raw hex colors in TSX/TS | `rg -n "#[0-9a-fA-F]{3,8}\b" console/src --type-add 'tsx:*.tsx' -t ts -t tsx` | only waivered lines |
-| 2 | Raw rgb()/hsl() in TSX + CSS semantic tier | `rg -n "rgba?\(|hsla?\(" console/src/components console/src/pages console/src/lib` | zero after P1 (primitive tier file exempt) |
-| 3 | Legacy token refs (post-P2 gate) | `rg -n "var\(--color-[dt][0-9]\)|var\(--b[1-4]\)" console/src` | zero at P2-complete |
-| 4 | Legacy utilities (post-P2 gate) | `rg -n "\b(bg-d[0-6]|text-t[1-5])\b" console/src` | zero at P2-complete |
-| 5 | WhatSoup in UI copy | `rg -n "WhatSoup" console/src --glob '!**/*.test.*'` then filter to non-comment, non-contract lines via the script's allowlist (contract list from soup/protected-identifiers) | only EXEMPT-PROTECTED sites after P4 |
-| 6 | Split-wordmark evasion | `rg -n -U ">What<.{0,80}>Soup<" console/src` | zero after P4 |
-| 7 | Soup Kitchen label | `rg -n "Soup Kitchen" console/src docs/console-guide.md` | zero after P4 (vocabulary: Fleet) |
-| 7a | Channel-specific generic copy | `rg -n "WhatsApp" console/src console/index.html docs/console-guide.md` then filter to protected runtime/prompt contexts via the `soup/no-channel-specific-copy` allowlist | only EXEMPT-PROTECTED protocol/runtime/setup-prompt contexts after G7 |
-| 8 | index.html title | `rg -n "<title>" console/index.html` | equals the P4-specced title |
-| 9 | Theme parity | `node console/scripts/check-theme-parity.mjs` | both theme scopes define identical semantic-token name sets |
-| 10 | Protected contracts still present | `rg -c "whatsoup:" console/src/lib/preferences.ts && rg -c "/run/whatsoup/" console/src/mock-data.ts && rg -c "whatsoup/instances" console/src/lib/agent-cwd.ts` | each count >= 1 (presence check) |
-| 11 | Undocumented variants / utility smell | `rg -n "\b[wh]-\[(?!var\()" console/src --pcre2` and `rg -n "rounded-\[(?!var\()" console/src --pcre2` | only waivered |
-| 12 | Focus suppression | `rg -n "outline-none" console/src` minus lines also matching `focus-visible:` | zero after P2 |
-| 13 | Infinite animation allowlist | `rg -n "infinite" console/src/index.css` (and successor token/component CSS) | only the sanctioned ok-breathing + waivered shimmer/typing until P5 disposition |
-| 14 | Expired waivers | script compares `expiry:` dates in `console/eslint-waivers.yaml` to today | none expired |
-| 15 | Lint-suppression waiver registry sync | `node console/scripts/check-waiver-sync.mjs` checks TS/TSX lint-suppression directives for registered `waiver:WVR-*` tags and verifies registry scopes point at the tagged source file | zero untagged suppressions, unknown source WVR ids, or stale TS/TSX registry scopes |
+| # | Check | Current gate |
+|---|---|---|
+| 1 | Raw TS/TSX hex colors, color-context aware | Blocking |
+| 2 | Raw rgb/hsl values | Blocking |
+| 3 | Legacy token references | Report-only |
+| 4 | Legacy utility classes | Report-only |
+| 5 | User-facing WhatSoup copy, with protected contexts | Report-only |
+| 6 | Split-wordmark evasion | Blocking |
+| 7 | Soup Kitchen label | Report-only |
+| 8 | Exact `<title>SOUP Console</title>` | Blocking |
+| 9 | Theme parity | Report-only in this script; standalone parity is in the shared chain |
+| 10 | Protected protocol identifiers remain present | Blocking |
+| 11 | Digit-led arbitrary `w-[N]`, `h-[N]`, and `rounded-[N]` utility values | Blocking |
+| 12 | Focus suppression without replacement | Blocking |
+| 13 | CSS infinite animation names: `ambient-disc` only | Blocking |
+| 14 | Expired waivers | Blocking |
+| 15 | Suppression/waiver registry synchronization | Blocking |
+| 16 | Retired fixed table/log lane variables | Blocking |
+| 17 | Raw component-tier CSS colors | Blocking |
+| 18 | Legacy aliases in the primitive tier | Report-only |
+| 19 | Undefined component-tier CSS variables without fallback | Blocking |
+| 20 | Duplicate cross-tier custom-property definitions | Report-only |
+
+The original proposed check 7a (generic channel-specific copy) remains a
+requirement in `soup/no-channel-specific-copy`; it is not a separately numbered
+implemented check in this script. The selector's old "ok-breathing" diagnostic
+wording is stale; the executable CSS allowlist and motion contract permit only
+`ambient-disc`. Preserve the infinite-animation prohibition when correcting
+that diagnostic in a code change.
 
 Each rule must also carry either a negative fixture or a documented negative example before it moves
 to `scoped-error`. The required trap list is maintained in
@@ -879,14 +880,15 @@ Integration points:
   implemented `soup/*` rules keep true-positive/false-positive fixtures and, when promoted, an
   error-severity probe. It is a promotion gate and must pass in any packet that adds, promotes,
   removes, or rewires a `soup/*` rule, selector, or lint-plan lifecycle row.
-- **Pre-push (existing):** root `.husky/pre-push` → `scripts/pre-push-guard.ts`. P6 adds
-  `bash console/scripts/design-regression.sh` invocation gated to pushes touching `console/`
-  (mirror of the staged-files gating in root pre-commit).
-- **Branch verify (existing):** `npm run verify:push:branch` (root `package.json:50`) gains the
-  same script call at P6; `verify:release` (`:51`) already runs `npm --prefix console ci` +
-  `npm --prefix console run build` and inherits the suite via the pre-push path.
+- **Shared design chain:** `npm run verify:console-design` is composed by the
+  branch/release verification and CI paths. `package.json`, `scripts/push-gate.ts`,
+  and workflow source own its exact commands; changes must pass
+  `guard:safeguard-diagnostics` rather than relying on the original P6 wiring plan.
 
 ## 6. Enforcement readiness scorecard
+
+**Historical June 2026 scorecard:** the grades below record the T7 baseline and
+P6 targets, not the current implementation or a fresh pass result.
 
 Grades: A (enforced + clean) / B (mechanism exists, partial adoption) / C (documented intent, no
 mechanism) / D (neither). "Current" graded against the audited tree; "P6 must achieve" is the exit
@@ -944,7 +946,7 @@ landed `ba4ed643`):
 - **Design-regression suite promotion state**: the section-5 suite has grown 15→16→20 checks
   (checks 1+8 made meaningful `db165001`; CSS tier-boundary checks 17–20 added `64332ce8`).
   Blocking set live in `design-regression.sh`: `EXIT_ON_FAIL=(1 2 6 8 10 11 12 13 14 15 16 17 19)` —
-  twelve checks fail the run; check 12 promoted after the final focus-suppression carve-out was
+  thirteen checks fail the run; check 12 promoted after the final focus-suppression carve-out was
   removed, check 15 promoted after the dead `useExitPresence` suppression was removed, and check 17
   promoted after `.c-kpi-hover` moved to `--shadow-hover` and `raw-color-css` ratcheted to zero.
   Check 19 promoted after dangling no-fallback CSS `var()` refs reached zero; undefined
@@ -1001,3 +1003,9 @@ Changelog: 2026-08-02 — `tests/scripts/design-lint-fixtures.test.ts` migrated 
 from `tests/helpers/tmp-dir.ts` (#2205 completion). No rule or selector changes — the test
 fixture harness was the last holdout using inline tmpdir setup/teardown boilerplate; the
 fixture probes, fixture content, and `check-design-lint-fixtures.mjs` contract are unchanged.
+
+Changelog: 2026-10-06 — documentation reconciled at `59cc562bc`: current lifecycle
+states, the 13-check blocking set, shared verification wiring and the 12-field
+waiver contract now point to their executable owners. Historical catalog examples
+remain design evidence. No lint rule, selector, waiver or enforcement setting was
+changed by this documentation audit.

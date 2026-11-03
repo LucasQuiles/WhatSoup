@@ -1,5 +1,7 @@
 # Control Catalogue — Form & Interactive Control Variant Matrix
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 Design-system audit of the WhatSoup console (`console/src`). Every claim carries repo-relative
 `file:line` evidence. Counts are exact-token greps over `console/src/**/*.tsx` (word-boundary
 matching, so `c-btn` does not double-count `c-btn-primary`). Line numbers verified against the

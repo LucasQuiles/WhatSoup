@@ -1,5 +1,7 @@
 # Python Deploy Redaction SSOT Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The Implementation Reconciliation section owns the landed design. Tasks 2–4 below preserve earlier proposed signatures and guard snippets; do not copy them over `deploy/scripts/lib/bot_errors_redaction.py` or its current regression tests. Preserve wrapper names, script-specific markers, credential-path redaction and the false-negative closure described in the reconciliation.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace divergent BOT ERRORS Python deploy-script redaction regex copies with one manifest-tracked redaction module and proof that every deploy consumer redacts the same secret fixtures.

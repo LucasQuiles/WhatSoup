@@ -21,6 +21,7 @@
     "deploy/scripts/bot-errors-sentinel.py"
   ],
   "cooperating_scripts": [
+    "deploy/scripts/bot-errors-credential-ack.py",
     "deploy/scripts/bot-errors-gui-session-monitor.py",
     "deploy/scripts/bot-errors-maintenance.py",
     "deploy/scripts/bot-errors-tree-provenance.py",
@@ -54,6 +55,24 @@
       "result_policy": "explicit_advance_check",
       "result_consumer": "persist_controller_log_health",
       "fault_test_ids": ["diagnostic.serialization", "diagnostic.result-inspection"]
+    },
+    {
+      "site_id": "collector-controller-log",
+      "script": "deploy/scripts/bot-errors-collector.py",
+      "function": "append_collector_log_record",
+      "logical_publication": "collector.controller_log",
+      "kind": "diagnostic_jsonl_append",
+      "operation_identity_source": "bounded_jsonl.record_sha256.evidence_only.v1",
+      "result_policy": "require_bounded_jsonl_commit",
+      "result_consumer": "append_collector_log_record",
+      "fault_test_ids": [
+        "jsonl.serialization",
+        "jsonl.lock-concurrency",
+        "jsonl.retention",
+        "jsonl.post-replace-unproven",
+        "jsonl.unsafe-entry",
+        "jsonl.adapter"
+      ]
     },
     {
       "site_id": "collector-state",
@@ -1134,6 +1153,17 @@
       "operation_identity_source": "durable_json.operation_id.v1",
       "result_policy": "require_advance",
       "result_consumer": "cmd_close",
+      "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
+    },
+    {
+      "site_id": "credential-ack-write-state",
+      "script": "deploy/scripts/bot-errors-credential-ack.py",
+      "function": "acknowledge",
+      "logical_publication": "credential_ack.write_state",
+      "kind": "state_replace_expected",
+      "operation_identity_source": "durable_json.operation_id.v1",
+      "result_policy": "require_advance",
+      "result_consumer": "acknowledge",
       "fault_test_ids": ["state.serialization", "state.predecessor-reconcile", "state.no-advance-unproven"]
     },
     {

@@ -28,14 +28,14 @@ export class ControlQueue implements IOutboundQueue {
 
   // ─── IOutboundQueue ──────────────────────────────────────────────────────
 
-  enqueueText(text: string, _role: OutboundMessageRole = 'answer'): void {
+  enqueueText(text: string, _role: OutboundMessageRole): void {
     this.log.push(text);
   }
 
   /** No-op aggregation — control sessions buffer all text via enqueueText. */
   enqueueStreamingText(
     text: string,
-    _role: OutboundMessageRole = 'answer',
+    _role: OutboundMessageRole,
     onCommit?: () => void,
   ): void {
     this.log.push(text);
@@ -50,7 +50,7 @@ export class ControlQueue implements IOutboundQueue {
     // intentional no-op: control sessions preserve their local transcript
   }
 
-  enqueueResultText(text: string, _role: OutboundMessageRole = 'answer'): boolean {
+  enqueueResultText(text: string, _role: OutboundMessageRole): boolean {
     if (text.trim() === '') return false;
     this.log.push(text);
     return true;

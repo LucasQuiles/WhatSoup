@@ -100,6 +100,18 @@ describe('platform', () => {
       expect(plist).toContain('stderr.log');
     });
 
+    it('turns the duplicate stdout log sink off so stdout.log stays bounded (#3704)', () => {
+      const plist = buildPlist('myapp');
+      // Nothing rotates StandardOutPath under launchd; the rolling whatsoup.log
+      // is the structured sink, so the logger must not write a second copy.
+      expect(plist).toContain([
+        '    <key>WHATSOUP_LOG_STDOUT_SINK</key>',
+        '    <string>off</string>',
+      ].join('\n'));
+      // Crash output still has somewhere to go.
+      expect(plist).toContain('<key>StandardErrorPath</key>');
+    });
+
     it('sets WorkingDirectory to the deterministic reviewed repository root', () => {
       const plist = buildPlist('working-directory');
       expect(plist).toContain([

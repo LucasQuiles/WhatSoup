@@ -42,6 +42,7 @@ CREATE TABLE producers (
   prev_expires_at TEXT,
   enrollment_secret_hash TEXT,              -- single-use, hashed at rest
   enrollment_secret_expires_at TEXT,        -- default now+10min, hard max 30min
+  enrollment_mismatches INTEGER NOT NULL DEFAULT 0, -- implemented mismatch budget
   created_at TEXT NOT NULL
 ) STRICT
 ```
@@ -50,6 +51,8 @@ CREATE TABLE producers (
 
 - `register(input, now)` → creates the row (status `enabled`) + returns the one-time plaintext enrollment secret (32 random bytes, base64url). Re-registering an existing `producer_id` is a conflict.
 - `exchangeEnrollmentSecret(producerId, secret, now)` → verifies hash + expiry + unused; mints the producer credential (plaintext returned once, sha256 stored), clears the enrollment secret. Single-use: any outcome consumes it.
+
+  **Implementation gap, source `59cc562bc` (2026-10-06):** `src/fleet/incidents/producers.ts` clears the secret on success, expiry, or the third mismatched attempt. The first two mismatches increment `enrollment_mismatches` and leave it active. This differs from the original "any outcome consumes it" requirement above; retain that requirement until the owner accepts the bounded-mismatch policy or the implementation is changed. The schema field shown here records the implemented state and does not settle that policy decision. External failures must still avoid disclosing the failed check.
 - `rotateCredential(producerId, currentCredential, now)` → new credential; the old hash moves to `prev_credential_hash` with `prev_expires_at = now + overlap` (default 24 h).
 - `revoke(producerId)` → status `revoked`, credential hashes cleared.
 - `authenticate(bearer, now)` → sha256(bearer) matched against live hash (or prev within overlap) of an `enabled`, unexpired producer → `AuthenticatedProducer { producerId, producerDomainId, allowedKinds, allowedConditionClasses, allowedSubjects }`; every failure mode returns the same `null` (the HTTP layer answers 401 without disclosing which check failed).

@@ -337,8 +337,10 @@ Implementation follows test-first behavior changes.
 - Core health tests prove healthy/no debt, healthy/retained debt,
   degraded/blocking debt, mixed operational failure plus debt, and unreadable
   fail-closed behavior.
-- Same-process latch test proves degraded -> fully evidenced healthy recovery
-  without restart and refuses to clear on missing evidence.
+- Same-process tests prove that directly reprobed debt reasons report current
+  blocking/unreadable evidence and return healthy when that evidence is repaired,
+  without a restart or a recovery-proof latch state machine. Unrelated latched
+  reasons still require their own release proof.
 - Privacy tests reject identifiers and content from every new field.
 
 ### Consumer contract tests
@@ -394,6 +396,9 @@ rollback.
   and a distinct non-outage alert lifecycle.
 - Corroborated historical delivery evidence is never replayed and is not
   rewritten to manufacture a healthy result.
-- The in-process degradation latch can clear only on explicit complete proof.
+- Debt reasons in `DIRECTLY_REPROBED_STATUS_REASONS` never arm the in-process
+  degradation latch; each poll reflects their current evidence. Other latch
+  reasons retain their existing proof requirements, as described in the
+  September 25 supersession note above.
 - The PR is based on current main, documented, self-reviewed, locally verified,
   and reviewed before merge.

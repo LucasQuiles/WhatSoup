@@ -29,7 +29,7 @@ from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
 )
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import configured_machine, event_machine, new_event_fields
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.bot_errors_roster import RosterError, load_roster  # noqa: E402
 from lib.fleet_config import (  # noqa: E402
@@ -683,7 +683,7 @@ def outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(current),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-heartbeat-watchdog",
         "source": "heartbeat-watchdog",
@@ -1222,6 +1222,21 @@ def local_daily_health_hosts() -> list[str]:
     if "BOT_ERRORS_LOCAL_DAILY_HEALTH_HOSTS" in os.environ:
         return [part.strip() for part in os.environ["BOT_ERRORS_LOCAL_DAILY_HEALTH_HOSTS"].split(",") if part.strip()]
     return [canonical_local_host()]
+
+
+def daily_health_source_host(host: str) -> str:
+    """Return the name the ``daily_health:<host>`` problem key carries.
+
+    That key becomes the event ``alertSource`` and so part of the incident key.
+    This host's lookup name follows the live hostname, which can change, so a
+    configured machine name replaces it in the key: the alert and its clear
+    keep one key across a rename. Unset, and for every other host, the key
+    keeps the lookup name. The ledger, the event scan and the tracked profile
+    are still looked up by the lookup name.
+    """
+    if host == canonical_local_host():
+        return configured_machine() or host
+    return host
 
 
 def tracked_health_profile() -> Path:
@@ -3021,7 +3036,7 @@ def collect_problems(
             scan = daily_health_scan()
             for host in hosts:
                 age, detail = daily_health_age(host, scan=scan)
-                key = f"daily_health:{host}"
+                key = f"daily_health:{daily_health_source_host(host)}"
                 if age is None or age > args.max_daily_health_age:
                     collector_context = collector_reachability_evidence(host)
                     problems[key] = (

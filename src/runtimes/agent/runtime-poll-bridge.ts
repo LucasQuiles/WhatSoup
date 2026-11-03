@@ -23,7 +23,7 @@ import {
 import type { ConnectionManager } from '../../transport/connection.ts';
 import { jidNormalizedUser } from '@whiskeysockets/baileys';
 import { createChildLogger } from '../../logger.ts';
-import type { IOutboundQueue } from './outbound-queue.ts';
+import type { IOutboundQueue, OutboundMessageRole } from './outbound-queue.ts';
 import type { QueuedDecisionConsumer } from './pending-poll-health.ts';
 import type { PendingPollStore } from './pending-poll-store.ts';
 import type { PendingPollPersistence } from './pending-poll-persistence.ts';
@@ -91,7 +91,7 @@ export interface RuntimePollBridgePort {
     operation: () => Promise<T>,
   ): Promise<T>;
   getQueueForChat(chatJid: string, mapKey?: string): IOutboundQueue | null;
-  sendDirect(chatJid: string, text: string): void;
+  sendDirect(chatJid: string, text: string, role: OutboundMessageRole): void;
   deletePendingPollQuestions(mapKey: string): void;
   fetchGroupAdminJids(chatJid: string): Promise<Set<string> | null>;
   markSystemTurn(
@@ -155,6 +155,7 @@ export class RuntimePollBridgeCoordinator {
     this.host.sendDirect(
       pending.chatJid,
       'I received your poll answer, but could not continue it safely. Please send your answer again.',
+      'status',
     );
     log.error(
       { err: error, mapKey, chatJid: pending.chatJid },
@@ -339,6 +340,8 @@ export class RuntimePollBridgeCoordinator {
     const audience = this.resolveSendAudience(pending.chatJid, isGroupJid(pending.chatJid));
     const unanswered = unansweredPollQuestions(pending);
     unanswered.forEach(({ question }, fallbackIndex) => {
+      // A timer-driven resend lands in whichever turn owns the queue's evidence
+      // now, so it is a status op even though the agent wrote the question.
       this.host.sendDirect(
         pending.chatJid,
         formatTextFallbackQuestion(
@@ -347,6 +350,7 @@ export class RuntimePollBridgeCoordinator {
           undefined,
           audience,
         ),
+        'status',
       );
     });
   }
@@ -517,7 +521,7 @@ export class RuntimePollBridgeCoordinator {
     if (!pending || pending !== expectedPending) return;
 
     if (unansweredPollQuestions(pending).length > 0) {
-      this.host.sendDirect(pending.chatJid, 'This decision has expired — please re-trigger when ready.');
+      this.host.sendDirect(pending.chatJid, 'This decision has expired — please re-trigger when ready.', 'status');
     }
     log.warn({ mapKey, chatJid: pending.chatJid }, 'AskUserQuestion poll hard-expired and was cleared');
     this.host.deletePendingPollQuestions(mapKey);
@@ -711,7 +715,7 @@ export class RuntimePollBridgeCoordinator {
         const selectableCount = q.multiSelect ? q.options.length : 1;
 
         if (formatted.followUpText) {
-          queue.enqueueText(formatted.followUpText);
+          queue.enqueueText(formatted.followUpText, 'answer');
           // Long option details should arrive before the poll so the user can read
           // context first instead of scrolling back after the tap target appears.
           try {
@@ -767,7 +771,7 @@ export class RuntimePollBridgeCoordinator {
       for (const { index, question: q } of formattedQuestions) {
         queue.enqueueText(formatTextFallbackQuestion(q, undefined, {
           includeDescriptions: !detailFlushedQuestionIndexes.has(index),
-        }, pollAudience));
+        }, pollAudience), 'answer');
       }
     }
 

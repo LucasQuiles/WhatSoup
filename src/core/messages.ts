@@ -179,6 +179,37 @@ export function getRecentMessages(db: Database, conversationKey: string, limit: 
   return rows.map(rowToStoredMessage).reverse();
 }
 
+/** Project recent text only when the complete window fits the caller's byte budget. */
+export function getRecentMessageText(
+  db: Database, conversationKey: string, limit: number, maxBytes: number,
+): Pick<StoredMessage, 'content' | 'senderName' | 'isFromMe'>[] {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new Error('Recent message text requires positive integer limits');
+  }
+  // One statement binds the size decision and projection to the same snapshot.
+  // BLOB length counts UTF-8 bytes, including bytes after embedded NULs.
+  const rows = db.raw.prepare(`
+    WITH recent AS MATERIALIZED (
+      SELECT content, sender_name, is_from_me, timestamp, pk FROM messages
+      WHERE conversation_key = @conversation_key AND deleted_at IS NULL
+      ORDER BY timestamp DESC, pk DESC LIMIT @limit
+    ), budget AS (
+      SELECT COALESCE(SUM(COALESCE(length(CAST(content AS BLOB)), 0)
+        + COALESCE(length(CAST(sender_name AS BLOB)), 0)), 0) AS bytes FROM recent
+    )
+    SELECT CASE WHEN budget.bytes <= @max_bytes THEN content END AS content,
+      CASE WHEN budget.bytes <= @max_bytes THEN sender_name END AS sender_name,
+      is_from_me, budget.bytes > @max_bytes AS oversized
+    FROM recent CROSS JOIN budget ORDER BY timestamp DESC, pk DESC
+  `).all({ conversation_key: conversationKey, limit, max_bytes: maxBytes }) as {
+    content: string | null; sender_name: string | null; is_from_me: number; oversized: number;
+  }[];
+  if (rows.some((row) => row.oversized)) throw new Error('Recent message text exceeds byte limit');
+  return rows.map((row) => ({
+    content: row.content, senderName: row.sender_name, isFromMe: Boolean(row.is_from_me),
+  })).reverse();
+}
+
 /**
  * Return messages in a conversation that arrived after `sinceUnixSec`, ordered
  * chronologically (ASC). Capped at `limit` to avoid runaway context injection.

@@ -45,6 +45,7 @@ import {
 import { fallbackProviderConfigFor } from './fallback-config.ts';
 import { bulletedSection, savedPreferenceLine } from './owner-render-format.ts';
 import type { SessionManager } from './session.ts';
+import type { OutboundMessageRole } from './outbound-queue.ts';
 
 const log = createChildLogger('agent-runtime');
 
@@ -84,7 +85,7 @@ export interface RuntimeRoutingPort {
   readonly lastSpawnRouteProvider: Map<string, string>;
   sessionProviderConfig(): Record<string, unknown> | undefined;
   resolvePerChatMapKey(chatJid: string): string;
-  sendDirect(chatJid: string, text: string): void;
+  sendDirect(chatJid: string, text: string, role: OutboundMessageRole): void;
   /** Credential-probe pair — stays on AgentRuntime (shared with the fallback
    *  selector's eligibility loop, C4, and stubbed as an instance property by
    *  the routing/model-pin characterization suites). */
@@ -263,6 +264,7 @@ export class RuntimeRoutingCoordinator {
         this.host.sendDirect(
           chatJid,
           `_Your pinned ${route.pinnedProvider} isn't available right now. Using the default route — your pin stays set; /reset to clear it._`,
+          'status',
         );
       }
       this.emitRouteEventChecked({
@@ -338,7 +340,7 @@ export class RuntimeRoutingCoordinator {
   /** Clear a sender's route preference — shared by `/model default` and `/reset`. */
   clearRoutePreference(chatJid: string, chatKey: string, senderKey: string): void {
     this.clearRoutePreferenceSilent(chatJid, chatKey, senderKey);
-    this.host.sendDirect(chatJid, '_Back to the default route._');
+    this.host.sendDirect(chatJid, '_Back to the default route._', 'status');
   }
 
   /** Store clear + route event without the reply echo. The NL typed-intent

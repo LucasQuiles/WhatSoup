@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -42,7 +43,7 @@ from lib.bounded_jsonl import (
     append_bounded_jsonl,
     require_bounded_jsonl_commit,
 )
-from lib.bot_errors_envelope import EnvelopeError, classify_event, new_event_fields, normalize_event
+from lib.bot_errors_envelope import SEVERITIES, EnvelopeError, classify_event, event_machine, new_event_fields, normalize_event
 from lib.bot_errors_redaction import (
     LEGACY_FAILURE_CLASSES,
     alert_text,
@@ -76,6 +77,7 @@ from lib.durable_json import (
     require_all_advance,
 )
 from lib.state_files import (
+    CREDENTIAL_ACK,
     DISPATCHER_META_STATE,
     DISPATCHER_STATE,
     INCIDENT_STATE,
@@ -83,6 +85,7 @@ from lib.state_files import (
 )
 from lib.state_root import state_root
 from lib.send_acceptance import SendAcceptanceUnknown, SendNotAccepted, validate_send_acceptance
+from lib import credential_repage
 
 
 BOT_ERRORS_JID = os.environ.get("BOT_ERRORS_JID", "").strip()
@@ -487,6 +490,16 @@ DELIVERY_HELD_ESCALATED_FIELD = "outcomeUnknownEscalatedAt"
 DELIVERY_RENOTIFY_INTENT_FIELD = "renotifyGeneration"
 DELIVERY_ANNOUNCE_INTENT_FIELD = "announcesAwaitingPhysicalAt"
 DELIVERY_INTENT_FIELDS = (DELIVERY_RENOTIFY_INTENT_FIELD, DELIVERY_ANNOUNCE_INTENT_FIELD)
+# The sender's severity, kept the first time a still-open reminder escalates. A
+# failed send requeues the event with the raised severity, so every attempt
+# raises from this value and the reminder climbs one step, not one per attempt.
+# It is not an intent: the decision must not clear it.
+DELIVERY_ESCALATED_FROM_FIELD = "escalatedFromSeverity"
+# True while base's copy of this event would be critical because of the age or
+# count escalation: set where base set critical, cleared wherever base would
+# then overwrite that severity (Pattern D, the awaiting-physical announcement).
+# A severity value alone cannot say why the event carries it (R73).
+DELIVERY_ESCALATED_NOW_FIELD = "escalatedNow"
 # Replay identity of one send attempt, minted just before the send: a random
 # nonce, plus the epoch and sequence of the incident state it was minted under.
 # A record carrying any of the three was minted by this code; a record with none
@@ -2840,7 +2853,9 @@ def apply_transient_tiering(
         if not isinstance(record, dict):
             record = {
                 "transientSince": current,
-                "firstSeverity": str(event.get("severity") or ""),
+                # R73: base stored critical for a reminder escalated now, so a
+                # later promotion of this record restores what base restored.
+                "firstSeverity": "critical" if escalated_now(event) else str(event.get("severity") or ""),
             }
             transient_state[key] = record
         since = int_field(record, "transientSince", current)
@@ -2856,12 +2871,14 @@ def apply_transient_tiering(
             record["promoted"] = True
             record["promotedAt"] = int_field(record, "promotedAt", current)
             event["severity"] = str(record.get("firstSeverity") or "critical") or "critical"
+            clear_escalated_now(event)
             diagnostics["failureClass"] = "outage_promoted"
             diagnostics["transientPromoted"] = True
             return None
 
         # Still inside the soft window: hold at warning tier, do not push.
         event["severity"] = "warning"
+        clear_escalated_now(event)
         held = int_field(record, "heldCount") + 1
         record["heldCount"] = held
         diagnostics["failureClass"] = "transient"
@@ -2894,6 +2911,13 @@ def resolve_transient_on_clear(
             return None
         if record.get("promoted"):
             return None  # promoted to outage — normal clear closes the open incident
+        # An open incident on this key means an alert on it WAS surfaced even
+        # though this record never promoted: a later event classified outage
+        # (a degraded body that lost its connected reading), or one that
+        # retired a stronger incident skipped the hold. Its recovery is news.
+        open_incidents = incident_state.get("openIncidents")
+        if isinstance(open_incidents, dict) and isinstance(open_incidents.get(key), dict):
+            return None
         event.setdefault("diagnostics", {})["transientAutoresolved"] = True
         return f"transient_autoresolved: {key} recovered before promotion; held recovery not surfaced"
     except Exception:
@@ -3173,11 +3197,11 @@ def close_recovered_daily_health_incidents(event: dict[str, Any], incident_state
     recovered = daily_health_recovered_incident_keys(event, incident_state)
     if not recovered:
         return []
-    open_incidents = incident_state.setdefault("openIncidents", {})
-    last_sent = incident_state.setdefault("lastSentAt", {})
+    # The same removal a matching clear performs, so a recovered key also drops
+    # its transient bookkeeping: a promoted record left behind would page the
+    # next hold-tier episode at once.
     for recovered_key in recovered:
-        open_incidents.pop(recovered_key, None)
-        last_sent.pop(recovered_key, None)
+        close_open_incident(incident_state, recovered_key)
     return recovered
 
 
@@ -3845,6 +3869,64 @@ def event_has_stale_context(event: dict[str, Any]) -> bool:
     return "incident_stale=true" in evidence or "incident_status=stale" in evidence
 
 
+ESCALATED_SEVERITY_STEP = {"info": "warning", "warning": "error", "error": "critical", "critical": "critical"}
+
+
+def is_readable_severity(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in SEVERITIES
+
+
+def higher_severity(*values: Any) -> Any:
+    """The most severe readable value in `values`; the last value when none is readable."""
+    readable = [v.strip().lower() for v in values if is_readable_severity(v)]
+    return min(readable, key=SEVERITIES.index) if readable else values[-1]
+
+
+def escalated_severity(value: Any, current: Any = None) -> str:
+    """The severity one step above `value`, never below `current`; critical for anything unreadable.
+
+    Age and repeat count say an incident has lasted, not that it got worse, so
+    they raise the sender's severity by one step at most: a sender's warning
+    must not become a critical page on age alone (register R73). A value this
+    cannot read escalates to critical, toward paging. The result is never lower
+    than the event's own readable severity `current`.
+    """
+    if not isinstance(value, str):
+        return "critical"
+    return higher_severity(current, ESCALATED_SEVERITY_STEP.get(value.strip().lower(), "critical"))
+
+
+def escalated_now(event: dict[str, Any]) -> bool:
+    """Would base's copy of this event be critical because of the age or count escalation?
+
+    Base sent such a reminder at critical, so storm collapse and Pattern D give it
+    base's critical treatment. The decision is the escalatedNow marker, which is set
+    where base set critical and cleared wherever base then overwrote the severity.
+    The other checks are belt and braces: a readable recorded sender severity, the
+    escalated=true evidence line written in the same call, and a current severity
+    at least the one-step escalation of the recorded one. lib/owner_route.py keeps
+    an identical copy (R73).
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, dict) or delivery.get(DELIVERY_ESCALATED_NOW_FIELD) is not True:
+        return False
+    recorded = delivery.get(DELIVERY_ESCALATED_FROM_FIELD)
+    severity = event.get("severity")
+    if not (is_readable_severity(recorded) and is_readable_severity(severity)):
+        return False
+    raised = ESCALATED_SEVERITY_STEP[recorded.strip().lower()]
+    if SEVERITIES.index(severity.strip().lower()) > SEVERITIES.index(raised):
+        return False
+    return "escalated=true" in event_text(event, "evidence").splitlines()
+
+
+def clear_escalated_now(event: dict[str, Any]) -> None:
+    """Base overwrote the escalated critical here, so base's critical treatment ends."""
+    delivery = event.get("delivery")
+    if isinstance(delivery, dict):
+        delivery.pop(DELIVERY_ESCALATED_NOW_FIELD, None)
+
+
 def append_still_open_context(
     event: dict[str, Any],
     open_record: dict[str, Any],
@@ -3854,6 +3936,7 @@ def append_still_open_context(
     escalated: bool,
     *,
     digest: bool = True,
+    sender_severity: Any = None,
 ) -> None:
     opened = int_field(open_record, "openedAt", current)
     last_notified = int_field(open_record, "lastNotifiedAt", int_field(open_record, "lastSentAt", opened))
@@ -3884,10 +3967,23 @@ def append_still_open_context(
             event["summary"] = f"Still-open digest, awaiting physical action: {event_display_summary(event) or key}"
     elif awaiting_physical:
         event["severity"] = "critical"
+        clear_escalated_now(event)
         if "awaiting physical" not in event_text(event, "summary").lower():
             event["summary"] = f"Awaiting physical action: {event_display_summary(event) or key}"
     elif escalated:
-        event["severity"] = "critical"
+        delivery = event.get("delivery")
+        if not isinstance(delivery, dict):
+            delivery = {}
+            event["delivery"] = delivery
+        recorded = delivery.get(DELIVERY_ESCALATED_FROM_FIELD)
+        if not is_readable_severity(recorded):
+            # Missing, or unreadable and so treated as missing. Pattern D may have
+            # lowered the severity this pass; start from what the sender sent.
+            recorded = higher_severity(sender_severity, event.get("severity"))
+            delivery[DELIVERY_ESCALATED_FROM_FIELD] = recorded
+        event["severity"] = escalated_severity(recorded, event.get("severity"))
+        # Base set critical here, on every attempt that escalates.
+        delivery[DELIVERY_ESCALATED_NOW_FIELD] = True
         if "escalated" not in event_text(event, "summary").lower():
             event["summary"] = f"ESCALATED still open: {event_display_summary(event) or key}"
     elif digest:
@@ -3998,9 +4094,11 @@ def json_rpc_call(
     """One JSON-RPC tool call over the instance socket.
 
     ``timeout`` bounds each phase separately. ``deadline`` (a time.monotonic()
-    value, used by the owner route) additionally bounds the WHOLE call: every
-    blocking step gets only the time left, and a spent deadline raises. Without
-    it the behaviour is exactly the per-phase one the group send relies on.
+    value, used by the owner route and the class meta-alerts) additionally
+    bounds the WHOLE call: each write and each recv gets only the time left. A
+    deadline spent before the tool call is written raises; one spent after it
+    is the post-request outcome (#2424). Without it the behaviour is exactly
+    the per-phase one the group send relies on.
     """
     if not socket_path:
         raise RuntimeError("socket path missing")
@@ -4009,19 +4107,26 @@ def json_rpc_call(
 
     init_id = int(time.time() * 1000)
     call_id = init_id + 1
-    def step_timeout() -> float:
+    def step_timeout(after_send: bool = False) -> float:
         if deadline is None:
             return timeout
         left = deadline - time.monotonic()
         if left <= 0:
+            if after_send:
+                # #2424: the tool call has left, so a spent deadline must read as
+                # the post-request outcome, never as a failure to send again.
+                return 0.0
             raise TimeoutError("json-rpc deadline spent")
         return min(timeout, left)
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(step_timeout())
         sock.connect(socket_path)
-        reader = sock.makefile("r", encoding="utf-8", newline="\n")
-        writer = sock.makefile("w", encoding="utf-8", newline="\n")
+        if deadline is None:
+            reader = sock.makefile("r", encoding="utf-8", newline="\n")
+            writer = sock.makefile("w", encoding="utf-8", newline="\n")
+        else:
+            reader = writer = _DeadlineLineIO(sock, step_timeout)
 
         writer.write(json.dumps({
             "jsonrpc": "2.0",
@@ -4038,7 +4143,7 @@ def json_rpc_call(
         # before the tool call is written, so nothing can have been accepted.
         wait_for_response(
             reader, init_id, step_timeout(), phase=JSON_RPC_HANDSHAKE_PHASE,
-            sock=sock if deadline is not None else None,
+            sock=sock if deadline is not None else None, until=deadline,
         )
 
         writer.write(json.dumps({
@@ -4051,13 +4156,47 @@ def json_rpc_call(
         # #2424: past this flush the remote may already have acted on the
         # request, so a missing reply is an ambiguous outcome, not a failure.
         return wait_for_response(
-            reader, call_id, step_timeout(), phase=JSON_RPC_POST_REQUEST_PHASE,
-            sock=sock if deadline is not None else None,
+            reader, call_id, step_timeout(after_send=True), phase=JSON_RPC_POST_REQUEST_PHASE,
+            sock=sock if deadline is not None else None, until=deadline,
         )
 
 
+class _DeadlineLineIO:
+    """The reader and writer of a call with a deadline: each write and each recv gets only the time left.
+
+    A buffered readline re-uses one timeout for every recv it makes, so a peer that sends a reply a few
+    bytes at a time could hold it past the deadline. Here the deadline is checked before every recv.
+    """
+
+    def __init__(self, sock: socket.socket, step_timeout: Any) -> None:
+        self._sock, self._step_timeout = sock, step_timeout
+        self._out, self._in = b"", b""
+
+    def write(self, text: str) -> None:
+        self._out += text.encode("utf-8")
+
+    def flush(self) -> None:
+        data, self._out = self._out, b""
+        # sendall's timeout bounds the whole send, not each chunk.
+        self._sock.settimeout(self._step_timeout())
+        self._sock.sendall(data)
+
+    def readline(self, deadline: float) -> str:
+        while b"\n" not in self._in:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise socket.timeout("timed out")
+            self._sock.settimeout(left)
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                break
+            self._in += chunk
+        line, sep, self._in = self._in.partition(b"\n")
+        return (line + sep).decode("utf-8")
+
+
 def wait_for_response(
-    reader: Any, expected_id: int, timeout: float, *, phase: str, sock: Any = None
+    reader: Any, expected_id: int, timeout: float, *, phase: str, sock: Any = None, until: float | None = None
 ) -> dict[str, Any]:
     """Read one JSON-RPC reply, labelling every no-outcome failure with `phase`.
 
@@ -4075,18 +4214,23 @@ def wait_for_response(
 
     Framing note: replies are newline-framed, so a reply that never terminates
     its line is indistinguishable from a slow one and surfaces as the timeout.
+
+    ``until`` is the caller's whole-call deadline (a time.monotonic() value):
+    the wait never ends later, however long the caller took between computing
+    ``timeout`` and starting it.
     """
     deadline = time.monotonic() + timeout
+    if until is not None:
+        deadline = min(deadline, until)
     try:
         while time.monotonic() < deadline:
             # The socket carries the same timeout as this deadline, so readline
             # raises socket.timeout("timed out") first; that is the text an
             # operator sees, not the deadline message below. With ``sock``
-            # (deadline-bound callers) each read gets only the time left, so
-            # a late read cannot overrun the deadline by a full timeout.
-            if sock is not None:
-                sock.settimeout(max(0.001, deadline - time.monotonic()))
-            line = reader.readline()
+            # (deadline-bound callers) the reader checks this deadline before
+            # each recv, so a reply that arrives a few bytes at a time cannot
+            # hold the call past it.
+            line = reader.readline(deadline) if sock is not None else reader.readline()
             if not line:
                 raise RuntimeError("socket closed before response")
             msg = json.loads(line)
@@ -4122,7 +4266,10 @@ def validate_bot_errors_target() -> None:
 
 def send_whatsapp(
     text: str, socket_path: str = DEFAULT_SOCKET, *, require_acceptance: bool = False,
+    deadline: float | None = None,
 ) -> dict[str, str] | None:
+    # `deadline` (a time.monotonic() value) bounds the whole call, as on the owner route.
+    # Only the credential re-page class's group meta-alerts pass one.
     # Test seam: force a delivery failure with a caller-supplied error string so
     # subprocess tests can drive the transient-vs-permanent failure routing
     # deterministically (mirrors the BOT_ERRORS_DRY_SEND_CAPTURE dry-run seam).
@@ -4154,6 +4301,7 @@ def send_whatsapp(
         socket_path,
         "tools/call",
         {"name": "send_message", "arguments": {"chatJid": BOT_ERRORS_JID, "text": text}},
+        **({"deadline": deadline} if deadline is not None else {}),
     )
     if not require_acceptance:
         if result.get("isError") is True:
@@ -4220,6 +4368,9 @@ def requested_action_text(event: dict[str, Any]) -> str:
         return redact(operator_action).replace("@", " at ")
     if severity == "info":
         return NONACTIONABLE_ACTION
+    credential_action = credential_action_sentence(event)
+    if credential_action:
+        return credential_action
     if event_has_stale_context(event):
         return stale_action_text()
     return INVESTIGATE_ACTION
@@ -4314,6 +4465,51 @@ def format_daily_health_event(core: list[str], evidence: str, details: list[str]
     return text
 
 
+_RETIREMENT_READING_TOKENS = frozenset({
+    "diagnostics.whatsappConnected=true",
+    "whatsapp_connected=true",
+    "connected=true",
+    "connection_state=connected",
+})
+
+
+def retired_stronger_incidents(diagnostics: dict[str, Any]) -> list[str]:
+    """The event's retirement audit, reduced to its fixed vocabulary.
+
+    Keeps only what retire_contradicted_stronger_incident writes: a
+    connectivity-loss root source and the positive reading tokens of
+    positive_connectivity_readings, one rendered entry per root and readings
+    (a retried send can retire the same root again). A queued event's
+    diagnostics can hold anything a producer put there, so every other value
+    is dropped: it neither skips the transient hold nor reaches the WhatsApp
+    message or the email fallback.
+    """
+    retired = diagnostics.get("retiredStrongerIncidents")
+    if not isinstance(retired, list):
+        return []
+    parts: list[str] = []
+    for entry in retired:
+        if not isinstance(entry, dict):
+            continue
+        root = _bare_root_source(str(entry.get("incidentKey") or ""))
+        if root not in CONNECTIVITY_LOSS_ROOT_SOURCES:
+            continue
+        readings = [
+            token
+            for token in str(entry.get("contradictingEvidence") or "").split()
+            if token in _RETIREMENT_READING_TOKENS
+        ]
+        part = f"{root} ({' '.join(readings)})" if readings else root
+        if part not in parts:
+            parts.append(part)
+    return parts
+
+
+def retired_stronger_incidents_text(diagnostics: dict[str, Any]) -> str | None:
+    """Root sources this event retired, with the readings that did it."""
+    return "; ".join(retired_stronger_incidents(diagnostics)) or None
+
+
 def format_event(event: dict[str, Any]) -> str:
     classification = classify_event(event)
     severity = classification.severity
@@ -4387,6 +4583,10 @@ def format_event(event: dict[str, Any]) -> str:
             else None,
             900,
         ),
+        # This alert retired a stronger incident (an open logout or bond loss
+        # its connectivity reading contradicts). It is the only notice of that
+        # closure: the root's own later clear finds nothing open.
+        event_line("closes_incident", retired_stronger_incidents_text(diagnostics), 300),
     ]
     freshness_lines = [
         event_line("dispatcher_attempts", delivery.get("attempts")),
@@ -4816,7 +5016,7 @@ def dead_letter_meta_event(paths: dict[str, Path], count: int, oldest_summary: s
         **new_event_fields("alert", "critical"),
         "id": f"dispatcher-dead-letter-meta-{now}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": "meta_alert_dead_letter",
@@ -5035,6 +5235,7 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
     # normally. Loop because one scope can hold several roots (bond loss AND
     # logout) and stronger_open_incident_for returns only the first match. Each
     # pass removes one open record, so the loop is bounded by the map size.
+    retired_stronger = False
     while stronger is not None:
         contradiction = stronger_incident_contradiction(
             event, stronger[0], stronger[1], incident_state.get("openIncidents")
@@ -5044,7 +5245,15 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         retire_contradicted_stronger_incident(
             event, incident_state, stronger[0], stronger[1], contradiction, current
         )
+        retired_stronger = True
         stronger = stronger_open_incident_for(event, incident_state)
+    # The retirement audit rides the event, so a retried send (the parent was
+    # already removed on the failed attempt) still skips the hold below. Read
+    # through the same vocabulary filter the page renders with, so a skipped
+    # hold always shows its closes_incident line. It can only force a send.
+    event_diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
+    if retired_stronger_incidents(event_diagnostics):
+        retired_stronger = True
     if stronger is not None:
         stronger_key, stronger_record = stronger
         mark_suppressed_by_stronger(event, stronger_key, stronger_record, current)
@@ -5078,10 +5287,16 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
         if unrepresented:
             return None
     if is_incident_alert(event):
+        # Read before Pattern D can rewrite it: escalation starts no lower (R73).
+        sender_severity = event.get("severity")
         # Pattern D — hold a transient soft-fault at warning tier; only a
         # transient that persists past TRANSIENT_PROMOTE_SECONDS promotes back to
         # the hard-outage tier and falls through to normal send handling.
-        if TRANSIENT_TIERING_ENABLED:
+        # Never hold an alert that just retired a stronger incident: it is the
+        # only notice that incident's closure gets, so holding it would close a
+        # paged logout or bond loss silently (#2409 hold-tier degraded alerts
+        # carry the connected reading that retires those roots).
+        if TRANSIENT_TIERING_ENABLED and not retired_stronger:
             transient_reason = apply_transient_tiering(event, incident_state, key, current)
             if transient_reason is not None:
                 return transient_reason
@@ -5157,7 +5372,9 @@ def should_suppress_send(event: dict[str, Any], incident_state: dict[str, Any]) 
                 # The interval doubles on delivery, and only for this record.
                 if not awaiting_physical:
                     set_delivery_intent(event, DELIVERY_RENOTIFY_INTENT_FIELD, renotify_generation(open_record))
-                append_still_open_context(event, open_record, key, current, suppressed, escalated)
+                append_still_open_context(
+                    event, open_record, key, current, suppressed, escalated, sender_severity=sender_severity
+                )
                 return None
             return f"incident already open for {key}; duplicate suppressed"
         last_sent = int(incident_state.setdefault("lastSentAt", {}).get(key) or 0)
@@ -5975,14 +6192,24 @@ def open_renotify_is_nonactionable(event: dict[str, Any], key: str) -> bool:
     return False
 
 
-def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> None:
+STALE_SUPPRESSION_DIAGNOSTIC_SECONDS = 300
+
+
+def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any], current: int) -> bool:
     """Pattern A: record a suppressed (non-sent) stale renotify for audit.
 
     The incident stays in state (audit trail preserved); only the WhatsApp push
     is gated. lastStaleRenotifiedAt is intentionally NOT advanced — we did not
     notify — so the existing renotify cadence still governs if it later becomes
     actionable.
+
+    Repeated diagnostic samples are recorded at most once per five minutes;
+    staleSuppressedCount counts these samples, not dispatcher sweeps. Recovery
+    and hold-expiry decisions are still evaluated on every sweep.
     """
+    previous = int_field(record, "lastStaleSuppressedAt")
+    if record.get("staleSuppressed") and previous > 0 and 0 <= current - previous < STALE_SUPPRESSION_DIAGNOSTIC_SECONDS:
+        return False
     if not record.get("staleAt"):
         record["staleAt"] = current
         record["staleIso"] = now_iso()
@@ -5991,6 +6218,7 @@ def mark_stale_incident_suppressed(record: dict[str, Any], event: dict[str, Any]
     record["lastStaleSuppressedIso"] = now_iso()
     record["lastStaleSuppressedEventId"] = event.get("id")
     record["staleSuppressedCount"] = int_field(record, "staleSuppressedCount") + 1
+    return True
 
 
 def stale_autoclose_summary_event(keys: list[str], current: int) -> dict[str, Any]:
@@ -6750,9 +6978,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                     "error": str(exc),
                 })
             if nonactionable:
-                mark_stale_incident_suppressed(record, event, current)
+                before_record = json_snapshot(record)
+                diagnostic_recorded = mark_stale_incident_suppressed(record, event, current)
                 suppressed += 1
-                changed = True
                 opened = int_field(record, "openedAt", current)
                 age = max(0, current - opened)
                 # Safety valve / §10 C5 terminal removal: a non-actionable stale
@@ -6783,8 +7011,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                             if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
                                 will_close = False
                                 held_for_liveness = True
+                                if diagnostic_recorded or not record.get("autocloseHeldForLiveness"):
+                                    record["lastAutocloseHoldAt"] = current
                                 record["autocloseHeldForLiveness"] = True
-                                record["lastAutocloseHoldAt"] = current
                                 append_dispatch_log(paths, {
                                     "type": "autoclose_held_for_liveness",
                                     "incidentKey": key,
@@ -6847,8 +7076,9 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                             if held_seconds < AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS:
                                 will_close = False
                                 held_for_recovery = True
+                                if diagnostic_recorded or not record.get("autocloseHeldForRecovery"):
+                                    record["lastAutocloseHoldAt"] = current
                                 record["autocloseHeldForRecovery"] = True
-                                record["lastAutocloseHoldAt"] = current
                                 append_dispatch_log(paths, {
                                     "type": "autoclose_held_for_recovery",
                                     "incidentKey": key,
@@ -6889,6 +7119,7 @@ def sweep_stale_incidents(paths: dict[str, Path], skip_keys: set[str] | None = N
                         })
                 if will_close:
                     auto_closed.append(str(key))
+                changed = changed or record != before_record
                 bounded_unverified = bool(record.get("autocloseBoundedUnverified"))
                 append_dispatch_log(paths, {
                     "type": "stale_renotify_suppressed",
@@ -7102,9 +7333,17 @@ def normalized_summary(event: dict[str, Any]) -> str:
 
 
 def storm_fingerprint(event: dict[str, Any]) -> str:
+    # R73: base sent every escalated reminder at critical, so a reminder that is
+    # escalated now keeps that fingerprint whatever step it took; every other
+    # event keeps its own severity, as in base.
+    severity = (
+        "critical"
+        if escalated_now(event)
+        else str(event.get("severity") or "critical").strip().lower()
+    )
     parts = [
         str(event.get("source") or "unknown").strip().lower(),
-        str(event.get("severity") or "critical").strip().lower(),
+        severity,
         normalized_summary(event),
     ]
     return "\n".join(parts)
@@ -7506,7 +7745,7 @@ def storm_receipt_orphan_event(record: dict[str, Any]) -> dict[str, Any]:
         **new_event_fields("alert", severity),
         "id": storm_receipt_orphan_event_id(record),
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": STORM_RECEIPT_ORPHAN_ALERT_SOURCE,
@@ -7858,7 +8097,13 @@ def is_storm_candidate(event: dict[str, Any]) -> bool:
     if isinstance(event.get("storm"), dict):
         return False
     classification = classify_event(event)
-    return classification.kind == "incident_alert" and classification.severity in {"critical", "warning"}
+    if classification.kind != "incident_alert":
+        return False
+    # R73: a reminder escalated warning -> error is requeued at error when its send
+    # fails; base requeued it at critical, a candidate.
+    return classification.severity in {"critical", "warning"} or (
+        classification.severity == "error" and escalated_now(event)
+    )
 
 
 def recovery_normalized_summary(event: dict[str, Any]) -> str:
@@ -7956,7 +8201,13 @@ def storm_digest_event(
 ) -> dict[str, Any]:
     first = events[0]
     hosts = sorted_unique_hosts(events)
-    severity = str(first.get("severity") or "critical").lower()
+    # R73: a digest with a reminder escalated now in it pages critical, as base sent
+    # it; otherwise the members share their fingerprint's severity.
+    severity = (
+        "critical"
+        if any(escalated_now(event) for event in events)
+        else str(higher_severity(*(event.get("severity") for event in events)) or "critical").lower()
+    )
     source = str(first.get("source") or "unknown")
     summary = normalized_summary(first) or "same fingerprint alert storm"
     digest_id = storm_window_token(fingerprint_hash, bucket_start)
@@ -8063,6 +8314,10 @@ def collapse_storm_group(
             "collapse_storm_group: incident_state must be incident.payload when an "
             "IncidentStateCycle is supplied; commit() would persist a different object"
         )
+    # The three branches below archive members; the credential re-page observer
+    # sees every record once, here, before any of them moves.
+    for _member_path, member_event in records:
+        credential_observe_leaving(member_event)
     fingerprint, requested_start = key
     window = storm_window_seconds()
     fingerprint_hash = storm_fingerprint_hash(fingerprint)
@@ -8766,6 +9021,9 @@ def move_suppressed_event(
     log_type: str = "suppressed",
     source_name: str | None = None,
 ) -> Path:
+    # A member event retired here never reaches process_one; the credential
+    # re-page observer sees it, and saves what it changed, before the move.
+    credential_observe_leaving(event)
     # Archival writes must honor the envelope contract ("normalized to v2
     # before ... archival") even on pre-loop paths that never reach
     # process_one. normalize_event is idempotent on already-v2 events, and
@@ -9116,7 +9374,7 @@ def test_provenance_meta_event(paths: dict[str, Path], refused: int, window: int
         **new_event_fields("alert", "warning"),
         "id": f"dispatcher-test-provenance-refused-{now}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": "test-provenance-refused",
@@ -9198,7 +9456,7 @@ def unrenderable_meta_event(signal: dict[str, str], count: int) -> dict[str, Any
         # dispatch-log entry or quarantine file. The letter ends the digit run.
         "id": f"dispatcher-unrenderable-alert-content-{now}-p{os.getpid()}-{key_digest}",
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": sys.platform,
         "instance": "bot-errors-dispatcher",
         "source": UNRENDERABLE_META_ALERT_SOURCE,
@@ -9531,28 +9789,11 @@ def _state_paths_for(quarantine_dir: Path) -> dict[str, Path]:
     return {"unrenderable_signals": quarantine_dir.parent / "unrenderable-signals"}
 
 
-def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
-    ensure_private_dir(quarantine_dir)
-    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.poison"
-    try:
-        shutil.move(str(path), str(dest))
-    except FileNotFoundError:
-        return dest
-    meta = {
-        **new_event_fields("alert", "critical"),
-        "id": f"poison-{int(time.time())}-{os.getpid()}",
-        "createdAt": now_iso(),
-        "machine": socket.gethostname(),
-        "instance": "bot-errors-dispatcher",
-        "source": "poison-event-quarantine",
-        "summary": "BOT ERRORS dispatcher quarantined an unreadable event",
-        "evidence": f"source={path}; quarantine={dest}; reason={reason}",
-        "diagnostics": {
-            "logHints": ["journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"],
-            "queue": str(state_root()),
-        },
-        "delivery": {"attempts": 0, "status": "meta"},
-    }
+def send_meta_alert(meta: dict[str, Any], email_subject: str) -> tuple[str, str, str | None]:
+    """Send a dispatcher meta-alert straight to the group, by e-mail when that fails.
+
+    Returns (direct WhatsApp status, e-mail fallback status, the direct send's error text).
+    """
     text = format_event(meta)
     direct_whatsapp = "not_attempted"
     email_status = "not_attempted"
@@ -9564,11 +9805,38 @@ def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
         direct_whatsapp = "failed"
         direct_error = str(exc)
         # #3070: classify an accepted email fallback as TERMINAL here, not
-        # accepted_unconfirmed. A poison event is already moved to quarantine
-        # (no requeue path), so a successful email handoff is a delivered
-        # alert -- mirroring the #3024 delivery-site semantics so the dispatch
-        # log never reports a delivered poison alert as unconfirmed/retryable.
-        email_status = "email_delivered" if email_fallback("BOT ERRORS poison event quarantine", text) else "failed"
+        # accepted_unconfirmed. A meta-alert has no queued event behind it
+        # (a poison event is already moved to quarantine, no requeue path), so
+        # a successful email handoff is a delivered alert -- mirroring the
+        # #3024 delivery-site semantics so the dispatch log never reports a
+        # delivered meta-alert as unconfirmed/retryable.
+        email_status = "email_delivered" if email_fallback(email_subject, text) else "failed"
+    return direct_whatsapp, email_status, direct_error
+
+
+def quarantine_poison(path: Path, quarantine_dir: Path, reason: str) -> Path:
+    ensure_private_dir(quarantine_dir)
+    dest = quarantine_dir / f"{path.name}.{int(time.time())}.{os.getpid()}.poison"
+    try:
+        shutil.move(str(path), str(dest))
+    except FileNotFoundError:
+        return dest
+    meta = {
+        **new_event_fields("alert", "critical"),
+        "id": f"poison-{int(time.time())}-{os.getpid()}",
+        "createdAt": now_iso(),
+        "machine": event_machine(),
+        "instance": "bot-errors-dispatcher",
+        "source": "poison-event-quarantine",
+        "summary": "BOT ERRORS dispatcher quarantined an unreadable event",
+        "evidence": f"source={path}; quarantine={dest}; reason={reason}",
+        "diagnostics": {
+            "logHints": ["journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"],
+            "queue": str(state_root()),
+        },
+        "delivery": {"attempts": 0, "status": "meta"},
+    }
+    direct_whatsapp, email_status, direct_error = send_meta_alert(meta, "BOT ERRORS poison event quarantine")
     try:
         log_record = {
             "type": "quarantine",
@@ -10085,7 +10353,7 @@ def record_state(paths: dict[str, Path], **updates: Any) -> None:
     state = {
         "updatedAt": now_iso(),
         "pid": os.getpid(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "counts": counts,
         **updates,
     }
@@ -10212,6 +10480,9 @@ def process_one(path: Path, paths: dict[str, Path], incident: IncidentStateCycle
             "matchedPattern": matched_pattern,
         })
         return False, "test_leak"
+
+    # The event may have reached the outbox after this cycle's observer scan.
+    credential_observe_leaving(event)
 
     diagnostics = event.setdefault("diagnostics", {})
     if isinstance(diagnostics, dict) and not omit_dispatch_log_in_message(event):
@@ -10762,6 +11033,8 @@ def drain_owner_route_queue(paths: dict[str, Path]) -> None:
         budget = OWNER_ROUTE_DEFAULT_BUDGET_SECONDS
     deadline = time.monotonic() + max(0.0, budget)
     for event, key, is_alert, text in items:
+        if credential_drops_legacy_copy(event):
+            continue
         try:
             from lib.owner_route import route_owner_critical
 
@@ -10778,6 +11051,493 @@ def drain_owner_route_queue(paths: dict[str, Path]) -> None:
             )
         except Exception:  # noqa: BLE001 - must never affect group delivery
             _log_owner_route_error(paths, event)
+
+
+# ---------------------------------------------------------------------------
+# Credential re-page (lib/credential_repage.py): one condition per bot for the
+# auth-caused sources, paged to the owner every four hours until it clears.
+# The rules are in the module. What follows is where a cycle calls them, and
+# the sends, which the module never makes.
+#
+# Failure boundary: a fault of this class costs the class a cycle and nothing
+# else. Every call into the module is contained (ControllerStateRequired is
+# re-raised, as everywhere; anything else is absorbed and reported once a UTC
+# day), so it cannot stop a group alert, the completion stamp or another
+# class's owner copy.
+# ---------------------------------------------------------------------------
+
+
+class _CredentialContext:
+    """What one cycle gives the class: where it commits, and the module's view of the cycle."""
+
+    def __init__(self, paths: dict[str, Path], incident: IncidentStateCycle, cycle: Any) -> None:
+        self.paths = paths
+        self.incident = incident
+        self.cycle = cycle
+
+
+# Set only inside run_once. Every entry point below does nothing without it,
+# so a caller that drives process_one or the owner drain on its own gets
+# today's behaviour.
+_credential_context: _CredentialContext | None = None
+# Class pages whose floor is committed and whose send has not started.
+# Module-level, like the legacy queue: a page listed by a cycle that raised
+# before its send step is found by the next cycle's timer pass, which counts
+# it as cut (no channel was tried).
+_credential_pages: list[dict[str, Any]] = []
+# The result of each class send, kept until the scope's next timer pass applies
+# it. Memory only: after a crash the floor on disk stands and no outcome exists.
+_credential_outcomes: dict[str, dict[str, Any]] = {}
+# The class send step absorbed an exception; the next cycle reports it.
+_credential_send_fault = False
+# The class's owed group meta-alerts, listed by the timer pass and sent after the
+# legacy drain inside their own budget. The list is made again in every timer
+# pass from the stored state: a state-lost alert is owed until a channel takes it
+# or the next announcement replaces it, a daily one until a channel takes it or
+# its UTC day ends.
+_credential_meta_alerts: list[dict[str, Any]] = []
+# The meta-alerts a channel took, kept until the next timer pass marks them.
+# Memory only, like the page outcomes.
+_credential_meta_taken: list[dict[str, Any]] = []
+CREDENTIAL_META_BUDGET_SECONDS = 20.0
+# The group leg of one class meta-alert gets no more of the budget, so its e-mail keeps the rest. It
+# equals the owner route's default WhatsApp timeout (lib/owner_route.py,
+# BOT_ERRORS_OWNER_ROUTE_TIMEOUT_SECONDS) and does not follow that setting: no owner-route variable is
+# read while the route is off.
+CREDENTIAL_META_GROUP_SECONDS = 8.0
+# The boolean that names each meta-alert's kind in its log record. Not named "...Error": the shared log
+# projection drops every detail key that contains "error" (lib/controller_log.py,
+# metadata_only_controller_details), as for the cycle record's passFault.
+_CREDENTIAL_META_FLAGS = {
+    credential_repage.META_STATE_LOST: "metaStateLost",
+    credential_repage.META_ROSTER_UNREADABLE: "metaRosterUnreadable",
+    credential_repage.META_PASS_ERROR: "metaPassFault",
+}
+
+
+@contextmanager
+def credential_cycle_scope():
+    """Drop the cycle's context when run_once leaves, however it leaves."""
+    global _credential_context
+    try:
+        yield
+    finally:
+        _credential_context = None
+
+
+def credential_ack_path() -> Path:
+    """The acknowledge file, beside the maintenance file (bot-errors-credential-ack.py writes it)."""
+    return state_root() / CREDENTIAL_ACK
+
+
+def credential_begin_cycle(paths: dict[str, Path], incident: IncidentStateCycle) -> None:
+    """Give the class this cycle's state, clock and roster, and validate what it stored."""
+    global _credential_context, _credential_send_fault
+    cycle = credential_repage.Cycle(
+        incident.payload,
+        clock=time.time,
+        roster=credential_repage.load_roster_names(),
+        created_order=event_created_order,
+        outcomes=_credential_outcomes,
+        owner_route_enabled=owner_route_enabled(),
+        # IncidentStateCycle.commit stores every text value through this.
+        stored_text=redact_dispatcher_text,
+    )
+    if _credential_send_fault:
+        cycle.pass_error = True
+        _credential_send_fault = False
+    try:
+        credential_repage.load_section(cycle)
+    except ControllerStateRequired:
+        raise
+    except Exception:  # noqa: BLE001 - see the failure boundary above
+        cycle.pass_error = True
+    _credential_context = _CredentialContext(paths, incident, cycle)
+    # A quarantined or rebuilt entry is saved before any pass reads the section.
+    if cycle.take_changed():
+        incident.commit()
+
+
+def _credential_member_kind(paths: dict[str, Path], event: dict[str, Any]) -> str | None:
+    """Whether the class observes this event, and as an alert or as a clear.
+
+    None for a source outside the class, and for the events the dispatcher
+    itself discards as fixtures: a test-provenance event, and one the test-leak
+    check would drop. That check reads the producer's claim, never the live
+    event, for the reason recorded in process_one. An event with no usable
+    envelope is None too; the existing passes quarantine it.
+    """
+    try:
+        if not credential_repage.is_member(str(event.get("source") or "")):
+            return None
+        if is_test_provenance_event(event):
+            return None
+        claim = producer_claim(event, injected_dispatch_log=str(paths["logs"] / "dispatch.jsonl"))
+        if matched_test_leak_pattern(claim) is not None:
+            return None
+        kind = classify_event(event).kind
+    except Exception:  # noqa: BLE001
+        return None
+    if kind == "incident_alert":
+        return credential_repage.ALERT
+    if kind == "incident_recovery":
+        return credential_repage.CLEAR
+    return None
+
+
+def _credential_observe(context: _CredentialContext, event: dict[str, Any], kind: str) -> None:
+    """One event, on its own: a fault here costs the class this event and no other."""
+    try:
+        credential_repage.observe_event(context.cycle, event, kind)
+    except ControllerStateRequired:
+        raise
+    except Exception:  # noqa: BLE001 - see the failure boundary above
+        context.cycle.pass_error = True
+
+
+def observe_credential_members(paths: dict[str, Path]) -> None:
+    """Read every outbox file once and apply its member events: all alerts, then the clears.
+
+    Sends nothing and moves nothing. A file it cannot read is counted and left
+    for the existing passes. What it changed is saved before it returns, so no
+    later pass can move an event whose member is not on disk.
+    """
+    context = _credential_context
+    if context is None:
+        return
+    cycle = context.cycle
+    try:
+        found: list[tuple[bool, int, int, dict[str, Any]]] = []
+        for index, path in enumerate(credential_repage.outbox_files(paths["outbox"])):
+            try:
+                event = credential_repage.read_event(path, safe_read_json)
+            except Exception:  # noqa: BLE001
+                cycle.unusable.add(path.name)
+                continue
+            kind = _credential_member_kind(paths, event)
+            if kind is None:
+                continue
+            order = event_created_order(event)
+            # File names need not sort by creation time: alerts first, each group by its own time.
+            found.append((kind == credential_repage.CLEAR, cycle.now_us() if order is None else order, index, event))
+        for is_clear, _order, _index, event in sorted(found, key=lambda item: item[:3]):
+            _credential_observe(context, event, credential_repage.CLEAR if is_clear else credential_repage.ALERT)
+    except ControllerStateRequired:
+        raise
+    except Exception:  # noqa: BLE001 - see the failure boundary above
+        cycle.pass_error = True
+    if cycle.take_changed():
+        context.incident.commit()
+
+
+def credential_observe_leaving(event: dict[str, Any]) -> None:
+    """The observer's exit point: this event is about to leave the outbox.
+
+    Every later pass lists the outbox again, so an event that arrived after
+    the observer's scan can be sent, collapsed or retired in the same cycle.
+    A second observation of an event changes nothing. What this one changed
+    is saved before the caller moves the file.
+    """
+    context = _credential_context
+    if context is None:
+        return
+    kind = _credential_member_kind(context.paths, event)
+    if kind is None:
+        return
+    _credential_observe(context, event, kind)
+    if context.cycle.take_changed():
+        context.incident.commit()
+
+
+def credential_action_sentence(event: dict[str, Any]) -> str | None:
+    """The human-action sentence for an alert of the class, or None for today's wording."""
+    context = _credential_context
+    try:
+        return credential_repage.action_sentence(context.cycle if context is not None else None, event)
+    except Exception:  # noqa: BLE001 - the wording must never stop a send
+        return None
+
+
+def credential_drops_legacy_copy(event: dict[str, Any]) -> bool:
+    """Whether the class has answered for a routed opener, so its legacy owner copy is not sent.
+
+    In every doubt the copy goes out, as today.
+    """
+    context = _credential_context
+    if context is None:
+        return False
+    try:
+        return credential_repage.drops_legacy_copy(context.cycle, event)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _credential_meta_line(name: str, at: int) -> str:
+    """The summary of the daily group meta-alert `name`, owed since `at` (epoch seconds).
+
+    It can go out after its cause has passed, so the roster alert names the time it was seen.
+    """
+    if name == credential_repage.META_ROSTER_UNREADABLE:
+        seen = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
+        return (f"the fleet roster could not be read at {seen}; credential re-page conditions were keyed "
+                "by each event's own host name while it could not")
+    return ("the credential re-page passes absorbed an error; a bot's page can be missing "
+            "while the group alerts and the legacy owner copies continue")
+
+
+def _utc_day() -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def credential_meta_alert(source: str, summary: str, deadline: float, *, log: Any = None) -> str | None:
+    """One group meta-alert of the class inside the class's own deadline. The UTC day a channel took it, or None.
+
+    The text and the channels are those of send_meta_alert, which has no deadline. The group send gets
+    at most CREDENTIAL_META_GROUP_SECONDS of the time left, as a whole, where the owner route caps each
+    phase at that default; the e-mail gets the rest and is skipped with less than a second left. A group
+    send whose request left and whose answer did not come counts as taken (#2424), so it is never sent
+    to the group again; it is logged, and its e-mail is still tried. The day is read when the first
+    channel takes it, so an e-mail that ends after midnight does not move a group take to the next day.
+    """
+    from lib.owner_route import EMAIL_TIMEOUT_SECONDS
+
+    try:
+        meta = {
+            **new_event_fields("alert", "critical"),
+            "id": f"{source}-{int(time.time())}-{os.getpid()}",
+            "createdAt": now_iso(),
+            "machine": event_machine(),
+            "instance": "bot-errors-dispatcher",
+            "source": source,
+            "summary": summary,
+            "evidence": "",
+            "diagnostics": {
+                "logHints": ["journalctl --user -u bot-errors-dispatcher.service --since '30 minutes ago'"],
+            },
+            "delivery": {"attempts": 0, "status": "meta"},
+        }
+        text = format_event(meta)
+    except Exception:  # noqa: BLE001 - it is owed again in the next cycle
+        return None
+    taken = False
+    try:
+        send_whatsapp(text, deadline=min(deadline, time.monotonic() + CREDENTIAL_META_GROUP_SECONDS))
+        return _utc_day()
+    except AmbiguousSendOutcome as exc:
+        # #2424: the request left and its answer did not come. Taken, so it is never sent again.
+        taken = exc.phase == JSON_RPC_POST_REQUEST_PHASE
+    except Exception:  # noqa: BLE001 - the e-mail is the fallback, as in send_meta_alert
+        pass
+    # Read when the group leg ends, before the e-mail can carry the take past midnight.
+    taken_day = _utc_day() if taken else None
+    if taken and log is not None:
+        try:
+            log({"type": credential_repage.LOG_PREFIX + "meta_alert", "ambiguous": True,
+                 _CREDENTIAL_META_FLAGS[source]: True})
+        except Exception:  # noqa: BLE001 - a log record never costs the alert its take
+            pass
+    email_timeout = min(EMAIL_TIMEOUT_SECONDS, deadline - time.monotonic())
+    if email_timeout < 1:
+        return taken_day
+    try:
+        sent = email_fallback(f"BOT ERRORS {source}", text, timeout=email_timeout)
+    except Exception:  # noqa: BLE001
+        return taken_day
+    return taken_day or (_utc_day() if sent else None)
+
+
+def credential_timer_pass(paths: dict[str, Path]) -> None:
+    """The class's timed transitions and its due pages, directly before the cycle's state record.
+
+    It sends nothing. A due page gets its floor in the entry, the state is
+    committed, and only then is the page listed for send_credential_pages: a
+    crash at any later point finds the floor on disk and sends nothing twice.
+    An owed group meta-alert is listed for send_credential_meta_alerts.
+    """
+    # Listed again from the stored state in every pass, so an alert that the last budget cut, or that
+    # both channels refused, is listed once more and never twice.
+    _credential_meta_alerts.clear()
+    context = _credential_context
+    if context is None:
+        return
+    cycle = context.cycle
+    pages: list[dict[str, Any]] = []
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+
+    def contained(step: Any) -> None:
+        try:
+            step()
+        except ControllerStateRequired:
+            raise
+        except Exception:  # noqa: BLE001 - see the failure boundary above
+            cycle.pass_error = True
+
+    def announcement_at() -> Any:
+        found = cycle.loss().get(credential_repage.ANNOUNCEMENT)
+        return found.get("at") if isinstance(found, dict) else None
+
+    def mark_what_was_taken() -> None:
+        # Taken after the previous cycle's stamp. Marked before anything is listed, so it is not owed again.
+        for item in _credential_meta_taken:
+            if item.get("day") is not None:
+                credential_repage.mark_meta_alerted(cycle, item["source"], item["day"])
+            elif item.get("at") is not None and item["at"] == announcement_at():
+                credential_repage.mark_group_alerted(cycle)
+        _credential_meta_taken.clear()
+
+    def cut_what_was_never_started() -> None:
+        # Listed by an earlier cycle that did not reach its send step.
+        for item in _credential_pages:
+            _credential_outcomes[item["scope"]] = {
+                "result": credential_repage.CUT, "attemptAt": item["attemptAt"], "before": item["before"],
+            }
+        _credential_pages.clear()
+
+    def read_the_holds() -> None:
+        cycle.acknowledgements, cycle.ack_file_unreadable = credential_repage.read_acknowledgements(
+            credential_ack_path()
+        )
+        windows = _load_maintenance_windows() if MAINTENANCE_ENABLED else {}
+        cycle.maintenance_scopes = credential_repage.maintenance_scopes(windows, cycle.roster)
+
+    def announce_a_loss() -> None:
+        group_line, page = credential_repage.evaluate_announcement(cycle)
+        if page is not None:
+            pages.append(page)
+        if group_line is not None:
+            _credential_meta_alerts.append(
+                {"source": credential_repage.META_STATE_LOST, "line": group_line, "at": announcement_at()}
+            )
+
+    def report_the_roster() -> None:
+        if cycle.roster is None:
+            credential_repage.owe_meta_alert(cycle, credential_repage.META_ROSTER_UNREADABLE, day)
+
+    def evaluate_the_entries() -> None:
+        for key in credential_repage.pass_order(cycle):
+            try:
+                page = credential_repage.evaluate_entry(key, cycle)
+            except ControllerStateRequired:
+                raise
+            except Exception:  # noqa: BLE001 - one entry, on its own; its waiting outcome is kept
+                cycle.pass_error = True
+                continue
+            if page is not None:
+                pages.append(page)
+        credential_repage.drop_orphan_outcomes(cycle)
+
+    def report_a_fault() -> None:
+        if cycle.pass_error:
+            credential_repage.owe_meta_alert(cycle, credential_repage.META_PASS_ERROR, day)
+
+    def list_what_is_owed() -> None:
+        # Owed in the state until a channel takes it or its UTC day ends, whether or not its cause is
+        # still there, so neither a budget cut, a refusal nor a restart drops it. One alert whose line
+        # cannot be made is a fault of the pass and does not hold back the others.
+        for name, at in credential_repage.owed_meta_alerts(cycle, day):
+            try:
+                line = _credential_meta_line(name, at)
+            except Exception:  # noqa: BLE001 - see the failure boundary above
+                cycle.pass_error = True
+                continue
+            _credential_meta_alerts.append({"source": name, "line": line, "day": day})
+
+    for step in (cut_what_was_never_started, mark_what_was_taken, read_the_holds, announce_a_loss,
+                 report_the_roster, evaluate_the_entries, report_a_fault, list_what_is_owed):
+        contained(step)
+    # A fault while listing comes after report_a_fault ran: owe it now, so the next pass lists it.
+    contained(report_a_fault)
+    # A page is listed only once its floor is on disk.
+    if cycle.take_changed():
+        context.incident.commit()
+    _credential_pages.extend(pages)
+    try:
+        for _ in range(cycle.disabled_logs):
+            append_dispatch_log(paths, {
+                "type": credential_repage.LOG_PREFIX + "owner_route_disabled", "ownerRouteDisabled": True,
+            })
+        summary = cycle.summary()
+        if summary:
+            append_dispatch_log(paths, {"type": credential_repage.LOG_PREFIX + "cycle", **summary})
+    except Exception:  # noqa: BLE001 - a log record must never cost the cycle its completion stamp
+        pass
+
+
+def send_credential_pages(paths: dict[str, Path]) -> None:
+    """Send the listed class pages inside the class's own time budget.
+
+    Runs after the completion stamp and before the legacy drain, which keeps
+    its own full budget from its own start. A page leaves the list when its
+    send starts. An exception absorbed after that counts as a failed attempt,
+    whatever a channel had answered, so three stays the bound on the sends of
+    one page in one interval. A page that never started stays listed and the
+    next timer pass counts it as cut.
+    """
+    global _credential_send_fault
+    if not _credential_pages:
+        return
+    try:
+        ordered = credential_repage.page_order(_credential_pages)
+    except Exception:  # noqa: BLE001 - see the failure boundary above
+        _credential_send_fault = True
+        return
+    deadline = time.monotonic() + credential_repage.CLASS_BUDGET_SECONDS
+    for item in ordered:
+        if deadline - time.monotonic() < 1:
+            break
+        _credential_pages.remove(item)
+        result = credential_repage.FAILED
+        try:
+            from lib.owner_route import send_credential_page
+
+            accepted = send_credential_page(
+                item["line"],
+                item["body"],
+                counters={"count": item["count"], "failedAttempts": item["failedAttempts"], "hours": item["hours"]},
+                json_rpc_call=json_rpc_call,
+                email_fallback=email_fallback,
+                log=lambda record: append_dispatch_log(paths, record),
+                deadline=deadline,
+            )
+            if accepted:
+                result = credential_repage.ACCEPTED
+        except Exception:  # noqa: BLE001 - must never keep the legacy drain from running
+            _credential_send_fault = True
+        _credential_outcomes[item["scope"]] = {
+            "result": result, "attemptAt": item["attemptAt"], "before": item["before"],
+        }
+
+
+def send_credential_meta_alerts(paths: dict[str, Path]) -> None:
+    """Send the class's owed group meta-alerts inside their own budget, after the legacy drain.
+
+    The class sends these itself and does not queue them as the dead-letter and
+    unrenderable meta-alerts are queued: a queued alert is an incident alert,
+    and the incident renotify policy (6 h, then 12 h, then 24 h) would absorb
+    a repeat that the class promises (the state-lost alert once per 4 hours,
+    the others once per UTC day). Nothing in the cycle waits on them: the
+    stamp, the class pages and the legacy drain have run. Each owed alert is
+    tried at most once per cycle. One that the budget cuts, or that both
+    channels refused, is owed again in the next cycle, at no cost. One that a
+    channel took is marked by the next timer pass.
+    """
+    global _credential_send_fault
+
+    def log(record: dict[str, Any]) -> None:
+        append_dispatch_log(paths, record)
+
+    try:
+        deadline = time.monotonic() + CREDENTIAL_META_BUDGET_SECONDS
+        for item in _credential_meta_alerts:
+            if deadline - time.monotonic() < 1:
+                break
+            day = credential_meta_alert(item["source"], item["line"], deadline, log=log)
+            if day is not None:
+                # Marked for the UTC day a channel first took it, not the day it was listed.
+                taken = {**item, "day": day} if "day" in item else item
+                _credential_meta_taken.append(taken)
+    except Exception:  # noqa: BLE001 - see the failure boundary above
+        _credential_send_fault = True
 
 
 @controller_cycle(
@@ -10800,7 +11560,7 @@ def run_once(max_events: int) -> dict[str, Any]:
         # effect — the caller (run_daemon / main) catches and exits 78.
         # The session stays open throughout the cycle so IncidentStateCycle
         # can commit state at each save barrier.
-        with open_dispatcher_state_session() as session:
+        with open_dispatcher_state_session() as session, credential_cycle_scope():
             _load_result = session.load()
             project_dispatcher_state_mode(_load_result.diagnostic)
             if _load_result.mode == "recovery_required":
@@ -10820,6 +11580,7 @@ def run_once(max_events: int) -> dict[str, Any]:
             _incident_cycle = IncidentStateCycle(
                 session, _load_result.payload, _load_result.capability, paths=paths
             )
+            credential_begin_cycle(paths, _incident_cycle)
 
             # #2386: mark BEFORE the first pass that can quarantine. Every pre-loop
             # pass below calls ready(), which is where an unrenderable event is
@@ -10843,6 +11604,9 @@ def run_once(max_events: int) -> dict[str, Any]:
             writefail_recovered = recover_writefail_breadcrumbs(paths)
             reclaimed = reclaim_processing(paths)
             test_provenance_suppressed, test_provenance_meta_alerted = suppress_test_provenance_events(paths)
+            # Credential re-page: after the fixture events are retired and before
+            # any pass that can move a member event out of the outbox.
+            observe_credential_members(paths)
             recovery_deduped = suppress_ready_recovery_duplicates(paths, incident=_incident_cycle)
             # Pattern F (§10 C1): count flap trips on raw input BEFORE storm-collapse
             # consumes members. Emits consolidated flap_storm alerts; members are
@@ -10993,6 +11757,10 @@ def run_once(max_events: int) -> dict[str, Any]:
                 failed += unaccounted
                 last_error = UNRENDERABLE_ALERT_CONTENT_CODE
 
+            # Credential re-page: the listing of its due pages and of its
+            # owed group meta-alerts, before the stamp. Both are sent after it.
+            credential_timer_pass(paths)
+
             record_state(
                 paths,
                 lastRunAt=now_iso(),
@@ -11022,7 +11790,12 @@ def run_once(max_events: int) -> dict[str, Any]:
             )
             # After the completion stamp and every group send of this cycle,
             # still under the dispatcher lock that serialises the owner state.
+            # The class pages go first, inside their own budget; the legacy
+            # drain then runs with its full budget, exactly as before.
+            send_credential_pages(paths)
             drain_owner_route_queue(paths)
+            # The class's group meta-alerts come last, inside their own budget.
+            send_credential_meta_alerts(paths)
             return {
                 "processed": processed,
                 "sent": sent,

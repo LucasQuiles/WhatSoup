@@ -32,7 +32,7 @@ runtime), plus the runtime assistant-text egress gate. Layer-level status is
 noted inline below.
 
 
-> **Rate-limit layering note:** two independent throttles are keyed per chat — the in-process watchdog limits its typing-only liveness nudge to 1 per 15 min (in-memory, reset on restart), while the hook-tier drain limits actual fallback messages to 3 per hour (persisted per instance in `fallback-rate-limit.json`). Tune them together without treating the runtime nudge as delivery or terminal proof.
+> **Rate-limit wiring:** the in-process watchdog limits its typing-only liveness nudge to 1 per 15 min per chat (in-memory, reset on restart). `rgp-state.mjs` defines `checkAndRecordRateLimit` for a persisted 3-per-hour fallback limit, but the Stop hook and drain do not call it in source revision `59cc562bc` (2026-10-06). That fallback limit is not currently enforced by these callers. Wiring and validating it remains an implementation gap; the runtime nudge is never delivery or terminal proof.
 
 ## Current Surface
 
@@ -58,8 +58,9 @@ RGP is decomposed into independently reviewable layers, all now shipped:
 2. Hook-tier state and MCP client helpers (shipped).
    A per-instance queue (`deploy/hooks/lib/rgp-state.mjs`) and a small UNIX-socket
    JSON-RPC client (`deploy/hooks/lib/whatsoup-mcp-call.mjs`). Those helpers stay
-   under `deploy/hooks/lib/` because hook processes cannot import runtime
-   TypeScript modules.
+   under `deploy/hooks/lib/` to keep hook state separate from runtime business
+   logic. `rgp-state.mjs` imports shared filesystem and process-lock utilities
+   from `src/lib/`.
 
 3. Stop hook (shipped).
    The Stop hook (`deploy/hooks/stop-ensure-reply.mjs`) uses transcript
@@ -80,6 +81,9 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    impact; only stale open inbound or recovery work is an operational breach.
    A turn an operator cancelled with `/stop` (`operator_cancelled`) is a
    requested outcome, not debt, so its failed terminal is not counted.
+   A continuity candidate whose inbound is a synthetic scheduled-job turn
+   (message id `agentjob-*`, case-sensitive) owes no user a reply, so it is
+   reported as `syntheticContinuityCandidates` and not counted as debt (#3754).
    `failedTerminalWithEchoEvidence` is a subset of failed-terminal debt, not an
    additional replay count; it exposes contradictory delivery evidence that
    must be reconciled before any targeted repair.
@@ -89,6 +93,78 @@ RGP is decomposed into independently reviewable layers, all now shipped:
    `deferred`, `queued`, `executing` or `no_owner` (never healthy), optionally
    joined with a captured provider-execution gate state. See runbook §8, "Who
    owns a stale `processing` inbound".
+
+   `staleOpenInbounds` counts the open inbounds (`pending`, `processing` or
+   `turn_done`) whose `received_at` text sorts before `datetime(now,
+   -threshold)` and that have no terminal record. Every alert latch reads that
+   count and the other `counts` fields only.
+   Each conclusive observation also carries `progressDiagnostics`, which a
+   page can cite but which never changes the state, an alert latch, a
+   `--clear` or the exit code (R46). Inconclusive observations omit it. The
+   diagnostics are read only after every instance's base observation is
+   complete, in the same instance order, each on a read-only connection of
+   its own, so they never delay a base read. Each result joins its
+   observation before anything is printed or emitted.
+   - **Available.** `{"available": true, "staleRows", "staleChats",
+     "staleRowsWithRecentSend"}`, read by one SQL statement over the
+     `staleOpenInbounds` predicate, copied verbatim:
+     - `staleRows`: the number of rows in that set;
+     - `staleChats`: the number of distinct `conversation_key` values among
+       them;
+     - `staleRowsWithRecentSend`: the rows in that set with at least one
+       `outbound_ops` row whose `source_inbound_seq` is the row's `seq`,
+       whose status is `submitted` or `echoed`, and whose send time
+       `COALESCE(datetime(echoed_at), datetime(submitted_at))` is after
+       `received_at`, no later than now, and no earlier than now minus the
+       stale threshold. The send time is the first of the two that parses as
+       a time, so a malformed `echoed_at` falls back to `submitted_at`; a
+       send with neither does not count. The stale set keeps base's text
+       comparison of `received_at`; the send bounds compare
+       `datetime()`-normalised values. Because the send time prefers
+       `echoed_at`, a send echoed after `now` but before the diagnostics read
+       drops out of `staleRowsWithRecentSend`, even if it was submitted
+       inside the window; this affects the diagnostics only.
+   - **What they do not say.** The fields make no claim about queue
+     position. In `single` and `shared` session scope one queue serves every
+     chat, so several stale chats can sit behind one stuck turn. Sends with no
+     source inbound never count: the "Queued behind the current task"
+     receipt, startup, admin and health notices. `outbound_ops` records no
+     message role, so a command reply sent through the chat queue while a row
+     is the active turn is tied to that row and counts as a recent send; that
+     is one reason these fields never page.
+   - **Time bound.** The diagnostics of each instance have a 2 s wall-clock
+     budget, counted from before their schema check. Before each diagnostic
+     statement the busy timeout is set to the budget that remains, so a lock
+     wait ends by the deadline; an SQLite progress handler interrupts
+     statement work once the budget is spent; and a result that arrives after
+     the budget, a missing column included, is discarded. The diagnostics add
+     at most about the budget plus one progress-check interval per conclusive
+     instance, before anything is emitted; instances run one after another.
+     The bound is cooperative, not strict:
+     - the cap applies to each lock wait, not to each statement, so a
+       statement that SQLite prepares again after a schema change can wait
+       again for up to the same remaining budget;
+     - neither mechanism covers a blocking file read inside one SQLite VM
+       instruction, or SQLite's own retry loop when it starts a WAL read,
+       which can back off for up to about 10 s before it fails. Base's own
+       reads carry the same exposure to both.
+   - **Unavailable.** `{"available": false, "reason": ...}` with one fixed
+     reason code:
+     - `diagnostic_columns_missing`: the database lacks
+       `inbound_events.conversation_key`, `outbound_ops.submitted_at` or
+       `outbound_ops.echoed_at`;
+     - `diagnostic_failed`: a diagnostic statement failed within the budget,
+       the database path is no longer a regular file or has become a
+       symlink, or opening the diagnostics connection, setting `query_only`
+       on it or closing it failed;
+     - `diagnostic_budget_exceeded`: the diagnostics ran past the budget,
+       whether waiting for a lock or working; any values are discarded;
+     - `diagnostic_count_changed`: `staleRows` differs from
+       `staleOpenInbounds`, which the base observation read earlier on its
+       own connection; the later instances' base observations and the
+       earlier instances' diagnostics run in between. This is a count check
+       only: a write between the two reads that leaves the count unchanged is
+       not detected.
 
 5. Runtime watchdog (shipped).
    The runtime-owned manager (`ReplyGuaranteeManager` in
@@ -140,8 +216,9 @@ lines are ignored so a partial transcript does not crash the Stop hook.
 RGP implementation must keep these boundaries intact:
 
 - Hook helpers may read transcript files and hook-local state only.
-- Hook helpers call runtime behavior through the MCP socket; they do not import
-  `src/` modules or open SQLite directly.
+- Hook helpers call runtime behavior through the MCP socket. Shared `src/lib/`
+  filesystem and process-lock utilities are imported by `rgp-state.mjs`; hooks
+  must not import runtime business logic or open the instance SQLite database.
 - The scheduled durability observer is not a hook helper. It may read the
   canonical per-instance database, but only through normal SQLite read-only mode;
   it must not use `immutable=1`, copy a live main file without its WAL/SHM

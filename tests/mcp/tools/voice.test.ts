@@ -74,7 +74,7 @@ describe('voice tools', () => {
             type: 'object',
             properties: {
               text: { type: 'string', description: 'Text to synthesize and send as a voice note' },
-              voice_id: { type: 'string', description: 'ElevenLabs voice ID (defaults to instance config)' },
+              voice_id: { type: 'string', description: 'ElevenLabs voice ID (defaults to the synthesis provider default, not instance config)' },
             },
             required: ['text'],
           },
@@ -82,8 +82,7 @@ describe('voice tools', () => {
       ]);
     });
 
-    it('is NOT visible in global session (chat-scoped tool)', () => {
-      // Chat-scoped tools are visible in global session but rejected on call
+    it('is visible in global sessions with an explicit chatJid requirement', () => {
       const tools = registry.listTools(globalSession());
       expect(registry.getChatScopedToolNames()).toEqual(['send_voice_reply']);
       expect(tools).toEqual([
@@ -96,7 +95,7 @@ describe('voice tools', () => {
             properties: {
               chatJid: { type: 'string' },
               text: { type: 'string', description: 'Text to synthesize and send as a voice note' },
-              voice_id: { type: 'string', description: 'ElevenLabs voice ID (defaults to instance config)' },
+              voice_id: { type: 'string', description: 'ElevenLabs voice ID (defaults to the synthesis provider default, not instance config)' },
             },
             required: ['chatJid', 'text'],
           },

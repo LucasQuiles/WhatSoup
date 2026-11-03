@@ -190,6 +190,119 @@ def test_structured_whatsapp_connected_diagnostic_retires_parent():
     assert parent_key not in state["openIncidents"]
 
 
+def _hold_tier_connected_child(event_id: str) -> dict:
+    child = _alert("health_body_degraded", evidence="health_status=degraded", event_id=event_id)
+    child["diagnostics"] = {
+        "whatsappConnected": True,
+        "degradationCauses": ["degradation_silence_unproven"],
+    }
+    return child
+
+
+def test_hold_tier_child_without_a_parent_is_held():
+    # Control for the test below: in this environment the #2409 per-cause
+    # hold is active for a connected, hold-tier-only degraded alert.
+    mod = _load()
+    state: dict = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    child = _hold_tier_connected_child("evt-child-hold-control")
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is not None and reason.startswith("transient_held:"), reason
+    assert child["severity"] == "warning"
+    assert child["diagnostics"]["transientHeld"] is True
+
+
+def test_hold_tier_child_that_retires_a_parent_is_sent_not_held():
+    # The alert that retires a paged logout parent is the only notice of that
+    # closure; holding it as transient would close the incident silently.
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _hold_tier_connected_child("evt-child-hold-retires")
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is None, reason
+    assert parent_key not in state["openIncidents"]
+    assert child["severity"] == "critical"
+    assert "transientHeld" not in child["diagnostics"]
+    retired = child["diagnostics"]["retiredStrongerIncidents"]
+    assert [entry["incidentKey"] for entry in retired] == [parent_key]
+    assert mod.incident_key(child) not in state.get("transientState", {})
+
+
+def test_retried_child_that_retired_a_parent_is_still_not_held():
+    # The send failed after the retirement was recorded: the parent is gone
+    # from state and the event is processed again from the outbox. Its own
+    # retirement audit must still keep it out of the hold.
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _hold_tier_connected_child("evt-child-hold-retry")
+    assert mod.should_suppress_send(child, state) is None
+    assert parent_key not in state["openIncidents"]
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is None, reason
+    assert child["severity"] == "critical"
+    assert "transientHeld" not in child["diagnostics"]
+
+
+def test_page_of_a_retiring_child_names_the_closed_incident():
+    mod = _load()
+    state, parent_key = _state_with_parent(mod, "instance_logged_out")
+    child = _hold_tier_connected_child("evt-child-hold-render")
+    assert mod.should_suppress_send(child, state) is None
+
+    text = mod.format_event(child)
+
+    assert "  > closes_incident: instance_logged_out (diagnostics.whatsappConnected=true)" in text.splitlines()
+
+
+def test_closes_incident_line_renders_only_the_fixed_vocabulary():
+    # A queued event's diagnostics are producer-controlled: a forged audit
+    # entry must not carry a path or identifier into the message.
+    mod = _load()
+    child = _hold_tier_connected_child("evt-child-forged-audit")
+    child["diagnostics"]["retiredStrongerIncidents"] = [
+        {"incidentKey": "host-a|sample|instance_logged_out", "contradictingEvidence": "/srv/customer-a/report.txt whatsapp_connected=true"},
+        {"incidentKey": "customer_alice", "contradictingEvidence": "connected=true"},
+        "not-a-dict",
+    ]
+
+    text = mod.format_event(child)
+
+    closes = [line for line in text.splitlines() if "closes_incident" in line]
+    assert closes == ["  > closes_incident: instance_logged_out (whatsapp_connected=true)"]
+    assert "/srv/customer-a" not in text
+    assert "customer_alice" not in text
+
+
+@pytest.mark.parametrize("forged", ["x", ["not-a-dict"], [{"incidentKey": "customer_alice"}]])
+def test_forged_retirement_audit_does_not_skip_the_hold(forged):
+    # Only an audit entry in the fixed vocabulary skips the hold, so a skipped
+    # hold always has a closes_incident line to show for it.
+    mod = _load()
+    state: dict = {"version": 1, "openIncidents": {}, "lastSentAt": {}}
+    child = _hold_tier_connected_child("evt-child-forged-skip")
+    child["diagnostics"]["retiredStrongerIncidents"] = forged
+
+    reason = mod.should_suppress_send(child, state)
+
+    assert reason is not None and reason.startswith("transient_held:"), reason
+
+
+def test_closes_incident_line_names_a_root_once_after_repeat_retirement():
+    mod = _load()
+    child = _hold_tier_connected_child("evt-child-repeat-audit")
+    entry = {"incidentKey": "host-a|sample|instance_logged_out", "contradictingEvidence": "diagnostics.whatsappConnected=true"}
+    child["diagnostics"]["retiredStrongerIncidents"] = [dict(entry), dict(entry)]
+
+    closes = [line for line in mod.format_event(child).splitlines() if "closes_incident" in line]
+
+    assert closes == ["  > closes_incident: instance_logged_out (diagnostics.whatsappConnected=true)"]
+
+
 def test_daily_health_prefixed_connectivity_root_is_retired():
     os.environ["BOT_ERRORS_INHIBITION_MAP"] = (
         '{"daily-health:whatsapp_device_bond_lost": ["health_body_degraded"]}'

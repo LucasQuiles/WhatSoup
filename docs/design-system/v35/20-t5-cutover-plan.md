@@ -12,7 +12,12 @@ Tracks branch off `main`, one PR per bead, cross-model review on every bead
   to main", accepting the G2 packet recommendations): `18-debt-disposition.md` all 14
   rows approved, `19-performance-budget.md` §1 numbers approved for CI enforcement
   (bundle falsifier wired into b-12), DD-22 = **defer** (§4 rationale corrected at
-  sign-off — two factual errors fixed). **Surface beads (b-03…b-09) are open.**
+  sign-off — two factual errors fixed). **This records the G2 authorization to
+  open surface beads, not their current delivery state.** The later
+  [G3 record](G3-SIGNOFF.md) contains integration evidence, a conditional merge
+  recommendation, and post-gate amendments. Check Git and the current console
+  source before assigning remaining work; code presence alone does not close
+  visual acceptance or deployment.
 
 ## Decomposition
 
@@ -26,12 +31,13 @@ Tracks branch off `main`, one PR per bead, cross-model review on every bead
 | b-06 | Dream Lab | queue + filters strip + recently-decided, review pane (rationale, diff, impact, actions) | mockup-conformant; diff caps 72ch |
 | b-07 | Inbox | 3-pane: channel chips, seg control, conversation list, thread (bottom-anchored), composer (uniform 36px), ctx cards | mockup-conformant; takeover state end-to-end |
 | b-08 | Deployments | summary strip, deployment cards, hub sync rows, pair card | mockup-conformant; fits 1440×900 |
-| b-09 | Settings | section nav + 5 sections per `17-settings-ia-spec.md`, swatch sync, danger zone | nav==sections 1:1; fits 1440×900 |
+| b-09 | Settings | section nav matching `17-settings-ia-spec.md`, swatch sync, danger zone | nav==sections 1:1; fits 1440×900 |
 | b-09a | Metrics→Ops absorption (added at G2) | move the metrics charts/content (KpiCard set, ChartPanel, FleetMetricsChart, FleetTokenChart, FleetSessionChart) from `/metrics` + the Fleet surface into the Ops surface per `02-mapping.md` §2 E4; `/metrics` then redirects to `/ops` | Ops renders the absorbed metrics content; `/metrics` deep links land on Ops; no duplicate h1 |
 | b-10 | Journey | splash (hero+proof+watermarks) + hatch 5-step flow + ceremony (one-shot glow) | journey register; ceremony ≤800ms, fades to 0 |
 | b-11 | Motion system | lift class, ambient loop (live disc only), reduced-motion=instant, lint bans | `13-ceremony-motion.md` gates pass |
 | b-12 | Perf instrumentation | per `19-performance-budget.md` §2: profiler points, WS meters, long-task observer, CI perf lane | lane runs with approved numbers |
 | b-13 | G3 conformance gate | screenshot-conformance vs mockups (both themes, 1440×900), AA re-verification per owner gate, full lint | G3 sign-off |
+| b-14 | Ops language follow-up | Recorded after G3; see `G3-SIGNOFF.md` §5 | Retain the named residual until its own acceptance evidence closes it |
 
 ## Rules per bead
 
@@ -45,5 +51,5 @@ Tracks branch off `main`, one PR per bead, cross-model review on every bead
 
 ## Sequencing
 
-b-01 → b-02 → (b-03 … b-09 parallel by surface) → b-10/b-11 parallel → b-12 → b-13 (gate).
+b-01 → b-02 → (b-03 … b-09 plus b-09a by surface) → b-10/b-11 parallel → b-12 → b-13 (gate).
 b-01/b-02 may start pre-G2 (no visual change); surface beads open on G2 sign-off.

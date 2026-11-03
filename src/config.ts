@@ -35,6 +35,7 @@ import { parseRuntimeBootstrapConfig, type RuntimeBootstrapConfig } from './lib/
 import { getLoadedInstanceConfigOrNull } from './lib/instance-context.ts';
 import { parseClientOutputPoliciesForInstance } from './core/client-output-policy-config.ts';
 import type { ProviderProcessIsolationConfig } from './runtimes/agent/provider-process-isolation.ts';
+import { resolveTypedHandoffDistillConfig, type TypedHandoffDistillInput } from './lib/handoff-distill-config.ts';
 
 const APP_NAME = 'whatsoup';
 
@@ -1170,6 +1171,9 @@ const resolvedSignalConfig: SignalConfig | undefined =
     : undefined;
 
 const resolvedAgentOptions = configSection(instance?.agentOptions, 'agentOptions') ?? {};
+const resolvedHandoffDistill = resolvedAgentOptions['handoffDistill'] === undefined
+  ? undefined
+  : resolveTypedHandoffDistillConfig(resolvedAgentOptions['handoffDistill'] as TypedHandoffDistillInput);
 const resolvedFallbacks = normalizeFallbackEntriesFromAgentOptions(resolvedAgentOptions);
 const resolvedChatOptions = configSection(instance?.chatOptions, 'chatOptions') ?? {};
 const resolvedTranscriptionOptions = configSection(instance?.transcriptionOptions, 'transcriptionOptions') ?? {};
@@ -1381,6 +1385,7 @@ export const config = {
   // is total — malformed or absent input resolves to 'off' (dark), never a
   // throw; the load-path validator separately rejects malformed values loudly.
   fleetLifecyclePhase: resolveFleetLifecyclePhase(resolvedAgentOptions),
+  handoffDistill: resolvedHandoffDistill,
 
   // NL-first routing aliases + per-sender preference store (owner-approved
   // PR-plan v2). Default false: flag off keeps behavior byte-identical —

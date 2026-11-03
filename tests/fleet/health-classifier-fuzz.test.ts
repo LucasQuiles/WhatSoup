@@ -388,6 +388,9 @@ describe('health snapshot schema fuzz', () => {
       expect.stringContaining('health_body_degraded_polls=2'),
       'critical',
       undefined,
+      // No cause list in this body, so only the connected flag rides the alert;
+      // the dispatcher pages a degraded event without causes.
+      { degradationDiagnostics: { whatsappConnected: true } },
     );
   });
 

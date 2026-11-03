@@ -30,10 +30,10 @@ Scripts are sanitized: machine-specific paths/hosts are environment variables.
   replaced in place because the shrink-only tracked-PNG ratchet from issue #2219,
   enforced by `scripts/png-estate-guard.ts` from `.husky/pre-commit` and the
   push gate, caps any new PNG, and any changed PNG outside `docs/screenshots/`,
-  at 100 KiB, and pins every tracked PNG to its committed size (a tracked
+  at 100 KiB, and pins the named baseline PNGs to their recorded sizes (a tracked
   screenshot under `docs/screenshots/` may be replaced only by one that is no
-  larger), while a fresh render of these surfaces is several times the 100 KiB
-  cap. Regenerate on demand instead, with the pipeline this directory
+  larger). The guard records fresh 1440×900 @2x renders at 119–476 KiB, above
+  the cap. Regenerate on demand instead, with the pipeline this directory
   documents:
 
       python3 -m venv .venv

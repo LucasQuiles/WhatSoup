@@ -23,7 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import event_machine, new_event_fields
 from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
 from lib.target_provenance import (
     safe_observer_provenance,
@@ -410,7 +410,7 @@ def build_failure_event(
         **new_event_fields("observation" if args.severity == "info" else "alert", args.severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": f"{platform.system()} {platform.release()}",
         "instance": args.instance,
         "source": args.source,

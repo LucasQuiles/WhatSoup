@@ -87,6 +87,28 @@ HEALTH_READER_SHA256="__HEALTH_READER_SHA256__"
 # for a read that still has not finished (e.g. a trickling response).
 HEALTH_READ_TIMEOUT_SECONDS=5
 HEALTH_READ_DEADLINE_SECONDS=8
+# Confirm window for SILENT reads. A silent read got its connection accepted
+# and then no answer: an OS-level failure while waiting for or reading the
+# response (a timeout, a reset, or EOF before the status line), or a read
+# killed at the deadline with no output. A blocked event loop looks exactly
+# like this and recovers on its own: every recorded restart of a live target
+# followed a silence of 20.5 to 83.2 s. So when a silent read would restart
+# its target and every restart gate is open, restart_label first re-reads
+# that target every CONFIRM_STEP_SECONDS until CONFIRM_WINDOW_SECONDS have
+# passed (confirm_silent_read). A trusted answer cancels the restart
+# (RESTART-AVOIDED). Otherwise, at the window's end, a reader that no longer
+# verifies ends the run (as at its start), and a job identity that changed or
+# could not be read at either end defers the restart to the next run; only a
+# job as the silent read saw it is restarted, through every gate again.
+# Nothing is kept between runs. On a steady clock a confirm read is running
+# at the window's end or starts then, so the last one starts about 82 to 90 s
+# (the window less one 8 s read deadline, up to the window) after the window
+# opens. The silence had already lasted the silent read's own wait: 5 s for a
+# reader timeout, 8 s at the deadline, none for a reset or EOF. Each confirm
+# read of a silent target costs one reader timeout, so a 15 s step makes
+# about five reads.
+CONFIRM_WINDOW_SECONDS=90
+CONFIRM_STEP_SECONDS=15
 
 # Use the pinned node binary — never /usr/bin/env node (see macOS-host-setup runbook).
 NODE_BIN="__HOME__/.nvm/versions/node/v24.15.0/bin/node"
@@ -191,17 +213,22 @@ trap 'release_mutex "$LOCK"' EXIT
 # overwritten by a later, lower-priority one (the fleet check runs after the
 # bot check, and a credential verdict outranks a restart outcome). Restart
 # outcomes are severity-ordered — a failed kickstart beats a successful one
-# beats a suppression — so a mixed bot/fleet cycle reports the most actionable
-# outcome; per-job detail stays in the preceding log lines. Strict > means
-# identical states keep the first writer.
+# beats a suppression beats a restart avoided by a confirm read — so a mixed
+# bot/fleet cycle reports the most actionable outcome; per-job detail stays in
+# the preceding log lines. RESTART-AVOIDED still outranks ERROR so a run that
+# confirmed a silent target shows it; the ERROR keeps its exit status. Strict >
+# means identical states keep the first writer.
+# deploy/observation-plane/outcome-projections.json (watchdog_wd_rank) holds a
+# closed copy of these states; keep both in step.
 wd_rank() {
   case "$1" in
-    OUTBOUND-POISON) print 9 ;;
-    CREDENTIAL-DEAD) print 8 ;;
-    HEALTH-UNKNOWN) print 7 ;;
-    RESTART-FAILED) print 6 ;;
-    RESTARTED) print 5 ;;
-    RESTART-SUPPRESSED) print 4 ;;
+    OUTBOUND-POISON) print 10 ;;
+    CREDENTIAL-DEAD) print 9 ;;
+    HEALTH-UNKNOWN) print 8 ;;
+    RESTART-FAILED) print 7 ;;
+    RESTARTED) print 6 ;;
+    RESTART-SUPPRESSED) print 5 ;;
+    RESTART-AVOIDED) print 4 ;;
     ERROR) print 3 ;;
     CREDENTIAL-UNKNOWN) print 2 ;;
     *) print 1 ;;
@@ -391,9 +418,16 @@ credential_page() {
 
 # Called only after restart-worthy evidence. Exit 2 means bootstrap succeeded,
 # so the caller must not immediately kickstart that newly started process.
+# A third argument "kickstart-only" (only a restart confirmed on a job loaded
+# at both ends of a confirm window passes it) never bootstraps: any failed
+# print here, not only "not found", gives exit 3, and the caller defers the
+# restart.
 ensure_loaded() {
-  local job_label="$1" plist="$2"
+  local job_label="$1" plist="$2" mode="${3:-}"
   if ! launchctl print "$domain/$job_label" >/dev/null 2>&1; then
+    if [ "$mode" = kickstart-only ]; then
+      return 3
+    fi
     log "$job_label not loaded; bootstrapping"
     if ! run_with_timeout 30 launchctl bootstrap "$domain" "$plist" >> "$LOG" 2>&1; then
       log "ERROR: bootstrap failed for $job_label"
@@ -429,12 +463,52 @@ launchd_reports_permanent_stop() {
   '
 }
 
-# Restart a job with a 5-minute cooldown to avoid restart storms.
+# The job's launchd identity, compared across a confirm window: load state
+# plus pids, so it cannot tell a reload that ends with the same pid, or two
+# job generations that both show no pid. "loaded, pid" and every pid launchd
+# prints for the job ("none" when it is not running); "unloaded" only for
+# launchctl's "could not find service" status (exit 113, verified on macOS
+# 26; other macOS versions in the fleet are not verified, and a different
+# not-found code there only defers); "unreadable" for any other failure or a
+# timeout, which says nothing about the job, a missing domain's exit 112
+# included.
+job_identity() {
+  local job_label="$1" launchd_state print_rc
+  launchd_state="$(run_with_timeout 15 launchctl print "$domain/$job_label" 2>/dev/null)"
+  print_rc=$?
+  if [ "$print_rc" -eq 113 ]; then
+    print -r -- unloaded
+    return 0
+  fi
+  if [ "$print_rc" -ne 0 ]; then
+    print -r -- unreadable
+    return 0
+  fi
+  print -r -- "$launchd_state" | awk '
+    /^[[:space:]]*pid[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*/, "", value)
+      sub(/[[:space:]]*$/, "", value)
+      pids = pids " " value
+    }
+    END {
+      if (pids == "") pids = " none"
+      print "loaded, pid" pids
+    }
+  '
+}
+
+# Restart a job with a 5-minute cooldown to avoid restart storms. A third
+# argument "silent" marks evidence from a read that connected but got no
+# answer: once every gate below has passed, such a restart is confirmed first
+# (confirm_silent_read) instead of acting at once. "kickstart-only" marks the
+# restart that follows a confirm window on a job loaded at both of its ends:
+# it may kickstart that job but never bootstrap one (see ensure_loaded).
 restart_label() {
-  local job_label="$1" reason="$2"
+  local job_label="$1" reason="$2" evidence="${3:-}"
   local stamp="$LOG_DIR/$job_label.last-restart"
   local rlock="$LOG_DIR/$job_label.restart.lock"
-  local now last load_rc action_rc
+  local now last load_rc action_rc identity current verify_resp verify_rc
   if launchd_reports_permanent_stop "$job_label"; then
     log "$job_label unhealthy but restart suppressed after permanent launchd exit code 78: $reason"
     wd_note RESTART-SUPPRESSED
@@ -483,9 +557,69 @@ restart_label() {
     release_mutex "$rlock"
     return 0
   fi
-  ensure_loaded "$job_label" "$HOME_DIR/Library/LaunchAgents/$job_label.plist"
+  # Every gate has passed: this is where a restart acts. A silent read first
+  # confirms. The lock is released for the window so no other watchdog can
+  # reclaim it as stale mid-window. A restart still due at the window's end
+  # acts only through a reader that still verifies: the run's start check
+  # again, and on failure the run ends there as it does at its start (exit 2,
+  # nothing else read or restarted; the last line is HEALTH-UNKNOWN unless the
+  # run already noted a higher-ranked state, as the ladder does anywhere else).
+  # It acts only on the job as the silent read saw it (job_identity, equal at
+  # both ends); an identity that changed, or that launchctl could not report
+  # at either end, leaves the job to the next run's own read
+  # (RESTART-SUPPRESSED). An identity unreadable at the silent read still runs
+  # the window, so a trusted answer can still cancel the restart. The restart
+  # then comes back through this function without the silent flag, so every
+  # gate above is evaluated again, in this order; bootstrap is possible only
+  # for a job unloaded at both ends, and a job loaded at both ends may only be
+  # kickstarted.
+  if [ "$evidence" = silent ]; then
+    identity="$(job_identity "$job_label")"
+    release_mutex "$rlock"
+    if confirm_silent_read "$job_label" "$reason"; then
+      return 0
+    fi
+    verify_resp="$(read_health_response 0 verify </dev/null 2>>"$LOG")"
+    verify_rc=$?
+    if [ "$verify_rc" -ne 0 ] || [ "$verify_resp" != VERIFIED ]; then
+      health_unknown "health reader binding unavailable or invalid"
+      log "$WD_FINAL"
+      exit "$WD_EXIT"
+    fi
+    if [ "$identity" = unreadable ]; then
+      log "$job_label restart deferred: job identity unreadable at the silent read: $reason"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+    current="$(job_identity "$job_label")"
+    if [ "$current" = unreadable ]; then
+      log "$job_label restart deferred: job identity unreadable at the window's end: $reason"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+    if [ "$current" != "$identity" ]; then
+      log "$job_label restart deferred: job changed during the confirm window (at the silent read: $identity; now: $current): $reason"
+      wd_note RESTART-SUPPRESSED
+      return 0
+    fi
+    # Unloaded at both ends: bootstrap stays possible, as base would at the
+    # silent read. Loaded at both ends: kickstart only, so a job booted out
+    # after this check is not brought back by a bootstrap base never made.
+    if [ "$current" = unloaded ]; then
+      restart_label "$job_label" "$reason"
+    else
+      restart_label "$job_label" "$reason" kickstart-only
+    fi
+    return
+  fi
+  ensure_loaded "$job_label" "$HOME_DIR/Library/LaunchAgents/$job_label.plist" "$evidence"
   load_rc=$?
-  if [ "$load_rc" -eq 1 ]; then
+  if [ "$load_rc" -eq 3 ]; then
+    log "$job_label restart deferred: job not confirmed loaded after the window check: $reason"
+    wd_note RESTART-SUPPRESSED
+    release_mutex "$rlock"
+    return 0
+  elif [ "$load_rc" -eq 1 ]; then
     release_mutex "$rlock"
     return 1
   elif [ "$load_rc" -eq 2 ]; then
@@ -509,6 +643,110 @@ restart_label() {
     WD_EXIT=1
   fi
   release_mutex "$rlock"
+}
+
+# One confirm read ($2 numbers it in the log) of a target whose silent read
+# would restart it, with the same reader, binding and token handling as the
+# main read. Exit 0 only for a trusted answer: the fleet console's HTTP status
+# below 400, or a bot body the decision block reads without a restart verdict
+# (exits 0, 3, 4, 5 and 7). Every other result, a restart verdict (1) and an
+# untrusted body (6) included, is exit 1. It changes no run state: no
+# wd_note, no exit status, no marker or paging; only log lines.
+confirm_read() {
+  local job_label="$1" number="$2" answer answer_rc answer_code answer_body token decision_rc
+  if [ "$job_label" = "$FLEET_LABEL" ]; then
+    answer="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
+    answer_rc=$?
+    answer_code="${answer##*$'\n'}"
+    if [ "$answer_rc" -ne 0 ] || [[ "$answer_code" != [1-5][0-9][0-9] ]]; then
+      log "$job_label confirm read $number: no HTTP answer (reader exit $answer_rc)"
+      return 1
+    fi
+    log "$job_label confirm read $number: HTTP $answer_code"
+    [ "$answer_code" -lt 400 ]
+    return
+  fi
+  if ! token="$(read_health_token 2>>"$LOG")"; then
+    token=""
+    log "$job_label confirm read $number: diagnostic health token unavailable"
+    return 1
+  fi
+  answer="$(print -rn -- "$token" | read_health_response BOT_PORT /health 2>>"$LOG")"
+  answer_rc=$?
+  token=""
+  answer_code="${answer##*$'\n'}"
+  answer_body="${answer%$'\n'*}"
+  if [ "$answer_rc" -ne 0 ] || [[ "$answer_code" != [1-5][0-9][0-9] ]]; then
+    log "$job_label confirm read $number: no HTTP answer (reader exit $answer_rc)"
+    return 1
+  fi
+  if [ -z "$answer_body" ] || [ "$(LC_ALL=C print -rn -- "$answer_body" | wc -c)" -gt 65536 ]; then
+    log "$job_label confirm read $number: empty or oversized diagnostic body (HTTP $answer_code)"
+    return 1
+  fi
+  bot_decision "$answer_body" "$answer_code"
+  decision_rc=$?
+  log "$job_label confirm read $number: HTTP $answer_code, decision exit $decision_rc"
+  case "$decision_rc" in
+    (0|3|4|5|7) return 0 ;;
+  esac
+  return 1
+}
+
+# Confirm a silent read's restart (see CONFIRM_WINDOW_SECONDS) once every
+# restart gate has passed. Re-reads the target every CONFIRM_STEP_SECONDS and
+# ends with the first read that finishes at or after the window's end, so on
+# a steady clock a read is running at that moment or starts then, and the
+# window lasts at most CONFIRM_WINDOW_SECONDS plus one 8 s read deadline. The
+# window is measured by the clock and the reads are capped at max_reads: a
+# forward clock step shortens the window, and a backward one lengthens it up
+# to that cap, every read after a full step: 6 x (15 s + 8 s), about 138 s.
+# A sleep that fails ends the window at once, with the restart still due.
+# Exit 0 when a confirm read got a trusted answer: the restart is avoided.
+# Exit 1 when the window ended without one: the restart is still due.
+# Around the window restart_label also runs launchctl print (15 s limit) for
+# the job's identity at the silent read and at the window's end and for the
+# second gate pass, and one binding check (8 s), so a restart comes at most
+# about 191 s later than an immediate restart, and about 90 to 100 s later
+# when nothing hangs. Those figures count the timed reads, the launchctl
+# queries and the binding check only: the per-read token and decision steps
+# (read_health_token, bot_decision) and ensure_loaded's launchctl print have
+# no deadline, as at base. Counting the bounded steps alone, a run with a bot
+# and a fleet window takes at most about 500 s, inside the invocation lock's
+# 600 s. Such a run can outlast the 120 s StartInterval: launchd never runs
+# two instances of one job, so the next run starts late. A watchdog killed
+# during a window performs no restart for that read; the next run decides
+# again from its own read.
+confirm_silent_read() {
+  local job_label="$1" reason="$2" deadline pause reads=0 max_reads sleep_rc
+  max_reads=$(( (CONFIRM_WINDOW_SECONDS + CONFIRM_STEP_SECONDS - 1) / CONFIRM_STEP_SECONDS ))
+  deadline=$(( $(date +%s) + CONFIRM_WINDOW_SECONDS ))
+  log "$job_label silent read; confirming before restarting (a read every ${CONFIRM_STEP_SECONDS}s for ${CONFIRM_WINDOW_SECONDS}s): $reason"
+  while [ "$reads" -lt "$max_reads" ]; do
+    pause=$(( deadline - $(date +%s) ))
+    if [ "$pause" -gt "$CONFIRM_STEP_SECONDS" ]; then
+      pause=$CONFIRM_STEP_SECONDS
+    fi
+    if [ "$pause" -gt 0 ]; then
+      sleep "$pause"
+      sleep_rc=$?
+      if [ "$sleep_rc" -ne 0 ]; then
+        log "$job_label confirm window ended: sleep failed (exit $sleep_rc) after $reads confirm reads; restart still due: $reason"
+        return 1
+      fi
+    fi
+    reads=$((reads + 1))
+    if confirm_read "$job_label" "$reads"; then
+      log "$job_label answered on confirm read $reads; restart avoided: $reason"
+      wd_note RESTART-AVOIDED
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      break
+    fi
+  done
+  log "$job_label no trusted answer in ${CONFIRM_WINDOW_SECONDS}s ($reads confirm reads); restart still due: $reason"
+  return 1
 }
 
 # --- Bot health check ---
@@ -656,6 +894,9 @@ try:
         if error.stage == "connect" and error.errno == errno.EADDRNOTAVAIL:
             print("EADDRNOTAVAIL")
             raise SystemExit(2)
+        if error.stage in ("response", "read"):
+            print("TRANSPORT_SILENT")
+            raise SystemExit(8)
         print("TRANSPORT_FAILURE")
         raise SystemExit(7)
     if type(code) is not int or not 100 <= code <= 599 or not isinstance(body, str):
@@ -671,6 +912,8 @@ except Exception:
 
 # An unverifiable reader leaves this cycle without evidence: no restart, no
 # bootstrap, and no credential verdict (the paging state is left untouched).
+# restart_label repeats this check, with the same exit, before a restart at
+# the end of a confirm window.
 binding_resp="$(read_health_response 0 verify </dev/null 2>>"$LOG")"
 binding_rc=$?
 if [ "$binding_rc" -ne 0 ] || [ "$binding_resp" != VERIFIED ]; then
@@ -678,41 +921,12 @@ if [ "$binding_rc" -ne 0 ] || [ "$binding_resp" != VERIFIED ]; then
   log "$WD_FINAL"
   exit "$WD_EXIT"
 fi
-# Capture the body EVEN on an HTTP error status. A logged-out / terminally
-# auth-failed bot returns HTTP 503 *with* a body carrying
-# whatsapp.connection.auth_failure_class; discarding that body would send us
-# down the "unreachable" restart path, restart-looping a bot a restart cannot
-# fix. So the reader returns body + code for every HTTP response, and the
-# decision block below acts on the body (incl. the terminal-no-restart branch).
-# Only a typed transport failure with no HTTP response is unreachable, and only
-# a connect-stage EADDRNOTAVAIL (local ephemeral-port exhaustion) is
-# HEALTH-UNKNOWN instead: restarting a healthy target cannot free local ports.
-# Ordinary refusal retains the existing restart policy. A read killed at the
-# wall deadline (run_with_timeout 124, no output) is restart evidence too, as
-# `curl --max-time` was: the reader's own shorter socket timeout already turns
-# a silent target into a typed failure, so reaching the deadline means the
-# response did not complete in time (e.g. a trickling target).
-HEALTH_TOKEN=""
-if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
-  bot_resp="$(print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health 2>>"$LOG")"
-  probe_rc=$?
-  HEALTH_TOKEN=""
-  bot_code="${bot_resp##*$'\n'}"
-  bot_json="${bot_resp%$'\n'*}"
-  if [ "$probe_rc" -eq 2 ] && [ "$bot_resp" = EADDRNOTAVAIL ]; then
-    health_unknown "bot loopback connect failed: EADDRNOTAVAIL"
-  elif [ "$probe_rc" -eq 7 ] && [ "$bot_resp" = TRANSPORT_FAILURE ]; then
-    restart_label "$BOT_LABEL" "health endpoint unreachable"
-  elif [ "$probe_rc" -eq 124 ] && [ -z "$bot_resp" ]; then
-    restart_label "$BOT_LABEL" "health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
-  elif [ "$probe_rc" -ne 0 ] || [[ "$bot_code" != [1-5][0-9][0-9] ]]; then
-    health_unknown "bot health reader unavailable or invalid"
-  elif [ -z "$bot_json" ]; then
-    health_unknown "empty diagnostic health body"
-  elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
-    health_unknown "diagnostic health body exceeds 65536 bytes"
-  else
-    BOT_JSON="$bot_json" BOT_CODE="$bot_code" python3 - <<'PY' 2>>"$LOG"
+
+# The bot decision block, as a function so a confirm read (confirm_read) can
+# classify a body exactly as the main read does. $1 is the body, $2 the HTTP
+# status; the exits are documented at the end of the block.
+bot_decision() {
+  BOT_JSON="$1" BOT_CODE="$2" python3 - <<'PY' 2>>"$LOG"
 import datetime as dt
 import json
 import math
@@ -1217,6 +1431,48 @@ if fallback_reason is not None:
     sys.exit(5)
 sys.exit(4)
 PY
+}
+
+# Capture the body EVEN on an HTTP error status. A logged-out / terminally
+# auth-failed bot returns HTTP 503 *with* a body carrying
+# whatsapp.connection.auth_failure_class; discarding that body would send us
+# down the "unreachable" restart path, restart-looping a bot a restart cannot
+# fix. So the reader returns body + code for every HTTP response, and the
+# decision block above acts on the body (incl. the terminal-no-restart branch).
+# Only a typed transport failure with no HTTP response is unreachable, and only
+# a connect-stage EADDRNOTAVAIL (local ephemeral-port exhaustion) is
+# HEALTH-UNKNOWN instead: restarting a healthy target cannot free local ports.
+# Ordinary refusal, and every other connect- or request-stage failure, retains
+# the existing restart policy. A SILENT read (TRANSPORT_SILENT: the connection
+# was accepted, then the response timed out or was reset) is restart evidence
+# that restart_label confirms before acting (CONFIRM_WINDOW_SECONDS). So is a
+# read killed at the wall deadline (run_with_timeout 124, no output), as
+# `curl --max-time` was: the reader's own shorter socket timeout already turns
+# a silent target into a typed failure, so reaching the deadline means the
+# response did not complete in time (e.g. a trickling target).
+HEALTH_TOKEN=""
+if HEALTH_TOKEN="$(read_health_token 2>>"$LOG")"; then
+  bot_resp="$(print -rn -- "$HEALTH_TOKEN" | read_health_response BOT_PORT /health 2>>"$LOG")"
+  probe_rc=$?
+  HEALTH_TOKEN=""
+  bot_code="${bot_resp##*$'\n'}"
+  bot_json="${bot_resp%$'\n'*}"
+  if [ "$probe_rc" -eq 2 ] && [ "$bot_resp" = EADDRNOTAVAIL ]; then
+    health_unknown "bot loopback connect failed: EADDRNOTAVAIL"
+  elif [ "$probe_rc" -eq 7 ] && [ "$bot_resp" = TRANSPORT_FAILURE ]; then
+    restart_label "$BOT_LABEL" "health endpoint unreachable"
+  elif [ "$probe_rc" -eq 8 ] && [ "$bot_resp" = TRANSPORT_SILENT ]; then
+    restart_label "$BOT_LABEL" "health endpoint unreachable: connection accepted, response timed out or was reset" silent
+  elif [ "$probe_rc" -eq 124 ] && [ -z "$bot_resp" ]; then
+    restart_label "$BOT_LABEL" "health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s" silent
+  elif [ "$probe_rc" -ne 0 ] || [[ "$bot_code" != [1-5][0-9][0-9] ]]; then
+    health_unknown "bot health reader unavailable or invalid"
+  elif [ -z "$bot_json" ]; then
+    health_unknown "empty diagnostic health body"
+  elif [ "$(LC_ALL=C print -rn -- "$bot_json" | wc -c)" -gt 65536 ]; then
+    health_unknown "diagnostic health body exceeds 65536 bytes"
+  else
+    bot_decision "$bot_json" "$bot_code"
   py_rc=$?
   if [ "$py_rc" -eq 7 ]; then
     # The bot is connected but its active outbound lane is deliberately
@@ -1425,7 +1681,11 @@ fi
 
 # --- Fleet console health check ---
 # Probe /livez, not the console root: the root serves built static assets and
-# 404s on a release without them while the fleet process is healthy.
+# 404s on a release without them while the fleet process is healthy. It runs
+# after the bot section, so after a bot confirm window it starts later than it
+# would have: about 90 to 100 s, at most about 191 s (confirm_silent_read).
+# It does not run at all when the reader stopped verifying by the end of a bot
+# window: that ends the run (restart_label).
 fleet_resp="$(read_health_response FLEET_PORT /livez </dev/null 2>>"$LOG")"
 probe_rc=$?
 fleet_code="${fleet_resp##*$'\n'}"
@@ -1433,8 +1693,10 @@ if [ "$probe_rc" -eq 2 ] && [ "$fleet_resp" = EADDRNOTAVAIL ]; then
   health_unknown "fleet loopback connect failed: EADDRNOTAVAIL"
 elif [ "$probe_rc" -eq 7 ] && [ "$fleet_resp" = TRANSPORT_FAILURE ]; then
   restart_label "$FLEET_LABEL" "fleet console unreachable"
+elif [ "$probe_rc" -eq 8 ] && [ "$fleet_resp" = TRANSPORT_SILENT ]; then
+  restart_label "$FLEET_LABEL" "fleet console unreachable: connection accepted, response timed out or was reset" silent
 elif [ "$probe_rc" -eq 124 ] && [ -z "$fleet_resp" ]; then
-  restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s"
+  restart_label "$FLEET_LABEL" "fleet console health read exceeded ${HEALTH_READ_DEADLINE_SECONDS}s" silent
 elif [ "$probe_rc" -ne 0 ] || [[ "$fleet_code" != [1-5][0-9][0-9] ]]; then
   health_unknown "fleet health reader unavailable or invalid"
 elif [ "$fleet_code" -ge 400 ]; then

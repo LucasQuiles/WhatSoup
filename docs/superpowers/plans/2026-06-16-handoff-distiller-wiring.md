@@ -1,5 +1,7 @@
 # Handoff Distiller Wiring Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** Historical verification counts and coverage-floor numbers below are dated evidence. Current floors and headroom behavior are owned by `vitest.config.ts` and `scripts/check-coverage-headroom.ts`; verify those files instead of treating the old 88/80/87 figures as a current gate. All distillation, wiring, test and acceptance requirements remain preserved.
+
 **Status:** completed - landed via PRs #939/#941/#942 on 2026-06-16; retained as historical implementation evidence.
 
 > **✅ COMPLETE (2026-06-16):** All tasks landed + merged via PRs #939/#941/#942 (verified wired, flag-default-OFF, byte-identical when off). This plan is retained as a historical record; do not re-execute. Residual follow-ups: `tool-activity-blocked` template id (documented in `docs/runbooks/error-response-workflows.md`); two intentionally-defensive orphan exports (`deleteHandoffArtifact`, `assertSeamRoutingConsistency`).

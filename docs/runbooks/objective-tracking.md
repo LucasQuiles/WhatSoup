@@ -10,8 +10,8 @@ evidence visible without turning chat history into the source of truth.
 | Git branch and worktree state | Local truth for in-flight code | `git status -sb`, `git branch --show-current`, `git worktree list`, `git stash list` |
 | GitHub pull requests and issues | Live queue truth | `gh pr list --state open`, `gh issue list --state open` |
 | Work index | Generated index of scoped planning, SDLC, and superpowers artifacts | `npm run guard:work-index` |
-| Current program narrative | Human synthesis over the generated index | `docs/current-program.md` |
-| Artifact sweep dry run | Report-only scan for scattered plans, specs, tasks, beads, and sessions | Operators with the artifact-sweep plugin can invoke its `run-sweep.sh` script; otherwise run `npm run guard:work-index` and read `docs/work-index.md` — the work index is the planning truth. |
+| Current program narrative | Active-work navigation to requirements, delivery and scoped planning records | `docs/current-program.md` |
+| Artifact sweep dry run | Report-only scan for scattered plans, specs, tasks, beads, and sessions | Operators with the artifact-sweep plugin can invoke its `run-sweep.sh` script; otherwise run `npm run guard:work-index` and read `docs/work-index.md`. The index covers `docs/sdlc`, `docs/superpowers` and `docs/plans`; it cannot prove the absence of other active work. |
 | Verification gates | Evidence that a change is ready to publish | `npm run verify:push:branch` for branch work; `npm run verify:release` for release work |
 
 Static docs must not be treated as live queue truth. Re-query GitHub for open
@@ -44,8 +44,9 @@ Before declaring an objective complete:
 
 1. Verify the PR state, merge commit, and CI status with `gh pr view` or
    `gh pr checks`.
-2. Verify local `main` has fast-forwarded to the merge commit when local follow-
-   up work depends on it.
+2. Verify the checkout used for follow-up work contains the required merge commit.
+   Keep a runtime-pinned checkout pinned until its existing migration procedure
+   permits advancement.
 3. Move or mark the planning artifact according to
    `docs/canonical-status-policy.md`.
 4. Leave any remaining blockers as explicit follow-up items with owner, evidence
@@ -63,8 +64,8 @@ Weekly maintenance review:
    superseded work. Use `git range-diff` or `git cherry -v` before deleting any
    branch claimed to be superseded, and never remove a worktree that has staged,
    unstaged, or untracked files.
-4. Check whether `docs/current-program.md` still describes the generated work
-   index accurately. If not, update it or add a staleness note.
+4. Check whether `docs/current-program.md` still routes readers to the current
+   owners, delivery records and scoped planning index. Correct stale references.
 
 Monthly maintenance review:
 

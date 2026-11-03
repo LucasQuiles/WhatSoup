@@ -7,7 +7,8 @@
 //   - opencode-cli            → refreshed verbose catalogue, explicitly
 //                               labeled cache/legacy degradation, then a
 //                               short-lived resolver cache for render traffic,
-//   - claude-cli              → anthropic /v1/models with the CLI OAuth identity,
+//   - claude-cli              → anthropic /v1/models with an explicit API key;
+//                               organization catalogue, not CLI login authority,
 //   - anthropic-api           → anthropic /v1/models with the managed API-key identity,
 //   - openai / openai-api     → openai /v1/models, keyed (Task B; both provider
 //                               strings route here — see resolveModelCatalogue),

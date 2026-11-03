@@ -52,8 +52,9 @@ immediately, consuming budget.
 
 ## Containment
 
-- `retry_not_before` is stored as an absolute ISO timestamp (monotonic-guarded
-  against clock regressions), never a bare delay.
+- `retry_not_before` is stored as an absolute ISO timestamp, never a bare
+  delay. `first_failure_at` and `last_failure_at` are monotonic-guarded against
+  clock regressions; `retry_not_before` has no separate monotonic guard.
 - The deferred retry is coherent: `retryable: true`, owner `pending_drainer`,
   budget `preserve`, and `mutation_state` is `rejected` (never `ambiguous` or
   `submitted` — the evidence validator rejects incoherent deferred retries).
@@ -94,6 +95,9 @@ supports it.
 
 - Escalate if `retryAfterMs` is absent on a clear 429 (adapter failed to parse
   `retry-after` → falls back to `retry_now` and can hammer the provider).
+  The Twilio port currently omits Retry-After, so its 429 path predictably takes
+  `retry_now`. That known implementation gap still needs correction; absence
+  alone does not identify a new regression in a running Twilio instance.
 - Escalate if rate limits persist past the stated window (provider quota model
   changed, or the limit is actually a usage/billing cap).
 - Escalate on a fleet-wide throttle across unrelated accounts (provider

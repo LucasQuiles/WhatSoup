@@ -1,5 +1,7 @@
 # Interaction patterns — focus, keyboard, overlays, toolbars, confirmation, errors, disclosure
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Sources: v2.html (locked), research-digest signals 5/6/8, inconsistency-register P1-2, P2-7, P2-8,

@@ -283,7 +283,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const before = rows();
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(rows().filter((r) => (r as { workspace_key: string }).workspace_key === SCHEDULED))
         .toEqual(before.filter((r) => (r as { workspace_key: string }).workspace_key === SCHEDULED));
     });
@@ -308,7 +308,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       recentMessages.rows = [storedMessage('fixture earlier question about the invoice')];
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerTurnText()).toContain('fixture earlier question about the invoice');
     });
 
@@ -318,7 +318,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       recentMessages.rows = [storedMessage('fixture earlier question about the lease')];
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerTurnText()).toContain('fixture earlier question about the lease');
     });
 
@@ -335,7 +335,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       });
       await view.sendTurnToSession(session, JID, 'fixture user turn', JID);
       expect(spawnSpy.mock.calls).toEqual([[OWN_SID, ownRow], []]);
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerTurnText()).toContain('fixture earlier question about the deposit');
     });
   });
@@ -360,7 +360,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         .rejects.toThrow('CHECKPOINT_ADOPTION_REFUSED');
       expect(spawnSpy).not.toHaveBeenCalled();
       expect(providerSend).not.toHaveBeenCalled();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, MAY_BE_RUNNING);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, MAY_BE_RUNNING, 'status');
       expect([...view.chatSessions.values()].filter((s) => s.getStatus().active)).toEqual([]);
       expect(rows()).toEqual(beforeRows);
       expect(engine.getSessionCheckpoint(PHONE)).toEqual(beforeCheckpoint);
@@ -383,7 +383,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(inboundStatus()).toBe('failed');
       expect(db.raw.prepare('SELECT state FROM turn_recovery_jobs WHERE source_inbound_seq = ?').all(seq)).toEqual([]);
       expect((runtime.getHealthSnapshot().details as { degradedReasons?: string[] }).degradedReasons).toEqual([]);
-      expect(notices.mock.calls).toEqual([[JID, MAY_BE_RUNNING]]);
+      expect(notices.mock.calls).toEqual([[JID, MAY_BE_RUNNING, 'status']]);
       expect(providerSend).not.toHaveBeenCalled();
       const queue = (runtime as unknown as { chatQueues: Map<string, ReturnType<typeof makeQueueDouble>> }).chatQueues.get(JID)!;
       expect(queue.enqueueText).not.toHaveBeenCalled();
@@ -408,7 +408,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       writeCheckpoint(PHONE, SCHEDULED_SID);
       const { spawnSpy } = await firstTurn();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
   });
 
@@ -427,7 +427,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
 
@@ -437,7 +437,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
 
@@ -447,7 +447,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { session, spawnSpy } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
 
@@ -470,7 +470,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       } finally {
         closeSpy.mockRestore();
       }
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
       expect(providerSend).toHaveBeenCalledTimes(1);
     });
 
@@ -709,7 +709,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { session, noticesAtBoundary } = managerWithDeferredFreshStart(async (onReady) => { onReady?.(); });
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       expect(noticesAtBoundary).toEqual([0]);
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     it('a deferred fresh start\'s notice goes out before the turn opens its answer evidence', async () => {
@@ -730,7 +730,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
         .rejects.toThrow('fixture deferred start refused');
       await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
       expect(noticesAtBoundary).toEqual([0, 0]);
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     it('a deferred fresh start superseded at one boundary sends its notice once, at the next turn\'s boundary', async () => {
@@ -744,7 +744,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       )).rejects.toThrow('TURN_RECOVERY_DISPATCH_TARGET_SUPERSEDED');
       await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
       expect(noticesAtBoundary).toEqual([0, 0]);
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     it('a deferred fresh start cancelled right after its spawn sends its notice once, at the next turn\'s boundary', async () => {
@@ -757,7 +757,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       expect(notices).not.toHaveBeenCalled();
       await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
       expect(noticesAtBoundary).toEqual([0]);
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     it('a deferred fresh start announced at its boundary is not announced again at the next one', async () => {
@@ -765,7 +765,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
       await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
       expect(noticesAtBoundary).toEqual([0, 1]);
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     it('a held notice waits past a scheduled turn for the next user turn', async () => {
@@ -778,7 +778,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       )).resolves.toBeUndefined();
       expect(notices).not.toHaveBeenCalled();
       await expect(view.sendTurnToSession(session, JID, 'fixture next turn', JID)).resolves.toBeUndefined();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     it('a generation reset, as /new does, drops a held notice', async () => {
@@ -796,7 +796,7 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       const { session } = managerWithFailingClose(new Error(LIFECYCLE_CLOSE_FAILED));
       vi.spyOn(session, 'sendTurnAtProviderBoundary').mockImplementationOnce(async (_input, onReady) => { onReady?.(); });
       await expect(view.sendTurnToSession(session, JID, 'fixture user turn', JID)).resolves.toBeUndefined();
-      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
     });
 
     const scheduledTurns: Array<[string, string, 'scheduled-agent-job' | undefined]> = [
@@ -919,6 +919,73 @@ describe('lazy per-chat checkpoint adoption (#3530 successor)', () => {
       await turn;
       expect(turnError).toBeNull();
       expect(spawnSpy).toHaveBeenCalledExactlyOnceWith(OWN_SID, ownRow);
+      expect(notices).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('an idle eviction whose suspend fails after its provider stopped does not wedge the chat', () => {
+    // Production 2026-10-07..12: a scheduled job's turn had written its own
+    // session into the chat's checkpoint (the pre-#3570 writer), so the idle
+    // suspend's durable close threw after the child was already terminated.
+    // The eviction's actor-socket teardown barrier stayed rejected, every new
+    // manager for the chat awaited it in spawnSession, and every later message
+    // was rejected before dispatch until the process restarted.
+    const CLOSE_FAILED = 'Exact session checkpoint lifecycle could not be closed';
+    type EvictView = { evictIdleSession(mapKey: string, session: SessionManager, reason: string): void };
+    const evict = (session: SessionManager) =>
+      (runtime as unknown as EvictView).evictIdleSession(JID, session, 'idle-ttl');
+    function agentStatus(rowId: number | null): string | undefined {
+      return (db.raw.prepare('SELECT status FROM agent_sessions WHERE id = ?').get(rowId) as
+        { status: string } | undefined)?.status;
+    }
+    async function nextTurn(text: string) {
+      view.ensureSessionAndQueueSync(JID, JID);
+      const session = view.chatSessions.get(JID)!;
+      const spawnSpy = vi.spyOn(session, 'spawnSession');
+      const turn = view.sendTurnToSession(session, JID, text, JID);
+      return { session, spawnSpy, turn };
+    }
+
+    it('the next messages start a fresh session with one notice instead of being rejected', async () => {
+      const { session: first } = await firstTurn();
+      const firstRow = first.getDbRowId();
+      expect(firstRow).not.toBeNull();
+      insertRow(SCHEDULED_SID, SCHEDULED, 'active');
+      engine.upsertSessionCheckpoint(PHONE, { sessionId: SCHEDULED_SID, sessionStatus: 'active' });
+      const shutdown = vi.spyOn(first, 'shutdown');
+
+      evict(first);
+      await expect(shutdown.mock.results[0]!.value).rejects.toThrow(CLOSE_FAILED);
+      expect(first.getStatus().providerTerminated).toBe(true);
+      providerSend.mockClear();
+
+      const second = await nextTurn('fixture turn after the failed eviction');
+      await expect(second.turn).resolves.toBeUndefined();
+      expect(second.session).not.toBe(first);
+      expect(second.spawnSpy).toHaveBeenCalledExactlyOnceWith();
+      expect(providerSend).toHaveBeenCalledTimes(1);
+      expect(notices).toHaveBeenCalledExactlyOnceWith(JID, NOT_RESTORED, 'status');
+      // The abandoned generation can never be resumed behind the chat's back,
+      // and the foreign checkpoint's session was not adopted.
+      expect(agentStatus(firstRow)).toBe('ended');
+      expect(second.spawnSpy.mock.calls.flat()).not.toContain(SCHEDULED_SID);
+
+      const third = await nextTurn('fixture later turn');
+      await expect(third.turn).resolves.toBeUndefined();
+      expect(providerSend).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failed eviction whose provider stop is unproven still refuses the next message', async () => {
+      const { session: first } = await firstTurn();
+      vi.spyOn(first, 'shutdown').mockRejectedValueOnce(
+        new AggregateError([new Error('fixture kill failed')], 'fixture termination and closure both failed'),
+      );
+      evict(first);
+      providerSend.mockClear();
+
+      const second = await nextTurn('fixture turn after the unproven stop');
+      await expect(second.turn).rejects.toThrow('fixture termination and closure both failed');
+      expect(providerSend).not.toHaveBeenCalled();
       expect(notices).not.toHaveBeenCalled();
     });
   });

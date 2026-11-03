@@ -167,7 +167,7 @@ The next scheduled invocation may retry the marker transition. The final log sta
 by a marker I/O failure: `CREDENTIAL-DEAD` on a failed create, `ok` on a failed clear — the
 error line and the nonzero invocation exit carry the failure.
 
-The final log line is managed by an upgrade-only escalation ladder: `CREDENTIAL-DEAD` >
+The final log line is managed by an upgrade-only escalation ladder: `OUTBOUND-POISON` > `CREDENTIAL-DEAD` >
 `HEALTH-UNKNOWN` > `RESTART-FAILED` > `RESTARTED` > `RESTART-SUPPRESSED` > `ERROR` >
 `CREDENTIAL-UNKNOWN` > `ok`. Restart outcomes are severity-ordered within their tier so a
 mixed bot/fleet cycle reports the most actionable outcome (a suppressed bot restart cannot

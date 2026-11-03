@@ -927,14 +927,32 @@ describe('registry.ts uncovered-branch coverage', () => {
     expect(result.content[0].text).toBe('Tool "non_error_throw" failed: plain string failure');
   });
 
-  it('sanitizes connection-level transport errors before exposing them', async () => {
+  const transportErrors: ReadonlyArray<{ label: string; message: string; code?: string }> = [
+    { label: 'message ECONNRESET', message: 'write ECONNRESET at TCPOnSession' },
+    { label: 'message EPIPE', message: 'write EPIPE at Socket._write' },
+    { label: 'message ENOTCONN', message: 'socket ENOTCONN' },
+    { label: 'message ETIMEDOUT', message: 'connect ETIMEDOUT 203.0.113.1' },
+    { label: 'message TLS handshake', message: 'TLS handshake failed during protocol negotiation' },
+    { label: 'message TLSv1 alert', message: 'TLSv1 alert protocol version' },
+    { label: 'message TLSv1.2 alert', message: 'TLSv1.2 alert unknown ca' },
+    { label: 'message TLSv1.3 handshake', message: 'TLSv1.3 handshake failed during protocol negotiation' },
+    { label: 'message TLS 1.2 alert', message: 'TLS 1.2 alert protocol version' },
+    { label: 'message ERR_SSL alert', message: 'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA: peer internal.example' },
+    { label: 'message certificate validation', message: 'certificate verify failed' },
+    { label: 'message socket hang up', message: 'socket hang up' },
+    { label: 'code ERR_TLS_CERT_ALTNAME_INVALID', message: 'peer host private.internal', code: 'ERR_TLS_CERT_ALTNAME_INVALID' },
+    { label: 'code SELF_SIGNED_CERT_IN_CHAIN', message: 'peer trust chain private.internal', code: 'SELF_SIGNED_CERT_IN_CHAIN' },
+  ];
+
+  it.each(transportErrors)('sanitizes transport error $label before exposing it', async ({ message, code }) => {
     registry.register(
       makeTool({
         name: 'transport_fail',
         scope: 'global',
         schema: z.object({}),
         handler: async () => {
-          const err = new Error('write ECONNRESET at TCPOnSession');
+          const err = new Error(message) as Error & { code?: string };
+          if (code !== undefined) err.code = code;
           throw err;
         },
       }),

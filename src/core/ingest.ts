@@ -309,15 +309,17 @@ export function createIngestHandler(
         // Correlate and idempotently store outbound echoes without consuming
         // bounded admission capacity. The shared helper below keeps the normal
         // downstream storage path behavior-identical without double writes.
-        if (msg.isFromMe && durability) {
-          try {
-            durability.matchEcho(msg.messageId);
-          } catch (err) {
-            log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
-          }
-        }
         if (msg.isFromMe) {
+          // Store first: settling a recovered turn's echo records its completed
+          // identity only when the outgoing message is stored.
           const storedEcho = persistIncomingMessage(db, msg);
+          if (durability) {
+            try {
+              durability.matchEcho(msg.messageId);
+            } catch (err) {
+              log.error({ err, messageId: msg.messageId }, 'failed to correlate outbound echo');
+            }
+          }
           if (!storedEcho) return;
           if (!storedEcho.isNew) {
             log.debug({ messageId: msg.messageId, reason: 'duplicate' }, 'skipping duplicate message delivery');

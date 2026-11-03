@@ -2,6 +2,8 @@
 
 **Status:** Pending implementation
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** `src/config.ts` already resolves the governor block through typed helpers; Task 2's unchecked-cast premise is historical. The waiter cap and total enqueue-to-admission deadline remain requirements. `OutboundRateLimiter.acquireBounded` currently bounds only each reservation's wait, not cumulative FIFO time, so its presence does not close the deadline requirement. Reconcile the proposed fields and cross-field rules with the current validator before editing; preserve all failure-isolation and attempt-accounting requirements.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Validate outbound-governor configuration, enforce a real enqueue-to-admission deadline with bounded waiters, and count every outbound socket attempt exactly once.

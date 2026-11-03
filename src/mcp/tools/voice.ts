@@ -55,7 +55,7 @@ export function registerVoiceTools(
     externalEffect: { version: EXTERNAL_EFFECT_CONTRACT_VERSION, kind: 'external' },
     schema: z.object({
       text: z.string().describe('Text to synthesize and send as a voice note'),
-      voice_id: z.string().optional().describe('ElevenLabs voice ID (defaults to instance config)'),
+      voice_id: z.string().optional().describe('ElevenLabs voice ID (defaults to the synthesis provider default, not instance config)'),
     }),
     handler: async (params, session: SessionContext) => {
       const { text: rawText, voice_id: voiceId } = z.object({

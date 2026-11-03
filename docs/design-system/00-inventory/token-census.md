@@ -1,5 +1,7 @@
 # Token Census — console/src/index.css
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 Audit date: 2026-06-11 (branch `design/soup-rebrand`). Source of truth: `console/src/index.css` (1,236 lines).
 
 Method: every `--*` custom property declaration in `console/src/index.css` was extracted with its definition line, then usage was counted across all of `console/src` (`.tsx`, `.ts`, `.css`):

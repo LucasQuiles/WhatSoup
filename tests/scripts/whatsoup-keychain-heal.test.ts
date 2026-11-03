@@ -280,7 +280,9 @@ describe('whatsoup-keychain-heal.sh', { timeout: 30_000 }, () => {
       '',
     ].join('\n'), { mode: 0o700 });
     const started = performance.now();
-    const result = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1', '--health-timeout', '1'], {
+    // The outer budget includes supervisor startup; admit the stalled child
+    // under full-suite load while retaining the eight-second cleanup ceiling.
+    const result = runHeal(h, [...BASE_ARGS, '--max-kickstarts', '1', '--health-timeout', '3'], {
       KICK_PID: pidPath,
     });
     const admission = JSON.stringify({

@@ -14,6 +14,25 @@
 
 const SYNC_FUNCS = new Set(['execSync', 'execFileSync', 'spawnSync']);
 
+function unwrapExpression(node) {
+  if (
+    node.type === 'TSAsExpression'
+    || node.type === 'TSTypeAssertion'
+    || node.type === 'TSNonNullExpression'
+    || node.type === 'TSSatisfiesExpression'
+    || node.type === 'ChainExpression'
+  ) {
+    return unwrapExpression(node.expression);
+  }
+  return node;
+}
+
+function staticPropertyName(key, computed) {
+  if (!computed && key.type === 'Identifier') return key.name;
+  if (key.type === 'Literal' && typeof key.value === 'string') return key.value;
+  return null;
+}
+
 /** @type {import('eslint').Rule.RuleModule} */
 export default {
   meta: {
@@ -43,18 +62,15 @@ export default {
         }
 
         // Member call: child_process.execSync(...) or cp.execFileSync(...)
-        if (
-          node.callee.type === 'MemberExpression' &&
-          node.callee.property.type === 'Identifier' &&
-          SYNC_FUNCS.has(node.callee.property.name)
-        ) {
-          funcName = node.callee.property.name;
+        if (node.callee.type === 'MemberExpression') {
+          const memberName = staticPropertyName(node.callee.property, node.callee.computed);
+          if (SYNC_FUNCS.has(memberName)) funcName = memberName;
         }
 
         if (!funcName) return;
 
         // Check the last argument for timeout
-        const args = node.arguments;
+        const args = node.arguments.map(unwrapExpression);
         if (args.length < 2) {
           // execSync(cmd) — definitely missing timeout
           context.report({ node, data: { name: funcName }, messageId: 'missingTimeout' });
@@ -72,7 +88,8 @@ export default {
         } else if (funcName === 'execFileSync') {
           if (args.length >= 3) {
             optsArg = args[2]; // execFileSync(bin, args, opts)
-          } else if (args.length === 2) {
+          } else if (args.length === 2 && args[1].type !== 'ArrayExpression') {
+            // An argument array cannot supply timeout options.
             optsArg = args[1]; // execFileSync(bin, opts)
           }
         }
@@ -87,8 +104,7 @@ export default {
           const hasTimeout = optsArg.properties.some(
             (prop) =>
               prop.type === 'Property' &&
-              prop.key.type === 'Identifier' &&
-              prop.key.name === 'timeout',
+              staticPropertyName(prop.key, prop.computed) === 'timeout',
           );
           if (!hasTimeout) {
             context.report({ node, data: { name: funcName }, messageId: 'missingTimeout' });

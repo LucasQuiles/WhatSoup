@@ -1,5 +1,7 @@
 # Command palette — the ⌘K fleet launcher (showcase §17)
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 A keyboard-first launcher overlay. **v1 is read-only**: fuzzy-switch routes and jump to a
 line's detail. No mutations, no confirm dialogs, no line actions (later slices). Opened by the
 global `⌘K` / `Ctrl+K` binding (`use-keyboard-shortcuts`), which v1 repurposes from the old

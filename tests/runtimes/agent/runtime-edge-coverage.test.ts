@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../src/core/database.ts';
 import type { Messenger } from '../../../src/core/types.ts';
-import type { IOutboundQueue } from '../../../src/runtimes/agent/outbound-queue.ts';
+import type { IOutboundQueue, OutboundMessageRole } from '../../../src/runtimes/agent/outbound-queue.ts';
 import type { SessionGenerationIdentity } from '../../../src/runtimes/agent/session.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import { createRuntimeTurnContext, type RuntimeTurnContext } from '../../../src/runtimes/agent/runtime-turn-context.ts';
@@ -443,7 +443,7 @@ type RuntimeView = {
     event: Extract<AgentEvent, { type: 'assistant_text' }>,
     mapKey?: string,
   ): string | null;
-  sendDirect(chatJid: string, text: string, bypassEchoGuard?: boolean): void;
+  sendDirect(chatJid: string, text: string, role: OutboundMessageRole, bypassEchoGuard?: boolean): void;
   maybeStartAutoCompact(session: { getStatus: ReturnType<typeof vi.fn>; getDbRowId: ReturnType<typeof vi.fn>; sendTurn: ReturnType<typeof vi.fn> }, mapKey?: string): void;
   startQueueSweepTimer(): void;
   ensureSessionAndQueueSync(chatJid: string, initialMapKey?: string, actorJid?: string): void;
@@ -1146,7 +1146,7 @@ describe('AgentRuntime edge coverage', () => {
 
     expect(recordTurnFailure).toHaveBeenCalledWith('usage-limit');
     expect(view(runtime).getFallbackState().fallbackReason).toBe('usage-limit');
-    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'));
+    expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('will not replay it automatically'), 'lifecycle');
     expect(session.shutdown).toHaveBeenCalledTimes(1);
     expect(mockBuildDiagnosticProbes).toHaveBeenCalledWith(expect.objectContaining({
       providerText: expect.stringContaining('Usage limit reached'),
@@ -1218,9 +1218,9 @@ describe('AgentRuntime edge coverage', () => {
       expect(session.completeProviderTurn).toHaveBeenCalledTimes(1);
       expect(queue.endTurn).toHaveBeenCalledTimes(1);
       expect(session.shutdown).toHaveBeenCalledTimes(1);
-      expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
+      expect(vi.mocked(queue.enqueueResultText).mock.calls.map((c) => c[0])).not.toContain(item.text);
       if (item.expectNotice) {
-        expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'));
+        expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'), 'status');
       } else {
         expect(queue.enqueueText).not.toHaveBeenCalled();
       }
@@ -1312,8 +1312,8 @@ describe('AgentRuntime edge coverage', () => {
       );
 
       expect(runtime.getFallbackState().fallbackReason).toBe(item.reason);
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup'));
-      expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup'), 'lifecycle');
+      expect(vi.mocked(queue.enqueueResultText).mock.calls.map((c) => c[0])).not.toContain(item.text);
       expect(mockEmitAlert).toHaveBeenCalledWith(
         'test',
         'provider_fallback_activated',
@@ -1392,9 +1392,9 @@ describe('AgentRuntime edge coverage', () => {
       expect(session.completeProviderTurn).toHaveBeenCalledTimes(1);
       expect(queue.endTurn).toHaveBeenCalledTimes(1);
       expect(session.shutdown).toHaveBeenCalledTimes(1);
-      expect(queue.enqueueResultText).not.toHaveBeenCalledWith(item.text);
+      expect(vi.mocked(queue.enqueueResultText).mock.calls.map((c) => c[0])).not.toContain(item.text);
       if (item.expectNotice) {
-        expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'));
+        expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('Context limit'), 'status');
       } else {
         expect(queue.enqueueText).not.toHaveBeenCalled();
       }
@@ -1704,7 +1704,7 @@ describe('AgentRuntime edge coverage', () => {
     perChatCreated.opts.notifyUser?.('per-chat crash notice');
     await Promise.resolve();
     expect(perChatQueue.abortTurn).not.toHaveBeenCalled();
-    expect(perChatQueue.enqueueText).toHaveBeenCalledWith('per-chat crash notice');
+    expect(perChatQueue.enqueueText).toHaveBeenCalledWith('per-chat crash notice', 'status');
     expect(perChatQueue.flush).toHaveBeenCalledTimes(1);
     expect(perChatMessenger.sendMessage).not.toHaveBeenCalled();
     expect(
@@ -1741,7 +1741,7 @@ describe('AgentRuntime edge coverage', () => {
       { type: 'result', text: 'singleton result' },
     );
     singleCreated.opts.notifyUser?.('singleton crash notice');
-    expect(singleQueue.enqueueText).toHaveBeenCalledWith('singleton crash notice');
+    expect(singleQueue.enqueueText).toHaveBeenCalledWith('singleton crash notice', 'status');
     await vi.waitFor(() => {
       expect(singleQueue.flush).toHaveBeenCalled();
     });
@@ -1788,7 +1788,7 @@ describe('AgentRuntime edge coverage', () => {
         extended: false,
         keyPresent: true,
       });
-      expect(queue.enqueueText).toHaveBeenLastCalledWith(expect.stringContaining(label));
+      expect(queue.enqueueText).toHaveBeenLastCalledWith(expect.stringContaining(label), 'lifecycle');
     }
 
     state.notifyProviderFallbackActivated(queue, {
@@ -1801,7 +1801,7 @@ describe('AgentRuntime edge coverage', () => {
       keyPresent: false,
     });
 
-    expect(queue.enqueueText).toHaveBeenLastCalledWith(expect.stringContaining('credentials'));
+    expect(queue.enqueueText).toHaveBeenLastCalledWith(expect.stringContaining('credentials'), 'lifecycle');
   });
 
   it('recreates singleton fallback sessions and wires lifecycle callbacks', () => {
@@ -1910,6 +1910,7 @@ describe('AgentRuntime edge coverage', () => {
 
     await vi.waitFor(() => expect(sourceQueue.enqueueText).toHaveBeenCalledWith(
       '_The backup model could not continue this turn. Please try again._',
+      'status',
     ));
     expect(replacementQueue.enqueueText).not.toHaveBeenCalled();
   });
@@ -1967,6 +1968,7 @@ describe('AgentRuntime edge coverage', () => {
 
     await vi.waitFor(() => expect(rekeyedQueue.enqueueText).toHaveBeenCalledWith(
       '_The backup model could not continue this turn. Please try again._',
+      'status',
     ));
     expect(sourceQueue.enqueueText).not.toHaveBeenCalled();
   });
@@ -2514,8 +2516,8 @@ describe('AgentRuntime edge coverage', () => {
     );
     await vi.advanceTimersByTimeAsync(3_000);
 
-    state.sendDirect('direct-edge@s.whatsapp.net', 'admin notice', true);
-    state.sendDirect('fallback-edge@s.whatsapp.net', 'fallback notice');
+    state.sendDirect('direct-edge@s.whatsapp.net', 'admin notice', 'status', true);
+    state.sendDirect('fallback-edge@s.whatsapp.net', 'fallback notice', 'status');
     (state.handleCrashNotify as unknown as (msg: string, chatJid?: string) => void)(
       'crash notice',
       'crash-edge@s.whatsapp.net',

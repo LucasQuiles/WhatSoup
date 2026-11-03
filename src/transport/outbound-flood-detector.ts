@@ -10,6 +10,7 @@
  * Detection is defense-in-depth: it fires even if a future code path bypasses
  * the in-band caps (PR-E / PR-F), shortening time-to-human from days to minutes.
  */
+import { clockDriftHoldExtensionMs } from '../lib/clock.ts';
 
 /** Rolling window over which sends to one destination are counted. */
 export const OUTBOUND_FLOOD_WINDOW_MS = 300_000; // 5 minutes
@@ -48,6 +49,22 @@ export interface OutboundFloodStats {
   worstKey: string | null;
   /** In-window send count for {@link worstKey}. */
   worstCount: number;
+  /**
+   * Until when, on the monotonic clock (performance.now()), the latest flood
+   * holds, capped at now: now while it holds, else that instant. Null if
+   * there has been none. Whether a destination floods is decided only by its
+   * wall-clock count above, when a send is recorded; the monotonic clock only
+   * measures how long it holds: until that destination's threshold-th newest
+   * counted send (for a threshold that is not a whole number of at least 1,
+   * the smallest such number that meets it) leaves the window, plus
+   * clockDriftHoldExtensionMs, at least until the send that completed it,
+   * and the longest of all destinations.
+   * Health holds `outbound_flood` from it, so a flood is seen whether or not
+   * a health read fell inside it. The monotonic instants are always
+   * performance.now(): the `tsMs` and `nowMs` arguments move only the
+   * wall-clock window, and production passes neither.
+   */
+  lastFloodingMonotonicMs: number | null;
 }
 
 export interface OutboundFloodDetectorOptions {
@@ -65,18 +82,36 @@ export interface OutboundFloodDetectorOptions {
 export class OutboundFloodDetector {
   private readonly windowMs: number;
   private readonly threshold: number;
+  /**
+   * The smallest whole count, at least 1, that meets `threshold`: the rank,
+   * from the newest, of the counted send a flood is held from. It equals
+   * `threshold` for every whole threshold of at least 1.
+   */
+  private readonly holdRank: number;
   private readonly resolveKey: (dest: string) => string;
-  /** resolved key → in-window send timestamps (ascending). */
-  private readonly sends = new Map<string, number[]>();
+  /**
+   * resolved key → in-window sends (ascending wall time). Each send also
+   * carries its monotonic instant, recorded with it, for the health hold
+   * only, so no counted send lacks one.
+   */
+  private readonly sends = new Map<string, Array<{ atMs: number; monotonicMs: number }>>();
   /**
    * Keys currently latched as flooding — so the rising-edge dedup fires one
    * `tripped` per flood. Cleared when a key drains below threshold or ages out.
    */
   private readonly alerted = new Set<string>();
+  /** When the latest flood stops holding (inclusive), on the monotonic clock, or null. */
+  private floodHeldUntilMonotonicMs: number | null = null;
 
   constructor(opts: OutboundFloodDetectorOptions = {}) {
     this.windowMs = opts.windowMs ?? OUTBOUND_FLOOD_WINDOW_MS;
     this.threshold = opts.threshold ?? OUTBOUND_FLOOD_THRESHOLD;
+    // Base takes the threshold as given and decides by `count >= threshold`,
+    // so the verdict keeps it unchanged. Only the hold's index is derived:
+    // after a send is recorded the count is a whole number of at least 1, so
+    // whenever the verdict is a flood the count is at least this rank. A NaN
+    // or +Infinity threshold never floods, so its rank is never used.
+    this.holdRank = Number.isFinite(this.threshold) ? Math.max(1, Math.ceil(this.threshold)) : 1;
     this.resolveKey = opts.resolveKey ?? ((dest) => dest);
   }
 
@@ -86,19 +121,30 @@ export class OutboundFloodDetector {
    * uses to alert exactly once per flood.
    */
   record(dest: string, tsMs: number = Date.now()): OutboundFloodRecordResult {
+    // Read after the wall clock (`tsMs`, read at the call) and before
+    // resolveKey, which can block on a database lookup: a pause between the
+    // two reads can only lengthen the hold.
+    const monotonicMs = performance.now();
     const key = this.resolveKey(dest);
     let arr = this.sends.get(key);
+    const send = { atMs: tsMs, monotonicMs };
     if (arr) {
-      arr.push(tsMs);
+      arr.push(send);
       this.prune(key, arr, tsMs);
     } else {
-      arr = [tsMs];
+      arr = [send];
       this.sends.set(key, arr);
     }
     const count = arr.length;
     const flooding = count >= this.threshold;
     let tripped = false;
     if (flooding) {
+      // This count alone decides the flood; the monotonic instants only time
+      // it. It holds until the holdRank-th newest counted send leaves the
+      // window, extended for clock drift, and at least until now.
+      const holdWindowMs = this.windowMs + clockDriftHoldExtensionMs(this.windowMs);
+      const heldUntilMs = Math.max(arr[count - this.holdRank]!.monotonicMs + holdWindowMs, monotonicMs);
+      this.floodHeldUntilMonotonicMs = Math.max(this.floodHeldUntilMonotonicMs ?? heldUntilMs, heldUntilMs);
       if (!this.alerted.has(key)) {
         tripped = true; // false→true rising edge
         this.alerted.add(key);
@@ -141,6 +187,8 @@ export class OutboundFloodDetector {
         worstKey = key;
       }
     }
+    const monotonicNowMs = performance.now();
+    const heldUntilMs = this.floodHeldUntilMonotonicMs;
     return {
       windowMs: this.windowMs,
       threshold: this.threshold,
@@ -148,6 +196,7 @@ export class OutboundFloodDetector {
       destCount,
       worstKey,
       worstCount,
+      lastFloodingMonotonicMs: heldUntilMs === null ? null : Math.min(heldUntilMs, monotonicNowMs),
     };
   }
 
@@ -156,10 +205,10 @@ export class OutboundFloodDetector {
    * order, so the expired prefix is contiguous — splice it in one shot. Mirrors
    * the `event.at >= cutoff` retention in `pruneRecentDisconnects`.
    */
-  private prune(key: string, arr: number[], nowMs: number): void {
+  private prune(key: string, arr: Array<{ atMs: number }>, nowMs: number): void {
     const cutoff = nowMs - this.windowMs;
     let expired = 0;
-    while (expired < arr.length && arr[expired]! < cutoff) expired += 1;
+    while (expired < arr.length && arr[expired]!.atMs < cutoff) expired += 1;
     if (expired > 0) arr.splice(0, expired);
     if (arr.length === 0) this.alerted.delete(key); // drained — re-arm
   }

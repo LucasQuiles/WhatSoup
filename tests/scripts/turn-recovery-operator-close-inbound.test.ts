@@ -27,13 +27,16 @@ const CLI = path.join(REPO_ROOT, 'scripts/turn-recovery-operator.ts');
 const CONVERSATION_KEY = '15550106666';
 const DELIVERY_JID = '15550106666@s.whatsapp.net';
 const MESSAGE_ID_PREFIX = 'wamid-close-cli';
+const CLI_TIMEOUT_MS = 60_000;
 
 function run(args: string[]): { status: number | null; stdout: string; stderr: string } {
   const res = spawnSync(process.execPath, ['--experimental-strip-types', CLI, ...args], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout: CLI_TIMEOUT_MS,
   });
+  expect(res.error, res.stderr).toBeUndefined();
+  expect(res.signal, res.stderr).toBeNull();
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
 
@@ -211,6 +214,7 @@ describe('turn-recovery-operator close-inbound', () => {
     expect(inboundState(seq, copyPath).processing_status).toBe('pending');
   });
 
+  // Three CLI starts retain their individual bounds; this is not a latency assertion.
   it('an apply bound to the dry run closes exactly the status finalization applied; a rerun reports alreadyClosed', () => {
     const { seq, finalized } = seedStaleFailed('apply', 'processing');
     const { parsed } = dryRun(seq);
@@ -231,7 +235,7 @@ describe('turn-recovery-operator close-inbound', () => {
     for (const leak of [CONVERSATION_KEY, DELIVERY_JID, MESSAGE_ID_PREFIX, `turn-${seq}`, 'manager-close-cli']) {
       expect(applied.stdout + applied.stderr + rerun.stdout + readFileSync(auditPath, 'utf8')).not.toContain(leak);
     }
-  });
+  }, 3 * CLI_TIMEOUT_MS + 5_000);
 
   it('an apply whose audit append fails after commit still reports the close, with exit 3', () => {
     const { seq, finalized } = seedStaleFailed('audit-fail', 'processing');

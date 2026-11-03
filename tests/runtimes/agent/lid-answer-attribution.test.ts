@@ -1156,7 +1156,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
         const q = internals().chatQueues.get(LID_JID);
 
         mark = markSends();
-        q?.enqueueText('fallback reply');
+        q?.enqueueText('fallback reply', 'answer');
         await waitForEchoedSend('fallback reply', mark);
         const flush = q ? await settle(q.flushTurnEvidence(ctx!.identity.logicalTurnId)) : null;
 
@@ -1245,7 +1245,7 @@ describe('a turn\'s outbound operations carry the turn\'s attribution', () => {
           const q = scopeQueue();
 
           mark = markSends();
-          q?.enqueueText('fallback reply');
+          q?.enqueueText('fallback reply', 'answer');
           await waitForEchoedSend('fallback reply', mark);
           const flush = q ? await settle(q.flushTurnEvidence(ctx!.identity.logicalTurnId)) : null;
 

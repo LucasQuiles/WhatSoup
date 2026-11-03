@@ -346,6 +346,9 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import { Database } from '../../../src/core/database.ts';
 import { DurabilityEngine } from '../../../src/core/durability.ts';
+import { createBead } from '../../../src/core/substrate/beads.ts';
+import { TriggerPoller } from '../../../src/core/substrate/poller.ts';
+import { createTrigger } from '../../../src/core/substrate/triggers.ts';
 import { AgentRuntime, type AgentRuntimeOptions } from '../../../src/runtimes/agent/runtime.ts';
 import { __setRuntimeLifecycleEmitterForTests, type LifecycleEmitInput } from '../../../src/core/observability/lifecycle-emission.ts';
 import { TurnQueue } from '../../../src/runtimes/agent/turn-queue.ts';
@@ -671,6 +674,74 @@ describe('scheduled agent-job turn lifecycle (#3374)', () => {
       // promoted coupling test below.)
       expect(engine.sweepStuckInbound()).toMatchObject({ failedStale: 0 });
       expect(status(seq)).toBe('processing');
+    });
+
+    it('records a scheduler-dispatched crash as a non-catch-up scheduled loss on pre-connect recovery (#3754)', async () => {
+      // The poller gets a successful acknowledgement after journaling, then the
+      // process dies before the asynchronous turn chain can begin.
+      const handleMessage = vi.spyOn(runtime, 'handleMessage').mockResolvedValue(undefined);
+      try {
+        const bead = createBead(db.raw, {
+          kind: 'agent_job', title: 'Crash-recovery scheduler fixture',
+          body: 'Check for a scholarship reply.', ownerJid: 'test-owner', actor: 'test',
+        });
+        const trigger = createTrigger(db.raw, {
+          beadId: bead.id, kind: 'schedule.cron', spec: { expr: '*/5 * * * *' },
+          reportChatJid: groupJid, nextFireAt: 1_000_000_000, actor: 'test',
+        });
+        const poller = new TriggerPoller(db.raw, messenger, {
+          now: () => 1_000_000_001,
+          agentJobDispatch: (ctx) => runtime.dispatchAgentJob(ctx),
+        });
+
+        await poller.tickOnce();
+
+        const occurrence = db.raw.prepare(
+          'SELECT id, state FROM trigger_occurrences WHERE trigger_id = ?',
+        ).get(trigger.id) as { id: number; state: string };
+        expect(occurrence.state).toBe('ok');
+        const source = db.raw.prepare(`
+          SELECT seq, message_id, processing_status
+          FROM inbound_events
+          WHERE message_id GLOB ?
+        `).get(`agentjob-${trigger.id}-*-occ${occurrence.id}`) as {
+          seq: number;
+          message_id: string;
+          processing_status: string;
+        };
+        expect(source).toMatchObject({
+          message_id: expect.stringMatching(new RegExp(`^agentjob-${trigger.id}-\\d+-occ${occurrence.id}$`)),
+          processing_status: 'processing',
+        });
+        expect(db.raw.prepare('SELECT status FROM trigger_runs WHERE trigger_id = ?').get(trigger.id))
+          .toEqual({ status: 'ok' });
+        expect(handleMessage).toHaveBeenCalledTimes(1);
+        expect(handleMessage).toHaveBeenCalledWith(expect.objectContaining({
+          messageId: source.message_id,
+          inboundSeq: source.seq,
+          chatJid: groupJid,
+          isSyntheticJob: true,
+        }));
+
+        // A new engine reads the same durable rows as the next process would.
+        const restarted = new DurabilityEngine(db);
+        const recovery = restarted.preConnectRecovery();
+
+        expect(recovery.openRecoveries).toBe(0);
+        expect(status(source.seq)).toBe('failed');
+        expect(failureClass(source.seq)).toBe('crash_recovery');
+        expect(db.raw.prepare(`
+          SELECT COUNT(*) AS count
+          FROM inbound_disposition_links
+          WHERE inbound_seq = ? AND disposition = 'recovery_pending_operator_catchup'
+        `).get(source.seq)).toEqual({ count: 0 });
+        expect(restarted.getTurnRecoverySupervisorCounts()).toMatchObject({
+          openRecoveries: 0,
+          scheduledTurnsLost: 1,
+        });
+      } finally {
+        handleMessage.mockRestore();
+      }
     });
 
     // #3374 ask 2 — PROMOTED from the fix-shaped it.fails gap probe: the W2

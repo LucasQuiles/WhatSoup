@@ -41,9 +41,19 @@ Edit an image. Send an image first, then use one of these operations:
 | `remove-bg` | `/image-edit remove-bg` | ~$0.04 |
 | `ai "<instructions>"` | `/image-edit ai "make the sky orange"` | ~$0.04 |
 
-All commands support `/image-edit help` for inline usage reference.
+Use `/image-edit help` for the editing usage reference.
+
+### `/image-coach <prompt>`
+
+Expand a prompt and explain the additions without generating an image. The
+coach allows a longer explanation prompt (under 500 words); `/image` targets
+under 200 words for its generation prompt.
 
 ## Cost Model
+
+The amounts below are the plugin's original estimates, not current billing
+quotes. Model, quality, size, and provider pricing determine the actual cost;
+confirm those before treating an estimate as a budget.
 
 | Command | Model | Cost per image |
 |---------|-------|---------------|
@@ -55,9 +65,12 @@ All commands support `/image-edit help` for inline usage reference.
 
 ## Rate Limiting
 
-- **10 image generation requests per hour per chat**
-- Checked by querying the WhatSoup SQLite messages table for `/image` commands in the last hour
-- Pillow-based editing operations (resize, compress, crop, convert, info) are not rate limited
+- The intended limit is **10 image generation requests per hour per chat**.
+- The current generation-command recipe queries the `q` instance DB for all
+  inbound messages matching `/image%` in the last hour. That includes
+  `/image-edit` and `/image-coach`, so the counter is broader than the intended
+  generation-only limit. This remains a command-recipe gap.
+- Local Pillow editing does not run that generation admission check.
 
 ## Dependencies
 
@@ -67,7 +80,10 @@ All commands support `/image-edit help` for inline usage reference.
 | `Pillow` (>=12.0) | Yes | Local image manipulation |
 | `pillow-heif` (>=0.18.0) | Optional | HEIC/HEIF format support |
 
-The OpenAI API key must be available as the `OPENAI_API_KEY` environment variable.
+The command and freeform-skill recipes read the key with
+`secret-tool lookup service openai`. They do not document an environment-key
+fallback. Configure that secret-store path for the deployment; do not place
+credential literals in tracked files.
 
 ## Security
 
@@ -89,6 +105,7 @@ plugins/q-image/
 │   └── plugin.json           # Plugin metadata
 ├── commands/
 │   ├── image.md              # /image and /image-hd commands
+│   ├── image-coach.md        # prompt coaching without generation
 │   └── image-edit.md         # /image-edit command
 ├── skills/
 │   └── image-editing/

@@ -54,6 +54,7 @@ function runtimeStub() {
     handleMessage: vi.fn(async () => {}),
     handleJidAliasChanged: vi.fn(),
     handleDatabaseCompatibilityRejection: vi.fn(),
+    invalidateHandoffArtifacts: vi.fn(),
     getMemoryContextHealth: vi.fn(() => null),
   };
 }
@@ -108,6 +109,7 @@ async function importMainWithMocks(options: {
     open: vi.fn(),
     close: vi.fn(),
     clearChat: vi.fn(() => 2),
+    markMessagesDeleted: vi.fn(() => 2),
     importFromLegacyDb: vi.fn(),
   };
   const connection = new FakeConnection();
@@ -333,6 +335,12 @@ async function importMainWithMocks(options: {
     checkDegradationSignals: vi.fn(),
     createIngestHandler: vi.fn(() => vi.fn()),
     toConversationKey: vi.fn((jid: string) => `conversation:${jid}`),
+    clearChatAndDeleteHandoffArtifact: vi.fn(() => ({ messages: 2, handoffArtifacts: 1 })),
+    deleteMessagesAndHandoffArtifacts: vi.fn(() => ({
+      messages: 2,
+      handoffArtifacts: 2,
+      conversations: 2,
+    })),
     toPersonalJid: vi.fn((phone: string) => `${phone}@s.whatsapp.net`),
     toLidJid: vi.fn((phone: string) => `${phone}@lid`),
     resolveConfiguredAdminJid: vi.fn((transport: string, identity: string) => {
@@ -436,6 +444,10 @@ async function importMainWithMocks(options: {
   }));
   vi.doMock('../src/runtimes/chat/runtime.ts', () => ({ ChatRuntime }));
   vi.doMock('../src/runtimes/agent/runtime.ts', () => ({ AgentRuntime }));
+  vi.doMock('../src/runtimes/agent/handoff-artifact.ts', () => ({
+    clearChatAndDeleteHandoffArtifact: mocks.clearChatAndDeleteHandoffArtifact,
+    deleteMessagesAndHandoffArtifacts: mocks.deleteMessagesAndHandoffArtifacts,
+  }));
   vi.doMock('../src/lib/capability-grant.ts', () => ({
     createCapabilityGrantManager: mocks.createCapabilityGrantManager,
   }));
@@ -752,13 +764,24 @@ describe('main bootstrap', () => {
     });
 
     h.connection.emit('chatCleared', 'chat@s.whatsapp.net');
-    expect(h.db.clearChat).toHaveBeenCalledWith('conversation:chat@s.whatsapp.net');
+    expect(h.clearChatAndDeleteHandoffArtifact).toHaveBeenCalledWith(
+      h.db,
+      'conversation:chat@s.whatsapp.net',
+      undefined,
+    );
 
-    h.db.clearChat.mockImplementationOnce(() => {
+    h.clearChatAndDeleteHandoffArtifact.mockImplementationOnce(() => {
       throw new Error('clear failed');
     });
     h.connection.emit('chatCleared', 'bad@s.whatsapp.net');
-    expect(h.logger.error).toHaveBeenCalledWith(expect.objectContaining({ err: expect.any(Error) }), 'chatCleared: failed to soft-delete messages');
+    expect(h.logger.error).toHaveBeenCalledWith(expect.objectContaining({ err: expect.any(Error) }), 'chatCleared: failed to clear messages and handoff artifact');
+
+    h.connection.emit('messageDeleted', ['revoked-a', 'revoked-b']);
+    expect(h.deleteMessagesAndHandoffArtifacts).toHaveBeenCalledWith(
+      h.db,
+      ['revoked-a', 'revoked-b'],
+      undefined,
+    );
 
     h.connection.emit('historyMessages', 'not-array');
     expect(h.logger.warn).toHaveBeenCalledWith({ type: 'string' }, 'historyMessages: expected array');
@@ -892,6 +915,36 @@ describe('main bootstrap', () => {
     expect(h.connection.contactsDir.invalidateLidCache).toHaveBeenCalled();
   });
 
+  it('wires agent clear and revoke events to fence distillation before artifact deletion', async () => {
+    const h = await importMainWithMocks({ instanceConfig: { type: 'agent' } });
+    const runtime = h.agentInstances[0];
+    expect(runtime).toBeDefined();
+
+    h.connection.emit('chatCleared', 'agent-chat@s.whatsapp.net');
+    type InvalidateHandoffArtifacts = (conversationKeys: readonly string[]) => void;
+    const clearCalls = h.clearChatAndDeleteHandoffArtifact.mock.calls as unknown as Array<
+      [unknown, string, InvalidateHandoffArtifacts | undefined]
+    >;
+    const clearInvalidator = clearCalls[0]?.[2];
+    expect(clearInvalidator).toEqual(expect.any(Function));
+    clearInvalidator?.(['conversation:agent-chat@s.whatsapp.net']);
+    expect(runtime!.invalidateHandoffArtifacts).toHaveBeenCalledWith([
+      'conversation:agent-chat@s.whatsapp.net',
+    ]);
+
+    h.connection.emit('messageDeleted', ['revoked-agent-message']);
+    const revokeCalls = h.deleteMessagesAndHandoffArtifacts.mock.calls as unknown as Array<
+      [unknown, readonly string[], InvalidateHandoffArtifacts | undefined]
+    >;
+    const revokeInvalidator = revokeCalls[0]?.[2];
+    expect(revokeInvalidator).toEqual(expect.any(Function));
+    revokeInvalidator?.(['conversation:revoke-a', 'conversation:revoke-b']);
+    expect(runtime!.invalidateHandoffArtifacts).toHaveBeenCalledWith([
+      'conversation:revoke-a',
+      'conversation:revoke-b',
+    ]);
+  });
+
   it('logs Pinecone bootstrap state without the configured index', async () => {
     const h = await importMainWithMocks({ pineconeState: 'ready' });
     const startupCall = h.logger.info.mock.calls.find(
@@ -966,6 +1019,22 @@ describe('main bootstrap', () => {
     expect(h.sendTracked).not.toHaveBeenCalled();
   });
 
+  it('hands the agent runtime the startup readiness observation, not a ready flag', async () => {
+    const h = await importMainWithMocks({
+      instanceConfig: { name: 'q', type: 'agent', agentOptions: {} },
+      pineconeState: 'index_missing',
+    });
+
+    expect(h.AgentRuntime).toHaveBeenCalledWith(
+      h.db,
+      h.connection,
+      'q',
+      expect.objectContaining({
+        memoryReadiness: expect.objectContaining({ state: 'index_missing', evidenceCoverage: 'provider_response' }),
+      }),
+    );
+  });
+
   it('reaches the controller strict-readiness seam for a structural agent-runtime stub', async () => {
     const h = await importMainWithMocks({
       instanceConfig: {
@@ -1008,6 +1077,7 @@ describe('main bootstrap', () => {
         allowM365Mutations: false,
         autoCompactInputTokens: 123,
         turnRecoveryCatchupReconcile: { enabled: true, groupLimit: 7 },
+        memoryReadiness: expect.objectContaining({ state: 'ready', evidenceCoverage: 'provider_response' }),
       }),
     );
     expect(h.resolveLatestPluginDir).toHaveBeenCalledWith(expect.stringMatching(/\/plugins\/one$/));

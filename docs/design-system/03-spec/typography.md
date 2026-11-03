@@ -1,5 +1,7 @@
 # Typography — Hanken Grotesk + IBM Plex Mono pair, closed named ramp, casing and figure laws
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Ramp definitions live in `tokens-v3.md` §2.6; this document is the usage law. Sources: v2.html

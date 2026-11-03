@@ -322,6 +322,9 @@ function isProviderCreditBalanceLimitMessage(lower: string): boolean {
     // Subscription credit/overage + org-allocation exhaustion. These are
     // terminal for the turn but carry no billing co-word, so match them directly.
     lower.includes('out of usage credits') ||
+    // Bare CLI billing gate for an API-key account without credit. The CLI prints
+    // only this sentence, with no billing_error token or billing co-word.
+    lower.includes('credit balance is too low') ||
     (
       lower.includes('out of usage') &&
       (
@@ -755,6 +758,7 @@ function bareUsageLimitEvidence(lower: string): string {
   if (lower.includes('billing_error')) consider('billing_error');
   if (lower.includes('billing quota exceeded')) consider('billing quota exceeded');
   if (lower.includes('out of usage credits')) consider('out of usage credits');
+  if (lower.includes('credit balance is too low')) consider('credit balance is too low');
   if (lower.includes('out of usage')) {
     for (const coWord of ['add funds', 'contact your admin', 'your org', 'org is', 'group']) {
       if (lower.includes(coWord)) consider(`out of usage ${coWord}`);

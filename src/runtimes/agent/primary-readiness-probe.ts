@@ -10,11 +10,21 @@
 // on the AgentRuntime instance (they're process-local lifecycle state), but
 // the scheduling CALCULATION and the receipt CONSTRUCTION live here.
 
-import { shortHash } from '../../lib/short-hash.ts';
-import { getProviderBinary } from './session.ts';
+import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
+import { probePrimaryModelUsability } from './providers/primary-model-usability.ts';
 import { homedir } from 'node:os';
-import type { ServingContextReceipt } from './providers/primary-model-usability.ts';
-import type { PrimaryModelProbeAdapterDeps } from './providers/primary-model-usability-adapters.ts';
+import type {
+  PrimaryModelProbeAdapterDeps,
+  PrimaryModelProbeTrigger,
+} from './providers/primary-model-usability-adapters.ts';
+import {
+  buildPrimaryProbeSelectorEnv,
+  buildPrimaryProbeServiceContext as buildServiceContext,
+  createPrimaryModelProbeAdapters,
+} from './providers/primary-model-usability-adapters.ts';
+import type { ProviderExecutionGate } from './provider-execution-gate.ts';
+import { getProviderBinary } from './session.ts';
+import { resolveProviderBinaryIdentity } from './provider-canary-proof.ts';
 
 // #3017 AXIS A: periodic primary-readiness probe. The freshness window
 // (MODEL_USABILITY_FRESHNESS_MS in runtime.ts = 30min) only matters if
@@ -144,63 +154,135 @@ export function calculatePeriodicProbeBackoff(
 }
 
 /**
- * #3017 AXIS C: build the serving-context receipt — content-free hashes of
- * the config root, credential-store class, binary digest, provider, and model
- * the runtime is actually serving with. The probe fail-closes when any of
- * these differ from the probe target, preventing a probe of a DIFFERENT
- * environment from reading green for a primary whose real serving context is
- * broken. Never includes credential material, paths that expose user data,
- * or account identity.
- */
-export function buildServingContextReceipt(
-  agentProvider: string,
-  model: string | null | undefined,
-  cwd: string | null | undefined,
-): ServingContextReceipt {
-  const configRoot = cwd ?? homedir();
-  // Defensive — getProviderBinary may be unavailable in test mocks; null
-  // is a valid "no binary digest" receipt field.
-  let binary: string | null = null;
-  try {
-    binary = getProviderBinary(agentProvider);
-  } catch {
-    binary = null;
-  }
-  return {
-    configRootHash: shortHash(configRoot),
-    credentialStoreClass: deriveCredentialStoreClass(agentProvider),
-    binaryDigest: binary !== null ? shortHash(binary) : null,
-    provider: agentProvider,
-    model: model ?? null,
-  };
-}
-
-function deriveCredentialStoreClass(provider: string): string | null {
-  if (provider === 'claude-cli') return 'keychain-or-file-store';
-  if (provider === 'opencode-cli') return 'keyring';
-  if (provider === 'openai-api' || provider === 'anthropic-api') return 'api-key';
-  return null;
-}
-
-/**
- * Build the PrimaryModelProbeAdapterDeps with the serving-context receipt
- * bound (AXIS C). The caller passes its existing adapter deps (cwd,
- * egressProxyPort, providerExecutionGate) and this function adds the
- * servingContext.
+ * Build adapter deps with the immutable runtime-primary context bound. The
+ * context is captured by AgentRuntime at its configuration boundary; this
+ * builder never manufactures a fresh expected context.
  */
 export function buildPrimaryProbeAdapterDeps(
-  agentProvider: string,
-  model: string | null | undefined,
+  _agentProvider: string,
+  _model: string | null | undefined,
   cwd: string | null | undefined,
   egressProxyPort: number | undefined,
   providerExecutionGate: PrimaryModelProbeAdapterDeps['providerExecutionGate'],
+  probeTrigger?: PrimaryModelProbeTrigger,
+  serviceContext?: PrimaryProbeServiceContext,
+  requireServiceContext = false,
+  currentServiceContext?: () => PrimaryProbeServiceContext | null,
 ): PrimaryModelProbeAdapterDeps {
   return {
     cwd: cwd ?? homedir(),
     egressProxyPort,
     providerExecutionGate,
-    servingContext: buildServingContextReceipt(agentProvider, model, cwd),
+    ...(serviceContext ? { serviceContext } : {}),
+    ...(requireServiceContext ? { requireServiceContext } : {}),
+    ...(currentServiceContext ? { currentServiceContext } : {}),
+    ...(probeTrigger ? { probeTrigger } : {}),
   };
+}
+
+/** Build the runtime-owned primary context while preserving fail-closed capture semantics. */
+export function buildRuntimePrimaryProbeServiceContext(
+  provider: string,
+  model: string | null,
+  serviceGeneration: string,
+  cwd: string | null | undefined,
+  providerConfig: Record<string, unknown> | undefined,
+  egressProxyPort: number | undefined,
+): PrimaryProbeServiceContext {
+  let selectorEnv: NodeJS.ProcessEnv;
+  try {
+    selectorEnv = buildPrimaryProbeSelectorEnv(provider, model, providerConfig, { egressProxyPort });
+  } catch {
+    // Preserve unknown/probe-error behavior; startup must not invent identity.
+    selectorEnv = {};
+  }
+  const hasBinary = provider === 'claude-cli' || provider === 'opencode-cli';
+  let identity: { resolvedPath: string; sha256: string } | null = null;
+  if (hasBinary) {
+    try {
+      const binaryToken = getProviderBinary(provider);
+      if (binaryToken) identity = resolveProviderBinaryIdentity(binaryToken, selectorEnv.PATH ?? '');
+    } catch {
+      // Missing CLI identity stays bound to this service generation; later installation
+      // is adopted only by an explicit new configuration generation.
+      identity = null;
+    }
+  }
+  return buildServiceContext({
+    provider,
+    model,
+    serviceGeneration,
+    cwd: cwd ?? homedir(),
+    providerConfig,
+    selectorEnv,
+    binaryState: hasBinary ? (identity ? 'resolved' : 'missing') : 'none',
+    binaryIdentity: identity,
+  });
+}
+
+/** Keep recovery and diagnostic adapter construction in one place. */
+export function createRuntimePrimaryProbeAdapters(
+  providerConfig: Record<string, unknown> | undefined,
+  provider: string,
+  model: string | null | undefined,
+  cwd: string | null | undefined,
+  egressProxyPort: number | undefined,
+  providerExecutionGate: ProviderExecutionGate,
+  probeTrigger: PrimaryModelProbeTrigger,
+  serviceContext: PrimaryProbeServiceContext | undefined,
+  currentServiceContext: () => PrimaryProbeServiceContext | null,
+) {
+  return createPrimaryModelProbeAdapters(
+    providerConfig,
+    buildPrimaryProbeAdapterDeps(
+      provider,
+      model,
+      cwd,
+      egressProxyPort,
+      providerExecutionGate,
+      probeTrigger,
+      serviceContext,
+      true,
+      currentServiceContext,
+    ),
+  );
+}
+
+export interface RuntimePrimaryProbeHost {
+  agentProvider: string;
+  model: string | null | undefined;
+  agentProviderConfig: Record<string, unknown> | undefined;
+  cwd: string | null | undefined;
+  egressProxy?: { port?: number };
+  providerExecutionGate: ProviderExecutionGate;
+  primaryProbeServiceContext: PrimaryProbeServiceContext | null;
+  currentPrimaryProbeServiceContext: () => PrimaryProbeServiceContext | null;
+}
+
+/** Run the recovery probe with the runtime's immutable context and evidence callback. */
+export async function probeRuntimePrimaryProviderRecovered(
+  host: RuntimePrimaryProbeHost,
+  onEvidence?: (evidence: Awaited<ReturnType<typeof probePrimaryModelUsability>> & { checkedAt: number }) => void,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const { agentProvider, model, agentProviderConfig, cwd, egressProxy, providerExecutionGate } = host;
+  const target = { provider: agentProvider, model: model ?? null };
+  const adapters = createRuntimePrimaryProbeAdapters(
+    agentProviderConfig,
+    agentProvider,
+    model,
+    cwd,
+    egressProxy?.port,
+    providerExecutionGate,
+    'recovery',
+    host.primaryProbeServiceContext ?? undefined,
+    () => host.currentPrimaryProbeServiceContext(),
+  );
+  const result = signal
+    ? await probePrimaryModelUsability(target, adapters, { signal })
+    : await probePrimaryModelUsability(target, adapters);
+  onEvidence?.({ ...result, checkedAt: Date.now() });
+  return result.status === 'usable';
 }
 
 /**

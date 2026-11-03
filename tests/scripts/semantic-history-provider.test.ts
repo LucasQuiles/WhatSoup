@@ -82,19 +82,19 @@ function expectBoundedLimitations(limitations: string[]): void {
 describe('semantic history provider collection', () => {
   it('collects a complete bounded query and sorts artifacts by kind and number', async () => {
     const fixture = providerFor([
-      page([artifact(1848)], 'page-2'),
+      page([artifact(10)], 'page-2'),
       page(
         [
-          artifact(31, {
+          artifact(2, {
             kind: 'issue',
             state: 'open',
-            url: `https://github.com/${REPOSITORY}/issues/31`,
+            url: `https://github.com/${REPOSITORY}/issues/2`,
           }),
         ],
         'page-3',
         { observedAt: '2026-07-16T05:01:00-04:00' },
       ),
-      page([artifact(1838)], null, { observedAt: '2026-07-16T05:02:00Z' }),
+      page([artifact(2)], null, { observedAt: '2026-07-16T05:02:00Z' }),
     ]);
 
     const result = await collectHistory({
@@ -108,9 +108,9 @@ describe('semantic history provider collection', () => {
       repository: REPOSITORY,
       observedAt: ['2026-07-16T05:00:00Z', '2026-07-16T05:01:00-04:00', '2026-07-16T05:02:00Z'],
       artifacts: [
-        expect.objectContaining({ kind: 'issue', number: 31 }),
-        expect.objectContaining({ kind: 'pull-request', number: 1838 }),
-        expect.objectContaining({ kind: 'pull-request', number: 1848 }),
+        expect.objectContaining({ kind: 'issue', number: 2 }),
+        expect.objectContaining({ kind: 'pull-request', number: 2 }),
+        expect.objectContaining({ kind: 'pull-request', number: 10 }),
       ],
       pageCount: 3,
       complete: true,

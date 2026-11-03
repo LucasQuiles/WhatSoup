@@ -1,4 +1,7 @@
-"""Owner critical route: copy selected critical BOT ERRORS alerts to the owner.
+"""Owner critical route: copy selected critical alerts and escalated reminders to the owner.
+
+An escalated still-open reminder of a routed source is copied at its own severity,
+so a warning sender's reminder now routes at error (register R73).
 
 The BOT ERRORS group is written by the owner's own line, so the owner's phone
 never notifies for it. This route sends a short, readable line from a SEPARATE
@@ -12,7 +15,8 @@ stamp, within one shared time budget, and swallows every failure: this route
 can never delay, fail, or re-send a group alert.
 
 Policy:
-  * severity critical, incident ALERT (never a clear);
+  * severity critical, or a still-open reminder escalated by age or repeat
+    count (see ``is_escalated_reminder``), incident ALERT (never a clear);
   * source matches BOT_ERRORS_OWNER_ROUTE_SOURCES (fnmatch patterns);
   * first open only, plus ESCALATED still-open reminders; plain still-open
     renotifies are skipped;
@@ -41,8 +45,9 @@ import re
 import socket
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
+from lib.bot_errors_envelope import SEVERITIES
 from lib.send_acceptance import validate_send_acceptance
 
 DEFAULT_SOURCES = (
@@ -71,6 +76,15 @@ TITLES = {
     "whatsapp_device_bond_lost": "WhatsApp device link lost",
     SELFTEST_SOURCE: "TEST — BOT ERRORS routing check",
 }
+
+# The dispatcher's DELIVERY_ESCALATED_FROM_FIELD: the sender's severity, written
+# on the delivery block only when a still-open reminder escalates by age or count.
+ESCALATED_FROM_FIELD = "escalatedFromSeverity"
+# The dispatcher's DELIVERY_ESCALATED_NOW_FIELD: true while the reminder still carries
+# the severity its escalation gave it (base sent it at critical).
+ESCALATED_NOW_FIELD = "escalatedNow"
+# The dispatcher's ESCALATED_SEVERITY_STEP: the severity escalation gives each recorded one.
+ESCALATED_SEVERITY_STEP = {"info": "warning", "warning": "error", "error": "critical", "critical": "critical"}
 
 STATE_RETENTION_SECONDS = 7 * 86400
 EMAIL_TIMEOUT_SECONDS = 20.0
@@ -102,17 +116,25 @@ def _evidence_value(evidence: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def owner_line(event: dict[str, Any]) -> str:
-    """'<host>/<bot>: <plain title> — <one-line detail>' built only from
-    source/machine/instance and dispatcher-derived fields (never the
-    digest-confined summary)."""
-    source = str(event.get("source") or "")
+def event_machine(event: Mapping[str, Any]) -> str:
+    """The machine an event came from: its `machine`, else the relay's remote
+    host, else this (dispatcher) host. The runtime's emitter writes no
+    `machine`, so the relay block is what names a relayed event's host."""
     machine = str(event.get("machine") or "").strip()
     if not machine or machine.lower() == "unknown":
         diagnostics = event.get("diagnostics") if isinstance(event.get("diagnostics"), dict) else {}
         relay = diagnostics.get("relay") if isinstance(diagnostics.get("relay"), dict) else {}
         # No relay block = produced on this (dispatcher) host.
         machine = str(relay.get("remoteHost") or socket.gethostname()).strip().lower()
+    return machine
+
+
+def owner_line(event: dict[str, Any]) -> str:
+    """'<host>/<bot>: <plain title> — <one-line detail>' built only from
+    source/machine/instance and dispatcher-derived fields (never the
+    digest-confined summary)."""
+    source = str(event.get("source") or "")
+    machine = event_machine(event)
     instance = str(event.get("instance") or "").strip()
     title = TITLES.get(source)
     match = _FLEET_MODEL.match(source)
@@ -136,11 +158,55 @@ def owner_line(event: dict[str, Any]) -> str:
     return f"{where}: {title} — {detail}"
 
 
+def _is_readable_severity(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in SEVERITIES
+
+
+def escalated_now(event: Mapping[str, Any]) -> bool:
+    """The dispatcher's escalated_now, kept as an identical copy (R73).
+
+    The escalatedNow marker, plus a readable recorded sender severity, the
+    escalated=true evidence line, and a current severity at least the one-step
+    escalation of the recorded one. A copy rather than an import: the dispatcher
+    is a script this module cannot import, and it loads this module lazily so the
+    owner route can never break dispatch. One test table holds both copies to the
+    same answers.
+    """
+    delivery = event.get("delivery")
+    if not isinstance(delivery, Mapping) or delivery.get(ESCALATED_NOW_FIELD) is not True:
+        return False
+    recorded = delivery.get(ESCALATED_FROM_FIELD)
+    severity = event.get("severity")
+    if not (_is_readable_severity(recorded) and _is_readable_severity(severity)):
+        return False
+    raised = ESCALATED_SEVERITY_STEP[recorded.strip().lower()]
+    if SEVERITIES.index(severity.strip().lower()) > SEVERITIES.index(raised):
+        return False
+    return "escalated=true" in str(event.get("evidence") or "").splitlines()
+
+
+def is_escalated_reminder(event: Mapping[str, Any]) -> bool:
+    """Did the dispatcher escalate this still-open reminder by age or repeat count?
+
+    Escalation used to force critical, which is how these reminders qualified.
+    It now raises the sender's severity one step (register R73), so a warning
+    source's escalated reminder arrives as error; the recorded sender severity
+    keeps the copy the owner got before. A reminder escalated now that also
+    carries ``incident_still_open=true`` qualifies: markers on a first-open
+    alert do not make it a reminder, and one sent below its escalation (Pattern
+    D restored a lower first severity on a later pass) was not copied by base
+    either.
+    """
+    return escalated_now(event) and (
+        _evidence_value(str(event.get("evidence") or ""), "incident_still_open") == "true"
+    )
+
+
 def qualifies(event: dict[str, Any], sources: list[str], is_alert: bool) -> str | None:
     """Return None when the event qualifies, else a skip reason."""
     if not is_alert:
         return "not_incident_alert"
-    if str(event.get("severity") or "").lower() != "critical":
+    if str(event.get("severity") or "").lower() != "critical" and not is_escalated_reminder(event):
         return "not_critical"
     source = str(event.get("source") or "")
     if not any(fnmatch.fnmatchcase(source, pattern) for pattern in sources):
@@ -199,6 +265,83 @@ def enabled() -> bool:
     )
 
 
+def _remaining(deadline: float | None) -> float:
+    return float("inf") if deadline is None else deadline - time.monotonic()
+
+
+def _send_owner_message(
+    cfg: dict[str, Any],
+    line: str,
+    email_body: str,
+    *,
+    json_rpc_call: Callable[..., dict[str, Any]],
+    email_fallback: Callable[..., bool],
+    deadline: float | None,
+) -> dict[str, Any]:
+    """Send one line to the owner's chat and, when enabled, by e-mail, inside
+    the caller's deadline. A channel's failure is that channel's False, never
+    raised; the result is the channel fields of the caller's log record."""
+    whatsapp_accepted = False
+    receipt: dict[str, str] = {}
+    try:
+        result = json_rpc_call(
+            cfg["socket"],
+            "tools/call",
+            {"name": "send_message", "arguments": {"chatJid": cfg["jid"], "text": line}},
+            timeout=max(1.0, min(cfg["timeout"], _remaining(deadline))),
+            **({"deadline": deadline} if deadline is not None else {}),
+        )
+        receipt = validate_send_acceptance(result, cfg["resolved"] or cfg["jid"])
+        whatsapp_accepted = True
+    except Exception:  # noqa: BLE001 - fail-open by design
+        whatsapp_accepted = False
+    email_accepted: bool | None = None
+    email_skipped_budget = False
+    if cfg["email"]:
+        email_timeout = min(EMAIL_TIMEOUT_SECONDS, _remaining(deadline))
+        if email_timeout < 1:
+            email_skipped_budget = True
+        else:
+            try:
+                email_accepted = bool(email_fallback(line, email_body, timeout=email_timeout))
+            except Exception:  # noqa: BLE001
+                email_accepted = False
+    return {
+        "whatsappAccepted": whatsapp_accepted,
+        "emailEnabled": cfg["email"],
+        "emailAccepted": email_accepted,
+        "emailSkippedBudget": email_skipped_budget,
+        "auditReceipt": receipt.get("audit_receipt"),
+    }
+
+
+def send_credential_page(
+    line: str,
+    body: str,
+    *,
+    counters: Mapping[str, int],
+    json_rpc_call: Callable[..., dict[str, Any]],
+    email_fallback: Callable[..., bool],
+    log: Callable[[dict[str, Any]], None],
+    deadline: float | None = None,
+) -> bool:
+    """Send one page of the credential re-page class; True when a channel
+    accepted it.
+
+    The class keeps its own pacing in the incident state, so this takes none of
+    the route's policy above: no source filter, no 6 h floor, no lock and no
+    state file. The caller checks enabled() and owns the deadline. The log
+    record carries booleans and the caller's integer counters only.
+    """
+    sent = _send_owner_message(
+        _cfg(), line, body,
+        json_rpc_call=json_rpc_call, email_fallback=email_fallback, deadline=deadline,
+    )
+    del sent["auditReceipt"]
+    log({"type": "credential_repage_page", **counters, **sent})
+    return bool(sent["whatsappAccepted"] or sent["emailAccepted"])
+
+
 def route_owner_critical(
     event: dict[str, Any],
     *,
@@ -220,12 +363,9 @@ def route_owner_critical(
     def skip(**flags: Any) -> None:
         log({"type": "owner_route_skipped", "eventId": event.get("id"), "incidentKey": key, **flags})
 
-    def remaining() -> float:
-        return float("inf") if deadline is None else deadline - time.monotonic()
-
     # Checked before the floor is recorded: a copy skipped for time must not
     # also block the next occurrence for a whole interval.
-    if remaining() < 1:
+    if _remaining(deadline) < 1:
         skip(skippedBudget=True)
         return
     state_path = state_dir / "owner-route-state.json"
@@ -252,33 +392,9 @@ def route_owner_critical(
         _save_state(state_path, state)
 
     line = owner_line(event)
-    whatsapp_accepted = False
-    receipt: dict[str, str] = {}
-    try:
-        result = json_rpc_call(
-            cfg["socket"],
-            "tools/call",
-            {"name": "send_message", "arguments": {"chatJid": cfg["jid"], "text": line}},
-            timeout=max(1.0, min(cfg["timeout"], remaining())),
-            **({"deadline": deadline} if deadline is not None else {}),
-        )
-        receipt = validate_send_acceptance(result, cfg["resolved"] or cfg["jid"])
-        whatsapp_accepted = True
-    except Exception:  # noqa: BLE001 - fail-open by design
-        whatsapp_accepted = False
-    email_accepted: bool | None = None
-    email_skipped_budget = False
-    if cfg["email"]:
-        email_timeout = min(EMAIL_TIMEOUT_SECONDS, remaining())
-        if email_timeout < 1:
-            email_skipped_budget = True
-        else:
-            try:
-                email_accepted = bool(email_fallback(line, f"{line}\n\n{group_text}", timeout=email_timeout))
-            except Exception:  # noqa: BLE001
-                email_accepted = False
+    sent = _send_owner_message(
+        cfg, line, f"{line}\n\n{group_text}",
+        json_rpc_call=json_rpc_call, email_fallback=email_fallback, deadline=deadline,
+    )
     log({"type": "owner_route_sent", "eventId": event.get("id"), "incidentKey": key,
-         "source": event.get("source"), "whatsappAccepted": whatsapp_accepted,
-         "emailEnabled": cfg["email"], "emailAccepted": email_accepted,
-         "emailSkippedBudget": email_skipped_budget,
-         "auditReceipt": receipt.get("audit_receipt")})
+         "source": event.get("source"), **sent})

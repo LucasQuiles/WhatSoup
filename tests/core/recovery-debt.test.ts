@@ -17,6 +17,7 @@ function evidence(overrides: Partial<RecoveryDebtEvidence> = {}): RecoveryDebtEv
         turnRecoveryRetainedTerminal: 0,
         turnRecoveryOpenRecoveries: 0,
         turnRecoveryCorroboratedRetained: 0,
+        turnRecoveryScheduledTurnsLost: 0,
         completedDeliveryIdentityBlocking: 0,
         completedDeliveryIdentityRetained: 0,
         completedDeliveryIdentityAdmissions: { nextAction: null },
@@ -36,6 +37,13 @@ function evidence(overrides: Partial<RecoveryDebtEvidence> = {}): RecoveryDebtEv
   };
 }
 
+function withRuntimeDetails(details: Record<string, unknown>): RecoveryDebtEvidence {
+  const base = evidence();
+  return evidence({
+    runtime: { readable: true, details: { ...(base.runtime.details as Record<string, unknown>), ...details } },
+  });
+}
+
 describe('normalizeRecoveryDebt', () => {
   it('reports no debt for complete zero evidence', () => {
     expect(normalizeRecoveryDebt(evidence())).toEqual({
@@ -51,6 +59,7 @@ describe('normalizeRecoveryDebt', () => {
         retained_terminal: 0,
         open_catchups: 0,
         corroborated_retained: 0,
+        scheduled_turns_lost: 0,
       },
       completed_delivery_identity: {
         readable: true,
@@ -66,6 +75,38 @@ describe('normalizeRecoveryDebt', () => {
         oldest_uncorroborated_at: null,
       },
     });
+  });
+
+  it('reports lost scheduled turns without opening debt (#3754)', () => {
+    const snapshot = normalizeRecoveryDebt(withRuntimeDetails({ turnRecoveryScheduledTurnsLost: 3 }));
+
+    expect(snapshot.turn_recovery.scheduled_turns_lost).toBe(3);
+    expect(snapshot.turn_recovery.readable).toBe(true);
+    expect(snapshot.open).toBe(false);
+    expect(snapshot.service_blocking).toBe(false);
+    expect(snapshot.attention).toBe('none');
+    expect(snapshot.reasons).toEqual([]);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['string', '3'],
+  ])('reports an %s lost-turn count as null without failing the section closed', (_label, value) => {
+    const snapshot = normalizeRecoveryDebt(withRuntimeDetails({ turnRecoveryScheduledTurnsLost: value }));
+
+    expect(snapshot.turn_recovery.scheduled_turns_lost).toBeNull();
+    expect(snapshot.turn_recovery.readable).toBe(true);
+    expect(snapshot.service_blocking).toBe(false);
+    expect(snapshot.attention).toBe('none');
+  });
+
+  it('reports a null lost-turn count when the runtime evidence is unreadable', () => {
+    const snapshot = normalizeRecoveryDebt(evidence({ runtime: { readable: false, details: null } }));
+
+    expect(snapshot.turn_recovery).toMatchObject({ readable: false, scheduled_turns_lost: null });
+    expect(snapshot.reasons).toContain('recovery_evidence_unreadable');
   });
 
   it('keeps retained debt open and nonblocking with stable reason ordering', () => {

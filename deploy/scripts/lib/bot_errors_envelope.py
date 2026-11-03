@@ -1,8 +1,15 @@
-"""Versioned BOT ERRORS queue-event envelope validation and normalization."""
+"""Versioned BOT ERRORS queue-event envelope validation and normalization.
+
+Also the single source of the ``machine`` identity that producers stamp on new
+events (:func:`event_machine`).
+"""
 
 from __future__ import annotations
 
+import os
+import socket
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 try:  # imported as ``lib.bot_errors_envelope`` by every deploy script
@@ -260,3 +267,76 @@ def new_event_fields(event_type: str, severity: str) -> dict[str, Any]:
         "eventType": canonical_event_type,
         "severity": canonical_severity,
     }
+
+
+MACHINE_ENV = "BOT_ERRORS_MACHINE"
+ENV_FILE_ENV = "BOT_ERRORS_ENV_FILE"
+
+
+def _env_file_path() -> Path:
+    override = os.environ.get(ENV_FILE_ENV, "")
+    return Path(override) if override else Path.home() / ".config" / "whatsoup" / "bot-errors.env"
+
+
+def _env_file_machine() -> str | None:
+    # Mirrors read_env_value (deploy/scripts/install-bot-errors-launchd.sh:18-26)
+    # and read_env_file_value (deploy/setup.sh:55-63), so the file means the same
+    # to every reader: only a regular file is read ([[ -f ]], so a FIFO cannot
+    # block a producer), lines end at "\n" only (a lone "\r" stays inside its
+    # line), comment lines are skipped, the key must start at column 1, the
+    # last match wins, and the rest of the line is taken as written, quotes
+    # included. Unlike the awk, the value is then stripped.
+    prefix = MACHINE_ENV + "="
+    try:
+        path = _env_file_path()
+        if not path.is_file():
+            return None
+        # Bytes, then decode: read_text() would turn a lone "\r" into a line end.
+        text = path.read_bytes().decode("utf-8", errors="replace")
+    except (OSError, RuntimeError):  # RuntimeError: Path.home() with no home
+        return None
+    value = ""
+    for line in text.split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        if line.startswith(prefix):
+            value = line[len(prefix):]
+    return value.strip() or None
+
+
+def configured_machine() -> str | None:
+    """Return the configured machine name, or None when none is configured.
+
+    The first non-blank source wins, each read on every call:
+
+    1. ``BOT_ERRORS_MACHINE`` in the process environment;
+    2. the same key in the BOT ERRORS env file (``BOT_ERRORS_ENV_FILE``, else
+       ``~/.config/whatsoup/bot-errors.env``). This reaches launch paths that
+       do not load the file into their environment: the macOS launchd agents,
+       the per-bot watchdog, the reply-guarantee drain and the release
+       observers, whose emitter environment passes ``HOME`` but not
+       ``BOT_ERRORS_MACHINE``.
+
+    Surrounding whitespace is dropped. A blank value, a missing or unreadable
+    file, or a path that is not a regular file counts as unset.
+    """
+    configured = os.environ.get(MACHINE_ENV, "").strip()
+    return configured or _env_file_machine()
+
+
+def event_machine() -> str:
+    """Return the ``machine`` identity a producer stamps on a new event.
+
+    The dispatcher keys incidents on ``machine|instance|source``, so this value
+    must not drift for a host. A live hostname can: a Mac without a fixed
+    HostName takes its name from the network it joins. Each name it takes then
+    opens its own incident for one condition, and a clear or a maintenance
+    window under one name never reaches the other.
+
+    A configured name (:func:`configured_machine`) names the host instead.
+    Without one, the live hostname is returned exactly as
+    ``socket.gethostname()`` reports it, with no case folding and no domain
+    stripping, so a host that configures nothing keeps the incident keys it
+    already has.
+    """
+    return configured_machine() or socket.gethostname()

@@ -1,5 +1,7 @@
 # Toast — Sonner-pattern restraint for operator-caused outcomes
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Locked source: v2.html toast block; research-digest §g (Sonner: steal the motion model, skin to

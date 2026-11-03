@@ -77,7 +77,7 @@ def test_five_controller_adapters_emit_one_envelope(monkeypatch, tmp_path: Path)
         module = load_script(filename)
         module.CONTROLLER_LOG_CONTEXT = deterministic_context(component)
         captured = []
-        if filename == "bot-errors-heartbeat-watchdog.py":
+        if filename in ("bot-errors-heartbeat-watchdog.py", "bot-errors-collector.py"):
             monkeypatch.setattr(
                 module,
                 "append_bounded_jsonl",
@@ -220,7 +220,7 @@ def test_identical_append_failure_policy_across_all_five_adapters(
         module.CONTROLLER_LOG_CONTEXT = deterministic_context(component)
         health = []
         fallback = []
-        if filename == "bot-errors-heartbeat-watchdog.py":
+        if filename in ("bot-errors-heartbeat-watchdog.py", "bot-errors-collector.py"):
             monkeypatch.setattr(
                 module,
                 "append_bounded_jsonl",

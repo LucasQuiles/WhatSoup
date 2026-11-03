@@ -1,5 +1,7 @@
 # SP4: Two-Way Voice (ElevenLabs) Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The task snippets below are historical. `src/runtimes/chat/providers/elevenlabs.ts` now uses the shared credential resolver rather than a Linux-only keyring subprocess. Current tool registration and schemas are owned by `docs/tools.md` and `src/mcp/register-all.ts`; historical module counts are not a current inventory. The voice, timeout, circuit-breaker and integration acceptance requirements remain intact.
+
 **Status:** completed — shipped as SP4 bead in the `whatsapp-mcp-features` epic (Phase 1, merged 2026-04-05).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

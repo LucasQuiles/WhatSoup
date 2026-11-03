@@ -966,11 +966,12 @@ describe('runtime terminal coordinator integration', () => {
       expect(consumeDeferral).toHaveReturnedWith(true);
       await vi.waitFor(() => expect(queue.enqueueText).toHaveBeenCalledWith(
         expect.stringContaining('backup model could not continue'),
+        'status',
       ));
       await vi.waitFor(() => expect(state.durability.finalizeTurnTerminal).toHaveBeenCalledOnce());
       await state.runtimeTurnCoordinator.awaitActiveFinalizations();
 
-      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup model could not continue'));
+      expect(queue.enqueueText).toHaveBeenCalledWith(expect.stringContaining('backup model could not continue'), 'status');
       expect(state.durability.finalizeTurnTerminal).toHaveBeenCalledWith(expect.objectContaining({
         terminal: expect.objectContaining({
           logicalTurnId: runtimeContext.identity.logicalTurnId,
@@ -1457,7 +1458,7 @@ describe('runtime terminal coordinator integration', () => {
         `${mapKey}#session`,
       );
 
-      expect(queue.enqueueStreamingText).toHaveBeenCalledWith('partial answer');
+      expect(queue.enqueueStreamingText).toHaveBeenCalledWith('partial answer', 'answer');
       expect(state.perChatRuntimeTurnContexts.get(mapKey)?.[0]?.replay.replaySafe).toBe(false);
       expect(runtimeContext.replay.replaySafe).toBe(true);
     } finally {

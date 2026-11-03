@@ -13,8 +13,8 @@ The send reached an indeterminate state: the runtime cannot prove whether the
 provider accepted the message or not. This is the highest-duplicate-risk class
 in the taxonomy, and the runtime's response is deliberately conservative — it
 **forbids blind retry without delivery-state proof**. Unlike the other codes,
-`phase` is **required** on this error (the constructor rejects an input without
-it).
+`phase` is **required** by the constructor's TypeScript input type. The
+constructor does not reject a missing phase at runtime; adapters must supply it.
 
 Structured payload (`TransportErrorPayload`):
 
@@ -66,9 +66,12 @@ sets `retryable: false`; the runtime stops regardless of phase.)
 - The evidence validator enforces that an `ambiguous` mutation state can never
   carry a deferred retry (`retry_not_before`) — so this code is structurally
   barred from any automatic replay path.
-- A stopped ambiguous outcome is routed to the `delivery_ambiguous_unsafe`
-  quarantine disposition when it carries unsafe-delivery-unconfirmed evidence,
-  which demands `delivery-risk-reviewed` acknowledgement before retirement.
+- A stopped ambiguous outcome with failure code
+  `outbound.unsafe_delivery_unconfirmed` and `mutation_state: ambiguous` routes
+  to `delivery_ambiguous_unsafe`, requiring `delivery-risk-reviewed`
+  acknowledgement before retirement. A `transport.send_ambiguous` failure
+  with ambiguous mutation state instead classifies as `legacy_unclassified`;
+  the two failure codes are not interchangeable.
 
 ## Duplicate-delivery risk
 

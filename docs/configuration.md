@@ -5,7 +5,7 @@ infrastructure-level settings, and per-instance `config.json` files for runtime 
 In multi-instance mode, `config.json` values take precedence over environment variables.
 Both take precedence over built-in defaults.
 
-**Resolution order:** canonical `memory.*` in `config.json` > legacy flat aliases in `config.json` > environment variable > built-in default
+**Memory resolution order:** canonical `memory.*` in `config.json` > legacy flat aliases in `config.json` > environment variable > built-in default, except the [unresolved recency-setting runtime gap](explainers/byok-memory-config-migration.md#what-the-migrator-changes).
 
 ---
 
@@ -138,11 +138,11 @@ lifecycle metadata (deprecations/retirements) needs occasional catalog updates.
 |----------|------|---------|-------------|
 | `MAX_TOKENS` | integer | `750` | Maximum tokens in a single LLM response. Parsed by `intEnv()` — invalid values fall back to the default. |
 | `RATE_LIMIT_PER_HOUR` | integer | `45` | Maximum messages per user per hour (chat runtime). |
-| `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts:928`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
+| `WHATSOUP_API_TIMEOUT_MS` | integer (ms) | `30000` | Timeout for outbound LLM API requests (`config.ts` `apiTimeoutMs`, `src/config.ts`). Lets operators raise the request timeout at runtime without a code edit (the documented recovery step for repeated API timeouts). Non-numeric (`intEnv` fallback) and non-positive (`0`/negative) values fall back to the `30000` default. |
 
 ### Agent session lifecycle (per_chat / shared agent runtimes)
 
-Bounds resident per-chat agent sessions so a long-running instance does not accumulate one `claude` subprocess (plus its MCP and browser children) per distinct chat until the host exhausts memory. A periodic sweep suspends idle sessions via the session's graceful `shutdown(true)` (resumable — the next message rehydrates via `--resume`); sessions mid-turn, awaiting a poll vote, mid-dispatch, or younger than the residency floor are never evicted. In-turn watchdogs (`TURN_WATCHDOG_MS` etc.) handle hangs; these knobs handle idle accumulation. All parsed as positive integers (invalid/≤0 → default).
+Bounds resident per-chat agent sessions so a long-running instance does not accumulate one `claude` subprocess (plus its MCP and browser children) per distinct chat until the host exhausts memory. A periodic sweep suspends idle sessions via the session's graceful `shutdown(true)` (resumable — the next message rehydrates via `--resume`); sessions mid-turn, awaiting a poll vote, mid-dispatch, or younger than the residency floor are never evicted. In-turn watchdogs in `src/runtimes/agent/session.ts`, with provider hard-timeout policy in `src/runtimes/agent/providers/watchdog-policy.ts`, handle hangs; these knobs handle idle accumulation. All parsed as positive integers (invalid/≤0 → default).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -184,13 +184,25 @@ reach that fence. If an active terminal or recovery handoff lacks exact durable 
 session, outbound queue, FIFO identity, and reply-guarantee ownership remain attached and shutdown
 fails visibly instead of clearing the evidence needed for diagnosis or retry.
 
+Process shutdown then closes refresh-ahead admission and waits for tracked Claude
+refresh children to emit `close`. It retains this wait after a child passes its
+ten-minute hard cap (`REFRESH_AHEAD_HARD_CAP_MS`). The wait ends two seconds before the shared ten-second shutdown deadline
+to leave time for transport and log cleanup. A pending child makes shutdown
+incomplete; the wait never signals the child or releases its credential-store claim.
+Fatal exceptions and rejected promises use that same shutdown watchdog.
+
+The systemd unit retains its 15-second stop timeout and `KillMode=mixed`. A detached
+process group does not escape its service cgroup: a supervisor's forced stop can
+still interrupt a refresh. These bounds reduce ordinary shutdown exposure; they do
+not guarantee completion after the application deadline, a crash or a forced stop.
+
 ### Access Control
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ADMIN_PHONES` | string | (empty) | Comma-separated list of phone numbers with admin access. Used only in single-instance mode; `config.json` `adminPhones` takes over in multi-instance mode. Example: `15555550100,15555550101`. |
 | `WHATSOUP_OUTBOUND_IDENTITY_MODE` | string | `log-only` | Mode for the outbound identity guard, which floors sends to cold (unknown) recipients at every `Messenger` egress. `log-only` (default) audits but never blocks — zero behavior change. `enforce` throws `OutboundIdentityError` and stops the send for cold targets. Any value other than `enforce` resolves to `log-only`. Resolved per-instance in `src/config.ts` (`outboundIdentityMode`). |
-| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts:1396`). `allowlisted_only` requires the group sender to be allowlisted or admin, and an unknown group sender produces a contact-approval request only when they @mention the bot; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
+| `WHATSOUP_GROUP_SENDER_POLICY` | string | (unset → per-instance `groupSenderPolicy`, default `any_member`) | Overrides the per-instance group-sender access-control policy (`src/config.ts`). `allowlisted_only` requires the group sender to be allowlisted or admin, and an unknown group sender produces a contact-approval request only when they @mention the bot; env takes precedence over `groupSenderPolicy` in instance config, letting an operator flip strict mode per instance without editing `config.json`. |
 | `WHATSOUP_INTERNAL_JIDS` | string (comma-separated JIDs) | (empty) | Group-JID allowlist read at outbound-safety-gate time (`src/core/outbound-message-safety.ts:363`); messages to a listed group are treated as internal operator coordination and skip the client-facing redaction scrub. Re-read per send (no restart needed). Admin 1:1 DM elevation is now handled separately by `internalPeerJids` in instance config — this var stays group-oriented. |
 
 #### Enabling enforce mode
@@ -207,21 +219,21 @@ structured logs from the `outbound-identity` child logger (`code`, `reason`,
 
 #### Guarded egresses and out-of-scope direct callers
 
-The guard runs at every free-recipient egress. The five `Messenger` methods
-(`ConnectionManager` `sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia` and
-`TwilioConnection.sendMessage`) are guarded inline. Two MCP tools that reach the
-raw socket directly — `forward_message` and `relay_message` — are **also** routed
-through the guard. `relay_message` is disabled by default
-(`advanced.enableRelayMessage`) and is guarded before it can be enabled.
+The guard is wired into `ConnectionManager`
+`sendMessage`/`sendRaw`/`sendPollMessage`/`sendMedia` and
+`TwilioConnection.sendMessage`. Raw-socket MCP paths also invoke it:
+`forward_message`, `relay_message`, `share_phone_number`,
+`request_phone_number`, `send_product_message`, and `send_group_invite`.
+The latter four accept a recipient or injected conversation target; they are
+not exempt merely because they exchange profile, catalog, or invite content.
+See `src/mcp/tools/advanced.ts`, `groups.ts`, and `chat-operations.ts`.
 
-The following direct callers are intentionally **out of scope**: they are
-fixed-destination, self-profile, or catalog sends with no free recipient, so the
-identity floor does not apply:
-
-- **status broadcast** — posts to the WhatsApp status JID, not a chosen recipient.
-- **send_product / send_product_message** — catalog content to a fixed target.
-- **share_phone_number / request_phone_number** — self-profile exchange, no message body to a cold target.
-- **group invite (send_group_invite)** — invite link delivery, fixed-destination.
+Normal module registration supplies the database-backed identity store. A null
+store causes `applyOutboundIdentityGuard` to return without blocking, and the
+default `log-only` mode records would-blocks rather than enforcing them.
+`relay_message` additionally requires `advanced.enableRelayMessage: true`.
+Status broadcasts target the fixed WhatsApp status JID rather than an arbitrary
+recipient; retain that distinction when auditing additional send paths.
 
 ### Storage Paths (single-instance / legacy mode only)
 
@@ -244,7 +256,7 @@ These have no effect when `INSTANCE_CONFIG` is set (multi-instance mode).
 | `PINECONE_INDEX` | string | `whatsapp-bot` | Pinecone index name for the memory pipeline. When this equals `whatsapp-bot` (the default), `pineconeSearchMode` defaults to `memory`; any other index defaults to `entity`. |
 | `PINECONE_PROJECT_ID` | string | unset | Optional project guard. When set, readiness and knowledge search verify that the resolved index host belongs to this project ID. |
 | `PINECONE_EXPECTED_HOST_SUFFIX` | string | unset | Optional stricter project guard, for example `-nf9hzvy.svc.aped-4627-b74a.pinecone.io`. |
-| `KNOWLEDGE_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Canonical local embed endpoint for vector knowledge profiles. Resolution order is `memory.pinecone.embedUrl` (per-instance) → `KNOWLEDGE_EMBED_URL` → `MW_MIND_EMBED_URL` (deprecated) → this default (`src/config.ts:691`). |
+| `KNOWLEDGE_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | Canonical local embed endpoint for vector knowledge profiles. Resolution order is `memory.pinecone.embedUrl` (per-instance) → `KNOWLEDGE_EMBED_URL` → `MW_MIND_EMBED_URL` (deprecated) → this default (`src/config.ts`). |
 | `MW_MIND_EMBED_URL` | string | `http://127.0.0.1:8799/embed` | **Deprecated alias** of `KNOWLEDGE_EMBED_URL` (expires 2026-10-26). Honored only when neither `memory.pinecone.embedUrl` nor `KNOWLEDGE_EMBED_URL` is set; using it emits a startup deprecation warning. Prefer `KNOWLEDGE_EMBED_URL`. |
 | `RECENCY_HALF_LIFE_DAYS` | integer | `14` | Positive day-count half-life for memory-search recency decay. Smaller values forget faster; zero/negative/malformed values fall back to `14`. |
 | `MAX_AGE_DAYS` | integer | `90` | Positive day-count cutoff for memory search; records older than this are filtered out. Zero/negative/malformed values fall back to `90`. |
@@ -273,6 +285,11 @@ each regular, non-symlinked `.key` file must be owned by that user with mode
 `0600` and is read through a bounded descriptor. Account-scoped lookups never
 consult this unscoped file store: they use the account-specific Keychain or
 `secret-tool` entry before any allowed environment or OpenCode fallback.
+
+The managed launcher additionally observes the credential file and every ancestor
+through the read. It rejects hard links, symlink ancestors, and file or ancestor
+replacement before exporting a value. An unsafe file aborts lookup; only an absent
+file proceeds to the keyring. The credential file is limited to 4 KiB.
 
 Default OpenAI, Anthropic, and Pinecone runtime lookups deliberately bypass the
 unscoped helper's environment-first step. They check the canonical secure
@@ -338,6 +355,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | string | `info` | Pino log level. Valid values: `trace`, `debug`, `info`, `warn`, `error`, `fatal`. |
 | `LOG_DIR` | path | `<dataRoot>/logs` | Set automatically by `config.ts` from the resolved data root. Set before `logger.ts` initializes. Enables pino-roll daily file rotation when present. |
+| `WHATSOUP_LOG_STDOUT_SINK` | `on` \| `off` | `on` | `off` drops the logger's stdout copy, so the pino-roll file is the only structured sink. The generated launchd plist sets it, because launchd sends stdout to an unrotated `stdout.log` (#3704). Leave it unset under systemd, where journald bounds stdout. Honoured only while `LOG_DIR` enables the rolling file sink: without `LOG_DIR`, or when that sink fails to start, logging stays on stdout. |
 
 ### Docker
 
@@ -354,12 +372,12 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `WHATSOUP_DIAGNOSTIC_BUNDLE` | `1` to enable | off | On an arming provider failure via the registry dispatcher, run the best-effort diagnostic bundle (health / usage-reset / model-usability / recovery / account-auth) and emit a redacted findings digest as a `provider_failure_diagnostics` alert. Requires `WHATSOUP_RESPONSE_REGISTRY_DISPATCH`. Fire-and-forget; throttled to one kick per primary per 60 s. |
 | `WHATSOUP_ONE_MESSAGE_HANDOFF` | `1` to enable | off | Collapse the fallback notice and the stand-in's reply into one user message: when a replay is scheduled the notice is stashed in the crash-safe `standby_notice` latch and prepended to the stand-in's first visible reply (or flushed standalone if the turn produces none). Off → the notice is sent standalone as before. Fronted by the typed `oneMessageHandoff` instance-config field (#2192); the env var remains the fallback in the config chain. |
 | `WHATSOUP_HANDOFF_DISTILLER` | `1` to enable | off | Arms the background production sweep that periodically distills each active conversation via `HandoffDistillRunner`. Inert (sweep not armed, one warn log) when set but `WHATSOUP_HANDOFF_DISTILL_MODEL` is unset or no API key resolves. Default-off; byte-identical when unset. See `docs/runbooks/error-response-workflows.md`. |
-| `WHATSOUP_HANDOFF_CONTEXT` | `1` to enable | off | On each fresh or stand-in session spawn, injects the most recently distilled summary into the session system prompt (`system` seam for all providers). The callback yields `null` (omitted silently) when no fresh artifact exists. Default-off; byte-identical when unset. |
-| `WHATSOUP_HANDOFF_DISTILL_MODEL` | string | (unset) | Cheap summarizer model id for the handoff distiller. Accepted values: `deepseek-chat`, `MiniMax-M2.7`, `glm-5.2`. When unset or unrecognised (no matching API key found) the distiller is inert and the sweep is not armed, even if `WHATSOUP_HANDOFF_DISTILLER=1`. |
+| `WHATSOUP_HANDOFF_CONTEXT` | `1` to enable | off | During an active fallback window, injects the most recently distilled summary for the same conversation into a fresh fallback session's system prompt (`system` seam for all providers). The callback yields `null` (omitted silently) outside that window or when no fresh artifact exists. Default-off; byte-identical when unset. |
+| `WHATSOUP_HANDOFF_DISTILL_MODEL` | string | (unset) | Legacy summarizer model id for the handoff distiller. DeepSeek-prefixed ids, `MiniMax-M2.7`, and `glm-5.2` resolve through their provider adapters. When unset or unrecognised (no matching API key found) the distiller is inert and the sweep is not armed, even if `WHATSOUP_HANDOFF_DISTILLER=1`. An explicit `agentOptions.handoffDistill` object takes precedence; its only enabled route is `deepseek-flash`. |
 | `WHATSOUP_HANDOFF_DISTILL_SWEEP_MS` | number (ms) | `60000` (60 s) | How often the background sweep consults the runner for each active conversation. Clamped to `[10000, 3600000]` (10 s – 1 h); non-positive/invalid values use the default. |
 | `WHATSOUP_HANDOFF_DISTILL_GROWTH_THRESHOLD` | integer (tokens) | `4000` | Token growth since the last distill baseline that makes a conversation eligible for a fresh distill; below it the runner skips the conversation (no model call). Clamped to `[500, 1000000]`; non-positive/invalid values use the default. |
 | `WHATSOUP_HANDOFF_DISTILL_VERBATIM_N` | integer | `40` | Trailing messages handed to the summarizer corpus. Clamped to `[1, 200]`; non-positive/invalid values use the default. |
-| `WHATSOUP_HANDOFF_DISTILL_MAX_TOKENS` | integer (tokens) | `50000` | Per-conversation token budget per rolling window (`maxTokensPerWindow`). Clamped to `[1000, 5000000]`; non-positive/invalid values use the default. |
+| `WHATSOUP_HANDOFF_DISTILL_MAX_TOKENS` | integer (tokens) | `50000` | Per-conversation admission budget per rolling window (`maxTokensPerWindow`). Before egress, reserves the final serialized UTF-8 request bytes plus 256 framing tokens and the 512-token output cap; a request that cannot fit is refused. Successful reported usage replaces the reservation; uncertain failures retain it. Small configured windows can refuse even a minimal request. Provider billing is not guaranteed by this estimate: a reported overrun closes the remaining window. Accounting is in-memory per active runner and survives artifact invalidation, but not restart or inactive-conversation pruning. Clamped to `[1000, 5000000]`; non-positive/invalid values use the default. |
 | `WHATSOUP_HANDOFF_DISTILL_MAX_CALLS` | integer | `6` | Per-conversation distill-call budget per rolling window (`maxCallsPerWindow`). Clamped to `[1, 1000]`; non-positive/invalid values use the default. |
 | `WHATSOUP_HANDOFF_DISTILL_WINDOW_MS` | number (ms) | `3600000` (1 h) | Rolling-window length for the distiller token/call budgets (`windowMs`). Clamped to `[60000, 86400000]` (1 min – 24 h); non-positive/invalid values use the default. |
 | `WHATSOUP_HANDOFF_DISTILL_FAILURE_THRESHOLD` | integer | `3` | Consecutive distill failures that trip the circuit breaker open (`failureThreshold`). Clamped to `[1, 100]`; non-positive/invalid values use the default. |
@@ -375,6 +393,7 @@ curl -sS -X POST "http://127.0.0.1:<healthPort>/agent/compact" \
 | `BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS` | positive integer | `604800` (7 days) | How long a conversation stays recorded as represented. Past the window that conversation can force a notification again. Enforced on both incident-state save paths (the controller-backed `IncidentStateCycle.commit()` that production takes, and the RESTORE-COMPAT `save_incident_state` wrapper), not only when the key next sees traffic, so a quiet instance cannot retain digests indefinitely. |
 | `BOT_ERRORS_CONVERSATION_SCOPE_MAX_PER_KEY` | positive integer | `256` | Conversations tracked per incident key, and event ids retained per conversation. Exceeding it evicts the oldest and sets an overflow marker, after which untracked conversations are treated as represented rather than new — without that, eviction recycles conversations into "new" status and one large incident becomes an unbounded alert loop. |
 | `BOT_ERRORS_CONVERSATION_SCOPE_MAX_KEYS` | positive integer | `128` | Incident keys carrying a conversation-scope sidecar at once. Bounds the state file against a long tail of historical keys. Evicting past this cap tombstones each evicted key in `conversationScopesEvicted` (`{incident key: eviction time}`, expiring after `BOT_ERRORS_CONVERSATION_SCOPE_RETENTION_SECONDS` and hard-capped at this same limit). The admission gate consults the tombstone for THAT key only: a conversation with no record under a recently evicted key is treated as represented rather than new, which stops an evicted conversation paging again on its next rejection, re-adding its key and evicting another. A key that was never evicted, or whose tombstone has expired, still forces one notification, so emptying the sidecar for ordinary reasons never silences a genuinely new conversation. A separate `conversationScopesOverflow` record counts evictions for telemetry and does not gate. |
+| `BOT_ERRORS_MACHINE` | string | (unset: live hostname) | Stable machine name that the BOT ERRORS Python producers (`deploy/scripts/bot-errors-*.py`) stamp as each event's `machine` field. The dispatcher keys incidents on machine, instance and source, so a host whose hostname changes with its network (for example a Mac without a fixed HostName) otherwise opens one incident per name for one condition, and a clear or maintenance window under one name never reaches the other. Resolved per event by `event_machine()` in `deploy/scripts/lib/bot_errors_envelope.py`, first non-blank wins: the process environment, then the same key in the BOT ERRORS env file (`BOT_ERRORS_ENV_FILE`, else `~/.config/whatsoup/bot-errors.env`, read with the launchd installers' rules), then the live hostname exactly as `socket.gethostname()` returns it, so a host that configures nothing keeps its existing incident keys. Surrounding whitespace is dropped. Set it in `~/.config/whatsoup/bot-errors.env`, unquoted (the file read keeps quotes as part of the name), and pin the host's HostName to the same string. systemd units with `EnvironmentFile=` get it from their environment and, when that value is non-blank, never read the file, so restart every BOT ERRORS unit after setting or changing it. Every other producer, including the macOS launchd agents, reads the file on each event once it runs a release that has this rule, and then needs no restart. The per-bot instance watchdog needs a re-render from such a release, and the reply-guarantee and release-drift-check LaunchAgents, whose plists bake their install root, need a rebind or reinstall onto one; until then their events keep the live hostname. Setting or changing it re-keys every incident this host produces. The next event opens a new incident; open incidents under the old name are not merged. A non-actionable one goes quiet and the stale sweep auto-closes it once it passes `BOT_ERRORS_INCIDENT_ESCALATE_SECONDS`. One whose stale renotify stays actionable (an autoclose-protected source or failure code, `flap_storm`, or a standing operator action such as a relink) keeps renotifying as stale until closed by hand. `bot-errors-maintenance.py` resolves its `--machine` default the same way, so run it as the host's BOT ERRORS user or pass `--machine`. The TypeScript outbox writer (`src/lib/bot-errors-outbox.ts`) does not read it; its events carry no `machine` field. Fleet silences and alert throttles (`src/fleet/silence-manager.ts`, `src/fleet/health-poller.ts`) stay scoped by `os.hostname()`. |
 | `FLEET_BIND_ADDRESS` | string | `127.0.0.1` | Bind address for the fleet server. Non-loopback values are refused at startup unless `WHATSOUP_FLEET_UNSAFE_REMOTE_CONSOLE=1` is set. The console HTML no longer carries the root fleet token (the console unlocks via `POST /api/console-session`, which sets an HttpOnly session cookie); the guard remains because a remote plain-HTTP bind would still transmit the operator-entered token and session cookie unencrypted. **The recommended way to reach the fleet from another host is to keep this loopback and front the port with `tailscale serve` (TLS), not to set the override** — see [Remote fleet access via tailscale serve](#remote-fleet-access-via-tailscale-serve). When a request arrives over TLS (a TLS-terminating front sets `X-Forwarded-Proto: https`, or the socket is directly encrypted) the console session cookie now carries `Secure`; a plain loopback-HTTP unlock omits it (localhost is a secure context, so the cookie still delivers). The root-token mint endpoints (`POST /api/console-session`, `/api/auth-ticket`, `/api/ws-ticket`) additionally refuse any non-loopback TCP source — behind `tailscale serve` the proxy connects from loopback, so legitimate remote mints still pass while a direct peer after a bind regression is rejected. |
 
 ### Docker Volume Layout
@@ -472,6 +491,11 @@ into place during deployment.
 
 ### Top-Level Fields
 
+For the recency overrides `recencyHalfLifeDays` and `maxAgeDays`, read the
+[migration runtime gap](explainers/byok-memory-config-migration.md#what-the-migrator-changes)
+before removing legacy fields. The nested migration targets are not consumed by
+the runtime at the audited revision.
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `enabled` | boolean | no | `true` | Fleet opt-out switch. Set to `false` to keep the config on disk while taking the instance out of fleet rotation — discovery skips it, ops routes ignore its `healthPort`, and no polling or proxying occurs. Any other value (including absent) leaves the instance enabled. See note below.[^enabled] |
@@ -509,25 +533,25 @@ into place during deployment.
 | `transcriptionOptions` | object | no | — | Shared OpenAI Whisper transcription endpoint/key override. Valid for chat, agent, and passive instances. See [transcriptionOptions](#transcriptionoptions). |
 | `transport` | string | no | `baileys` | Message transport: `baileys` (WhatsApp, default), `twilio` (SMS), `signal`, or `imessage`. Transport-specific settings are required by their selected transport; see [`twilioConfig`](#twilioconfig), the [Signal transport runbook](runbooks/signal-transport.md), and the [iMessage transport runbook](runbooks/imessage-transport.md). |
 | `twilioConfig` | object | iff `transport: "twilio"` | — | Twilio SMS transport settings. **Required** when `transport` is `twilio`; **rejected** when present with any other transport. See [`twilioConfig`](#twilioconfig). |
-| `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts:448`). |
+| `rateLimitWindowMs` | integer (ms) | `3600000` (1 h) | Measurement window for the per-user response rate limit — `checkRateLimit` counts responses sent within this window and compares against `rateLimitPerHour` (`src/runtimes/chat/rate-limiter.ts:15`). When unset it falls back to `rateLimitNoticeWindowMs` if that is set (with a startup deprecation warning), else the 1-hour default (`src/config.ts`). |
 | `rateLimitNoticeWindowMs` | integer (ms) | `3600000` (1 h) | Dedup window for the "chill, I need a minute" rate-limit notice — once a user is told they are rate-limited, the notice is suppressed for this long before it can be sent again (`src/runtimes/chat/runtime.ts:174`). Distinct from `rateLimitWindowMs` (the counting window). |
-| `recencyHalfLifeDays` | integer | `14` | Per-instance override of `RECENCY_HALF_LIFE_DAYS` — positive day-count half-life for memory-search recency decay (`src/config.ts:858`). Smaller values forget faster. Falls back to the `RECENCY_HALF_LIFE_DAYS` env var, then `14`; non-positive/non-integer values are ignored. |
-| `maxAgeDays` | integer | `90` | Per-instance override of `MAX_AGE_DAYS` — positive day-count cutoff for memory search; records older than this are filtered out (`src/config.ts:859`). Falls back to the `MAX_AGE_DAYS` env var, then `90`; non-positive/non-integer values are ignored. |
+| `recencyHalfLifeDays` | integer | `14` | Per-instance override of `RECENCY_HALF_LIFE_DAYS` — positive day-count half-life for memory-search recency decay (`src/config.ts`). Smaller values forget faster. Falls back to the `RECENCY_HALF_LIFE_DAYS` env var, then `14`; non-positive/non-integer values are ignored. |
+| `maxAgeDays` | integer | `90` | Per-instance override of `MAX_AGE_DAYS` — positive day-count cutoff for memory search; records older than this are filtered out (`src/config.ts`). Falls back to the `MAX_AGE_DAYS` env var, then `90`; non-positive/non-integer values are ignored. |
 | `toolUpdateRedirectJid` | string | `null` | Redirect target for the agent's batched tool-status updates. When set, the aggregated tool-status text is sent to this JID instead of the originating chat (`src/runtimes/agent/outbound-queue.ts:717`), keeping operational chatter out of the user-facing conversation. `null` (default) sends status inline as a typing indicator in the active chat. |
 | `startupNotifications` | boolean | `true` | Gates only the generic agent back-online aggregate. `false` does not suppress early boot evidence or named resume, restart-loop-guard, expired-session, or intentional-restart-receipt policies. Only consulted for `agent` instances and only when `toolUpdateMode` is not `minimal`; see [Startup-notification protocol](#startup-notification-protocol). |
 | `startupNotificationStabilitySeconds` | integer (s) | `600` | Stability window for the generic back-online aggregate. Every applicable agent boot is recorded in `<stateRoot>/startup-notify.json`; one aggregate covers every boot since the last generic settlement. The controller waits for this window and strict readiness, with a three-second floor even when configured as `0`. Accepted range is an integer `0`–`86400`; any other value falls back to `600`. See [Startup-notification protocol](#startup-notification-protocol). |
 | `proactiveResumeOnStartup` | boolean | `true` | For `per_chat` (non-sandboxed) agents, controls whether sessions that were active or gracefully suspended at last shutdown are proactively resumed instead of waiting for the next user message. Resume requires a complete, self-consistent persisted delivery identity. Missing, invalid, or scope-mismatched identities enter durable admission debt and are excluded from proactive, lazy, direct, shared, and single-session resume selection; eligible fresh inbound work resolves its own debt, while unscoped shared/single debt requires operator action. Runtime health remains degraded while this debt is unresolved. `false` disables proactive resume. Group conversations are never proactively resumed. |
 | `restartLoopGuard` | object | `{ enabled: true, maxRestarts: 3, windowMs: 300000 }` | Resume-replay circuit breaker for proactive resume (`src/runtimes/agent/restart-loop-guard.ts`). Each boot marks a crash marker in `<stateRoot>/restart-loop-guard.json`; a graceful shutdown clears it. When a boot follows an unclean exit with resumable checkpoints pending, the guard counts it; at `maxRestarts` crashy boots inside `windowMs`, proactive resume is suppressed for that boot (sessions still lazy-resume on their next message) and one admin notice is sent via the startup-notification channel. Defaults trip strictly before systemd's `StartLimitBurst=10`/`StartLimitIntervalSec=300` wedge, so the instance self-heals instead of the whole unit going dark. The guard fails open on any persistence error and never blocks inbound service. `enabled: false` disables the trip consult entirely. Guard state is surfaced in the runtime health snapshot (`restartLoopGuard` field). |
 | `textAggregateDelayMs` | integer (ms) | `2000` | Debounce window for aggregating an agent's streamed text chunks into one outbound WhatsApp message — the stream buffer flushes this long after the last chunk (`src/runtimes/agent/outbound-queue.ts:382`). Non-positive/non-integer values fall back to `2000`. |
-| `pollResolution` | object | `{ defaultStrategy: "first-vote-wins", defaultTimeoutMs: 3600000 }` | Group poll behaviour for `AskUserQuestion`-bridged decisions. `defaultStrategy` (`first-vote-wins`, `admin-only`, or `admin-wins`) is applied to group polls (`src/runtimes/agent/runtime.ts:3416`); DMs always use `first-vote-wins`. `defaultTimeoutMs` is the default pending-poll timeout, clamped to the poll-resolution min/max before use (`src/runtimes/agent/poll-resolution.ts:401`). |
-| `gui` | boolean | `false` | Per-instance flag indicating the instance exposes a GUI surface; surfaced through fleet discovery/line metadata. Read into `config.gui` (`src/config.ts:891`). |
-| `guiPort` | integer | `9099` | Port advertised for this instance's GUI. Read into `config.guiPort` (`src/config.ts:892`) and surfaced by fleet discovery (`src/fleet/discovery.ts:177`) and the `GET /api/lines/:name` route (`src/fleet/routes/lines.ts:559`). Falls back to the `WHATSOUP_GUI_PORT` env var, then the fleet-port default `9099`. |
+| `pollResolution` | object | `{ defaultStrategy: "first-vote-wins", defaultTimeoutMs: 3600000 }` | Group poll behaviour for `AskUserQuestion`-bridged decisions. The four strategies are `first-vote-wins`, `admin-only`, `admin-wins`, and `majority-after-timeout`; DMs use `first-vote-wins`. `defaultTimeoutMs` is clamped to 1,000–86,400,000 ms by `configuredDefaultPollTimeoutMs` in `src/runtimes/agent/poll-resolution.ts`. See [the decision-poll contract](runbooks/agent-decision-polls.md#trigger-matrix). |
+| `gui` | boolean | `false` | Per-instance flag indicating the instance exposes a GUI surface; surfaced through fleet discovery/line metadata. Read into `config.gui` (`src/config.ts`). |
+| `guiPort` | integer | `9099` | Port advertised for this instance's GUI. Read into `config.guiPort` (`src/config.ts`) and surfaced by fleet discovery (`src/fleet/discovery.ts:177`) and the `GET /api/lines/:name` route (`src/fleet/routes/lines.ts:559`). Falls back to the `WHATSOUP_GUI_PORT` env var, then the fleet-port default `9099`. |
 | `controlPeers` | object | `{}` | Map of trusted-peer name → phone number for the self-healing control plane. Messages from these phones carrying a control protocol are routed to `control_messages` instead of normal ingest (`src/core/ingest.ts:151`), and named peers (`q`, `loops`) gate degradation-monitor and runtime control behaviour (`src/main.ts:705`, `src/runtimes/agent/runtime.ts:2158`). Empty disables the control-peer paths. |
 | `pausedChats` | string[] | `[]` | JIDs (chat JID or conversation key, e.g. `120363...@g.us`) whose inbound messages are stored but never dispatched to the runtime (`src/core/ingest.ts:250`). Lets an operator toggle a chat off without losing messages. Admin commands from a paused chat still process. Non-string/blank entries are dropped. |
 | `pausedChatBypassPatterns` | string[] | `[]` | Case-insensitive regex source strings matched against inbound message content in a paused chat (`src/core/ingest.ts`). A match dispatches the message through the normal path as if the chat were not paused, so operator-directed traffic (e.g. escalations) survives pausing a busy group. Default empty keeps `pausedChats` behavior unchanged. Null content (media) never matches. Invalid regex entries are rejected by the instance-config validator; at runtime a bad entry is skipped with a single warn and never breaks ingest. |
 | `voiceReply` | string | `never` | Agent voice-reply policy (`src/runtimes/agent/runtime.ts:4196`): `never` (text only), `when_received` (reply with TTS audio only when the inbound message was a voice note), or `always` (always reply with audio). Requires ElevenLabs configuration to produce audio. |
 | `autoTyping` | string | `off` | Outbound typing-presence simulation while sending (`src/transport/connection.ts:754`): `off` (no presence), `composing` ("typing…"), or `recording` ("recording audio…"). The presence is set before the send and cleared (`paused`) after. |
-| `elevenlabs` | object | see fields | ElevenLabs TTS settings used when a voice reply is produced (`src/runtimes/agent/runtime.ts:7214`). Fields: `defaultVoiceId` (default `pNInz6obpgDQGcFmaJgB`), `defaultModel` (default `eleven_multilingual_v2`), `stability` (default `0.5`), `similarityBoost` (default `0.75`). |
+| `elevenlabs` | object | see fields | ElevenLabs TTS settings passed by the agent runtime's automatic voice-response path in `src/runtimes/agent/runtime.ts`. Fields: `defaultVoiceId` (default `pNInz6obpgDQGcFmaJgB`), `defaultModel` (default `eleven_multilingual_v2`), `stability` (default `0.5`), `similarityBoost` (default `0.75`). The MCP `send_voice_reply` path currently passes only its explicit `voice_id` and otherwise uses provider defaults; see [the tool contract](tools.md#send_voice_reply). |
 | `generateHighQualityLinkPreview` | boolean | `false` | When `true`, Baileys generates high-quality link-preview thumbnails for outbound messages (`src/transport/connection.ts:704`). Default `false` keeps the lighter-weight preview behaviour. |
 | `mediaRetention` | object | `{ tempHours: 72, cacheHours: 168, intervalHours: 6 }` | Media-sweep retention policy (`src/main.ts:679`). `tempHours` is the max age for temp media, `cacheHours` for cached media (default 7 days), and `intervalHours` is how often the retention timer runs. |
 | `ingest` | object | `{ maxConcurrent: 20, maxQueueDepth: 500 }` | Inbound ingest backpressure (`src/core/ingest.ts:60`). `maxConcurrent` caps simultaneous in-flight ingests; `maxQueueDepth` caps the waiting queue before new inbound work is shed. |
@@ -768,8 +792,22 @@ with the account the owner ratified?**
 
 - **Observed identity.** The runtime spawns `claude auth status --json` with the
   same scrubbed allow-list environment the model probe and real turns use
-  (`HOME`, `PATH`, `USER`, `NO_COLOR`, and `CLAUDE_CONFIG_DIR` when set) and
-  reduces the answer to an opaque digest. The CLI's `email` and `orgId` are
+  (`HOME`, `PATH`, `USER`, `NO_COLOR`, `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` when set) and
+  reduces the answer to an opaque digest. Before probing, shared refresh-ahead
+  may refresh and persist an existing CLI-managed login; it never starts an
+  interactive login. `npm run --silent claude-account-digest` uses this same
+  observation and returns exit 4 if the binary/probe fails, a refresh is still
+  running, refresh ownership is unavailable, or the refresh fails.
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` selects credential storage before
+  `CLAUDE_CONFIG_DIR`; a defined empty value selects the default
+  `$HOME/.claude` store. The BOT ERRORS functional probe preserves both
+  selectors, including that empty override. It does not forward credential values.
+  Non-turn command probes accept at most 64 KiB combined stdout and stderr,
+  counted before decoding. Overflow fails the observation and discards its output;
+  termination still respects refresh-lock grace and process ownership lasts until
+  the child closes. Later output is discarded after the result settles.
+  The CLI's `email` and `orgId` are
   read only inside the parser; nothing downstream — config, logs, alerts,
   health, this repository's tests — ever carries a raw identifier.
 - **Ratified expectation.** `sha256:` + SHA-256 over a versioned canonical
@@ -784,7 +822,8 @@ with the account the owner ratified?**
   degraded with reason `runtime.credential_identity_mismatch` / cause
   `credential_identity_mismatch`. `unverifiable` (not logged in, identity
   fields missing, output unparseable, binary missing, probe failed or
-  threw, malformed expectation, stale receipt, never verified) → warning
+  threw, refresh in flight, refresh owner unavailable, refresh failed, malformed expectation,
+  stale receipt, never verified) → warning
   alert `credential_identity_unverifiable` + the matching reason/cause pair.
   Unverifiable is never treated as a match, and it never clears an open
   mismatch. A match older than the model-usability freshness window is
@@ -1085,6 +1124,32 @@ Activation remains deliberately blocked until the requirements in the [send-appr
 
 An unavailable file, wrong owner or mode, a symlink, a mismatched service UID, identical service/worker UIDs, a missing client, a malformed authority response, or an authority request failure stops the send before the provider call. The authority records inbound events before the conversation queue receives them. `/stop`, `/review`, `/approve`, and `/reject` are parsed from that stored authenticated inbound text by Agent365, never by the model. A persisted stop can send only the one-use fixed `whatsapp.control_receipt` returned by the authority for that exact inbound event; the client has no local acknowledgement template or general paused-account exemption. Review cards are rendered directly from authority JSON on the authenticated turn. An approved stored WhatsApp operation is retried with its `operation_id` at the admission envelope's top level; the reply context remains only the inbound event ID.
 
+### Handoff artifact retention
+
+Agent fallback stores a per-conversation handoff artifact only for short-lived
+cross-provider continuity. Its summary, seeded artifact content, source provider,
+source model, and token baseline have one 24-hour eligibility cutoff. The canonical
+database-retention runner deletes rows whose `updated_at` is strictly older than
+that cutoff through deterministic statements of at most 100 rows, draining the
+eligible backlog during each successful sweep. It runs once immediately when the
+instance starts and then on the configured database-retention interval (daily by
+default). A row is therefore removed on the next successful sweep after it becomes
+eligible; a stopped process or failed sweep delays online deletion.
+`health.retention.database.lastResult.handoffArtifacts` is the count deleted by the
+most recent successful sweep. Databases without the optional agent table report zero
+for that field.
+
+The prompt-injection freshness TTL is separate from disk retention: a stale artifact
+is excluded from a prompt before its row necessarily becomes eligible for deletion.
+Chat clear, message revoke/delete, and the agent `/new` workspace reset also
+invalidate the affected conversation's artifact. The current application has no
+separate privacy-erasure event or API; any future privacy-erasure path must use the
+same artifact invalidation seam.
+
+This is online database deletion only. It does not erase bytes already present in
+SQLite backups, WAL copies, storage snapshots, or provider copies. Those copies
+follow their own backup-retention, destruction, and provider-data controls.
+
 ### `memory`
 
 `memory` is the canonical BYOK configuration block. It owns every memory/search setting that used to be spread across flat fields such as `pineconeIndex`, hardwired namespace literals, and code-level knowledge profiles.
@@ -1150,6 +1215,8 @@ The default is a fixed HOME-relative template — it does not consult `LANG`/`LC
 | `memory.pinecone.index` | string | env/`whatsapp-bot` | Primary chat memory/entity index. |
 | `memory.pinecone.namespaces` | object | WhatsApp defaults | Namespaces used by chat context, fact export, and `mw-mind` intent routing. Every namespace is configurable per instance. |
 | `memory.pinecone.searchMode` | string | auto | `memory` for chat/sender/self-fact filters, `entity` for entity index search. Defaults from the index name. |
+| `memory.pinecone.recencyHalfLifeDays` | number | migration target only | Recognized by validation and migration, but the runtime still reads top-level `recencyHalfLifeDays`, then `RECENCY_HALF_LIFE_DAYS`, then `14`. Retain an existing legacy override with `--keep-legacy`; see the linked recency gap. |
+| `memory.pinecone.maxAgeDays` | number | migration target only | Recognized by validation and migration, but the runtime still reads top-level `maxAgeDays`, then `MAX_AGE_DAYS`, then `90`. Retain an existing legacy override with `--keep-legacy`; see the linked recency gap. |
 | `memory.pinecone.allowedIndexes` | string[] | `[]` | Indexes exposed through the agent `knowledge_search` MCP tool. Empty disables that tool. |
 | `memory.pinecone.knowledgeSearch.enabled` | boolean | `true` | Global on/off switch for knowledge tool registration. Still requires `allowedIndexes`. |
 | `memory.pinecone.knowledgeSearch.allowGlobalAgentSessions` | boolean | `false` | Allows `knowledge_search` in non-`sandboxPerChat` agent sessions. Default is fail-closed because global sessions can span callers. |
@@ -1227,6 +1294,55 @@ group, and the group's own records are limited to shared records and the
 sender's own. It has no membership reader, so it does not detect DM-lane groups
 and treats them as configurable groups.
 
+##### Memory guidance in the agent prompt
+
+Agent instances have no automatic memory write path, so a memory is saved only
+when the model calls `memory_write`. The agent system prompt therefore carries a
+short "Long-term memory" block (`src/runtimes/agent/memory-guidance.ts`). It
+says:
+
+- Save only what will matter in a later conversation, using the tool's memory
+  types: a lasting fact, plan or arrangement (`user_fact`, or `group_context`
+  for facts about a group), a preference (`preference`), a fix to something
+  saved before (`correction`), or anything the person asks you to remember.
+- Do not save the same thing twice. When `knowledge_search` accepts the memory
+  index (`memory.pinecone.index` is among its `allowedIndexes` that have a
+  knowledge profile), the line also says to check `knowledge_search` first,
+  before saving and before asking again.
+- Never save passwords, keys, codes or payment details, even if asked, and say
+  so. Save health details or details about other people only when the person
+  asks.
+- The reach of a memory, following the recall table above: memories are saved
+  to the calling chat; the bot's admins, and contacts set to `instance`, can
+  recall them from other chats, and an admin can do so even in a group with
+  other people. On `q` it says every chat can recall them.
+
+The runtime adds the block, for every provider, when memory is usable for the
+instance and `memory_write` is listed for that session's tool context. Usable
+means the startup readiness check was `ready`, or its provider call failed only
+transiently. Pinecone SDK errors carry no HTTP status, so the readiness probe
+classifies a failure from the status of the last response its own fetch
+wrapper saw: 5xx is `provider_unavailable`, 429 `rate_limited` and 408
+`timeout` (all transient); 401/403 is `auth_failed` (also the `/health`
+readiness state) and any other 4xx `invalid_request` (both definitive). With no
+response, the readiness deadline and connection failures are transient
+(`timeout`, or `network_error` for a connection error code such as
+`ECONNREFUSED`, `UND_ERR_CONNECT_TIMEOUT`, `UND_ERR_SOCKET`, `EHOSTUNREACH` or
+`ENETUNREACH`, or a bare `fetch failed`). Any other failure is `unknown` and
+hides the block. A transient startup failure therefore does not hide the block
+for the process lifetime; `memory_write` reports its own errors. A local
+refusal (`disabled`, or `project_mismatch` because no guard is configured) and a
+definitive provider answer (`index_missing`, `project_mismatch`, `auth_failed`,
+`invalid_request`) give no block. An explicit `sandbox.allowedMcpTools` list
+that omits `memory_write` gives no block for any provider, although only
+claude-cli sessions enforce the list (through the `agent-sandbox.sh` hook); a
+list that omits `knowledge_search` drops the check-first wording. Otherwise the
+prompt is unchanged. The block does not prove writes work: an index whose field
+map does not name `text` still gets it, and each of its writes fails. Pinecone
+rejects the record without an HTTP status the SDK keeps, so the upsert is logged
+with failure code `unknown`, rethrown as `PINECONE_UNAVAILABLE`, and
+`memory_write` returns code `provider_unavailable` with `retryable: true`.
+
 #### Legacy Migration
 
 Dry-run all local instance configs:
@@ -1243,7 +1359,7 @@ npm run migrate-memory-config -- --instance example-agent --write
 
 The migrator only reads and writes `config.json`. It does not touch `tokens.env`, `auth/`, `bot.db`, provider keychains, or WhatsApp session credentials, so a successful config migration does not require a QR re-auth.
 
-Field aliases migrated into `memory.*` include `pineconeIndex`, `pineconeAllowedIndexes`, `pineconeSearchMode`, `pineconeRerank`, `pineconeTopK`, `pineconeRerankTopN`, `pineconeNamespaces`, `pineconeFactsNamespace`, `pineconeChunksNamespace`, `pineconeSummariesNamespace`, `pineconeApiKeyEnv`, `pineconeProjectId`, `pineconeExpectedHostSuffix`, `conversationWindow`, `conversationWindowExtended`, `windowExtensionThresholdMs`, `retentionDays`, and enrichment tuning fields.
+The [migration field table](explainers/byok-memory-config-migration.md#what-the-migrator-changes) owns the complete alias mapping, including `recencyHalfLifeDays` and `maxAgeDays` and their unresolved runtime-consumption gap. Review that gap before removing legacy fields.
 
 ### `operationTracker`
 
@@ -1358,7 +1474,9 @@ proof unless a WhatSoup-specific proof artifact says so.
 | `pluginDirs` | string[] | no | — | Additional plugin directories to pass via `--plugin-dir` to the `claude-cli` agent subprocess. Tilde is expanded (`~` → `$HOME`). **Version resilience:** when an entry pins a version directory (e.g. `~/.claude/plugins/superpowers/5.0.7`) that no longer exists — for example after `claude plugin update` bumps it to `5.1.0` — the highest existing semver sibling under the same parent is substituted automatically at startup. Non-version paths and still-present directories are passed through unchanged. |
 | `enabledPlugins` | Record<string, boolean> | no | — | Per-instance plugin overrides. Keys are `plugin@marketplace` identifiers. `true` = enabled, `false` = disabled. Omitted keys inherit from global `~/.claude/settings.json`. Written to `<cwd>/.claude/settings.json` at startup. |
 | `autoCompactInputTokens` | number | no | `150000` | For Claude CLI agent sessions, automatically send a silent `/compact` after this many input tokens since the last successful compact. Default: 150,000 tokens (prevents prompt-too-long errors while leaving headroom for tool results). Valid range: 50,000-100,000,000. **Bootstrap behavior:** the first time eligibility is checked on any session whose `last_compact_input_tokens=0` (a fresh enable, or a brand-new session whose first turn crosses the threshold), the baseline is initialised silently without firing `/compact`. This prevents a compact storm on rollout but means the first real compact is deferred by one full threshold's worth of tokens. **Cooldown behavior:** successful auto-compacts wait 5 minutes before re-arming; scopes that become eligible again inside the rapid re-arm window escalate to 15, 30, then 60 minute cooldowns. A compact still unfinished after 4 minutes releases the following dispatch and applies a 5-minute retry backoff, but retains its FIFO result-classification slot: a late compact result is still consumed as a system result and cannot steal the next user's inbound identity. `GET /health` exposes current aggregate state through `runtime.agent.autoCompactState`, `autoCompactActiveBackoffScopes`, and `autoCompactWorstCurrentBackoffTier`. It also preserves the process-lifetime diagnostics `autoCompactIneffective`, `autoCompactConsecutiveRapidRearmsMax`, and `autoCompactNextTurnOverThreshold`; those totals/maxima do not independently degrade current health. |
-| `allowM365Mutations` | boolean | no | `false` | Per-instance opt-in for propagating `ALLOW_M365_MUTATIONS` to the agent subprocess. Only consulted when `WHATSOUP_CONNECTOR_FAILCLOSED=1` is set on the parent process (off by default). See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
+| `handoffDistill` | object | no | legacy environment behavior | Typed, per-instance warm-handoff policy. Requires the matching launcher, config reader, and runtime before config rollout; follow the [code-first rollout gate](runbooks/error-response-workflows.md#handoff-distiller-rollout-gate). Only a process started through those updated components honors `{ "enabled": false }` as disabling distillation and ignoring legacy `WHATSOUP_HANDOFF_*` controls. Writing this object and restarting an older installation does not provide that guarantee. An enabled object must use exactly `{ "provider": "deepseek", "model": "deepseek-flash" }`; it may set `contextInjection` and the documented sweep, growth, verbatim, budget, breaker, and concurrency bounds. The launcher projects only the existing `deepseek` credential for that exact enabled object. An absent object preserves the legacy environment path for existing fleet instances. Context injection remains restricted to a fresh fallback session for the same conversation. |
+| `allowM365Mutations` | boolean | no | `false` | Required with `m365Bridge` before the account-bound M365 mutation exception can be granted. Without `m365Bridge`, legacy child-env behavior remains unchanged. See [Connector mutation policy (#411)](#connector-mutation-policy-411). |
+| `m365Bridge` | object | no | — | Exact Agent365 binding: concrete Azure tenant GUID `tenantId`, exactly one `accountId` or `accountEmail`, loopback `origin`, and fixed profile `user-full-v1`. Requires `provider: "claude-cli"`, `allowM365Mutations: true`, and enabled plugin `microsoft_365@microsoft-365-dev`. |
 | `capabilityObligations` | object | no | — (inert) | Capability-obligation replay activation — all-or-inert, default OFF. Absent, or anything not exactly `enabled: true`, activates nothing. `enabled: true` requires a fully valid body — `contract` (versioned rule list: exact leading token, exact URL-host allowlist, declared prepared-media class), `mediaRoot`, `retentionPolicyVersion` (must name the owner-approved `policy/media-retention.json` artifact's `policyVersion` verbatim — #3221 Debt 3), `retentionHorizonDays` (finite 1–365 media-retention horizon; A-08 — additionally must not EXCEED the owner-approved horizon in `policy/media-retention.json` (90 days, ruled 2026-08-28); both policy checks are verified fail-closed at load, upstream of every DM/group media drain), `execution` (the TYPED resolver execution struct — #3221 Debt 4, owner-ratified: `interpreter` (an explicit interpreter PATH, or `null` for a directly executable artifact — the KEY is required, so the mode is DECLARED, never guessed; a bare `$PATH` name like `node` is unpinnable and refused at load), `resolverArtifactPath` (the code file whose content is hashed and executed — ALWAYS the executing token by construction), `args` (the data argv tail: at least one arg MUST embed the `{source}` placeholder, and with `interpreter: null` EVERY arg must embed `{source}` and must not be a flag — round-21 finding 2 made structural, so `["-c","{source}"]` and `["--eval={source}"]` are unrepresentable), plus `timeoutMs` and `minOutputBytes`. The schema DERIVES `command` = `[interpreter?, resolverArtifactPath, ...args]` and `interpreted` = `interpreter !== null` for the executor and the canonicalizer (an equivalent declaration canonicalizes byte-identically — no attested composite-digest drift); the legacy free-form `command`/`interpreted` body is refused loudly at load — spawned shell-lessly by the trusted `execute_capability` tool, which re-verifies the artifact by realpath, refuses an `interpreted:false` mislabel of an interpreter (and in direct mode any token after the artifact that is a flag or does not embed `{source}` — round-21 finding 2, so `["-c","{source}"]` cannot run the source as code), requires an EXPLICIT interpreter PATH when `interpreted:true` (a bare `$PATH` name like `node` is unpinnable and refused at config LOAD) that is NOT writable by a different untrusted actor (world/group-writable, non-sticky — round-21 finding 1, since the interpreter is executed from its realpath not staged), and CONTENT-ADDRESSED STAGES the artifact's whole directory into a private root — re-hashing and executing the immutable COPY (round-20), so a post-attest rename or in-place write cannot substitute unverified bytes; the substituted source is refused if it begins with `-`. **The resolver artifact MUST live in an ISOLATED, symlink-free directory containing ONLY itself and its intentional siblings** — nothing else may be written next to it (no `.DS_Store`, editor swap file, `__pycache__`, log, db, or media) or the whole-directory manifest drifts and every drain fails closed with `resolver_digest_mismatch`), and `attestation` (expected skill name/version/digest, resolver digest — a COMPOSITE binding the artifact content, the whole-DIRECTORY manifest (artifact + every sibling), the INTERPRETER content, AND the canonical execution shape + envelope (`timeoutMs`/`minOutputBytes`), re-derived and re-compared at the drain seam so a post-attest content swap, sibling swap, interpreter swap, or shape/envelope change is refused — dependency versions, probe version, canary id) — validated at config load by `parseCapabilityObligationsOptions` (`src/core/capability-contract.ts`); a malformed enabled body is a startup `ConfigValidationError` (exit `EX_CONFIG`), never a partial activation. `per_chat` session scope only. |
 | `turnRecoveryCatchupReconcile` | object | no | — (off) | Turns on the turn-recovery supervisor's automatic operator catch-up reconciler for this instance: `{ "enabled": true, "groupLimit": 50 }`. Each scan cycle closes up to `groupLimit` recovery groups whose conversation already got a delivered catch-up reply (closure rows carry `actor = 'auto_reconciler'`). `enabled` is a required boolean inside the block; `groupLimit` is an optional integer 1–1000 (default 50). Closed shape: an unknown inner key or an invalid value is a load-time `ConfigValidationError`. Absent or `enabled: false` = the pre-reconciler behavior. Read once at startup, so a change needs an instance restart. Enablement and observation steps: [Enabling per instance](turn-recovery-continuity-reconciler.md#enabling-per-instance). |
 | `observability` | object | no | — (phase `off`) | Fleet Lifecycle Observability Standard dark flag. Closed shape with one key, `fleetLifecycle`: the promotion phase `off` \| `shadow` \| `alerting` \| `default` (design §11; `off` when the block or key is absent). Anything else — a boolean, a case variant, an unknown key inside the block — is a load-time `ConfigValidationError` (fail-closed, never a partial enable). Code behind the flag ships dark; every phase transition is a separate owner act per cohort with single-step rollback (one phase back). |
@@ -1435,9 +1553,33 @@ result after the provider starts invalidates that provider's prior receipt.
 
 #### Primary model usability probe
 
-Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. CLI model probes have a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
+Refresh ownership initializes an absent final credential-store directory with
+mode `0700` before reading credentials or starting the refresh. Its resolved
+parent must already exist, belong to the current user, and deny group and other
+write access; a conventional `0755` home directory is supported. Ancestors must
+be owned by that user or root and deny group/other writes, except for sticky
+shared directories that protect owned entries. Missing
+intermediate directories and dangling links are refused. Initialization assumes
+cooperating processes under the same user account. A concurrent parent exchange
+can leave an empty directory, but a detected identity change prevents credential
+access and refresh admission. Existing credential contents are never copied or
+repaired by this initialization. An existing selected store must itself be
+current-user-owned and mode `0700`-private; its resolved parent and physical
+ancestors receive the same ownership, symlink, and writable-ancestor checks as
+an initialized store. A final symlink remains a supported canonical alias only
+when both its parent chain and its resolved target are safe; a dangling alias
+is refused. The original selector remains in the child environment, preserving
+the CLI's configured storage/keychain namespace. Selectors must be absolute
+and contain no `.` or `..` path segments. Refresh admission checks their original
+ancestry before resolving the store and refuses intermediate symlinks, except
+the verified root-owned macOS `/var` and `/tmp` prefix aliases. A final alias in
+a private parent keeps its exact selector spelling. These checks assume
+cooperating same-user writers; they do not prevent that user from retargeting a
+private alias or renaming a directory after admission.
 
-Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` POST a minimal generation-class probe (`/chat/completions` / `/messages`) to the configured endpoint — `providerConfig.baseUrl` when set, else the provider default — authenticated with the key resolved via `providerConfig.apiKeyService` when set (`src/runtimes/agent/providers/primary-model-usability-adapters.ts`). A custom-endpoint instance therefore probes the endpoint it will actually serve from, not the provider's public API. This probe makes the startup surface explicit about account/model access.
+Agent runtimes launch a non-blocking startup probe for the configured primary conversation model. The killable CLI probe child has a 15-second deadline so cold Claude/OpenCode startup does not create false degraded health. Claude refresh-ahead preparation may wait up to 60 seconds for `claude auth status --json`; WhatSoup does not signal that preparation child. Graceful shutdown closes new refresh admission and joins tracked children within the shutdown deadline; a supervisor forced stop can still kill them. A verified live durable refresh owner in the current parent defers the CLI probe with `deferred-refresh-in-flight` and suppresses the primary alert. A verified owner adopted after a parent restart has no bounded elapsed duration, so it retains its fence and defers the probe with alert-worthy `refresh-failed` instead of suppressing alerts indefinitely. Version 3 ownership records the host, child PID, and boot-bound process identity. On macOS, `python3` resolved through the fixed system-only path `/usr/bin:/bin:/usr/sbin:/sbin`, with its standard-library `ctypes`, reads the native process unique identifier from `libproc`; missing Python, an unsupported native query, or an unreadable identifier leaves ownership unavailable. There is no fallback to the whole-second `ps` start display. A live legacy macOS claim remains unavailable until the recorded PID is proven absent or operators reconcile it; the new record version also prevents older readers from reclaiming a live upgraded claim. After a parent restart, proven child absence or PID reuse permits recovery; a legacy claim, foreign host, unreadable identity, or uncertain publication remains unavailable rather than being presumed live. Unsafe or unavailable ownership instead reports `refresh-owner-unavailable`; a failed completed refresh or thrown refresh reports `refresh-failed`. Both failures block the killable probe and remain alert-worthy. Verified close may release that child's ownership claim, but does not establish that refreshing the login succeeded. A synchronous failure of the native spawn releases only its matching claim when no child was created; uncertain child outcomes retain ownership. The 10-minute hard cap stops local waiting without releasing the claim or permitting a new probe. A verified child still alive at that cap remains fenced and unsignalled. Later readiness checks, and verified owners adopted after a parent restart, report the bounded `hung` refresh outcome so they defer the killable probe with an alert-worthy failure instead of indefinitely suppressing the primary alert. A short exclusive mutation guard serializes claim recovery and successor publication. A crash during that guarded transition can leave the guard or an unpublished legacy claim; these require operator reconciliation only after all refresh owners and callers are proven stopped. The guard is never reclaimed automatically, and age alone never permits either file to be removed. The result is surfaced in the `/health` `instance.primaryModelUsability` block with `status`, `provider`, `model`, optional `reason` / `suggestion`, `checkedAt`, and `probeInFlight`. A configured primary that returns `model-unavailable`, `credential-unavailable`, `provider-unavailable`, `timeout`, or an inconclusive `unknown` probe emits the `primary_model_unusable` operator alert. The alert evidence includes only safe metadata (provider, model, status, reason/suggestion) and never includes raw provider output or credential values.
+
+Probe mechanism is provider-specific and intentionally separate from fallback activation: `claude-cli` performs a cheap model-addressed CLI probe, `opencode-cli` performs a minimal model-addressed `opencode run` probe from the agent cwd using the same model routing and credential env as normal turns, and `openai-api` / `anthropic-api` POST a minimal generation-class probe (`/chat/completions` / `/messages`) to the configured endpoint — `providerConfig.baseUrl` when set, else the provider default — authenticated with the key resolved via `providerConfig.apiKeyService` when set (`src/runtimes/agent/providers/primary-model-usability-adapters.ts`). A custom-endpoint instance therefore probes the endpoint it will actually serve from, not the provider's public API. This probe makes the startup surface explicit about account/model access. API generation probes refuse redirects, and read non-success diagnostic bodies through a 64 KiB byte cap that cancels the stream at the limit. Successful probes cancel the unused response body without waiting for cancellation to settle and abort their request at completion.
 
 Probe deadlines are cancellation boundaries, not detached result timers. A queued OpenCode probe is removed from the shared execution gate before its `timeout` result completes. If its process has already started, cancellation terminates the process and retains the execution lease until process closure, so later turns cannot overlap a timed-out probe. Diagnostic primary-usability and recovery probes use the same cancellation path. A cancelled probe's `timeout` carries a bounded `reason` naming the cause (the probe deadline or the caller's abort) and the probe stage in flight at that moment, for example `deadline-credential-heal`, `deadline-gate-wait`, `caller-abort-child-run`, or `caller-pre-aborted`; the full vocabulary is in `docs/public-surface.md` (`http:health.status`).
 
@@ -1808,7 +1950,7 @@ When the primary provider returns a usage-limit, rate-limit, auth-required, or m
 1. **Tears down, explains briefly, and continues when safe.** The in-flight session is killed and the user receives a one- or two-line notice naming the switch reason and backup model, for example: "_Primary model hit a token/quota limit; switching until about 3:00 PM. Backup: OpenCode / minimax/MiniMax-M2.7. I will continue here._" If fallback credentials are missing, the notice says an operator has been notified and does not promise continuation. Provider policy-block results deliberately do **not** activate fallback.
 2. **Arms a fallback window** (only when `fallbackProvider` or `fallbacks` is set). The first arm of a window (never an extension, and never the post-restart restore of a persisted window — the alert belongs to the original arm, once per window across restarts) raises the `provider_fallback_activated` operator alert carrying the reason, the selected entry's provider/model, and the window end; a post-restart restore instead raises `provider_fallback_restored` (the same window resuming — repeated restores are the crash-loop signature) carrying the original reason, the selected entry, the window end, and the resumed probe-attempt count; every deactivation of an active window raises `provider_fallback_reverted` carrying the revert reason (`window-elapsed`, `admin-disabled`, `primary-probe-ok`, ...), the window's own turn counts (served/empty during that window — not the process-lifetime totals), and the window duration; a completed replay raises `provider_fallback_replayed` carrying the reason and target entry (a failed replay raises only `runtime_provider_fallback_replay_failed` — never both for the same turn). The interrupted turn is replayed once on a freshly created fallback session only when the selected fallback target is usable and no tool side effects have started; it is not a general crash-replay path. Later sessions also route to that fallback until the window ends. With `fallbacks`, selection is static at arm/restore time: entries are checked in order for required key presence, the first eligible entry wins, and if every keyed entry is missing a key the runtime fails open to entry zero while alerting per-entry missing-key evidence. Usage-limit windows end at the reset time parsed from the provider message when available, else 5 hours from now, clamped to [1 minute, 24 hours]. Rate-limit windows use the default rolling window. Auth-required windows stay armed until a background primary recovery probe succeeds: while the remaining window exceeds the recheck cadence a standing probe re-checks every `WHATSOUP_PROVIDER_FALLBACK_PRIMARY_RECHECK_MS` (early recovery), and once the window reaches its end each failed probe extends it by one recheck interval. After `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` consecutive failed extension probes (default 12) the first `fallback_recovery_stalled` operator alert fires, and then re-fires at every subsequent multiple of the threshold (2T, 3T, …) within the same stall episode, up to the `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_CEILING_MULTIPLE` escalation ceiling — cadenced re-surfacing without per-probe noise. The window keeps extending so the instance is never stranded on a dead primary. A second usage-limit hit while a window is active is tier-attributed by the failing session's route identity: a PRIMARY-tier hit extends the window (never shortens) and updates the stored reset time, while a FALLBACK-tier hit — the active entry's own session, or a prior chain entry's still-running session — advances the chain but preserves every window clock (the window end, the stored reset time, and the standing primary recovery-probe countdown stay untouched), because a fallback entry's reset estimate describes the fallback provider's quota, never the primary's. The same tier attribution governs every other classified failure class during a window: fallback-tier evidence can never extend the window, restart the recovery probe, or — while window state exists but the deadline has passed during an in-flight recovery probe — arm a new window over the probe's pending decision. **Probe-confirmed recovery is a typed transaction (DUR-02, honest re-scope):** the same fresh primary-usability result that ends the window also drives the revert, in one pass — the reused evidence (provider, model, status, `checkedAt`) is appended to that `provider_fallback_reverted` alert's evidence as `from_provider=… from_model=… to_provider=… to_model=… evidence_status=… evidence_provider=… evidence_model=… checked_at=… probe_validated=true post_revert_canary=not_run probe_attempts=N`. `probe_validated=true` is a genuine claim — the probe passed all three validation axes — but it is a PRE-revert check, not a post-revert canary (a real turn actually served through the reverted route); `post_revert_canary` is honestly `not_run` at receipt time because no such turn has happened yet. The SAME transaction clears `fallback_recovery_stalled` immediately if that stall episode had raised it (that incident is honestly about probe cadence, and a validated probe genuinely resolves it) — the stall clear is gated on `fallbackProbeAttempts` reaching `WHATSOUP_PROVIDER_FALLBACK_PROBE_STALL_THRESHOLD` at deactivation time, true for ANY deactivation reason (not only a probe-confirmed one), so an admin-disable mid-stall clears it too, with honest `reason=… recovery=unconfirmed episode=abandoned` evidence instead of a receipt. `provider_fallback_activated`, however, stays open after a probe-confirmed revert until the real post-revert canary: the FIRST successful user turn served after the revert (outside any fallback window) clears it with `reason=post-revert-turn-success` evidence; a failing first post-revert turn leaves it open — no false "recovery confirmed" claim. A manual or window-elapsed deactivation (no receipt) clears `provider_fallback_activated` immediately, as it always has — it makes no probe-confirmed claim to defer. The transaction is instance-scoped only: it never reads or writes per-chat model pins, so a chat holding its own strict provider pin (`/model keep`) is unaffected by an instance-default revert.
 3. **Persists the window across restarts.** The window is written to the singleton `agent_fallback_state` SQLite table (`src/runtimes/agent/fallback-state-db.ts`) and re-armed on startup, so a restart mid-window resumes on the fallback provider. Restored windows are clamped to at most 24 hours from startup; expired, corrupt, or no-longer-applicable rows are cleared and startup proceeds on the primary. The original activation time is preserved across extensions and restores, and the recovery-probe attempt count is persisted in the same row (additive `probe_attempts` column; rows written by older builds read back as 0) so a restart mid-stall resumes the stall clock instead of resetting it — without this, frequent restarts could keep a dead primary below the stall threshold forever. Each restore raises the `provider_fallback_restored` operator alert.
-4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`) — but only for services with a verified probe endpoint: `anthropic`, `deepseek`, `minimax`, and `openai`. All other keyring services (`kimi`, `xai`, `groq`, `mistral`, `openrouter`, `google`, `fireworks-ai`, `togetherai`, ...) have no validity probe: the pre-flight returns `unknown` for them and degrades to the presence-only check, so `fallback_credential_invalid` cannot fire for those providers. The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
+4. **Pre-flights credentials and binary on every window arm — without ever blocking.** When the selected fallback target resolves to a keyring service (`opencode-cli` uses the model's provider prefix, e.g. `minimax/MiniMax-M2` -> `minimax`; `openai-api` -> `openai`; `anthropic-api` -> `anthropic`; same-provider API fallback honors `providerConfig.apiKeyService`), a missing key raises the `fallback_credential_missing` operator alert, and a present key is probed against the provider's models endpoint (`src/runtimes/agent/providers/credential-verify.ts`) — but only for services with a verified probe endpoint: `anthropic`, `deepseek`, `minimax`, and `openai`. All other keyring services (`kimi`, `xai`, `groq`, `mistral`, `openrouter`, `google`, `fireworks-ai`, `togetherai`, `zai-coding-plan`, `minimax-coding-plan`, ...) have no validity probe: the pre-flight returns `unknown` for them and degrades to the presence-only check, so `fallback_credential_invalid` cannot fire for those providers. The probe is fail-open: only a definitive 401/403 raises `fallback_credential_invalid`; network errors, timeouts, and unexpected statuses are ignored. The key value is never logged. In addition, CLI-backed providers (`opencode-cli`, `claude-cli`, `codex-cli`, `gemini-cli`) have their binary probed via `binary --version` (`src/runtimes/agent/providers/binary-preflight.ts`): a definitive ENOENT raises `fallback_binary_missing`; anything else is fail-open. Managed-loop providers (`openai-api`, `anthropic-api`) have no binary to probe. For `opencode-cli` with a selected model configured, a present binary additionally has its model catalog probed via `opencode models`: a model id absent from the catalog raises `fallback_model_unknown`, carrying the catalog's exact casing as a suggestion when the id differs only by case (model ids are case-sensitive, and a wrong-case id fails sessions with an error indistinguishable from an unknown model). The catalog probe is fail-open too: spawn errors, timeouts, and empty output stay silent. The window arms in all cases — no pre-flight blocks or reverts activation.
 5. **Counts fallback turns.** Every completed user turn during an active window (compact and system turns excluded) increments process-local counters — `fallbackTurnsServed`, `fallbackTurnsEmpty`, `lastFallbackTurnAt` — surfaced in the `GET /health` `instance` block along with `effectiveProvider`, `fallbackReason`, `fallbackModel`, `fallbackResetAt`, `fallbackRecoveryProbeRequired`, `primaryModelUsability`, and the recovery-probe telemetry `probeAttempts` (consecutive failed extension probes in the current stall episode) and `lastProbeAt` (epoch ms of the most recent recovery probe, `null` until one runs); counters are reset on restart. Transition totals are counted the same way — `fallbackActivations` (first arms only; extensions and post-restart restores excluded), `fallbackReverts`, and `fallbackReplays` are process-local lifetime totals in the same `instance` block, reset on restart like the turn counters. Provider-reported turn cost is counted too: when a result event carries a finite `costUsd` (opencode today) it is logged beside the token counts and, while a fallback window is active, accumulated into `fallbackWindowCostUsd` — a process-local lifetime total (same semantics as `fallbackTurnsServed`) in the same `instance` block answering "what has fallback serving cost this process". The fleet `GET /api/lines/:name/provider-status` route forwards the same fields under `fallback.probeAttempts` / `fallback.lastProbeAt` / `fallback.windowCostUsd` / `fallback.activations` / `fallback.reverts` / `fallback.replays` (`null` when the instance health predates them). A turn that completes with zero visible output raises the `fallback_empty_turn` operator alert (the silent-dead-bot signal); the alert is deduplicated per chat using the `WHATSOUP_PROVIDER_FALLBACK_NOTICE_DEDUP_MS` window so a sustained silent-bot episode does not flood the operator channel. Counters always increment regardless of the dedup. On `per_chat` sessions the user additionally gets "_The backup model returned no reply — please resend or rephrase your message._"; `single`/`shared` sessions surface their existing generic `_(no response)_` fallback instead.
 
 If no fallback activates for a rate-limit or model-unavailable terminal, the raw provider
@@ -1888,7 +2030,7 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    must be current-user regular files with private mode and bounded size;
    symlinks and loose modes are refused.
 
-   **Route A — environment variable (universal).**
+   **Route A — environment variable (unmanaged processes only).**
    Set the variable named in `SERVICE_ENV_MAP` (`src/lib/provider-key-service.ts`, re-exported from `src/lib/keyring.ts`):
 
    | Provider service | Environment variable |
@@ -1904,42 +2046,64 @@ When deploying an instance config that uses `fallbackProvider` or `fallbacks` to
    | `google`        | `GOOGLE_API_KEY`    |
    | `fireworks-ai`  | `FIREWORKS_API_KEY` |
    | `togetherai`    | `TOGETHER_API_KEY`  |
+   | `zai-coding-plan` | `ZHIPU_API_KEY`   |
+   | `minimax-coding-plan` | `MINIMAX_API_KEY` |
 
    Service names are opencode's models.dev provider ids — the prefix of the
    configured fallback model (`xai/grok-4` → `xai`). Note the catalog spells
    them `fireworks-ai` and `togetherai` (not `fireworks` / `together`). The
+   coding-plan ids are separate services: `zai-coding-plan/<model>` reads
+   `ZHIPU_API_KEY` (not the `glm` row's `ZAI_API_KEY`), and
+   `minimax-coding-plan/<model>` has its own keychain and `auth.json` entry
+   even though it shares `MINIMAX_API_KEY`. The
    same service name is the keychain service for Routes B and C below.
 
-   For **systemd** managed instances, add a drop-in or `EnvironmentFile`:
-   ```ini
-   # ~/.config/systemd/user/whatsoup@<name>.service.d/fallback-key.conf
-   [Service]
-   Environment="MINIMAX_API_KEY=sk-…"
-   # or: EnvironmentFile=%h/.config/whatsoup/<name>.env
-   ```
-   For **launchd** managed instances, add an `EnvironmentVariables` key to the plist (plists are generated in-process by `buildPlist()` in `src/fleet/platform.ts`; to regenerate and redeploy, follow [macOS launchd deployment](runbooks/macos-launchd-deployment.md)):
-   ```xml
-   <key>EnvironmentVariables</key>
-   <dict>
-     <key>MINIMAX_API_KEY</key>
-     <string>sk-…</string>
-   </dict>
-   ```
+   **Managed instances cannot rely on Route A.** Both service managers start the
+   instance through the `deploy/whatsoup` wrapper (`deploy/whatsoup@.service`
+   `ExecStart`, and the generated launchd plist's `ProgramArguments`). The
+   wrapper unsets every variable in this table before anything else runs, then
+   re-resolves only the keys it supplies itself from the secure stores: the
+   chat-instance keys, `OPENAI_API_KEY`/`PINECONE_API_KEY` for agent instances,
+   and the one handoff-distiller key. On the ordinary path, with no
+   `WHATSOUP_HANDOFF_DISTILL_MODEL`, a provider key set only through a systemd
+   `Environment=`/`EnvironmentFile=` or a launchd `EnvironmentVariables` entry
+   therefore never reaches the runtime, and a fallback that needs it raises
+   `fallback_credential_missing`. Do not remove the scrub to work around this.
 
-   **launchd caveat:** generated plists emit `PATH`/`HOME`/`TMPDIR`
-   (+`WHATSOUP_NODE`, and — when configured through the instance
-   [`service` block](#service-launchd-render-options) — `CLAUDE_CONFIG_DIR`
-   plus a `pathPrepend`-extended `PATH`) in `EnvironmentVariables`
-   (`buildPlist()`, `src/fleet/platform.ts`). There is no `EnvironmentFile`
-   equivalent to the systemd units' per-instance `tokens.env`, so a hand-added
-   key outside that governed set (e.g. a credential variable) is LOST on the
-   next `deploy:launchd.generated` regeneration. On macOS prefer Route B: API-provider keys are read
-   in-process at request time, so the keychain entry alone is sufficient —
-   no plist edit needed. Grant the service user's launchd context access to
-   the item (`security add-generic-password -U …` under that user); keychain
-   reads from a non-GUI launchd session fail when the login keychain is
-   locked, which surfaces as `fallback_credential_missing` / QR-104 env
-   fallback rather than an explicit error.
+   One exception is deliberate. When an agent instance sets
+   `WHATSOUP_HANDOFF_DISTILL_MODEL`, the wrapper restores that model's one
+   variable (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY` or `ZAI_API_KEY`): from the
+   `deepseek`, `minimax` or `zai` keyring entry first, otherwise from the value
+   the service manager supplied. Runtime lookup reads the environment first, so
+   every service mapped to that variable then uses it. `minimax-coding-plan`
+   shares `MINIMAX_API_KEY`, so with a `MiniMax-*` distiller the restored value
+   shadows the separate `minimax-coding-plan` file, keyring or `auth.json`
+   entry: when the two keys differ, a `minimax-coding-plan` fallback sends the
+   distiller's key.
+
+   Provision managed instances through one of the stores the runtime reads after
+   the environment:
+
+   - **Private credential file:** `$XDG_CONFIG_HOME/whatsoup/credentials/<service>.key`
+     (default `~/.config/whatsoup/credentials/`), owned by the service user,
+     mode `0600`, holding only the key (for example `zai-coding-plan.key`).
+   - **Platform keyring:** Route B or Route C below.
+   - **OpenCode login:** the `auth.json` entry stored under the provider id
+     (`opencode auth login`, default `~/.local/share/opencode/auth.json`).
+
+   **Health-probe caveat:** the BOT ERRORS provider probe
+   (`deploy/scripts/bot-errors-health-check.py`) reads the loaded LaunchAgent
+   environment, which is the wrapper's input before the scrub. An environment-only
+   key can therefore make that probe pass while the managed runtime has no key.
+   A passing probe is not evidence that Route A provisioning works for a managed
+   instance.
+
+   On macOS prefer Route B. API-provider keys are read in-process at request
+   time, so the keychain entry alone is sufficient and no plist edit is needed.
+   Grant the service user's launchd context access to the item
+   (`security add-generic-password -U …` under that user). Keychain reads from a
+   non-GUI launchd session fail when the login keychain is locked, which
+   surfaces as `fallback_credential_missing` rather than an explicit error.
 
    **Route B — macOS Keychain.**
    The keyring reads via `security find-generic-password -s <service> -a <username> -w` (`src/lib/keyring.ts:128–134`), where `<service>` is the service name (e.g. `minimax`) and `<username>` is the OS username (`os.userInfo().username`). Store with the matching attributes:
@@ -2008,17 +2172,19 @@ orphaned by the interrupt.
 
 #### `agentOptions.sandbox`
 
-Passed directly to agent sandbox enforcement hooks (`deploy/hooks/agent-sandbox.sh`). Sandboxed agent workspaces also install `deploy/hooks/poll-interaction-lint.mjs` as a fail-open `PostToolUse` diagnostic hook for poll/AskUser friction; it writes session-local JSONL telemetry and does not block tool calls.
+The runtime writes a policy consumed by `deploy/hooks/agent-sandbox.sh`. For the instance workspace, `AgentRuntime` resolves configured `allowedPaths` to absolute paths; per-chat workspace provisioning instead confines that policy to the generated chat workspace. Sandboxed agent workspaces also install `deploy/hooks/poll-interaction-lint.mjs` as a fail-open `PostToolUse` diagnostic hook for poll/AskUser friction; it writes session-local JSONL telemetry and does not block tool calls.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowedPaths` | string[] | Filesystem paths the agent may read/write. |
-| `allowedTools` | string[] | Claude Code tools the agent may use. Empty array blocks all non-essential tools. |
-| `allowedMcpTools` | string[] | MCP tools permitted within the sandbox. |
+| `allowedPaths` | string[] | Roots checked for file-tool paths and, when enabled, Bash path checks. Per-chat provisioning writes `[workspacePath]` rather than copying this configured list. An empty list in the effective policy applies no path restriction. |
+| `allowedTools` | string[] | Allowlist for core tools after the separate MCP and Bash checks. An omitted or empty list applies no core-tool allowlist restriction; it does **not** deny all tools. |
+| `allowedMcpTools` | string[] | Non-empty allowlist accepting full MCP tool names or their tool-name suffixes. An omitted or empty list in the effective policy applies no MCP restriction. When this field is omitted, chat-scoped provisioning can supply the runtime's scoped tool list. |
 | `bash` | object | Bash execution policy: `{ "enabled": boolean, "pathRestricted": boolean }`. |
 | `allowedEgress` | string[] | Opt-in network egress allowlist for the filtering proxy (#1607 / QR-008). Entries are `host` (any port) or `host:port` (exact); host match is case-insensitive; no wildcards. **Absent or omitted ⇒ no proxy is started and no egress restriction applies (today's behaviour, unchanged).** A present array (including `[]`) starts a loopback filtering proxy for this instance's agent subprocesses — see **Agent egress allowlist** below. |
 
 **Policy path is explicit, not discovered.** `writeSandboxArtifacts` wires the `PreToolUse` hook with the absolute path of the policy it writes (passed as an argument), so the hook enforces exactly that file regardless of the agent's working directory — a mid-turn `cd` into a subdirectory can neither miss the policy nor pick up a `.claude/sandbox-policy.json` an agent plants in a writable subdirectory. A hook wired with no path argument falls back to a cwd-relative `.claude/sandbox-policy.json`; if that is absent, the missing-policy behaviour below applies.
+
+**Existing settings are validated before sandbox refresh.** The settings file must be a current-user-owned, private regular file of at most 1 MiB, with no hard link or symlink ancestor. The `.claude` directory must be private. Use mode `0600` for settings and `0700` for the directory; review and correct older manually created files before starting the runtime. Refresh does not change their permissions to admit them. Unsafe settings, settings changed during the observed read, and malformed or non-object settings are refused before either artifact is written. The two writes are sequential, not a transaction: concurrent replacement, a crash or a later write failure can leave different artifact versions, and a reported failure aborts runtime startup.
 
 **Missing-policy behaviour.** When the hook runs but `.claude/sandbox-policy.json` is absent it **fails closed** (denies, logs `sandbox_deny`) by default. Override with `WHATSOUP_SANDBOX_FAIL_OPEN=1` (see [Environment Variables → Internal / Bootstrap](#internal--bootstrap)).
 
@@ -2218,35 +2384,113 @@ To give the repo a real say without rewriting existing on-disk settings, two mec
 **1. `REQUIRED_DENY` floor (`src/core/settings-template.ts`).**
 A repo-owned readonly list of deny patterns that `mergeSettingsJson` always unions into the resulting deny array, and that `isValidPermissionsSettings` requires as a subset. Custom `settingsJson` payloads cannot remove a floor entry.
 
-The floor is populated with full permission strings for the mutation-capable connector tools approved in the #411 inventory. It covers Gmail and Google Calendar mutation tools exposed through the `mcp__claude_ai_*` namespace, Microsoft 365 mail, calendar, file, list, contact, group, task, chat, channel, Dataverse, Booking, OneNote, meeting, workbook, attachment, dynamic execution, batch, and subscription mutation tools. The read-only `mcp__google-workspace__*` namespace is intentionally not denied.
+The floor is populated with full permission strings for the mutation-capable connector tools approved in the #411 inventory and subsequent additions. It covers Gmail and Google Calendar mutation tools and Google Drive `create_file` / `copy_file` exposed through the `mcp__claude_ai_*` namespace, Microsoft 365 mail, calendar, file, list, contact, group, task, chat, channel, Dataverse, Booking, OneNote, meeting, workbook, attachment, dynamic execution, batch, and subscription mutation tools. The read-only `mcp__google-workspace__*` namespace is intentionally not denied.
 
-The source of truth is `REQUIRED_DENY`; this document describes categories only. New defaults, merged settings, and repaired settings receive the floor. Existing `.claude/settings.json` files that are not rewritten keep their current contents.
+The source of truth is `REQUIRED_DENY`; this document describes categories only. New defaults, merged settings, and repaired settings receive the effective floor, subject to the admitted bridge exception below. Existing `.claude/settings.json` files that are not rewritten keep their current contents.
 
-**2. `WHATSOUP_CONNECTOR_FAILCLOSED` env flag (`src/runtimes/agent/providers/child-env.ts`).**
+**2. Account-bound Microsoft 365 bridge exception (`src/core/m365-bridge-policy.ts`).**
 
-- **Unset (default, today's behavior):** `buildBaseChildEnv` propagates `ALLOW_M365_MUTATIONS` to the agent subprocess whenever it is set in the parent env. This is exactly the pre-#411 child-env path; existing parent-process opt-ins keep working unchanged.
-- **Set to `"1"` (opt-in):** `buildBaseChildEnv` drops `ALLOW_M365_MUTATIONS` from the child env *unless* the instance has `agentOptions.allowM365Mutations: true`. This converts the env-var gate into a per-instance allowlist that can be audited at config-write time.
-- Any other value of the flag is treated as unset (back-compat).
+The M365 mutation deny entries remain in the floor unless one instance supplies a
+complete `agentOptions.m365Bridge` binding. The binding requires the fixed
+`"user-full-v1"` profile, one concrete Azure tenant GUID, exactly one account selector,
+and one exact numeric `https://` loopback origin (`127.0.0.1` or `[::1]`).
+Hostnames, including `localhost`, cannot authorize credential projection because
+their resolution is not part of admission. Configure the same numeric origin in
+the binding and both service origin variables before launching. It also requires
+`agentOptions.allowM365Mutations: true`, an explicit `agentOptions.provider: "claude-cli"`, and the
+exact enabled plugin key `"microsoft_365@microsoft-365-dev": true`.
 
-WhatSoup forwards `agentOptions.allowM365Mutations` from the loaded instance config through runtime/session startup into each Claude CLI child-env builder; `buildBaseChildEnv` remains the single policy gate.
+HTTPS authenticates the receiving endpoint before the plugin sends its bearer
+credential. The certificate must cover the configured numeric IP address and be
+trusted by the actual plugin Node process. A loopback address alone does not prove
+which local process owns the listener. Plain HTTP bindings are invalid and stop
+configuration admission before credential lookup; changing the URL alone does not
+provision TLS. Qualify the endpoint certificate, trust configuration and both bridge
+clients before enabling the binding. Do not disable certificate verification.
+The child environment does not forward inherited `NODE_TLS_REJECT_UNAUTHORIZED`,
+`NODE_OPTIONS` or `NODE_EXTRA_CA_CERTS`; parent-only trust settings are not proof of
+plugin trust. This source contract does not install a certificate or activate an
+endpoint.
 
-`WHATSOUP_CONNECTOR_FAILCLOSED` only controls child-env propagation of `ALLOW_M365_MUTATIONS`. It does not gate the `REQUIRED_DENY` floor.
+At startup, WhatSoup compares that binding with its own service environment:
+`ALLOW_M365_MUTATIONS=1`, `MS365_AGENT365_BRIDGE=true`, tenant, profile, exactly
+one matching account selector, non-empty Agent365 API key, and matching loopback
+Agent365 and hub origins, plus the current launcher's process-bound credential
+admission. Only a complete match generates the child M365
+environment and omits Microsoft 365 entries from the generated deny floor.
+Approval preserves caller-supplied denies and startup preserves valid stored denies,
+including exact M365 entries. Explicit settings replacement still replaces the
+permissions block; approval itself never removes entries from that input.
+The bridge variables are not an environment-only authorization path. A missing or
+mismatched binding retains the full deny floor and exports no M365 bridge values.
+Other instances retain their existing child-environment behavior.
 
-**How operators enable fail-closed child-env propagation:**
+The launcher scrubs any inherited `MS365_AGENT365_API_KEY`, validates the instance
+name and complete binding, then resolves only `agent365-<instance-name>` through
+the canonical private credential file/keychain lookup. The name must match the
+on-disk agent configuration. A missing or unsafe credential stops a qualified
+bridge startup; an unconfigured bridge does not attempt a lookup. Credential
+service names are derived from validated instance names, never supplied as an
+arbitrary configuration path. Each instance must provision its own credential.
+The projection helper observes at most 1 MiB of configuration through the shared
+private-file reader. The file and its containing directory must be owned by the
+invoking user with no group/other access. Symlink ancestors, hard-linked files,
+and file or ancestor changes during the read are rejected before lookup or
+admission. This stricter authorization read does not change legacy config loading.
 
-```bash
-# 1. In the launchd plist / systemd unit for the WhatSoup parent process:
-export WHATSOUP_CONNECTOR_FAILCLOSED=1
+After lookup, the launcher creates `WHATSOUP_M365_LAUNCH_ADMISSION`, an HMAC bound
+to its process ID, instance name, complete binding and resolved key. Its final
+`exec` preserves that process ID for runtime verification. The launcher clears
+inherited admissions, and the runtime never forwards an admission to agent
+children. Missing, malformed or reused admissions retain the M365 deny floor;
+changing the key or binding after admission also rejects the exception.
+Install the matching launcher before enabling a bridge binding: an older wrapper
+or direct Node start cannot grant the exception from an ambient key. This prevents
+accidental credential reuse across launch paths; it does not isolate a malicious
+process already controlling the same user's credentials and environment. The HMAC
+authenticates launcher inputs, while HTTPS authenticates the bridge peer; neither
+replaces the other.
 
-# 2. For each instance that legitimately needs mutation access:
-#    config.json
+Capability-grant writes use that runtime's verified policy on every write. Before
+startup restores persisted fallback state, and while a fallback window is active,
+they retain the full M365 deny floor. Startup settings repair uses the same policy.
+Grant groups cannot authorize M365 mutations themselves.
+
+Settings do not record deny authorship. Approval therefore never removes existing
+entries, even if they match a previously generated floor. Legacy settings and a
+floor persisted before startup, during fallback or by fleet writes remain denied
+after approval returns. An operator must review those restrictions and explicitly
+remove only the M365 denies they intend to permit once the primary bridge is
+admitted. Restart alone does not remove them. Sandbox hook refresh and capability
+grant writes preserve the remaining restrictions; a later rejected policy restores
+the full floor. Fresh approved settings omit the M365 floor without this migration.
+Repairing corrupt settings or a malformed permissions block restores the full floor
+even for an admitted bridge and retains readable deny entries. Sandbox refresh
+rejects corrupt/non-object settings before changing either sandbox artifact.
+
+Fleet create, settings PATCH and plugin PATCH retain the full deny floor: the fleet
+process cannot verify the target runtime's process-bound admission. These writes
+do not reload or restart an active runtime; its cached binding remains unchanged.
+Apply binding or plugin changes through the normal instance restart procedure.
+An admitted primary startup reconciles the generated floor while preserving all
+existing restrictions; use the explicit review above for previously written denies.
+
+```json
 {
   "name": "mutation-enabled-agent",
   "type": "agent",
   "agentOptions": {
-    "sessionScope": "per_chat",
-    "cwd": "...",
-    "allowM365Mutations": true
+    "provider": "claude-cli",
+    "enabledPlugins": {
+      "microsoft_365@microsoft-365-dev": true
+    },
+    "allowM365Mutations": true,
+    "m365Bridge": {
+      "tenantId": "11111111-2222-3333-4444-555555555555",
+      "accountEmail": "user@custom-domain.example",
+      "origin": "https://127.0.0.1:10000",
+      "profile": "user-full-v1"
+    }
   }
 }
 ```
@@ -2326,8 +2570,9 @@ The loader enforces these constraints before the process starts:
 - `agentOptions.allowM365Mutations`, when present, must be a boolean.
 - `chatAliases`, when present, must be an object of non-empty alias to JID strings.
 - `profiles`, when present, must be an object of profile names to profile objects with only `prefix`, `tag`, and `linkPreview` fields.
-- `transport`, when present, must be `baileys` or `twilio`.
+- `transport`, when present, must be `baileys`, `twilio`, `signal`, or `imessage`; omission defaults to `baileys`.
 - `twilioConfig` is required when `transport` is `twilio` and rejected otherwise; its field rules (SID shapes, sender XOR, inbound mode, webhook block, voice coherence, numeric ranges) are listed under [`twilioConfig`](#twilioconfig).
+- `signalConfig` and `imessageConfig` are likewise required for their matching transports and rejected for other transports; see the [Signal](runbooks/signal-transport.md) and [iMessage](runbooks/imessage-transport.md) runbooks.
 
 ---
 
@@ -2365,6 +2610,9 @@ The loader creates all directories on startup with mode `0700`.
 
 A sandboxed agent available to an allowlist of friends. Each chat gets its own Claude Code
 workspace under `~/workspace/sandbox-agent`. Bash is permitted but path-restricted.
+The empty `allowedTools` list below adds no core-tool restriction. Per-chat
+provisioning sets the effective allowed path to that chat's workspace; Bash path
+checks remain best-effort as described above.
 
 ```json
 {

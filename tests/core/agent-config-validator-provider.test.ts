@@ -188,3 +188,24 @@ describe('validateInstanceConfig — agentOptions.providerConfig.baseUrl', () =>
     expect(err?.field).toBe('agentOptions.providerConfig.baseUrl');
   });
 });
+
+describe('validateInstanceConfig — opencode-cli coding-plan model prefixes', () => {
+  it.each(['zai-coding-plan/synthetic-model', 'minimax-coding-plan/synthetic-model'])(
+    'accepts %s because the prefix maps to the credential OpenCode reads',
+    (model) => {
+      const raw = agentRaw('opencode-cli');
+      raw['model'] = model;
+      expect(validateInstanceConfig(raw, { name: 'test-line', mode: 'create' })).toBeNull();
+    },
+  );
+
+  it.each(['kimi-for-coding/synthetic-model', 'unmapped-vendor/synthetic-model'])(
+    'still rejects %s, which has no mapped credential service',
+    (model) => {
+      const raw = agentRaw('opencode-cli');
+      raw['model'] = model;
+      const err = validateInstanceConfig(raw, { name: 'test-line', mode: 'create' });
+      expect(err?.message).toMatch(/does not resolve to a mapped provider credential service/);
+    },
+  );
+});

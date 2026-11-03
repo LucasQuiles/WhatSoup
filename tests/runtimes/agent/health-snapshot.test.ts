@@ -339,6 +339,8 @@ function expectedTurnRecoveryDetails(): Record<string, number> {
     turnRecoveryBlockedUnsafe: 0,
     turnRecoveryExhausted: 0,
     turnRecoveryOpenRecoveries: 0,
+    turnRecoveryOpenRecoveriesSynthetic: 0,
+    turnRecoveryScheduledTurnsLost: 0,
     turnRecoveryQuarantinedDelivery: 0,
     turnRecoveryCorruptLinks: 0,
     turnRecoveryOrphanTransfers: 0,
@@ -465,6 +467,38 @@ describe('AgentRuntime.getHealthSnapshot — per_chat shape', () => {
     const snapshot = runtime.getHealthSnapshot();
     const val = snapshot.details['lastSessionStartedAt'];
     expect(val === null || typeof val === 'string').toBe(true);
+  });
+
+  it('reports typed handoff policy instead of legacy environment state', () => {
+    const typed = new AgentRuntime(makeDb(), makeMessenger(), 'test', {
+      sessionScope: 'per_chat',
+      handoffDistill: {
+        enabled: true,
+        contextInjection: true,
+        model: 'deepseek-flash',
+        config: {
+          sweepMs: 10_000,
+          growthThreshold: 500,
+          verbatimN: 1,
+          budget: {
+            maxTokensPerWindow: 1_000,
+            maxCallsPerWindow: 1,
+            windowMs: 60_000,
+            failureThreshold: 1,
+            breakerCooldownMs: 10_000,
+            globalConcurrency: 1,
+          },
+        },
+      },
+    });
+
+    expect(typed.getHealthSnapshot().details).toMatchObject({
+      handoffDistiller: {
+        enabled: true,
+        contextInjection: true,
+        model: 'deepseek-flash',
+      },
+    });
   });
 
   it('lastSessionStatus is null when no sessions exist', () => {

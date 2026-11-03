@@ -34,8 +34,9 @@
  *     status change on it, and corroboration rows are append-only;
  *   - no OPEN `inbound_disposition_links` row names its source inbound seq:
  *     a `recovery_pending_operator_catchup` row with no matching
- *     `superseded_by_operator_catchup` row, the open_recoveries predicate in
- *     turn-recovery-store.ts. An open link is a catch-up obligation that a
+ *     `superseded_by_operator_catchup` row, the open predicate of
+ *     OPEN_RECOVERIES_CTE_SQL (open-recoveries-sql.ts). An open link is a
+ *     catch-up obligation that a
  *     settle, which forbids replay, must not sit next to.
  * Everything else is refused with a specific reason.
  *
@@ -257,10 +258,11 @@ export class OrphanTransferSettler {
       `SELECT message_id, processing_status, terminal_reason, conversation_key, chat_jid
        FROM inbound_events WHERE seq = ?`,
     );
-    // The open_recoveries predicate of getTurnRecoverySupervisorCounts
-    // (turn-recovery-store.ts), restricted to one source seq. It is mirrored,
-    // not shared: there it is inline in that query's CTE, as it is in the
-    // migration triggers and recovery-catchup-closure.ts.
+    // The open predicate of OPEN_RECOVERIES_CTE_SQL (open-recoveries-sql.ts),
+    // restricted to one source seq. It is mirrored, not shared: that CTE
+    // aggregates over every link and splits synthetic sources, while this asks
+    // whether one seq has any open link, as the migration triggers and
+    // recovery-catchup-closure.ts do.
     this.selectOpenDispositionLink = raw.prepare(
       `SELECT 1 AS found
        FROM inbound_disposition_links pending

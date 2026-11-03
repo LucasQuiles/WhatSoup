@@ -364,3 +364,108 @@ def test_cycle_sweep_of_unpersisted_content_is_a_no_op(adopted) -> None:
         result = cycle.commit()
     assert result.generation == generation
     assert _primary(paths)["_controllerState"]["generation"] == generation
+
+
+@pytest.fixture()
+def quiet_held_incident(adopted, monkeypatch):
+    clock = [2_000_000_000]
+    monkeypatch.setattr(disp.time, "time", lambda: clock[0])
+    for name, value in {
+        "SUPPRESS_STALE_INFO_RENOTIFY": True,
+        "INCIDENT_STALE_SECONDS": 60,
+        "INCIDENT_ESCALATE_SECONDS": 120,
+        "AUTOCLOSE_LIVENESS_GATE": True,
+        "AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS": 86400,
+        "STALE_AUTOCLOSE_DIGEST_COALESCE_SECONDS": 0,
+    }.items():
+        monkeypatch.setattr(disp, name, value)
+    sends = []
+    monkeypatch.setattr(disp, "send_whatsapp", sends.append)
+    key = "host-a|bot-errors-health|daily-health-fail:instance-x"
+    with _dispatcher_session(adopted) as session:
+        loaded = session.load()
+        cycle = disp.IncidentStateCycle(session, loaded.payload, loaded.capability, paths=adopted)
+        cycle.payload["openIncidents"] = {key: {
+            "status": "stale", "openedAt": clock[0] - 1000,
+            "lastSeenAt": clock[0] - 900, "lastSummary": "daily-health found issues",
+        }}
+        cycle.commit()
+    return adopted, key, clock, sends
+
+
+def _sweep_held(paths, mutate=None):
+    ops = CountingOps()
+    with _dispatcher_session(paths, ops) as session:
+        loaded = session.load()
+        cycle = disp.IncidentStateCycle(session, loaded.payload, loaded.capability, paths=paths)
+        if mutate:
+            mutate(cycle.payload)
+        ops.calls.clear()
+        assert disp.sweep_stale_incidents(paths, incident=cycle) == (0, 0, None)
+    return ops
+
+
+def test_unchanged_stale_hold_avoids_state_writes_across_restarts(quiet_held_incident):
+    paths, key, clock, sends = quiet_held_incident
+    assert _sweep_held(paths).mutations()
+    before = _primary(paths)
+    for _ in range(9):
+        clock[0] += 30
+        assert _sweep_held(paths).mutations() == []
+        assert _primary(paths) == before
+    assert sends == []
+    clock[0] += 30
+    assert _sweep_held(paths).mutations()
+    after = _primary(paths)
+    assert after["openIncidents"][key]["staleSuppressedCount"] == 2
+    assert after["openIncidents"][key]["autocloseFirstHeldAt"] == before["openIncidents"][key]["autocloseFirstHeldAt"]
+
+
+def test_stale_hold_cap_is_checked_before_diagnostic_cadence(quiet_held_incident, monkeypatch):
+    paths, key, clock, sends = quiet_held_incident
+    monkeypatch.setattr(disp, "AUTOCLOSE_LIVENESS_HOLD_CAP_SECONDS", 45)
+    _sweep_held(paths)
+    clock[0] += 60
+    assert _sweep_held(paths).mutations()
+    assert key not in _primary(paths)["openIncidents"]
+    assert len(sends) == 1 and "unverified" in sends[0].lower()
+
+
+def test_verified_recovery_is_checked_before_diagnostic_cadence(quiet_held_incident):
+    paths, key, clock, sends = quiet_held_incident
+    _sweep_held(paths)
+    clock[0] += 30
+    def recover(payload):
+        payload["openIncidents"][key]["lastEvidence"] = (
+            "health instance-x: 200 status=healthy wa_connected=true state=connected "
+            "auth_bond_status=present auth_bond_creds_exists=true "
+            "auth_bond_creds_size=4096 auth_failure_class=none"
+        )
+    assert _sweep_held(paths, recover).mutations()
+    assert key not in _primary(paths)["openIncidents"]
+    assert len(sends) == 1
+
+
+def test_actionable_stale_alert_does_not_wait_for_diagnostic_cadence(quiet_held_incident):
+    paths, key, clock, sends = quiet_held_incident
+    _sweep_held(paths)
+    clock[0] += 30
+    with _dispatcher_session(paths) as session:
+        loaded = session.load()
+        cycle = disp.IncidentStateCycle(session, loaded.payload, loaded.capability, paths=paths)
+        cycle.payload["openIncidents"][key]["failureCode"] = "WA_AUTH_BOND_SERVER_REVOKED"
+        assert disp.sweep_stale_incidents(paths, incident=cycle) == (1, 0, None)
+    assert len(sends) == 1
+    record = _primary(paths)["openIncidents"][key]
+    assert record["lastStaleRenotifiedAt"] == clock[0]
+
+
+def test_backward_clock_step_does_not_freeze_suppression_diagnostics(quiet_held_incident):
+    paths, key, clock, sends = quiet_held_incident
+    _sweep_held(paths)
+    clock[0] -= 10
+    assert _sweep_held(paths).mutations()
+    record = _primary(paths)["openIncidents"][key]
+    assert record["lastStaleSuppressedAt"] == clock[0]
+    assert record["staleSuppressedCount"] == 2
+    assert sends == []

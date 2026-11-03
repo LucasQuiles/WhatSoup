@@ -45,15 +45,16 @@ scoped to the instance process rather than a global shell profile.
 
 ## Launch Wrapper
 
-Keep the Pinecone wrapper before the Node invocation for any instance that uses
+Keep the Pinecone wrapper before the repository launcher for any instance that uses
 Pinecone memory or `knowledge_search`:
 
 ```bash
 ~/.local/bin/with-pinecone-env \
-  /opt/homebrew/bin/node /path/to/WhatSoup/src/bootstrap.ts <instance>
+  /bin/bash /path/to/WhatSoup/deploy/whatsoup <instance>
 ```
 
-The wrapper must not print secrets, write temporary secret files, or export
+The repository launcher selects and validates the supported Node runtime. The
+wrapper must not print secrets, write temporary secret files, or export
 unrelated provider credentials. If the instance starts agent subprocesses,
 validate the child-provider env allowlist before enabling `knowledge_search`.
 
@@ -110,9 +111,12 @@ auth:
 ```bash
 cd ~/LAB/WhatSoup
 npm run migrate-memory-config -- --instance <instance>
-npm run migrate-memory-config -- --instance <instance> --write
+npm run migrate-memory-config -- --instance <instance> --write --keep-legacy
 ```
 
+Before removing legacy fields, resolve the
+[recency runtime gap](../explainers/byok-memory-config-migration.md#what-the-migrator-changes).
+Keep the flat and nested recency values consistent while that gap remains.
 The migration helper rewrites only `config.json` and creates a
 `config.json.bak-*` backup by default. It does not touch `auth/`, `tokens.env`,
 `bot.db`, keychains, or provider secret stores, so a successful config migration
@@ -132,19 +136,20 @@ cd ~/LAB/WhatSoup
 bash scripts/install-transcription-deps.sh
 ```
 
-This installs:
+On macOS, the installer uses Homebrew for `ffmpeg`, `whisper-cpp`, and
+`python@3.12`. On Linux it checks prerequisites and prints the required install
+commands when they are missing; it does not use Homebrew. It then prepares:
 
-- Homebrew `ffmpeg`
-- Homebrew `whisper-cpp`
-- Homebrew Python
 - dedicated venv at `~/.local/share/whatsoup/transcription-venv`
 - faster-whisper cache under `~/.local/share/whatsoup/models/faster-whisper`
 - whisper.cpp model under `~/.local/share/whatsoup/models/whisper.cpp/`
 
 ## Database Migration Trigger
 
-Schema migrations run when a runtime opens its writable `bot.db`. Fleet opens
-instance DBs read-only and does not run migrations.
+Schema migrations run through `Database.open()` on a writable `bot.db`, including
+runtime startup and writable maintenance tools such as backfill. Fleet opens
+instance DBs read-only and does not run migrations. Coordinate writable tools
+with the instance lifecycle.
 
 For a missing table or old schema version:
 
@@ -174,9 +179,15 @@ npm run backfill-enrichment -- --strict --provider {anthropic|openai} --instance
 error, the script:
 
 - leaves the affected messages retry-eligible
-- records the failure in `BackfillSummary.failedBatches[]`
-- writes a distinct strict-failure marker
-- exits with code `6` when strict failures exist
+- records `{chatJid, messageIds, errorType, stage, details}` in
+  `BackfillSummary.failedBatches[]`
+- writes `backfill_strict_fail_<stage>` to `enrichment_runs.error`, distinct from
+  the `backfill_fail` accounting-invariant marker
+- exits with code `6` when strict failures exist, except in dry-run mode
+
+A dry run can report strict failures while exiting `0`; inspect the summary
+before treating it as successful validation. A legitimate empty array is not
+itself a strict failure.
 
 Exit code taxonomy:
 
@@ -189,8 +200,32 @@ Exit code taxonomy:
 | `5` | Provider config error |
 | `6` | Strict-mode fail-closed validation/extraction failure |
 
-For provider-call failures, check network, provider status, local model health,
-and `WHATSOUP_API_TIMEOUT_MS`.
+The same stages apply to `ExtractionError` and `ValidationError`; use
+`failedBatches[].errorType` to distinguish them:
+
+| Stage | Meaning |
+|---|---|
+| `provider-call` | Provider error, timeout, or network failure |
+| `json-parse` | Malformed model JSON |
+| `schema-shape` | Top-level result is not an array |
+| `schema-items-all-dropped` | Every item failed schema validation |
+
+For recovery:
+
+1. Read `inputs.failedBatches` from the final `run_complete` telemetry record
+   or the stdout summary:
+   ```bash
+   jq 'select(.action == "run_complete") | .inputs.failedBatches' \
+     /path/to/backfill-telemetry.jsonl
+   ```
+2. For `provider-call`, check network, provider status, local model health,
+   cold-load latency, and `WHATSOUP_API_TIMEOUT_MS` before retrying. For Ollama,
+   `curl http://localhost:11434/api/tags` checks the local endpoint.
+3. For `schema-*` failures, change the extraction/validation model or provider
+   before retrying; repeating the same malformed output does not repair it.
+4. The affected messages remain eligible through
+   `enrichment_processed_at IS NULL`; no DB reset is needed. `--run-id` labels
+   the run and is not a retry key.
 
 ## Local Model Recipe
 

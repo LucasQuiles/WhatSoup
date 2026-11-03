@@ -38,7 +38,7 @@ import { isExplicitModelId } from './commands.ts';
 import type { listModelCatalog } from './providers/binary-preflight.ts';
 import { getProviderBinary, type SessionManager } from './session.ts';
 import type { SendDirectOutcome } from './chat-transport.ts';
-import type { IOutboundQueue } from './outbound-queue.ts';
+import type { IOutboundQueue, OutboundMessageRole } from './outbound-queue.ts';
 import type { TurnQueue } from './turn-queue.ts';
 import type { OperationTracker } from './operation-tracker.ts';
 import {
@@ -218,7 +218,7 @@ export interface ModelPinPort extends ModelCatalogueRenderPort {
    * module still goes through the void `sendDirect`, so the widening adds no
    * new obligation at the other call sites.
    */
-  sendDirectWithReceipt(chatJid: string, text: string): Promise<SendDirectOutcome>;
+  sendDirectWithReceipt(chatJid: string, text: string, role: OutboundMessageRole): Promise<SendDirectOutcome>;
 }
 
 /**
@@ -254,7 +254,7 @@ export function tryHandleBareKeep(port: ModelPinPort, classified: CommandResult,
   if (!isBareKeep && !isThreadedToPinReceipt(port, keys.chatKey, msg)) return false;
   const keepReply = handleBareKeep(port, chatJid, keys, msg.timestamp * 1000);
   if (keepReply === null) return false;
-  port.sendDirect(chatJid, keepReply);
+  port.sendDirect(chatJid, keepReply, 'status');
   port.completeLocalInbound(msg.inboundSeq);
   return true;
 }
@@ -337,7 +337,7 @@ async function sendPinReceipt(
     // that landed after the fall-through would authenticate a confirmation the
     // user sent while the pin was still unauthenticated.
     outcome = await withBoundedTimeout(
-      () => port.sendDirectWithReceipt(chatJid, text),
+      () => port.sendDirectWithReceipt(chatJid, text, 'status'),
       PIN_RECEIPT_SEND_TIMEOUT_MS,
       {
         onLateSettle: (late) =>
@@ -380,7 +380,7 @@ async function sendPinEcho(
   echo: PinEcho,
 ): Promise<void> {
   if (!echo.keepPromising) {
-    port.sendDirect(chatJid, echo.text);
+    port.sendDirect(chatJid, echo.text, 'status');
     return;
   }
   await sendPinReceipt(port, chatJid, chatKey, senderKey, echo.text);
@@ -1079,6 +1079,7 @@ async function pinConfiguredModelEntry(
     port.sendDirect(
       chatJid,
       `_Couldn't pin ${modelId} — ${verifyResult.dropped}. Still on the default route; try /model list._`,
+      'status',
     );
     return;
   }
@@ -1092,6 +1093,7 @@ async function pinConfiguredModelEntry(
     port.sendDirect(
       chatJid,
       `_Pinned ${providerId} — ${modelId} pending a catalogue check; using ${providerId}'s default until then. /reset to undo._`,
+      'status',
     );
     return;
   }
@@ -1145,16 +1147,16 @@ function sendModelDrillBrandLevel(port: ModelPinPort, chatJid: string, senderJid
   const result = computeBrandLevel(port, chatJid, senderJid);
   if ('degraded' in result) {
     port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'brand', []);
-    port.sendDirect(chatJid, "_Couldn't read your configured providers right now — try again._");
+    port.sendDirect(chatJid, "_Couldn't read your configured providers right now — try again._", 'status');
     return;
   }
   const { rendered } = result;
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'brand', rendered.entries);
   if (rendered.entries.length === 0) {
-    port.sendDirect(chatJid, '_No providers are set up to pick from yet._');
+    port.sendDirect(chatJid, '_No providers are set up to pick from yet._', 'status');
     return;
   }
-  port.sendDirect(chatJid, rendered.text);
+  port.sendDirect(chatJid, rendered.text, 'status');
 }
 
 /**
@@ -1176,7 +1178,7 @@ async function sendModelDrillModelLevel(
 ): Promise<void> {
   const listing = await fetchProviderCatalogue(port, provider);
   if (listing.status !== 'ok') {
-    port.sendDirect(chatJid, `_Couldn't load ${brand} models right now — try again._`);
+    port.sendDirect(chatJid, `_Couldn't load ${brand} models right now — try again._`, 'status');
     return;
   }
   const route = port.resolveRouteForTurn(chatJid, senderJid);
@@ -1194,7 +1196,7 @@ async function sendModelDrillModelLevel(
   const text = nextOffset !== null || safeOffset > 0
     ? `${rendered.text}\n_showing ${safeOffset + 1}–${safeOffset + shown.length} of ${listing.ids.length}_`
     : rendered.text;
-  port.sendDirect(chatJid, text);
+  port.sendDirect(chatJid, text, 'status');
 }
 
 /**
@@ -1217,7 +1219,7 @@ function sendModelDrillEffortLevel(
   const currentEffort = route.provider === provider && route.model === model ? route.effort ?? null : null;
   const rendered = renderEffortLevel(model, provider, control, currentEffort);
   port.catalogueSnapshot.putDrillSnapshot(chatJid, senderJid, 'effort', rendered.entries);
-  port.sendDirect(chatJid, rendered.text);
+  port.sendDirect(chatJid, rendered.text, 'status');
 }
 
 /**
@@ -1230,7 +1232,7 @@ function sendModelDrillEffortLevel(
  * stable re-entry).
  */
 function reRenderCurrentMenuOnMiss(port: ModelPinPort, chatJid: string, senderJid: string): void {
-  port.sendDirect(chatJid, "_That list moved — here's the current one._");
+  port.sendDirect(chatJid, "_That list moved — here's the current one._", 'status');
   if (port.catalogueSnapshot.latestSnapshotKind(chatJid, senderJid) === 'flat') {
     sendModelCatalogue(port, chatJid, senderJid, null);
     return;
@@ -1278,7 +1280,7 @@ export async function handleModelCommand(
   }
   if (sub === '' || sub === 'status') {
     // Explicit `/model status` (or the defensive empty arg) → the route readout.
-    port.sendDirect(chatJid, port.renderRouteStatus(chatJid, senderJid));
+    port.sendDirect(chatJid, port.renderRouteStatus(chatJid, senderJid), 'status');
     return;
   }
   if (sub === 'list' || sub.startsWith('list ')) {
@@ -1405,6 +1407,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${shownId} isn't configured on this instance. Use /model list to see configured models._`,
+        'status',
       );
       return;
     }
@@ -1415,6 +1418,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${shownId} matches more than one configured route. Use /model list and reply with its number._`,
+        'status',
       );
       return;
     }
@@ -1431,6 +1435,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${shownId} isn't available on this instance right now. Use /model list to see what you can pick._`,
+        'status',
       );
       return;
     }
@@ -1453,6 +1458,7 @@ export async function handleModelCommand(
       port.sendDirect(
         chatJid,
         `_${sub} isn't available on this instance. Available: ${routable.join(', ')}. /model status shows the current route._`,
+        'status',
       );
       return;
     }
@@ -1469,6 +1475,7 @@ export async function handleModelCommand(
     port.sendDirect(
       chatJid,
       `_I do not recognize "${safeSub}". Use /model status to see available routes._`,
+      'status',
     );
     return;
   }

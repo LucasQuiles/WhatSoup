@@ -1,9 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { cleanGitEnv } from '../../src/lib/git-env.ts';
+import {
+  __setTestGitPath,
+  MAX_EXACT_SINGLE_BLOB_BYTES,
+} from '../../scripts/lib/ci-control/git-input-core.ts';
 import {
   readCandidateTree,
   type CandidateTree,
@@ -55,6 +59,59 @@ function makeRepo(extraFiles: Record<string, string> = {}): { repo: string; base
   write(repo, 'src/main.ts', 'export const main = true;\n');
   for (const [relativePath, contents] of Object.entries(extraFiles)) write(repo, relativePath, contents);
   return { repo, baseOid: commit(repo, 'baseline') };
+}
+
+function resolveOnPath(command: string): string {
+  for (const directory of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (!directory) continue;
+    const candidate = path.join(directory, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not executable here; keep searching PATH.
+    }
+  }
+  throw new Error(`${command} is not on PATH`);
+}
+
+function shellQuoted(value: string): string {
+  if (value.includes("'")) throw new Error(`path cannot be single-quoted: ${value}`);
+  return `'${value}'`;
+}
+
+// A `git` shim that runs `body` (which sees "$@") and then the real Git.
+function writeGitShim(name: string, body: string[]): string {
+  const shim = path.join(tmp.make(name), 'git');
+  const lines = ['#!/bin/sh', ...body, `exec ${shellQuoted(resolveOnPath('git'))} "$@"`, ''];
+  writeFileSync(shim, lines.join('\n'), { mode: 0o700 });
+  return shim;
+}
+
+// A `git` shim whose `cat-file` calls drain stdin and fail; other calls run the real Git.
+function writeFailingBatchShim(name: string): string {
+  return writeGitShim(name, [
+    'for arg in "$@"; do',
+    '  case "$arg" in',
+    '    -*) ;;',
+    '    cat-file) cat >/dev/null; exit 1 ;;',
+    '    *) break ;;',
+    '  esac',
+    'done',
+  ]);
+}
+
+// Reads the tree with `shim` as the Git of the exact blob reader (the ci-control
+// test seam) and, when `onPath`, also first on PATH for git-tree.ts's own calls.
+function readTreeWithShim(repo: string, shim: string, onPath: boolean): CandidateTree {
+  const priorGitPath = __setTestGitPath(shim);
+  if (onPath) vi.stubEnv('PATH', `${path.dirname(shim)}${path.delimiter}${process.env.PATH ?? ''}`);
+  try {
+    return readCandidateTree({ cwd: repo, head: 'HEAD', scope: 'tree' });
+  } finally {
+    vi.unstubAllEnvs();
+    __setTestGitPath(priorGitPath);
+  }
 }
 
 function readBranch(repo: string, baseOid: string): CandidateTree {
@@ -253,6 +310,147 @@ describe('exact candidate Git tree', () => {
     expect(tree.mergeBaseOid).toBeNull();
     expect(tree.changedPaths).toContainEqual({ status: 'modified', path: 'src/island.ts' });
     expect(finding).toMatchObject({ decision: 'warn' });
+  });
+
+  // A per-file `git show` made the Git subprocess count grow with the tree (one
+  // process per source file). The shim logs each call's subcommand, on PATH and
+  // as the exact reader's Git, only around the read.
+  it.each([12, 40])('reads every head blob through a fixed set of Git processes (%i extra files)', (count) => {
+    const extraFiles = Object.fromEntries(
+      Array.from({ length: count }, (_, index) => [`src/module-${index}.ts`, `export const value${index} = ${index};\n`]),
+    );
+    const { repo } = makeRepo(extraFiles);
+    const logPath = path.join(tmp.make('semantic-quality-git-log'), 'git-calls.log');
+    const shim = writeGitShim('semantic-quality-git-shim', [
+      'for arg in "$@"; do',
+      '  case "$arg" in',
+      '    -*) ;;',
+      `    *) printf '%s\\n' "$arg" >> ${shellQuoted(logPath)}; break ;;`,
+      '  esac',
+      'done',
+    ]);
+
+    const tree = readTreeWithShim(repo, shim, true);
+
+    const calls = readFileSync(logPath, 'utf8').trim().split('\n');
+    expect(tree.limitations).toEqual([]);
+    expect(tree.sources).toHaveLength(count + 1);
+    expect(tree.sources.find((source) => source.path === 'src/module-7.ts')?.text)
+      .toBe('export const value7 = 7;\n');
+    expect(calls.filter((call) => call === 'show')).toEqual([]);
+    expect(calls).toEqual(['rev-parse', 'ls-tree', 'rev-parse', 'cat-file', 'cat-file']);
+  });
+
+  // Oracle: the batch read must return what a per-file `git show` returns for
+  // every blob entry (a gitlink to an existing commit is the disclosed
+  // exception; see the next test) — same text for a spaced path, a newline path,
+  // a symlink, CRLF text and non-UTF-8 bytes, and a per-path limitation wherever
+  // `git show` fails.
+  it('matches per-file git show content and failures across awkward tree entries', () => {
+    const { repo } = makeRepo();
+    write(repo, 'src/with space.ts', 'export const spaced = true;\n');
+    write(repo, 'src/new\nline.ts', 'export const newline = true;\n');
+    write(repo, 'src/crlf.ts', 'export const crlf = true;\r\n');
+    writeFileSync(path.join(repo, 'src/bytes.ts'), Buffer.from([0x2f, 0x2f, 0xff, 0xfe, 0x00, 0x41, 0x0a]));
+    symlinkSync('main.ts', path.join(repo, 'src/link.ts'));
+    git(repo, ['add', '-A']);
+    git(repo, ['update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},src/gitlink.ts`]);
+    git(repo, ['commit', '-m', 'awkward entries']);
+
+    const listed = git(repo, ['ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', 'src'])
+      .split('\0')
+      .filter((entry) => entry.endsWith('.ts'))
+      .sort();
+    const expectedSources: Array<{ path: string; text: string }> = [];
+    const expectedFailures: string[] = [];
+    for (const sourcePath of listed) {
+      try {
+        const text = execFileSync('git', ['show', `HEAD:${sourcePath}`], {
+          cwd: repo,
+          encoding: 'utf8',
+          env: cleanGitEnv(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        expectedSources.push({ path: sourcePath, text });
+      } catch {
+        expectedFailures.push(sourcePath);
+      }
+    }
+    expect(listed).toContain('src/gitlink.ts');
+    expect(expectedFailures).toEqual(['src/gitlink.ts']);
+
+    const tree = readCandidateTree({ cwd: repo, head: 'HEAD', scope: 'tree' });
+
+    expect(tree.sources).toEqual(expectedSources);
+    for (const failed of expectedFailures) {
+      expect(tree.limitations.some((entry) => entry.startsWith(`head blob ${failed} could not be read: `)), failed)
+        .toBe(true);
+    }
+    expect(tree.limitations).toContain(`source tree is incomplete: read ${expectedSources.length} of ${listed.length} blobs`);
+  });
+
+  // The batch read refuses a non-blob entry per path. A gitlink whose commit
+  // exists is the one entry where this differs from per-file `git show`, which
+  // printed the formatted commit; the analyzer must not see that as source.
+  it('refuses a gitlink to an existing commit as a non-blob head entry', () => {
+    const { repo, baseOid } = makeRepo();
+    git(repo, ['update-index', '--add', '--cacheinfo', `160000,${baseOid},src/sub.ts`]);
+    git(repo, ['commit', '-m', 'gitlink to an existing commit']);
+
+    const tree = readCandidateTree({ cwd: repo, head: 'HEAD', scope: 'tree' });
+
+    expect(tree.sources.map((source) => source.path)).toEqual(['src/main.ts']);
+    expect(tree.limitations).toContain('head blob src/sub.ts could not be read: object is a commit, not a blob');
+    expect(tree.limitations).toContain('source tree is incomplete: read 1 of 2 blobs');
+  });
+
+  // A failure of the batch read itself is one tree-level limitation and no
+  // sources, never a partial tree. Only the exact reader's Git sees this shim.
+  it('reports one limitation and no sources when the head blob batch fails', () => {
+    const { repo } = makeRepo();
+    const shim = writeFailingBatchShim('semantic-quality-git-failing-batch');
+
+    const tree = readTreeWithShim(repo, shim, false);
+
+    expect(tree.sources).toEqual([]);
+    expect(tree.limitations).toEqual([
+      'head blobs could not be read: ci.input.blob-unavailable',
+      'source tree is incomplete: read 0 of 1 blobs',
+    ]);
+  });
+
+  // The per-path refusal of a non-blob entry does not depend on the read: a
+  // gitlink keeps its limitation when the batch read fails as well.
+  it('keeps the gitlink refusal when the head blob batch fails', () => {
+    const { repo, baseOid } = makeRepo();
+    git(repo, ['update-index', '--add', '--cacheinfo', `160000,${baseOid},src/sub.ts`]);
+    git(repo, ['commit', '-m', 'gitlink to an existing commit']);
+    const shim = writeFailingBatchShim('semantic-quality-git-failing-batch-gitlink');
+
+    const tree = readTreeWithShim(repo, shim, false);
+
+    expect(tree.sources).toEqual([]);
+    expect(tree.limitations).toEqual([
+      'head blob src/sub.ts could not be read: object is a commit, not a blob',
+      'head blobs could not be read: ci.input.blob-unavailable',
+      'source tree is incomplete: read 0 of 2 blobs',
+    ]);
+  });
+
+  // The exact reader caps one blob at MAX_EXACT_SINGLE_BLOB_BYTES; a larger
+  // source file fails the whole read closed instead of being analysed.
+  it('fails the head read closed when one source blob exceeds the exact reader size cap', () => {
+    const { repo } = makeRepo({
+      'src/large.ts': `export const large = '${'x'.repeat(MAX_EXACT_SINGLE_BLOB_BYTES)}';\n`,
+    });
+
+    const tree = readCandidateTree({ cwd: repo, head: 'HEAD', scope: 'tree' });
+
+    expect(tree.sources).toEqual([]);
+    expect(tree.limitations).toEqual([
+      'head blobs could not be read: ci.input.blob-set-budget',
+      'source tree is incomplete: read 0 of 2 blobs',
+    ]);
   });
 
   it('does not report an empty source tree as healthy', () => {

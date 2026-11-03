@@ -71,7 +71,6 @@ import json
 import os
 from pathlib import Path
 import re
-import socket
 import subprocess
 import sys
 import time
@@ -81,7 +80,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lib.bot_errors_envelope import new_event_fields
+from lib.bot_errors_envelope import event_machine, new_event_fields
 from lib.state_root import state_root
 from lib.durable_json import (
     JsonVersion,
@@ -608,7 +607,7 @@ def build_outbox_event(
         **new_event_fields(envelope_event_type, severity),
         "id": event_id,
         "createdAt": now_iso(),
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": HOST_PLATFORM,
         "instance": "bot-errors-tree-provenance",
         "source": source,

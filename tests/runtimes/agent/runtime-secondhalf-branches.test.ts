@@ -1227,6 +1227,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
       expect(pending.mode).toBe('textFallback');
       expect(mockQueue.enqueueText).toHaveBeenCalledWith(
         expect.stringContaining('did not receive the poll vote'),
+        'status',
       );
       // Poll is NOT removed — it remains pending for text reply
       expect(state.pendingPolls.questions.has(groupJid)).toBe(true);
@@ -1267,6 +1268,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
 
       expect(mockQueue.enqueueText).toHaveBeenCalledWith(
         expect.stringContaining('expired'),
+        'status',
       );
       expect(state.pendingPolls.questions.has(groupJid)).toBe(false);
     });
@@ -2379,7 +2381,7 @@ describe('AgentRuntime second-half: poll expiry + auto-respawn continuation', ()
         { type: 'assistant_text', text: 'Picking up where we left off.' },
         toolScopeKey,
       );
-      expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Picking up where we left off.');
+      expect(mockQueue.enqueueStreamingText).toHaveBeenCalledWith('Picking up where we left off.', 'answer');
       // The dispatch site cleared the stale gate before sending the continuation.
       expect(postTurnGate.has(mapKey)).toBe(false);
 

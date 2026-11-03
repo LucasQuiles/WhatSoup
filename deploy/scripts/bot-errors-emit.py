@@ -11,7 +11,6 @@ from pathlib import Path
 import platform
 import re
 import shlex
-import socket
 import sys
 import time
 import uuid
@@ -23,7 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from lib.bot_errors_redaction import redact_bot_errors_text, redact_json_value as redact_shared_json_value
 from lib.state_root import DEFAULT_STATE_ROOT, state_root, test_state_root
-from lib.bot_errors_envelope import EVENT_TYPES, SEVERITIES, EnvelopeError, new_event_fields
+from lib.bot_errors_envelope import EVENT_TYPES, SEVERITIES, EnvelopeError, event_machine, new_event_fields
 from lib.durable_json import (
     JsonVersion,
     durable_json_target,
@@ -484,7 +483,7 @@ def build_event(args: argparse.Namespace) -> dict[str, Any]:
         **new_event_fields(event_type, severity),
         "id": event_id,
         "createdAt": created,
-        "machine": socket.gethostname(),
+        "machine": event_machine(),
         "platform": f"{host_system()} {host_release()}",
         "instance": instance,
         "source": source,

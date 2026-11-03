@@ -23,7 +23,7 @@
     "design:theme-parity": "node scripts/check-theme-parity.mjs",
     "design:capture": "node scripts/capture-visual-matrix.mjs",
     "design:capture:validate": "node scripts/validate-visual-manifest.mjs",
-    "design:contrast": "node scripts/check-contrast-matrix.mjs",
+    "design:contrast": "node scripts/check-contrast-matrix.mjs --no-write",
     "design:color-semantics": "node scripts/check-color-semantics.mjs --fail-on-rule soup/no-component-local-palette --fail-on-rule soup/provider-palette-only --fail-on-rule soup/data-series-token-only --fail-on-rule soup/traffic-neutrality",
     "design:raw-form-control-inventory": "node scripts/check-raw-form-control-inventory.mjs",
     "design:shadow-frozen-inventory": "node scripts/check-shadow-frozen-inventory.mjs",

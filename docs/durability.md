@@ -110,7 +110,7 @@ The policy is set at creation time by the caller. Autonomous bot responses (via 
 
 | From | To | Trigger |
 |---|---|---|
-| `pending` | `processing` | Initial insert (journalInbound writes `processing` directly) |
+| — | `processing` | `journalInbound` inserts directly as `processing`; the schema default `pending` is not an initial runtime transition. |
 | `processing` | `turn_done` | `markTurnDone()` — agent/chat runtime signals the LLM turn completed |
 | `turn_done` | `complete` | `markInboundComplete()` — terminal outbound op echoed |
 | `processing` | `complete` | `markInboundSkipped()` — message filtered/skipped without a turn (e.g. `local_command`, `empty_content`) |
@@ -1137,7 +1137,7 @@ delivery proof while adding auditable completion and conflict evidence.
 | `processing_status` | TEXT NOT NULL | Lifecycle state: `pending`, `processing`, `turn_done`, `complete`, `failed`. Default `pending`. |
 | `completed_at` | TEXT | Timestamp when status reached a terminal state. |
 | `terminal_reason` | TEXT | Human-readable terminal cause: `response_sent`, `error`, `local_command` / `empty_content` (skipped without a turn), `recovered_turn_done` / `recovered_response_sent` (finalized by recovery or the stuck-inbound reconciler §4.5), etc. Every failed row keeps `terminal_reason = 'error'` exactly (an external matcher contract); the driver split lives in `failure_class`. |
-| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), `processor_throw`, or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. Exact terminal-attempt classes remain independently preserved on `turn_terminal_records.attempt_failure_class`: for example, `provider_stream_corrupt` projects to the bounded inbound class `provider_failure` rather than expanding this column's vocabulary. |
+| `failure_class` | TEXT | Bounded, content-free failure driver stamped alongside `terminal_reason = 'error'` on a failed row. Migration 36; nullable, no CHECK/default/backfill/index (the vocabulary is gated in code at `src/core/inbound-failure-class.ts`). One of: `provider_failure`, `transport_send_failed`, `transport_disconnected`, `timeout`, `db_error`, `session_crash`, `session_spawn_failed`, `crash_recovery`, `stale_reclaim`, the admission-rejection subclasses `queue_full` / `queue_halted` / `queue_closed` / `pre_dispatch_error` / `scope_blocked_recovery` (#1750), `recovery_owner_reclaimed` (#1749), `operator_cancelled`, `processor_throw`, or `unknown`. **NULL** = a pre-taxonomy row (failed before migration 36); **`unknown`** = classified but unattributable. Crash reclaim in `preConnectRecovery` stamps `crash_recovery`; the stuck-inbound reconciler (§4.5) stamps `stale_reclaim` (bucket 3) and `recovery_owner_reclaimed` (bucket 4, the recovery-owner reclaim of §4.7). An admitted-then-rejected turn stamps its distinct rejection driver (queue depth-cap shed, halt, closed admissions, pre-dispatch error, or recovery-scope block) instead of collapsing to `unknown`, so alerting can page on a queue halt without false-positiving on a benign capacity shed. Exact terminal-attempt classes remain independently preserved on `turn_terminal_records.attempt_failure_class`: for example, `provider_stream_corrupt` projects to the bounded inbound class `provider_failure` rather than expanding this column's vocabulary. |
 
 ### `outbound_ops`
 
@@ -1207,7 +1207,16 @@ payload substitution.
 
 `markEchoed()` preserves the first echo timestamp and records the selected op as `echoed`. When
 the exact linked job is unsettled and its source is `processing`/`turn_done` (or already completed
-as `response_echoed`), the source inbound and job settle in the same SQLite transaction. Startup
+as `response_echoed`), the source inbound and job settle in the same SQLite transaction.
+When that settlement completes a per-chat `completed` turn, the same transaction also writes the
+turn's completed-identity bundle to the checkpoint. It does so only when all of these hold:
+- the bot's own message is stored for the op's exact conversation and chat;
+- that WhatsApp message is claimed by exactly one outbound op;
+- the checkpoint still ends at that inbound and delivery;
+- the checkpoint's session is live for the conversation;
+- there is no active turn and no newer completed identity.
+
+Otherwise the bundle stays unset. Ingest stores an outgoing message before correlating its echo. Startup
 also scans a bounded set of already-echoed exact links, closing the crash gap between transport
 truth and job settlement. If a late echo contradicts a worker-completed outcome or a pending/
 failed source, delivery truth is not rolled back: the completed job retains its original
@@ -1265,6 +1274,9 @@ per-chat or global scope. When the selected delivery is provably dead (`failed_p
 `pending`/`claimed` owning job to `exhausted` and fails its source inbound, releasing the scope.
 Terminal `blocked_unsafe` and `exhausted` jobs do not block admission; isolated terminal receipts
 and historical catch-ups remain visible as retained recovery debt without making health degraded.
+Only user-facing catch-ups count as historical catch-ups: a link whose source is a synthetic
+scheduled-job (`agentjob-*`) inbound, enrolled before #3754, is reported apart as
+`turnRecoveryOpenRecoveriesSynthetic` (see docs/turn-recovery-continuity-reconciler.md).
 Pending/claimed work, orphan transfers, active finalization, corrupt or unclassified proof, and
 uncorroborated delivery ambiguity are blocking. An orphan transfer has no job to settle. For one
 admitted shape only (a corroborated `maybe_sent` terminal op with a NULL `wa_message_id`, and a terminal
@@ -1329,7 +1341,8 @@ Migration 39 adds the completed-turn identity bundle below. The seven fields are
 all null (legacy or not-yet-completed checkpoints) or all populated; database triggers
 reject partial bundles. Terminal finalization derives the bundle from the same validated
 terminal identity and writes it in the terminal transaction, rejecting caller-supplied
-values that contradict that identity. `last_inbound_seq` remains independent progress state;
+values that contradict that identity. A completed turn transferred to recovery while its answer
+awaited the echo gets the bundle at echo settlement instead (see the `markEchoed()` contract). `last_inbound_seq` remains independent progress state;
 only `completed_inbound_seq` identifies the resumable completed turn.
 
 | Column | Type | Description |
@@ -1387,6 +1400,15 @@ start fresh.
   it is also `active` in another namespace. The turn fails closed with
   `CHECKPOINT_ADOPTION_REFUSED` and the chat is told its previous session may still be
   running. No session is spawned, so the chat never gets a second live session.
+
+Idle eviction suspends a resident manager and holds the chat's actor-socket teardown
+barrier until the provider has stopped; every later manager for the chat waits on that
+barrier before spawning. When the suspend fails only at its durable lifecycle step after
+the provider stopped, the evicted generation is retired (its row ends, so it is never
+resumed) and the barrier settles. The next message then takes the "own session, not
+resumable" or foreign-checkpoint path above and starts fresh with the notice. When the stop
+itself is unproven, the barrier stays rejected and the chat's turns are refused, so no
+second provider can start. Both outcomes are logged with the underlying `errorMessage`.
 
 A fresh provider spawn creates its `agent_sessions` row and resets its checkpoint in one
 transaction before provider initialization. The reset clears stale session, turn, watchdog,
@@ -1643,10 +1665,20 @@ are independently queryable.
 
 `AgentJobContext` carries the durable `occurrenceId` of the dispatching claim, and the agent
 runtime embeds it in the journaled synthetic inbound's messageId
-(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`). The #2144 turn journal and
+(`agentjob-<triggerId>-<unixSeconds>-occ<occurrenceId>`, minted by
+`scheduledJobInboundMessageId` in `src/core/synthetic-turn-source.ts`). The #2144 turn journal and
 `trigger_occurrences` are therefore deterministically joinable — an accepted agent-job
 occurrence without a matching journaled owner is auditable incoherence rather than an
 unanswerable question.
+
+The trigger run is recorded `ok` once the turn is queued, so a turn that later dies is not a
+trigger failure. Crash recovery fails its synthetic inbound but does not enroll it as an operator
+catch-up, because it owes no user a reply (#3754). The loss surfaces in `/health` as
+`runtime.agent.turnRecoveryScheduledTurnsLost` and `recovery_debt.turn_recovery.scheduled_turns_lost`:
+synthetic inbounds failed with `crash_recovery`, `stale_reclaim` or `recovery_owner_reclaimed`
+within `SCHEDULED_TURN_LOSS_WINDOW_DAYS` (7). The count is visibility only and pages nothing. The
+first terminal wins for such a row: the seq-keyed inbound writers leave it unchanged
+(`NOT_SCHEDULED_TURN_LOSS_ROW_SQL`), so a late runtime path cannot drop it from the count.
 
 ### 8.6 History lifecycle, gauges, reader, and field audit
 
@@ -1745,7 +1777,8 @@ Consolidation promotes durable knowledge out of episodic memory:
 `MemoryConsolidationScheduler` (`src/memory/consolidation-scheduler.ts`) owns deadlines,
 durable run receipts, cancellation, and the post-stop write fence;
 `runConsolidation` (`src/memory/consolidation-cron.ts`) selects sources (fixed semantic
-query, top-100, unfiltered), scopes them by chat+sender, clusters them
+query, top-100, with a provider-side filter excluding the `consolidated`
+confidence qualifier while retaining records without that field), scopes them by chat+sender, clusters them
 (`clusterMemories`, `src/memory/consolidation.ts`), sends each cluster to the model, and
 upserts promoted claims back to the remote store under
 `durable:<shortHash(scope + claim)>` ids with `confidenceQualifier: 'consolidated'`.
@@ -1772,7 +1805,10 @@ duplicate ids, where the text tie-break totalizes the order (records tied on bot
 tokenize identically, so any residual tie is inert). Same set in, same partition out,
 regardless of search ranking drift.
 
-**Recursive-eligibility exclusion.** `runConsolidation` drops records carrying either
+**Recursive-eligibility exclusion.** Before top-K selection, `runConsolidation`
+passes a metadata filter that retains missing qualifiers and qualifiers unequal
+to `consolidated`. The `durable:` id marker has no corresponding metadata field;
+the post-retrieval check still owns that exclusion. After retrieval, it drops records carrying either
 promotion marker — the `durable:` id prefix or the `consolidated` confidence qualifier
 (case-insensitive) — before scoping. Non-string ids pass through untouched;
 `consolidateCluster`'s cluster-id guard owns that failure mode and rejects such

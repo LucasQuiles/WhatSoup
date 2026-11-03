@@ -1,5 +1,7 @@
 # Fleet Charts Expansion Implementation Plan
 
+> **Source reconciliation (2026-10-06, `59cc562bc`):** The blanket deferred/11-unimplemented record below is historical. Migration 18, token-event storage, session end tracking, expanded `METRIC_NAMES`, and the fleet metrics readers/routes are present in source. The plan is not a fresh execution queue: compare each remaining UI/integration requirement with current console source and acceptance evidence before implementing or closing it. Original metric shapes, range buckets, partial-data semantics and UI requirements remain preserved; this audit does not certify deployment or whole-plan completion.
+
 **Status:** deferred — inherits from parent epic `docs/sdlc/closed/fleet-charts-20260407/` (Phase 4-Execute incomplete, 11 beads unimplemented).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

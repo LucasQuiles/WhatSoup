@@ -10,9 +10,10 @@ credentials — enter the fleet token on the lock screen to start a session:
 - The token is sent once to `POST /api/console-session` and never stored in
   the browser; the server answers with an HttpOnly `SameSite=Strict` session
   cookie (24-hour fixed lifetime).
-- All API/WebSocket access then rides short-lived audience tickets minted
-  against that session. A fleet-server restart relocks the console.
-- To log out, click **Lock** in the top-right of the nav bar — it revokes the
+- Authenticated HTTP and SSE requests use short-lived audience tickets minted
+  against that session; WebSocket connections use a separate `/api/ws-ticket`.
+  A fleet-server restart relocks the console.
+- To log out, click **Lock** in the navigation rail's utility area — it revokes the
   session server-side (`DELETE /api/console-session`), clears the cookie, and
   returns to the lock screen. (`DELETE /api/console-session` can also be called
   directly.)
@@ -23,7 +24,25 @@ credentials — enter the fleet token on the lock screen to start a session:
 
 ## Pages
 
-The console has four main pages accessible from the top navigation bar.
+The navigation rail groups pages into **Operate**, **Create**, and **System**.
+The route definitions live in [App.tsx](../console/src/App.tsx); rail labels and
+groups live in [route-meta.ts](../console/src/components/chrome/route-meta.ts).
+
+| Group | Page | Route and current boundary |
+|---|---|---|
+| Operate | Fleet | `/`: lines, health, KPIs and activity. A line opens `/lines/:name`. |
+| Operate | Agents | `/agents`: agent-mode line roster and selected-line details backed by fleet queries. |
+| Operate | Inbox | `/inbox`: conversations and replies for the selected line. |
+| Operate | Ops | `/ops`: logs and operations; `/ops?tab=metrics` opens metrics. Legacy `/operator` and `/metrics` links redirect here. |
+| Create | Skills | `/skills`: searchable plugin catalog. Skill, MCP-server and tool catalog types remain empty; upload and organization-hub actions are disabled. |
+| Create | Dream Lab | `/dream-lab`: review layout with an empty queue. A Dream backend and persisted decisions are not implemented. |
+| System | Deployments | `/deployments`: the local deployment uses live fleet/version/liveness data. Remote pairing and hub synchronization remain designed states. |
+| System | Settings | `/settings`: workspace, channels, notifications, API tokens and danger-zone sections. Disabled controls identify capabilities without a backend. |
+
+`/welcome` and `/hatch` provide the landing and onboarding journey outside those
+rail groups. A visible route does not imply that every designed action is implemented.
+The screenshots below retain earlier layouts; use the route table and current
+components for navigation and capability decisions.
 
 ### Fleet
 
@@ -49,7 +68,10 @@ The left panel shows every instance with its status, phone number, message count
 
 ![Unhealthy Instance Management](screenshots/ops-unhealthy.png)
 
-The right panel shows a structured log viewer with level filtering (all, error, warn, info, debug). Select any instance on the left to view its logs. The log viewer shows timestamps, sources, and color-coded severity levels.
+The console tab shows a structured log viewer with level filtering (all, error,
+warn, info, debug). Select a line to view its logs. The log viewer shows timestamps,
+sources, and severity levels. The Metrics tab contains the fleet charts previously
+available at `/metrics`.
 
 ### Inbox
 
@@ -128,9 +150,9 @@ Empty, loading, and error states each render an `EmptyState` panel: a loading pa
 
 Data is fetched from `GET /api/lines/:name/metrics?range=24h|7d|30d` (per-line) with the fleet-wide aggregate available at `GET /api/metrics?range=24h|7d|30d` for the Fleet view.
 
-**Scheduled** — Queue of scheduled messages for this instance. The header bar shows the total count and a "New Scheduled Message" button that opens the composer modal. Each row exposes Cancel, Edit, and Duplicate actions; pending and processing messages sort to the top by send time, with sent / failed / cancelled rows below in reverse chronological order. The list polls every 30 s. Empty, loading, and error states each render an `EmptyState` panel. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by `GET/POST/DELETE /api/lines/:name/scheduled` (list, create, cancel-all) and `GET/PUT/DELETE /api/lines/:name/scheduled/:id` (fetch, update, cancel one) — see the Fleet API table in the README.
+**Scheduled** — Queue of scheduled messages for this instance. The header bar shows the total count and a "New Scheduled Message" button that opens the composer modal. Each row exposes Cancel, Edit, and Duplicate actions; pending and processing messages sort to the top by send time, with sent / failed / cancelled rows below in reverse chronological order. The list polls every 30 s. Empty, loading, and error states each render an `EmptyState` panel. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by `GET/POST/DELETE /api/lines/:name/scheduled` (list, create, cancel-all) and `GET/PUT/DELETE /api/lines/:name/scheduled/:id` (fetch, update, cancel one) — see the [Fleet API table](../README.md#fleet-api).
 
-**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. The list polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the Fleet API table in the README.
+**Groups** — Groups this instance participates in. The header bar shows the total count and a "Create Group" button that opens the create modal. Each group card opens a detail modal with the participant list, promote / demote, add and remove participants, editable subject and description, invite link (get and revoke), ephemeral message duration, member-add mode (admins only vs all members), join-approval mode, pending join requests (approve / reject), and a Leave Group action. The list polls every 30 s. This tab is only shown for instances with a global MCP socket (not sandbox-per-chat). Backed by 15 routes under `/api/lines/:name/groups/...` (list, create, get detail, leave, subject, description, participants, settings, invite get and revoke, ephemeral, member-add-mode, join-approval, requests get and update) — see the [Fleet API table](../README.md#fleet-api).
 
 ### Add Line Wizard
 
@@ -150,11 +172,16 @@ Type-matched accent colors distinguish the three modes throughout the wizard. In
 
 ## Design System
 
-The console uses 60+ CSS custom properties and 40+ ESLint rules enforcing token usage. No hardcoded colors, spacing, or transition durations in components.
+The console uses primitive, semantic and component tokens with dark and light
+themes. Use the [design-system index](design-system/README.md) to find the current
+requirements and the checks that enforce them; dated conformance reports do not
+establish the state of a later revision.
 
-**Color palette:** Dark backgrounds with teal (passive), cyan (chat), and purple (agent) accent colors. Status indicators use teal (ok), orange (warn), and red (critical).
-
-**Typography:** Outfit for UI text, IBM Plex Mono for code and data. Nine font sizes from 9.6px to 27.2px.
+Fonts are self-hosted: Hanken Grotesk for body text, IBM Plex Mono for data and
+monospace text, and Bricolage Grotesque for display text. The definitions are in
+[fonts.css](../console/src/styles/fonts.css) and
+[tokens.primitive.css](../console/src/styles/tokens.primitive.css); provenance and
+checksums are in the [font inventory](../console/public/fonts/README.md).
 
 ## Mock Mode
 
@@ -169,7 +196,7 @@ When the fleet server is unreachable, the console can fall back to built-in mock
 - **Development builds** (`npm run dev`) — Mock mode activates automatically (1.5s timeout on fleet API check) and re-checks every 60 seconds.
 - **Production builds** (`npm run build`) — Mock mode is **disabled by default**. Real fleet/auth failures surface as errors so the UI can render a true unhealthy state instead of masquerading as healthy mock data. To opt back in for demos or static showcase builds, set the Vite env var `VITE_MOCK_MODE=1` at build time (e.g. `VITE_MOCK_MODE=1 npm run build`).
 
-When mock mode is active, most read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. A few read endpoints intentionally still hit the live API: `searchMessages`, `getScheduledById`, `checkExists`, `checkDirectory`, and `getVersion`. Write operations always require a live fleet server.
+When mock mode is active, supported read operations return deterministic mock data — line metadata, chats, messages, metrics, access lists, logs, feed/typing, scheduled messages, groups, and contact search. Other reads still require the live API, including `searchMessages`, `getScheduledById`, `checkExists`, `checkDirectory`, and `getVersion`. Consult [api.ts](../console/src/lib/api.ts) for each method's fallback behavior. Write operations always require a live fleet server.
 
 ## Development
 

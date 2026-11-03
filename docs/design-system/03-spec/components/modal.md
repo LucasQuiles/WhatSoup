@@ -1,5 +1,7 @@
 # Modal — one dialog anatomy, one dismiss contract, one scrim
 
+> V3 reference: values, counts and implementation observations belong to the recorded design baseline. See [design navigation](../../README.md) for v3.5 authority and current code; retain these requirements for explicit reconciliation.
+
 v3.0.0-draft · G2-locked direction · pending G3
 
 Resolves P1-2 (11 dialog surfaces, 9 Escape copies, 0 focus traps). Locked source: v2.html modal
