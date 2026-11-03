@@ -953,9 +953,78 @@ export function listStagedFiles(cwd: string, diffFilter: string): string[] {
  * `.gitattributes` rule (`-diff`, `binary`) or a NUL byte in a file's first 8000
  * bytes hides every line that file adds. The other flags pin the output against
  * user config: an external diff or a textconv driver rewrites the text, and
- * `color.ui=always` hides the `+` markers.
+ * `color.ui=always` hides the `+` markers. `--full-index` prints each file's full
+ * new blob id, which the verified-binary check below reads.
  */
-export const DISCLOSURE_PATCH_FLAGS = ['--text', '--no-ext-diff', '--no-textconv', '--no-color'] as const;
+export const DISCLOSURE_PATCH_FLAGS = ['--text', '--no-ext-diff', '--no-textconv', '--no-color', '--full-index'] as const;
+
+/**
+ * Binary formats the disclosure scans skip. Every other path is scanned, whatever
+ * its name. With --text a real image's bytes reach the scans and match loose rules
+ * (an internal-label or email shape): main's screenshots did, 58 times over 60 days
+ * of history. A file is skipped only when its new blob is the format its name says:
+ * the extension (any case) is listed, the blob starts with that format's signature,
+ * and it holds a NUL in its first 8000 bytes, Git's own content test for binary.
+ * Attributes are never read, so a `-diff` or `binary` rule, a NUL in a source file,
+ * and a text file under an image name are all still scanned. A skipped file is what
+ * main did not scan either: a real image's bytes, including any text in its metadata
+ * (PNG text chunks, for example), and a file built to pass all three checks. The
+ * table holds the binary types main tracks; a new type is scanned until it is listed.
+ */
+const VERIFIED_BINARY_FORMATS: ReadonlyArray<{ extension: string; signature: readonly number[] }> = [
+  { extension: '.png', signature: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { extension: '.woff2', signature: [0x77, 0x4f, 0x46, 0x32] }, // "wOF2"
+  { extension: '.ogg', signature: [0x4f, 0x67, 0x67, 0x53] }, // "OggS"
+];
+
+const GIT_BINARY_PROBE_BYTES = 8000;
+
+function verifiedBinaryFormat(filePath: string): (typeof VERIFIED_BINARY_FORMATS)[number] | undefined {
+  const extension = path.extname(filePath).toLowerCase();
+  return VERIFIED_BINARY_FORMATS.find((entry) => entry.extension === extension);
+}
+
+function isFormatBlob(format: (typeof VERIFIED_BINARY_FORMATS)[number], blob: Uint8Array): boolean {
+  if (!format.signature.every((byte, index) => blob[index] === byte)) return false;
+  return blob.subarray(0, GIT_BINARY_PROBE_BYTES).includes(0);
+}
+
+/** The blob `blobSpec` names, or an empty buffer when it cannot be read as a blob. */
+function readBlob(cwd: string, blobSpec: string): Buffer {
+  try {
+    return execFileSync('git', ['cat-file', 'blob', blobSpec], {
+      cwd,
+      env: cleanGitEnv(),
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
+  } catch {
+    return Buffer.alloc(0); // unreadable, or not a blob (a submodule commit): scanned
+  }
+}
+
+/**
+ * The one test every disclosure scan uses to skip a file's added lines. `blobSpec`
+ * names the file's new content: the blob id from the patch's `index` line, or
+ * `:<path>` for the staged copy. Without one, the file is scanned. Verdicts are
+ * cached per blob for the life of the returned function.
+ */
+export function createVerifiedBinaryCheck(cwd: string): (filePath: string, blobSpec: string | undefined) => boolean {
+  const verdicts = new Map<string, boolean>();
+  return (filePath, blobSpec) => {
+    if (!blobSpec) return false;
+    const format = verifiedBinaryFormat(filePath);
+    if (!format) return false;
+    const key = `${format.extension}\0${blobSpec}`;
+    let verdict = verdicts.get(key);
+    if (verdict === undefined) {
+      verdict = isFormatBlob(format, readBlob(cwd, blobSpec));
+      verdicts.set(key, verdict);
+    }
+    return verdict;
+  };
+}
 
 /**
  * The live main the push hook proved. pre-push-guard reads it from the pushed

@@ -380,7 +380,7 @@ Coverage includes: ingest backpressure (semaphore + overflow queue), relay guard
 
 ## Quality Gates
 
-- `npm run verify:push:fast` — what the pre-push hook runs for a branch push: repo hygiene, commit authors, the publication audit table and a private-literal scan of the commits the branch adds. It builds nothing and runs no tests; the required `quality (24.x)` and `quality (25.x)` checks do that before merge.
+- `npm run verify:push:fast` — what the pre-push hook runs for a branch push of one commit: repo hygiene, commit authors, the publication audit table and a private-literal scan of the commits the branch adds (every path except verified binary images, fonts and audio; fixture areas keep their earlier file selection). It builds nothing and runs no tests; the required `quality (24.x)` and `quality (25.x)` checks do that before merge. A push of two or more distinct commits is refused; push one lane at a time.
 - `npm run verify:push:branch` — the full local branch gate, run by hand before merge or by the hook when it cannot read the pushed refs: typecheck, targeted tests, and the source/doc/surface guards. It is a **subset** of CI; some gates (the BOT ERRORS sentinel + deployer mutation gate) run only in CI, so reproduce them with `GITHUB_ACTIONS=1` when touching pinned runtime files.
 - `npm run verify:release` / `verify:publish` — broader release/publish gates.
 - Drift guards: `guard:doc-drift`, `guard:public-surface-drift` ([docs/public-surface.md](docs/public-surface.md) is the generated public-surface SSOT), `guard:work-index`, and the ESLint architectural-fitness ring (`guard:lint:src`, see [docs/architecture/fitness-taxonomy.md](docs/architecture/fitness-taxonomy.md)).

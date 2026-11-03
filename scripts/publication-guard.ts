@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { types as utilTypes } from 'node:util';
 import {
+  createVerifiedBinaryCheck,
   git,
   isTextCandidate,
   listStagedFiles,
@@ -40,6 +41,7 @@ import { validateExactRangeProvenance } from './lib/ci-control/exact-range-prove
 import { branchDiffBaseRef } from './repo-hygiene-guard.ts';
 import {
   BRANCH_SCAN_LIMITS,
+  isPublicationFixtureExempt,
   scanBranchRange,
   type BranchDiffResult,
   type BranchScanLimits,
@@ -565,7 +567,11 @@ function validateStaged(cwd: string): GuardIssue[] {
     }
   }
 
-  for (const filePath of staged.filter(isTextCandidate)) {
+  // Every staged path except a verified binary (the test every disclosure scan uses)
+  // and the fixture files isPublicationFixtureExempt keeps on their earlier selection.
+  const isVerifiedBinary = createVerifiedBinaryCheck(cwd);
+  for (const filePath of staged) {
+    if (isPublicationFixtureExempt(filePath) || isVerifiedBinary(filePath, `:${filePath}`)) continue;
     const addedText = stagedAddedText(cwd, filePath);
     issues.push(...scanTextForPrivateLiterals(filePath, addedText));
     if (path.extname(filePath) === '.md') {

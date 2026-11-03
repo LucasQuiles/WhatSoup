@@ -83,7 +83,8 @@ function gitList(args: string[], cwd: string): string[] {
   return output ? output.split(/\r?\n/).map(normalizeRepoPath).filter(Boolean) : [];
 }
 
-function isTextCandidate(filePath: string): boolean {
+/** The files this tool may rewrite: a narrow known-text list, not the disclosure scans' file selection. */
+function isRewritableTextFile(filePath: string): boolean {
   const normalized = normalizeRepoPath(filePath);
   const baseName = path.basename(normalized);
   if (baseName === 'Dockerfile' || baseName.startsWith('.env')) return true;
@@ -268,7 +269,7 @@ function listPathCandidates(cwd: string, args: ParsedArgs): string[] {
 function listCandidateFiles(cwd: string, args: ParsedArgs): string[] {
   return [...new Set(listPathCandidates(cwd, args))]
     .map(normalizeRepoPath)
-    .filter((filePath) => isTextCandidate(filePath))
+    .filter((filePath) => isRewritableTextFile(filePath))
     .filter((filePath) => args.includeTests || !filePath.startsWith('tests/'))
     .filter((filePath) => !skippedPathPatterns.some((pattern) => pattern.test(filePath)))
     .filter((filePath) => existsSync(path.join(cwd, filePath)))

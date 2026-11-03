@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
+import { OGG_SIGNATURE, PNG_SIGNATURE, seededBinary as seededBinaryFixture, WOFF2_SIGNATURE } from '../helpers/seeded-binary.ts';
 import { cleanGitEnv, PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
 import { canonicalizeBoundaryRun } from '../../scripts/lib/verification/boundary-run/shared.ts';
 import * as repoHygieneGuardModule from '../../scripts/repo-hygiene-guard.ts';
@@ -191,6 +192,42 @@ describe('repo hygiene guard', () => {
     ].join('\n'));
 
     expect(lines.map((line) => line.filePath)).toEqual(['src/a\tb.ts', 'src/caf\u00e9.ts', 'src/q"u\\o.ts']);
+  });
+
+  it('carries each file\'s new blob id from its index line, and drops it at the next file header', () => {
+    const [oldBlob, newBlob, otherBlob] = ['a', 'b', 'c'].map((digit) => digit.repeat(40));
+    const lines = parseUnifiedDiffAddedLines([
+      'diff --git a/assets/one.png b/assets/one.png',
+      `index ${oldBlob}..${newBlob} 100644`,
+      '+++ b/assets/one.png',
+      '@@ -1 +1 @@',
+      `+index ${otherBlob}..${otherBlob}`,
+      'diff --cc assets/two.png',
+      `index ${oldBlob},${newBlob}..${otherBlob}`,
+      '+++ b/assets/two.png',
+      '@@ -0,0 +1 @@',
+      '+second',
+      'diff --git a/assets/three.png b/assets/three.png',
+      'new file mode 100644',
+      `index ${'0'.repeat(40)}..${otherBlob}`,
+      '+++ b/assets/three.png',
+      '@@ -0,0 +1 @@',
+      '+third',
+      'diff --git a/assets/four.png b/assets/four.png',
+      '+++ b/assets/four.png',
+      '@@ -0,0 +1 @@',
+      '+fourth',
+      '',
+    ].join('\n'));
+
+    // two.png: a combined header drops one.png's blob, and its index line is not read.
+    // four.png: a file header with no index line drops three.png's blob.
+    expect(lines.map((line) => [line.filePath, line.blob])).toEqual([
+      ['assets/one.png', newBlob],
+      ['assets/two.png', undefined],
+      ['assets/three.png', otherBlob],
+      ['assets/four.png', undefined],
+    ]);
   });
 
   it('splits lines as /\\r?\\n/ does: a CR goes only before a LF, and a last line needs no newline', () => {
@@ -1034,31 +1071,12 @@ The migrated group was 1203631234567890@g.us.
   });
 
   describe('real binary files read as text', () => {
-    // A seeded stand-in for a real image: xorshift32, seed 0x3839, 524,288 bytes after a
-    // format signature and four header bytes that start with a NUL, as a PNG's IHDR length
-    // does. It carries an internal-label run and an email run, the shapes main's own
-    // screenshots produced when read as text.
-    const SEED = 0x3839;
-    const BODY_BYTES = 524_288;
-    const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-    const WOFF2_SIGNATURE = [0x77, 0x4f, 0x46, 0x32];
-    const OGG_SIGNATURE = [0x4f, 0x67, 0x67, 0x53];
+    // The seeded stand-in (tests/helpers/seeded-binary.ts: seed 0x3839, 524,288 bytes)
+    // carries an internal-label run and an email run, the shapes main's own screenshots
+    // produced when read as text.
     const phoneLine = "export const phone = '+447123456789';\n";
-    const seededBinary = (signature: readonly number[]): Buffer => {
-      const body = Buffer.alloc(BODY_BYTES);
-      let x = SEED;
-      for (let i = 0; i < body.length; i += 1) {
-        x ^= x << 13;
-        x >>>= 0;
-        x ^= x >>> 17;
-        x ^= x << 5;
-        x >>>= 0;
-        body[i] = x & 0xff;
-      }
-      body.write(`\n${['B', '1'].join('-')} \n`, 100_000, 'latin1');
-      body.write(`\n${['qz', 'kq.io'].join('@')}\n`, 200_000, 'latin1');
-      return Buffer.concat([Buffer.from(signature), Buffer.from([0, 0, 0, 0x0d]), body]);
-    };
+    const seededBinary = (signature: readonly number[]): Buffer =>
+      seededBinaryFixture(signature, [`${['B', '1'].join('-')} `, ['qz', 'kq.io'].join('@')]);
     const quietRun = (argv: string[], repo: string) => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1120,6 +1138,28 @@ The migrated group was 1203631234567890@g.us.
       expect(history.map((issue) => issue.code)).toEqual(['operator-phone']);
       expect(history[0].message).toContain('[branch history');
       expect(codesFor(scanCommitHistory(repo, 5), filePath)).toContain('operator-phone');
+    });
+
+    it('flags text that replaces a verified image, from the new blob, and still flags it from history once the image is back', () => {
+      const repo = makeBranchRepo();
+      const filePath = 'assets/shot.png';
+      mkdirSync(join(repo, 'assets'), { recursive: true });
+      writeFileSync(join(repo, filePath), seededBinary(PNG_SIGNATURE));
+      commitAll(repo, 'test: image at the base');
+      git(repo, ['branch', '-f', 'main', 'HEAD']);
+
+      writeFileSync(join(repo, filePath), phoneLine);
+      git(repo, ['add', filePath]);
+      expect(codesFor(quietRun(['--staged'], repo), filePath)).toEqual(['operator-phone']);
+      git(repo, ['commit', '-m', 'test: text under the image name']);
+      expect(codesFor(scanBranchDiff(repo, 'main'), filePath)).toEqual(['operator-phone']);
+
+      writeFileSync(join(repo, filePath), seededBinary(PNG_SIGNATURE));
+      commitAll(repo, 'test: image back');
+      const history = scanBranchDiff(repo, 'main').filter((issue) => issue.filePath === filePath);
+      expect(history.map((issue) => issue.code)).toEqual(['operator-phone']);
+      expect(history[0].message).toContain('[branch history');
+      expect(codesFor(scanCommitHistory(repo, 5), filePath)).toEqual(['operator-phone']);
     });
   });
 

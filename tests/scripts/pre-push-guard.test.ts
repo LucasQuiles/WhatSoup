@@ -29,6 +29,7 @@ import {
 } from '../helpers/gate-membership.ts';
 import { BRANCH_STEPS, RELEASE_STEPS } from '../../scripts/push-gate.ts';
 import { PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
+import { verifyAlignmentAfter, verifyAlignmentBefore, type GitProbe } from '../../scripts/pre-push-alignment.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const prePushHook = resolve(repoRoot, '.husky/pre-push');
@@ -261,24 +262,45 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
     });
   });
 
-  // A delete-only push is proved by the metadata test below. Each shape here carries at
-  // least one content update, and the strictest destination decides the tier.
+  // The installed hook always names the remote (.husky/pre-push), so these shapes run
+  // through the real alignment check, with git stubbed: the invoking HEAD is a…a and
+  // live main is c…c. A delete-only push is proved by the metadata test below.
+  const hookRemote = { remoteName: 'origin', remoteUrl: 'git@github.com:LucasQuiles/WhatSoup.git' };
+  const stubbedAlignmentGit: GitProbe = (args) => {
+    const key = args.join(' ');
+    const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+    if (key === 'remote get-url --push origin') return ok(`${hookRemote.remoteUrl}\n`);
+    if (key === 'rev-parse --verify HEAD') return ok(`${'a'.repeat(40)}\n`);
+    const commit = /^rev-parse --verify ([0-9a-f]{40})\^\{commit\}$/.exec(key);
+    if (commit) return ok(`${commit[1]}\n`);
+    if (key === 'status --porcelain=v2 -z --untracked-files=all') return ok();
+    if (key === `ls-remote --exit-code ${hookRemote.remoteUrl} refs/heads/main`) return ok(`${'c'.repeat(40)}\trefs/heads/main\n`);
+    if (key === `merge-base --is-ancestor ${'c'.repeat(40)} ${'a'.repeat(40)}`) return ok();
+    return { status: 2, stdout: '', stderr: `unexpected git call: ${key}` };
+  };
+  const realAlignment = {
+    verifyAlignmentBefore: (options: Parameters<typeof verifyAlignmentBefore>[0]) =>
+      verifyAlignmentBefore({ ...options, runGit: stubbedAlignmentGit }),
+    verifyAlignmentAfter: (receipt: Parameters<typeof verifyAlignmentAfter>[0], options: Parameters<typeof verifyAlignmentAfter>[1]) =>
+      verifyAlignmentAfter(receipt, { ...options, runGit: stubbedAlignmentGit }),
+  };
+
+  // One content commit: the strictest destination decides the tier.
   it.each([
-    ['two branches', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/b ${'b'.repeat(40)} refs/heads/b ${ZERO_SHA}`, 'branch', 'run verify:push:fast', 0],
     ['a branch and a delete', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/old ${ZERO_SHA} refs/heads/old ${'b'.repeat(40)}`, 'branch', 'run verify:push:fast', 0],
     ['a forced branch update', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${'b'.repeat(40)}`, 'branch', 'run verify:push:fast', 0],
-    ['a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'b'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
+    ['the same commit to a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'a'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
     ['a delete and main', `refs/heads/old ${ZERO_SHA} refs/heads/old ${'b'.repeat(40)}\nrefs/heads/main ${'a'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release', 'run verify:release', 1],
     ['a version tag', `refs/tags/v1.2.3 ${'a'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release', 'run verify:release', 1],
-    ['a branch and a version tag', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/tags/v1.2.3 ${'b'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release', 'run verify:release', 1],
-  ])('takes the strictest tier for %s', (_shape, input, expectedDecision, expectedCall, consoleChecks) => {
+  ])('takes the strictest tier for %s, through the real alignment check', (_shape, input, expectedDecision, expectedCall, consoleChecks) => {
     withStubNpm((callsLog) => {
       const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
       let checked = 0;
       try {
         expect(runPrePushGuard(input, repoRoot, {
           assertConsoleDependencies: () => { checked += 1; },
-        })).toBe(expectedDecision);
+          ...realAlignment,
+        }, hookRemote)).toBe(expectedDecision);
         const calls = readFileSync(callsLog, 'utf8').trim().split('\n');
         expect(calls[0]).toContain('run guard:git-estate -- guard --phase pre-push');
         expect(calls.slice(1)).toEqual([expectedCall]);
@@ -287,6 +309,39 @@ describe('pre-push guard runtime — fail-closed on empty stdin', () => {
         spy.mockRestore();
       }
     });
+  });
+
+  // Two distinct content commits cannot share one verification run, whatever their
+  // destinations: the hook refuses them before any verification step.
+  it.each([
+    ['two branches', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/b ${'b'.repeat(40)} refs/heads/b ${ZERO_SHA}`],
+    ['a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'b'.repeat(40)} refs/heads/main ${ZERO_SHA}`],
+    ['a branch and a version tag', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/tags/v1.2.3 ${'b'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`],
+  ])('refuses %s with two distinct commits before any verification step', (_shape, input) => {
+    withStubNpm((callsLog) => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let checked = 0;
+      try {
+        expect(() => runPrePushGuard(input, repoRoot, {
+          assertConsoleDependencies: () => { checked += 1; },
+          ...realAlignment,
+        }, hookRemote)).toThrow('exactly one candidate commit may share a verification run');
+        const calls = readFileSync(callsLog, 'utf8').trim().split('\n');
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toContain('run guard:git-estate -- guard --phase pre-push');
+        expect(checked).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  it.each([
+    ['two branches', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/b ${'b'.repeat(40)} refs/heads/b ${ZERO_SHA}`, 'branch'],
+    ['a branch and main', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/heads/main ${'b'.repeat(40)} refs/heads/main ${ZERO_SHA}`, 'release'],
+    ['a branch and a version tag', `refs/heads/a ${'a'.repeat(40)} refs/heads/a ${ZERO_SHA}\nrefs/tags/v1.2.3 ${'b'.repeat(40)} refs/tags/v1.2.3 ${ZERO_SHA}`, 'release'],
+  ])('still classifies %s by its strictest destination', (_shape, input, expectedDecision) => {
+    expect(classifyPrePushInput(input)).toBe(expectedDecision);
   });
 
   it('maps a symbolic HEAD push to its branch destination for lane exemption', () => {

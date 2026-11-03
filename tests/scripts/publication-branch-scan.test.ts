@@ -4,9 +4,10 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PNG_SIGNATURE, seededBinary } from '../helpers/seeded-binary.ts';
 import { trackTmpDirs } from '../helpers/tmp-dir.ts';
-import { cleanGitEnv, PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
-import { BRANCH_SCAN_LIMITS, scanBranchRange } from '../../scripts/lib/publication-branch-scan.ts';
+import { cleanGitEnv, createVerifiedBinaryCheck, PUSH_BASE_OID_ENV } from '../../scripts/lib/guard-core.ts';
+import { BRANCH_SCAN_LIMITS, isPublicationFixtureExempt, scanBranchRange } from '../../scripts/lib/publication-branch-scan.ts';
 import { runPublicationGuard, validateBranchDiff } from '../../scripts/publication-guard.ts';
 
 const tmp = trackTmpDirs('');
@@ -21,12 +22,32 @@ function gitOutput(repo: string, args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: cleanGitEnv() }).trim();
 }
 
-function commitFile(repo: string, filePath: string, text: string, message: string): string {
+function stageFile(repo: string, filePath: string, content: string | Buffer): void {
   mkdirSync(join(repo, filePath, '..'), { recursive: true });
-  writeFileSync(join(repo, filePath), text);
+  writeFileSync(join(repo, filePath), content);
   git(repo, ['add', filePath]);
+}
+
+function commitFile(repo: string, filePath: string, content: string | Buffer, message: string): string {
+  stageFile(repo, filePath, content);
   git(repo, ['commit', '-m', message]);
   return gitOutput(repo, ['rev-parse', 'HEAD']);
+}
+
+/** The guard's exit code, and the paths and codes of the issues it printed, each once. */
+function guardRun(repo: string, mode: '--staged' | '--branch-diff'): { code: number; paths: string[]; codes: string[] } {
+  vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const code = runPublicationGuard([mode], repo);
+  const issues = error.mock.calls
+    .map((call) => /^(\S+):\d+ \S+ (\S+):/.exec(String(call[0])))
+    .filter((match): match is RegExpExecArray => match !== null);
+  vi.restoreAllMocks();
+  return {
+    code,
+    paths: [...new Set(issues.map((match) => match[1]))].sort(),
+    codes: [...new Set(issues.map((match) => match[2]))].sort(),
+  };
 }
 
 /** A repository whose origin/main is its one base commit. */
@@ -84,6 +105,79 @@ describe('publication branch scan — files Git takes as binary', () => {
     expect(branchPatch(repo)).toContain('Binary files');
     expect(runPublicationGuard(['--branch-diff'], repo)).toBe(1);
     expect(error.mock.calls.join('\n')).toContain('local-home-path');
+  });
+});
+
+describe('publication scans — which paths they read', () => {
+  const homeLine = `# ${privatePath}\n`;
+  const flaggedAt = (filePath: string) => ({ code: 1, paths: [filePath], codes: ['local-home-path'] });
+
+  it.each([
+    ['a Python file', 'src/tool.py'],
+    ['an extensionless script', 'bin/run'],
+    ['an unlisted extension', 'assets/data.dat'],
+    ['a text file in a fixture area', 'tools/agent-runtime-probes/probe.ts'],
+    ['a fixture source file', 'scripts/repo-hygiene-guard.ts'],
+  ])('flags a workspace path in %s when staged, in the branch diff, and from history after removal', (_label, filePath) => {
+    const { repo } = branchRepo();
+    stageFile(repo, filePath, homeLine);
+    expect(guardRun(repo, '--staged')).toEqual(flaggedAt(filePath));
+    git(repo, ['commit', '-m', 'add literal']);
+    expect(guardRun(repo, '--branch-diff')).toEqual(flaggedAt(filePath));
+    commitFile(repo, filePath, '# clean\n', 'remove literal');
+    expect(guardRun(repo, '--branch-diff')).toEqual(flaggedAt(filePath));
+  });
+
+  it('keeps a fixture area on its earlier selection, and flags the same line in a file outside it', () => {
+    const { repo } = branchRepo();
+    const fixtures = ['tools/agent-runtime-probes/probe.py', 'tests/fixtures/redaction-parity-corpus.jsonl'];
+    for (const filePath of [...fixtures, 'src/probe.py']) stageFile(repo, filePath, homeLine);
+    expect(guardRun(repo, '--staged')).toEqual(flaggedAt('src/probe.py'));
+    git(repo, ['commit', '-m', 'add literals']);
+    expect(guardRun(repo, '--branch-diff')).toEqual(flaggedAt('src/probe.py'));
+    expect(fixtures.map(isPublicationFixtureExempt)).toEqual([true, true]);
+    expect(['tools/agent-runtime-probes/probe.ts', 'scripts/repo-hygiene-guard.ts', 'src/probe.py'].map(isPublicationFixtureExempt))
+      .toEqual([false, false, false]);
+  });
+
+  it('skips a verified image that carries a workspace path, and flags the same bytes under an unlisted name', () => {
+    const { repo } = branchRepo();
+    const bytes = seededBinary(PNG_SIGNATURE, [privatePath]);
+    stageFile(repo, 'assets/shot.PNG', bytes);
+    stageFile(repo, 'assets/shot.dat', bytes);
+    for (const mode of ['--staged', '--branch-diff'] as const) {
+      const result = guardRun(repo, mode);
+      expect(result.code).toBe(1);
+      expect(result.paths).toEqual(['assets/shot.dat']);
+      expect(result.codes).toContain('local-home-path');
+      if (mode === '--staged') git(repo, ['commit', '-m', 'add images']);
+    }
+  });
+
+  it('flags text that replaces a verified image, from the new blob, and from history once the image is back', () => {
+    const { repo } = branchRepo();
+    const filePath = 'assets/shot.png';
+    const image = seededBinary(PNG_SIGNATURE);
+    git(repo, ['update-ref', 'refs/remotes/origin/main', commitFile(repo, filePath, image, 'image at the base')]);
+
+    stageFile(repo, filePath, homeLine);
+    expect(guardRun(repo, '--staged')).toEqual(flaggedAt(filePath));
+    git(repo, ['commit', '-m', 'text under the image name']);
+    expect(guardRun(repo, '--branch-diff')).toEqual(flaggedAt(filePath));
+    commitFile(repo, filePath, image, 'image back');
+    expect(guardRun(repo, '--branch-diff')).toEqual(flaggedAt(filePath));
+  });
+
+  it('never takes a commit id, as a gitlink\'s index line gives, for a verified image', () => {
+    const { repo, baseOid } = branchRepo();
+    writeFileSync(join(repo, 'shot.png'), seededBinary(PNG_SIGNATURE));
+    const imageBlob = gitOutput(repo, ['hash-object', '-w', 'shot.png']);
+    const isVerifiedBinary = createVerifiedBinaryCheck(repo);
+
+    expect(isVerifiedBinary('vendor/sub.png', imageBlob)).toBe(true);
+    expect(isVerifiedBinary('vendor/sub.png', baseOid)).toBe(false);
+    expect(isVerifiedBinary('vendor/sub.png', undefined)).toBe(false);
+    expect(isVerifiedBinary('vendor/sub.dat', imageBlob)).toBe(false);
   });
 });
 

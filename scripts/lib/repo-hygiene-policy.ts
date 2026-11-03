@@ -38,6 +38,8 @@ export const fixtureFiles = new Set([
 // subtree as fixtures for these hygiene SHAPE patterns; the suite's own corpus_guard /
 // sensitive_pattern_loader covers its corpus. NOTE: no external secret scanner backstops this
 // repo (the repo hooksPath shadows the global git hooks) - keep exemptions minimal.
+// Shared by the repo-hygiene and publication scans; widening it widens both
+// (publication: scripts/lib/publication-branch-scan.ts isPublicationFixtureExempt).
 export const isFixtureFile = (filePath: string): boolean =>
   fixtureFiles.has(filePath)
   || filePath.startsWith('tools/agent-runtime-probes/');

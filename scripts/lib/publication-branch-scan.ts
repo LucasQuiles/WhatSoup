@@ -1,6 +1,17 @@
-import { DISCLOSURE_PATCH_FLAGS, git, isTextCandidate, normalizeRepoPath } from './guard-core.ts';
+import { createVerifiedBinaryCheck, DISCLOSURE_PATCH_FLAGS, git, isTextCandidate, normalizeRepoPath } from './guard-core.ts';
 import { MAX_EXACT_AGGREGATE_BLOB_BYTES, MAX_EXACT_BLOB_COUNT, MAX_EXACT_COMMIT_COUNT } from './ci-control/git-input.ts';
+import { isFixtureFile } from './repo-hygiene-policy.ts';
 import { baseRefFileLines, iterateUnifiedDiffAddedLines } from '../repo-hygiene-guard.ts';
+
+/**
+ * The publication scans read every path except a verified binary, with one exception:
+ * in the fixture areas repo hygiene exempts (isFixtureFile), whose corpora are secret-
+ * and path-shaped by design, they keep their earlier file selection (isTextCandidate).
+ * So a fixture area keeps exactly the publication coverage it had, and is never widened.
+ */
+export function isPublicationFixtureExempt(filePath: string): boolean {
+  return isFixtureFile(filePath) && !isTextCandidate(filePath);
+}
 
 export interface BranchScanLimits {
   commits: number;
@@ -60,8 +71,11 @@ function baseBlobByteCount(cwd: string, baseRef: string, filePath: string, timeo
  * A push discloses every commit, so this reads each commit's patch, merges
  * included and diffed against each parent. Every line the branch's final diff
  * adds is added by one of those patches, so no separate final diff is read.
- * DISCLOSURE_PATCH_FLAGS keep a file Git takes as binary in the patch as text,
- * and pin the output against user config, as do the flags beside them:
+ * Every path is scanned except a verified binary (createVerifiedBinaryCheck,
+ * the test the repo-hygiene scans use) and isPublicationFixtureExempt's fixture
+ * files. DISCLOSURE_PATCH_FLAGS keep a file Git
+ * takes as binary in the patch as text, give each file's new blob id for that
+ * test, and pin the output against user config, as do the flags beside them:
  * `log.diffMerges` can turn merges into a combined diff, and `diff.noprefix` or
  * `diff.dstPrefix` moves the path. Diffing a merge against a parent re-exposes
  * the other side's lines, so a matching line byte-identical to a line of the
@@ -106,13 +120,14 @@ export function scanBranchRange<Issue extends { line?: number }>(
     const patchStop = overLimit();
     if (patchStop) return patchStop;
 
+    const isVerifiedBinary = createVerifiedBinaryCheck(cwd);
     const matches = new Map<string, { filePath: string; line: number; text: string; found: Issue[] }>();
     for (const added of iterateUnifiedDiffAddedLines(patches)) {
       used.addedLines += 1;
       const lineStop = overLimit();
       if (lineStop) return lineStop;
       const filePath = normalizeRepoPath(added.filePath);
-      if (!isTextCandidate(filePath)) continue;
+      if (isPublicationFixtureExempt(filePath) || isVerifiedBinary(filePath, added.blob)) continue;
       const key = `${filePath}\0${added.text}`;
       if (matches.has(key)) continue;
       const found = scanLine(filePath, added.text);
