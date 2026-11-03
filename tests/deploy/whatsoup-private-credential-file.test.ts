@@ -5,6 +5,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { writeKeychainFixture } from './keychain-security-preload-fixture.ts';
+
 const repoRoot = path.resolve('.');
 const wrapperPath = path.join(repoRoot, 'deploy/whatsoup');
 const readerPath = path.join(repoRoot, 'deploy/lib/read-private-credential.mjs');
@@ -125,6 +127,9 @@ syncBuiltinESMExports();
 describe('deploy/whatsoup unscoped credential precedence', () => {
   function runLookup(scenario: 'file' | 'missing' | 'unsafe' | 'hard-link' | 'ancestor-symlink', scoped: boolean): { status: number; stdout: string; stderr: string; log: string } {
     const root = makeRoot();
+    const fixture = writeKeychainFixture(root);
+    const keychainAccount = scoped ? 'fixture-user' : os.userInfo().username;
+    const keychainResponses = JSON.stringify({ ['pinecone\u0000' + keychainAccount]: 'keychain-value\n' });
     const bin = path.join(root, 'bin');
     const config = path.join(root, 'config');
     const credentials = path.join(config, 'whatsoup', 'credentials');
@@ -152,10 +157,11 @@ describe('deploy/whatsoup unscoped credential precedence', () => {
     const script = path.join(root, 'lookup.sh');
     fs.writeFileSync(script, `#!/usr/bin/env bash
 set -u
+unset USER
 PATH=${JSON.stringify(bin)}:"$PATH"
 export LOOKUP_LOG=${JSON.stringify(logPath)}
 unset PINECONE_API_KEY
-NODE=${JSON.stringify(node)}
+NODE=${JSON.stringify(fixture.node)}
 SCRIPT_DIR=${JSON.stringify(path.join(repoRoot, 'deploy'))}
 XDG_CONFIG=${JSON.stringify(config)}
 . ${JSON.stringify(path.join(repoRoot, 'deploy/lib/bounded-exec.sh'))}
@@ -168,7 +174,17 @@ else
 fi
 `, 'utf8');
     fs.chmodSync(script, 0o700);
-    const result = spawnSync('/bin/bash', [script], { encoding: 'utf8' });
+    const result = spawnSync('/bin/bash', [script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_ARMED: '1',
+        WHATSOUP_TEST_KEYCHAIN_PROBE_LOG: path.join(root, 'keychain-probe.jsonl'),
+        WHATSOUP_TEST_KEYCHAIN_SECURITY_FIXTURE: fixture.securityFixture,
+        WHATSOUP_TEST_KEYCHAIN_PROBE_RESPONSES: keychainResponses,
+        WHATSOUP_TEST_KEYCHAIN_COMPAT_LOG: logPath,
+      },
+    });
     return {
       status: result.status ?? -1,
       stdout: result.stdout ?? '',

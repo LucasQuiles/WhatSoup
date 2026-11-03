@@ -5,7 +5,7 @@
   "entrypoints": [
     {
       "path": "src/main.ts",
-      "sha256": "f5908273fc4d342a93e76fbc4db487963dabc7a76ca0ed942dda3d9c3cd9c7fc",
+      "sha256": "05b46f2987b4a6b4a8afd4cb58169d5efb7d964d934030441c2c19e3be258270",
       "mustContain": [
         "startHealthServer",
         "createConnection"
@@ -84,7 +84,7 @@
     },
     {
       "path": "src/runtimes/agent/session.ts",
-      "sha256": "ef5adfd9902ec6bf9d7a1c47d08fa8824341b2ae73406643050129882c05b447",
+      "sha256": "75ecc59bf9a8776a5bc1bca86e11a2e0d52eb5dd14423fab67d49b3954436bd5",
       "mustContain": [
         "composeWithExactLineDedup",
         "managedTerminationUnknown",
