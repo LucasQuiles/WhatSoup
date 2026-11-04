@@ -1284,6 +1284,10 @@ policy and a transport-verified decision inbound. Only `open > 0` keeps `continu
 continuity part of `recovery_debt`; malformed, orphaned or conflicting closure rows make the ledger
 unreadable (top-level counts `null`, `recovery_debt` service-blocking), never zero debt.
 `turn_recovery_degraded` is derived independently and is not cleared by a closure.
+An `addressed` closure records the later live reissue and its linked terminal reply; its echoed or
+corroborated evidence does not prove recipient delivery or reading. Those outcomes remain unproven
+by the closure. A stored own-message row alone is insufficient: the non-self live inbound, exact
+terminal linkage, and context witness are still required.
 Admission blocks only `pending` or `claimed` jobs plus orphan transfers, and only on the affected
 per-chat or global scope. When the selected delivery is provably dead (`failed_permanent`/
 `quarantined`) the job can never echo-settle, so the stuck-inbound reclaim (§4.7) drives a

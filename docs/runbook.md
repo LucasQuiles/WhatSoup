@@ -2331,6 +2331,10 @@ evidence manifest: a manifest that calls an audio receipt `text` is rejected.
   An audio receipt also requires `original_media` and `transcript` files whose digests equal the
   `audio` hashes, with `enrichmentComplete: true`. A later reply, elapsed time, a generic recovery note,
   or replaying the historical text is not proof.
+  Here, `addressed` records closure through the live reissue and its linked terminal reply.
+  The echoed/corroborated proof does not establish recipient delivery or reading; those outcomes
+  remain unproven by this closure. A stored own-message row alone cannot replace the live inbound,
+  terminal record, or context witness.
 - **`declined`** (`proofKind: sender_declined` or `owner_declined`) requires `--policy` and a `decision`
   referencing a real decision inbound plus a `continuity-closure-decision.v1` record that binds the plan,
   receipt, inbound message hash and the SHA-256 of the inbound's exact text. `original_sender_inbound`
