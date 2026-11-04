@@ -45,7 +45,10 @@ vi.mock('../../../src/runtimes/agent/process-tree.ts', () => ({
   }),
 }));
 
-vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
+  readFileSync: vi.fn(),
+}));
 
 vi.mock('../../../src/runtimes/agent/session-db.ts', () => ({
   createSession: vi.fn(() => 42),

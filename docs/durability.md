@@ -49,7 +49,7 @@ Every message the bot sends is journaled in `outbound_ops` before the network ca
 
 When Baileys delivers an outgoing message, WhatsApp echoes it back on the same WebSocket connection with the same `message_id` it assigned to the send. WhatSoup captures this echo via `matchEcho(waMessageId)`:
 
-1. Look up `outbound_ops` for a row with `wa_message_id = ? AND status = 'submitted'`.
+1. Look up `outbound_ops` with the matching `wa_message_id` in `submitted`, `maybe_sent`, `quarantined`, or `failed_permanent` state.
 2. If found, call `markEchoed()`.
 3. If the op has `is_terminal = 1`, `markEchoed()` automatically calls `completeInbound()` on the linked inbound event.
 
