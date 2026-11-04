@@ -591,6 +591,44 @@ describe('OperationsAuthorityClient HTTP boundaries', () => {
 });
 
 describe('OperationsAuthorityClient ingress and receipt contract', () => {
+  it('discovers metadata and reads one exact approved transport operation', async () => {
+    const reference = { id: 'ready-1', digest: 'a'.repeat(64) };
+    const operation = { ...reference, account_id: 'pilot-account', action: 'whatsapp.send', state: 'approved',
+      payload: { recipient: 'third-party@s.whatsapp.net', content: { document: { $binary: 'bW1t' } } } };
+    const { client, calls } = clientWith([response(200, { items: [reference] }), response(200, { operation })]);
+    await expect(client.readyOperations()).resolves.toEqual([reference]);
+    await expect(client.readyOperation(reference)).resolves.toMatchObject({
+      ...reference, accountId: 'pilot-account', state: 'approved', payload: operation.payload,
+    });
+    expect(calls.map((call) => JSON.parse(String(call.init.body)))).toEqual([
+      { account_id: 'pilot-account' },
+      { account_id: 'pilot-account', operation_id: reference.id, payload_digest: reference.digest },
+    ]);
+    expect(calls.every((call) => call.url === 'https://authority.example/operations/transport/ready')).toBe(true);
+  });
+
+  it.each([
+    { items: [{ id: 'one', digest: 'digest' }, { id: 'one', digest: 'digest' }] },
+    { items: Array.from({ length: 101 }, (_, index) => ({ id: String(index), digest: 'digest' })) },
+    { items: [{ id: 'one' }] },
+    { items: [], operation: {} },
+  ])('rejects malformed ready-work discovery: %j', async (body) => {
+    const { client } = clientWith([response(200, body)]);
+    await expect(client.readyOperations()).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+  });
+
+  it.each([
+    { id: 'different' }, { digest: 'different' }, { account_id: 'different' },
+    { action: 'mail.send' }, { state: 'pending' }, { review_only: true },
+  ])('rejects a changed or non-dispatchable ready snapshot: %j', async (changed) => {
+    const reference = { id: 'ready-1', digest: 'a'.repeat(64) };
+    const { client } = clientWith([response(200, { operation: {
+      ...reference, account_id: 'pilot-account', action: 'whatsapp.send', state: 'approved',
+      payload: { recipient: 'third-party@s.whatsapp.net', content: { text: 'reviewed' } }, ...changed,
+    } })]);
+    await expect(client.readyOperation(reference)).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+  });
+
   const mediaInbound = {
     eventId: 'media-review', sender: '15551230000@s.whatsapp.net',
     conversation: '15551230000@s.whatsapp.net', receivedAt: '2026-11-02T14:30:00.000Z',

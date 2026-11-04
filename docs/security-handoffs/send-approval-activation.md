@@ -62,6 +62,21 @@ requires the complete frozen payload. Older authority responses containing
 binary data also take the Desk path. The client reads authority expiry times in
 milliseconds and retains compatibility with existing string expiry values.
 
+While the protected connection is open, a serial dispatcher collects at most
+100 approved operation references, then reads one frozen payload at a time.
+Desk approval therefore needs no second chat command. Discovery never claims an
+operation: the existing final socket gate checks its exact payload, current
+approval and account state immediately before submission. Competing consumers
+cannot claim the same operation twice. Close, shutdown and every reconnect
+cancel discovery and prevent late admission from starting a provider call.
+Authority wiring is permitted only before connection startup, so discovery and
+the socket gate cannot use different authority clients.
+An unavailable authority holds work and logs the error; it never enables a
+fallback send. Already submitted calls retain the existing unknown-outcome rules.
+If error reporting itself throws, the dispatcher stops and emits the fixed
+`TRANSPORT_DISPATCH_REPORTING_FAILED` process warning. Investigate the reporting
+failure before reconnecting or restarting the dispatcher.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
@@ -99,6 +114,8 @@ milliseconds and retains compatibility with existing string expiry values.
    WhatSoup's existing media limit is 50 MiB. The matching authority must accept
    that frozen payload through its bounded request parser and provide exact
    downloads in Desk, while keeping binary data out of transport review cards.
+   Verify the Desk decision through the installed transport dispatcher and final
+   gate with a fake provider, not just a direct admission request.
    Source tests do not establish installed parity. Rejected operations must
    remain visible and must never be truncated or submitted without review.
 

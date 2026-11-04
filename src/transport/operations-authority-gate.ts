@@ -434,7 +434,7 @@ function fromApprovedSnapshot(
 
 export async function retryApprovedWhatsappOperations(input: {
   accountId: string;
-  inboundEventId: string;
+  inboundEventId?: string;
   operations: TransportOperation[];
   send(recipient: string, content: unknown, options?: Record<string, unknown>): Promise<unknown>;
 }): Promise<void> {
@@ -445,7 +445,7 @@ export async function retryApprovedWhatsappOperations(input: {
     .map((operation) => ({ operation, payload: whatsappDispatchPayload(operation) }));
   for (const { operation, payload } of retries) {
     await withTransportInboundContext({
-      inbound_event_id: input.inboundEventId,
+      ...(input.inboundEventId === undefined ? {} : { inbound_event_id: input.inboundEventId }),
       operation_id: operation.id,
     }, () => input.send(payload.recipient, payload.content, payload.options));
   }
@@ -779,7 +779,7 @@ export class FinalTransportAuthorityGate implements OutboundAuthorityGate {
       recipient: input.recipient,
       content: frozen.approvalContent,
       ...(options === undefined ? {} : { options: options.approvalOptions }),
-      ...(activeInbound === undefined
+      ...(activeInbound?.inbound_event_id === undefined
         ? {}
         : { context: { inbound_event_id: activeInbound.inbound_event_id } }),
       ...(activeInbound?.operation_id === undefined

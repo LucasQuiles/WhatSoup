@@ -1,10 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-export interface TransportInboundContext {
-  readonly inbound_event_id: string;
-  /** Present only when authority has released this exact held operation. */
-  readonly operation_id?: string;
-}
+export type TransportInboundContext =
+  | { readonly inbound_event_id: string; readonly operation_id?: string }
+  /** Desk-approved work has no conversational inbound event to inherit. */
+  | { readonly inbound_event_id?: never; readonly operation_id: string };
 
 const inboundContext = new AsyncLocalStorage<TransportInboundContext | undefined>();
 

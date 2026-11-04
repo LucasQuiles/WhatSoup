@@ -67,6 +67,7 @@ vi.mock('../../src/config.ts', () => ({
     botName: 'WhatSoup',
     accessMode: 'allowlist',
     healthPort: 9090,
+    transportAuthority: { enabled: false, accountId: 'synthetic-account' },
     models: {
       conversation: 'claude-opus-4-5',
       extraction: 'claude-haiku-4-5',
@@ -2023,6 +2024,8 @@ describe('ConnectionManager — lifecycle edge coverage', () => {
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
 
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error('no approved work'); }),
       admit: vi.fn(async () => ({ attemptId: 'media-unknown-1', payloadDigest: 'sha256:media' })),
       recordReceipt: vi.fn(async () => undefined),
     };

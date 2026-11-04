@@ -94,6 +94,7 @@ import {
   type OutboundAuthorityGate,
 } from './operations-authority-gate.ts';
 import type { OperationsAuthorityPort } from './operations-authority-client.ts';
+import { ApprovedOperationDispatcher } from './approved-operation-dispatcher.ts';
 import { readWhatsoupGitSha } from '../lib/git-env.ts';
 
 export type { IncomingMessage } from '../core/types.ts';
@@ -775,6 +776,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
    */
   private outboundAuthorityGate: OutboundAuthorityGate | null;
   private operationsAuthority: OperationsAuthorityPort | null = null;
+  private approvedOperationDispatcher: ApprovedOperationDispatcher | null = null;
 
   /**
    * Injected send-seam content classifier (#1783). Wired by the composition root
@@ -797,8 +799,30 @@ export class ConnectionManager extends EventEmitter implements Messenger {
 
   /** Wire the protected authority client before connection startup. */
   setOperationsAuthorityClient(authority: OperationsAuthorityPort): void {
+    if (this.sock !== null || this.connectionState !== 'disconnected') {
+      throw new Error('protected authority must be wired before connection startup');
+    }
+    const accountId = config.transportAuthority?.accountId;
+    if (!accountId) throw new Error('protected authority account identity is unavailable');
+    this.approvedOperationDispatcher?.stop();
     this.operationsAuthority = authority;
     this.outboundAuthorityGate = new FinalTransportAuthorityGate(authority);
+    this.approvedOperationDispatcher = new ApprovedOperationDispatcher({
+      accountId,
+      authority,
+      send: async (recipient, content, options) => {
+        const socket = this.sock;
+        if (!socket || this.shuttingDown || this.connectionState !== 'connected') {
+          throw new Error('approved transport work cannot send while disconnected');
+        }
+        return options === undefined
+          ? socket.sendMessage(recipient, content as any)
+          : socket.sendMessage(recipient, content as any, options as any);
+      },
+      onError: (err, operationId) => {
+        this.log.error({ err, operationId }, 'approved transport dispatch held; no fallback send');
+      },
+    });
   }
 
   /** When true, incoming calls are automatically rejected via sock.rejectCall(). */
@@ -2465,6 +2489,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
       const lidBare = this.botLid ? bareNumber(this.botLid) : undefined;
       this.selfMentionRegexLid = (lidBare && lidBare !== bare) ? new RegExp(`@${lidBare}\\b`, 'g') : null;
       this.setConnectionState('connected');
+      this.approvedOperationDispatcher?.start();
       this.lastOpenAt = Date.now();
       this.startKeepalive(sock);
       this.captureAuthBondSnapshot('connection-open');
@@ -2478,6 +2503,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
     }
 
     if (connection === 'close') {
+      this.approvedOperationDispatcher?.stop();
       const statusCode: number | undefined = (lastDisconnect?.error as any)?.output?.statusCode;
       const reason = statusCode !== undefined ? (DisconnectReason[statusCode] ?? 'Unknown') : 'Unknown';
       const conflictType = extractStreamErrorConflictType(lastDisconnect);
@@ -3551,6 +3577,7 @@ export class ConnectionManager extends EventEmitter implements Messenger {
   }
 
   private setConnectionState(state: ConnectionLifecycleState): void {
+    if (state !== 'connected') this.approvedOperationDispatcher?.stop();
     if (this.connectionState === state) return;
     this.connectionState = state;
     this.stateChangedAt = Date.now();

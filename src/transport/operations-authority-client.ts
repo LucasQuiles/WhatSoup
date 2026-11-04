@@ -127,6 +127,11 @@ export interface TransportAutomationHold {
   reason: string;
 }
 
+export interface ReadyTransportReference {
+  id: string;
+  digest: string;
+}
+
 export type TransportInboundResponse =
   | {
     kind: 'inbound';
@@ -141,6 +146,8 @@ export type TransportInboundResponse =
 
 /** The narrow capability exposed to the final transport seam and inbound bridge. */
 export interface OperationsAuthorityPort {
+  readyOperations(signal?: AbortSignal): Promise<ReadyTransportReference[]>;
+  readyOperation(reference: ReadyTransportReference, signal?: AbortSignal): Promise<TransportOperation>;
   admit(input: TransportAdmissionInput): Promise<TransportAdmission>;
   recordReceipt(input: TransportReceiptInput): Promise<void>;
   registerInbound(input: TransportInboundInput): Promise<TransportInboundResponse>;
@@ -516,6 +523,40 @@ export class OperationsAuthorityClient implements OperationsAuthorityPort {
       throw new TransportAuthorityUnavailableError('transport authority account or credential is unavailable');
     }
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+  }
+
+  async readyOperations(signal?: AbortSignal): Promise<ReadyTransportReference[]> {
+    const response = await this.post('/operations/transport/ready', { account_id: this.options.accountId }, signal);
+    if (response.status !== 200 || !isRecord(response.body)
+      || Object.keys(response.body).length !== 1 || !Array.isArray(response.body['items'])
+      || response.body['items'].length > 100) {
+      throw new TransportAuthorityUnavailableError('transport authority ready list is malformed');
+    }
+    const items = response.body['items'].map((item): ReadyTransportReference => {
+      if (!isRecord(item) || Object.keys(item).length !== 2
+        || !nonEmptyString(item['id']) || !nonEmptyString(item['digest'])) {
+        throw new TransportAuthorityUnavailableError('transport authority ready reference is malformed');
+      }
+      return { id: item['id'], digest: item['digest'] };
+    });
+    if (new Set(items.map((item) => item.id)).size !== items.length) {
+      throw new TransportAuthorityUnavailableError('transport authority ready references are duplicated');
+    }
+    return items;
+  }
+
+  async readyOperation(reference: ReadyTransportReference, signal?: AbortSignal): Promise<TransportOperation> {
+    const response = await this.post('/operations/transport/ready', {
+      account_id: this.options.accountId, operation_id: reference.id, payload_digest: reference.digest,
+    }, signal);
+    const operation = isRecord(response.body) && Object.keys(response.body).length === 1
+      ? transportOperation(response.body['operation'], this.deskUrl) : null;
+    if (response.status !== 200 || operation === null || operation.accountId !== this.options.accountId
+      || operation.action !== 'whatsapp.send' || operation.state !== 'approved'
+      || operation.id !== reference.id || operation.digest !== reference.digest) {
+      throw new TransportAuthorityUnavailableError('transport authority ready snapshot is unavailable');
+    }
+    return operation;
   }
 
   async admit(input: TransportAdmissionInput): Promise<TransportAdmission> {
