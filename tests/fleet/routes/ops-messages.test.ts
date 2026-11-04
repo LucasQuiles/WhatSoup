@@ -22,6 +22,10 @@ import * as opsShim from '../../../src/fleet/routes/ops.ts';
 import type { OpsDeps } from '../../../src/fleet/routes/ops.ts';
 import type { DiscoveredInstance } from '../../../src/fleet/discovery.ts';
 import { proxyToInstance } from '../../../src/fleet/http-proxy.ts';
+import { Database } from '../../../src/core/database.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
+import { FleetDbReader } from '../../../src/fleet/db-reader.ts';
+import { handleGetChats } from '../../../src/fleet/routes/data.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
@@ -86,6 +90,48 @@ describe('ops-messages handlers', () => {
     expect([port, route, method, token]).toEqual([3010, '/send', 'POST', 'tok123']);
     expect(JSON.parse(forwarded as string).chatJid).toBe('15551230006@s.whatsapp.net');
     expect(deps.realtime.publish).toHaveBeenCalled();
+  });
+
+  it.each([
+    'iMessage;+;chat-example@imessage',
+    'abcdefghijklmnop==@signal',
+  ])('sends a listed transport group back to its original JID: %s', async (jid) => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const key = toConversationKey(jid);
+      db.raw.prepare(`INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(jid, key, 'participant', 'Pat Example', 'message-1', 'hello', 1712332800);
+      db.raw.prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
+        .run(jid, key, 'Project group');
+      const deps = depsFor(fakeInstance());
+      const listed = mockRes();
+      handleGetChats(mockReq(), listed, {
+        discovery: deps.discovery,
+        dbReader: new FleetDbReader('test-line', db.raw),
+      }, { name: 'test-line' });
+      expect(listed._status).toBe(200);
+      const chats = JSON.parse(listed._body);
+      expect(chats).toHaveLength(1);
+      expect(chats[0].conversationKey).toBe(key);
+
+      vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
+      const sent = mockRes();
+      await handleSend(mockReq({ method: 'POST', body: JSON.stringify({
+        chatJid: chats[0].conversationKey, text: 'reply',
+      }) }), sent, deps, { name: 'test-line' });
+
+      expect(sent._status).toBe(200);
+      expect(proxyToInstance).toHaveBeenCalledExactlyOnceWith(
+        3010, '/send', 'POST', JSON.stringify({ chatJid: jid, text: 'reply' }), 'tok123',
+      );
+      expect(chats[0]).toMatchObject({
+        isGroup: true, name: 'Project group', lastMessagePreview: 'Pat: hello',
+      });
+    } finally {
+      db.close();
+    }
   });
 
   it('access update rejects an invalid action with the unchanged 400 message', async () => {

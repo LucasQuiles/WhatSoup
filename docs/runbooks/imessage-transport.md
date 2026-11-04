@@ -136,6 +136,9 @@ are not groups. This applies the existing policies across consumers:
   ([#3847](https://github.com/LucasQuiles/WhatSoup/issues/3847)).
 - Outbound identity checks use explicit group approval; a warm direct-target
   record does not authorize a group. Group JIDs cannot be trusted DM peers.
+- Console group conversation keys retain their transport when converted back
+  to a send target. iMessage and Signal group keys use the shared group predicate;
+  direct and unknown keys retain their existing conversion behavior.
 
 The iMessage bridge exposes no Baileys socket, so the current memory membership
 reader cannot prove an owner-and-bots group. The shared identity resolver also
