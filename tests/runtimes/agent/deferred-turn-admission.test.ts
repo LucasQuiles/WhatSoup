@@ -381,12 +381,12 @@ registerInboundAuthorityCompletionCases({
       });
     });
   },
-  createHarness: () => {
+  createHarness: (sessionScope = 'per_chat') => {
     resetDoubles();
     const db = new Database(':memory:');
     db.open();
     const engine = new DurabilityEngine(db);
-    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { sessionScope: 'per_chat' });
+    const runtime = new AgentRuntime(db, makeMessenger(), 'test', { sessionScope });
     installFakePerChatMcpSocketManager(runtime);
     runtime.setDurability(engine);
     const ingest = createIngestHandler(db, makeMessenger(), runtime, () => '15550000@s.whatsapp.net', () => null, engine);

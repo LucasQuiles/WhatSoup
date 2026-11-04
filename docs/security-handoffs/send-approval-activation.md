@@ -42,16 +42,28 @@ error finalization, and settlement. Outbound chunks and buffered updates retain
 their own immutable context. Batching separates different inbound events and
 approved operations; an unbound item explicitly clears ambient authority. These
 queue checks do not establish provider callback ownership or platform isolation.
-Publishing queued work transfers completion ownership before ingest capacity is
-released. The exact queued admission retains that ownership through asynchronous
-preparation; local handling settles it, while a dispatched turn transfers it
-to the existing queue finalizer. A rejected admission finalizer retains completion.
+Publishing queued work transfers completion ownership while retaining the ingest
+slot until queue admission or local handling finishes. Single-session mode releases
+that slot at the provider boundary, after publishing its exact turn-completion
+owner; the serialized chain still waits for that turn. Followers waiting behind
+it consume bounded ingest capacity. A dispatched turn retains its inbound lease
+until the existing terminal finalizer settles, including single-session provider
+failure. A rejected admission finalizer retains completion.
 Admission rejection and shutdown finalize durable state before releasing inbound
 authority. Detached turns retain their original queue ownership through finalization
 or retained recovery; another queue cannot reuse them before settlement. Reentrant
 settlement is rejected. A failed processor finalizer or thrown finalization retains
 the inbound completion; the existing degraded-scope contract requires operator
 recovery or restart.
+
+This bounds waiting between ingest admission and runtime admission, not all
+registered leases or provider work. Registration RPCs and approved automation
+run before ingest; their capacity and ambiguous-close recovery remain unqualified.
+Existing ingest overflow selection is unchanged: displaced messages are neither
+stored nor dispatched. Protected control-message routing, overlapping duplicate
+close ownership, and cancellation before the single-session provider boundary
+still require separate end-to-end qualification. No fleet activation follows
+from the controlled runtime tests.
 
 Session-scoped provider events without verified turn identity remain unbound and
 enter human review. Verified per-turn callbacks retain their admitted context;

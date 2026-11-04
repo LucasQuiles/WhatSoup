@@ -4884,11 +4884,16 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
-    // Publishing work releases ingest capacity before queued admission can bind
-    // its completion. Retain that completion until this exact admission settles.
+    // Keep pre-admission work inside the ingest limit. Single scope has no
+    // TurnQueue, so its provider boundary releases admission separately from
+    // the exact queued work that still owns terminal completion.
     const finishAdmission = this.inboundTurnCompletions.holdForAdmission(msg.messageId);
+    let onAdmitted: (() => void) | undefined;
+    const admitted = finishAdmission && this.sessionScope === 'single'
+      ? new Promise<void>((resolve) => { onAdmitted = resolve; })
+      : undefined;
     const queuedWork = this.turnChain
-      .then(() => this._handleMessageInner(msg))
+      .then(() => this._handleMessageInner(msg, onAdmitted))
       .catch((err) => {
         // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
         // settlement of a turn the W2 sweep already terminalized, not a
@@ -4935,10 +4940,12 @@ export class AgentRuntime implements Runtime {
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
-    if (awaitQueuedRouteCommand) await queuedWork;
+    if (awaitQueuedRouteCommand || finishAdmission) {
+      await (admitted && !awaitQueuedRouteCommand ? Promise.race([queuedWork, admitted]) : queuedWork);
+    }
   }
 
-  private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
+  private async _handleMessageInner(msg: IncomingMessage, onAdmitted?: () => void): Promise<void> {
     let content = msg.content;
     const chatJid = msg.chatJid;
     // The key the inbound row was journaled under. A caller that journaled the
@@ -5568,7 +5575,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined);
+      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined, onAdmitted);
     }
   }
 
@@ -6069,6 +6076,7 @@ export class AgentRuntime implements Runtime {
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
     purpose?: SessionContext['purpose'],
+    onAdmitted?: () => void,
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -6123,13 +6131,25 @@ export class AgentRuntime implements Runtime {
             GLOBAL_TOOL_SCOPE_KEY,
             chatJid,
           );
+          onAdmitted?.();
           return;
         }
         this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(this.queue!, context);
         this.currentRuntimeTurnContext = context;
         this.pendingSingletonRuntimeTurnContext = null;
-        completion.value = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const turnCompletion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+        completion.value = {
+          ...turnCompletion,
+          resolve: () => {
+            turnCompletion.resolve();
+            // The coordinator calls resolve after terminal post-effects, even
+            // when provider failure has already released the serialized chain.
+            settleInbound?.();
+          },
+        };
         this.currentRuntimeTurnCompletion = completion.value;
+        onAdmitted?.();
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))

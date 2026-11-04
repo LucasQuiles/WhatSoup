@@ -18,12 +18,13 @@ interface SessionProbe {
   turnInFlight: boolean;
   turnsSent: unknown[];
   emit(event: { type: 'result'; text: string }): void;
+  failProviderTurn(error: unknown): void;
 }
 
 // Reuse the deferred-admission provider fixtures while keeping their test file
 // within its size budget. Production runtime, ingest and SQLite remain real.
 export function registerInboundAuthorityCompletionCases(fixtures: {
-  createHarness(): CompletionHarness;
+  createHarness(sessionScope?: 'single' | 'shared' | 'per_chat'): CompletionHarness;
   makeMsg(overrides: Partial<IncomingMessage>): IncomingMessage;
   sessions(): SessionProbe[];
   holdStartup(hold: Promise<void>, onEnter: () => void): void;
@@ -37,7 +38,7 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
     let shutdownVerified: boolean;
     const authority = {
       registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
-      closeInbound: vi.fn(async () => {}),
+      closeInbound: vi.fn(async (_input: { eventId: string }) => {}),
     };
 
     async function deliver(msg: IncomingMessage): Promise<void> {
@@ -70,7 +71,7 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       vi.restoreAllMocks();
     });
 
-    it('releases ingest capacity but retains authority through cold startup and provider settlement', async () => {
+    it('releases ingest capacity after queue admission but retains authority through cold startup and settlement', async () => {
       // Break caught: publishing queuedWork settles unadopted completion before bind.
       let release!: () => void;
       const startup = new Promise<void>((resolve) => { release = resolve; });
@@ -100,7 +101,7 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
         .get('authority-cold-start')).toEqual({ processing_status: 'failed' });
     });
 
-    it('keeps queued predecessors independent without retaining ingest capacity', async () => {
+    it('keeps queued predecessors independent within ingest capacity', async () => {
       const releases = new Map<string, () => void>();
       const holds = new Map(['authority-first', 'authority-second'].map((id) => [
         id,
@@ -120,9 +121,9 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       const second = deliver(makeMsg({ messageId: 'authority-second', content: '/help' }))
         .then(() => { secondSettled = true; });
       try {
-        await vi.waitFor(() => expect(db.raw.prepare('SELECT COUNT(*) AS n FROM inbound_events').get())
-          .toEqual({ n: 2 }));
-        await vi.waitFor(() => expect(getIngestStats().active).toBe(0));
+        await vi.waitFor(() => expect(getIngestStats().queued).toBe(1));
+        expect(db.raw.prepare('SELECT COUNT(*) AS n FROM inbound_events').get()).toEqual({ n: 1 });
+        expect(getIngestStats().active).toBe(1);
         expect(authority.closeInbound).not.toHaveBeenCalled();
         releases.get('authority-first')!();
         await first;
@@ -135,6 +136,102 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       }
       expect(authority.closeInbound).toHaveBeenCalledTimes(2);
       expect(authority.closeInbound).toHaveBeenLastCalledWith({ eventId: 'authority-second' });
+    });
+
+    async function useScope(scope: 'single' | 'shared' | 'per_chat'): Promise<void> {
+      if (scope === 'per_chat') return;
+      await runtime.shutdown();
+      db.close();
+      ({ db, engine, runtime, ingest } = fixtures.createHarness(scope));
+    }
+
+    it.each(['single', 'shared', 'per_chat'] as const)('bounds stalled %s admission and closes each displaced lease once', async (scope) => {
+      await useScope(scope);
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const host = runtime as unknown as {
+        _handleMessageInner(msg: IncomingMessage, onAdmitted?: () => void): Promise<void>;
+        inboundTurnCompletions: { completions: Map<string, unknown> };
+      };
+      const admit = host._handleMessageInner.bind(runtime);
+      const entered: string[] = [];
+      vi.spyOn(host, '_handleMessageInner').mockImplementation(async (msg, onAdmitted) => {
+        entered.push(msg.messageId);
+        await hold;
+        await admit(msg, onAdmitted);
+      });
+      const droppedBefore = getIngestStats().dropped;
+      const ids = Array.from({ length: 31 }, (_, i) => `authority-flood-${scope}-${i}`);
+      const handling: Promise<void>[] = [];
+      try {
+        for (const messageId of ids) {
+          handling.push(deliver(makeMsg({ messageId, content: '/help' })));
+          // Allow each arrival to finish its synchronous admission microtasks;
+          // a simultaneous burst alone would exercise only the overflow queue.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        expect(authority.registerInbound).toHaveBeenCalledTimes(31);
+        expect(getIngestStats()).toEqual({ active: 1, queued: 10, dropped: droppedBefore + 20 });
+        expect(host.inboundTurnCompletions.completions.size).toBe(1);
+        expect(entered).toEqual([ids[0]]);
+        expect(authority.closeInbound.mock.calls.map(([input]) => input.eventId).sort()).toEqual(ids.slice(1, 21).sort());
+        expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(0);
+      } finally {
+        release();
+        await Promise.all(handling);
+      }
+      expect(authority.closeInbound.mock.calls.map(([input]) => input.eventId).sort()).toEqual(ids.sort());
+      expect(db.raw.prepare("SELECT COUNT(*) AS n FROM inbound_events WHERE processing_status = 'complete'").get()).toEqual({ n: 11 });
+      expect(host.inboundTurnCompletions.completions.size).toBe(0);
+      expect(getIngestStats().active).toBe(0);
+      expect(getIngestStats().queued).toBe(0);
+    });
+
+    it.each(['single', 'shared', 'per_chat'] as const)('releases %s ingest capacity at provider admission while retaining its lease', async (scope) => {
+      await useScope(scope);
+      const messageId = `authority-provider-${scope}`;
+      const handling = deliver(makeMsg({ messageId }));
+      try {
+        await vi.waitFor(() => expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(1));
+        await vi.waitFor(() => expect(getIngestStats().active).toBe(0));
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+      } finally {
+        finishProviderTurns();
+        await handling;
+      }
+      expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
+      expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'failed' });
+    });
+
+    it('retains the single-scope lease while provider failure finalization is stalled', async () => {
+      await useScope('single');
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const messageId = 'authority-single-failure';
+      const handling = deliver(makeMsg({ messageId }));
+      await vi.waitFor(() => expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(1));
+      const queue = (runtime as unknown as {
+        queue: { flushTurnEvidence(turnId: string): Promise<unknown> };
+      }).queue;
+      const flush = vi.mocked(queue.flushTurnEvidence).getMockImplementation()!;
+      let finalizationEntered = false;
+      vi.spyOn(queue, 'flushTurnEvidence').mockImplementation(async (turnId) => {
+        finalizationEntered = true;
+        await hold;
+        return flush(turnId);
+      });
+      try {
+        fixtures.sessions()[0]!.failProviderTurn(new Error('injected provider failure'));
+        await vi.waitFor(() => expect(finalizationEntered).toBe(true));
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+      } finally {
+        release();
+        await vi.waitFor(() => expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'failed' }));
+        await handling;
+      }
+      expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
     });
 
     it('settles an empty inbound without leaking an authority lease', async () => {
@@ -162,7 +259,8 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
         .get('authority-after-shutdown')).toEqual({ processing_status: 'failed' });
     });
 
-    it('retains authority and reports unresolved shutdown after terminal persistence fails', async () => {
+    it.each(['single', 'per_chat'] as const)('retains %s authority and reports unresolved shutdown after terminal persistence fails', async (scope) => {
+      await useScope(scope);
       let settled = false;
       void deliver(makeMsg({ messageId: 'authority-retained-finalizer' })).then(() => { settled = true; });
       await vi.waitFor(() => expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(1));
@@ -210,7 +308,7 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       let shutdownFinished = false;
       const shutting = runtime.shutdown().then(() => { shutdownFinished = true; });
       try {
-        await vi.waitFor(() => expect(join).toHaveBeenCalled());
+        await new Promise<void>((resolve) => setImmediate(resolve));
         expect(shutdownFinished).toBe(false);
         expect(authority.closeInbound).not.toHaveBeenCalled();
       } finally {
@@ -218,6 +316,7 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
         await shutting;
         await handling;
       }
+      expect(join).toHaveBeenCalled();
       expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: 'authority-startup-shutdown' });
       expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(0);
       expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?')
