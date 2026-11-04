@@ -14,7 +14,7 @@ WhatSoup addresses this with a write-ahead journal approach: every outbound send
 
 1. **Crash during send** — the process dies after `sendMessage()` is called but before the echo arrives. The `sending → maybe_sent` promotion in pre-connect recovery captures this.
 
-2. **Echo never arrives** — the message was delivered but the WebSocket echo was lost (e.g., brief disconnect). The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this.
+2. **Echo never arrives** — no matching own-message echo was observed; the message may or may not have reached the recipient. The 30-second sweep (`sweepStaleSubmitted`) and post-connect reconciliation against the messages table handle this missing-evidence case under the recorded replay policy.
 
 3. **Interrupted inbound processing** — an incoming message started an agent turn but the process crashed before the terminal transaction. Recovery never blindly replays that prompt. A turn with exact immutable identity and unresolved delivery evidence can transfer to a proof-linked recovery job; an arbitrary open inbound with no provable owner is marked `failed` and remains operator-visible instead of risking duplicate provider or tool side effects.
 
@@ -390,9 +390,10 @@ bounds the class to one outstanding ping per chat; (3) **TTL age-out** — the d
 
 `preConnectRecovery` (§4.1) only runs at process start. An inbound row can also become
 stranded in a non-terminal `processing_status` **while the process is live** — for example a
-reply that was echoed (delivery confirmed) but whose linked-inbound completion step was
+reply whose own-message echo was recorded but whose linked-inbound completion step was
 missed (the QR-102 ordering strand), or a turn that finished with no reply and never
-finalized. Such a row never reaches `complete`/`failed`, so retention (which deletes only
+finalized. An echoed status records own-message observation, without proving recipient
+delivery. Such a row never reaches `complete`/`failed`, so retention (which deletes only
 terminal rows) never reclaims it. `sweepStuckInbound()` is the live counterpart to
 pre-connect recovery. It is wired in `main.ts` to run once at startup and then every
 **15 minutes**, and reconciles four buckets in a single transaction, plus a fifth that it only
