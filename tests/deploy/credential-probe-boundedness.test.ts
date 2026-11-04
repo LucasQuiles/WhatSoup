@@ -762,6 +762,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted)',
     '  kill() {',
     '    local kill_rc=0 polls=0',
+    // The worker's loop checks its command only after its USR1 trap returns; hold it there, out of read, for the driver's TERM.
+    '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
     '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
     '      outer_held=1',
     '      : > "$OUTER_HOLDING"',

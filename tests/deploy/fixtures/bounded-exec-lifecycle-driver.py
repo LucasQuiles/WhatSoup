@@ -458,6 +458,16 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 while not (root / 'guard-usr1-sent').exists() and child.poll() is None and time.monotonic() < usr1_deadline:
                     time.sleep(0.01)
                 if not (root / 'guard-usr1-sent').exists(): raise RuntimeError('guard USR1 unavailable')
+                # /bin/bash 3.2 runs a trap inside the signal handler while read
+                # waits, and after an exit from there it keeps doing so. A TERM
+                # landing in the USR1 trap can then leave malloc with its lock
+                # held, or one landing in a fork can allocate during it, and the
+                # worker aborts. The probe holds the worker out of read, past the
+                # return of its USR1 trap, so each TERM runs its trap normally.
+                resumed_deadline = time.monotonic() + 3
+                while not (root / 'worker-resumed-after-usr1').exists() and child.poll() is None and time.monotonic() < resumed_deadline:
+                    time.sleep(0.01)
+                if not (root / 'worker-resumed-after-usr1').exists(): raise RuntimeError('worker did not resume after USR1')
                 os.kill(worker, signal.SIGTERM)
             if mode.endswith('-cleanup-interrupted') or mode.startswith('authorization-valid-'):
                 # The probe holds the worker's cleanup at its first step. A TERM
