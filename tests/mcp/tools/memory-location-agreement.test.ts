@@ -399,6 +399,7 @@ describe('knowledge_search in configurable groups', () => {
     [GROUP_JID, pn(MEMBER_A), pn(MEMBER_B)],
     ['YWJjZGVmZ2hpamtsbW5vcA==@signal', `+${MEMBER_A}@signal`, `+${MEMBER_B}@signal`],
     ['iMessage;+;chat-example@imessage', `+${MEMBER_A}@imessage`, `+${MEMBER_B}@imessage`],
+    ['iMessage;+;chat-example@imessage', 'alice@one.example@imessage', 'alice@two.example@imessage'],
   ])('holds formatted memories to own/shared records for %s with unreadable membership', async (chatJid, actorJid, otherJid) => {
     const db = adminDb();
     try {

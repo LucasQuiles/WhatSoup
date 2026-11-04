@@ -134,6 +134,8 @@ are not groups. This applies the existing policies across consumers:
   `knowledge_search` excludes untagged and other-chat memories; chat-runtime
   recall excludes another member's private records
   ([#3847](https://github.com/LucasQuiles/WhatSoup/issues/3847)).
+  Sender matching preserves the complete canonical AppleID email and transport
+  suffix; equal email local parts in different domains remain different members.
 - Outbound identity checks use explicit group approval; a warm direct-target
   record does not authorize a group. Group JIDs cannot be trusted DM peers.
 - Console group conversation keys retain their transport when converted back

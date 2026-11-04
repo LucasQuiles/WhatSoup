@@ -539,6 +539,31 @@ describe('loadContext', () => {
     expect(result.text.includes('sender direct-chat secret')).toBe(operatorInstance);
   });
 
+  it.each(['one.example', 'two.example'])('keeps same-local-part AppleID memories private for %s', async (domain) => {
+    const chatJid = 'iMessage;+;chat-example@imessage';
+    const senderJid = `alice@${domain}@imessage`;
+    const own = makeResult('own-email', 'own AppleID private fact');
+    own.record.chatJid = chatJid;
+    own.record.senderJid = `Alice@${domain.toUpperCase()}@imessage`;
+    const other = makeResult('other-email', 'other AppleID private fact');
+    other.record.chatJid = chatJid;
+    other.record.senderJid = `alice@${domain === 'one.example' ? 'two.example' : 'one.example'}@imessage`;
+    const shared = makeResult('shared-email', 'shared group fact');
+    shared.record.chatJid = chatJid;
+    shared.record.memoryType = 'group_context';
+    const pinecone = makeMockPinecone([own, other, shared], []);
+    const boundary = chatRecallBoundary({
+      chatJid, senderJid, operatorInstance: false, adminPhones: new Set(), sharedWorkflowGroups: [],
+    });
+
+    const result = await loadContextDetailed(pinecone as any, chatJid, senderJid, 'query', undefined, boundary);
+
+    expect(boundary).toBe('group');
+    expect(result.text).toContain('own AppleID private fact');
+    expect(result.text).toContain('shared group fact');
+    expect(result.text).not.toContain('other AppleID private fact');
+  });
+
   it('holds the sender leg to this group when it may not cross chats, matching both key spellings', async () => {
     const fromDm = makeResult('s-dm', 'sender fact from their direct chat');
     fromDm.record.chatJid = '15550000002@s.whatsapp.net';
