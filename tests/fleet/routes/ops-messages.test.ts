@@ -26,6 +26,8 @@ import { Database } from '../../../src/core/database.ts';
 import { toConversationKey } from '../../../src/core/conversation-key.ts';
 import { FleetDbReader } from '../../../src/fleet/db-reader.ts';
 import { handleGetChats } from '../../../src/fleet/routes/data.ts';
+import { __resetAttemptedCacheForTests } from '../../../src/fleet/group-resolver.ts';
+import { mcpCall } from '../../../src/fleet/mcp-client.ts';
 import { makeDeps, mockReq, mockRes } from '../../helpers/http-mocks.ts';
 
 function fakeInstance(overrides: Partial<DiscoveredInstance> = {}): DiscoveredInstance {
@@ -51,6 +53,8 @@ function depsFor(instance: DiscoveredInstance): OpsDeps {
 describe('ops-messages handlers', () => {
   beforeEach(() => {
     vi.mocked(proxyToInstance).mockReset();
+    vi.mocked(mcpCall).mockReset();
+    __resetAttemptedCacheForTests();
   });
 
   it('are the same functions ops.ts re-exports', () => {
@@ -93,9 +97,11 @@ describe('ops-messages handlers', () => {
   });
 
   it.each([
-    'iMessage;+;chat-example@imessage',
-    'abcdefghijklmnop==@signal',
-  ])('sends a listed transport group back to its original JID: %s', async (jid) => {
+    ['iMessage;+;chat-example@imessage', 'Project group'],
+    ['abcdefghijklmnop==@signal', 'Project group'],
+    ['iMessage;+;chat-unnamed@imessage', null],
+    ['qrstuvwxyzabcdef==@signal', null],
+  ] as const)('sends a listed transport group back to its original JID: %s (name: %s)', async (jid, name) => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -104,7 +110,7 @@ describe('ops-messages handlers', () => {
         (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, timestamp)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(jid, key, 'participant', 'Pat Example', 'message-1', 'hello', 1712332800);
       db.raw.prepare('INSERT INTO chats (jid, conversation_key, name) VALUES (?, ?, ?)')
-        .run(jid, key, 'Project group');
+        .run(jid, key, name);
       const deps = depsFor(fakeInstance());
       const listed = mockRes();
       handleGetChats(mockReq(), listed, {
@@ -115,6 +121,8 @@ describe('ops-messages handlers', () => {
       const chats = JSON.parse(listed._body);
       expect(chats).toHaveLength(1);
       expect(chats[0].conversationKey).toBe(key);
+      expect(proxyToInstance).not.toHaveBeenCalled();
+      expect(mcpCall).not.toHaveBeenCalled();
 
       vi.mocked(proxyToInstance).mockResolvedValue({ status: 200, body: '{"ok":true}' });
       const sent = mockRes();
@@ -127,8 +135,36 @@ describe('ops-messages handlers', () => {
         3010, '/send', 'POST', JSON.stringify({ chatJid: jid, text: 'reply' }), 'tok123',
       );
       expect(chats[0]).toMatchObject({
-        isGroup: true, name: 'Project group', lastMessagePreview: 'Pat: hello',
+        isGroup: true, name: name ?? 'Pat Example', lastMessagePreview: 'Pat: hello',
       });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('still backfills an unnamed WhatsApp group while returning its participant fallback', () => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const jid = 'backfill-room@g.us';
+      const key = toConversationKey(jid);
+      db.raw.prepare(`INSERT INTO messages
+        (chat_jid, conversation_key, sender_jid, sender_name, message_id, content, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(jid, key, 'participant', 'Pat Example', 'wa-message', 'hello', 1712332800);
+      vi.mocked(proxyToInstance).mockResolvedValue({ status: 503, body: '{}' });
+      const listed = mockRes();
+      handleGetChats(mockReq(), listed, {
+        discovery: depsFor(fakeInstance()).discovery,
+        dbReader: new FleetDbReader('test-line', db.raw),
+      }, { name: 'test-line' });
+
+      expect(listed._status).toBe(200);
+      expect(JSON.parse(listed._body)).toMatchObject([
+        { conversationKey: key, isGroup: true, name: 'Pat Example', lastMessagePreview: 'Pat: hello' },
+      ]);
+      expect(proxyToInstance).toHaveBeenCalledExactlyOnceWith(
+        3010, '/group-metadata', 'POST', JSON.stringify({ groupJid: jid }), 'tok123',
+      );
     } finally {
       db.close();
     }

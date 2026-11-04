@@ -139,6 +139,9 @@ are not groups. This applies the existing policies across consumers:
 - Console group conversation keys retain their transport when converted back
   to a send target. iMessage and Signal group keys use the shared group predicate;
   direct and unknown keys retain their existing conversion behavior.
+- Unnamed iMessage and Signal groups use participant names, or the conversation
+  key when no names are available. Their chat-list entries do not request
+  WhatsApp group metadata; unnamed WhatsApp groups still use background backfill.
 
 The iMessage bridge exposes no Baileys socket, so the current memory membership
 reader cannot prove an owner-and-bots group. The shared identity resolver also
