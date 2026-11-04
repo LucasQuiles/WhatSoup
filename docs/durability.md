@@ -255,7 +255,7 @@ For each `maybe_sent` op (including those promoted in Step 1):
   - Found: `markEchoed()` — the message was delivered and stored by normal ingest. This also completes the linked inbound event if the op is terminal.
   - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe`: `markQuarantined()`.
-- **No `wa_message_id`** (send never reached WhatsApp): the message was definitely not delivered.
+- **No `wa_message_id`**: provider/echo correlation is unknown. The send may have reached the provider before failing or before its ID was persisted; absence of an ID does not prove non-delivery.
   - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe`: `markQuarantined()`.
 
