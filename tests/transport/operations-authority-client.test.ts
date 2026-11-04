@@ -9,6 +9,7 @@ import {
   createProtectedOperationsAuthorityClient,
 } from '../../src/transport/operations-authority-client.ts';
 import { runWithTransportSendDeadline } from '../../src/transport/send-deadline.ts';
+import { renderTransportReviewCard } from '../../src/transport/operations-authority-gate.ts';
 
 type Call = { url: string; init: RequestInit };
 const tmpDirs = trackTmpDirs('operations-authority-client');
@@ -590,6 +591,112 @@ describe('OperationsAuthorityClient HTTP boundaries', () => {
 });
 
 describe('OperationsAuthorityClient ingress and receipt contract', () => {
+  const mediaInbound = {
+    eventId: 'media-review', sender: '15551230000@s.whatsapp.net',
+    conversation: '15551230000@s.whatsapp.net', receivedAt: '2026-11-02T14:30:00.000Z',
+    text: '/review media-operation',
+  };
+  const mediaOperation = {
+    id: 'media-operation', account_id: 'pilot-account', action: 'whatsapp.send',
+    digest: 'a'.repeat(64), state: 'pending',
+  };
+  const mediaReview = (operation: Record<string, unknown>) => ({
+    kind: 'review', review: {
+      challenge: 'media-challenge', items: [{ id: 'media-operation', digest: 'a'.repeat(64) }],
+      previews: [operation], expires_at: '2026-11-02T15:00:00.000Z',
+      desk_url: 'https://untrusted.example/agent-controlled',
+    },
+  });
+
+  it.each([3, 50 * 1024 * 1024])('routes legacy %i-byte media to the trusted Desk before serializing a card', async (size) => {
+    const binary = Buffer.alloc(size, 109).toString('base64');
+    const { client } = clientWith([response(200, mediaReview({
+      ...mediaOperation, payload: { recipient: '15551230000@s.whatsapp.net', content: { document: { $binary: binary } } },
+    }))]);
+    const result = await client.registerInbound(mediaInbound);
+    expect(result.kind).toBe('review');
+    if (result.kind !== 'review') throw new Error('expected a review');
+    Object.defineProperty(result.review.previews[0]!.payload, 'toJSON', {
+      value: () => { throw new Error('raw media must never be serialized into a human review card'); },
+    });
+    const card = renderTransportReviewCard(result.review);
+    expect(card).toContain('https://authority.example/operation-review');
+    expect(card).not.toContain('untrusted.example');
+    expect(card).not.toContain('/approve');
+    expect(card).not.toContain('/reject');
+    expect(card).not.toContain('$binary');
+    expect(card).not.toContain(binary.slice(0, 20));
+    expect(card.length).toBeLessThan(1000);
+  });
+
+  it('accepts a payload-free media review only as a Desk referral', async () => {
+    const { client } = clientWith([response(200, mediaReview({
+      ...mediaOperation, review_only: true,
+      preview: { recipient: '15551230000@s.whatsapp.net', attachments: [{ index: 0, size: 3, sha256: 'b'.repeat(64) }] },
+    }))]);
+    const result = await client.registerInbound(mediaInbound);
+    expect(result.kind).toBe('review');
+    if (result.kind !== 'review') throw new Error('expected a review');
+    expect(result.review.previews[0]).toMatchObject({ reviewOnly: true, payload: {} });
+    const card = renderTransportReviewCard(result.review);
+    expect(card).toContain('https://authority.example/operation-review');
+    expect(card).not.toContain('/approve');
+  });
+
+  it('reads the authority millisecond review expiry without weakening malformed-value rejection', async () => {
+    const review = mediaReview({
+      ...mediaOperation, review_only: true,
+      preview: { recipient: '15551230000@s.whatsapp.net', attachments: [{ index: 0, size: 3, sha256: 'b'.repeat(64) }] },
+    });
+    const { client } = clientWith([
+      response(200, { ...review, review: { ...review.review, expires_at: 1793750400000 } }),
+      ...[-1, 1.5, Number.MAX_SAFE_INTEGER, null, true].map((expires_at) => response(200, { ...review, review: { ...review.review, expires_at } })),
+    ]);
+    const result = await client.registerInbound(mediaInbound);
+    expect(result).toMatchObject({ kind: 'review', review: { expiresAt: '2026-11-04T00:00:00.000Z' } });
+    for (let index = 0; index < 5; index += 1) {
+      await expect(client.registerInbound(mediaInbound)).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+    }
+  });
+
+  it.each([
+    { review_only: false },
+    { state: 'approved' },
+    { action: 'whatsapp.control_receipt' },
+    { payload: {} },
+    { preview: { recipient: '15551230000@s.whatsapp.net', attachments: [] } },
+    { preview: { recipient: '', attachments: [{ index: 0 }] } },
+  ])('rejects malformed media review projections: %j', async (invalid) => {
+    const { client } = clientWith([response(200, mediaReview({
+      ...mediaOperation, review_only: true,
+      preview: { recipient: '15551230000@s.whatsapp.net', attachments: [{ index: 0 }] },
+      ...invalid,
+    }))]);
+    await expect(client.registerInbound(mediaInbound)).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+  });
+
+  it('holds mixed reviews with nested binary options when no trusted Desk is available', async () => {
+    const { client } = clientWith([response(200, mediaReview({
+      ...mediaOperation, payload: { recipient: '15551230000@s.whatsapp.net', content: { text: 'caption' },
+        options: { nested: { thumbnail: { $binary: 'bW1t' } } } },
+    }))]);
+    const result = await client.registerInbound(mediaInbound);
+    if (result.kind !== 'review') throw new Error('expected a review');
+    const textOperation = { ...result.review.previews[0]!, id: 'text-operation', payload: { content: { text: 'ordinary' } } };
+    result.review.previews.unshift(textOperation);
+    result.review.items.unshift({ id: textOperation.id, digest: textOperation.digest });
+    expect(renderTransportReviewCard(result.review)).not.toContain('/approve');
+    delete result.review.deskUrl;
+    expect(() => renderTransportReviewCard(result.review)).toThrow(TransportAuthorityUnavailableError);
+  });
+
+  it.each(['decision', 'inbound', 'paused'])('rejects a review-only record in the %s execution response', async (kind) => {
+    const operation = { ...mediaOperation, state: 'approved', review_only: true,
+      payload: { recipient: '15551230000@s.whatsapp.net', content: { text: 'must not dispatch' } } };
+    const { client } = clientWith([response(200, { kind, operations: [operation], automation_operations: [operation], receipt: operation })]);
+    await expect(client.registerInbound(mediaInbound)).rejects.toBeInstanceOf(TransportAuthorityUnavailableError);
+  });
+
   it('submits authenticated inbound text and returns a server-bound review instruction', async () => {
     // Break caught: letting a model parse a review command or compose the
     // selection would turn a human approval path into agent-controlled input.
@@ -631,6 +738,7 @@ describe('OperationsAuthorityClient ingress and receipt contract', () => {
           state: 'held',
         }],
         expiresAt: '2026-11-02T15:00:00.000Z',
+        deskUrl: 'https://authority.example/operation-review',
       },
     });
 

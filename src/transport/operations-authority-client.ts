@@ -8,9 +8,8 @@ export const TRANSPORT_AUTHORITY_ADAPTER_VERSION = 1;
 
 const AUTHORITY_REQUEST_TIMEOUT_MS = 5_000;
 // An authority operation can carry the established 50 MiB media payload as
-// base64 (~66.7 MiB) plus snapshot metadata. Agent365 still has a separate
-// 1 MiB request cap, so activation needs positive parity proof before media
-// operations can use this envelope end to end.
+// base64 (~66.7 MiB) plus snapshot metadata. Activation still requires
+// installed client/authority parity proof within the unchanged deadline.
 const AUTHORITY_RESPONSE_MAX_BYTES = 100 * 1024 * 1024;
 // The snapshot gate accepts depth 64 and 10,000 nodes. Leave room for the
 // response envelope while stopping JSON.parse from creating a hostile graph.
@@ -108,6 +107,8 @@ export interface TransportOperation {
   payload: Record<string, unknown>;
   digest: string;
   state: string;
+  /** A review projection cannot supply bytes to an execution path. */
+  reviewOnly?: boolean;
   /** Required for mail.send review operations, absent for non-mail operations. */
   preview?: MailSendPreview;
 }
@@ -117,6 +118,8 @@ export interface TransportReview {
   items: Array<{ id: string; digest: string }>;
   previews: TransportOperation[];
   expiresAt: string;
+  /** Derived from the configured authority origin, never a response field. */
+  deskUrl?: string;
 }
 
 export interface TransportAutomationHold {
@@ -386,18 +389,25 @@ function mailPreview(value: unknown, deskUrl: string): MailSendPreview | null {
   };
 }
 
-function transportOperation(value: unknown, deskUrl: string): TransportOperation | null {
+function transportOperation(value: unknown, deskUrl: string, allowReviewOnly = false): TransportOperation | null {
   if (!isRecord(value)
     || !nonEmptyString(value['id'])
     || !nonEmptyString(value['account_id'])
     || !nonEmptyString(value['action'])
     || !nonEmptyString(value['digest'])
-    || !nonEmptyString(value['state'])
-    || !isRecord(value['payload'])) {
+    || !nonEmptyString(value['state'])) {
     return null;
   }
-  if ((value['action'] === 'whatsapp.send' || value['action'] === 'whatsapp.control_receipt')
-    && (!nonEmptyString(value['payload']['recipient']) || !Object.hasOwn(value['payload'], 'content'))) return null;
+  const reviewOnly = Object.hasOwn(value, 'review_only');
+  if (reviewOnly && (!allowReviewOnly || value['review_only'] !== true
+    || value['action'] !== 'whatsapp.send' || value['state'] !== 'pending'
+    || Object.hasOwn(value, 'payload') || !isRecord(value['preview'])
+    || !nonEmptyString(value['preview']['recipient'])
+    || !Array.isArray(value['preview']['attachments']) || value['preview']['attachments'].length === 0)) return null;
+  const payload = reviewOnly ? {} : value['payload'];
+  if (!isRecord(payload)) return null;
+  if (!reviewOnly && (value['action'] === 'whatsapp.send' || value['action'] === 'whatsapp.control_receipt')
+    && (!nonEmptyString(payload['recipient']) || !Object.hasOwn(payload, 'content'))) return null;
   if (value['action'] === 'mail.send' && Object.hasOwn(value, 'preview_error')) return null;
   const preview = value['action'] === 'mail.send' ? mailPreview(value['preview'], deskUrl) : undefined;
   if (value['action'] === 'mail.send' && preview === null) return null;
@@ -405,16 +415,17 @@ function transportOperation(value: unknown, deskUrl: string): TransportOperation
     id: value['id'],
     accountId: value['account_id'],
     action: value['action'],
-    payload: value['payload'],
+    payload,
     digest: value['digest'],
     state: value['state'],
+    ...(reviewOnly ? { reviewOnly: true } : {}),
     ...(preview === undefined || preview === null ? {} : { preview }),
   };
 }
 
-function transportOperations(value: unknown, deskUrl: string): TransportOperation[] | null {
+function transportOperations(value: unknown, deskUrl: string, allowReviewOnly = false): TransportOperation[] | null {
   if (!Array.isArray(value)) return null;
-  const operations = value.map((operation) => transportOperation(operation, deskUrl));
+  const operations = value.map((operation) => transportOperation(operation, deskUrl, allowReviewOnly));
   return operations.every((operation): operation is TransportOperation => operation !== null)
     ? operations
     : null;
@@ -449,7 +460,12 @@ function inboundResponse(value: unknown, deskUrl: string): TransportInboundRespo
   }
   if (value['kind'] !== 'review' || !isRecord(value['review'])) return null;
   const review = value['review'];
-  if (!nonEmptyString(review['challenge']) || !nonEmptyString(review['expires_at']) || !Array.isArray(review['items'])) {
+  const expiry = review['expires_at'];
+  const expiresAt = typeof expiry === 'number' && Number.isSafeInteger(expiry)
+    && expiry >= 0 && expiry <= 8_640_000_000_000_000
+    ? new Date(expiry).toISOString()
+    : nonEmptyString(expiry) ? expiry : null;
+  if (!nonEmptyString(review['challenge']) || expiresAt === null || !Array.isArray(review['items'])) {
     return null;
   }
   const items = review['items'].map((item) => {
@@ -457,7 +473,7 @@ function inboundResponse(value: unknown, deskUrl: string): TransportInboundRespo
     return { id: item['id'], digest: item['digest'] };
   });
   if (!items.every((item): item is { id: string; digest: string } => item !== null)) return null;
-  const previews = transportOperations(review['previews'], deskUrl);
+  const previews = transportOperations(review['previews'], deskUrl, true);
   if (previews === null || previews.length !== items.length) return null;
   const previewsById = new Map(previews.map((preview) => [preview.id, preview]));
   if (previewsById.size !== previews.length
@@ -468,7 +484,8 @@ function inboundResponse(value: unknown, deskUrl: string): TransportInboundRespo
       challenge: review['challenge'],
       items,
       previews,
-      expiresAt: review['expires_at'],
+      expiresAt,
+      deskUrl,
     },
   };
 }

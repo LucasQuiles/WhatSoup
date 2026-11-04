@@ -55,6 +55,13 @@ stale callbacks cannot acquire a later turn's authority. Aggregated voice replie
 also enter review because their text accumulator does not retain per-fragment
 provenance. The complete frozen audio remains available for exact approval.
 
+File reviews direct the human to the configured Agent365 Desk before rendering
+any binary content. These cards contain no inline approval command. The client
+accepts payload-free media projections only in review responses; dispatch still
+requires the complete frozen payload. Older authority responses containing
+binary data also take the Desk path. The client reads authority expiry times in
+milliseconds and retains compatibility with existing string expiry values.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
@@ -88,10 +95,11 @@ provenance. The complete frozen audio remains available for exact approval.
 5. Keep authority activation refused until all requirements above have
    independently demonstrated the desired behavior. The refusal is intentional
    and must not be weakened to make a pilot appear available.
-6. Qualify large-media request and review parity. WhatSoup's existing media
-   limit is 50 MiB, while the current Agent365 middleware rejects ordinary
-   requests declaring more than 1 MiB. Bounded snapshot allocation does not
-   prove those larger operations work end to end. Rejected operations must
+6. Qualify large-media request and review parity on the installed packages.
+   WhatSoup's existing media limit is 50 MiB. The matching authority must accept
+   that frozen payload through its bounded request parser and provide exact
+   downloads in Desk, while keeping binary data out of transport review cards.
+   Source tests do not establish installed parity. Rejected operations must
    remain visible and must never be truncated or submitted without review.
 
 ## Acceptance evidence
