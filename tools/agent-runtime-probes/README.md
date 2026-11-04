@@ -252,15 +252,21 @@ Missing managed-policy candidates are omitted by default and included only with
 redaction posture.
 
 
-## Historical unverified closures in J1 inventory
+## Historical auto-closes in J1 inventory
 
-The additive `metrics.incident_inventory.historical_unverified_autoclose` object
-reports retained `staleAutocloseHistory` diagnostics. These are historical unverified
-closures, not current unresolved failures. The dispatcher owns and prunes this state;
+The additive `metrics.incident_inventory.historical_autoclose` object
+reports retained `staleAutocloseHistory` diagnostics. The retained rows include
+verified recovery and unverified age-out closures; their stored reason does not
+distinguish these paths. This gauge describes all retained auto-closes, not current
+unresolved failures. The dispatcher owns and prunes this state;
 the collector only reads it. Treat the counts as gauges: do not diff them between
 bundles or add them to the open-incident count.
 
 - `count` counts stored history entries, including malformed entries.
+- `scan_limit` is 1,000 entries. Larger history sets `truncated` to true and
+  `rows_scanned` to zero. Its entry count remains exact, but all detail aggregates
+  (`daily_health_fail_count`, `oldest_age_days`, `rows_skipped`, `future_count`)
+  are null. The collector does not present an arbitrary subset as a complete gauge.
 - `daily_health_fail_count` counts object entries whose source begins with
   `daily-health-fail:`. It does not prove a bounded hold-cap closure.
 - `oldest_age_days` uses the oldest positive integer `closedAt` at or before the
@@ -270,6 +276,19 @@ bundles or add them to the open-incident count.
 - An absent history field means an empty history. A present nonobject history sets
   `history_malformed` and leaves counts and age null. Missing or unreadable state
   still fails the entire section; it is never reported as zero.
+
+The inventory section reads at most 8 MiB plus one sentinel byte from the incident
+state file before parsing JSON. A larger file fails the section; the parser reports
+unknown inventory and includes `incident-inventory` in `failed_sections`. This bound
+applies to this section, not to the collector's other planes. Backfill inherits the
+same bound. The draft field name `historical_unverified_autoclose` is replaced by
+`historical_autoclose`; consumers must use the truthful name before installation.
+
+The inventory and producer-to-collector regressions live in
+`deploy/scripts/tests/test_bot_errors_j1_inventory.py` and
+`deploy/scripts/tests/test_bot_errors_autoclose_honesty.py`. Required quality CI
+selects both through `run-bot-errors-full-suite.sh`; no manual probe-suite invocation
+is needed to include these cases.
 
 The output has fixed fields and includes no history keys or evidence. Ages compare
 the dispatcher clock with the collector interval end; clock skew remains a limit.

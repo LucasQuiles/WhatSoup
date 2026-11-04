@@ -113,22 +113,6 @@ def _sha(path):
 # ----------------------------------------------------------------------------- section reuse
 
 
-def test_reconstructed_history_age_uses_forensics_copy_time(tmp_path):
-    copy_t = T0 + 1800
-    store = _store(0, T0)
-    store["staleAutocloseHistory"] = {
-        "prior": {"closedAt": copy_t - 86400, "source": "daily-health-fail:a"},
-        "future": {"closedAt": copy_t + 1},
-    }
-    (tmp_path / "incident-state.json").write_text(json.dumps(store))
-    facts, source = b.reconstruct_inventory(T0, [(copy_t, str(tmp_path))], 3600)
-    assert facts["historical_unverified_autoclose"] == {
-        "count": 2, "daily_health_fail_count": 1, "oldest_age_days": 1.0,
-        "rows_skipped": 0, "future_count": 1, "history_malformed": False,
-    }
-    assert source["copy_utc"] == _iso(copy_t)
-
-
 def test_section_script_extracts_exactly_the_alert_host_blocks():
     d = c.section_script("dispatch-outcomes")
     i = c.section_script("incident-inventory")

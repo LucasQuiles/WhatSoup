@@ -192,16 +192,24 @@ python3 - "$STATE" "$ST" "$EN" <<'PY'
 import json, os, sys
 S, ST, EN = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 TOP_N, FLAP_N = 10, 8
+MAX_STATE_BYTES, MAX_HISTORY_ROWS = 8 * 1024 * 1024, 1000
 def is_int(v): return isinstance(v, int) and not isinstance(v, bool)
-d = json.load(open(os.path.join(S, "incident-state.json")))
+with open(os.path.join(S, "incident-state.json"), "rb") as fh:
+    raw = fh.read(MAX_STATE_BYTES + 1)
+if len(raw) > MAX_STATE_BYTES:
+    raise SystemExit("incident inventory state exceeds 8388608-byte limit")
+d = json.loads(raw)
 oi = d.get("openIncidents") if isinstance(d.get("openIncidents"), dict) else {}
 fs = d.get("flapState") if isinstance(d.get("flapState"), dict) else {}
 # History is a retained diagnostic gauge, not a count of unresolved conditions.
 history = d.get("staleAutocloseHistory", {})
 historical = {"count": None, "daily_health_fail_count": None, "oldest_age_days": None,
-              "rows_skipped": None, "future_count": None, "history_malformed": not isinstance(history, dict)}
+              "rows_skipped": None, "future_count": None, "history_malformed": not isinstance(history, dict),
+              "rows_scanned": 0, "scan_limit": MAX_HISTORY_ROWS, "truncated": False}
 if isinstance(history, dict):
-    historical.update(count=len(history), daily_health_fail_count=0, rows_skipped=0, future_count=0)
+    historical.update(count=len(history), truncated=len(history) > MAX_HISTORY_ROWS)
+if isinstance(history, dict) and not historical["truncated"]:
+    historical.update(daily_health_fail_count=0, rows_skipped=0, future_count=0, rows_scanned=len(history))
     oldest = None
     for v in history.values():
         if not isinstance(v, dict):
@@ -262,7 +270,7 @@ for k, v in fs.items():
     flap.append({"key": str(k)[:120], "cumulative": cc, "trips_in_window": inwin, "window_complete": complete})
 flap.sort(key=lambda r: (-r["cumulative"], r["key"]))
 out = {"open": len(oi), "rows_skipped": skipped, "status": status, "age_days_p50": pct(ages, 0.5), "age_days_p90": pct(ages, 0.9), "age_days_max": pct(ages, 1.0),
-       "historical_unverified_autoclose": historical,
+       "historical_autoclose": historical,
        "suppressed_total": sup, "renotify_total": ren, "top_suppressed": items[:TOP_N],
        "flap_keys": len(fs), "flap_trip_unit": unit, "flap_cumulative_retained_total": cumulative_total,
        "flap_trips_in_window_lower_bound": (sum(f["trips_in_window"] or 0 for f in flap) if scale else None),

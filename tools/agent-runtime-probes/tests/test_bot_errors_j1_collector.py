@@ -555,57 +555,6 @@ def test_incident_inventory_flags_pruned_flap_history_and_detects_the_trip_unit(
     assert all(f["trips_in_window"] is None for f in out_mixed["flap_top"])
 
 
-def test_historical_autoclose_inventory_is_bounded_and_survives_plane_parsing(tmp_path):
-    en = 1789098550
-    history = {
-        "old": {"closedAt": en - 32 * 86400, "source": "daily-health-fail:a"},
-        "future": {"closedAt": en + 1, "source": "daily-health-fail:b"},
-        "bool": {"closedAt": True},
-        "string": {"closedAt": str(en)},
-        "zero": {"closedAt": 0},
-        "broken": None,
-    }
-    history.update({f"private-key-{i}": {"closedAt": en} for i in range(1000)})
-    _write(str(tmp_path / "incident-state.json"), json.dumps({"staleAutocloseHistory": history}))
-    out = _run_section("incident-inventory", str(tmp_path), en - 3600, en)
-    expected = {
-        "count": 1006, "daily_health_fail_count": 2, "oldest_age_days": 32.0,
-        "rows_skipped": 4, "future_count": 1, "history_malformed": False,
-    }
-    assert out["historical_unverified_autoclose"] == expected
-    assert out["open"] == 0 and out["age_days_max"] is None
-    assert "private-key" not in json.dumps(out)
-    planes = "=== SECTION incident-inventory ===\n" + json.dumps(out) + "\nSECTION_RC incident-inventory 0\n"
-    assert c.parse_planes(planes, ())["incident_inventory"]["historical_unverified_autoclose"] == expected
-
-
-@pytest.mark.parametrize("store, count, malformed", [
-    ({}, 0, False),
-    ({"staleAutocloseHistory": {}}, 0, False),
-    ({"staleAutocloseHistory": None}, None, True),
-    ({"staleAutocloseHistory": []}, None, True),
-])
-def test_historical_autoclose_missing_and_malformed_are_distinct(tmp_path, store, count, malformed):
-    _write(str(tmp_path / "incident-state.json"), json.dumps(store))
-    out = _run_section("incident-inventory", str(tmp_path), 1789094950, 1789098550)
-    assert out["historical_unverified_autoclose"] == {
-        "count": count, "daily_health_fail_count": count, "oldest_age_days": None,
-        "rows_skipped": count, "future_count": count, "history_malformed": malformed,
-    }
-
-
-def test_missing_incident_store_remains_a_failed_read(tmp_path):
-    result = subprocess.run(
-        [sys.executable, "-", str(tmp_path), "1789094950", "1789098550"],
-        input=c.section_script("incident-inventory"), text=True, capture_output=True,
-    )
-    assert result.returncode != 0
-    planes = "=== SECTION incident-inventory ===\n" + result.stdout + f"\nSECTION_RC incident-inventory {result.returncode}\n"
-    facts = c.parse_planes(planes, ())
-    assert facts["incident_inventory"] is None
-    assert "incident-inventory" in facts["failed_sections"]
-
-
 def test_clock_skew_is_signed_remote_minus_local_and_none_when_unread():
     now = c.parse_iso("2026-09-11T01:17:00Z")
     assert c.clock_skew("2026-09-11T01:27:00Z", now) == 600
