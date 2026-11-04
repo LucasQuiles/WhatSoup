@@ -1588,8 +1588,8 @@ curl -s -H "Authorization: Bearer $WHATSOUP_HEALTH_TOKEN" http://127.0.0.1:9091/
 - `pending` with a future `retry_not_before` — producer-requested defer; the
   pending drainer owns the retry and will not send before the deadline
 - `sending` — send in progress
-- `submitted` — sent to WhatsApp, waiting for echo confirmation
-- `echoed` — confirmed delivered (normal terminal state)
+- `submitted` — the transport returned a submission receipt; waiting for echo correlation
+- `echoed` — an own-message echo was correlated (normal terminal state); this alone does not prove recipient delivery. See [stored recovery evidence](durability.md#42-post-connect-recovery-postconnectrecovery) for identity limits.
 - `maybe_sent` — send attempted but uncertain (network issue or crash mid-send)
 - `failed_permanent` — permanent failure (e.g. invalid JID)
 - `quarantined` — terminal containment; consult `quarantine_disposition` before inferring whether a provider send was possible
@@ -1718,8 +1718,10 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 #
 # Then postConnectRecovery() runs after reconnect:
 #    - Reconciles 'maybe_sent' ops against the messages table
-#    - Resets safe/read_only ops to 'pending' for replay
-#    - Quarantines unsafe ops
+#    - Settles matching self-authored rows as 'echoed'
+#    - Quarantines conflicting stored rows regardless of replay policy
+#    - With missing evidence only: resets safe/read_only ops to 'pending';
+#      quarantines unsafe ops (see docs/durability.md §4.2)
 #
 # Immediately after, and on the live 10s echo-timeout interval,
 # drainPendingOutbound() actually re-sends the 'pending' (reset) ops:
@@ -1732,8 +1734,10 @@ sqlite3 $DB ".backup '${DB}.pre-recovery'"
 # While the process remains live, the 10-second echo-maintenance loop also
 # reconciles up to 200 oldest live `maybe_sent` rows after each current
 # ambiguity_at episode has aged 30 seconds (not from queue creation).
-# Safe/read-only sends return to the pending drainer; unsafe sends quarantine and the existing
-# stuck-inbound sweep can then release a terminally non-echoed recovery owner.
+# Matching self-authored rows settle; conflicting stored rows quarantine under
+# every policy. Only missing evidence returns safe/read_only sends to the pending
+# drainer; unsafe sends quarantine. The existing stuck-inbound sweep can then
+# release a terminally non-echoed recovery owner.
 
 # 5. Start the service
 systemctl --user start whatsoup@$INSTANCE

@@ -262,6 +262,15 @@ For each `maybe_sent` op (including those promoted in Step 1):
 
 Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
+Here, a conflict means a row occupying the exact stored `message_id` used by the
+outbound receipt. Ordinary Signal peer messages use a composite `signal:` storage
+key; self syncs and outbound receipts retain the raw provider timestamp. A peer
+message with the same timestamp therefore does not occupy the self-echo key and
+does not by itself require quarantine. Without a matching self echo, the existing
+missing-evidence replay policy still applies. The composed Signal recovery tests
+cover both arrival orders and database reopening; they use controlled provider
+records, not live delivery evidence. Conversation/account correlation remains #3841.
+
 > The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
 > counting site for `outbound_reconciled` (one increment per op). (BEAD-060)
@@ -306,8 +315,10 @@ after 30 seconds from that current episode, never from queue creation. Legacy
 rows fall back conservatively to a valid submission timestamp and then queue
 creation; missing, malformed, or future chronology is treated as stale rather
 than fresh. Each pass selects the oldest 200 eligible rows so a large backlog
-cannot monopolize the maintenance tick: confirmed echoes settle,
-`safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
+cannot monopolize the maintenance tick. The evidence rules in §4.2 apply:
+self-authored matching rows settle as `echoed`; conflicting stored rows quarantine
+regardless of replay policy; only missing evidence permits `safe`/`read_only` ops
+to reset to `pending`. Missing evidence for unsafe ops also quarantines.
 Corroborated selected-delivery proof is excluded before applying the page limit
 so intentionally preserved rows neither create repeated recovery evidence nor
 starve actionable debt. An empty scan creates no recovery plan or run. The
@@ -318,7 +329,8 @@ same interval and immediately after each recovery pass.
 
 ### 4.4 Pending Drainer (`drainPendingOutbound`)
 
-`postConnectRecovery` resets unconfirmed `safe`/`read_only` ops to `pending`, but the reset
+`postConnectRecovery` resets `safe`/`read_only` ops with missing evidence to `pending`
+(conflicting stored rows quarantine under §4.2), but the reset
 alone does not re-deliver them. `drainPendingOutbound(messenger, durability)` is the step
 that re-sends them. It is wired in two places (`main.ts`):
 
