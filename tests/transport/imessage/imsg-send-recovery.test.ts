@@ -157,7 +157,7 @@ describe('imsg send failure recovery', () => {
     } finally { rpc.close(); }
   });
 
-  it('exposes the existing replay policy for a caller-declared safe operation', async () => {
+  it.each(['safe', 'read_only'] as const)('quarantines ambiguous sends despite caller replay policy %s', async (replayPolicy) => {
     const effects: string[] = [];
     const socketPath = await listen((frame, socket) => {
       if (frame.method !== 'send') {
@@ -178,7 +178,7 @@ describe('imsg send failure recovery', () => {
     connection.setIdentityStore(new SqliteIdentityStore(db.raw), 'enforce');
     await connection.connect();
     const engine = new DurabilityEngine(db);
-    await expect(sendTracked(connection, CHAT, 'safe-policy witness', engine, { replayPolicy: 'safe' }))
+    await expect(sendTracked(connection, CHAT, 'safe-policy witness', engine, { replayPolicy }))
       .rejects.toMatchObject({ payload: { code: 'transport.send_ambiguous' } });
     expect(engine.getOutboundByStatus('maybe_sent')).toHaveLength(1);
     expect(effects).toEqual(['safe-policy witness']);
@@ -192,9 +192,9 @@ describe('imsg send failure recovery', () => {
     const recovered = new DurabilityEngine(db);
     recovered.preConnectRecovery();
     recovered.postConnectRecovery();
-    expect(recovered.getOutboundByStatus('pending')).toHaveLength(1);
-    expect(await drainPendingOutbound(connection, recovered)).toEqual({ resent: 1, expired: 0 });
-    expect(effects).toEqual(['safe-policy witness', 'safe-policy witness']);
-    expect(recovered.getOutboundByStatus('submitted')).toHaveLength(1);
+    expect(recovered.getOutboundByStatus('pending')).toHaveLength(0);
+    expect(await drainPendingOutbound(connection, recovered)).toEqual({ resent: 0, expired: 0 });
+    expect(effects).toEqual(['safe-policy witness']);
+    expect(recovered.getOutboundByStatus('quarantined')).toHaveLength(1);
   });
 });

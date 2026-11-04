@@ -3309,6 +3309,11 @@ export class DurabilityEngine {
           continue;
         }
 
+        // A caller's replay label does not establish provider deduplication after an uncertain send.
+        const mayReplay = (op.replay_policy === 'safe' || op.replay_policy === 'read_only')
+          && !(op.failure_evidence.schema === OUTBOUND_FAILURE_EVIDENCE_SCHEMA
+            && op.failure_evidence.failure_code === 'transport.send_ambiguous');
+
         if (op.wa_message_id) {
           const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
             | { pk: number }
@@ -3320,7 +3325,7 @@ export class DurabilityEngine {
               { opId: op.id, waMessageId: op.wa_message_id },
               `${operation}: maybe_sent confirmed via messages table → echoed`,
             );
-          } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+          } else if (mayReplay) {
             const evidence = this.pendingReplayEvidence(op);
             const reset = this.statements.resetMaybeSentWithWaToPending.run(
               encodeOutboundFailureEvidence(evidence),
@@ -3336,7 +3341,7 @@ export class DurabilityEngine {
           } else {
             this.quarantineMaybeSent(op, recoveryRun, operation);
           }
-        } else if (op.replay_policy === 'safe' || op.replay_policy === 'read_only') {
+        } else if (mayReplay) {
           const evidence = this.pendingReplayEvidence(op);
           const reset = this.statements.resetMaybeSentWithoutWaToPending.run(
             encodeOutboundFailureEvidence(evidence),

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   AuthRequiredError,
   PayloadTooLargeError,
@@ -41,6 +41,49 @@ const base = {
 };
 
 describe('outbound failure disposition', () => {
+  it.each(
+    (['safe', 'read_only'] as const).flatMap((replayPolicy) =>
+      (['post-connect', 'live'] as const).flatMap((recovery) =>
+        (['absent', 'unmatched', 'matched'] as const).map((correlation) => ({ replayPolicy, recovery, correlation })))),
+  )('preserves explicit send ambiguity: $replayPolicy / $recovery / $correlation', async ({ replayPolicy, recovery, correlation }) => {
+    const db = new Database(':memory:');
+    db.open();
+    try {
+      const engine = new DurabilityEngine(db);
+      const chatJid = '15550000001@s.whatsapp.net';
+      const opId = engine.createOutboundOp({
+        conversationKey: 'ambiguity-test', chatJid, opType: 'text',
+        payload: JSON.stringify({ text: 'uncertain effect' }), replayPolicy,
+      });
+      engine.markSending(opId);
+      const evidence = classifyOutboundFailure(new SendAmbiguousError({
+        ...base, phase: 'provider_call_started',
+      }), { retryOwner: 'send_tracked', attemptsRemaining: 0 });
+      persistOutboundFailureDisposition(engine, opId, evidence,
+        correlation === 'absent' ? undefined : 'known-provider-id');
+      if (correlation === 'matched') {
+        db.raw.prepare(`INSERT INTO messages
+          (chat_jid, conversation_key, sender_jid, message_id, timestamp, is_from_me)
+          VALUES (?, 'ambiguity-test', ?, 'known-provider-id', 1, 1)`).run(chatJid, chatJid);
+      }
+      if (recovery === 'live') {
+        db.raw.prepare("UPDATE outbound_ops SET ambiguity_at = datetime('now', '-31 seconds') WHERE id = ?").run(opId);
+      }
+
+      const stats = recovery === 'post-connect' ? engine.postConnectRecovery() : engine.reconcileLiveMaybeSent();
+      const sendMessage = vi.fn(async () => ({ waMessageId: 'unexpected-replay' }));
+      expect(await drainPendingOutbound({ sendMessage } as unknown as Messenger, engine))
+        .toEqual({ resent: 0, expired: 0 });
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(stats.outboundReconciled).toBe(1);
+      expect(stats.outboundReplayed).toBe(0);
+      const row = db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId) as { status: string };
+      expect(row.status).toBe(correlation === 'matched' ? 'echoed' : 'quarantined');
+    } finally {
+      db.close();
+    }
+  });
+
   it('classifies quarantine outcomes only from bounded failure evidence', () => {
     const unreconstructable = createInternalOutboundFailureEvidence({
       failureCode: 'outbound.pending_replay_unreconstructable',

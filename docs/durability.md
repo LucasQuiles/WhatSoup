@@ -61,18 +61,25 @@ Every outbound op declares one of three replay policies:
 
 | Policy | Meaning | On unconfirmed delivery |
 |---|---|---|
-| `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
+| `safe` | Caller declares re-sending safe | Reset to `pending` unless typed send ambiguity blocks replay; then re-sent by the pending drainer (§4.4) |
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
-| `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
+| `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending` unless typed send ambiguity blocks replay; then re-sent by the pending drainer (§4.4) |
 
-**Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
-reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
-replayed), a replay that re-sends an op which *was* actually delivered produces at most a
-duplicate of an idempotent/side-effect-free message. That duplicate is the accepted tradeoff
-for guaranteeing safe/read_only ops are not silently dropped; it is never incurred for
-user-terminal replies.
+A typed `transport.send_ambiguous` result blocks automatic replay regardless of
+the caller's policy. A caller label does not prove provider deduplication.
+Existing delivery corroboration or a matching stored message can still confirm
+the operation; otherwise recovery quarantines it. Other failure classes retain
+their existing replay-policy behavior.
 
-The policy is set at creation time by the caller. Autonomous bot responses (via `sendTracked`) typically use `safe` because the text is deterministic for a given conversation state. MCP tool sends are excluded from the durability journal by design (gap-matrix item 92) — those use direct Baileys calls and do not go through `sendTracked`.
+**Replay duplicate-delivery tradeoff.** Outside that typed-ambiguity exception,
+the existing recovery policy can reset `safe`/`read_only` ops to `pending` and
+repeat an effect that already occurred. Callers must justify accepting that
+tradeoff. Unconfirmed `unsafe` operations quarantine instead of replaying.
+
+The policy is set at creation time by the caller. Some `sendTracked` callers use
+`safe`; deterministic text alone does not establish provider idempotence. MCP tool
+sends are excluded from the durability journal by design (gap-matrix item 92) —
+those use direct Baileys calls and do not go through `sendTracked`.
 
 ---
 
@@ -145,10 +152,10 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
                                                        │  in messages table
                                                        │  → echoed
                                                        │
-                                                       ├─ not found + safe/read_only
+                                                       ├─ not found + replay-eligible safe/read_only
                                                        │  → pending  (replay)
                                                        │
-                                                       └─ not found + unsafe
+                                                       └─ not found + unsafe or typed send ambiguity
                                                           → quarantined
 
   pending ─── drainPendingOutbound() ──► sending → submitted   (re-send, §4.4)
@@ -253,11 +260,11 @@ For each `maybe_sent` op (including those promoted in Step 1):
 
 - **Has `wa_message_id`**: query `messages` table for a matching `message_id`.
   - Found: `markEchoed()` — the message was delivered and stored by normal ingest. This also completes the linked inbound event if the op is terminal.
-  - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
-  - Not found + `unsafe`: `markQuarantined()`.
-- **No `wa_message_id`** (send never reached WhatsApp): the message was definitely not delivered.
-  - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
-  - `unsafe`: `markQuarantined()`.
+  - Not found + `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
+  - Not found + `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
+- **No `wa_message_id`**: correlation is unknown; absence does not prove non-delivery.
+  - `safe`/`read_only`, without typed `transport.send_ambiguous`: reset to `pending` for replay (re-sent by the drainer, §4.4).
+  - `unsafe` or typed `transport.send_ambiguous`: `markQuarantined()`.
 
 > The `stale-submitted → maybe_sent` promotion in Step 1 is **not** counted in
 > `outbound_reconciled`; Step 2 re-reads those ops as `maybe_sent` and is the single
@@ -304,7 +311,8 @@ rows fall back conservatively to a valid submission timestamp and then queue
 creation; missing, malformed, or future chronology is treated as stale rather
 than fresh. Each pass selects the oldest 200 eligible rows so a large backlog
 cannot monopolize the maintenance tick: confirmed echoes settle,
-`safe`/`read_only` ops reset to `pending`, and non-safe ops quarantine.
+replay-eligible `safe`/`read_only` ops reset to `pending`, and non-safe or typed
+`transport.send_ambiguous` ops quarantine.
 Corroborated selected-delivery proof is excluded before applying the page limit
 so intentionally preserved rows neither create repeated recovery evidence nor
 starve actionable debt. An empty scan creates no recovery plan or run. The
@@ -315,7 +323,7 @@ same interval and immediately after each recovery pass.
 
 ### 4.4 Pending Drainer (`drainPendingOutbound`)
 
-`postConnectRecovery` resets unconfirmed `safe`/`read_only` ops to `pending`, but the reset
+`postConnectRecovery` resets eligible unconfirmed `safe`/`read_only` ops to `pending`, but the reset
 alone does not re-deliver them. `drainPendingOutbound(messenger, durability)` is the step
 that re-sends them. It is wired in two places (`main.ts`):
 
