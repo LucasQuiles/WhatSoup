@@ -5,6 +5,7 @@ import {
   type CapabilityDecisionParams,
 } from '../../core/capability-obligation-store.ts';
 import type { ContentType } from '../../core/types.ts';
+import { withTransportInboundContext } from '../../core/transport-inbound-context.ts';
 import type {
   DurabilityEngine,
   TurnFinalizationBookkeepingParams,
@@ -493,13 +494,13 @@ private observeOutboundQueueFailure(
 
 rejectRuntimeTurnIfOutboundQueuePoisoned(scopeKey: string, turn: QueuedTurn): boolean {
   if (!this.outboundQueuePoisons.has(scopeKey)) return false;
-  this.finalizeRejectedRuntimeTurn(turn, 'scope_blocked_recovery');
+  this.finalizeRejectedRuntimeTurnAndSettle(turn, 'scope_blocked_recovery');
   return true;
 }
 
 enqueueSharedRuntimeTurn(turn: QueuedTurn): boolean {
   if (this.host.isShuttingDown?.() === true) {
-    this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    this.finalizeRejectedRuntimeTurnAndSettle(turn, 'queue_closed');
     return false;
   }
   if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(GLOBAL_CONVERSATION_KEY, turn)) {
@@ -516,7 +517,7 @@ private containOutboundQueuePoison(scopeKey: string, error: unknown): void {
     ? this.host.perChatTurnQueues.get(scopeKey)
     : this.host.turnQueue;
   for (const pending of turnQueue?.haltAndTakePendingTurns(poisonCause) ?? []) {
-    this.finalizeRejectedRuntimeTurn(pending, 'scope_blocked_recovery');
+    this.finalizeRejectedRuntimeTurnAndSettle(pending, 'scope_blocked_recovery', turnQueue);
   }
 }
 
@@ -1319,18 +1320,22 @@ async finalizeActiveRuntimeTurnsForShutdown(
   for (const queue of shutdownQueues) queue.preemptForShutdown?.(deadlineAt);
 
   const pending: Promise<FinalizeRuntimeTurnResult>[] = [];
-  const queueUndispatched = (turn: QueuedTurn): void => {
+  const queueUndispatched = (owner: TurnQueue, turn: QueuedTurn): void => {
     if (!turn.runtimeContext) {
       if (turn.inboundSeq !== undefined) {
         pending.push(Promise.reject(
           new Error('Journaled shutdown turn has no immutable runtime turn context'),
         ));
+      } else {
+        this.settleDetachedQueuedTurn(owner, turn);
       }
       return;
     }
-    pending.push(this.finalizeUndispatchedRuntimeTurn(turn.runtimeContext));
+    pending.push(this.finalizeDetachedQueuedTurn(owner, turn));
   };
-  for (const turn of this.host.turnQueue.closeAndTakePendingTurns()) queueUndispatched(turn);
+  for (const turn of this.host.turnQueue.closeAndTakePendingTurns()) {
+    queueUndispatched(this.host.turnQueue, turn);
+  }
   const pendingSingleton = this.host.pendingSingletonRuntimeTurnContext;
   if (
     pendingSingleton
@@ -1358,7 +1363,7 @@ async finalizeActiveRuntimeTurnsForShutdown(
     }));
   }
   for (const [mapKey, runtimeQueue] of this.host.perChatTurnQueues) {
-    for (const turn of runtimeQueue.closeAndTakePendingTurns()) queueUndispatched(turn);
+    for (const turn of runtimeQueue.closeAndTakePendingTurns()) queueUndispatched(runtimeQueue, turn);
     const activeTurn = runtimeQueue.activeTurn;
     const published = this.host.perChatRuntimeTurnContexts.get(mapKey)?.[0];
     if (
@@ -1589,6 +1594,11 @@ async terminalizeGlobalTurnForReset(
       ))),
     );
   }
+  for (const detached of detachedFinalizations) {
+    if (detached.settledIndex === null || settled[detached.settledIndex]?.status === 'fulfilled') {
+      this.settleQueuedTurn(detached.turn);
+    }
+  }
   state.resolveTerminalization(transaction);
   return transaction;
 }
@@ -1798,6 +1808,11 @@ async terminalizePerChatTurnQueueForKill(
         detached.settledIndex === null ? [] : [detached.settledIndex]
       ))),
     );
+  }
+  for (const detached of detachedFinalizations) {
+    if (detached.settledIndex === null || settled[detached.settledIndex]?.status === 'fulfilled') {
+      this.settleQueuedTurn(detached.turn);
+    }
   }
   state.resolveTerminalization(transaction);
   return transaction;
@@ -2135,8 +2150,11 @@ async applyRuntimeTurnPostEffects(
     (config.voiceReply === 'always' || postEffects.voice.inboundContentType === 'audio')
   ) {
     ledger.voiceScheduled = true;
-    // The finalized turn owns the destination, as it does for its text.
-    void this.host.sendVoiceReply(context.identity.deliveryJid, postEffects.voice.responseText);
+    // Voice text has lost per-fragment provenance. A verified terminal cannot
+    // authorize that aggregate; the frozen audio must enter human review.
+    void withTransportInboundContext(undefined, () => this.host.sendVoiceReply(
+      context.identity.deliveryJid, postEffects.voice!.responseText,
+    ));
   }
 }
 
@@ -2168,7 +2186,7 @@ flushUnownedRuntimeResult(
         config.voiceReply !== 'never' &&
         (config.voiceReply === 'always' || voice.inboundContentType === 'audio')
       ) {
-        return this.host.sendVoiceReply(voice.chatJid, voice.responseText);
+        return withTransportInboundContext(undefined, () => this.host.sendVoiceReply(voice.chatJid, voice.responseText));
       }
     })
     .catch((err) => log.error({ err }, 'flush or voice reply failed'));
@@ -2213,14 +2231,14 @@ async applyRecoveredRuntimeTurnFinalization(
 enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   if (this.host.isShuttingDown?.() === true) {
     // Shutdown-time admission rejection is a closed queue (#1750).
-    this.finalizeRejectedRuntimeTurn(turn, 'queue_closed');
+    this.finalizeRejectedRuntimeTurnAndSettle(turn, 'queue_closed');
     return false;
   }
   if (this.rejectRuntimeTurnIfOutboundQueuePoisoned(mapKey, turn)) {
     return false;
   }
   if (this.turnQueueHalts.has(mapKey)) {
-    this.finalizeRejectedRuntimeTurn(turn, 'queue_halted');
+    this.finalizeRejectedRuntimeTurnAndSettle(turn, 'queue_halted');
     return false;
   }
   let queue = this.host.perChatTurnQueues.get(mapKey);
@@ -2229,11 +2247,11 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
     queue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
       onReject: (rejected, reason) => {
-        this.finalizeRejectedRuntimeTurn(rejected, reason);
         log.warn(
           { chatJid: rejected.chatJid, senderJid: rejected.senderJid, mapKey: queueKey.value, reason },
           'per-chat turn rejected — agent queue full or halted',
         );
+        return this.finalizeRejectedRuntimeTurn(rejected, reason);
       },
       onProcessorError: (failed, error) => this.finalizePerChatProcessorError(queueKey.value, failed, error),
       onHalt: () => {
@@ -2250,13 +2268,13 @@ enqueuePerChatRuntimeTurn(mapKey: string, turn: QueuedTurn): boolean {
   return queue.enqueue(turn);
 }
 
-finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
+finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): Promise<void> {
   const context = turn.runtimeContext;
   if (!context) {
     if (turn.inboundSeq !== undefined) {
       throw new Error('Journaled queue rejection has no immutable runtime turn context');
     }
-    return;
+    return Promise.resolve();
   }
   // #1750: carry the distinct rejection reason into the admission outcome so it
   // lands as a distinct durable failure_class; absent stays legacy 'unknown'.
@@ -2264,12 +2282,13 @@ finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
     ? { kind: 'admission_rejected' }
     : { kind: 'admission_rejected', class: reason };
   let tracked!: Promise<void>;
-  tracked = this.finalizeUndispatchedRuntimeTurn(context, undefined, attemptOutcome)
+  const finalization = this.finalizeUndispatchedRuntimeTurn(context, undefined, attemptOutcome)
     .then(async (result) => {
       if (result.kind !== 'terminal' && !result.mayAdvance) {
         await this.host.runtimeTurnSupervisor.waitForRecovery(context);
       }
-    })
+    });
+  tracked = finalization
     .catch((err: unknown) => {
       this.host.runtimeTurnSupervisor.markDegraded(context);
       this.rejectedTurnFinalizationFailures.push(err);
@@ -2282,6 +2301,55 @@ finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
       this.rejectedTurnFinalizations.delete(tracked);
     });
   this.rejectedTurnFinalizations.add(tracked);
+  return finalization;
+}
+
+private finalizeRejectedRuntimeTurnAndSettle(
+  turn: QueuedTurn,
+  reason?: TurnRejectReason,
+  owner?: TurnQueue,
+): void {
+  void this.finalizeRejectedRuntimeTurn(turn, reason).then(
+    () => {
+      if (owner) this.settleDetachedQueuedTurn(owner, turn);
+      else this.settleQueuedTurn(turn);
+    },
+    () => undefined,
+  ).catch((err: unknown) => {
+    log.error({ err, chatJid: turn.chatJid }, 'detached rejected turn could not settle after finalization');
+  });
+}
+
+private settleDetachedQueuedTurn(owner: TurnQueue, turn: QueuedTurn): void {
+  if (owner.settleDetachedTurn(turn)) return;
+  throw new Error('Detached runtime turn lost its original queue admission');
+}
+
+private async finalizeDetachedQueuedTurn(
+  owner: TurnQueue,
+  turn: QueuedTurn,
+): Promise<FinalizeRuntimeTurnResult> {
+  const context = turn.runtimeContext;
+  if (!context) {
+    throw new Error('Journaled shutdown turn has no immutable runtime turn context');
+  }
+  let result = await this.finalizeUndispatchedRuntimeTurn(context);
+  if (result.kind !== 'terminal' && !result.mayAdvance) {
+    await this.host.runtimeTurnSupervisor.waitForRecovery(context);
+    result = await this.finalizeUndispatchedRuntimeTurn(context);
+  }
+  if (result.kind === 'terminal' || result.mayAdvance) {
+    this.settleDetachedQueuedTurn(owner, turn);
+  }
+  return result;
+}
+
+private settleQueuedTurn(turn: QueuedTurn): void {
+  try {
+    turn.onSettled?.();
+  } catch (err) {
+    log.warn({ err, chatJid: turn.chatJid }, 'runtime turn settlement callback threw');
+  }
 }
 
 async finalizeUndispatchedRuntimeTurn(
