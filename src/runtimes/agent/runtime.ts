@@ -6158,6 +6158,7 @@ export class AgentRuntime implements Runtime {
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
         }
+        await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(context);
         return;
       }
       if (completion.value !== null) await completion.value.promise;

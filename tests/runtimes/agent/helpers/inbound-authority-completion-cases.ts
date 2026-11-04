@@ -234,6 +234,54 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
     });
 
+    it('joins single-scope shutdown finalization before releasing an undispatched lease', async () => {
+      await useScope('single');
+      let releaseSend!: () => void;
+      let releaseFinalization!: () => void;
+      const sendHold = new Promise<void>((resolve) => { releaseSend = resolve; });
+      const finalizationHold = new Promise<void>((resolve) => { releaseFinalization = resolve; });
+      const host = runtime as unknown as {
+        sendTurnToSession(...args: unknown[]): Promise<void>;
+        runtimeTurnCoordinator: { finalizeUndispatchedRuntimeTurn(...args: unknown[]): Promise<unknown> };
+      };
+      const send = host.sendTurnToSession.bind(runtime);
+      const coordinator = host.runtimeTurnCoordinator;
+      const finalize = coordinator.finalizeUndispatchedRuntimeTurn.bind(coordinator);
+      let sendEntered = false;
+      let finalizationEntered = false;
+      vi.spyOn(host, 'sendTurnToSession').mockImplementation(async (...args) => {
+        sendEntered = true;
+        await sendHold;
+        await send(...args);
+      });
+      vi.spyOn(coordinator, 'finalizeUndispatchedRuntimeTurn').mockImplementation(async (...args) => {
+        finalizationEntered = true;
+        await finalizationHold;
+        return finalize(...args);
+      });
+      const messageId = 'authority-single-undispatched-shutdown';
+      const handling = deliver(makeMsg({ messageId }));
+      let shutting: Promise<void> | undefined;
+      try {
+        await vi.waitFor(() => expect(sendEntered).toBe(true));
+        shutting = runtime.shutdown();
+        await vi.waitFor(() => expect(finalizationEntered).toBe(true));
+        releaseSend();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(0);
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+      } finally {
+        releaseSend();
+        releaseFinalization();
+        await shutting;
+        shutdownVerified = shutting !== undefined;
+        await handling;
+      }
+      expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
+      expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'failed' });
+    });
+
     it('settles an empty inbound without leaking an authority lease', async () => {
       await deliver(makeMsg({ messageId: 'authority-empty', content: '' }));
       expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: 'authority-empty' });

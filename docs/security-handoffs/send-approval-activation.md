@@ -49,6 +49,8 @@ owner; the serialized chain still waits for that turn. Followers waiting behind
 it consume bounded ingest capacity. A dispatched turn retains its inbound lease
 until the existing terminal finalizer settles, including single-session provider
 failure. A rejected admission finalizer retains completion.
+Single-session shutdown joins undispatched-turn finalization before releasing
+the inbound completion when no provider boundary was reached.
 Admission rejection and shutdown finalize durable state before releasing inbound
 authority. Detached turns retain their original queue ownership through finalization
 or retained recovery; another queue cannot reuse them before settlement. Reentrant
