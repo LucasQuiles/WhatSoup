@@ -330,6 +330,13 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
+            if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped'):
+                # Start the guard's budget only now, so a slow host cannot let
+                # the deadline overtake the stop.
+                with (root / 'event-order.log').open('a') as log: log.write('H_WORKER_STOPPED worker=%d\n' % worker)
+                release = os.open(root / 'event-order-authority-release', os.O_WRONLY | os.O_NONBLOCK)
+                try: os.write(release, b'release\n')
+                finally: os.close(release)
         if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
             deadline = time.monotonic() + 3
             authorization = None
@@ -515,7 +522,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        child.wait(timeout=8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
@@ -579,6 +586,7 @@ record['fork_race_intercept'] = (root / 'fork-race-intercept').read_text() if (r
 record['record_read_trap'] = (root / 'record-read-trap').read_text() if (root / 'record-read-trap').exists() else None
 record.setdefault('worker_cut_observed', False)
 record['barrier_expired'] = sorted(item.name for item in root.glob('barrier-expired-*'))
+record['sleep_ledger'] = (root / 'sleep-ledger').read_text().splitlines() if (root / 'sleep-ledger').exists() else []
 if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
     record.setdefault('event_observations', [])
