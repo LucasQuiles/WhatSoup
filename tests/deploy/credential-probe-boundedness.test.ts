@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { expectGuardChainEndsStoppedWorker, installSleepLedgerShim } from './fixtures/credential-probe-stopped-worker.ts';
 
 // Incident 2026-07-24 (mini11 / ph-bot, ~45h outage): an unbounded
 // `security find-generic-password` blocked the launcher forever because macOS
@@ -569,15 +570,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     ].join('\n'), { mode: 0o700 });
   }
   if (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') {
-    // Record each whole-second wait with its parent, so the guard's own waits
-    // can be counted.
-    fs.unlinkSync(path.join(shim, 'sleep'));
-    fs.writeFileSync(path.join(shim, 'sleep'), [
-      '#!/bin/bash',
-      'case "$1" in *.*) ;; *) builtin printf "%s %s\\n" "$PPID" "$1" >> "$TMPDIR/sleep-ledger" ;; esac',
-      'exec /bin/sleep "$@"',
-      '',
-    ].join('\n'), { mode: 0o700 });
+    installSleepLedgerShim(shim);
   }
   if (mode === 'cleanup-residual') {
     fs.unlinkSync(path.join(shim, 'sleep'));
@@ -1017,36 +1010,6 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-}
-// A worker stopped after authorization never resumes, so only the guard can
-// end it: the budget, one grace for the worker's timeout entry, one for the
-// recorded groups, then SIGKILL. The fixture holds the budget until the worker
-// is stopped, and the events show the call returned through that fixed chain
-// and waited for nothing else, so the bound holds however slowly the host
-// runs. A wall-clock limit here measured host load instead: the chain's own
-// timers take 5 s of the 6 s it allowed.
-function expectGuardChainEndsStoppedWorker(result: ReturnType<typeof runLifecycleProbe>) {
-  const evidence = JSON.stringify(result);
-  expect(result.error, evidence).toBeUndefined();
-  const events: string[] = result.events;
-  const index = (name: string) => events.findIndex((event) => event === name || event.startsWith(`${name} `));
-  const worker = result.stopped_worker;
-  expect(index('CONTROL_ERROR'), evidence).toBe(-1);
-  expect(index(`H_WORKER_STOPPED worker=${worker}`), evidence).toBeGreaterThanOrEqual(0);
-  expect(index(`S_OUTER budget=1 worker=${worker}`), evidence).toBeGreaterThan(index(`H_WORKER_STOPPED worker=${worker}`));
-  expect(events[index('O_OUTER_CLAIM')], evidence).toBe(`O_OUTER_CLAIM rc=0 worker=${worker}`);
-  expect(index('O_OUTER_CLAIM'), evidence).toBeGreaterThan(index('S_OUTER'));
-  expect(index('AUTHORITY state=0'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
-  expect(index(`G_GRACE_ELAPSED n=1 worker=${worker}`), evidence).toBeGreaterThan(index('AUTHORITY state=0'));
-  expect(index(`G_GRACE_ELAPSED n=2 worker=${worker}`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=1 worker=${worker}`));
-  expect(index(`P_WORKER_REAPED worker=${worker} worker_rc=137`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=2 worker=${worker}`));
-  expect(events.filter((event) => event.startsWith('P_WORKER_REAPED ')), evidence).toHaveLength(1);
-  const returned = new RegExp(`^A worker=${worker} worker_rc=137 guard=(\\d+) guard_rc=2 deadline_rc=\\d+ rc=2$`).exec(events[index('A')]);
-  expect(returned, evidence).not.toBeNull();
-  expect(index('A'), evidence).toBeGreaterThan(index('P_WORKER_REAPED'));
-  // The guard itself waits only its two graces; the budget runs in its timer.
-  const guard = returned?.[1];
-  expect(result.sleep_ledger.filter((entry: string) => entry.startsWith(`${guard} `)), evidence).toEqual([`${guard} 2`, `${guard} 2`]);
 }
 function expectLifecycleIsolation(result: ReturnType<typeof runLifecycleProbe>) {
   const evidence = JSON.stringify(result);
