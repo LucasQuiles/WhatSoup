@@ -403,8 +403,8 @@ function observeLifecycleEventOrder(source: string): string {
     '      if [ "$authorization_state" -eq 0 ]; then',
   ].join('\n'));
   // The guard's two grace waits after the budget. Each event is reached only
-  // when its timer ran out; the second one immediately precedes the SIGKILL of
-  // a worker that is still alive.
+  // when its timer ran out. The second is followed by the worker's state, read
+  // before the guard's own cleanup stops the group, then the SIGKILL.
   insert('      fi\n      _bounded_guard_kill_authorized\n      if [ "$authorization_state" -eq 0 ]; then\n        sleep "$grace" &', [
     '      fi',
     `      ${event('G_GRACE_ELAPSED n=1 worker=$worker_pid')}`,
@@ -415,6 +415,7 @@ function observeLifecycleEventOrder(source: string): string {
   insert('        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }\n        _bounded_guard_end_worker', [
     '        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }',
     `        ${event('G_GRACE_ELAPSED n=2 worker=$worker_pid')}`,
+    `        ${event('W_WORKER_STATE worker=$worker_pid stat=$(/bin/ps -o stat= -p "$worker_pid" 2>/dev/null)')}`,
     '        _bounded_guard_end_worker',
   ].join('\n'));
   insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', `    wait "$worker_pid" 2>/dev/null || worker_rc=$?\n    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`);

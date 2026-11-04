@@ -24,13 +24,19 @@ interface StoppedWorkerProbeRecord {
   sleep_ledger: string[];
 }
 
-// A worker stopped after authorization never resumes, so only the guard can
-// end it: the budget, one grace for the worker's timeout entry, one for the
-// recorded groups, then SIGKILL. The fixture holds the budget until the worker
-// is stopped, and the events show the call returned through that fixed chain
-// and waited for nothing else, so the bound holds however slowly the host
-// runs. A wall-clock limit here measured host load instead: the chain's own
-// timers take 5 s of the 6 s it allowed.
+// The guard's monitor resumes the worker once, from the worker's own startup
+// stop, and exits. The worker writes its authorization only after that, and the
+// driver stops it only after reading the authorization, so this stop has no
+// resume and only the guard can end the worker: the budget, one grace for the
+// worker's timeout entry, one for the recorded groups, then SIGKILL.
+// W_WORKER_STATE checks that at run time, because worker_rc=137 would also fit
+// a worker that was resumed and then killed. It is read before the guard's
+// cleanup, whose own SIGSTOP of the group would make any later read show T.
+// The fixture holds the budget until the worker is stopped, and the events show
+// the call returned through that fixed chain and waited for nothing else, so
+// the bound holds however slowly the host runs. A wall-clock limit here
+// measured host load instead: the chain's own timers take 5 s of the 6 s it
+// allowed.
 export function expectGuardChainEndsStoppedWorker(result: StoppedWorkerProbeRecord) {
   const evidence = JSON.stringify(result);
   expect(result.error, evidence).toBeUndefined();
@@ -45,7 +51,9 @@ export function expectGuardChainEndsStoppedWorker(result: StoppedWorkerProbeReco
   expect(index('AUTHORITY state=0'), evidence).toBeGreaterThan(index('O_OUTER_CLAIM'));
   expect(index(`G_GRACE_ELAPSED n=1 worker=${worker}`), evidence).toBeGreaterThan(index('AUTHORITY state=0'));
   expect(index(`G_GRACE_ELAPSED n=2 worker=${worker}`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=1 worker=${worker}`));
-  expect(index(`P_WORKER_REAPED worker=${worker} worker_rc=137`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=2 worker=${worker}`));
+  expect(index(`W_WORKER_STATE worker=${worker}`), evidence).toBeGreaterThan(index(`G_GRACE_ELAPSED n=2 worker=${worker}`));
+  expect(events[index('W_WORKER_STATE')], evidence).toMatch(new RegExp(`^W_WORKER_STATE worker=${worker} stat=T`));
+  expect(index(`P_WORKER_REAPED worker=${worker} worker_rc=137`), evidence).toBeGreaterThan(index(`W_WORKER_STATE worker=${worker}`));
   expect(events.filter((event) => event.startsWith('P_WORKER_REAPED ')), evidence).toHaveLength(1);
   const returned = new RegExp(`^A worker=${worker} worker_rc=137 guard=(\\d+) guard_rc=2 deadline_rc=\\d+ rc=2$`).exec(events[index('A')]);
   expect(returned, evidence).not.toBeNull();
