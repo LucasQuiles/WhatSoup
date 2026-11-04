@@ -77,6 +77,12 @@ export type RuntimeAdmissionReceipt =
 export interface Runtime {
   start(): Promise<void>;
   handleMessage(msg: IncomingMessage): Promise<void | RuntimeAdmissionReceipt>;
+  /**
+   * Agent runtimes may expose an actual-turn completion lease. Ingest starts it
+   * before admission and awaits it only for protected inbound authority events.
+   */
+  beginInboundTurnCompletion?(messageId: string): void;
+  awaitInboundTurnCompletion?(messageId: string): Promise<void>;
   getHealthSnapshot(): RuntimeHealth;
   shutdown(): Promise<void>;
   setDurability(engine: DurabilityEngine): void;

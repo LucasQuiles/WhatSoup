@@ -353,6 +353,9 @@ import {
 } from './auto-respawn-policy.ts';
 import type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
 export type { AgentRuntimeOptions, SandboxPolicy, SessionScope } from './runtime-options.ts';
+import type { ProviderProcessIsolationConfig } from './provider-process-isolation.ts';
+import { InboundTurnCompletionTracker } from './inbound-turn-completion.ts';
+import { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   deriveModelUsable,
   MODEL_USABILITY_FRESHNESS_MS,
@@ -361,6 +364,7 @@ import {
 } from './model-usability.ts';
 export { deriveModelUsable } from './model-usability.ts';
 export type { RuntimePrimaryModelUsability, RuntimeTurnCapability } from './model-usability.ts';
+export { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   logAmbientProviderFailureOutcome,
   suppressStreamedProviderFailure as gateStreamedProviderFailure,
@@ -568,80 +572,6 @@ import { errorMessage } from '../../lib/error-message.ts';
 
 
 
-/**
- * Extract the usage-limit reset time from a provider usage-limit message.
- *
- * Claude usage-limit notices often name when the cap resets — e.g.
- *   "resets at 3pm", "resets at 15:00", "try again at 9:30am",
- *   "will be available at 11pm", or a raw Unix-epoch seconds value.
- * The fallback state machine uses this to schedule auto-revert to the primary
- * provider. Parsing is conservative: anything it cannot confidently interpret
- * yields `null`, and the caller then applies a default rolling-window estimate.
- *
- * Returned times are always in the future relative to `now` — a clock time like
- * "3pm" that has already passed today is rolled forward to tomorrow.
- *
- * @param text the usage-limit message text
- * @param now  injectable clock for deterministic tests (defaults to Date.now)
- * @returns the reset Date, or null when unparseable
- */
-export function extractUsageLimitResetTime(text: string, now: Date = new Date()): Date | null {
-  if (typeof text !== 'string' || text.length === 0) return null;
-  const lower = text.toLowerCase();
-
-  // 1) Clock time after a reset cue: "resets at 3pm", "available at 15:00",
-  //    "come back at 9:30am", "try again at 11 pm".
-  //    Parsed FIRST so an explicit clock cue always wins over an incidental
-  //    long number elsewhere in the message (e.g. an order/quota figure).
-  //    The trailing (?!\d) prevents the clock hour from matching the leading
-  //    digits of a longer number (e.g. "5551234567").
-  const cue = /(?:reset[s]?|available|come\s+back|try\s+again|back)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?(?!\d)\s*(am|pm)?/i;
-  const m = lower.match(cue);
-  if (m) {
-    let hour = Number.parseInt(m[1]!, 10);
-    const minute = m[2] ? Number.parseInt(m[2], 10) : 0;
-    const meridiem = m[3];
-    if (
-      Number.isFinite(hour) &&
-      Number.isFinite(minute) &&
-      hour >= 0 &&
-      minute >= 0 &&
-      minute < 60 &&
-      (meridiem ? hour >= 1 && hour <= 12 : hour <= 23)
-    ) {
-      if (meridiem === 'pm' && hour < 12) hour += 12;
-      if (meridiem === 'am' && hour === 12) hour = 0;
-      const candidate = new Date(now);
-      candidate.setHours(hour, minute, 0, 0);
-      // A clock time already past today rolls forward to tomorrow.
-      if (candidate.getTime() <= now.getTime()) {
-        candidate.setDate(candidate.getDate() + 1);
-      }
-      return candidate;
-    }
-  }
-
-  // 2) Raw Unix epoch (seconds, 10 digits) — e.g. "resets at 1771000000".
-  //    Milliseconds (13 digits) are also accepted. Cue-anchored: the epoch must
-  //    directly follow a reset cue, so an incidental long number (order/quota
-  //    figure) is never mistaken for a reset time.
-  const epochMatch = lower.match(
-    /(?:reset[s]?|available|try\s+again|come\s+back|back)\D{0,12}(1[5-9]\d{8}|[2-9]\d{9})(\d{3})?\b/,
-  );
-  if (epochMatch) {
-    const seconds = epochMatch[1]!;
-    const millis = epochMatch[2];
-    const epochMs = millis
-      ? Number.parseInt(seconds + millis, 10)
-      : Number.parseInt(seconds, 10) * 1000;
-    if (Number.isFinite(epochMs) && epochMs > now.getTime()) {
-      return new Date(epochMs);
-    }
-  }
-
-  return null;
-}
-
 // `isPromptTooLongMessage` lives in `./failure-taxonomy.ts` (imported + re-exported above).
 
 /**
@@ -709,6 +639,7 @@ export class AgentRuntime implements Runtime {
   private pluginDirs: string[];
   private readonly enabledPlugins: Record<string, boolean> | undefined;
   private readonly allowM365Mutations: boolean | undefined;
+  private readonly providerProcessIsolation: ProviderProcessIsolationConfig | undefined;
   private readonly m365MutationPolicy: M365MutationPolicy | undefined;
   private m365SettingsPolicyReady = false;
   private readonly autoCompactInputTokens: number | undefined;
@@ -2137,6 +2068,8 @@ export class AgentRuntime implements Runtime {
   /** Exact-source teardowns for terminal results that could not be safely attributed. */
   private readonly rejectedTerminalTeardowns = new WeakMap<SessionManager, Promise<boolean>>();
   private readonly activeMessageHandlers = new Set<Promise<void>>();
+  /** Ingest-owned leases settle only when the exact admitted turn is terminal. */
+  private readonly inboundTurnCompletions = new InboundTurnCompletionTracker();
   private readonly routeRecycleCommandWork = this.routeRecycleLifecycle.commandWork;
   private readonly routeRecyclePublicationWork = this.routeRecycleLifecycle.publicationWork;
   private shutdownRequested = false;
@@ -2747,6 +2680,7 @@ export class AgentRuntime implements Runtime {
     this.pluginDirs = options?.pluginDirs ?? [];
     this.enabledPlugins = options?.enabledPlugins;
     this.allowM365Mutations = options?.allowM365Mutations;
+    this.providerProcessIsolation = options?.providerProcessIsolation;
     this.autoCompactInputTokens =
       typeof options?.autoCompactInputTokens === 'number' &&
       Number.isFinite(options.autoCompactInputTokens) &&
@@ -2818,9 +2752,9 @@ export class AgentRuntime implements Runtime {
     const turnQueue = new TurnQueue({
       maxDepth: config.agentMaxQueueDepth,
       onReject: (turn, reason) => {
-        this.finalizeRejectedRuntimeTurn(turn, reason);
         log.warn({ chatJid: turn.chatJid, senderJid: turn.senderJid, reason },
           'turn rejected — agent queue full');
+        return this.finalizeRejectedRuntimeTurn(turn, reason);
       },
       onProcessorError: (turn, error) => this.finalizeSharedProcessorError(turn, error),
     });
@@ -4779,13 +4713,23 @@ export class AgentRuntime implements Runtime {
     }
   }
 
+  beginInboundTurnCompletion(messageId: string): void {
+    this.inboundTurnCompletions.begin(messageId);
+  }
+
+  async awaitInboundTurnCompletion(messageId: string): Promise<void> {
+    return this.inboundTurnCompletions.await(messageId);
+  }
+
   handleMessage(msg: IncomingMessage): Promise<void> {
     try {
       this.db.assertWritableCompatibility();
     } catch (err) {
+      this.inboundTurnCompletions.settle(msg.messageId);
       return Promise.reject(err);
     }
     if (this.shutdownRequested) {
+      this.inboundTurnCompletions.settle(msg.messageId);
       return Promise.reject(new Error('Agent runtime is shutting down; new turns are not accepted'));
     }
     const initialClassification = msg.content === null
@@ -4808,6 +4752,7 @@ export class AgentRuntime implements Runtime {
     }
     void processing.finally(() => {
       this.activeMessageHandlers.delete(processing);
+      this.inboundTurnCompletions.settleUnadopted(msg.messageId);
       if (tracksRouteRecycle) {
         this.routeRecycleLifecycle.untrackRouteCommand(processing);
       }
@@ -5523,6 +5468,7 @@ export class AgentRuntime implements Runtime {
         session: this.session!,
         toolScopeKey: GLOBAL_TOOL_SCOPE_KEY,
       });
+      const onSettled = this.inboundTurnCompletions.bind(msg.messageId);
       this.runtimeTurnCoordinator.enqueueSharedRuntimeTurn({
         sourceMessageId: msg.messageId,
         receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5537,6 +5483,7 @@ export class AgentRuntime implements Runtime {
         purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
         ...(runtimeContext ? { runtimeContext } : {}),
         inboundSeq: msg.inboundSeq,
+        ...(onSettled === undefined ? {} : { onSettled }),
       });
     } else if (this.sessionScope === 'per_chat') {
       const mapKey = perChatMapKey!;
@@ -5544,7 +5491,11 @@ export class AgentRuntime implements Runtime {
       // Image coalescing: batch rapid image sends into a single turn.
       // For coalesced images, defer seq/state setup until flush time — only
       // the representative turn gets a seq entry, preventing desync.
-      if (msg.contentType === 'image') {
+      // A coalesced batch has several authenticated inbound contexts but only
+      // one later provider turn. Under transport authority, keep each media
+      // event as an exact queued turn so its reply grant and lease cannot be
+      // inherited from whichever image happened to arm the coalesce timer.
+      if (msg.contentType === 'image' && !config.transportAuthority?.enabled) {
         await this.coalesceImageTurn(mapKey, chatJid, text, msg);
       } else {
         // Flush any pending image buffer first (text message after images = done uploading).
@@ -5573,6 +5524,7 @@ export class AgentRuntime implements Runtime {
           mapKey,
         });
 
+        const onSettled = this.inboundTurnCompletions.bind(msg.messageId);
         this.enqueuePerChatRuntimeTurn(mapKey, {
           sourceMessageId: msg.messageId,
           receivedAtUnixSeconds: receivedAtUnixSeconds(msg),
@@ -5587,6 +5539,7 @@ export class AgentRuntime implements Runtime {
           purpose: msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined,
           ...(runtimeContext ? { runtimeContext } : {}),
           inboundSeq: msg.inboundSeq,
+          ...(onSettled === undefined ? {} : { onSettled }),
         });
       }
     } else {
@@ -5629,8 +5582,8 @@ export class AgentRuntime implements Runtime {
     return admitted;
   }
 
-  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): void {
-    this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
+  private finalizeRejectedRuntimeTurn(turn: QueuedTurn, reason?: TurnRejectReason): Promise<void> {
+    return this.runtimeTurnCoordinator.finalizeRejectedRuntimeTurn(turn, reason);
   }
 
   private finalizePerChatProcessorError(
@@ -10660,6 +10613,7 @@ export class AgentRuntime implements Runtime {
       routePolicy: route ?? undefined,
       egressProxyPort: this.egressProxy?.port,
       providerExecutionGate: this.providerExecutionGate,
+      providerProcessIsolation: this.providerProcessIsolation,
       providerMcpConfigArgs: this.globalMcpSocketPath
         ? buildProviderMcpConfigArgs(
             sessionProvider,

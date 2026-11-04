@@ -158,6 +158,37 @@ describe('handleCreateLine — service block passthrough (issue #3401 item 2)', 
     expect(persisted.service).toEqual(service);
   });
 
+  it('rejects enabled transportAuthority CREATE until its isolation contract is present', async () => {
+    // Break caught: CREATE persists an authority-enabled config that cannot
+    // prove its protected worker boundary and then fails after activation.
+    const transportAuthority = {
+      enabled: true,
+      baseUrl: 'https://authority.example',
+      accountId: 'pilot-account',
+      credentialFile: '/var/db/whatsoup/authority.bearer',
+      serviceUid: 501,
+      workerUid: 502,
+    };
+    const res = mockRes();
+    await handleCreateLine(
+      mockReq({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'transport-authority-roundtrip',
+          type: 'chat',
+          adminPhones: ['15551234567'],
+          transportAuthority,
+        }),
+      }),
+      res,
+      successDeps(),
+    );
+
+    expect(res._status).toBe(400);
+    expect(res._body).toContain('providerProcessIsolation');
+    expect(fs.existsSync(cfgPathFor('transport-authority-roundtrip'))).toBe(false);
+  });
+
   it('persists the accepted physical service and plugin paths', async () => {
     const real = path.join(os.homedir(), 'physical');
     fs.mkdirSync(real);

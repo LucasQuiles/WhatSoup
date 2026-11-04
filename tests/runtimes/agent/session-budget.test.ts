@@ -17,7 +17,8 @@ vi.mock('node:child_process', async () => {
   return childProcessMock();
 });
 
-vi.mock('node:fs', () => ({
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
   readFileSync: vi.fn(),
 }));
 

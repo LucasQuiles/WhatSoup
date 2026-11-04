@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { prepareRuntimeHome, ownedRuntimeCwd } from '../../helpers/runtime-home-fixture.ts';
 import { registerRuntimeHomeConfinementTests } from './runtime-home-confinement.cases.ts';
 import { registerRuntimeSettingsPolicyTests } from './runtime-settings-policy.cases.ts';
+import { registerRuntimeProviderProcessIsolationTest } from './runtime-provider-process-isolation.case.ts';
 import type { Database } from '../../../src/core/database.ts';
 import type { IncomingMessage, Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
@@ -1052,6 +1053,12 @@ describe('AgentRuntime', () => {
     expect(capturedSessionManagerOptsRef.current).toMatchObject({
       allowM365Mutations: true,
     });
+  });
+
+  registerRuntimeProviderProcessIsolationTest({
+    createRuntime: (isolation) => new AgentRuntime(makeDb(), makeMessenger().messenger, 'test', { providerProcessIsolation: isolation }),
+    sendAndDrain: (runtime) => sendAndDrain(runtime, makeMsg({ content: 'hello claude' })),
+    capturedSessionManagerOptions: () => capturedSessionManagerOptsRef.current,
   });
 
   it('auto-compacts silently and advances baseline only after compact_boundary', async () => {
