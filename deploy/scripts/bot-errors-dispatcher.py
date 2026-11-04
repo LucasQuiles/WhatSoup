@@ -2984,6 +2984,49 @@ def evidence_epoch(text: str, key: str) -> int | None:
     return int(parsed.timestamp())
 
 
+WHATSAPP_HEALTH_RECOVERY_FIELDS = {
+    "status": "healthy",
+    "wa_connected": "true",
+    "state": "connected",
+    "auth_bond_status": "present",
+    "auth_bond_creds_exists": "true",
+}
+
+
+def has_diagnostic_health_contradiction(probe: str, expected_instance: str) -> bool:
+    if evidence_field(probe, "health_projection") != "diagnostic":
+        return False
+    if evidence_field(probe, "instance_name") != expected_instance:
+        return False
+    # Preserve the producer's write grace without trusting an inconsistent marker.
+    credential_write_inflight = (
+        evidence_field(probe, "auth_bond_credential_write_inflight") == "true"
+        and evidence_field(probe, "auth_bond_status") == "invalid"
+        and evidence_field(probe, "auth_bond_creds_exists") == "true"
+        and bool(
+            {"creds_json_empty", "creds_json_invalid_json"}
+            & set((evidence_field(probe, "auth_bond_issues") or "").split(","))
+        )
+    )
+    for key, expected in WHATSAPP_HEALTH_RECOVERY_FIELDS.items():
+        if credential_write_inflight and key == "auth_bond_status":
+            continue
+        actual = evidence_field(probe, key)
+        if actual is not None and actual != expected:
+            return True
+    auth_failure_class = evidence_field(probe, "auth_failure_class")
+    if auth_failure_class is not None and auth_failure_class != "none":
+        return True
+    creds_size = evidence_field(probe, "auth_bond_creds_size")
+    if not credential_write_inflight and creds_size is not None:
+        try:
+            if int(creds_size) <= 0:
+                return True
+        except ValueError:
+            pass  # Malformed evidence is unknown, not an observed empty file.
+    return bool({"physical_intervention_required", "auth_bond_at_risk"} & set(probe.split()))
+
+
 def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: bool = False) -> bool:
     if not probe.startswith("200 "):
         return False
@@ -2991,14 +3034,7 @@ def is_verified_whatsapp_health_recovery(probe: str, *, require_outbound_proof: 
         return False
     if "physical_intervention_required" in probe or "auth_bond_at_risk" in probe:
         return False
-    required = {
-        "status": "healthy",
-        "wa_connected": "true",
-        "state": "connected",
-        "auth_bond_status": "present",
-        "auth_bond_creds_exists": "true",
-    }
-    for key, expected in required.items():
+    for key, expected in WHATSAPP_HEALTH_RECOVERY_FIELDS.items():
         if evidence_field(probe, key) != expected:
             return False
     auth_failure_class = evidence_field(probe, "auth_failure_class")
@@ -3130,15 +3166,22 @@ def daily_health_recovered_incident_keys(
         if daily_health_line_is_failure(line)
         if (instance := daily_health_instance_from_fail_line(line)) is not None
     }
+    health_observations = [
+        (match.group(1), match.group(2).strip())
+        for line in evidence_lines
+        if (match := re.match(r"^health\s+([^:\s]+):\s+(.+)$", line.strip()))
+    ]
+    contradicted_instances = {
+        safe_segment(instance)
+        for instance, probe in health_observations
+        if has_diagnostic_health_contradiction(probe, instance)
+    }
     recovered: list[str] = []
     seen: set[str] = set()
-    for raw_line in evidence_lines:
-        line = raw_line.strip()
-        match = re.match(r"^health\s+([^:\s]+):\s+(.+)$", line)
-        if not match:
+    for observed_instance, probe in health_observations:
+        instance = safe_segment(observed_instance)
+        if instance in contradicted_instances:
             continue
-        instance = safe_segment(match.group(1))
-        probe = match.group(2).strip()
         scope = f"{machine}|{instance}"
         if instance not in failed_instances and is_verified_whatsapp_health_recovery(probe):
             for key in (
