@@ -539,10 +539,15 @@ export function classifyOutboundFailure(
         : 'outbound.unknown_failure');
   const phase = payload?.phase;
   const stage = stageFor(code, phase);
-  const mutationState = mutationStateFor(code, phase);
+  const previous = options.previousEvidence;
+  const attemptMutationState = mutationStateFor(code, phase);
+  // Rejecting a later attempt cannot prove an earlier timed-out send did not occur.
+  const mutationState = previous?.mutation_state === 'ambiguous'
+    ? 'ambiguous'
+    : attemptMutationState;
   const retryable = payload?.retryable
     ?? !(isOutboundIdentityBlocked(error) || isOutboundGovernorShed(error));
-  const retryAfterMs = retryable && mutationState !== 'ambiguous'
+  const retryAfterMs = retryable && attemptMutationState !== 'ambiguous'
     ? validPositiveDelay(payload?.retryAfterMs, nowMs)
     : null;
 
@@ -550,12 +555,12 @@ export function classifyOutboundFailure(
   let retryNotBefore: string | null = null;
   let retryOwner: OutboundRetryOwner;
   let budget: OutboundAttemptBudgetDisposition;
-  if (retryAfterMs !== null) {
+  if (retryAfterMs !== null && mutationState !== 'ambiguous') {
     retryDecision = 'retry_not_before';
     retryNotBefore = toIsoTimestamp(nowMs + retryAfterMs);
     retryOwner = 'pending_drainer';
     budget = 'preserve';
-  } else if (retryable && options.attemptsRemaining > 0) {
+  } else if (retryAfterMs === null && retryable && options.attemptsRemaining > 0) {
     retryDecision = 'retry_now';
     retryOwner = options.retryOwner;
     budget = 'consume';
@@ -565,10 +570,9 @@ export function classifyOutboundFailure(
     budget = 'stop';
   }
 
-  const previous = options.previousEvidence;
   const logicalAttemptCount = (previous?.logical_attempt_count ?? 0) + 1;
   const providerSubmissionCount = (previous?.provider_submission_count ?? 0)
-    + (mutationState === 'not_started' ? 0 : 1);
+    + (attemptMutationState === 'not_started' ? 0 : 1);
 
   return assertValidEvidence({
     schema: OUTBOUND_FAILURE_EVIDENCE_SCHEMA,
@@ -584,7 +588,7 @@ export function classifyOutboundFailure(
     provider_submission_count: providerSubmissionCount,
     first_failure_at: previous?.first_failure_at ?? now,
     last_failure_at: now,
-    evidence_coverage: payload ? 'complete' : 'partial',
+    evidence_coverage: payload && previous?.evidence_coverage !== 'partial' ? 'complete' : 'partial',
   });
 }
 

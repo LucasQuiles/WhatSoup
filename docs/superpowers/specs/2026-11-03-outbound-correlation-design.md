@@ -31,6 +31,15 @@ that declaration is exactly `true`. Reuse `markMaybeSent` and the existing echo
 and stored-message reconciliation paths. Successful sends continue to store the
 actual returned provider ID. Deterministic non-sends retain their current state.
 
+Failure evidence retains unresolved ambiguity across the whole logical send.
+A later admission rejection or provider rejection cannot erase an earlier
+possibly submitted attempt. Submission counts still describe each attempt's
+boundary, and partial evidence cannot become complete just because the last
+error is typed. If a later rate limit supplies a delay while prior delivery is
+ambiguous, stop with that ambiguity retained: neither hand it to the pending
+drainer nor retry immediately in violation of the delay. This uses the existing
+`maybe_sent`, quarantine and echo paths without granting replay permission.
+
 Alternatives considered:
 
 - Persist every requested ID: rejected because three bridges ignore the option.
@@ -39,8 +48,9 @@ Alternatives considered:
 - Keep the current behavior: avoids a new declaration but loses a known matching
   key and retains misleading shutdown keys on other transports.
 
-The selected approach is a narrow correction to post-failure evidence. No schema,
-retry policy, deadline, recovery timer or historical-row migration changes.
+The selected approach corrects post-failure evidence and prevents retry ownership
+from transferring after unresolved ambiguity. No schema, deadline, recovery timer
+or historical-row migration changes.
 Generic scoped echo identity is tracked separately in #3841; queue deadline
 measurement is tracked in #3842. Existing no-ID-only operator actions remain
 inapplicable when a valid correlation ID exists; retaining identity does not

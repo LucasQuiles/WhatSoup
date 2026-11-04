@@ -1161,6 +1161,13 @@ delivery proof while adding auditable completion and conflict evidence.
 | `is_terminal` | INTEGER | Boolean (0/1). If 1, echoing this op completes the linked inbound event. |
 | `replay_policy` | TEXT NOT NULL | `'safe'`, `'unsafe'`, or `'read_only'`. Default `'unsafe'`. |
 
+Failure evidence preserves an earlier attempt's unresolved ambiguity even if a
+later attempt is rejected before submission. A later error cannot erase its
+qualified correlation ID or upgrade partial evidence to complete. A subsequent
+rate limit with a retry delay stops the ambiguous operation for existing recovery;
+it neither transfers it to the pending drainer nor bypasses the delay with an
+immediate retry. Deterministic-only failures retain their existing disposition.
+
 Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(source_inbound_seq)`.
 
 `GET /health` exposes a privacy-safe `durability.outboundFailureEvidence`

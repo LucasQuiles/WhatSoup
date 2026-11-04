@@ -48,14 +48,16 @@ describe('outbound correlation after ambiguous sends', () => {
     expect(timers).toBe(0);
   });
 
-  function start(equivalent?: boolean, outcome: 'hang' | 'success' | 'shed' = 'hang'): void {
+  function start(equivalent?: boolean, outcome: 'hang' | 'success' | 'shed' | 'hang-then-shed' = 'hang'): void {
     const messenger: Messenger = {
       requestedIdIsProviderId: equivalent,
       sendMessage: async (_jid, _text, opts) => {
         if (!opts?.messageId) return { waMessageId: null };
         requestedIds.push(opts.messageId);
         if (outcome === 'success') return { waMessageId: 'actual-provider-id' };
-        if (outcome === 'shed') throw new WhatSoupError('outbound governor ceiling exceeded', 'OUTBOUND_GOVERNOR_SHED');
+        if (outcome === 'shed' || (outcome === 'hang-then-shed' && requestedIds.length > 1)) {
+          throw new WhatSoupError('outbound governor ceiling exceeded', 'OUTBOUND_GOVERNOR_SHED');
+        }
         return new Promise<SubmissionReceipt>((resolve) => pending.push(resolve));
       },
       sendMedia: async () => ({ waMessageId: null }),
@@ -146,5 +148,26 @@ describe('outbound correlation after ambiguous sends', () => {
     expect(row().status).toBe('failed_permanent');
     expect(row().wa_message_id).toBeNull();
     expect(requestedIds).toHaveLength(1);
+  });
+
+  it.each([undefined, false, true])('retains prior ambiguity after a governor shed for declaration %s', async (equivalent) => {
+    start(equivalent, 'hang-then-shed');
+    await vi.runAllTimersAsync();
+    await queue.flush();
+    expect(requestedIds).toHaveLength(2);
+    expect(new Set(requestedIds).size).toBe(1);
+    expect(row().status).toBe('maybe_sent');
+    expect(row().retry_count).toBe(2);
+    expect(row().wa_message_id).toBe(equivalent === true ? requestedIds[0] : null);
+    const evidence = JSON.parse((db.raw.prepare('SELECT error FROM outbound_ops').get() as { error: string }).error);
+    expect(evidence).toMatchObject({
+      mutation_state: 'ambiguous', provider_submission_count: 1, logical_attempt_count: 2,
+      failure_code: 'outbound.governor_shed', retry_decision: 'stop',
+    });
+    durability.postConnectRecovery();
+    expect(row().status).toBe('quarantined');
+    expect(durability.matchEcho(requestedIds[0]!)).toBe(equivalent === true);
+    expect(row().status).toBe(equivalent === true ? 'echoed' : 'quarantined');
+    expect(requestedIds).toHaveLength(2);
   });
 });
