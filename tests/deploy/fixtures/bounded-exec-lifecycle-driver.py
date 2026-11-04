@@ -27,6 +27,10 @@ def members(session):
 # command to start and the watchdog to enter its budget sleep, not for the
 # record's release line, which the worker writes before releasing either.
 GROUP_MODES = ('control-tokenless-worker-stopped', 'control-tokenless-cleanup-interrupted', 'authorization-unreadable-cleanup-interrupted', 'authorization-valid-cleanup-interrupted', 'authorization-valid-outer-terminated-after-reap', 'guard-terminated', 'outer-terminated')
+def release_budget():
+    # holdBudgetForDriver in credential-probe-stopped-worker.ts holds the budget
+    # until this, so a slow host cannot let it overtake the driver's identity read.
+    (root / 'budget-hold-release').write_text('release')
 def wait_ready():
     deadline = time.monotonic() + 3
     while not ((root / 'command-started').exists() and (root / 'watchdog-sleep-started').exists()) and time.monotonic() < deadline:
@@ -330,6 +334,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
+            release_budget()
             if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped'):
                 # Start the guard's budget only now, so a slow host cannot let
                 # the deadline overtake the stop.
@@ -362,6 +367,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
+            release_budget()
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
                 time.sleep(0.01)
             if not (root / 'authorization-rm-ready').exists(): raise RuntimeError('worker cleanup did not retain authorization')
@@ -440,6 +446,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             worker_record = next((item for item in processes if item['pid'] == worker), None)
             if worker is None or worker == child.pid or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
+            release_budget()
             if mode == 'authorization-unreadable-cleanup-interrupted':
                 guard_timer_deadline = time.monotonic() + 3
                 while not (root / 'guard-timer-entered').exists() and child.poll() is None and time.monotonic() < guard_timer_deadline:
@@ -519,8 +526,12 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             record['supervisor_pid'] = supervisor
             if mode == 'parent-stopped':
                 os.kill(supervisor, signal.SIGSTOP)
+                release_budget()
                 try:
-                    time.sleep(1.5)
+                    # The budget starts at the release, so wait for its effect, not a fixed time.
+                    gone_deadline = time.monotonic() + 6
+                    while any(item['pid'] == command_pid for item in members(session)) and time.monotonic() < gone_deadline:
+                        time.sleep(0.01)
                     record['command_alive_while_parent_stopped'] = any(item['pid'] == command_pid for item in members(session))
                 finally: os.kill(supervisor, signal.SIGCONT)
             else: os.kill(supervisor, signal.SIGTERM)

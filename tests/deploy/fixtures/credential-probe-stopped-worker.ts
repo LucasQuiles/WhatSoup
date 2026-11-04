@@ -2,7 +2,45 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect } from 'vitest';
 
-// Fixture for the stopped-worker probes in ../credential-probe-boundedness.test.ts.
+// Fixture for the lifecycle probes in ../credential-probe-boundedness.test.ts.
+
+// The driver finds these modes' worker through the live command, or stops a
+// process before the budget runs out. The budget runs three ways: the guard's
+// timer, the inner watchdog and the worker's ticker. All three start only when
+// the driver has done so; otherwise a slow host lets one end the command first.
+export const BUDGET_HOLD_MODES: ReadonlySet<string> = new Set([
+  'worker-stopped-after-authorization', 'forged-completion-worker-stopped', 'deadline-timer-descendant', 'cleanup-child-group',
+  'control-tokenless-worker-stopped', 'control-tokenless-cleanup-interrupted',
+  'dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup',
+  'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup', 'parent-stopped',
+]);
+
+// The ticker's timed read is the only read with these arguments.
+export const TICKER_HOLD = [
+  'read() {',
+  '  if [ "$2 $3 $4 $5" = "-t 1 -u 9" ]; then',
+  '    local polls=0',
+  '    while [ ! -e "$TMPDIR/budget-hold-release" ] && [ "$polls" -lt 1000 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+  '  fi',
+  '  builtin read "$@"',
+  '}',
+].join('\n');
+
+// Each of these modes runs a budget of 1, and no other wait in them is `sleep 1`.
+export function holdBudgetForDriver(shim: string) {
+  const unheld = path.join(shim, 'sleep-unheld');
+  fs.renameSync(path.join(shim, 'sleep'), unheld);
+  fs.writeFileSync(path.join(shim, 'sleep'), [
+    '#!/bin/bash',
+    'if [ "$1" = 1 ]; then',
+    '  polls=0',
+    '  while [ ! -e "$TMPDIR/budget-hold-release" ] && [ "$polls" -lt 1000 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done',
+    '  [ -e "$TMPDIR/budget-hold-release" ] || { : > "$BARRIER_EXPIRED-budget-hold"; exit 2; }',
+    'fi',
+    `exec "${unheld}" "$@"`,
+    '',
+  ].join('\n'), { mode: 0o700 });
+}
 
 export function installSleepLedgerShim(shim: string) {
   // Record each whole-second wait with its parent, so the guard's own waits

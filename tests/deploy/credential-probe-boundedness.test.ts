@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { expectGuardChainEndsStoppedWorker, installSleepLedgerShim } from './fixtures/credential-probe-stopped-worker.ts';
+import { BUDGET_HOLD_MODES, TICKER_HOLD, expectGuardChainEndsStoppedWorker, holdBudgetForDriver, installSleepLedgerShim } from './fixtures/credential-probe-stopped-worker.ts';
 
 // Incident 2026-07-24 (mini11 / ph-bot, ~45h outage): an unbounded
 // `security find-generic-password` blocked the launcher forever because macOS
@@ -570,9 +570,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       '',
     ].join('\n'), { mode: 0o700 });
   }
-  if (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') {
-    installSleepLedgerShim(shim);
-  }
+  if (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') installSleepLedgerShim(shim);
   if (mode === 'cleanup-residual') {
     fs.unlinkSync(path.join(shim, 'sleep'));
     fs.writeFileSync(path.join(shim, 'sleep'), [
@@ -582,9 +580,11 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       '',
     ].join('\n'), { mode: 0o700 });
   }
+  if (BUDGET_HOLD_MODES.has(mode)) holdBudgetForDriver(shim);
   fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
   fs.writeFileSync(path.join(root, 'probe.sh'), [
     'IFS= read -r go',
+    ...(BUDGET_HOLD_MODES.has(mode) ? [TICKER_HOLD] : []),
     'cleanup_mode="$4"',
     'case "$4" in control-*|cleanup-residual)',
     '  kill() {',
