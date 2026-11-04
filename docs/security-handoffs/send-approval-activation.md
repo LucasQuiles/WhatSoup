@@ -42,6 +42,10 @@ error finalization, and settlement. Outbound chunks and buffered updates retain
 their own immutable context. Batching separates different inbound events and
 approved operations; an unbound item explicitly clears ambient authority. These
 queue checks do not establish provider callback ownership or platform isolation.
+Publishing queued work transfers completion ownership before ingest capacity is
+released. The exact queued admission retains that ownership through asynchronous
+preparation; local handling settles it, while a dispatched turn transfers it
+to the existing queue finalizer. A rejected admission finalizer retains completion.
 Admission rejection and shutdown finalize durable state before releasing inbound
 authority. Detached turns retain their original queue ownership through finalization
 or retained recovery; another queue cannot reuse them before settlement. Reentrant
@@ -61,6 +65,9 @@ provenance. The complete frozen audio remains available for exact approval.
    including immutable operation snapshots, account pause generation, review
    decisions from authenticated human ingress, dispatch receipts, and inbound
    lease close semantics. The Agent365 service is a required dependency.
+   Qualify overlapping duplicate deliveries: a duplicate callback must not close
+   another delivery's active reply lease. Event deduplication and completion
+   ownership require separate proof.
 2. Prove that every production send route converges at an equivalent final
    authority seam, including provider options that affect audience. A raw route
    without a semantic adapter remains held instead of receiving an opaque

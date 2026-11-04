@@ -4884,6 +4884,9 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
+    // Publishing work releases ingest capacity before queued admission can bind
+    // its completion. Retain that completion until this exact admission settles.
+    const finishAdmission = this.inboundTurnCompletions.holdForAdmission(msg.messageId);
     const queuedWork = this.turnChain
       .then(() => this._handleMessageInner(msg))
       .catch((err) => {
@@ -4922,7 +4925,8 @@ export class AgentRuntime implements Runtime {
         if (!wedgedReclaim && msg.isSyntheticJob !== true) {
           this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?', 'status');
         }
-      });
+      })
+      .then(() => finishAdmission?.());
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? resolveAgentTurnMapKey(
           this.resolvePerChatMapKey(msg.chatJid),
