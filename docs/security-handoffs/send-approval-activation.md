@@ -73,6 +73,28 @@ stale callbacks cannot acquire a later turn's authority. Aggregated voice replie
 also enter review because their text accumulator does not retain per-fragment
 provenance. The complete frozen audio remains available for exact approval.
 
+File reviews direct the human to the configured Agent365 Desk before rendering
+any binary content. These cards contain no inline approval command. The client
+accepts payload-free media projections only in review responses; dispatch still
+requires the complete frozen payload. Older authority responses containing
+binary data also take the Desk path. The client reads authority expiry times in
+milliseconds and retains compatibility with existing string expiry values.
+
+While the protected connection is open, a serial dispatcher collects at most
+100 approved operation references, then reads one frozen payload at a time.
+Desk approval therefore needs no second chat command. Discovery never claims an
+operation: the existing final socket gate checks its exact payload, current
+approval and account state immediately before submission. Competing consumers
+cannot claim the same operation twice. Close, shutdown and every reconnect
+cancel discovery and prevent late admission from starting a provider call.
+Authority wiring is permitted only before connection startup, so discovery and
+the socket gate cannot use different authority clients.
+An unavailable authority holds work and logs the error; it never enables a
+fallback send. Already submitted calls retain the existing unknown-outcome rules.
+If error reporting itself throws, the dispatcher stops and emits the fixed
+`TRANSPORT_DISPATCH_REPORTING_FAILED` process warning. Investigate the reporting
+failure before reconnecting or restarting the dispatcher.
+
 ## Open activation requirements
 
 1. Deploy and independently verify the protected authority service contract,
@@ -109,10 +131,13 @@ provenance. The complete frozen audio remains available for exact approval.
 5. Keep authority activation refused until all requirements above have
    independently demonstrated the desired behavior. The refusal is intentional
    and must not be weakened to make a pilot appear available.
-6. Qualify large-media request and review parity. WhatSoup's existing media
-   limit is 50 MiB, while the current Agent365 middleware rejects ordinary
-   requests declaring more than 1 MiB. Bounded snapshot allocation does not
-   prove those larger operations work end to end. Rejected operations must
+6. Qualify large-media request and review parity on the installed packages.
+   WhatSoup's existing media limit is 50 MiB. The matching authority must accept
+   that frozen payload through its bounded request parser and provide exact
+   downloads in Desk, while keeping binary data out of transport review cards.
+   Verify the Desk decision through the installed transport dispatcher and final
+   gate with a fake provider, not just a direct admission request.
+   Source tests do not establish installed parity. Rejected operations must
    remain visible and must never be truncated or submitted without review.
 
 ## Acceptance evidence

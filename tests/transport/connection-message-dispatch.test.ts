@@ -73,6 +73,19 @@ function openEvent() {
   return { 'connection.update': { connection: 'open' } };
 }
 
+function idleAuthority() {
+  return {
+    readyOperations: vi.fn(async (): Promise<Array<{ id: string; digest: string }>> => []),
+    readyOperation: vi.fn(async () => { throw new Error('no approved work'); }),
+    registerInbound: vi.fn(async () => { throw new Error('no inbound event'); }),
+    closeInbound: vi.fn(async () => undefined),
+    admit: vi.fn(async () => ({ attemptId: 'unused', payloadDigest: 'unused' })),
+    recordReceipt: vi.fn(async () => undefined),
+    recordDecision: vi.fn(async () => undefined),
+    pause: vi.fn(async () => undefined),
+  };
+}
+
 function makeTextMessage(opts: {
   id?: string;
   remoteJid: string;
@@ -106,10 +119,120 @@ afterEach(() => {
 });
 
 describe('ConnectionManager — messages.upsert dispatch', () => {
+  it.each(['connecting', 'connected'])('rejects authority replacement while %s', async (state) => {
+    const { mockSock, emit } = makeMockSocket();
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const first = idleAuthority();
+    const replacement = idleAuthority();
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(first);
+    try {
+      await manager.connect();
+      if (state === 'connected') emit(openEvent());
+      expect(() => manager.setOperationsAuthorityClient(replacement)).toThrow(/before connection startup/);
+      emit(openEvent());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.readyOperations).toHaveBeenCalled();
+      expect(replacement.readyOperations).not.toHaveBeenCalled();
+    } finally { await manager.shutdown(); }
+  });
+
+  it('cancels late approved admission when keepalive replaces the socket without a close event', async () => {
+    const sockets: ReturnType<typeof makeMockSocket>[] = [];
+    vi.mocked(makeWASocket).mockImplementation(() => {
+      const socket = makeMockSocket();
+      socket.mockSock.sendMessage.mockResolvedValue({ key: { id: 'must-not-send' } });
+      sockets.push(socket);
+      return socket.mockSock as any;
+    });
+    const reference = { id: 'approved-before-reconnect', digest: 'a'.repeat(64) };
+    const base = idleAuthority();
+    let approved = false;
+    let finish!: (result: { attemptId: string; payloadDigest: string }) => void;
+    const admission = new Promise<{ attemptId: string; payloadDigest: string }>((resolve) => { finish = resolve; });
+    const authority = { ...base,
+      readyOperations: vi.fn(async () => approved ? [reference] : []),
+      readyOperation: vi.fn(async () => ({ ...reference, accountId: 'pilot-account', action: 'whatsapp.send', state: 'approved',
+        payload: { recipient: 'recipient@s.whatsapp.net', content: { text: 'approved' } } })),
+      admit: vi.fn(() => admission),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    try {
+      await manager.connect();
+      sockets[0]!.mockSock.query.mockRejectedValueOnce(new Error('keepalive lost'));
+      sockets[0]!.emit(openEvent());
+      await vi.advanceTimersByTimeAsync(28_000);
+      approved = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(authority.admit).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sockets).toHaveLength(2);
+      finish({ attemptId: 'late-after-reconnect', payloadDigest: reference.digest });
+      await vi.advanceTimersByTimeAsync(0);
+      for (const socket of sockets) expect(socket.mockSock.sendMessage).not.toHaveBeenCalled();
+    } finally { finish({ attemptId: 'cleanup', payloadDigest: reference.digest }); await manager.shutdown(); }
+  });
+
+  it('releases a Desk-approved file after review closes through the one-use final seam', async () => {
+    const { mockSock, emit } = makeMockSocket();
+    mockSock.sendMessage.mockResolvedValue({ key: { id: 'fake-provider-id' } });
+    vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
+    const reference = { id: 'file-1', digest: 'a'.repeat(64) };
+    let approved = false;
+    let claimed = false;
+    const payload = { recipient: '15551234567@s.whatsapp.net', content: { document: { $binary: 'bW1t' }, fileName: 'review.txt', mimetype: 'text/plain' } };
+    const operation = { ...reference, accountId: 'pilot-account', action: 'whatsapp.send', state: 'approved', payload };
+    const authority = {
+      readyOperations: vi.fn(async () => approved ? [reference] : []),
+      readyOperation: vi.fn(async () => operation),
+      registerInbound: vi.fn(async () => ({ kind: 'review' as const, review: {
+        challenge: 'review-1', items: [reference], expiresAt: '2026-11-04T00:00:00.000Z',
+        deskUrl: 'https://authority.example/operation-review',
+        previews: [{ ...operation, state: 'pending', reviewOnly: true, payload: {} }],
+      } })),
+      closeInbound: vi.fn(async () => undefined),
+      admit: vi.fn(async (input: { operationId?: string }) => {
+        if (input.operationId !== undefined) {
+          if (!approved || claimed || input.operationId !== reference.id) throw new Error('not approved or already claimed');
+          claimed = true;
+        }
+        return { attemptId: 'fake-attempt', payloadDigest: reference.digest };
+      }),
+      recordReceipt: vi.fn(async () => undefined), recordDecision: vi.fn(async () => undefined), pause: vi.fn(async () => undefined),
+    };
+    const manager = new ConnectionManager();
+    manager.setOperationsAuthorityClient(authority);
+    manager.onMessage = vi.fn();
+    try {
+      await manager.connect();
+      emit(openEvent());
+      emit({ 'messages.upsert': { type: 'notify', messages: [makeTextMessage({
+        id: 'review-command', remoteJid: '15551234567@s.whatsapp.net', text: '/review file-1',
+      })] } });
+      await vi.waitFor(() => expect(authority.closeInbound).toHaveBeenCalledWith({ eventId: 'review-command' }));
+      const fileCalls = () => mockSock.sendMessage.mock.calls.filter((call) => call[1]?.document !== undefined);
+      expect(fileCalls()).toHaveLength(0);
+      approved = true;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(fileCalls()).toHaveLength(1);
+      expect(fileCalls()[0]?.slice(0, 2)).toEqual([payload.recipient, { ...payload.content, document: Buffer.from('mmm') }]);
+      const released = authority.admit.mock.calls.find(([input]) => input.operationId === reference.id)?.[0];
+      expect(released).toMatchObject({ operationId: reference.id, content: payload.content });
+      expect(released).not.toHaveProperty('context');
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(fileCalls()).toHaveLength(1);
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
   it('preserves outbound echo storage without registering bot text as human authority', async () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => { throw new Error('authority unavailable'); }),
       closeInbound: vi.fn(async () => undefined),
       admit: vi.fn(async () => ({ attemptId: 'unused', payloadDigest: 'unused' })),
@@ -144,6 +267,8 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => ({
         kind: 'review' as const,
         review: {
@@ -197,6 +322,8 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => ({
         kind: 'decision' as const,
         operations: [{
@@ -254,6 +381,8 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => ({
         kind: 'decision' as const,
         operations: [{
@@ -310,6 +439,8 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     const { mockSock, emit } = makeMockSocket();
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => ({
         kind: 'paused' as const,
         receipt: {
@@ -359,6 +490,8 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     vi.mocked(makeWASocket).mockReturnValue(mockSock as any);
     const onMessage = vi.fn();
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => ({
         kind: 'inbound' as const,
         automationOperations: [
@@ -412,6 +545,8 @@ describe('ConnectionManager — messages.upsert dispatch', () => {
     let resolveTurn!: () => void;
     const onMessage = vi.fn(() => new Promise<void>((resolve) => { resolveTurn = resolve; }));
     const authority = {
+      readyOperations: vi.fn(async () => []),
+      readyOperation: vi.fn(async () => { throw new Error("no approved work"); }),
       registerInbound: vi.fn(async () => ({ kind: 'inbound' as const, automationOperations: [], automationHolds: [] })),
       closeInbound: vi.fn(async () => undefined),
       admit: vi.fn(async () => ({ attemptId: 'unused', payloadDigest: 'sha256:unused' })),

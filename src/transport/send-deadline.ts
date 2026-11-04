@@ -41,28 +41,43 @@ export async function observeTransportSubmission<T>(submission: Promise<T>): Pro
 }
 
 /** Keep late admission continuations from initiating a provider submission. */
-export async function runWithTransportSendDeadline<T>(work: () => Promise<T>): Promise<T> {
-  if (currentDeadline.getStore()) {
+export async function runWithTransportSendDeadline<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const inherited = currentDeadline.getStore();
+  if (inherited && signal === undefined) {
     assertTransportSendActive();
     return work();
   }
   const deadline: SendDeadline = {
     controller: new AbortController(),
-    expiresAt: performance.now() + SEND_DEADLINE_MS,
+    expiresAt: Math.min(inherited?.expiresAt ?? Infinity, performance.now() + SEND_DEADLINE_MS),
     error: new WhatSoupError('sendMessage timed out after 30s', 'SEND_TIMEOUT'),
   };
+  const upstream = inherited
+    ? AbortSignal.any([inherited.controller.signal, ...(signal ? [signal] : [])])
+    : signal;
   return currentDeadline.run(deadline, async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onCancel: (() => void) | undefined;
     const expired = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         deadline.controller.abort(deadline.error);
         reject(deadline.error);
-      }, SEND_DEADLINE_MS);
+      }, Math.max(0, deadline.expiresAt - performance.now()));
+      onCancel = () => {
+        deadline.controller.abort(upstream?.reason);
+        reject(upstream?.reason);
+      };
+      if (upstream?.aborted) onCancel();
+      else upstream?.addEventListener('abort', onCancel, { once: true });
     });
     try {
-      return await Promise.race([work(), expired]);
+      return await Promise.race([Promise.resolve().then(() => {
+        assertTransportSendActive();
+        return work();
+      }), expired]);
     } finally {
       clearTimeout(timer);
+      if (onCancel) upstream?.removeEventListener('abort', onCancel);
     }
   });
 }

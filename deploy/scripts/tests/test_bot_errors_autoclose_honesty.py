@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -395,3 +396,21 @@ def test_1429_verified_recovery_closes_as_recovered(tmp_path):
     types = [json.loads(l).get("type") for l in log_path.read_text().splitlines() if l.strip()]
     assert "autoclose_recovery_verified" in types
     assert "autoclose_bounded_unverified_cap_reached" not in types
+
+    collector = dispatcher_fixtures.load_module_from_path(
+        "j1_verified_autoclose_inventory",
+        Path(__file__).resolve().parents[3]
+        / "tools/agent-runtime-probes/bot_errors_j1_collector.py",
+    )
+    result = subprocess.run(
+        [sys.executable, "-", str(tmp_path), str(now - 3600), str(now)],
+        input=collector.section_script("incident-inventory"),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    inventory = json.loads(result.stdout)
+    assert "historical_unverified_autoclose" not in inventory
+    assert inventory["historical_autoclose"]["count"] == 1
+    assert inventory["historical_autoclose"]["daily_health_fail_count"] == 1
