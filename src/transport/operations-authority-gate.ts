@@ -289,8 +289,27 @@ function renderMailPreview(preview: NonNullable<TransportOperation['preview']>):
   ].join('\n');
 }
 
+function containsFrozenBinary(value: unknown): boolean {
+  const pending = [value];
+  const visited = new WeakSet<object>();
+  while (pending.length > 0) {
+    const item = pending.pop();
+    if (item === null || typeof item !== 'object' || visited.has(item)) continue;
+    visited.add(item);
+    if (Object.hasOwn(item, '$binary')) return true;
+    for (const child of Object.values(item)) pending.push(child);
+  }
+  return false;
+}
+
 /** Render exactly the authority-supplied review data; conversational code never sees it. */
 export function renderTransportReviewCard(review: TransportReview): string {
+  if (review.previews.some((operation) => operation.reviewOnly === true || containsFrozenBinary(operation.payload))) {
+    if (review.deskUrl === undefined) {
+      throw new TransportAuthorityUnavailableError('media review requires the configured Desk URL');
+    }
+    return `Open Agent365 Desk to inspect the exact files and approve: ${review.deskUrl}`;
+  }
   const challenge = commandToken(review.challenge, 'challenge');
   const ids = review.items.map((item) => commandToken(item.id, 'operation id'));
   const previews = review.previews.map((preview) => [
@@ -415,7 +434,7 @@ function fromApprovedSnapshot(
 
 export async function retryApprovedWhatsappOperations(input: {
   accountId: string;
-  inboundEventId: string;
+  inboundEventId?: string;
   operations: TransportOperation[];
   send(recipient: string, content: unknown, options?: Record<string, unknown>): Promise<unknown>;
 }): Promise<void> {
@@ -426,7 +445,7 @@ export async function retryApprovedWhatsappOperations(input: {
     .map((operation) => ({ operation, payload: whatsappDispatchPayload(operation) }));
   for (const { operation, payload } of retries) {
     await withTransportInboundContext({
-      inbound_event_id: input.inboundEventId,
+      ...(input.inboundEventId === undefined ? {} : { inbound_event_id: input.inboundEventId }),
       operation_id: operation.id,
     }, () => input.send(payload.recipient, payload.content, payload.options));
   }
@@ -760,7 +779,7 @@ export class FinalTransportAuthorityGate implements OutboundAuthorityGate {
       recipient: input.recipient,
       content: frozen.approvalContent,
       ...(options === undefined ? {} : { options: options.approvalOptions }),
-      ...(activeInbound === undefined
+      ...(activeInbound?.inbound_event_id === undefined
         ? {}
         : { context: { inbound_event_id: activeInbound.inbound_event_id } }),
       ...(activeInbound?.operation_id === undefined
