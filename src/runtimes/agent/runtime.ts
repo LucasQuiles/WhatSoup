@@ -6123,6 +6123,7 @@ export class AgentRuntime implements Runtime {
       this.pendingSingletonRuntimeTurnContext = context;
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
+    let retainUndispatchedContext = false;
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
         if (!context) {
@@ -6155,10 +6156,14 @@ export class AgentRuntime implements Runtime {
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
       ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
+        const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+        retainUndispatchedContext = true;
         if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
           this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
         }
         await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(context);
+        retainUndispatchedContext = false;
+        settleInbound?.();
         return;
       }
       if (completion.value !== null) await completion.value.promise;
@@ -6168,7 +6173,7 @@ export class AgentRuntime implements Runtime {
       }
       throw err;
     } finally {
-      if (this.pendingSingletonRuntimeTurnContext === context) {
+      if (!retainUndispatchedContext && this.pendingSingletonRuntimeTurnContext === context) {
         this.pendingSingletonRuntimeTurnContext = null;
       }
     }

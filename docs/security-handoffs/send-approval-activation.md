@@ -51,6 +51,9 @@ until the existing terminal finalizer settles, including single-session provider
 failure. A rejected admission finalizer retains completion.
 Single-session shutdown joins undispatched-turn finalization before releasing
 the inbound completion when no provider boundary was reached.
+If that finalization exhausts recovery, its context and inbound completion remain
+owned by the coordinator; the outer handler cannot substitute a legacy failed-row
+write or close the lease.
 Admission rejection and shutdown finalize durable state before releasing inbound
 authority. Detached turns retain their original queue ownership through finalization
 or retained recovery; another queue cannot reuse them before settlement. Reentrant

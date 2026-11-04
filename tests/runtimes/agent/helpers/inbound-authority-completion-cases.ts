@@ -282,6 +282,56 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'failed' });
     });
 
+    it.each(['once', 'persistent'] as const)('retains undispatched single authority through a %s terminal-write fault', async (fault) => {
+      await useScope('single');
+      let releaseSend!: () => void;
+      const sendHold = new Promise<void>((resolve) => { releaseSend = resolve; });
+      const host = runtime as unknown as { sendTurnToSession(...args: unknown[]): Promise<void> };
+      const send = host.sendTurnToSession.bind(runtime);
+      let sendEntered = false;
+      vi.spyOn(host, 'sendTurnToSession').mockImplementation(async (...args) => {
+        sendEntered = true;
+        await sendHold;
+        await send(...args);
+      });
+      const finalize = engine.finalizeTurnTerminal.bind(engine);
+      let writes = 0;
+      vi.spyOn(engine, 'finalizeTurnTerminal').mockImplementation((...args) => {
+        writes += 1;
+        if (fault === 'persistent' || writes === 1) throw new Error('injected terminal-write fault');
+        return finalize(...args);
+      });
+      const messageId = `authority-single-write-${fault}`;
+      let handlingFinished = false;
+      const handling = deliver(makeMsg({ messageId })).then(() => { handlingFinished = true; });
+      let stopped: Promise<void> | undefined;
+      try {
+        await vi.waitFor(() => expect(sendEntered).toBe(true));
+        const shutting = runtime.shutdown();
+        stopped = expect(shutting).rejects.toThrow('AgentRuntime shutdown failed');
+        await vi.waitFor(() => expect(writes).toBeGreaterThan(0));
+        releaseSend();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+      } finally {
+        releaseSend();
+        await stopped;
+        shutdownVerified = stopped !== undefined;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(0);
+      if (fault === 'once') {
+        await handling;
+        expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'failed' });
+      } else {
+        expect(handlingFinished).toBe(false);
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+      }
+    });
+
     it('settles an empty inbound without leaking an authority lease', async () => {
       await deliver(makeMsg({ messageId: 'authority-empty', content: '' }));
       expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: 'authority-empty' });

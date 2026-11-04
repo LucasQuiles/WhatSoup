@@ -2540,6 +2540,15 @@ async waitForUndispatchedRuntimeCrash(context: RuntimeTurnContext): Promise<void
 
 finalizeMessageProcessingFailure(inboundSeq: number | undefined): boolean {
   if (inboundSeq === undefined) return false;
+  const pendingSingleton = this.host.pendingSingletonRuntimeTurnContext;
+  if (
+    pendingSingleton?.identity.inboundSeq === inboundSeq
+    && this.isUndispatchedRuntimeTurnCancelled(pendingSingleton)
+  ) {
+    // A rejected cancellation barrier still has its original retry owner.
+    // The outer handler must not replace it with a legacy failed-row write.
+    return true;
+  }
   let mapKey: string | undefined;
   let context = this.host.currentRuntimeTurnContext?.identity.inboundSeq === inboundSeq
     ? this.host.currentRuntimeTurnContext
