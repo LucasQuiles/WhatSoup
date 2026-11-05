@@ -7400,7 +7400,6 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_use':
-        session?.trackToolStart(event.toolId);
         session?.tickWatchdog();
         // Post-turn gate: suppress phantom tool_use events (same rationale as assistant_text)
         if (mapKey !== undefined && this.postTurnGate.has(mapKey)) {
@@ -7408,6 +7407,7 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(mapKey)) break;
+        session?.trackToolStart(event.toolId, event.toolName, event.toolInput);
 
         if (mapKey !== undefined && this.pendingSystemResults.count(mapKey) === 0) {
           const contexts = this.perChatRuntimeTurnContexts.get(mapKey);
@@ -7437,7 +7437,7 @@ export class AgentRuntime implements Runtime {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           // The scheduled prompt forbids exposing tool progress (#3497).
           if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(toolUpdate);
-          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
+          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category, event.toolInput);
         }
         break;
 
@@ -12308,7 +12308,6 @@ export class AgentRuntime implements Runtime {
         break;
 
       case 'tool_use':
-        this.session?.trackToolStart(event.toolId);
         this.session?.tickWatchdog();
         // Post-turn gate: suppress phantom tool_use (same as handleEventWithContext)
         if (this.postTurnGate.has(GLOBAL_TOOL_SCOPE_KEY)) {
@@ -12316,6 +12315,7 @@ export class AgentRuntime implements Runtime {
           break;
         }
         if (this.isSilentCompact(GLOBAL_TOOL_SCOPE_KEY)) break;
+        this.session?.trackToolStart(event.toolId, event.toolName, event.toolInput);
 
         if (this.pendingSystemResults.count(GLOBAL_TOOL_SCOPE_KEY) === 0 && this.currentRuntimeTurnContext) {
           this.currentRuntimeTurnContext = markRuntimeTurnReplayUnsafe(this.currentRuntimeTurnContext);
@@ -12340,7 +12340,7 @@ export class AgentRuntime implements Runtime {
         {
           const toolUpdate = buildToolUpdate(event.toolName, event.toolInput ?? {});
           if (scheduledScopeKey === undefined) queue.enqueueToolUpdate(toolUpdate);
-          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category);
+          tracker?.onToolStart(event.toolId, event.toolName, toolUpdate.category, event.toolInput);
         }
         break;
 

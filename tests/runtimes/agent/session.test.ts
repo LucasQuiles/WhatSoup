@@ -8,6 +8,8 @@ import type { Messenger } from '../../../src/core/types.ts';
 import type { AgentEvent } from '../../../src/runtimes/agent/stream-parser.ts';
 import type { ProviderMcpBridge } from '../../../src/runtimes/agent/providers/types.ts';
 import { ProviderExecutionGate } from '../../../src/runtimes/agent/provider-execution-gate.ts';
+import { OperationTracker } from '../../../src/runtimes/agent/operation-tracker.ts';
+import { config } from '../../../src/config.ts';
 import { shortHash } from '../../../src/lib/short-hash.ts';
 import { outsideRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
 import {
@@ -2212,6 +2214,80 @@ describe('SessionManager', () => {
     expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
 
     vi.useRealTimers();
+  });
+
+  it('a blocking poll survives both watchdogs until its bounded vote wait ends', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), instanceName: 'personal', notifyUser: vi.fn(),
+    });
+    const tracker = new OperationTracker('personal', config.operationTracker, {
+      onProgress: () => {},
+      onStalled: (id, name) => sm.recoverStalledOperation(id, name),
+      onThinkingStalled: () => sm.probeLiveness(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      const input = { awaitResult: true, timeoutMs: 3_600_000 };
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', input);
+      sm.tickWatchdog();
+      tracker.onToolStart('poll', 'mcp__whatsoup__send_poll', 'other', input);
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(3_600_000 - WATCHDOG_HARD_MS - 2);
+      expect(mockChild.kill).not.toHaveBeenCalledWith('SIGKILL');
+      // A missing tool result after the poll deadline still reaches ordinary stalled recovery.
+      await vi.advanceTimersByTimeAsync(75_000 + STALLED_OP_KILL_GRACE_MS + 2);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      tracker.shutdown();
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a settled poll restores the ordinary session watchdog deadline', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      sm.tickWatchdog();
+      expect(sm.hasPendingTools).toBe(true);
+      sm.trackToolEnd('poll');
+      sm.tickWatchdog();
+      expect(sm.hasPendingTools).toBe(false);
+      await vi.advanceTimersByTimeAsync(WATCHDOG_HARD_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a pending poll does not excuse a different stalled tool', async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(),
+    });
+    try {
+      await sm.spawnSession();
+      await sm.sendTurn('wait for the poll answer');
+      sm.trackToolStart('poll', 'mcp__whatsoup__send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      sm.recoverStalledOperation('hung', 'Bash');
+      await vi.advanceTimersByTimeAsync(STALLED_OP_KILL_GRACE_MS + 1);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
   });
 
   it('a stalled operation is SIGKILLed after the grace period, long before the 30-min hard watchdog', async () => {

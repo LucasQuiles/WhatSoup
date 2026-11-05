@@ -47,6 +47,7 @@ import {
   type BuildBaseChildEnvOptions,
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
+import { blockingPollWaitMs } from './poll-resolution.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
 import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
@@ -804,7 +805,7 @@ export class SessionManager {
   private intentionalKill:
     | { child: ReturnType<typeof spawn>; signal: NodeJS.Signals; reason: SessionTerminationReason }
     | null = null;
-  private pendingToolIds: Set<string> = new Set();
+  private pendingToolIds = new Map<string, number>();
   /** Codex app-server thread ID for persistent sessions. */
   private codexThreadId: string | null = null;
   /** Monotonic counter for Codex JSON-RPC request IDs. */
@@ -2023,8 +2024,10 @@ export class SessionManager {
     return this.dbRowId;
   }
 
-  trackToolStart(toolId: string): void {
-    this.pendingToolIds.add(toolId);
+  trackToolStart(toolId: string, toolName = '', toolInput?: Record<string, unknown>): void {
+    if (this.pendingToolIds.has(toolId)) return;
+    const waitMs = blockingPollWaitMs(toolName, toolInput);
+    this.pendingToolIds.set(toolId, waitMs > 0 ? Date.now() + waitMs : 0);
   }
 
   trackToolEnd(toolId: string): void {
@@ -3422,13 +3425,17 @@ export class SessionManager {
   }
 
   clearTurnWatchdog(): void {
+    this.clearWatchdogTimers();
+    this.pendingToolIds.clear();
+  }
+
+  private clearWatchdogTimers(): void {
     clearTimeout(this.watchdogSoft ?? undefined);
     clearTimeout(this.watchdogWarn ?? undefined);
     clearTimeout(this.watchdogHard ?? undefined);
     this.watchdogSoft = null;
     this.watchdogWarn = null;
     this.watchdogHard = null;
-    this.pendingToolIds.clear();
   }
 
   private releaseProviderExecutionLease(child: ReturnType<typeof spawn>): void {
@@ -3496,7 +3503,7 @@ export class SessionManager {
     // Real stream events also close the current quiet stretch: the long-op ceiling
     // anchors to the NEXT stall/watchdog fire, not to one from a finished step.
     this.longOpGateStartedAt = null;
-    this.clearTurnWatchdog();
+    this.clearWatchdogTimers();
     this.armWatchdog();
   }
 
@@ -3733,6 +3740,16 @@ export class SessionManager {
     if (expectedWatchdog !== undefined && this.watchdogHard !== expectedWatchdog) return;
     this.watchdogHard = null;
     if (!this.active) return;
+
+    // A bounded human vote wait is quiet by design; other stalled tools retain their kill timers.
+    const remainingWaitMs = Math.max(0, ...this.pendingToolIds.values()) - Date.now();
+    if (remainingWaitMs > 0) {
+      this.armWatchdog(
+        managedProviderSession, managedProviderGeneration,
+        remainingWaitMs + watchdogHardMsForProvider(this.provider),
+      );
+      return;
+    }
 
     const inactivityMinutes = Math.round(watchdogHardMsForProvider(this.provider) / 60_000);
     const terminationNotice = `_Session terminated after ${inactivityMinutes} minutes of inactivity — restarting._`;
