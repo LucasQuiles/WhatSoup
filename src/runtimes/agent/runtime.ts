@@ -4894,7 +4894,7 @@ export class AgentRuntime implements Runtime {
       : undefined;
     const queuedWork = this.turnChain
       .then(() => this._handleMessageInner(msg, onAdmitted))
-      .catch((err) => {
+      .catch(async (err) => {
         // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
         // settlement of a turn the W2 sweep already terminalized, not a
         // processing failure. It reaches this catch because single mode has no
@@ -4918,8 +4918,15 @@ export class AgentRuntime implements Runtime {
         }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
+        const failedTurnCompletion = this.currentRuntimeTurnCompletion;
         if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
-          // Coordinator owns terminal persistence and reply-guarantee disarm.
+          // A following single turn must not replace the context while the
+          // coordinator still owns terminal persistence and post-effects.
+          if (
+            this.sessionScope === 'single'
+            && failedTurnCompletion
+            && failedTurnCompletion.context.identity.inboundSeq === msg.inboundSeq
+          ) await failedTurnCompletion.promise;
         } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
@@ -6155,8 +6162,7 @@ export class AgentRuntime implements Runtime {
           ...turnCompletion,
           resolve: () => {
             turnCompletion.resolve();
-            // The coordinator calls resolve after terminal post-effects, even
-            // when provider failure has already released the serialized chain.
+            // The coordinator calls resolve only after terminal post-effects.
             settleInbound?.();
           },
         };

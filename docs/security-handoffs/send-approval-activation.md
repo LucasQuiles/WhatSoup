@@ -75,6 +75,10 @@ including evidence-publication errors. The immutable turn context retains inboun
 authority through durable finalization; a failed terminal write retains that
 authority and reports unresolved shutdown. Successful finalization clears the
 turn's activity state before another command can use the session.
+After a provider rejection, the single-session turn chain also waits for that
+turn's completion before admitting a following turn. A controlled interleaving
+test holds evidence finalization and verifies that the follower cannot enter the
+runtime until the predecessor settles; both inbound leases then close once.
 
 Session-scoped provider events without verified turn identity remain unbound and
 enter human review. Verified per-turn callbacks retain their admitted context;

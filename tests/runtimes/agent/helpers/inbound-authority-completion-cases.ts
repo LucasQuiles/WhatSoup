@@ -235,6 +235,58 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
       expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
     });
 
+    it('keeps a following single turn behind failed-provider finalization', async () => {
+      await useScope('single');
+      const firstId = 'authority-single-failed-predecessor';
+      const secondId = 'authority-single-following-turn';
+      const host = runtime as unknown as {
+        _handleMessageInner(msg: IncomingMessage, onAdmitted?: () => void): Promise<void>;
+        queue: { flushTurnEvidence(turnId: string): Promise<unknown> };
+      };
+      const handle = host._handleMessageInner.bind(runtime);
+      let releaseFollower!: () => void;
+      const followerHold = new Promise<void>((resolve) => { releaseFollower = resolve; });
+      let followerEntered = false;
+      vi.spyOn(host, '_handleMessageInner').mockImplementation(async (msg, onAdmitted) => {
+        if (msg.messageId === secondId) {
+          followerEntered = true;
+          // Preserve the predecessor during RED cleanup if serialization breaks.
+          await followerHold;
+        }
+        await handle(msg, onAdmitted);
+      });
+      const first = deliver(makeMsg({ messageId: firstId }));
+      await vi.waitFor(() => expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(1));
+      let releaseFinalization!: () => void;
+      const finalizationHold = new Promise<void>((resolve) => { releaseFinalization = resolve; });
+      const flush = vi.mocked(host.queue.flushTurnEvidence).getMockImplementation()!;
+      let finalizationEntered = false;
+      vi.spyOn(host.queue, 'flushTurnEvidence').mockImplementationOnce(async (turnId) => {
+        finalizationEntered = true;
+        await finalizationHold;
+        return flush(turnId);
+      });
+      fixtures.sessions()[0]!.failProviderTurn(new Error('injected provider failure before follower'));
+      await vi.waitFor(() => expect(finalizationEntered).toBe(true));
+      const second = deliver(makeMsg({ messageId: secondId }));
+      try {
+        await vi.waitFor(() => expect(getIngestStats().active).toBe(1));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(followerEntered).toBe(false);
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+        expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(1);
+      } finally {
+        releaseFinalization();
+        await first;
+        releaseFollower();
+        await vi.waitFor(() => expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(2));
+        finishProviderTurns();
+        await second;
+      }
+      expect(authority.closeInbound.mock.calls.map(([input]) => input.eventId)).toEqual([firstId, secondId]);
+      expect(db.raw.prepare("SELECT COUNT(*) AS n FROM inbound_events WHERE processing_status = 'failed'").get()).toEqual({ n: 2 });
+    });
+
     it.each(['provider preflight', 'evidence publication'] as const)('retains single authority after %s rejects until finalization completes', async (failure) => {
       await useScope('single');
       const host = runtime as unknown as {
