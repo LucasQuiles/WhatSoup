@@ -119,6 +119,7 @@ export const CURATED_TEST_PATHS = [
   'tests/scripts/harness-maintenance-guard.test.ts',
   'tests/scripts/logger-mock-residue.test.ts',
   'tests/scripts/publication-guard.test.ts',
+  'tests/scripts/publication-branch-scan.test.ts',
   'tests/scripts/guard-test-coverage-check.test.ts',
   'tests/deploy/preflight-check.test.ts',
   'tests/scripts/import-boundary-check.test.ts',
@@ -146,12 +147,28 @@ export const CURATED_TEST_PATHS = [
 const guard = (name: string): GateStep => ({ name, cmd: `npm run ${name}` });
 const step = (name: string, cmd: string): GateStep => ({ name, cmd });
 
+/**
+ * What the installed hook runs for a branch push: the checks that must pass before
+ * content reaches the public remote. They take seconds and build nothing. Each of
+ * these guards is also a named step of the quality workflow, and the rest of
+ * BRANCH_STEPS is backed by the required hosted checks, which block merge
+ * (tests/scripts/pre-push-guard.test.ts keeps every push-gate guard backed there).
+ */
+export const FAST_PUSH_STEPS: readonly GateStep[] = [
+  guard('guard:repo:branch-diff'),
+  guard('guard:repo:commit-authors'),
+  guard('guard:publication:all'),
+  guard('guard:publication:branch-diff'),
+  step('push-gate-scope', 'bash scripts/print-push-gate-scope.sh fast'),
+];
+
 /** verify:push:branch — exact legacy order (semantic:shadow sits mid-block). */
 export const BRANCH_STEPS: readonly GateStep[] = [
   guard('guard:repo:staged'),
   guard('guard:repo:branch-diff'),
   guard('guard:repo:commit-authors'),
   guard('guard:publication:staged'),
+  guard('guard:publication:branch-diff'),
   guard('guard:doc-drift'),
   guard('guard:public-surface-drift'),
   guard('guard:work-index'),
@@ -355,9 +372,15 @@ function runStep(gateStep: GateStep): Promise<number> {
 
 export async function main(argv: readonly string[]): Promise<number> {
   const lane = argv[0];
-  const steps = lane === 'branch' ? BRANCH_STEPS : lane === 'release' ? RELEASE_STEPS : undefined;
+  const steps = lane === 'branch'
+    ? BRANCH_STEPS
+    : lane === 'release'
+      ? RELEASE_STEPS
+      : lane === 'fast'
+        ? FAST_PUSH_STEPS
+        : undefined;
   if (!steps) {
-    console.error('Usage: push-gate.ts <branch|release>');
+    console.error('Usage: push-gate.ts <branch|release|fast>');
     return 64;
   }
 

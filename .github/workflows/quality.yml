@@ -292,6 +292,12 @@ jobs:
       - name: Publication guard
         run: npm run guard:publication:all
 
+      # The push hook's private-literal scan of every commit the branch adds. Run
+      # here as well, so a merge that skips the local hook still meets it. It reads
+      # GITHUB_BASE_REF for the base; on a push to main the range is empty.
+      - name: Publication branch-diff scan
+        run: npm run guard:publication:branch-diff
+
       - name: Node pin consistency guard
         run: npm run guard:node-pin-consistency
 

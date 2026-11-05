@@ -6,16 +6,19 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { types as utilTypes } from 'node:util';
 import {
+  createVerifiedBinaryCheck,
   git,
   isTextCandidate,
   listStagedFiles,
   normalizeRepoPath,
-  readStagedAddedLines,
+  printableText,
+  readStagedAddedLinesResult,
   readStagedFileContentResult,
   isDocumentationEmailFixture,
   isGitHubSshTransportPrincipal,
   isOperationalProtocolToken,
   operationalReleaseHygieneFiles,
+  PUSH_BASE_OID_ENV,
 } from './lib/guard-core.ts';
 import {
   ExactGitInputError,
@@ -36,11 +39,25 @@ import {
 import { canonicalizeBoundaryRun } from './lib/verification/boundary-run/shared.ts';
 import { parseBoundaryJsonBytes } from './lib/verification/boundary-run/schema.ts';
 import { validateExactRangeProvenance } from './lib/ci-control/exact-range-provenance.ts';
+import { branchDiffBaseRef, parseUnifiedDiffAddedLines } from './repo-hygiene-guard.ts';
+import {
+  BRANCH_SCAN_LIMITS,
+  isPublicationFixtureExempt,
+  scanBranchRange,
+  type BranchDiffResult,
+  type BranchScanLimits,
+} from './lib/publication-branch-scan.ts';
 
 export { isTextCandidate, normalizeRepoPath } from './lib/guard-core.ts';
+export {
+  BRANCH_SCAN_LIMITS,
+  branchScanOverLimit,
+  type BranchDiffResult,
+  type BranchScanLimits,
+} from './lib/publication-branch-scan.ts';
 
 export type PublicationClass = 'PUBLIC' | 'PRIVATE-ARCHIVE' | 'SANITIZE' | 'DELETE';
-export type PublicationMode = 'all' | 'release' | 'staged';
+export type PublicationMode = 'all' | 'branch-diff' | 'release' | 'staged';
 export type GuardSeverity = 'error' | 'warning';
 
 export interface AuditRow {
@@ -242,6 +259,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.mode = 'release';
     } else if (arg === '--staged') {
       args.mode = 'staged';
+    } else if (arg === '--branch-diff') {
+      args.mode = 'branch-diff';
     } else if (arg === '--json') {
       args.json = true;
     } else if (arg === '--write') {
@@ -443,15 +462,10 @@ export function validatePublicationAudit(
   return issues;
 }
 
-function stagedAddedText(cwd: string, filePath: string): string {
-  const lines: string[] = [];
-
-  for (const diffLine of readStagedAddedLines(cwd, filePath).split(/\r?\n/)) {
-    if (diffLine.startsWith('+++') || diffLine.startsWith('---')) continue;
-    if (diffLine.startsWith('+')) lines.push(diffLine.slice(1));
-  }
-
-  return lines.join('\n');
+/** The staged lines a path adds, by the shared hunk-aware parser (so `++…` content is kept), or why the read failed. */
+function stagedAddedText(cwd: string, filePath: string): { ok: true; text: string } | { ok: false; error: string } {
+  const read = readStagedAddedLinesResult(cwd, filePath);
+  return read.ok ? { ok: true, text: parseUnifiedDiffAddedLines(read.diff).map((line) => line.text).join('\n') } : read;
 }
 
 function listTrackedInternalDocs(cwd: string): string[] {
@@ -549,11 +563,19 @@ function validateStaged(cwd: string): GuardIssue[] {
     }
   }
 
-  for (const filePath of staged.filter(isTextCandidate)) {
-    const addedText = stagedAddedText(cwd, filePath);
-    issues.push(...scanTextForPrivateLiterals(filePath, addedText));
+  // Every staged path except a verified binary (the test every disclosure scan uses)
+  // and the fixture files isPublicationFixtureExempt keeps on their earlier selection.
+  const isVerifiedBinary = createVerifiedBinaryCheck(cwd);
+  for (const filePath of staged) {
+    if (isPublicationFixtureExempt(filePath) || isVerifiedBinary(filePath, `:${filePath}`)) continue;
+    const added = stagedAddedText(cwd, filePath);
+    if (!added.ok) {
+      issues.push({ severity: 'error', code: 'staged-diff-unread', filePath, message: `Not scanned: ${added.error}. A staged file the scan cannot read in full is refused.` });
+      continue;
+    }
+    issues.push(...scanTextForPrivateLiterals(filePath, added.text));
     if (path.extname(filePath) === '.md') {
-      issues.push(...findMissingMarkdownRefs(filePath, addedText, (ref) => existsSync(path.join(cwd, ref))));
+      issues.push(...findMissingMarkdownRefs(filePath, added.text, (ref) => existsSync(path.join(cwd, ref))));
     }
   }
 
@@ -601,6 +623,17 @@ function validateAll(cwd: string): GuardIssue[] {
   return issues;
 }
 
+/** The branch-diff scan (scripts/lib/publication-branch-scan.ts) with this guard's line scanner. */
+export function validateBranchDiff(
+  cwd: string,
+  baseRef: string,
+  limits: Readonly<BranchScanLimits> = BRANCH_SCAN_LIMITS,
+  head = 'HEAD',
+  now: () => number = Date.now,
+): BranchDiffResult<GuardIssue> {
+  return scanBranchRange(cwd, baseRef, scanTextForPrivateLiterals, limits, head, now);
+}
+
 function validateRelease(cwd: string): GuardIssue[] {
   const issues = validateAll(cwd);
   const parsed = loadAudit(cwd);
@@ -624,7 +657,7 @@ function validateRelease(cwd: string): GuardIssue[] {
 function printIssues(issues: GuardIssue[]): void {
   for (const issue of issues) {
     const location = issue.filePath ? `${issue.filePath}:${issue.line ?? 1}` : 'publication-guard:1';
-    console.error(`${location} ${issue.severity} ${issue.code}: ${issue.message}`);
+    console.error(printableText(`${location} ${issue.severity} ${issue.code}: ${issue.message}`));
   }
 }
 
@@ -657,6 +690,9 @@ function printHelp(): void {
 Checks:
   --all      Validate tracked publication audit state.
   --staged   Validate the same deterministic publication audit state before commit.
+  --branch-diff
+             Scan every commit this branch adds relative to its base for private
+             literals (size-limited; exit 2 when it cannot finish).
   --release  Require every tracked internal doc to be PUBLIC-clean before publication.
   --json     Print machine-readable results.
   --write    Rewrite docs/publication-audit.md into canonical form (does NOT validate).
@@ -701,7 +737,7 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
   // and "0 issues over 0 files" must not read as a pass. Gated on mode: `staged` scans the
   // commit's ADDED lines, where an empty set is legitimate (committing with nothing staged is
   // normal, and .husky/pre-commit runs guard:publication:staged), so it is deliberately exempt.
-  if (args.mode !== 'staged') {
+  if (args.mode !== 'staged' && args.mode !== 'branch-diff') {
     const trackedCount = git(['ls-files'], cwd).split(/\r?\n/).filter(Boolean).length;
     if (trackedCount === 0) {
       console.error(
@@ -712,8 +748,33 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     }
   }
 
+  let branchBase: string | null = null;
+  if (args.mode === 'branch-diff') {
+    try {
+      branchBase = branchDiffBaseRef(cwd);
+    } catch (err) {
+      console.error(`publication-guard: INCONCLUSIVE — ${(err as Error).message}`);
+      return 2;
+    }
+  }
+  if (args.mode === 'branch-diff' && branchBase === null) {
+    console.error('publication-guard: INCONCLUSIVE — no base ref to compare this branch with; fetch origin/main.');
+    return 2;
+  }
+
+  const branchResult = branchBase !== null ? validateBranchDiff(cwd, branchBase) : null;
+  if (branchResult !== null && 'inconclusive' in branchResult) {
+    console.error(
+      `publication-guard: INCONCLUSIVE — the branch scan did not finish (${branchResult.inconclusive}). ` +
+        'An unfinished scan is not a pass; a budget stop means the range is too large for the push hook.',
+    );
+    return 2;
+  }
+
   const issues =
-    args.mode === 'staged'
+    branchResult !== null
+      ? branchResult.issues
+      : args.mode === 'staged'
       ? validateStaged(cwd)
       : args.mode === 'release'
         ? validateRelease(cwd)
@@ -739,6 +800,18 @@ export function runPublicationGuard(argv = process.argv.slice(2), cwd = process.
     // invisible here — "guard clean" must not be read as "repo clean".
     if (args.mode === 'staged') {
       console.log('  scope: staged added lines only — pre-existing repo content is NOT scanned');
+    }
+    if (args.mode === 'branch-diff' && branchResult !== null && 'used' in branchResult) {
+      console.log('  scope: lines this branch adds relative to its base, in every commit — history lines already on the base are NOT flagged');
+      // The counts show the scan read something; a zero-commit range is a push of the base itself.
+      const { used } = branchResult;
+      console.log(`  base: ${branchBase}${process.env[PUSH_BASE_OID_ENV] ? ' (the live push base)' : ''}`);
+      console.log(
+        `  read: ${used.commits} commits, ${used.patchBytes} patch bytes, ${used.addedLines} added lines, ` +
+          `${used.baseBlobs} base files (${used.baseBytes} bytes) in ${used.milliseconds} ms; limits ` +
+          `${BRANCH_SCAN_LIMITS.commits} / ${BRANCH_SCAN_LIMITS.patchBytes} / ${BRANCH_SCAN_LIMITS.addedLines} / ` +
+          `${BRANCH_SCAN_LIMITS.baseBlobs} / ${BRANCH_SCAN_LIMITS.baseBytes} / ${BRANCH_SCAN_LIMITS.milliseconds} ms`,
+      );
     }
   }
   return 0;

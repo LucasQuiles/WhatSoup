@@ -3,6 +3,7 @@ import { accessSync, constants, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { PUSH_BASE_OID_ENV } from './lib/guard-core.ts';
 import {
   classifyPushRemote,
   isPreserveMirrorUrl,
@@ -120,7 +121,10 @@ export function classifyPrePushInput(input: string): PushDecision {
 
 export function commandsForDecision(decision: PushDecision): string[] {
   if (decision === 'release') return ['verify:release'];
-  if (decision === 'branch') return ['verify:push:branch'];
+  // A branch push keeps the checks that must run before disclosure. The heavy
+  // tests run in the required hosted checks, which block merge and cover more.
+  // `verify:push:branch` stays the complete local gate for a person to run.
+  if (decision === 'branch') return ['verify:push:fast'];
   return [];
 }
 
@@ -249,7 +253,10 @@ export function runPrePushGuard(
   }
 
   const decision = classifyPrePushInput(input);
-  const commands = commandsForDecision(decision);
+  // With no readable ref updates the destination is unknown and could be main, so
+  // this case keeps the complete gate rather than the branch tier.
+  const refsUnknown = nonBlankLines(input).length === 0;
+  const commands = refsUnknown ? ['verify:push:branch'] : commandsForDecision(decision);
 
   if (commands.length === 0) {
     console.error(
@@ -265,7 +272,7 @@ export function runPrePushGuard(
     return decision;
   }
 
-  if (nonBlankLines(input).length === 0) {
+  if (refsUnknown) {
     console.error(
       'pre-push guard: no ref updates received on stdin — refusing to skip verification (fail-closed); genuine branch deletions still skip',
     );
@@ -284,14 +291,29 @@ export function runPrePushGuard(
       })
     : null;
 
-  dependencies.assertConsoleDependencies(cwd);
+  // Only the complete gates build the console; the branch tier does not need it.
+  if (refsUnknown || decision === 'release') {
+    dependencies.assertConsoleDependencies(cwd);
+  }
 
-  for (const script of commands) {
-    console.error(`pre-push guard: running npm run ${script}`);
-    // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
-    // run for minutes — 600s bounds a hang without tripping real steps. The 30s
-    // default used elsewhere in this series is for fast single git/gh invocations.
-    execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
+  // The branch scans compare with the live main the alignment check just read from
+  // the pushed remote, never with a local tracking ref or a value left in the
+  // caller's environment. The steps inherit this process's environment, so the
+  // value is set for them here and the caller's value is put back after.
+  const callerBase = process.env[PUSH_BASE_OID_ENV];
+  if (alignmentReceipt) process.env[PUSH_BASE_OID_ENV] = alignmentReceipt.remoteMainOid;
+  else delete process.env[PUSH_BASE_OID_ENV];
+  try {
+    for (const script of commands) {
+      console.error(`pre-push guard: running npm run ${script}`);
+      // Gate STEP runner: individual npm steps (vitest suites, typecheck) legitimately
+      // run for minutes — 600s bounds a hang without tripping real steps. The 30s
+      // default used elsewhere in this series is for fast single git/gh invocations.
+      execFileSync('npm', ['run', script], { cwd, timeout: 600_000, stdio: 'inherit' });
+    }
+  } finally {
+    if (callerBase === undefined) delete process.env[PUSH_BASE_OID_ENV];
+    else process.env[PUSH_BASE_OID_ENV] = callerBase;
   }
 
   if (alignmentReceipt) {
