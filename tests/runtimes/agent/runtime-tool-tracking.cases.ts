@@ -62,7 +62,12 @@ export function registerRuntimeToolTrackingTests(): void {
     expect(state.activeToolNames.has(toolScopeKey)).toBe(false);
   });
 
-  it('scoped tool_use hands the tool input to the tracker so a blocking send_poll keeps its poll timeout', () => {
+  it.each([
+    { content: 'Selected A', isError: false },
+    { content: 'Poll expired', isError: false },
+    { content: 'Poll cancelled', isError: true },
+    { content: 'Vote transport failed', isError: true },
+  ])('scoped poll forwards its wait and clears both trackers on $content', ({ content, isError }) => {
     const db = makeDb();
     const { messenger } = makeMessenger();
     const runtime = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
@@ -74,13 +79,14 @@ export function registerRuntimeToolTrackingTests(): void {
     const mapKey = 'scoped@s.whatsapp.net';
     const toolScopeKey = `${mapKey}#1`;
     const context = makeRuntimeTurnContext('per_chat', 'scoped', queue.targetChatJid, 42, 'turn-scoped-poll');
+    const session = { tickWatchdog: vi.fn(), trackToolStart: vi.fn(), trackToolEnd: vi.fn() };
     const state = runtime as unknown as {
       operationTrackers: Map<string, typeof tracker>;
       perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
       handleEventWithContext(
         event: AgentEvent,
         queue: IOutboundQueue,
-        session: null,
+        session: typeof session,
         conversationKey: string,
         inboundSeq: number,
         mapKey: string,
@@ -94,7 +100,7 @@ export function registerRuntimeToolTrackingTests(): void {
     state.handleEventWithContext(
       { type: 'tool_use', toolId: 'call_poll', toolName: 'mcp__whatsoup__send_poll', toolInput },
       queue,
-      null,
+      session,
       'scoped',
       42,
       mapKey,
@@ -107,6 +113,14 @@ export function registerRuntimeToolTrackingTests(): void {
       expect.any(String),
       toolInput,
     );
+    expect(session.trackToolStart).toHaveBeenCalledWith('call_poll', 'mcp__whatsoup__send_poll', toolInput);
+
+    state.handleEventWithContext(
+      { type: 'tool_result', toolId: 'call_poll', toolName: 'mcp__whatsoup__send_poll', content, isError },
+      queue, session, 'scoped', 42, mapKey, toolScopeKey,
+    );
+    expect(tracker.onToolEnd).toHaveBeenCalledWith('call_poll');
+    expect(session.trackToolEnd).toHaveBeenCalledWith('call_poll');
   });
 
 }

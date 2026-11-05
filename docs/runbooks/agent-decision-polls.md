@@ -18,7 +18,7 @@ There are two poll paths with different semantics:
    - Set `selectableCount` above `1` for multi-select polls.
    - By default, `send_poll` returns after sending. With `awaitResult: true`, it stays open until a vote, expiry, or cancellation and returns the result.
    - A blocking wait uses the tool timeout (default one hour, clamped to one second through 24 hours). The operation tracker and session hard watchdog allow that bounded wait. Unrelated stalled tools retain their normal deadlines.
-   - After the wait expires, a missing tool result still reaches the ordinary stall-recovery path. The session hard watchdog remains a bounded fallback when operation tracking is disabled.
+   - After the wait expires, a missing tool result still reaches ordinary stall recovery for child-process providers. Managed API providers use their hard-watchdog fallback. The session hard watchdog also bounds recovery when operation tracking is disabled.
 
 ## Agent Guidance
 

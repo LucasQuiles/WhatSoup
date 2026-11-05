@@ -6955,6 +6955,9 @@ describe('AgentRuntime', () => {
       expect.any(String),
       { question: 'Pick one', options: ['A', 'B'] },
     );
+    expect(sourceSession.trackToolStart).toHaveBeenCalledWith(
+      'ask-user-shared', 'AskUserQuestion', { question: 'Pick one', options: ['A', 'B'] },
+    );
 
     state.handleEvent(sourceSession, { type: 'compact_boundary' });
     expect(queue.indicateTyping).toHaveBeenCalledTimes(1);

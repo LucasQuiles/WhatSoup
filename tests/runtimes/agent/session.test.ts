@@ -2248,6 +2248,36 @@ describe('SessionManager', () => {
     }
   });
 
+  it.each(['openai-api', 'anthropic-api'])('%s protects a bounded poll and still terminates a missing result', async (provider) => {
+    vi.useFakeTimers();
+    const Provider = provider === 'openai-api' ? OpenAIApiProvider : AnthropicApiProvider;
+    const killSpy = vi.spyOn(Provider.prototype, 'kill').mockImplementation(() => {});
+    const sm = new SessionManager({
+      db: makeDb(), messenger: makeMessenger().messenger, chatJid: CHAT_JID,
+      onEvent: vi.fn(), notifyUser: vi.fn(), provider,
+    });
+    try {
+      await sm.spawnSession();
+      const state = sm as unknown as { managedProviderSession: { sendTurn: ReturnType<typeof vi.fn> } };
+      state.managedProviderSession.sendTurn = vi.fn(async () => {});
+      await sm.sendTurn('wait for a managed poll');
+      sm.trackToolStart('poll', 'send_poll', { awaitResult: true, timeoutMs: 3_600_000 });
+      sm.tickWatchdog();
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(sm.getStatus().active).toBe(true);
+      await vi.advanceTimersByTimeAsync(3_600_000 - 600_001);
+      expect(killSpy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(killSpy).toHaveBeenCalledTimes(1);
+      expect(sm.getStatus().active).toBe(false);
+      expect(sm.hasPendingTools).toBe(false);
+    } finally {
+      sm.clearTurnWatchdog();
+      vi.useRealTimers();
+    }
+  });
+
   it('a settled poll restores the ordinary session watchdog deadline', async () => {
     vi.useFakeTimers();
     const sm = new SessionManager({
