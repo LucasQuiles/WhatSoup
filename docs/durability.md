@@ -141,9 +141,11 @@ Note: `completeInbound()` is a guarded helper — if the row is still `processin
                                        ▼               ▼
                                     echoed          maybe_sent
                                   (terminal)           │
-                                                       ├─ wa_message_id found
-                                                       │  in messages table
-                                                       │  → echoed
+                                                       ├─ matching row + is_from_me = 1
+                                                       │  → echoed (own-message observation)
+                                                       │
+                                                       ├─ matching row + is_from_me != 1
+                                                       │  → quarantined (any replay policy)
                                                        │
                                                        ├─ not found + safe/read_only
                                                        │  → pending  (replay)
