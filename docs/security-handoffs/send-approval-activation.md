@@ -70,6 +70,12 @@ close ownership, and cancellation before the single-session provider boundary
 still require separate end-to-end qualification. No fleet activation follows
 from the controlled runtime tests.
 
+Controlled single-session tests also cover rejection before the provider boundary,
+including evidence-publication errors. The immutable turn context retains inbound
+authority through durable finalization; a failed terminal write retains that
+authority and reports unresolved shutdown. Successful finalization clears the
+turn's activity state before another command can use the session.
+
 Session-scoped provider events without verified turn identity remain unbound and
 enter human review. Verified per-turn callbacks retain their admitted context;
 stale callbacks cannot acquire a later turn's authority. Aggregated voice replies

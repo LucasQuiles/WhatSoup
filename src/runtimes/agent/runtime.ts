@@ -6124,6 +6124,17 @@ export class AgentRuntime implements Runtime {
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
     let retainUndispatchedContext = false;
+    const finalizeUndispatched = async (pending: RuntimeTurnContext): Promise<void> => {
+      const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+      retainUndispatchedContext = true;
+      if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(pending)) {
+        this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(pending);
+      }
+      await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(pending);
+      this.runtimeTurnCoordinator.clearUndispatchedRuntimeTurnCancellation(pending);
+      retainUndispatchedContext = false;
+      settleInbound?.();
+    };
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
         if (!context) {
@@ -6156,18 +6167,21 @@ export class AgentRuntime implements Runtime {
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
       ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
-        const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
-        retainUndispatchedContext = true;
-        if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
-          this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
-        }
-        await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(context);
-        retainUndispatchedContext = false;
-        settleInbound?.();
+        await finalizeUndispatched(context);
         return;
       }
       if (completion.value !== null) await completion.value.promise;
     } catch (err) {
+      if (context && completion.value === null && !retainUndispatchedContext) {
+        log.error({ err, chatJid, inboundSeq }, 'single turn failed before provider admission');
+        await finalizeUndispatched(context);
+        // This context now has a proven terminal owner; do not fall through to
+        // the outer handler's legacy failed-row write.
+        if (purpose !== 'scheduled-agent-job') {
+          this.sendDirect(chatJid, 'Something went wrong processing that message. Try again?', 'status');
+        }
+        return;
+      }
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
       }

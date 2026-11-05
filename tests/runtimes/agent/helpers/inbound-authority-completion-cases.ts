@@ -5,6 +5,7 @@ import { createIngestHandler, getIngestStats } from '../../../../src/core/ingest
 import type { IncomingMessage } from '../../../../src/core/types.ts';
 import type { AgentRuntime } from '../../../../src/runtimes/agent/runtime.ts';
 import type { TurnQueue } from '../../../../src/runtimes/agent/turn-queue.ts';
+import type { RuntimeTurnCoordinator } from '../../../../src/runtimes/agent/runtime-turn-coordinator.ts';
 import { registerTrustedInbound } from '../../../../src/transport/operations-authority-gate.ts';
 
 interface CompletionHarness {
@@ -232,6 +233,71 @@ export function registerInboundAuthorityCompletionCases(fixtures: {
         await handling;
       }
       expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
+    });
+
+    it.each(['provider preflight', 'evidence publication'] as const)('retains single authority after %s rejects until finalization completes', async (failure) => {
+      await useScope('single');
+      const host = runtime as unknown as {
+        sendTurnToSession(...args: unknown[]): Promise<void>;
+        runtimeTurnCoordinator: RuntimeTurnCoordinator;
+        isTurnInFlight(scopeKey: string): boolean;
+      };
+      const coordinator = host.runtimeTurnCoordinator;
+      if (failure === 'provider preflight') {
+        vi.spyOn(host, 'sendTurnToSession').mockRejectedValueOnce(new Error('injected provider preflight rejection'));
+      } else {
+        vi.spyOn(coordinator, 'beginRuntimeTurnEvidence').mockImplementationOnce(() => {
+          throw new Error('injected evidence publication rejection');
+        });
+      }
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const finalize = coordinator.finalizeUndispatchedRuntimeTurn.bind(coordinator);
+      let finalizationEntered = false;
+      vi.spyOn(coordinator, 'finalizeUndispatchedRuntimeTurn').mockImplementation(async (...args) => {
+        finalizationEntered = true;
+        await hold;
+        return finalize(...args);
+      });
+      const messageId = `authority-single-preboundary-${failure}`;
+      const handling = deliver(makeMsg({ messageId }));
+      try {
+        await vi.waitFor(() => expect(finalizationEntered).toBe(true));
+        expect(fixtures.sessions().flatMap((session) => session.turnsSent)).toHaveLength(0);
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+        expect(host.isTurnInFlight('global')).toBe(true);
+      } finally {
+        release();
+        await handling;
+      }
+      expect(authority.closeInbound).toHaveBeenCalledExactlyOnceWith({ eventId: messageId });
+      expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'failed' });
+      expect(host.isTurnInFlight('global')).toBe(false);
+    });
+
+    it('retains single authority when a preflight rejection cannot persist its terminal result', async () => {
+      await useScope('single');
+      const host = runtime as unknown as { sendTurnToSession(...args: unknown[]): Promise<void> };
+      vi.spyOn(host, 'sendTurnToSession').mockRejectedValueOnce(new Error('injected provider preflight rejection'));
+      const finalize = vi.spyOn(engine, 'finalizeTurnTerminal').mockImplementation(() => {
+        throw new Error('injected preflight terminal persistence failure');
+      });
+      const messageId = 'authority-preflight-persistence-failure';
+      let settled = false;
+      void deliver(makeMsg({ messageId })).then(() => { settled = true; });
+      try {
+        await vi.waitFor(() => expect(finalize).toHaveBeenCalled());
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+        expect(db.raw.prepare('SELECT processing_status FROM inbound_events WHERE message_id = ?').get(messageId)).toEqual({ processing_status: 'processing' });
+        const shutdown = runtime.shutdown();
+        await expect(shutdown).rejects.toThrow('AgentRuntime shutdown failed');
+        shutdownVerified = true;
+        expect(settled).toBe(false);
+        expect(authority.closeInbound).not.toHaveBeenCalled();
+      } finally {
+        finalize.mockRestore();
+      }
     });
 
     it('joins single-scope shutdown finalization before releasing an undispatched lease', async () => {
