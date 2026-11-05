@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../../src/core/database.ts';
 import {
@@ -641,18 +642,38 @@ describe('database retention', () => {
   });
 
   it('keeps a bucket exactly at the retention boundary (strict <) (#1108 hardening)', () => {
-    const exactCutoff = (db.raw
-      .prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now', '-180 days') AS b`)
-      .get() as { b: string }).b;
-    db.raw.prepare(
-      `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', 9)`,
-    ).run(exactCutoff);
+    const nativeClock = new DatabaseSync(':memory:');
+    let now = '2030-01-01 12:00:00';
+    try {
+      // SQLite's clock is independent of Date.now(); keep native date parsing
+      // while sharing one controlled instant between fixture and sweep.
+      db.raw.function('datetime', { varargs: true }, (...args) => {
+        const row = nativeClock.prepare(
+          `SELECT datetime(${args.map(() => '?').join(',')}) AS value`,
+        ).get(...args.map((arg) => arg === 'now' ? now : arg));
+        return row!.value;
+      });
+      const bucketAt = nativeClock.prepare(
+        `SELECT strftime('%Y-%m-%dT%H:%M:%S.000Z', ?, '-180 days', ?) AS bucket`,
+      );
+      const insert = db.raw.prepare(
+        `INSERT INTO metrics_hourly (bucket, metric, value) VALUES (?, 'messages_in', ?)`,
+      );
+      insert.run(bucketAt.get(now, '-1 second')!.bucket, 1);
+      insert.run(bucketAt.get(now, '+0 seconds')!.bucket, 2);
+      insert.run(bucketAt.get(now, '+1 second')!.bucket, 3);
 
-    const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+      const result = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+      expect(result.metricsHourly).toBe(1);
+      expect(columnValues('metrics_hourly', 'value')).toEqual([2, 3]);
 
-    // `datetime(bucket) < datetime('now','-180 days')` is false at exact equality → kept.
-    expect(result.metricsHourly).toBe(0);
-    expect(rowCount('metrics_hourly')).toBe(1);
+      now = '2030-01-01 12:00:01';
+      const advanced = runDatabaseRetention(db, DEFAULT_DATABASE_RETENTION);
+      expect(advanced.metricsHourly).toBe(1);
+      expect(columnValues('metrics_hourly', 'value')).toEqual([3]);
+    } finally {
+      nativeClock.close();
+    }
   });
 
   it('preserves recoverable and unexported rows regardless of age', () => {
