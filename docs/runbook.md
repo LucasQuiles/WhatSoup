@@ -2063,6 +2063,8 @@ sqlite3 "$SNAPSHOT_DB" \
 
 A returned row with a real `content_type` means the body is stored. `content_type = 'history'` is
 an envelope-only placeholder; the body never arrived. A missing row means the message is absent.
+When a full history body upgrades a placeholder, its `fromMe` value also replaces
+the stored `is_from_me` flag. Later history does not overwrite a non-placeholder row.
 Treat a repeated batch as successful only when the expected row already exists. Stored history is
 not an inbound admission: backfilled messages are never answered automatically, so use the
 continuity manifest audit below to decide on any catch-up.

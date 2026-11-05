@@ -262,6 +262,11 @@ For each `maybe_sent` op (including those promoted in Step 1):
 
 Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
+When a full history message replaces an envelope-only placeholder, its `fromMe`
+value replaces the placeholder's persisted authorship together with the body.
+This corrects either direction of stale authorship. History replay leaves an
+existing non-placeholder row unchanged; previously upgraded rows are not backfilled.
+
 Here, a conflict means a row occupying the exact stored `message_id` used by the
 outbound receipt. Ordinary Signal peer messages use a composite `signal:` storage
 key; self syncs and outbound receipts retain the raw provider timestamp. A peer
