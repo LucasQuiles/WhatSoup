@@ -257,6 +257,48 @@ def test_custom_promote_seconds_respected(tmp_path):
     assert mod.apply_transient_tiering(_alert(), state, key, 1061) is None  # promoted
 
 
+# The envelope's incident severities (lib/bot_errors_envelope.py), weakest first.
+_INCIDENT_SEVERITY_RANK = {"warning": 1, "error": 2, "critical": 3}
+
+
+def test_promotion_takes_the_stronger_of_first_and_current_severity(tmp_path):
+    # A record held under an older, weaker severity (e.g. written before a
+    # producer raised its severity) must not cap the promoted page below what
+    # the promoting event itself says. Over every pair of incident
+    # severities: the result is one of the two, ranks as the stronger, never
+    # ranks below the first severity, and an equal pair keeps that severity.
+    mod = _load()
+    rank = _INCIDENT_SEVERITY_RANK
+    for first in rank:
+        for current in rank:
+            state = _empty_state()
+            key = _key(mod, _alert())
+            assert mod.apply_transient_tiering(_alert(severity=first), state, key, 1000) is not None
+            assert state["transientState"][key]["firstSeverity"] == first
+            evt = _alert(severity=current)
+            assert mod.apply_transient_tiering(evt, state, key, 1000 + 1800) is None
+            promoted = evt["severity"]
+            assert promoted in (first, current), (first, current)
+            assert rank[promoted] == max(rank[first], rank[current]), (first, current)
+            assert rank[promoted] >= rank[first], (first, current)
+            if rank[current] <= rank[first]:
+                assert promoted == first, (first, current)
+
+
+def test_promotion_with_equal_severity_is_unchanged_for_another_transient_source(tmp_path):
+    # health_body_degraded held at warning and promoted by another warning
+    # stays warning; the stronger-severity rule changes nothing for it.
+    mod = _load()
+    state = _empty_state()
+    key = _key(mod, _alert())
+    assert mod.apply_transient_tiering(_alert(severity="warning"), state, key, 1000) is not None
+    evt = _alert(severity="warning")
+    assert mod.apply_transient_tiering(evt, state, key, 1000 + 1800) is None
+    assert evt["severity"] == "warning"
+    assert evt["diagnostics"]["transientPromoted"] is True
+    assert state["transientState"][key]["firstSeverity"] == "warning"
+
+
 def test_outage_not_tiered(tmp_path):
     mod = _load()
     state = _empty_state()
