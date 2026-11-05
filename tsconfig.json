@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": "./.local/typescript/tsconfig.tsbuildinfo",
     "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",

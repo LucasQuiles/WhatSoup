@@ -137,6 +137,30 @@ with `WHATSOUP_SKIP_DRIFT_WARN=1`.
 
 ## Layer 2 — Local pre-push guards
 
+The three backend type-check commands retain TypeScript's incremental compiler
+state in `.local/typescript/`. Each project has a separate `.tsbuildinfo` file;
+the directory belongs to the invoking worktree, even when `node_modules` is a
+shared symlink. TypeScript checks current source and compiler options against
+that state. Test results are never cached. A fresh checkout still performs a
+cold check. For a cold comparison in an existing worktree, use a fresh,
+owned scratch directory. This example checks the root project and removes
+only the directory it creates:
+
+```bash
+(
+  typecheck_scratch=$(mktemp -d "${TMPDIR:-/tmp}/whatsoup-typecheck.XXXXXX") || exit
+  trap 'rm -rf "$typecheck_scratch"' EXIT
+  npm run typecheck -- --tsBuildInfoFile "$typecheck_scratch/root.tsbuildinfo"
+)
+```
+
+The real-repository ESLint assertions share one fresh scan in
+`tests/scripts/fitness-file-size-warning-budget.test.ts`: warning/error counts,
+nonempty scope, synchronous-command timeout findings, and the file-size warning
+identity set. The scan retains the 300-second warning-budget bound. Synthetic
+rule and failure-path tests remain in `tests/scripts/eslint-fitness-check.test.ts`.
+Both files remain in the branch test list and full suite.
+
 The shared push and release runner accepts `VITEST_MAX_WORKERS` as an integer
 from 1 through 4 and forwards it to gate children. Other values fail before
 any gate child starts. Omitting it preserves each suite's own configuration;
