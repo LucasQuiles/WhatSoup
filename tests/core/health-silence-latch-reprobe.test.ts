@@ -1,0 +1,905 @@
+/**
+ * #3562: the #2280 silence latch on instances with no primary-turn receipt.
+ *
+ * The only release channel the latch had was a fresh exact-primary agent-turn
+ * receipt. Turn capability exists only for agent mode, so a passive (or chat)
+ * instance that armed a latch read `degradation_silence_unproven` until the
+ * process restarted, with its transport connected and its auth bond present.
+ *
+ * The release added for that case is a DIRECT RE-PROBE: a latched reason is
+ * released once a positive read of the state it names has held on every quiet
+ * evaluation across the observation window, on the monotonic clock; the rest
+ * stay latched. Silence (a source that stopped reporting, or a reason a later
+ * evaluation no longer shows), a stale read, a failed evaluation, elapsed time
+ * alone and an empty reason list alone still release nothing. The late
+ * sources (pending polls, retention, the durability ledgers, the schema)
+ * count once their own read is clean, and a stale enrichment latch needs a
+ * run newer than the one seen at the latch point. A reason with no direct
+ * probe still needs its old proof.
+ *
+ * Each case opens ONE server and polls it repeatedly: the latch map belongs to
+ * the server instance, so a fresh server per poll would reset the state under
+ * test.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createServer, request } from 'node:http';
+
+vi.mock('../../src/config.ts', () => ({
+  config: {
+    fallbackTunables: { noticeDedupMs: 1_800_000, primaryRecheckMs: 300_000, probeStallThreshold: 12, probeStallCeilingMultiple: 10 },
+    adminPhones: new Set(['admin-under-test']),
+    controlPeers: new Map<string, string>(),
+    dbPath: ':memory:',
+    mediaDir: '/tmp/whatsoup-test-media-health-latch-reprobe/tmp',
+    botName: 'reprobe',
+    accessMode: 'allowlist',
+    healthPort: 9999,
+    healthBindAddress: '127.0.0.1',
+    agentProvider: 'claude-cli',
+    models: { conversation: 'test-model-a', extraction: 'test-model-b', validation: 'test-model-b', fallback: 'test-model-c' },
+  },
+}));
+
+const healthLogger = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
+const lookupCredentialMock = vi.hoisted(() => vi.fn(
+  (service: string) => service === 'whatsoup-health-token' ? process.env.WHATSOUP_HEALTH_TOKEN ?? null : null,
+));
+vi.mock('../../src/lib/keyring.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/keyring.ts')>();
+  return { ...actual, lookupCredential: lookupCredentialMock };
+});
+vi.mock('../../src/logger.ts', async () => {
+  const { componentLoggerMock, loggerMock } = await import('../helpers/logger-mock.ts');
+  const { log, createChildLogger } = componentLoggerMock('health', () => loggerMock().createChildLogger());
+  Object.assign(healthLogger, log);
+  return { createChildLogger };
+});
+vi.mock('../../src/lib/emit-alert.ts', () => ({
+  emitAlert: vi.fn(() => true),
+  emitAlertChecked: vi.fn(() => true),
+  emitObservationChecked: vi.fn(() => true),
+  clearAlertSource: vi.fn(() => true),
+  clearAlertSourceChecked: vi.fn(() => true),
+}));
+
+import { CURRENT_SCHEMA_MIGRATION, Database } from '../../src/core/database.ts';
+import * as health from '../../src/core/health.ts';
+import { startHealthServer, type DegradationLatchEntry, type HealthDeps } from '../../src/core/health.ts';
+import type { ConnectionManager } from '../../src/transport/connection.ts';
+import { emptyConnectionStateSnapshot } from '../../src/transport/twilio/connection-snapshot.ts';
+
+const TOKEN = 'test-health-token-latch-reprobe';
+// Test-owned literal for the observation window; a test below pins it to the
+// source constant, so a change to either has to be deliberate.
+const WINDOW_MS = 60_000;
+
+function healthReq(port: number): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { hostname: '127.0.0.1', port, path: '/health', method: 'GET', headers: { Authorization: `Bearer ${TOKEN}` } },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function buildTestServer(deps: HealthDeps): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
+  return new Promise((resolve) => {
+    const server = startHealthServer(deps);
+    server.close(() => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        resolve({ server, port: typeof addr === 'object' && addr ? addr.port : 0 });
+      });
+    });
+  });
+}
+
+/** A walked auth bond: clean by default, at risk when it carries an issue. */
+function authBond(issues: string[] = []): Record<string, unknown> {
+  return {
+    status: 'present',
+    issues,
+    authDir: { path: '/auth', exists: true, mode: '700', size: 128, mtime: '2026-10-01T00:00:00.000Z', sha256: null },
+    creds: { path: '/auth/creds.json', exists: true, mode: '600', size: 512, mtime: '2026-10-01T00:00:00.000Z', sha256: 'a'.repeat(64) },
+    meHash: 'b'.repeat(20),
+    treeHash: 'c'.repeat(64),
+    treeProvenance: {
+      source: 'cached',
+      ageMs: 1_000,
+      refreshInFlight: false,
+      refreshCount: 1,
+      lastInvalidationReason: null,
+      lastRefreshKind: 'fresh',
+      lastRefreshReason: null,
+      refreshScheduled: false,
+      nextRefreshEligibleInMs: null,
+      refreshAttemptCount: 1,
+      firstWalkPending: false,
+    },
+    backup: {
+      root: '/state/auth-bond-backups/test',
+      latest: '/state/auth-bond-backups/test/history/latest',
+      latestAt: '2026-10-01T00:00:00.000Z',
+      latestReason: 'connection-open',
+      latestTreeHash: 'c'.repeat(64),
+      lastCaptureAt: '2026-10-01T00:00:00.000Z',
+      lastCaptureReason: 'connection-open',
+      lastCaptureError: null,
+      lastCaptureDeferredAt: null,
+      lastCaptureDeferredReason: null,
+      lastCaptureDeferredAgeMs: null,
+      lastRestoreAt: null,
+      lastRestoreSource: null,
+      lastRestoreError: null,
+    },
+  };
+}
+const AT_RISK_ISSUE = 'auth_mode_chmod_failed:creds.json:EPERM';
+
+/** A clean bond whose cached walk an event invalidated and whose refresh has not landed. */
+function staleCachedBond(): Record<string, unknown> {
+  const bond = authBond();
+  return { ...bond, treeProvenance: { ...(bond.treeProvenance as Record<string, unknown>), source: 'stale' } };
+}
+
+interface PassiveInstance {
+  poll: () => Promise<Record<string, any>>;
+  /** One poll whatever its HTTP status (a disconnected instance answers 503). */
+  pollAnyStatus: () => Promise<{ status: number; json: Record<string, any> }>;
+  /** Makes the next evaluation throw, so that poll answers 500. */
+  failNextPoll: () => Promise<number>;
+  /** Makes the next evaluation throw while it builds the response body, after
+   * latch maintenance has run, so that poll answers 500. */
+  failNextBody: () => Promise<number>;
+  setBond: (bond: Record<string, unknown> | null) => void;
+  setEnrichment: (stats: { lastRun: string | null; runtimeDegraded?: boolean }) => void;
+  setConnected: (connected: boolean) => void;
+  setRetentionFailed: (failed: boolean) => void;
+  /** A reported memory readiness state, or null for a getter that reports nothing. */
+  setMemoryReadiness: (state: string | null) => void;
+}
+
+function latchSetLines(callsBefore: number): unknown[] {
+  return healthLogger.info.mock.calls.slice(callsBefore)
+    .filter((call) => call[1] === 'degradation silence latch set')
+    .map((call) => call[0]);
+}
+function latchJoinedLines(callsBefore: number): unknown[] {
+  return healthLogger.info.mock.calls.slice(callsBefore)
+    .filter((call) => call[1] === 'degradation silence latch reasons added')
+    .map((call) => call[0]);
+}
+function latchNarrowedLines(callsBefore: number): unknown[] {
+  return healthLogger.info.mock.calls.slice(callsBefore)
+    .filter((call) => call[1] === 'degradation silence latch narrowed: direct re-probe')
+    .map((call) => call[0]);
+}
+function latchReleasedLines(callsBefore: number): unknown[] {
+  return healthLogger.info.mock.calls.slice(callsBefore)
+    .filter((call) => typeof call[1] === 'string' && (call[1] as string).startsWith('degradation silence latch released'))
+    .map((call) => [call[0], call[1]]);
+}
+
+function expectLatched(json: Record<string, any>): void {
+  expect(json.status).toBe('degraded');
+  expect(json.status_reasons).toEqual(['degradation_silence_unproven']);
+  expect(json.degradation_causes).toContain('degradation_silence_unproven');
+}
+function expectReleased(json: Record<string, any>): void {
+  expect(json.status).toBe('healthy');
+  expect(json.status_reasons).toEqual([]);
+  expect(json.degradation_causes).not.toContain('degradation_silence_unproven');
+}
+
+describe('GET /health — passive silence latch released by direct re-probe (#3562)', () => {
+  let db: Database;
+  let server: ReturnType<typeof createServer> | null = null;
+
+  beforeEach(() => {
+    process.env.WHATSOUP_HEALTH_TOKEN = TOKEN;
+    db = new Database(':memory:');
+    db.open();
+    // Only the clocks are faked; the HTTP server's timers stay real.
+    vi.useFakeTimers({ toFake: ['Date', 'performance'] });
+    vi.setSystemTime(new Date('2026-10-01T12:00:00.000Z'));
+  });
+
+  afterEach(async () => {
+    if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = null;
+    vi.useRealTimers();
+    db.close();
+    delete process.env.WHATSOUP_HEALTH_TOKEN;
+  });
+
+  const advance = (ms: number): void => { vi.advanceTimersByTime(ms); };
+
+  async function openPassive(instanceName: string): Promise<PassiveInstance> {
+    let bond: Record<string, unknown> | null = authBond();
+    let enrichment: { lastRun: string | null; runtimeDegraded?: boolean } = { lastRun: null };
+    let failNext = false;
+    let failNextBody = false;
+    let connected = true;
+    let retentionFailed = false;
+    let memoryState: string | null = null;
+    const connectionState = () => ({
+      ...emptyConnectionStateSnapshot({
+        connected,
+        stateChangedAt: '2026-10-01T00:00:00.000Z',
+        lastDisconnectReason: null,
+      }),
+      ...(bond === null ? {} : { authBond: bond }),
+    });
+    const built = await buildTestServer({
+      db,
+      connectionManager: {
+        // Read only while the response body is built.
+        get botJid() {
+          if (failNextBody) {
+            failNextBody = false;
+            throw new Error('body field read failed');
+          }
+          return 'bot-under-test';
+        },
+        botLid: null,
+        sendMessage: vi.fn(),
+        sendMedia: vi.fn(),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getConnectionState: connectionState,
+        getHealthConnectionState: connectionState,
+      } as unknown as ConnectionManager,
+      startedAt: Date.now() - 1_000,
+      getEnrichmentStats: () => {
+        if (failNext) {
+          failNext = false;
+          throw new Error('enrichment stats read failed');
+        }
+        return { unprocessed: 0, ...enrichment };
+      },
+      getDatabaseRetentionHealth: () => ({
+        running: false,
+        state: retentionFailed ? 'failed' : 'succeeded',
+        consecutiveFailures: retentionFailed ? 1 : 0,
+        failureCode: retentionFailed ? 'retention_failed' : null,
+        lastRunAt: null,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastResult: null,
+      }) as unknown as ReturnType<NonNullable<HealthDeps['getDatabaseRetentionHealth']>>,
+      getMemoryReadinessHealth: () => (memoryState === null ? null : {
+        state: memoryState,
+        observedAt: new Date().toISOString(),
+        failureCode: null,
+        retryable: true,
+        evidenceCoverage: 'complete',
+      }) as unknown as ReturnType<NonNullable<HealthDeps['getMemoryReadinessHealth']>>,
+      instanceName,
+      instanceType: 'passive',
+      accessMode: 'allowlist',
+      runtime: {
+        getHealthSnapshot: () => ({ status: 'healthy', details: {} }),
+      } as unknown as HealthDeps['runtime'],
+    });
+    server = built.server;
+    return {
+      poll: async () => {
+        const { status, body } = await healthReq(built.port);
+        expect(status).toBe(200);
+        return JSON.parse(body);
+      },
+      pollAnyStatus: async () => {
+        const { status, body } = await healthReq(built.port);
+        return { status, json: JSON.parse(body) };
+      },
+      failNextPoll: async () => {
+        failNext = true;
+        return (await healthReq(built.port)).status;
+      },
+      failNextBody: async () => {
+        failNextBody = true;
+        return (await healthReq(built.port)).status;
+      },
+      setBond: (next) => { bond = next; },
+      setEnrichment: (next) => { enrichment = next; },
+      setConnected: (next) => { connected = next; },
+      setRetentionFailed: (next) => { retentionFailed = next; },
+      setMemoryReadiness: (next) => { memoryState = next; },
+    };
+  }
+
+  it('pins the observation window to the source constant', () => {
+    expect(health.LATCH_REPROBE_OBSERVATION_MS).toBe(WINDOW_MS);
+  });
+
+  it('(c) a passive at-risk auth bond, walked clean and re-probed across the window, releases with no turn', async () => {
+    const p = await openPassive('passive-auth-bond');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    const episode = await p.poll();
+    expect(episode.status).toBe('degraded');
+    expect(episode.status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+
+    // The originating reason cleared: the next walk finds the tree clean.
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+    // Stays released: nothing re-arms on a quiet instance.
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+    expect(latchReleasedLines(callsBefore)).toHaveLength(1);
+  });
+
+  it('(c) a passive stale enrichment latch releases once a fresh run is re-probed across the window', async () => {
+    const p = await openPassive('passive-enrichment');
+    p.setEnrichment({ lastRun: new Date(Date.now() - 11 * 60_000).toISOString() });
+    const episode = await p.poll();
+    expect(episode.status_reasons).toEqual(['enrichment_stale']);
+
+    p.setEnrichment({ lastRun: new Date(Date.now()).toISOString() });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it('(b) the latch-set line names the latched reasons; the release line names them and the proof', async () => {
+    const p = await openPassive('passive-log-lines');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    expect(latchSetLines(callsBefore)).toEqual([
+      { instance: 'passive-log-lines', reasons: ['auth_failure.auth_bond_at_risk'] },
+    ]);
+
+    p.setBond(authBond());
+    await p.poll();
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+    expect(latchReleasedLines(callsBefore)).toEqual([[
+      { instance: 'passive-log-lines', reasons: ['auth_failure.auth_bond_at_risk'], proof: 'direct_reprobe' },
+      'degradation silence latch released: direct re-probe',
+    ]]);
+  });
+
+  it('(d) elapsed time alone does not release: the window needs a re-probe at both ends', async () => {
+    const p = await openPassive('passive-elapsed');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    // Hours pass with no evaluation at all; the first quiet re-probe only
+    // opens the window.
+    advance(6 * 60 * 60_000);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it('(d) a recurrence inside the window restarts it', async () => {
+    const p = await openPassive('passive-flap');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+
+    advance(WINDOW_MS / 2);
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expectReleased(await p.poll());
+  });
+
+  it('(d) a latch whose reason is still active does not release', async () => {
+    const p = await openPassive('passive-still-active');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    for (let i = 0; i < 4; i += 1) {
+      const json = await p.poll();
+      expect(json.status).toBe('degraded');
+      expect(json.status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+      advance(WINDOW_MS);
+    }
+  });
+
+  it('(d) silence is not a re-probe: a bond that stops reporting keeps the latch', async () => {
+    const p = await openPassive('passive-bond-silent');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    // No bond read at all: the class reads 'none' by absence, not by a clean walk.
+    p.setBond(null);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(d) a reason with no direct probe still needs its proof (enrichment runtime, child-reported)', async () => {
+    // May pass on base: base never releases this latch at all.
+    const p = await openPassive('passive-no-probe');
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    expect((await p.poll()).status_reasons).toEqual(['enrichment_runtime_degraded']);
+    p.setEnrichment({ lastRun: null, runtimeDegraded: false });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(B1) a degraded poll that no longer shows an unproven reason keeps it latched', async () => {
+    const p = await openPassive('passive-drop-unproven');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk', 'enrichment_runtime_degraded']);
+    // The child stops reporting the enrichment runtime fault while the bond is
+    // still at risk. Its absence is not a proof that it recovered.
+    p.setEnrichment({ lastRun: null, runtimeDegraded: false });
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+    // The bond is then re-probed clean across the window. That proves the bond
+    // only, so the enrichment runtime reason keeps the latch.
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(B1) the narrowed line names the reasons the re-probe released and the ones still latched', async () => {
+    const p = await openPassive('passive-narrowed-line');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    await p.poll();
+    p.setBond(authBond());
+    p.setEnrichment({ lastRun: null, runtimeDegraded: false });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    const narrowed = healthLogger.info.mock.calls.slice(callsBefore)
+      .filter((call) => call[1] === 'degradation silence latch narrowed: direct re-probe')
+      .map((call) => call[0]);
+    expect(narrowed).toEqual([{
+      instance: 'passive-narrowed-line',
+      reasons: ['auth_failure.auth_bond_at_risk'],
+      remaining: ['enrichment_runtime_degraded'],
+      proof: 'direct_reprobe',
+    }]);
+    expect(latchReleasedLines(callsBefore)).toEqual([]);
+  });
+
+  it('(B2) a failed poll inside the window restarts it', async () => {
+    const p = await openPassive('passive-failed-poll');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expect(await p.failNextPoll()).toBe(500);
+    advance(WINDOW_MS / 2);
+    // A clean window needs a clean re-probe on every evaluation; the failed one
+    // was not, so this read only opens a new window.
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it('(C1) a stale cached auth bond is not a clean re-probe', async () => {
+    const p = await openPassive('passive-stale-bond');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    // Reads 'present' with no issue, but from a walk an event has invalidated.
+    p.setBond(staleCachedBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    // The refresh lands: from here the bond is clean evidence again.
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it.each([
+    ['an unparseable', () => 'not-a-timestamp'],
+    ['a future', () => new Date(Date.now() + 60 * 60_000).toISOString()],
+  ])('(C2) %s enrichment run time is not a fresh run', async (_label, lastRun) => {
+    const p = await openPassive('passive-bad-enrichment-time');
+    p.setEnrichment({ lastRun: new Date(Date.now() - 11 * 60_000).toISOString() });
+    expect((await p.poll()).status_reasons).toEqual(['enrichment_stale']);
+    p.setEnrichment({ lastRun: lastRun() });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(C3) a forward wall-clock step does not shorten the window', async () => {
+    const p = await openPassive('passive-wall-step-forward');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    // Only the wall clock moves, as a host clock step does.
+    vi.setSystemTime(Date.now() + 2 * WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it('(C3) a backward wall-clock step does not lengthen the window', async () => {
+    const p = await openPassive('passive-wall-step-back');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  // The late sources are read on every evaluation. Each test below turns one
+  // of them bad beside an early reason, so that the latch arms holding both.
+  const lateReasonTable: Array<[string, (p: PassiveInstance, bad: boolean) => void]> = [
+    ['pending_polls_unreadable', (_p, bad) => {
+      db.raw.exec(bad
+        ? 'ALTER TABLE pending_polls RENAME TO pending_polls_hidden'
+        : 'ALTER TABLE pending_polls_hidden RENAME TO pending_polls');
+    }],
+    ['database_retention_failed', (p, bad) => { p.setRetentionFailed(bad); }],
+    ['durability_evidence_unreadable', (_p, bad) => {
+      db.raw.exec(bad
+        ? 'ALTER TABLE outbound_sends RENAME TO outbound_sends_hidden'
+        : 'ALTER TABLE outbound_sends_hidden RENAME TO outbound_sends');
+    }],
+    ['schema_not_ready', (_p, bad) => {
+      if (bad) db.raw.prepare('DELETE FROM schema_migrations WHERE version = ?').run(CURRENT_SCHEMA_MIGRATION);
+      else db.raw.prepare('INSERT INTO schema_migrations(version) VALUES (?)').run(CURRENT_SCHEMA_MIGRATION);
+    }],
+  ];
+
+  it.each(lateReasonTable)('(1) a latched %s is released once its own read is clean across the window', async (reason, setBad) => {
+    const p = await openPassive(`passive-late-${reason}`);
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    setBad(p, true);
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk', reason]);
+
+    p.setBond(authBond());
+    setBad(p, false);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it.each(lateReasonTable)('(1) a latched %s whose read fails again inside the window restarts it', async (reason, setBad) => {
+    const p = await openPassive(`passive-late-flap-${reason}`);
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    setBad(p, true);
+    await p.poll();
+    p.setBond(authBond());
+    setBad(p, false);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    setBad(p, true);
+    expect((await p.poll()).status_reasons).toEqual(['degradation_silence_unproven', reason]);
+    setBad(p, false);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expectReleased(await p.poll());
+  });
+
+  it('(1) scenario A: a pending_polls read that fails on a later poll joins an auth latch, and both release once clean', async () => {
+    const p = await openPassive('passive-scenario-a');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    const [, setPendingPollsBad] = lateReasonTable.find(([reason]) => reason === 'pending_polls_unreadable')!;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    expect((await p.poll()).status_reasons).toEqual(['auth_failure.auth_bond_at_risk']);
+    // A later poll: the bond is clean, and one pending_polls read fails.
+    advance(WINDOW_MS / 2);
+    p.setBond(authBond());
+    setPendingPollsBad(p, true);
+    expect((await p.poll()).status_reasons).toEqual(['degradation_silence_unproven', 'pending_polls_unreadable']);
+    expect(latchJoinedLines(callsBefore)).toEqual([{
+      instance: 'passive-scenario-a',
+      reasons: ['pending_polls_unreadable'],
+      latched: ['auth_failure.auth_bond_at_risk', 'pending_polls_unreadable'],
+    }]);
+    // Both clean from here: one window, opened by the first clean poll.
+    setPendingPollsBad(p, false);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it('(2) a stale enrichment run that reads fresh again only because the clock moved is not a new run', async () => {
+    const p = await openPassive('passive-enrichment-same-run');
+    p.setEnrichment({ lastRun: new Date(Date.now() - 11 * 60_000).toISOString() });
+    expect((await p.poll()).status_reasons).toEqual(['enrichment_stale']);
+    // The wall clock steps back, so the same run now reads inside the bound.
+    vi.setSystemTime(Date.now() - 10 * 60_000);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    // A run newer than the one seen at the latch point is the witness.
+    p.setEnrichment({ lastRun: new Date(Date.now()).toISOString() });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it('(2) an advance that sees no enrichment run keeps the run seen before as the baseline', async () => {
+    const p = await openPassive('passive-enrichment-baseline-kept');
+    const staleRun = new Date(Date.now() - 11 * 60_000).toISOString();
+    p.setEnrichment({ lastRun: staleRun });
+    expect((await p.poll()).status_reasons).toEqual(['enrichment_stale']);
+    // A later evaluation advances the latch with no run reported at all.
+    p.setEnrichment({ lastRun: null });
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    expect((await p.poll()).status_reasons).toContain('auth_failure.auth_bond_at_risk');
+    // The same run comes back, and a backward clock step makes it read fresh.
+    p.setBond(authBond());
+    p.setEnrichment({ lastRun: staleRun });
+    vi.setSystemTime(Date.now() - 10 * 60_000);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    // Only a run newer than that one is the witness.
+    p.setEnrichment({ lastRun: new Date(Date.now()).toISOString() });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectReleased(await p.poll());
+  });
+
+  it('(3) a reason that joins a held latch is logged once, with the whole latched set', async () => {
+    const p = await openPassive('passive-join-line');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    expect(latchJoinedLines(callsBefore)).toEqual([]);
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    await p.poll();
+    // The same reasons again: nothing new joins.
+    await p.poll();
+    expect(latchJoinedLines(callsBefore)).toEqual([{
+      instance: 'passive-join-line',
+      reasons: ['enrichment_runtime_degraded'],
+      latched: ['auth_failure.auth_bond_at_risk', 'enrichment_runtime_degraded'],
+    }]);
+  });
+
+  it('(4) a poll that releases and then fails building its body logs no release and keeps the latch', async () => {
+    const p = await openPassive('passive-throw-after-release');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    // This evaluation proves the release, then throws after latch maintenance.
+    expect(await p.failNextBody()).toBe(500);
+    expect(latchReleasedLines(callsBefore)).toEqual([]);
+    // The failed evaluation was not a clean re-probe: the latch is back and its window restarts.
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+    expect(latchReleasedLines(callsBefore)).toHaveLength(1);
+  });
+
+  it('(4) a poll that narrows and then fails building its body logs no narrowing', async () => {
+    const p = await openPassive('passive-throw-after-narrow');
+    const callsBefore = healthLogger.info.mock.calls.length;
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    p.setEnrichment({ lastRun: null, runtimeDegraded: true });
+    await p.poll();
+    p.setBond(authBond());
+    p.setEnrichment({ lastRun: null, runtimeDegraded: false });
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expect(await p.failNextBody()).toBe(500);
+    expect(latchNarrowedLines(callsBefore)).toEqual([]);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    expect(latchNarrowedLines(callsBefore)).toHaveLength(1);
+  });
+
+  it('(5) a passive memory readiness latch releases once a ready state is re-probed across the window', async () => {
+    const p = await openPassive('passive-memory');
+    p.setMemoryReadiness('index_missing');
+    expect((await p.poll()).status_reasons).toEqual(['memory_readiness_index_missing']);
+    p.setMemoryReadiness('ready');
+    expectLatched(await p.poll());
+    advance(WINDOW_MS - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+
+  it('(5) a memory readiness getter that stops reporting is silence, not a re-probe', async () => {
+    const p = await openPassive('passive-memory-silent');
+    p.setMemoryReadiness('index_missing');
+    await p.poll();
+    p.setMemoryReadiness(null);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS);
+    expectLatched(await p.poll());
+  });
+
+  it('(5) a disconnect inside the window restarts it', async () => {
+    const p = await openPassive('passive-disconnect-in-window');
+    p.setBond(authBond([AT_RISK_ISSUE]));
+    await p.poll();
+    p.setBond(authBond());
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    p.setConnected(false);
+    const down = await p.pollAnyStatus();
+    expect(down.status).toBe(503);
+    expect(down.json.status_reasons).toEqual(['connection_disconnected']);
+    p.setConnected(true);
+    // The disconnect joined the latch and restarted every window.
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2);
+    expectLatched(await p.poll());
+    advance(WINDOW_MS / 2 - 1);
+    expectLatched(await p.poll());
+    advance(1);
+    expectReleased(await p.poll());
+  });
+});
+
+describe('releaseDegradationLatchOnReprobe — the re-probe release contract', () => {
+  const NAME = 'unit-instance';
+  const T0 = 1_000_000;
+  const CLEAN = {
+    connected: true,
+    authBondClear: true,
+    enrichmentFresh: true,
+    memoryReadinessClear: true,
+    memoryContextClear: true,
+    memoryConsolidationClear: true,
+    durabilityEvidenceReadable: true,
+    databaseRetentionClear: true,
+    schemaReady: true,
+    pendingPollsReadable: true,
+  };
+  const latch = (reasons: string[]): Map<string, DegradationLatchEntry> =>
+    new Map([[NAME, { latchedAtMs: T0, reasons: new Set(reasons) }]]);
+
+  it('(a) a latch holding only runtime.auto_compact_backoff releases once the backoff has ended', () => {
+    // Directly re-probed: the runtime recomputes the backoff from its own
+    // cooldown deadlines every snapshot, so a quiet evaluation (evidence
+    // non-null) proves the cooldown has passed.
+    const map = latch(['runtime.auto_compact_backoff']);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(true);
+    expect(map.has(NAME)).toBe(false);
+  });
+
+  it('(a) a still-active backoff keeps the latch (the evaluation is not quiet)', () => {
+    const map = latch(['runtime.auto_compact_backoff']);
+    for (let t = T0 + 1; t < T0 + 5 * WINDOW_MS; t += WINDOW_MS) {
+      expect(health.releaseDegradationLatchOnReprobe(map, NAME, null, t)).toBe(false);
+    }
+    expect(map.has(NAME)).toBe(true);
+  });
+
+  it('every directly re-probed reason is cleared by a quiet evaluation', () => {
+    const map = latch([...health.DIRECTLY_REPROBED_STATUS_REASONS]);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(true);
+  });
+
+  it('(d) turn-pipeline and unprobed reasons keep needing their own proof', () => {
+    for (const reason of [
+      'turn_capability_degraded',
+      'agent_runtime_degraded',
+      'runtime.provider_fallback_active',
+      'runtime.recent_crashes',
+      'runtime.credential_identity_mismatch',
+      'enrichment_runtime_degraded',
+      'runtime_degraded',
+      'runtime_unhealthy',
+      'schema_future',
+      'fact_export_consumer_missing',
+    ]) {
+      const map = latch([reason]);
+      expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);
+      expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS), reason).toBe(false);
+      expect(map.has(NAME)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['pending_polls_unreadable', 'pendingPollsReadable'],
+    ['database_retention_failed', 'databaseRetentionClear'],
+    ['durability_evidence_unreadable', 'durabilityEvidenceReadable'],
+    ['schema_not_ready', 'schemaReady'],
+  ])('(1) a latched %s needs its own clean read (%s)', (reason, field) => {
+    const unread = latch([reason]);
+    const notClean = { ...CLEAN, [field]: false };
+    expect(health.releaseDegradationLatchOnReprobe(unread, NAME, notClean, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(unread, NAME, notClean, T0 + 1 + WINDOW_MS)).toBe(false);
+    const read = latch([reason]);
+    expect(health.releaseDegradationLatchOnReprobe(read, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(read, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(true);
+  });
+
+  it('a mixed latch releases only when every reason is witnessed', () => {
+    const map = latch(['auth_failure.auth_bond_at_risk', 'enrichment_stale', 'connection_disconnected']);
+    const noFreshRun = { ...CLEAN, enrichmentFresh: false };
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, noFreshRun, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, noFreshRun, T0 + 1 + WINDOW_MS)).toBe(false);
+    // Witnessed from here on: the window starts now, not at the first quiet read.
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 2 + WINDOW_MS)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + 2 * WINDOW_MS)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 2 + 2 * WINDOW_MS)).toBe(true);
+  });
+
+  it('(B1) a mixed latch releases only the re-probed reasons; the rest keep needing their own proof', () => {
+    const map = latch(['auth_failure.auth_bond_at_risk', 'turn_capability_degraded']);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(false);
+    expect([...map.get(NAME)!.reasons]).toEqual(['turn_capability_degraded']);
+    // What is left is turn-provable, so the turn receipt channel can now release it.
+    expect(health.releaseDegradationLatchOnRecoveryProof(
+      map,
+      NAME,
+      {
+        last_successful_turn_at: T0 + 2,
+        last_successful_turn_provider: 'claude-cli',
+        last_successful_turn_model: null,
+        last_successful_turn_session_current: true,
+      },
+      { providerId: 'claude-cli', modelRef: null },
+    )).toBe(true);
+  });
+
+  it('an unwitnessed evaluation inside the window restarts it', () => {
+    const map = latch(['auth_failure.auth_bond_at_risk']);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, null, T0 + 2)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(map, NAME, CLEAN, T0 + 1 + 2 * WINDOW_MS)).toBe(true);
+  });
+
+  it('an empty latched set or a missing latch never releases', () => {
+    const empty = latch([]);
+    expect(health.releaseDegradationLatchOnReprobe(empty, NAME, CLEAN, T0 + 1)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(empty, NAME, CLEAN, T0 + 1 + WINDOW_MS)).toBe(false);
+    expect(health.releaseDegradationLatchOnReprobe(new Map(), NAME, CLEAN, T0 + WINDOW_MS)).toBe(false);
+  });
+});
