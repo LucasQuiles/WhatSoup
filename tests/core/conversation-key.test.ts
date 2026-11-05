@@ -53,6 +53,31 @@ describe('isGroupConversationKey', () => {
 });
 
 describe('conversationKeyToJid', () => {
+  it.each([
+    'iMessage;+;chat-example@imessage',
+    'iMessage;+;chat_at_imessage-example@imessage',
+    'abcdefghijklmnop==@signal',
+  ])('preserves group identity through conversation-key conversion: %s', (jid) => {
+    const key = toConversationKey(jid);
+    expect(isGroupConversationKey(key)).toBe(true);
+    expect(isGroupConversationKey(jid)).toBe(true);
+    expect(conversationKeyToJid(key)).toBe(jid);
+  });
+
+  it.each([
+    '+15550100001@imessage',
+    'person@example.com@imessage',
+    'iMessage;-;direct@imessage',
+    'iMessage;+;@imessage',
+    'iMessage;+;chat-example@other',
+    '+15550100001@signal',
+    '0f8fad5b-d9cb-469f-a165-70867728950e@signal',
+  ])('leaves direct or unrecognized transport keys unchanged: %s', (jid) => {
+    const key = toConversationKey(jid);
+    expect(isGroupConversationKey(key)).toBe(false);
+    expect(conversationKeyToJid(key)).toBe(key);
+  });
+
   it('converts normalized group keys back to group JIDs', () => {
     expect(conversationKeyToJid('group-alpha_at_g.us')).toBe('group-alpha@g.us');
   });

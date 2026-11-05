@@ -1,4 +1,6 @@
-import { DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP } from './jid-constants.ts';
+import {
+  DOMAIN_PERSONAL, DOMAIN_LID, DOMAIN_GROUP, DOMAIN_IMESSAGE, DOMAIN_SIGNAL, isGroupJid,
+} from './jid-constants.ts';
 
 /**
  * Reserved conversation-key-space sentinel for global-tier (non-chat) scopes:
@@ -11,10 +13,18 @@ export const GLOBAL_CONVERSATION_KEY = '__global__';
 
 export function isGroupConversationKey(key: string): boolean {
   return key.includes('_at_g.us') || key.includes('@g.us')
+    || isGroupJid(conversationKeyToJid(key));
 }
 
 export function conversationKeyToJid(key: string): string {
-  return key.replace('_at_g.us', '@g.us')
+  for (const domain of [DOMAIN_IMESSAGE, DOMAIN_SIGNAL]) {
+    const suffix = `_at_${domain}`;
+    if (key.endsWith(suffix)) {
+      const jid = `${key.slice(0, -suffix.length)}@${domain}`;
+      if (isGroupJid(jid)) return jid;
+    }
+  }
+  return key.replace('_at_g.us', '@g.us');
 }
 
 export function toConversationKey(jid: string): string {

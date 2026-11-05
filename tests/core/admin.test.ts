@@ -1148,6 +1148,31 @@ describe('admin.ts uncovered-branch coverage', () => {
     }
   });
 
+  it.each([true, false])('#3566: iMessage group rows cannot receive approval previews (prior direct row: %s)', async (priorDirect) => {
+    const { config } = await import('../../src/config.ts');
+    const mutableConfig = config as { transport: typeof config.transport; adminPhones: Set<string> };
+    const originalTransport = mutableConfig.transport;
+    const originalAdmins = mutableConfig.adminPhones;
+    mutableConfig.transport = 'imessage';
+    mutableConfig.adminPhones = new Set(['+15550100001']);
+    const db = openDb();
+    try {
+      const direct = '+15550100001@imessage';
+      if (priorDirect) storeAdminRow(db, direct, direct, 'admin-imessage-direct', 1700070040);
+      storeAdminRow(db, 'iMessage;+;chat-example@imessage', direct, 'admin-imessage-group', 1700070041);
+      const messenger = makeMockMessenger();
+
+      await sendApprovalRequest(db, messenger, '15550003571', 'NewContact', 'private approval preview');
+
+      expect(messenger.sendMessage).toHaveBeenCalledTimes(1);
+      expect(messenger.sendMessage).toHaveBeenCalledWith(direct, expect.stringContaining('private approval preview'));
+    } finally {
+      db.close();
+      mutableConfig.transport = originalTransport;
+      mutableConfig.adminPhones = originalAdmins;
+    }
+  });
+
   it('#3566: a newer admin-authored status@broadcast row does not displace the admin direct chat', async () => {
     const db = openDb();
     const messenger = makeMockMessenger();

@@ -71,6 +71,17 @@ describe('identity folding', () => {
     expect(fold.sender(`${MEMBER_LID}@lid`)).toBe(MEMBER);
     expect(fold.sender(`${MEMBER}:4@s.whatsapp.net`)).toBe(MEMBER);
   });
+
+  it.each([false, true])('preserves canonical AppleID domains with database=%s', (withDatabase) => {
+    const fold = memoryIdentityFold(withDatabase ? db : undefined);
+    const own = fold.sender('alice@one.example@imessage');
+    expect(own).toBe('alice@one.example@imessage');
+    expect(fold.sender('Alice@One.Example@imessage')).toBe(own);
+    expect(fold.sender('alice@two.example@imessage')).not.toBe(own);
+    expect(fold.sender('alice@s.whatsapp.net')).not.toBe(own);
+    expect(fold.sender(`+${MEMBER}@imessage`)).toBe(`+${MEMBER}@imessage`);
+    expect(fold.sender(`${MEMBER}:4@s.whatsapp.net`)).toBe(MEMBER);
+  });
 });
 
 describe('DM-lane membership', () => {

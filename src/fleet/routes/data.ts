@@ -12,6 +12,7 @@ import { projectError, validationError } from '../response-error-projection.ts';
 import { inspectLatestLogFile, readTailLinesDetailed } from '../log-utils.ts';
 import { resolveGroupNames } from '../group-resolver.ts';
 import { isGroupConversationKey, conversationKeyToJid } from '../../core/conversation-key.ts';
+import { JID_GROUP } from '../../core/jid-constants.ts';
 import { normalizeTimestamp, toIsoFromUnix } from '../time-utils.ts';
 import { isTypingHealthEntry } from '../typing-payload.ts';
 import { isPathWithinAllowedRoot } from '../../lib/path-boundary.ts';
@@ -187,14 +188,14 @@ export function handleGetChats(
       const preview = lastMsg?.content ?? null;
       const unread = (unreadStmt.get(chat.conversationKey) as UnreadRow | undefined)?.unread_count ?? 0;
 
-      // Detect group: conversation_key contains _at_g.us or @g.us
+      // Group identity includes every supported transport.
       const isGroup = isGroupConversationKey(chat.conversationKey);
 
       // Resolve display name
       let displayName: string;
       let needsBackfill = false;
       if (isGroup) {
-        // Convert _at_g.us back to @g.us for the groups table lookup
+        // Restore the transport JID for the groups table lookup.
         const groupJid = conversationKeyToJid(chat.conversationKey);
         const groupSubject = (groupNameStmt.get(groupJid) as GroupNameRow | undefined)?.subject;
         const chatName = (chatNameStmt.get(chat.conversationKey) as ChatNameRow | undefined)?.name;
@@ -206,7 +207,8 @@ export function handleGetChats(
           // No metadata — build from participant names (temporary fallback)
           const parts = (participantsStmt.all(chat.conversationKey) as unknown as ParticipantRow[]).map(p => p.sender_name);
           displayName = parts.length > 0 ? parts.join(', ') : chat.conversationKey;
-          needsBackfill = true;
+          // The metadata resolver requires the WhatsApp/Baileys group API.
+          needsBackfill = groupJid.endsWith(JID_GROUP);
         }
       } else {
         // DM: prefer the other person's name

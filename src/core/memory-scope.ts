@@ -35,9 +35,10 @@ import type { Database } from './database.ts';
 import { canonicalConversationKey, resolvePhoneFromJid, resolvePhoneFromJidForGrant } from './access-list.ts';
 import { conversationKeyToJid, isGroupConversationKey, toConversationKey } from './conversation-key.ts';
 import {
-  bareNumber, isAuthenticatedSenderJid, isGroupJid, isLidJid, isPnJid, normalizeLid, toLidJid, toPersonalJid,
+  bareNumber, fromImessageJid, isAuthenticatedSenderJid, isGroupJid, isImessageJid, isLidJid, isPnJid, normalizeLid, toImessageJid, toLidJid, toPersonalJid,
 } from './jid-constants.ts';
 import { resolveLid, resolveLidsForPhone } from './lid-resolver.ts';
+import { canonicalizeImessageDirectIdentity } from './transport-refs.ts';
 import { systemClock } from '../lib/clock.ts';
 import { isAdminPhone, normalizePhoneE164 } from '../lib/phone.ts';
 import { isNonEmptyString } from '../lib/type-guards.ts';
@@ -96,6 +97,11 @@ export function foldChatAttribution(value: string, db?: Database | null): string
 export function foldSenderIdentity(value: string, db?: Database | null): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
+  if (isImessageJid(trimmed)) {
+    // AppleID domains distinguish members; WhatsApp's first-@ fold discards them.
+    const identity = canonicalizeImessageDirectIdentity(fromImessageJid(trimmed));
+    return identity === null ? trimmed : toImessageJid(identity);
+  }
   if (trimmed.includes('@')) {
     if (db) {
       try {

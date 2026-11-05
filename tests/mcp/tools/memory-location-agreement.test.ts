@@ -127,6 +127,7 @@ import { registerMemoryWriteTools } from '../../../src/mcp/tools/memory-write.ts
 import { registerKnowledgeTools, type KnowledgeSearchDeps } from '../../../src/mcp/tools/knowledge.ts';
 import { GroupMembershipCache } from '../../../src/core/memory-scope.ts';
 import { Database } from '../../../src/core/database.ts';
+import { toConversationKey } from '../../../src/core/conversation-key.ts';
 
 const OWNER = '15550000001';
 const MEMBER_A = '15550000002';
@@ -394,6 +395,76 @@ describe('knowledge_search ranking outside configurable groups', () => {
 });
 
 describe('knowledge_search in configurable groups', () => {
+  it.each([
+    [GROUP_JID, pn(MEMBER_A), pn(MEMBER_B)],
+    ['YWJjZGVmZ2hpamtsbW5vcA==@signal', `+${MEMBER_A}@signal`, `+${MEMBER_B}@signal`],
+    ['iMessage;+;chat-example@imessage', `+${MEMBER_A}@imessage`, `+${MEMBER_B}@imessage`],
+    ['iMessage;+;chat-example@imessage', 'alice@one.example@imessage', 'alice@two.example@imessage'],
+  ])('holds formatted memories to own/shared records for %s with unreadable membership', async (chatJid, actorJid, otherJid) => {
+    const db = adminDb();
+    try {
+      const conversationKey = toConversationKey(chatJid);
+      seed([
+        { id: 'own', score: 0.8, fields: { text: 'own allowed memory', chat_jid: conversationKey, sender_jid: actorJid } },
+        { id: 'shared', score: 0.7, fields: { text: 'shared allowed memory', chat_jid: chatJid, sender_jid: '', memory_type: 'group_context' } },
+        { id: 'other', score: 0.9, fields: { text: 'other member private memory', chat_jid: chatJid, sender_jid: otherJid } },
+        { id: 'untagged', score: 0.99, fields: { text: 'legacy private memory' } },
+        { id: 'foreign', score: 0.98, fields: { text: 'foreign chat private memory', chat_jid: otherJid } },
+      ]);
+      const { knowledgeSearch } = registerTools({ db, identities: () => identities, membership: null });
+
+      const result = await knowledgeSearch.handler(
+        { index: 'mw-mind', query: 'what do we know' },
+        { tier: 'chat-scoped', conversationKey, deliveryJid: chatJid, actorJid },
+      ) as SearchResult;
+
+      expect(result.results.map((r) => r.id)).toEqual(['own', 'shared']);
+      expect(result.formatted).toContain('own allowed memory');
+      expect(result.formatted).toContain('shared allowed memory');
+      for (const privateText of ['other member private memory', 'legacy private memory', 'foreign chat private memory']) {
+        expect(result.formatted).not.toContain(privateText);
+      }
+      const memoryQueries = queries.filter((q) => !['local-docs', 'onedrive', 'whatsapp-contacts'].includes(q.namespace));
+      expect(memoryQueries).toHaveLength(5);
+      for (const query of memoryQueries) {
+        expect(query.filter).toEqual({ chat_jid: { $in: expect.arrayContaining([conversationKey, chatJid]) } });
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each(['direct', 'admin', 'operator', 'owner-bots', 'shared-workflow'] as const)(
+    'applies existing iMessage %s scope without assuming unproven identity grants', async (mode) => {
+      const db = adminDb();
+      try {
+        const actorJid = `+${mode === 'admin' ? OWNER : MEMBER_A}@imessage`;
+        const chatJid = mode === 'direct' ? actorJid : 'iMessage;+;chat-example@imessage';
+        const conversationKey = toConversationKey(chatJid);
+        seed([
+          { id: 'own', score: 0.8, fields: { text: 'own', chat_jid: chatJid, sender_jid: actorJid } },
+          { id: 'other', score: 0.9, fields: { text: 'other', chat_jid: chatJid, sender_jid: `+${MEMBER_B}@imessage` } },
+          { id: 'untagged', score: 0.7, fields: { text: 'untagged' } },
+          { id: 'foreign', score: 0.6, fields: { text: 'foreign', chat_jid: `+${MEMBER_B}@imessage` } },
+        ]);
+        if (mode === 'operator') configState.botName = 'q';
+        const { knowledgeSearch } = registerTools({
+          db, identities: () => ({ ...identities, botJid: `+${MEMBER_A}@imessage` }),
+          membership: mode === 'owner-bots' ? membershipOf([`+${OWNER}@imessage`, actorJid]) : null,
+          sharedWorkflowGroups: mode === 'shared-workflow' ? [chatJid] : [],
+        });
+
+        const ids = await search(knowledgeSearch, { tier: 'chat-scoped', conversationKey, deliveryJid: chatJid, actorJid });
+
+        expect(ids).toEqual(mode === 'shared-workflow' ? ['other', 'own']
+          : mode === 'direct' ? ['other', 'own', 'untagged']
+            : mode === 'operator' ? ['other', 'own', 'foreign', 'untagged'] : ['own']);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
   it('returns this group\'s shared records and the verified sender\'s own, nothing else', async () => {
     seed();
     const { knowledgeSearch } = registerTools({
