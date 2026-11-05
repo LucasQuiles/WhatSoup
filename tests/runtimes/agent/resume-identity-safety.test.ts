@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { parseDeliveryNamespace } from '../../../src/core/jid-constants.ts';
 import {
   resolveResumeIdentity,
   type PersistedResumeIdentity,
@@ -16,6 +17,31 @@ const PHONE_IDENTITY: PersistedResumeIdentity = {
 };
 
 describe('resume identity safety', () => {
+  it.each([
+    ['+15550100001@sms', '+15550100001_at_sms', 'sms'],
+    ['+15550100001@signal', '+15550100001_at_signal', 'signal'],
+    ['c174e550-3036-4f0d-9ad5-b40a75a9d101@signal', 'c174e550-3036-4f0d-9ad5-b40a75a9d101_at_signal', 'signal'],
+    ['Z3JvdXAtY29udmVyc2F0aW9u@signal', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal', 'signal'],
+    ['+15550100001@imessage', '+15550100001_at_imessage', 'imessage'],
+    ['person@example.test@imessage', 'person_at_example.test@imessage', 'imessage'],
+  ])('resumes canonical transport identity %s without changing its conversation key', (deliveryJid, conversationKey, deliveryNamespace) => {
+    const candidate = { ...PHONE_IDENTITY, deliveryJid, conversationKey, deliveryNamespace };
+    expect(resolveResumeIdentity(candidate)).toEqual(candidate);
+    expect(resolveResumeIdentity({ ...candidate, conversationKey: PHONE_IDENTITY.conversationKey })).toBeNull();
+    expect(resolveResumeIdentity({ ...candidate, deliveryNamespace: 's.whatsapp.net' })).toBeNull();
+  });
+
+  it.each([
+    '+15550100001@unknown', '15550100001@sms', '+15550100001@SMS',
+    'peer@signal', 'a@b@signal', '@imessage', 'person@example.test@imessage@imessage',
+    'Person@Example.test@imessage', 'iMessage;+;@imessage', 'iMessage;-;@imessage',
+    'iMessage;+;chat123@imessage', 'iMessage;-;chat123@imessage',
+    'person@example.test\u0000@imessage', '+15550100001 @signal',
+  ])('rejects unsupported or noncanonical transport identity %s', (deliveryJid) => {
+    expect(parseDeliveryNamespace(deliveryJid)).toBeNull();
+    expect(resolveResumeIdentity({ ...PHONE_IDENTITY, deliveryJid })).toBeNull();
+  });
+
   it.each([
     {
       name: 'phone resume',

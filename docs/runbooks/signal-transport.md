@@ -4,6 +4,12 @@ WhatSoup connects to Signal through a separately managed `signal-cli` JSON-RPC
 daemon. The daemon owns Signal credentials and identity keys; WhatSoup stores
 only its endpoint and the account's public E.164 identity.
 
+Schema 67 supports canonical phone, service UUID and group delivery identities in
+agent terminal/checkpoint records. Existing group startup exclusion is preserved
+(#3666 tracks its retention policy). Timestamp acceptance alone is not echoed
+delivery. See the [identity and rollback contract](../durability.md#session_checkpoints);
+local adapter fixtures do not attest a daemon, account or deployed host.
+
 ## Start signal-cli
 
 Install a current `signal-cli` release, link or register the account using its

@@ -274,6 +274,7 @@ import { AgentRuntime } from '../../../src/runtimes/agent/runtime.ts';
 import { installFakePerChatMcpSocketManager } from './helpers/fake-per-chat-mcp-socket-manager.ts';
 import { drainIngest } from '../../core/_helpers/ingest-drain.ts';
 import { prepareRuntimeHome } from '../../helpers/runtime-home-fixture.ts';
+import { transportIdentityFixture } from './helpers/transport-identity-fixture.ts';
 
 // ─── Fixtures (synthetic identities only) ───────────────────────────────────
 
@@ -400,8 +401,8 @@ describe('late delivery echo through ingest records the completed identity', () 
     }
   });
 
-  function makeRuntime(): AgentRuntime {
-    const created = new AgentRuntime(db, transport.messenger, 'test', { sessionScope: 'per_chat' });
+  function makeRuntime(messenger: Messenger = transport.messenger): AgentRuntime {
+    const created = new AgentRuntime(db, messenger, 'test', { sessionScope: 'per_chat' });
     installFakePerChatMcpSocketManager(created);
     created.setDurability(engine);
     runtime = created;
@@ -466,6 +467,79 @@ describe('late delivery echo through ingest records the completed identity', () 
       'SELECT state, completion_kind FROM turn_recovery_jobs WHERE source_inbound_seq = ?',
     ).get(seq) as { state: string; completion_kind: string | null } | undefined;
   }
+
+  describe.each([
+    ['signal', '+15550008101', '+15550008101_at_signal', false],
+    ['signal', 'c174e550-3036-4f0d-9ad5-b40a75a9d101', 'c174e550-3036-4f0d-9ad5-b40a75a9d101_at_signal', false],
+    ['signal', 'Z3JvdXAtY29udmVyc2F0aW9u', 'Z3JvdXAtY29udmVyc2F0aW9u_at_signal', true],
+    ['sms', '+15550008101', '+15550008101_at_sms', false],
+    ['imessage', '+15550008101', '+15550008101_at_imessage', false],
+    ['imessage', 'person@example.test', 'person_at_example.test@imessage', false],
+  ] as const)('%s %s through its adapter and bridge', (kind, peer, key, group) => {
+    it.each(['policy silence', 'late echo'] as const)('persists exact identity for %s and preserves startup eligibility', async (outcome) => {
+      const fixture = transportIdentityFixture(kind, peer, group);
+      const { connection } = fixture;
+      const agent = makeRuntime(connection);
+      connection.onMessage = createIngestHandler(db, connection, agent, () => connection.botJid!, () => null, engine);
+      await connection.connect();
+      try {
+        fixture.inbound('please handle this turn');
+        const session = await waitForInFlightTurn((text) => text.includes('please handle this turn'));
+        await drainIngest();
+        const row = db.raw.prepare('SELECT seq, chat_jid, conversation_key FROM inbound_events').get() as {
+          seq: number; chat_jid: string; conversation_key: string;
+        };
+        expect(row).toMatchObject({ chat_jid: `${peer}@${kind}`, conversation_key: key });
+        if (outcome === 'policy silence') {
+          // The normal customer-lane no-op policy consumes assistant text.
+          // NO_REPLY is a scheduled-job marker, not that policy's input.
+          session.emit({ type: 'assistant_text', text: '.' });
+          session.emit({ type: 'result', text: null });
+        } else {
+          session.emit({ type: 'result', text: 'one answer' });
+        }
+        await vi.waitFor(() => expect(terminal(row.seq)).toHaveLength(1), SEND_WAIT);
+        if (outcome === 'late echo') {
+          expect(answerOp(row.seq).status).toBe('submitted');
+          expect(recoveryJob(row.seq)?.state).toBe('pending');
+          expect(completedIdentity(key)?.completed_inbound_seq).toBeNull();
+          fixture.echo(answerOp(row.seq).wa_message_id!, 'one answer');
+          await drainIngest();
+          expect(answerOp(row.seq).status).toBe('echoed');
+          expect(recoveryJob(row.seq)).toEqual({ state: 'completed', completion_kind: 'echo' });
+        }
+        expect(inbound(row.seq).processing_status).toBe('complete');
+        expect(completedIdentity(key)).toMatchObject({
+          completed_inbound_seq: row.seq, completed_delivery_jid: `${peer}@${kind}`,
+        });
+        expect(db.raw.prepare('SELECT completed_delivery_namespace FROM session_checkpoints WHERE conversation_key = ?').get(key))
+          .toEqual({ completed_delivery_namespace: kind });
+        expect(engine.getTurnRecoveryAdmissionStateForScope('per_chat', key)).toBe('clear');
+        expect(fixture.sends()).toBe(outcome === 'late echo' ? 1 : 0);
+
+        const sessionId = session.getStatus().sessionId;
+        await agent.shutdown();
+        runtime = undefined;
+        await prepareRuntimeHome();
+        const bootIndex = sessionDoubles.length;
+        mockConfig.proactiveResumeOnStartup = true;
+        const restarted = makeRuntime(connection);
+        await restarted.start();
+        const resumed = sessionDoubles.slice(bootIndex).find((s) => s.ctorOpts.chatJid === `${peer}@${kind}`);
+        if (group) {
+          // Existing group policy deliberately forbids unsolicited startup turns.
+          expect(resumed).toBeUndefined();
+          expect(engine.getSessionCheckpoint(key)?.session_status).toBe('ended');
+        } else {
+          expect(resumed).toBeDefined();
+          await vi.waitFor(() => expect(resumed!.spawnSession).toHaveBeenCalledWith(sessionId));
+        }
+        expect(engine.getCompletedDeliveryIdentityAdmissionHealth().unresolvedCount).toBe(0);
+      } finally {
+        await connection.shutdown();
+      }
+    });
+  });
 
   /**
    * One customer turn answered with `answer` and no echo yet: the turn ends

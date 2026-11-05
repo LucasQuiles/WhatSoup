@@ -1392,7 +1392,7 @@ only `completed_inbound_seq` identifies the resumable completed turn.
 | `session_status` | TEXT NOT NULL | `active`, `suspended`, `orphaned`, `ended`. Default `'active'`. |
 | `completed_inbound_seq` | INTEGER | Exact inbound sequence for the most recently completed resumable turn. Part of the all-or-none completed identity bundle. |
 | `completed_delivery_jid` | TEXT | Exact raw delivery JID for the most recently completed inbound turn. Part of the all-or-none completed identity bundle. |
-| `completed_delivery_namespace` | TEXT | Persisted JID domain (`s.whatsapp.net`, `lid`, or `g.us`); must match `completed_delivery_jid`. |
+| `completed_delivery_namespace` | TEXT | Persisted delivery namespace (`s.whatsapp.net`, `lid`, `g.us`, `sms`, `signal`, or `imessage`); must match a supported canonical `completed_delivery_jid`. |
 | `completed_scope` | TEXT | Completing turn scope: `per_chat`, `shared`, or `singleton`. |
 | `completed_logical_turn_id` | TEXT | Logical turn ID that completed the checkpoint. |
 | `completed_manager_id` | TEXT | Session manager ID that owned the completing turn. |
@@ -1409,6 +1409,27 @@ contradictory identity fails closed; the runtime never appends a guessed namespa
 conversation key. When the runtime knows an exact `session_id`, lifecycle status changes
 update every checkpoint row for that ID so all conversations attached to a shared session
 move together.
+
+Migration 67 records a compatibility fence for transport identity readers. It changes
+no tables or existing rows. SMS identities must be E.164; Signal accepts E.164,
+canonical service UUIDs and existing group IDs; iMessage accepts E.164 and canonical
+AppleID emails. iMessage chat GUIDs remain unsupported by terminal identity until
+their group classification and lifecycle are qualified (#3844, related #3666).
+The shared parser validates the final transport suffix, so the address in
+`person@example.test@imessage` keeps its email separator. Existing conversation-key
+encoding is unchanged. Late-echo promotion uses that same parser while retaining
+the exact conversation, session, inbound and outbound witness conditions above.
+
+This contract does not turn provider acceptance into echoed delivery, change sender
+authorization, or join accounts. Account provenance still belongs to the instance's
+database/configuration boundary; reusing a database for another account is not
+qualified by these tests. Canonical identity alone does not make a transport ready
+for deployment. See the [qualification specification](superpowers/specs/2026-11-03-terminal-transport-identity.md).
+
+An older binary with schema ceiling 66 refuses a migrated file as `future_schema`.
+Rollback requires a separately reviewed pre-migration database snapshot and its
+compatible binary, with reconciliation of any subsequent external effects. Do not
+delete migration 67 from the ledger to force an older reader to open newer identities.
 
 Non-sandbox `per_chat` lazy adoption (`src/runtimes/agent/checkpoint-adoption.ts`, #3530):
 the first turn of a chat manager that has not yet started reads the chat's checkpoint and

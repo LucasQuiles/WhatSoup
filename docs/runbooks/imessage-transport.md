@@ -4,6 +4,13 @@ This runbook covers operating a WhatSoup instance on iMessage via either
 supported backend: BlueBubbles Server (HTTP) or macOS-native `imsg rpc`
 behind WhatSoup's local UNIX-socket relay.
 
+Agent terminal/checkpoint identity supports canonical direct phone and AppleID email
+addresses under schema 67. Chat GUIDs remain outside that contract pending group
+lifecycle qualification (#3844, related #3666). Provider acceptance alone still
+does not establish echoed delivery or turn completion. Read the
+[identity and rollback contract](../durability.md#session_checkpoints) before
+qualifying either backend for rollout.
+
 ## Architecture
 
 ```

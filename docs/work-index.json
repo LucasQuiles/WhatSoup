@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-10-25T04:26:35Z",
+  "generated_at": "2026-11-03T12:35:37Z",
   "repo": "WhatSoup",
-  "git_head": "8b7526fd7a101b71900d24dcd2845b77e99669d4",
+  "git_head": "7dd4428c37211237989ccee9240900ae8d4c54d5",
   "git_head_note": "git_head is captured at scan time, so it reflects the branch HEAD at the moment `build-work-index` ran — NOT the commit that carries this index. Expect divergence in two cases: (1) intra-branch, when the regenerated index is committed after further content changes are staged; (2) post-squash-merge, when the landed main SHA differs from the pre-merge branch SHA. The row data and inconsistency detection remain accurate regardless of git_head freshness.",
-  "total": 133,
+  "total": 134,
   "schema_version": 5,
   "rows": [
     {
@@ -1658,6 +1658,19 @@
       "size_bytes": 16667
     },
     {
+      "path": "docs/superpowers/specs/2026-11-03-terminal-transport-identity.md",
+      "kind": "spec",
+      "topic_raw": "2026-11-03-terminal-transport-identity",
+      "topic": "terminal-transport-identity",
+      "status": "active",
+      "status_source": "body-marker",
+      "lifecycle": "receipt",
+      "canonical_parent": "docs/superpowers/specs",
+      "supersedes_hint": null,
+      "last_modified": "2026-11-03",
+      "size_bytes": 6035
+    },
+    {
       "path": "docs/superpowers/specs/kill-session-transactional-cancellation/design.md",
       "kind": "spec",
       "topic_raw": "design",
@@ -1706,8 +1719,8 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-10-06",
-      "size_bytes": 82315
+      "last_modified": "2026-11-03",
+      "size_bytes": 82361
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/requirements.md",
@@ -1719,8 +1732,8 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-10-06",
-      "size_bytes": 115296
+      "last_modified": "2026-11-03",
+      "size_bytes": 115956
     },
     {
       "path": "docs/superpowers/specs/provider-event-lifecycle/tasks.md",
@@ -1732,8 +1745,8 @@
       "lifecycle": "executable",
       "canonical_parent": "docs/superpowers/specs/provider-event-lifecycle",
       "supersedes_hint": null,
-      "last_modified": "2026-10-06",
-      "size_bytes": 61483
+      "last_modified": "2026-11-03",
+      "size_bytes": 61513
     }
   ],
   "cross_tree_topics": {
