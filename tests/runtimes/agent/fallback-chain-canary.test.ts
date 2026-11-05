@@ -27,7 +27,7 @@ const { emitAlertMock, clearAlertMock, sweepProbe } = vi.hoisted(() => ({
   clearAlertMock: vi.fn((..._args: unknown[]) => true),
   // Runtime sweeps route through `impl` when set; the unit tests below keep
   // the real probe (impl null) so their injected-spawn coverage is unchanged.
-  sweepProbe: { impl: null as null | ((args: string[]) => Promise<SweepProbeResult>) },
+  sweepProbe: { impl: null as null | ((args: string[], env: NodeJS.ProcessEnv) => Promise<SweepProbeResult>) },
 }));
 
 vi.mock('../../../src/lib/emit-alert.ts', () => ({
@@ -43,7 +43,7 @@ vi.mock('../../../src/runtimes/agent/providers/chain-entry-canary.ts', async (im
   return {
     ...actual,
     probeChainEntryCompletion: (...args: Parameters<typeof actual.probeChainEntryCompletion>) => (
-      sweepProbe.impl ? sweepProbe.impl(args[1]) as never : actual.probeChainEntryCompletion(...args)
+      sweepProbe.impl ? sweepProbe.impl(args[1], args[3]) as never : actual.probeChainEntryCompletion(...args)
     ),
   };
 });
@@ -127,7 +127,7 @@ import { resolveFallbackCanaryConfig } from '../../../src/runtimes/agent/fallbac
 type FakeChild = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
-  stdin: { end: (s?: string) => void };
+  stdin: EventEmitter & { end: (s?: string) => void };
   kill: (sig?: string) => void;
 };
 
@@ -135,17 +135,21 @@ function makeFakeChild(): FakeChild {
   const child = new EventEmitter() as FakeChild;
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  child.stdin = { end: vi.fn() };
+  child.stdin = Object.assign(new EventEmitter(), { end: vi.fn() });
   child.kill = vi.fn();
   return child;
 }
 
 describe('probeChainEntryCompletion', () => {
-  it('classifies a clean exit with output as ok', async () => {
+  it('classifies a clean exit with a complete OK turn as ok', async () => {
     const child = makeFakeChild();
     const spawnImpl = vi.fn(() => child) as never;
     const p = probeChainEntryCompletion('opencode', ['run'], 'Reply OK', {}, 5_000, spawnImpl);
-    child.stdout.emit('data', Buffer.from('OK'));
+    child.stdout.emit('data', Buffer.from([
+      JSON.stringify({ type: 'step_start', sessionID: 'ses_synthetic' }),
+      JSON.stringify({ type: 'text', part: { text: 'OK' } }),
+      JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } }),
+    ].join('\n')));
     child.emit('close', 0, null);
     const result = await p;
     expect(result.evidence).toBeNull();
@@ -432,6 +436,33 @@ const STATIC_CHAIN = [
   { provider: 'opencode-cli', model: 'minimax/model-a1' },
   { provider: 'opencode-cli', model: 'xai/model-b1' },
 ];
+
+describe('chain canary child environment', () => {
+  beforeEach(() => {
+    lookupCredentialMock.mockReturnValue('present-key');
+  });
+  afterEach(() => {
+    sweepProbe.impl = null;
+  });
+
+  it('does not give the canary the WhatsApp tool socket', async () => {
+    const runtime = makeRuntime(STATIC_CHAIN);
+    (runtime as unknown as { globalMcpSocketPath: string | null }).globalMcpSocketPath = '/tmp/synthetic-whatsoup.sock';
+    const envs: NodeJS.ProcessEnv[] = [];
+    sweepProbe.impl = (_args, env) => {
+      envs.push(env);
+      return Promise.resolve({ status: 'ok', evidence: null, failureClass: null, durationMs: 1 });
+    };
+
+    await sv(runtime).fallback.runChainCanarySweep('scheduled');
+
+    expect(envs).toHaveLength(STATIC_CHAIN.length);
+    for (const env of envs) {
+      expect(env).not.toHaveProperty('WHATSOUP_MCP_SOCKET');
+      expect(env['MINIMAX_API_KEY'] ?? env['XAI_API_KEY']).toBe('present-key');
+    }
+  });
+});
 
 describe('fallback_chain_entry_unhealthy incident lifecycle', () => {
   beforeEach(() => {
