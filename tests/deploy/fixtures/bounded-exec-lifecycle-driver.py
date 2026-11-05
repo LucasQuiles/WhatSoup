@@ -27,6 +27,10 @@ def members(session):
 # command to start and the watchdog to enter its budget sleep, not for the
 # record's release line, which the worker writes before releasing either.
 GROUP_MODES = ('control-tokenless-worker-stopped', 'control-tokenless-cleanup-interrupted', 'authorization-unreadable-cleanup-interrupted', 'authorization-valid-cleanup-interrupted', 'authorization-valid-outer-terminated-after-reap', 'guard-terminated', 'outer-terminated')
+def release_budget():
+    # holdBudgetForDriver in credential-probe-stopped-worker.ts holds the budget
+    # until this, so a slow host cannot let it overtake the driver's identity read.
+    (root / 'budget-hold-release').write_text('release')
 def wait_ready():
     deadline = time.monotonic() + 3
     while not ((root / 'command-started').exists() and (root / 'watchdog-sleep-started').exists()) and time.monotonic() < deadline:
@@ -330,6 +334,14 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             if mode != 'cleanup-child-group':
                 os.kill(worker, signal.SIGSTOP)
                 record['stopped_worker'] = worker
+            release_budget()
+            if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped'):
+                # Start the guard's budget only now, so a slow host cannot let
+                # the deadline overtake the stop.
+                with (root / 'event-order.log').open('a') as log: log.write('H_WORKER_STOPPED worker=%d\n' % worker)
+                release = os.open(root / 'event-order-authority-release', os.O_WRONLY | os.O_NONBLOCK)
+                try: os.write(release, b'release\n')
+                finally: os.close(release)
         if mode in ('dead-leader-before-authorization', 'dead-leader-clean-cleanup', 'dead-leader-finishing-cleanup', 'deadline-fifo-after-cleanup', 'authorization-unreadable-after-cleanup'):
             deadline = time.monotonic() + 3
             authorization = None
@@ -355,6 +367,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             (root / 'expected-guard-pid').write_text(str(guard))
             os.kill(guard, signal.SIGSTOP)
             record['stopped_guard'] = guard
+            release_budget()
             while not (root / 'authorization-rm-ready').exists() and time.monotonic() < deadline + 5:
                 time.sleep(0.01)
             if not (root / 'authorization-rm-ready').exists(): raise RuntimeError('worker cleanup did not retain authorization')
@@ -433,6 +446,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             worker_record = next((item for item in processes if item['pid'] == worker), None)
             if worker is None or worker == child.pid or worker_record is None: raise RuntimeError('worker identity unavailable')
             outer = worker_record['ppid']
+            release_budget()
             if mode == 'authorization-unreadable-cleanup-interrupted':
                 guard_timer_deadline = time.monotonic() + 3
                 while not (root / 'guard-timer-entered').exists() and child.poll() is None and time.monotonic() < guard_timer_deadline:
@@ -451,6 +465,16 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
                 while not (root / 'guard-usr1-sent').exists() and child.poll() is None and time.monotonic() < usr1_deadline:
                     time.sleep(0.01)
                 if not (root / 'guard-usr1-sent').exists(): raise RuntimeError('guard USR1 unavailable')
+                # /bin/bash 3.2 runs a trap inside the signal handler while read
+                # waits, and after an exit from there it keeps doing so. A TERM
+                # landing in the USR1 trap can then leave malloc with its lock
+                # held, or one landing in a fork can allocate during it, and the
+                # worker aborts. The probe holds the worker out of read, past the
+                # return of its USR1 trap, so each TERM runs its trap normally.
+                resumed_deadline = time.monotonic() + 3
+                while not (root / 'worker-resumed-after-usr1').exists() and child.poll() is None and time.monotonic() < resumed_deadline:
+                    time.sleep(0.01)
+                if not (root / 'worker-resumed-after-usr1').exists(): raise RuntimeError('worker did not resume after USR1')
                 os.kill(worker, signal.SIGTERM)
             if mode.endswith('-cleanup-interrupted') or mode.startswith('authorization-valid-'):
                 # The probe holds the worker's cleanup at its first step. A TERM
@@ -502,8 +526,12 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             record['supervisor_pid'] = supervisor
             if mode == 'parent-stopped':
                 os.kill(supervisor, signal.SIGSTOP)
+                release_budget()
                 try:
-                    time.sleep(1.5)
+                    # The budget starts at the release, so wait for its effect, not a fixed time.
+                    gone_deadline = time.monotonic() + 6
+                    while any(item['pid'] == command_pid for item in members(session)) and time.monotonic() < gone_deadline:
+                        time.sleep(0.01)
                     record['command_alive_while_parent_stopped'] = any(item['pid'] == command_pid for item in members(session))
                 finally: os.kill(supervisor, signal.SIGCONT)
             else: os.kill(supervisor, signal.SIGTERM)
@@ -515,7 +543,7 @@ with (root / 'stdout').open('w') as out, (root / 'stderr').open('w') as err:
             timer_group = int((root / 'timer-partial-signal').read_text())
             record['timer_survivors_after_return'] = [item for item in members(session) if item['pgid'] == timer_group]
         record['before_child_wait_ms'] = int((time.monotonic() - started) * 1000)
-        child.wait(timeout=6 if mode in ('worker-stopped-after-authorization', 'forged-completion-worker-stopped') else 8)
+        child.wait(timeout=8)
         record['child_exit_ms'] = int((time.monotonic() - started) * 1000)
         record['exit'] = child.returncode
         record['sentinel_alive_before_cleanup'] = sentinel.poll() is None
@@ -579,6 +607,7 @@ record['fork_race_intercept'] = (root / 'fork-race-intercept').read_text() if (r
 record['record_read_trap'] = (root / 'record-read-trap').read_text() if (root / 'record-read-trap').exists() else None
 record.setdefault('worker_cut_observed', False)
 record['barrier_expired'] = sorted(item.name for item in root.glob('barrier-expired-*'))
+record['sleep_ledger'] = (root / 'sleep-ledger').read_text().splitlines() if (root / 'sleep-ledger').exists() else []
 if mode.startswith('event-order-') or os.environ.get('EVENT_ORDER_TRACE') == '1':
     record['events'] = (root / 'event-order.log').read_text().splitlines()
     record.setdefault('event_observations', [])

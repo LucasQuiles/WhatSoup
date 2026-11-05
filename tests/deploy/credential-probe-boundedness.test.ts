@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BUDGET_HOLD_MODES, TICKER_HOLD, expectGuardChainEndsStoppedWorker, holdBudgetForDriver, installSleepLedgerShim } from './fixtures/credential-probe-stopped-worker.ts';
 
 // Incident 2026-07-24 (mini11 / ph-bot, ~45h outage): an unbounded
 // `security find-generic-password` blocked the launcher forever because macOS
@@ -265,7 +266,7 @@ function observeLifecycleEventOrder(source: string): string {
   };
   const event = (text: string) => `builtin printf '%s\\n' "${text}" >> "$EVENT_ORDER_LOG"`;
   insert('          sleep "$chunk" || return 2', [
-    '          case "$EVENT_ORDER_MODE" in event-order-natural-*)',
+    '          case "$EVENT_ORDER_MODE" in event-order-natural-*|worker-stopped-after-authorization|forged-completion-worker-stopped)',
     '            IFS= read -r event_release <> "$EVENT_ORDER_AUTHORITY_RELEASE" || return 2',
     '            [ "$event_release" = release ] || return 2',
     '            ;; esac',
@@ -401,6 +402,22 @@ function observeLifecycleEventOrder(source: string): string {
     `      ${event('AUTHORITY state=$authorization_state')}`,
     '      if [ "$authorization_state" -eq 0 ]; then',
   ].join('\n'));
+  // The guard's two grace waits after the budget. Each event is reached only
+  // when its timer ran out. The second is followed by the worker's state, read
+  // before the guard's own cleanup stops the group, then the SIGKILL.
+  insert('      fi\n      _bounded_guard_kill_authorized\n      if [ "$authorization_state" -eq 0 ]; then\n        sleep "$grace" &', [
+    '      fi',
+    `      ${event('G_GRACE_ELAPSED n=1 worker=$worker_pid')}`,
+    '      _bounded_guard_kill_authorized',
+    '      if [ "$authorization_state" -eq 0 ]; then',
+    '        sleep "$grace" &',
+  ].join('\n'));
+  insert('        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }\n        _bounded_guard_end_worker', [
+    '        [ "$?" -eq 0 ] || { _bounded_guard_end_worker; guard_status=2; _bounded_guard_exit; }',
+    `        ${event('G_GRACE_ELAPSED n=2 worker=$worker_pid')}`,
+    `        ${event('W_WORKER_STATE worker=$worker_pid stat=$(/bin/ps -o stat= -p "$worker_pid" 2>/dev/null)')}`,
+    '        _bounded_guard_end_worker',
+  ].join('\n'));
   insert('    wait "$worker_pid" 2>/dev/null || worker_rc=$?', `    wait "$worker_pid" 2>/dev/null || worker_rc=$?\n    ${event('P_WORKER_REAPED worker=$worker_pid worker_rc=$worker_rc')}`);
   insert('      _bounded_read_deadline_bounded\n      deadline_rc=$?', `      _bounded_read_deadline_bounded\n      deadline_rc=$?\n      ${event('P_DEADLINE_READ deadline_rc=$deadline_rc cleanup_failed=$status_cleanup_failed')}`);
   insert('    wait "$guard_pid" 2>/dev/null || guard_rc=$?', `    ${event('G_WAIT worker=$worker_pid guard=$guard_pid worker_rc=$worker_rc deadline_rc=$deadline_rc')}\n    wait "$guard_pid" 2>/dev/null || guard_rc=$?\n    ${event('P_GUARD_REAPED guard=$guard_pid guard_rc=$guard_rc')}`);
@@ -413,7 +430,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
   const outcomeTrace = mode === 'outcome-candidate-directory' && process.env.WHATSOUP_OUTCOME_EVENT_TRACE === '1';
   const stoppedWorkerTrace = mode === 'forged-completion-worker-stopped' && process.env.WHATSOUP_STOPPED_WORKER_EVENT_TRACE === '1';
   // near-deadline always records its events: its expected result follows the claim order.
-  const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || outcomeTrace || stoppedWorkerTrace;
+  // A stopped worker always records them too: its bound is the guard's timer chain.
+  const eventTrace = mode.startsWith('event-order-') || mode === 'near-deadline' || mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped' || outcomeTrace;
   const eventOrderSource = eventTrace ? observeLifecycleEventOrder(fs.readFileSync(BOUNDED_LIB, 'utf8')) : undefined;
   let outcomeSource: string | undefined;
   if (mode.startsWith('outcome-') || mode === 'event-order-outcome-candidate-directory') {
@@ -450,6 +468,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     fs.writeFileSync(path.join(root, 'event-order.log'), '', { mode: 0o600 });
     if (mode.startsWith('event-order-')) {
       execFileSync(resolveBinary('mkfifo')!, ['event-order-cleanup-release', 'event-order-child-release', 'event-order-inner-start', 'event-order-authority-release', 'event-order-poll-release'].map((name) => path.join(root, name)));
+    } else if (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') {
+      execFileSync(resolveBinary('mkfifo')!, [path.join(root, 'event-order-authority-release')]);
     }
   }
   if (mode === 'dead-leader-before-authorization' || mode === 'dead-leader-clean-cleanup' || mode === 'dead-leader-finishing-cleanup' || mode === 'deadline-fifo-after-cleanup' || mode === 'authorization-unreadable-after-cleanup') {
@@ -550,6 +570,7 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       '',
     ].join('\n'), { mode: 0o700 });
   }
+  if (mode === 'worker-stopped-after-authorization' || mode === 'forged-completion-worker-stopped') installSleepLedgerShim(shim);
   if (mode === 'cleanup-residual') {
     fs.unlinkSync(path.join(shim, 'sleep'));
     fs.writeFileSync(path.join(shim, 'sleep'), [
@@ -559,9 +580,11 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
       '',
     ].join('\n'), { mode: 0o700 });
   }
+  if (BUDGET_HOLD_MODES.has(mode)) holdBudgetForDriver(shim);
   fs.writeFileSync(path.join(root, 'lifecycle.py'), LIFECYCLE_DRIVER);
   fs.writeFileSync(path.join(root, 'probe.sh'), [
     'IFS= read -r go',
+    ...(BUDGET_HOLD_MODES.has(mode) ? [TICKER_HOLD] : []),
     'cleanup_mode="$4"',
     'case "$4" in control-*|cleanup-residual)',
     '  kill() {',
@@ -739,6 +762,8 @@ function runLifecycleProbe(mode: EventOrderMode | 'fast' | 'near-deadline' | 'pr
     'case "$4" in authorization-valid-*|authorization-unreadable-cleanup-interrupted)',
     '  kill() {',
     '    local kill_rc=0 polls=0',
+    // The worker's loop checks its command only after its USR1 trap returns; hold it there, out of read, for the driver's TERM.
+    '    if [ "$1" = -0 ] && [ -n "${cmd_pid-}" ] && [ "$2" = "$cmd_pid" ] && [ "${entry_timeout-}" = 1 ]; then : > "$TMPDIR/worker-resumed-after-usr1"; while [ "$polls" -lt 400 ]; do /bin/sleep 0.01; polls=$((polls + 1)); done; : > "$BARRIER_EXPIRED-worker-resumed"; fi',
     '    if [ "$cleanup_mode" = authorization-valid-outer-terminated-after-reap ] && [ -z "${outer_held-}" ] && [ "$1" = -CONT ] && [ -n "${guard_pid-}" ] && [ "$2" = "$guard_pid" ]; then',
     '      outer_held=1',
     '      : > "$OUTER_HOLDING"',
@@ -1275,17 +1300,17 @@ describe('whatsoup_run_bounded process-group lifecycle', () => {
   it('bounds an authorized worker that is stopped before timeout cleanup', () => {
     const result = runLifecycleProbe('worker-stopped-after-authorization');
     expect(result.exit, JSON.stringify(result)).toBe(0);
-    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.stopped_worker, JSON.stringify(result)).toBeTruthy();
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expectGuardChainEndsStoppedWorker(result);
     expectLifecycleIsolation(result);
   });
   it('does not trust a forged completion marker for a stopped worker', () => {
     const result = runLifecycleProbe('forged-completion-worker-stopped');
     expect(result.exit, JSON.stringify(result)).toBe(0);
-    expect(result.duration_ms, JSON.stringify(result)).toBeLessThan(6_000);
     expect(result.forged_completion, JSON.stringify(result)).toBeTruthy();
     expect(result.stdout, JSON.stringify(result)).toContain('rc=2 output=');
+    expectGuardChainEndsStoppedWorker(result);
     expectLifecycleIsolation(result);
   });
   it('does not lose a release sent before the worker stops', () => {
