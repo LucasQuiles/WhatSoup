@@ -42,12 +42,43 @@ error finalization, and settlement. Outbound chunks and buffered updates retain
 their own immutable context. Batching separates different inbound events and
 approved operations; an unbound item explicitly clears ambient authority. These
 queue checks do not establish provider callback ownership or platform isolation.
+Publishing queued work transfers completion ownership while retaining the ingest
+slot until queue admission or local handling finishes. Single-session mode releases
+that slot at the provider boundary, after publishing its exact turn-completion
+owner; the serialized chain still waits for that turn. Followers waiting behind
+it consume bounded ingest capacity. A dispatched turn retains its inbound lease
+until the existing terminal finalizer settles, including single-session provider
+failure. A rejected admission finalizer retains completion.
+Single-session shutdown joins undispatched-turn finalization before releasing
+the inbound completion when no provider boundary was reached.
+If that finalization exhausts recovery, its context and inbound completion remain
+owned by the coordinator; the outer handler cannot substitute a legacy failed-row
+write or close the lease.
 Admission rejection and shutdown finalize durable state before releasing inbound
 authority. Detached turns retain their original queue ownership through finalization
 or retained recovery; another queue cannot reuse them before settlement. Reentrant
 settlement is rejected. A failed processor finalizer or thrown finalization retains
 the inbound completion; the existing degraded-scope contract requires operator
 recovery or restart.
+
+This bounds waiting between ingest admission and runtime admission, not all
+registered leases or provider work. Registration RPCs and approved automation
+run before ingest; their capacity and ambiguous-close recovery remain unqualified.
+Existing ingest overflow selection is unchanged: displaced messages are neither
+stored nor dispatched. Protected control-message routing, overlapping duplicate
+close ownership, and cancellation before the single-session provider boundary
+still require separate end-to-end qualification. No fleet activation follows
+from the controlled runtime tests.
+
+Controlled single-session tests also cover rejection before the provider boundary,
+including evidence-publication errors. The immutable turn context retains inbound
+authority through durable finalization; a failed terminal write retains that
+authority and reports unresolved shutdown. Successful finalization clears the
+turn's activity state before another command can use the session.
+After a provider rejection, the single-session turn chain also waits for that
+turn's completion before admitting a following turn. A controlled interleaving
+test holds evidence finalization and verifies that the follower cannot enter the
+runtime until the predecessor settles; both inbound leases then close once.
 
 Session-scoped provider events without verified turn identity remain unbound and
 enter human review. Verified per-turn callbacks retain their admitted context;
@@ -83,6 +114,9 @@ failure before reconnecting or restarting the dispatcher.
    including immutable operation snapshots, account pause generation, review
    decisions from authenticated human ingress, dispatch receipts, and inbound
    lease close semantics. The Agent365 service is a required dependency.
+   Qualify overlapping duplicate deliveries: a duplicate callback must not close
+   another delivery's active reply lease. Event deduplication and completion
+   ownership require separate proof.
 2. Prove that every production send route converges at an equivalent final
    authority seam, including provider options that affect audience. A raw route
    without a semantic adapter remains held instead of receiving an opaque
