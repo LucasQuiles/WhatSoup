@@ -48,6 +48,7 @@ import {
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
 import { blockingPollWaitMs } from './poll-resolution.ts';
+import { systemClock } from '../../lib/clock.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
 import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
 import type { ProviderMcpBridge, ProviderSession } from './providers/types.ts';
@@ -2027,7 +2028,7 @@ export class SessionManager {
   trackToolStart(toolId: string, toolName = '', toolInput?: Record<string, unknown>): void {
     if (this.pendingToolIds.has(toolId)) return;
     const waitMs = blockingPollWaitMs(toolName, toolInput);
-    this.pendingToolIds.set(toolId, waitMs > 0 ? Date.now() + waitMs : 0);
+    this.pendingToolIds.set(toolId, waitMs > 0 ? systemClock.now() + waitMs : 0);
   }
 
   trackToolEnd(toolId: string): void {
@@ -3742,7 +3743,7 @@ export class SessionManager {
     if (!this.active) return;
 
     // A bounded human vote wait is quiet by design; other stalled tools retain their kill timers.
-    const remainingWaitMs = Math.max(0, ...this.pendingToolIds.values()) - Date.now();
+    const remainingWaitMs = Math.max(0, ...this.pendingToolIds.values()) - systemClock.now();
     if (remainingWaitMs > 0) {
       this.armWatchdog(
         managedProviderSession, managedProviderGeneration,
