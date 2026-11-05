@@ -35,7 +35,7 @@ An inbound event becomes terminal from the outcome selected by the immutable tur
 Every message the bot sends is journaled in `outbound_ops` before the network call. The journal entry captures:
 
 - `payload` — the message text (or media descriptor), with a `payload_hash` (SHA-256) for deduplication detection.
-- `replay_policy` — governs what happens if the op is found undelivered after a crash (see §2.4).
+- `replay_policy` — governs recovery when delivery remains unconfirmed after a crash (see §2.4).
 - `source_inbound_seq` — links the outbound op back to the inbound event that caused it.
 - `is_terminal` — marks the op as the "final reply" for a conversation turn. When a terminal op reaches `echoed`, the linked inbound event is automatically advanced to `complete`.
 - `created_at` records queue creation and `submitted_at` records a provider submission receipt. `ambiguity_at` records entry to the current `maybe_sent` episode; it is not a substitute for either of the other clocks.
@@ -59,17 +59,21 @@ If no echo arrives within 30 seconds after submission, the periodic sweep (§4.3
 
 Every outbound op declares one of three replay policies:
 
-| Policy | Meaning | On unconfirmed delivery |
+| Policy | Meaning | When matching stored evidence is absent |
 |---|---|---|
 | `safe` | Re-sending is idempotent (same text produces same observable result) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
 | `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 
+The evidence check precedes replay policy: a matching self-authored row settles as
+`echoed`; a matching non-self or unknown-authorship row quarantines under every
+policy (§4.2). The table applies only when matching evidence is absent.
+
 **Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
 reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
 replayed), a replay that re-sends an op which *was* actually delivered produces at most a
 duplicate of an idempotent/side-effect-free message. That duplicate is the accepted tradeoff
-for guaranteeing safe/read_only ops are not silently dropped; it is never incurred for
+for recovering safe/read_only ops with missing evidence; it is never incurred for
 user-terminal replies.
 
 The policy is set at creation time by the caller. Autonomous bot responses (via `sendTracked`) typically use `safe` because the text is deterministic for a given conversation state. MCP tool sends are excluded from the durability journal by design (gap-matrix item 92) — those use direct Baileys calls and do not go through `sendTracked`.
