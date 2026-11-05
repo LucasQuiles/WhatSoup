@@ -588,6 +588,40 @@ describe('close-continuity-gap apply: addressed', () => {
     expect(closures(fx)).toBe(0);
   });
 
+  it('rejects a self-authored message as the live reissue despite linked terminal proof', () => {
+    const fx = buildFixture();
+    const raw = new DatabaseSync(fx.dbPath);
+    try {
+      raw.prepare('UPDATE messages SET is_from_me = 1 WHERE message_id = ?')
+        .run('fixture-live-1');
+    } finally {
+      raw.close();
+    }
+    expectRejected(apply(fx, 'self-reissue', addressed(fx, 1)),
+      'conflict', 'not_later_live_inbound');
+    expect(closures(fx)).toBe(0);
+  });
+
+  it('does not substitute a stored own-message echo for a terminal proof', () => {
+    const fx = buildFixture();
+    const raw = new DatabaseSync(fx.dbPath);
+    const messageId = `fixture-reply-${fx.seqs.liveNoReply}`;
+    try {
+      insertMessage(raw, {
+        messageId, sender: OWNER, content: 'done', timestamp: 1_750_000_120, inbound: false,
+      });
+      raw.prepare('UPDATE messages SET is_from_me = 1 WHERE message_id = ?').run(messageId);
+    } finally {
+      raw.close();
+    }
+    const manifest = addressed(fx, 1, {
+      liveInbound: { seq: fx.seqs.liveNoReply, messageSha256: sha('fixture-live-2') },
+    });
+    expectRejected(apply(fx, 'echo-without-terminal', manifest),
+      'blocked', 'terminal_proof_missing');
+    expect(closures(fx)).toBe(0);
+  });
+
   it.each(['external_action', 'owner_session_declined', 'anything_else'])(
     'rejects unsupported proof kind %s as Blocked with a named condition',
     (proofKind) => {

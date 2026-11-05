@@ -1348,7 +1348,7 @@ export class DurabilityEngine {
          WHERE status = 'submitted' AND submitted_at < datetime('now', '-30 seconds')`,
       ),
       getMessageByWaMessageId: prepare(
-        `SELECT pk FROM messages WHERE message_id = ?`,
+        `SELECT pk, is_from_me FROM messages WHERE message_id = ?`,
       ),
       resetMaybeSentWithWaToPending: prepare(
         `UPDATE outbound_ops
@@ -3311,10 +3311,12 @@ export class DurabilityEngine {
 
         if (op.wa_message_id) {
           const found = this.statements.getMessageByWaMessageId.get(op.wa_message_id) as
-            | { pk: number }
+            | { pk: number; is_from_me: number }
             | undefined;
 
-          if (found) {
+          if (found && found.is_from_me !== 1) {
+            this.quarantineMaybeSent(op, recoveryRun, operation);
+          } else if (found) {
             this.markEchoed(op.id);
             log.info(
               { opId: op.id, waMessageId: op.wa_message_id },
@@ -3385,7 +3387,7 @@ export class DurabilityEngine {
     recoveryRun.stats.outboundQuarantined += 1;
     log.warn(
       { opId: op.id, replayPolicy: op.replay_policy },
-      `${operation}: maybe_sent non-safe delivery quarantined`,
+      `${operation}: maybe_sent unconfirmed delivery quarantined`,
     );
     const alertQueued = emitOutboundQuarantineAlert(evidence);
     if (!alertQueued) {
