@@ -1,7 +1,7 @@
 import { createChildLogger } from '../../logger.ts';
 import type { ToolCategory } from './providers/tool-mapping.ts';
 import type { OperationTrackerConfig, ToolThreshold } from '../../config.ts';
-import { blockingPollWaitMs } from './poll-resolution.ts';
+import { blockingPollWaitMs } from './poll-timeouts.ts';
 
 const log = createChildLogger('operation-tracker');
 

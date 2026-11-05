@@ -10,6 +10,8 @@
  * and the poll test suites are unchanged.
  */
 import { config } from '../../config.ts';
+import { clampPollTimeoutMs, DEFAULT_POLL_TIMEOUT_MS } from './poll-timeouts.ts';
+export { blockingPollWaitMs, clampPollTimeoutMs, DEFAULT_POLL_TIMEOUT_MS, MIN_POLL_TIMEOUT_MS, MAX_POLL_TIMEOUT_MS } from './poll-timeouts.ts';
 import { redactInternalArtifacts, type OutboundAudience } from '../../core/outbound-message-safety.ts';
 
 // ---------------------------------------------------------------------------
@@ -20,11 +22,6 @@ import { redactInternalArtifacts, type OutboundAudience } from '../../core/outbo
 export const POLL_QUESTION_MAX_CHARS = 900;
 export const POLL_OPTION_MAX_CHARS = 95;  // leave margin under WhatsApp's ~100 char limit
 export const POLL_DETAIL_DESCRIPTION_MIN_CHARS = 72;
-import { MS_PER_HOUR } from '../../lib/time-units.ts';
-
-export const DEFAULT_POLL_TIMEOUT_MS = MS_PER_HOUR;
-export const MIN_POLL_TIMEOUT_MS = 1_000;
-export const MAX_POLL_TIMEOUT_MS = 86_400_000;
 export const ASKUSER_OTHER_OPTION_LABEL = 'Other — propose a different option';
 
 export type AskUserOption = { label: string; description: string };
@@ -408,17 +405,6 @@ export function normalizeAskUserQuestions(questions: AskUserQuestion[]): AskUser
       ],
     };
   });
-}
-
-export function clampPollTimeoutMs(timeoutMs: number): number {
-  return Math.min(Math.max(timeoutMs, MIN_POLL_TIMEOUT_MS), MAX_POLL_TIMEOUT_MS);
-}
-
-export function blockingPollWaitMs(toolName: string, toolInput: Record<string, unknown> | undefined): number {
-  if (toolName !== 'send_poll' && !toolName.endsWith('__send_poll')) return 0;
-  if (toolInput?.['awaitResult'] !== true) return 0;
-  const timeoutMs = toolInput['timeoutMs'];
-  return clampPollTimeoutMs(typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_POLL_TIMEOUT_MS);
 }
 
 export function configuredDefaultPollTimeoutMs(): number {

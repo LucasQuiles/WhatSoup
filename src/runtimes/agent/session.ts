@@ -47,7 +47,7 @@ import {
   type BuildBaseChildEnvOptions,
 } from './providers/child-env.ts';
 import { ProviderBudget, type BudgetConfig } from './providers/budget.ts';
-import { blockingPollWaitMs } from './poll-resolution.ts';
+import { blockingPollWaitMs } from './poll-timeouts.ts';
 import { systemClock } from '../../lib/clock.ts';
 import { watchdogHardMsForProvider } from './providers/watchdog-policy.ts';
 import { providerConfigEffort, providerHasNativeReasoningControl } from './reasoning-control.ts';
