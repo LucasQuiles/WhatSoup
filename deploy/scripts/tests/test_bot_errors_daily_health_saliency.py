@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 
 import pytest
+from hypothesis import example, given, settings, strategies as st
 
 # ---------------------------------------------------------------------------
 # Module loader (mirrors test_bot_errors_collector_backoff.py)
@@ -379,6 +380,118 @@ def test_health_probe_cannot_clear_other_failure_domains(recovery_case, other_fa
     dispatcher, state, key, recovery, _ = recovery_case([other_failure, "health line-a: FAIL status=unhealthy"])
     assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
     assert key in state["openIncidents"]
+
+
+def test_current_target_failure_vetoes_only_its_daily_health_key(recovery_case):
+    dispatcher, seed_state, key, seed_recovery, _ = recovery_case()
+    other = key.replace("line-a", "line-b")
+    seed_state["openIncidents"][other] = deepcopy(seed_state["openIncidents"][key])
+    seed_state["openIncidents"][other]["lastEvidence"] = "health line-b: FAIL status=unhealthy"
+
+    @settings(database=None, deadline=None, max_examples=40, derandomize=True)
+    @given(
+        failure=st.sampled_from([
+            "FAIL config line-a: health_port_authority_drift profile=9094 live=9093",
+            "config line-a: invalid JSON required extra.json: malformed",
+            "health line-a: FAIL 503 unavailable",
+            "FAIL socket line-a: absent",
+        ]),
+        failure_first=st.booleans(),
+        separator=st.sampled_from(["\n", "\r\n"]),
+    )
+    @example(failure="config line-a: invalid JSON required extra.json: malformed",
+             failure_first=False, separator="\n")
+    def check(failure, failure_first, separator):
+        state, recovery = deepcopy(seed_state), deepcopy(seed_recovery)
+        health_lines = recovery["evidence"] + separator + recovery["evidence"].replace("line-a", "line-b")
+        recovery["evidence"] = (
+            failure + separator + health_lines if failure_first else health_lines + separator + failure
+        )
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [other]
+        assert dispatcher.close_recovered_daily_health_incidents(recovery, state) == [other]
+        assert key in state["openIncidents"] and other not in state["openIncidents"]
+
+    check()
+
+
+def test_unattributed_or_unrelated_lines_do_not_veto_recovery(recovery_case):
+    dispatcher, seed_state, key, seed_recovery, _ = recovery_case()
+
+    @settings(database=None, deadline=None, derandomize=True)
+    @given(line=st.sampled_from([
+        "health line-a: WARN 200 health_token_missing",
+        "FAIL disk: low space",
+        "config /fixture/config.json: invalid JSON",
+        "FAIL config line-b: absent",
+    ]), line_first=st.booleans())
+    @example(line="health line-a: WARN 200 health_token_missing", line_first=False)
+    def check(line, line_first):
+        state, recovery = deepcopy(seed_state), deepcopy(seed_recovery)
+        recovery["evidence"] = (
+            line + "\n" + recovery["evidence"] if line_first else recovery["evidence"] + "\n" + line
+        )
+        assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [key]
+
+    check()
+
+
+def test_current_config_failure_preserves_source_specific_recovery(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    reachable_key = "test-machine|line-a|instance_unreachable"
+    state["openIncidents"][reachable_key] = {"status": "open", "eventCreatedAtEpoch": 1780185600}
+    recovery["evidence"] += "\nFAIL config line-a: invalid required file"
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == [reachable_key]
+    assert key in state["openIncidents"]
+
+
+def test_late_failure_in_full_aggregate_still_vetoes_recovery(recovery_case):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    recovery["evidence"] += "\ninventory_note: " + "x" * 12000
+    recovery["evidence"] += "\nconfig line-a: invalid JSON required extra.json: malformed"
+    assert dispatcher.daily_health_recovered_incident_keys(recovery, state) == []
+    assert key in state["openIncidents"]
+
+
+def test_contradiction_survives_process_one_and_state_reload(recovery_case, dirs, monkeypatch):
+    dispatcher, state, key, recovery, _ = recovery_case()
+    other = key.replace("line-a", "line-b")
+    state["openIncidents"][other] = deepcopy(state["openIncidents"][key])
+    state["openIncidents"][other]["lastEvidence"] = "health line-b: FAIL status=unhealthy"
+    recovery.update({
+        "schemaVersion": 1, "id": "daily-health-contradiction", "eventType": "alert",
+        "severity": "critical", "summary": "Daily health has a configuration failure",
+    })
+    recovery["evidence"] += "\n" + recovery["evidence"].replace("line-a", "line-b")
+    recovery["evidence"] += "\nconfig line-a: invalid JSON required extra.json: malformed"
+    monkeypatch.delenv("BOT_ERRORS_SEND_DAILY_HEALTH_INFO", raising=False)
+    monkeypatch.setattr(dispatcher, "MAINTENANCE_ENABLED", True)
+
+    def unexpected_send(*args, **kwargs):
+        pytest.fail("maintenance should suppress notification after recovery absorption")
+
+    monkeypatch.setattr(dispatcher, "send_whatsapp", unexpected_send)
+    with _env(*dirs):
+        paths = dispatcher.setup_dirs()
+        dispatcher.maintenance_state_path().write_text(json.dumps({
+            "test-machine|bot-errors-health": {"expiresAt": 1780189200, "reason": "planned work"},
+        }))
+        path = paths["outbox"] / "daily-health-contradiction.json"
+        path.write_text(json.dumps(recovery))
+        path.chmod(0o600)
+        with dispatcher.open_dispatcher_state_session() as session:
+            loaded = session.load()
+            cycle = dispatcher.IncidentStateCycle(session, loaded.payload, loaded.capability)
+            cycle.payload.update(state)
+            cycle.commit()
+            assert dispatcher.process_one(path, paths, cycle) == (True, "suppressed")
+        with dispatcher.open_dispatcher_state_session() as session:
+            persisted = session.load().payload
+        assert key in persisted["openIncidents"]
+        assert other not in persisted["openIncidents"]
+        assert not path.exists()
+        archived = list(paths["suppressed"].glob("*.suppressed"))
+        assert len(archived) == 1
+        assert json.loads(archived[0].read_text())["diagnostics"]["maintenanceSilenced"] is True
 
 
 @pytest.mark.parametrize("evidence", [
