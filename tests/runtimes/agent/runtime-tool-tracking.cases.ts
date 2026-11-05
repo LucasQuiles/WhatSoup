@@ -80,13 +80,14 @@ export function registerRuntimeToolTrackingTests(): void {
     const toolScopeKey = `${mapKey}#1`;
     const context = makeRuntimeTurnContext('per_chat', 'scoped', queue.targetChatJid, 42, 'turn-scoped-poll');
     const session = { tickWatchdog: vi.fn(), trackToolStart: vi.fn(), trackToolEnd: vi.fn() };
+    type ScopedSession = typeof session;
     const state = runtime as unknown as {
       operationTrackers: Map<string, typeof tracker>;
       perChatRuntimeTurnContexts: Map<string, Array<typeof context>>;
       handleEventWithContext(
         event: AgentEvent,
         queue: IOutboundQueue,
-        session: typeof session,
+        session: ScopedSession,
         conversationKey: string,
         inboundSeq: number,
         mapKey: string,
