@@ -1,0 +1,16 @@
+[Unit]
+Description=WhatSoup release drift+currency observer (Linux parity for com.whatsoup.release-drift-check.plist)
+Documentation=https://github.com/LucasQuiles/WhatSoup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/whatsoup/bot-errors.env
+ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
+# 0 clean, 1 drifted/behind-target, 2 inconclusive are all EXPECTED observer
+# outcomes; the actionable signal is emitted via the BOT ERRORS outbox by the
+# script, so they are the single alert channel. Keep the unit itself green to
+# avoid a second, duplicate failure signal (alerts must be actionable).
+SuccessExitStatus=0 1 2
+Nice=10
