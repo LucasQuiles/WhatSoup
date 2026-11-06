@@ -1,0 +1,131 @@
+name: Private test integrity
+
+on:
+  workflow_run:
+    workflows: [Quality]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  private-scanner:
+    if: >-
+      github.repository == 'LucasQuiles/WhatSoup' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.status == 'completed' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: private-scanner-trusted
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      checks: write
+    steps:
+      - name: Setup Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Create owned scanner scratch
+        id: scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          scanner_root="$(mktemp -d "$GITHUB_WORKSPACE/.private-scanner.XXXXXXXX")"
+          test "$(realpath "$scanner_root")" = "$scanner_root"
+          printf 'root=%s\n' "$scanner_root" >> "$GITHUB_OUTPUT"
+          printf 'checkout=%s/private-checkout\n' "${scanner_root#"$GITHUB_WORKSPACE"/}" >> "$GITHUB_OUTPUT"
+
+      # workflow_run supplies the default-branch revision; no candidate checkout is used.
+      - name: Read exact trusted driver files
+        id: trusted-driver
+        timeout-minutes: 6
+        shell: bash
+        env:
+          TRUSTED_SHA: ${{ github.sha }}
+          SCANNER_ROOT: ${{ steps.scratch.outputs.root }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$TRUSTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir "$SCANNER_ROOT/driver"
+          for file in bounded_github.py candidate_scan.py github_binding.py private_bundle.py \
+            private_check.py private_git.py private_scanner_candidate.py run_workflow.py \
+            runtime_capture.py scanner_runtime.py; do
+            status="$(curl --silent --fail --proto '=https' --connect-timeout 5 --max-time 30 \
+              --max-filesize 1048576 --header 'Accept: application/vnd.github.raw+json' \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --output "$SCANNER_ROOT/driver/$file" --write-out '%{http_code}' \
+              "https://api.github.com/repos/LucasQuiles/WhatSoup/contents/tools/private-test-integrity/$file?ref=$TRUSTED_SHA")"
+            test "$status" = 200
+            test -s "$SCANNER_ROOT/driver/$file"
+          done
+          status="$(curl --silent --fail --proto '=https' --connect-timeout 5 --max-time 30 \
+            --max-filesize 16384 --header 'Accept: application/vnd.github.raw+json' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --output "$SCANNER_ROOT/resolve-timeout-bin.sh" --write-out '%{http_code}' \
+            "https://api.github.com/repos/LucasQuiles/WhatSoup/contents/scripts/resolve-timeout-bin.sh?ref=$TRUSTED_SHA")"
+          test "$status" = 200
+          test -s "$SCANNER_ROOT/resolve-timeout-bin.sh"
+
+      - name: Acquire pinned private scanner over SSH
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: LucasQuiles/test-integrity
+          ref: ea0b01a4e3d99dc58a9a475c57e22ee204b04a7c
+          path: ${{ steps.scratch.outputs.checkout }}
+          # An absent secret must fail SSH authentication, never select an HTTPS remote.
+          ssh-key: ${{ secrets.TEST_INTEGRITY_DEPLOY_KEY || 'missing-private-scanner-key' }}
+          ssh-strict: true
+          persist-credentials: false
+          set-safe-directory: false
+          clean: false
+          fetch-depth: 1
+          show-progress: false
+          submodules: false
+          lfs: false
+
+      - name: Qualify runtime and scan exact pull request data
+        id: scan
+        timeout-minutes: 22
+        shell: bash
+        env:
+          SCANNER_ROOT: ${{ steps.scratch.outputs.root }}
+          QUALITY_RUN_ID: ${{ github.event.workflow_run.id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python_bin="$(realpath "$(command -v python3.12)")"
+          bash_bin="$(realpath /bin/bash)"
+          git_bin="$(realpath "$(command -v git)")"
+          trusted_path="$(dirname "$python_bin"):/usr/bin:/bin"
+          timeout_bin="$(PATH="$trusted_path" "$bash_bin" "$SCANNER_ROOT/resolve-timeout-bin.sh")"
+          python_sha="$(sha256sum "$python_bin" | cut -d ' ' -f 1)"
+          bash_sha="$(sha256sum "$bash_bin" | cut -d ' ' -f 1)"
+          git_sha="$(sha256sum "$git_bin" | cut -d ' ' -f 1)"
+          cd "$SCANNER_ROOT"
+          env -i PATH="$trusted_path" LANG=C LC_ALL=C TMPDIR="$SCANNER_ROOT" GITHUB_TOKEN="$GITHUB_TOKEN" \
+            "$timeout_bin" --signal=TERM --kill-after=30s 20m \
+            "$python_bin" -I -S -B "$SCANNER_ROOT/driver/run_workflow.py" \
+            --run-id "$QUALITY_RUN_ID" --private-checkout "$SCANNER_ROOT/private-checkout" \
+            --git "$git_bin" --git-sha256 "$git_sha" \
+            --python "$python_bin" --python-sha256 "$python_sha" \
+            --bash "$bash_bin" --bash-sha256 "$bash_sha" --trusted-path "$trusted_path" >/dev/null 2>&1
+
+      - name: Remove owned scanner scratch
+        if: always()
+        shell: bash
+        env:
+          SCANNER_ROOT: ${{ steps.scratch.outputs.root }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SCANNER_ROOT" ]]; then exit 0; fi
+          [[ "$SCANNER_ROOT" == "$GITHUB_WORKSPACE"/.private-scanner.* ]]
+          test "$(dirname "$SCANNER_ROOT")" = "$GITHUB_WORKSPACE"
+          test "$(realpath "$SCANNER_ROOT")" = "$SCANNER_ROOT"
+          rm -rf -- "$SCANNER_ROOT"
+          test ! -e "$SCANNER_ROOT"

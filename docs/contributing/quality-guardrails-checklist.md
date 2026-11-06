@@ -44,6 +44,28 @@ path, and exact savings vary with runner scheduling and step duration.
 | Full test suite + coverage | `npm run coverage:check -- --pool=forks` | Node 24 runs the entire Vitest suite under V8 coverage and enforces thresholds. Node 25 separately runs `npm test -- --pool=forks` without duplicating coverage. |
 | Console build | `npm --prefix console run build` | Vite production build smoke |
 
+The private scanner migration adds `.github/workflows/private-test-integrity.yml`.
+It requires the `private-scanner-trusted` environment to admit only `main`, with a
+read-only scanner deploy key stored in that environment. A completed same-repository
+pull request run of Quality triggers trusted default-branch code. Candidate test
+files are retrieved as immutable Git data; candidate code, hooks, configuration and
+package scripts are not executed. The scanner and its diagnostics remain private.
+
+The driver validates the current pull request head and base, qualifies the pinned
+Linux/Python 3.12 scanner runtime, removes its owned private checkout and temporary
+bundle, and rechecks the pull request before publishing `test-integrity (private)`.
+Operational or cleanup failures cannot produce a successful local conclusion.
+The 20-minute watchdog can leave an inconclusive or missing check; a failed readback
+after a remote write is an observability gap, not proof that no check was created.
+Fork and merge-queue inputs remain unsupported by this workflow.
+
+Keep the existing Quality scanner step and required checks during qualification.
+Only after hosted canaries prove current-head publication, stale-head refusal,
+credential confinement, cleanup and failure handling should the private check be
+required. Remove the repository-scoped scanner secret only after the trusted check
+is operational and Quality no longer consumes that secret. Local adapter tests or
+a parsed workflow contract do not establish those hosted guarantees.
+
 Before the Node 24 toolchain setup, `scripts/ci-disk-reclaim.sh` records free
 space and enforces a 30 GiB budget. Sufficient runners skip mutation with a
 structured receipt. Low-space runners remove only the allowlisted unused
