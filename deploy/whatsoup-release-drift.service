@@ -8,9 +8,13 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=%h/.config/whatsoup/bot-errors.env
 ExecStart=%h/.local/bin/whatsoup-release-drift-linux.sh
-# 0 clean, 1 drifted/behind-target, 2 inconclusive are all EXPECTED observer
-# outcomes; the actionable signal is emitted via the BOT ERRORS outbox by the
-# script, so they are the single alert channel. Keep the unit itself green to
-# avoid a second, duplicate failure signal (alerts must be actionable).
-SuccessExitStatus=0 1 2
+# Exit statuses of deploy/scripts/whatsoup-release-drift-linux.sh:
+#   0 clean.
+#   1 drifted or behind target. The observer has emitted the alert through the
+#     BOT ERRORS outbox (the dispatcher suppresses duplicates while the incident
+#     is open), so the outbox is the single alert channel and the unit stays green.
+#   2 inconclusive: wrapper or configuration error, observer crash, or the
+#     outbox emit itself failed. No outbox alert can be relied on, so the unit
+#     must fail where failed-unit monitoring sees it.
+SuccessExitStatus=0 1
 Nice=10

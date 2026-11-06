@@ -11,7 +11,8 @@
 # Emits release-integrity (drift) + release-currency (behind origin/main) alerts
 # through the existing BOT ERRORS outbox pipeline (deploy/scripts/bot-errors-emit.py),
 # and clears them on a clean run (--clear-on-ok). Fail-closed exit codes:
-#   0 clean · 1 drifted/behind-target · 2 inconclusive.
+#   0 clean · 1 drifted/behind-target (alert emitted) · 2 inconclusive
+# (fails the systemd unit; see deploy/whatsoup-release-drift.service).
 # ============================================================================
 set -uo pipefail
 
@@ -36,8 +37,6 @@ esac
 [ -f "$RELEASE_ROOT/scripts/live-release-observers.ts" ] || \
   [ -f "$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh" ] || \
   fail "release root missing observer entrypoints: $RELEASE_ROOT"
-
-mkdir -p -- "$WHATSOUP_RELEASE_DRIFT_LOG_DIR" 2>/dev/null || true
 
 exec bash "$RELEASE_ROOT/deploy/scripts/run-release-drift-schedule.sh" \
   --release "$RELEASE_ROOT" \
