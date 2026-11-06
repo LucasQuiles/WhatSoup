@@ -1134,7 +1134,7 @@ describe('atomic linked turn recovery jobs', () => {
       ),
     });
 
-    expect(durability.matchEcho('wa-echo-settlement')).toBe(true);
+    expect(durability.matchEcho('wa-echo-settlement', '15550100001')).toBe(true);
     expect(durability.getInboundStatus(transfer.inboundSeq)).toBe('complete');
     expect(durability.getTurnRecoveryJob(receipt.recoveryJob!.jobId)).toMatchObject({
       state: 'completed',
@@ -1180,7 +1180,7 @@ describe('atomic linked turn recovery jobs', () => {
       WHERE seq = ?
     `).run(transfer.inboundSeq);
 
-    expect(durability.matchEcho('wa-echo-partial-job')).toBe(true);
+    expect(durability.matchEcho('wa-echo-partial-job', '15550100001')).toBe(true);
     expect(durability.getTurnRecoveryJob(receipt.recoveryJob!.jobId)).toMatchObject({
       state: 'completed',
     });
@@ -1203,7 +1203,7 @@ describe('atomic linked turn recovery jobs', () => {
     durability.markQuarantined(opId);
     durability.completeTurnRecoveryJob(receipt.recoveryJob!.jobId, OWNER, claim);
 
-    expect(durability.matchEcho('wa-echo-after-worker')).toBe(true);
+    expect(durability.matchEcho('wa-echo-after-worker', '15550100001')).toBe(true);
     expect(db.raw.prepare('SELECT status FROM outbound_ops WHERE id = ?').get(opId))
       .toEqual({ status: 'echoed' });
     expect(durability.getInboundStatus(transfer.inboundSeq)).toBe('failed');
@@ -1267,7 +1267,7 @@ describe('atomic linked turn recovery jobs', () => {
         durability.markInboundFailed(transfer.inboundSeq, 'crash_recovery');
       }
 
-      expect(durability.matchEcho(`wa-echo-source-${sourceState}`)).toBe(true);
+      expect(durability.matchEcho(`wa-echo-source-${sourceState}`, '15550100001')).toBe(true);
       expect(durability.getOutboundByStatus('echoed').map((op) => op.id)).toContain(opId);
       expect(durability.getInboundStatus(transfer.inboundSeq)).toBe(sourceState);
       expect(durability.getTurnRecoveryJob(receipt.recoveryJob!.jobId)).toMatchObject({
@@ -1305,7 +1305,7 @@ describe('atomic linked turn recovery jobs', () => {
       BEGIN SELECT RAISE(ABORT, 'recovery echo completion denied'); END
     `);
 
-    expect(() => durability.matchEcho('wa-echo-rollback'))
+    expect(() => durability.matchEcho('wa-echo-rollback', '15550100001'))
       .toThrow('recovery echo completion denied');
     expect(durability.getOutboundByStatus('submitted').map((op) => op.id)).toContain(opId);
     expect(durability.getInboundStatus(transfer.inboundSeq)).toBe('processing');

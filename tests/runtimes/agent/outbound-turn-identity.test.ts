@@ -122,7 +122,7 @@ describe('outbound turn identity', () => {
     const evidence = await queue.flushTurnEvidence('turn-mapped-lid');
 
     expect(transport.sendMessage).toHaveBeenCalledTimes(1);
-    expect(durability.matchEcho('wa-mapped-lid-answer')).toBe(true);
+    expect(durability.matchEcho('wa-mapped-lid-answer', PHONE_KEY)).toBe(true);
 
     const result = finalizeRuntimeTurn({
       instanceName: 'identity-test',
@@ -234,7 +234,7 @@ describe('outbound turn identity', () => {
       beforeAnswer(queue);
       queue.enqueueText('one attributed answer', 'answer');
       const evidence = await queue.flushTurnEvidence(turnId);
-      for (const waId of recorder.waIds) durability.matchEcho(waId);
+      for (const waId of recorder.waIds) durability.matchEcho(waId, attribution.conversationKey);
       const result = finalizeRuntimeTurn({
         instanceName: 'identity-test',
         durability,

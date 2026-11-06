@@ -186,7 +186,7 @@ export function openTurn(options: TurnOptions) {
     const markSubmitted = engine.markSubmitted.bind(engine);
     vi.spyOn(engine, 'markSubmitted').mockImplementation((id, waMessageId, logicalAttemptCount) => {
       markSubmitted(id, waMessageId, logicalAttemptCount);
-      if (waMessageId !== null) engine.matchEcho(waMessageId);
+      if (waMessageId !== null) engine.matchEcho(waMessageId, key);
     });
   }
   let sends = 0;

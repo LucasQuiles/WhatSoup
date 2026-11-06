@@ -75,7 +75,7 @@ describe('runtime shutdown outbound persistence', () => {
     vi.restoreAllMocks();
   });
 
-  it('persists a recovery-owned terminal before one absolute deadline when the outbound send never settles', async () => {
+  it.each([true, false, undefined])('persists a recovery-owned terminal before one absolute deadline with requested-ID equivalence %s', async (requestedIdIsProviderId) => {
     const db = new Database(':memory:');
     db.open();
     try {
@@ -97,6 +97,7 @@ describe('runtime shutdown outbound persistence', () => {
       );
       const lateReceipt = deferred<{ waMessageId: string | null }>();
       const messenger: Messenger = {
+        ...(requestedIdIsProviderId === undefined ? {} : { requestedIdIsProviderId }),
         sendMessage: vi.fn(() => lateReceipt.promise),
         sendMedia: vi.fn(async () => ({ waMessageId: null })),
       };
@@ -154,7 +155,7 @@ describe('runtime shutdown outbound persistence', () => {
 
       expect(outbound).toEqual({
         status: 'maybe_sent',
-        wa_message_id: expect.any(String),
+        wa_message_id: requestedIdIsProviderId === true ? expect.any(String) : null,
         is_terminal: 1,
       });
       expect(terminal).toEqual({

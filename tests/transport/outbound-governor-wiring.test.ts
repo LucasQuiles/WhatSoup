@@ -113,6 +113,14 @@ describe('PR-F wiring — the socket-seam wrap governs every send tier', () => {
       .rejects.toThrow(/outbound governor ceiling exceeded/);
   });
 
+  it('declares requested ID equivalence and forwards the ID while retaining the actual receipt', async () => {
+    const { manager, mockSock } = await connected();
+    const receipt = await manager.sendMessage(JID, 'correlated', { messageId: 'requested-key' });
+    expect(manager.requestedIdIsProviderId).toBe(true);
+    expect(mockSock.sendMessage.mock.calls.at(-1)?.[2]).toEqual({ messageId: 'requested-key' });
+    expect(receipt.waMessageId).toBe('wa-ok');
+  });
+
   it('Tier B: sendRaw text is governed by the same wrap', async () => {
     const { manager } = await connected();
     await manager.sendRaw(JID, { text: 'first' });

@@ -156,7 +156,7 @@ describe('DurabilityEngine edge coverage', () => {
     engine.markSending(id);
     engine.markSubmitted(id, 'WA_MATCHED');
 
-    expect(engine.matchEcho('WA_MATCHED')).toBe(true);
+    expect(engine.matchEcho('WA_MATCHED', 'key-echo-match')).toBe(true);
     expect(getOutbound(db, id)['status']).toBe('echoed');
   });
 

@@ -613,6 +613,7 @@ describe('OutboundQueue', () => {
   it('shutdown during a provider call records one ambiguous submitted attempt', async () => {
     const inFlight = deferred<{ waMessageId: string | null }>();
     const messenger: Messenger = {
+      requestedIdIsProviderId: true,
       sendMessage: vi.fn(() => inFlight.promise),
       sendMedia: vi.fn(async () => ({ waMessageId: null })),
     };

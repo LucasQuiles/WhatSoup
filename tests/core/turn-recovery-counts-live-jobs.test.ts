@@ -138,7 +138,7 @@ describe('turn-recovery corrupt-link and echo-conflict counts cover live jobs on
     durability.markSending(t.opId);
     durability.markSubmitted(t.opId, `wa-live-count-${suffix}`);
     durability.markInboundFailed(t.inboundSeq, 'crash_recovery');
-    expect(durability.matchEcho(`wa-live-count-${suffix}`)).toBe(true);
+    expect(durability.matchEcho(`wa-live-count-${suffix}`, `live-count-${suffix}`)).toBe(true);
   }
 
   function jobState(jobId: number): unknown {
@@ -217,7 +217,7 @@ describe('turn-recovery corrupt-link and echo-conflict counts cover live jobs on
     const t = transfer('completed-echo');
     completeByWorker(t, 'completed-echo');
 
-    expect(durability.matchEcho('wa-live-count-completed-echo')).toBe(true);
+    expect(durability.matchEcho('wa-live-count-completed-echo', 'live-count-completed-echo')).toBe(true);
     expect(jobConflict(t.jobId)).toEqual({
       state: 'completed',
       echo_conflict_reason: 'completed_job_source_conflict',

@@ -504,9 +504,11 @@ describe('a failed fallback replay', () => {
     await settle(turn);
 
     const [answer] = opsMatching(turn, 'full answer you asked for');
-    const sent = turn.db.raw.prepare('SELECT wa_message_id AS wa FROM outbound_ops WHERE id = ?')
-      .get(answer?.id ?? -1) as { wa: string | null } | undefined;
-    turn.engine.matchEcho(sent?.wa ?? 'no message id');
+    const sent = turn.db.raw.prepare(
+      'SELECT wa_message_id AS wa, conversation_key AS conversationKey FROM outbound_ops WHERE id = ?',
+    ).get(answer?.id ?? -1) as { wa: string | null; conversationKey: string } | undefined;
+    if (!sent?.wa) throw new Error('test answer did not retain its provider message ID');
+    turn.engine.matchEcho(sent.wa, sent.conversationKey);
 
     expect({
       answer: opsMatching(turn, 'full answer you asked for').map((op) => op.status),

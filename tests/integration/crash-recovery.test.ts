@@ -23,6 +23,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Database } from '../../src/core/database.ts';
+import { toConversationKey } from '../../src/core/conversation-key.ts';
 import { DurabilityEngine } from '../../src/core/durability.ts';
 import { waitForHistorySyncThenRecover } from '../../src/core/post-connect-recovery.ts';
 
@@ -42,7 +43,7 @@ function ingestEcho(db: Database, messageId: string, chatJid = 'g1@g.us'): void 
   db.raw.prepare(
     `INSERT INTO messages (chat_jid, conversation_key, sender_jid, message_id, content_type, is_from_me, timestamp)
      VALUES (?, ?, ?, ?, 'text', 1, ?)`,
-  ).run(chatJid, chatJid, 'bot@s.whatsapp.net', messageId, Date.now());
+  ).run(chatJid, toConversationKey(chatJid), 'bot@s.whatsapp.net', messageId, Date.now());
 }
 
 function getOutbound(db: Database, id: number): Record<string, unknown> {
@@ -357,7 +358,7 @@ describe('Crash Recovery — Scenario 5: full round-trip happy path', () => {
     expect(getOutbound(db, opId)['status']).toBe('submitted');
 
     // Echo arrives normally (before any crash or recovery needed)
-    const matched = engine.matchEcho('WA-HAPPY-1');
+    const matched = engine.matchEcho('WA-HAPPY-1', 'chat-K');
     expect(matched).toBe(true);
 
     expect(getOutbound(db, opId)['status']).toBe('echoed');
@@ -388,7 +389,7 @@ describe('Crash Recovery — Scenario 5: full round-trip happy path', () => {
     expect(getToolCall(db, tcId)['outbound_op_id']).toBe(opId);
 
     // Echo arrives
-    const matched = engine.matchEcho('WA-HAPPY-2');
+    const matched = engine.matchEcho('WA-HAPPY-2', 'chat-L');
     expect(matched).toBe(true);
 
     expect(getOutbound(db, opId)['status']).toBe('echoed');

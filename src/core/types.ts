@@ -40,6 +40,8 @@ export interface SendOptions {
 }
 
 export interface Messenger {
+  /** Requested message IDs are also provider/echo IDs; this does not promise delivery or deduplication. */
+  readonly requestedIdIsProviderId?: boolean;
   /**
    * @param opts Optional per-send options: `messageId` (QR-028) for stable
    *   retry-dedup, and `caller` (QR-086) for the outbound-identity guard

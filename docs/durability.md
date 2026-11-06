@@ -47,11 +47,12 @@ Every message the bot sends is journaled in `outbound_ops` before the network ca
 
 ### 2.3 Echo Correlation
 
-When Baileys delivers an outgoing message, WhatsApp echoes it back on the same WebSocket connection with the same `message_id` it assigned to the send. WhatSoup captures this echo via `matchEcho(waMessageId)`:
+When Baileys delivers an outgoing message, WhatsApp echoes it back on the same WebSocket connection with the same `message_id` it assigned to the send. WhatSoup captures this echo via `matchEcho(waMessageId, conversationKey)`, using the canonical conversation key resolved by ingest:
 
-1. Look up `outbound_ops` for a row with `wa_message_id = ? AND status = 'submitted'`.
-2. If found, call `markEchoed()`.
-3. If the op has `is_terminal = 1`, `markEchoed()` automatically calls `completeInbound()` on the linked inbound event.
+1. Look up `outbound_ops` with both the matching `wa_message_id` and nonempty `conversation_key` in `submitted`, `maybe_sent`, `quarantined`, or `failed_permanent` state.
+2. If that exact identity is absent, accept only one proven WhatsApp historical LID → PN alias: the candidate operation must retain a canonical raw `@lid` `chat_jid` whose conversation key equals its immutable stored key, and the current durable `lid_mappings` row must target a canonical `@s.whatsapp.net` JID whose conversation key equals ingest's supplied key. The fallback counts every row bearing the provider ID: a nonempty exact-key or proven LID/PN claimant blocks an alias unless that alias is the one echo-eligible claimant. Ingest reaches `matchEcho()` only for self echoes after deriving that key, so this live proof remains available when message persistence fails. An unproven, ambiguous, non-WhatsApp, or malformed candidate does not settle.
+3. If either proof identifies one op, call `markEchoed()`.
+4. If the op has `is_terminal = 1`, `markEchoed()` automatically calls `completeInbound()` on the linked inbound event.
 
 If no echo arrives within 30 seconds after submission, the periodic sweep (§4.3) promotes the op to `maybe_sent` and starts its current ambiguity episode. The recurring live reconciliation loop waits that episode's own late-echo grace before replaying or quarantining it.
 
@@ -65,9 +66,11 @@ Every outbound op declares one of three replay policies:
 | `unsafe` | Re-sending would cause a duplicate visible to the recipient | Quarantine — require manual resolution |
 | `read_only` | Op has no side effects visible to the recipient (e.g., presence, read receipt) | Reset to `pending`, then re-sent by the pending drainer (§4.4) |
 
-The evidence check precedes replay policy: a matching self-authored row settles as
-`echoed`; a matching non-self or unknown-authorship row quarantines under every
-policy (§4.2). The table applies only when matching evidence is absent.
+The evidence check precedes replay policy: a self-authored row with the same
+provider ID and nonempty canonical conversation key settles as `echoed`. A
+historical WhatsApp raw-LID key may also settle only through the bounded LID →
+PN proof above. A row occupying that ID with another key, non-self authorship, or unknown authorship
+quarantines under every policy (§4.2). The table applies only when the ID is absent.
 
 **Replay duplicate-delivery tradeoff.** Because only `safe`/`read_only` ops are ever
 reset to `pending` (`unsafe` ops — including terminal user replies — are quarantined, never
@@ -257,16 +260,16 @@ This one-time startup pass is an immediate history/corroboration reconciliation 
 
 For each `maybe_sent` op (including those promoted in Step 1):
 
-- **Has `wa_message_id`**: query `messages` for the matching `message_id` and its persisted authorship. Startup and live reconciliation share this check, including stored history.
-  - Found with `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and cannot authorize automatic replay. Existing delivery-risk quarantine review and retention apply.
-  - Found with `is_from_me = 1`: `markEchoed()` — our own message was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
+- **Has `wa_message_id`**: query `messages` for the matching `message_id`, persisted authorship, `conversation_key`, and raw `chat_jid`. Startup and live reconciliation share this check, including stored history.
+  - Found with another `conversation_key`, an empty key, or `is_from_me != 1`: conflicting evidence; quarantine regardless of replay policy. A historical WhatsApp LID key is the sole exception: it must satisfy canonical raw-LID, raw-PN witness, and current durable mapping proof in either operation/witness direction. Recovery counts all same-provider-ID rows as equivalent claimants when they have a nonempty exact key or that proof; the current operation must be the sole equivalent claimant and must be echo eligible. This retains echoed, quarantined, failed, pending, and sending claimants through mixed-order reconciliation. Recovery requires the raw PN witness because it has stored evidence rather than the trusted live ingest caller. Global message-ID uniqueness may have displaced our own echo, so an occupied ID is not missing evidence and cannot authorize automatic replay. Existing delivery-risk quarantine review and retention apply.
+  - Found with the exact nonempty operation `conversation_key` and `is_from_me = 1`, or the unique bounded WhatsApp LID → PN proof: `markEchoed()` — our own message in that conversation was observed and stored. This is not proof of recipient delivery. It also completes the linked legacy inbound if the op is terminal; immutable terminal records retain their own settlement rules.
   - Not found + `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - Not found + `unsafe`: `markQuarantined()`.
-- **No `wa_message_id`**: no provider receipt was recorded; delivery remains unconfirmed.
+- **No `wa_message_id`**: no provider receipt was recorded, so provider/echo correlation is unknown and delivery remains unconfirmed. The send may have reached the provider before failing or before its ID was persisted; absence of an ID does not prove non-delivery.
   - `safe`/`read_only`: reset to `pending` for replay (re-sent by the drainer, §4.4).
   - `unsafe`: `markQuarantined()`.
 
-Self-authorship is necessary but does not establish provider account or conversation identity. This check does not resolve same-ID self messages in different conversations, Signal UUID/number aliases, or rows lost to the message store's global ID uniqueness; those remain tracked in #3841. A provider or historical row that omits self-authorship is conflicting evidence and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
+This conversation check does not establish provider account identity. Durable account binding, Signal UUID/number aliases, and rows lost to the message store's global ID uniqueness remain tracked in #3841. The LID exception does not apply to Signal, SMS, groups, unknown aliases, a changed LID key, or a missing/malformed mapping. A provider or historical row without explicit self-authorship is stored with `is_from_me = 0` and requires quarantine review, including for caller-declared safe/read-only operations. Only an absent matching row retains the existing missing-evidence replay policy. This can increase manual recovery work for legacy history; qualify adapter history behavior before rollout.
 
 When a full history message replaces an envelope-only placeholder, its `fromMe`
 value replaces the placeholder's persisted authorship together with the body.
@@ -1181,12 +1184,19 @@ delivery proof while adding auditable completion and conflict evidence.
 | `submitted_at` | TEXT | Timestamp when `markSubmitted()` was called (after `sendMessage()` returned). |
 | `ambiguity_at` | TEXT | Nullable timestamp when the current `maybe_sent` episode began. Set atomically on entry, retained while the episode stays active, and replaced on a later re-entry. Legacy `maybe_sent` rows are backfilled from `submitted_at`, then `created_at`. |
 | `echoed_at` | TEXT | Timestamp when WhatsApp echo was matched. |
-| `wa_message_id` | TEXT | WhatsApp-assigned message ID, populated by `markSubmitted()`. May be null if send failed before an ID was returned. |
+| `wa_message_id` | TEXT | Actual provider message ID from `markSubmitted()`, or a requested ID retained after ambiguous exhaustion/shutdown only when the transport declares that requested IDs become provider/echo IDs. An ID alone does not prove submission or delivery. May be null when correlation is unknown. |
 | `error` | TEXT | Nullable bounded `whatsoup-outbound-failure-v1` JSON for deferred or failed states. Stable fields: `failure_code`, `stage`, `mutation_state`, `retryable`, `retry_decision`, `retry_not_before`, `retry_owner`, `attempt_budget_disposition`, logical/provider attempt counts, first/last failure timestamps, and `evidence_coverage`. Legacy prose is read as `legacy_unclassified`; new writers never persist thrown prose. |
 | `source_inbound_seq` | INTEGER | FK to `inbound_events.seq`. Links this outbound op to the message that caused it. Nullable for proactive sends. |
 | `retry_count` | INTEGER | Number of completed logical send invocations recorded for the op, including a call rejected at admission. Waiting until a producer deadline does not add another attempt, and `provider_submission_count` separately records calls that crossed the provider boundary. |
 | `is_terminal` | INTEGER | Boolean (0/1). If 1, echoing this op completes the linked inbound event. |
 | `replay_policy` | TEXT NOT NULL | `'safe'`, `'unsafe'`, or `'read_only'`. Default `'unsafe'`. |
+
+Failure evidence preserves an earlier attempt's unresolved ambiguity even if a
+later attempt is rejected before submission. A later error cannot erase its
+qualified correlation ID or upgrade partial evidence to complete. A subsequent
+rate limit with a retry delay stops the ambiguous operation for existing recovery;
+it neither transfers it to the pending drainer nor bypasses the delay with an
+immediate retry. Deterministic-only failures retain their existing disposition.
 
 Index: `idx_outbound_ops_status` on `(status)`, `idx_outbound_ops_source` on `(source_inbound_seq)`.
 
