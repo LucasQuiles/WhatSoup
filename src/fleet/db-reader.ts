@@ -728,7 +728,14 @@ export class FleetDbReader {
     const handle = this.markerHandles.get(dbPath);
     this.markerHandles.delete(dbPath);
     this.markerCache.delete(dbPath);
-    try { handle?.db.close(); } catch { /* already closed */ }
+    if (!handle) return;
+    // Handles leave the map before closing, so close() runs once per handle; a
+    // failure here is unexpected and must stay visible.
+    try {
+      handle.db.close();
+    } catch (err) {
+      log.warn({ dbPath, error: (err as Error).message }, 'latest-marker handle close failed');
+    }
   }
 
   /** Fetch messages by a set of message_ids (for feed preview enrichment). */
