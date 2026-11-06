@@ -273,19 +273,6 @@ function makeListChats(db: Database): ToolDeclaration {
                CASE WHEN ? = 'last_active' THEN last_timestamp END DESC NULLS LAST,
                conversation_key ASC
              LIMIT ? OFFSET ?
-           ), latest_messages AS (
-             SELECT *
-             FROM (
-               SELECT m.*,
-                      ROW_NUMBER() OVER (
-                        PARTITION BY m.conversation_key
-                        ORDER BY m.timestamp DESC, m.pk DESC
-                      ) AS rn
-               FROM messages m
-               WHERE m.deleted_at IS NULL
-                 AND m.conversation_key IN (SELECT conversation_key FROM paged_rows)
-             ) latest_ranked
-             WHERE rn = 1
            )
            SELECT paged_rows.*,
                   latest.message_id AS last_message_id,
@@ -295,8 +282,19 @@ function makeListChats(db: Database): ToolDeclaration {
                   latest.content_type AS last_content_type,
                   latest.timestamp AS last_message_timestamp
            FROM paged_rows
-           LEFT JOIN latest_messages latest
-             ON latest.conversation_key = paged_rows.conversation_key
+           -- Latest message per paged conversation: one descending seek on
+           -- idx_messages_conversation_ts (pk is the index's implicit tie-break),
+           -- reading only the preview columns. A window function over every
+           -- message wrote ~230 MB of temp B-tree per call on large instances.
+           LEFT JOIN messages latest
+             ON latest.pk = (
+               SELECT m3.pk
+               FROM messages m3
+               WHERE m3.conversation_key = paged_rows.conversation_key
+                 AND m3.deleted_at IS NULL
+               ORDER BY m3.timestamp DESC, m3.pk DESC
+               LIMIT 1
+             )
            ORDER BY
              CASE WHEN ? = 'name' THEN lower(COALESCE(name, paged_rows.conversation_key)) END ASC,
              CASE WHEN ? = 'last_active' THEN last_timestamp END DESC NULLS LAST,
