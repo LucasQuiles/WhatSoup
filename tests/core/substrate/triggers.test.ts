@@ -58,6 +58,22 @@ describe('triggers core', () => {
     })).not.toThrow();
   });
 
+  it('rejects a CSS-escaped nested-content selector at admission', () => {
+    expect(() => validateTriggerSpec('poll.url', {
+      url: 'https://example.com/price',
+      hash_mode: 'selector',
+      selector: ':ha\\73(*)',
+    })).toThrow(/selector/i);
+  });
+
+  it('accepts a CSS-escaped structural selector at admission', () => {
+    expect(() => validateTriggerSpec('poll.url', {
+      url: 'https://example.com/price',
+      hash_mode: 'selector',
+      selector: '#pri\\63 e',
+    })).not.toThrow();
+  });
+
   it('applies the RE2 byte and syntax contract to event.message regexes', () => {
     const atBoundary = '😀'.repeat(128);
     const overBoundary = `${atBoundary}😀`;

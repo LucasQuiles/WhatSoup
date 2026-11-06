@@ -1174,6 +1174,75 @@ describe('TriggerPoller — terminal_at expiry', () => {
     expect(eventKinds).toContain('trigger_expired');
   });
 
+  it('batchSize=0 expires terminal rows without dispatching due work', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, { kind: 'watch', title: 'expiry-only', ownerJid: 'mw', actor: 'u' });
+    const expired = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'admin@s.whatsapp.net', intervalSeconds: 60,
+      nextFireAt: 1_000_000_000, requestedTerminalAt: 999_999_999,
+      onTerminal: 'silent', actor: 'u',
+    });
+    const due = createTrigger(db.raw, {
+      beadId: bead.id, kind: 'poll.email', spec: { source: 'gmail' },
+      reportChatJid: 'admin@s.whatsapp.net', intervalSeconds: 60,
+      nextFireAt: 1_000_000_000, actor: 'u',
+    });
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      batchSize: 0,
+    });
+    expect(await poller.tickOnce()).toBe(1);
+
+    expect(calls).toHaveLength(0);
+    expect(db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(expired.id))
+      .toMatchObject({ status: 'expired' });
+    expect(db.raw.prepare(`SELECT status FROM bead_triggers WHERE id = ?`).get(due.id))
+      .toMatchObject({ status: 'active' });
+    expect(db.raw.prepare(`SELECT status FROM trigger_runs WHERE trigger_id = ?`).all(expired.id))
+      .toMatchObject([{ status: 'terminal_fired' }]);
+    expect(db.raw.prepare(`SELECT id FROM trigger_runs WHERE trigger_id = ?`).all(due.id))
+      .toEqual([]);
+  });
+
+  it('batchSize=0 keeps expiry-only work within the bounded page', async () => {
+    const { messenger, calls } = makeMessenger();
+    const bead = createBead(db.raw, {
+      kind: 'watch',
+      title: 'bounded-expiry-only',
+      ownerJid: 'mw',
+      actor: 'u',
+    });
+    for (let index = 0; index <= TRIGGER_BUDGETS.maxBatchSize; index++) {
+      createTrigger(db.raw, {
+        beadId: bead.id,
+        kind: 'poll.email',
+        spec: { source: 'gmail' },
+        reportChatJid: 'admin@s.whatsapp.net',
+        intervalSeconds: 60,
+        nextFireAt: 1_000_000_000,
+        requestedTerminalAt: 999_999_999,
+        onTerminal: 'silent',
+        actor: 'u',
+      });
+    }
+
+    const poller = new TriggerPoller(db.raw, messenger, {
+      now: () => 1_000_000_001,
+      batchSize: 0,
+    });
+    expect(await poller.tickOnce()).toBe(TRIGGER_BUDGETS.maxBatchSize);
+    expect(calls).toHaveLength(0);
+
+    const states = db.raw.prepare(
+      'SELECT status FROM bead_triggers WHERE bead_id = ?',
+    ).all(bead.id) as Array<{ status: string }>;
+    expect(states.filter((row) => row.status === 'expired'))
+      .toHaveLength(TRIGGER_BUDGETS.maxBatchSize);
+    expect(states.filter((row) => row.status === 'active')).toHaveLength(1);
+  });
+
   it("on_terminal='reopen_bead' reactivates a terminal bead at expiry", async () => {
     const { messenger, calls } = makeMessenger();
     const bead = createBead(db.raw, {
@@ -2916,6 +2985,23 @@ describe('TriggerPoller — poll.url (gated, default-OFF)', () => {
     const run = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string };
     expect(run).toMatchObject({ status: 'failed', error_kind: 'spec_invalid' });
     expect(urlFetch).not.toHaveBeenCalled();
+  });
+
+  it('fails closed before fetch for a CSS-escaped legacy nested-content selector', async () => {
+    const { messenger } = makeMessenger();
+    const urlFetch = vi.fn(async () => ({ status: 200, headers: {}, body: '<html><div>A</div></html>' }));
+    const t = makeUrlTrigger({ url: 'https://example.com/escaped-selector', hash_mode: 'selector', selector: '#stable' });
+    db.raw.prepare(`UPDATE bead_triggers SET spec_json = ? WHERE id = ?`).run(
+      JSON.stringify({ url: 'https://example.com/escaped-selector', hash_mode: 'selector', selector: ':ha\\73(*)' }),
+      t.id,
+    );
+
+    const poller = new TriggerPoller(db.raw, messenger, { now: () => 1_000_000_001, enableUrlWatch: true, urlFetch });
+    await poller.tickOnce();
+
+    expect(urlFetch).not.toHaveBeenCalled();
+    const run = db.raw.prepare(`SELECT status, error_kind FROM trigger_runs WHERE trigger_id = ?`).get(t.id) as { status: string; error_kind: string };
+    expect(run).toMatchObject({ status: 'failed', error_kind: 'spec_invalid' });
   });
 
   it('malformed prior urlHash JSON is ignored and current URL hash is treated as first run', async () => {

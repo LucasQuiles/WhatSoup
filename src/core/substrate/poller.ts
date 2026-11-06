@@ -1018,8 +1018,9 @@ export class TriggerPoller {
     let processed = 0;
     // 1. Expiry sweep — dueTriggers filters out triggers past terminal_at,
     //    so without this sweep they would stay status='active' forever.
+    const expiryBatchSize = this.batchSize === 0 ? DEFAULT_BATCH_SIZE : this.batchSize;
     const overdue = this.stmtOverdueTerminalTriggers
-      .all(now, this.batchSize) as unknown as TriggerRow[];
+      .all(now, expiryBatchSize) as unknown as TriggerRow[];
     for (const t of overdue) {
       try {
         this.expireTrigger(t, now);

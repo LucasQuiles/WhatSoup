@@ -2,6 +2,7 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { z } from 'zod';
 import RE2 from 're2';
+import { parse, SelectorType } from 'css-what';
 import { clampTtl } from './time.ts';
 import { type Clock, systemClock } from '../../lib/clock.ts';
 import { writeBeadEvent } from './events.ts';
@@ -179,25 +180,36 @@ function isBoundedRe2Pattern(value: string): boolean {
 
 function isBoundedSelector(value: string): boolean {
   if (Buffer.byteLength(value, 'utf8') > TRIGGER_BUDGETS.maxSelectorBytes) return false;
-  // css-select can traverse recursively for content-sensitive pseudos. URL
-  // watches intentionally admit a compatibility-friendly structural subset:
-  // tags, ids, classes, attributes, and ordinary child/sibling/descendant
-  // combinators. Pseudos that inspect nested content or apply a subselector
-  // are rejected instead of relying on an unbounded evaluator.
-  if (/:\s*(?:has|contains|matches|not|is|where)\s*\(/i.test(value)) return false;
-  let bracketDepth = 0;
-  let combinators = 0;
-  for (const character of value) {
-    if (character === '[') bracketDepth++;
-    if (character === ']') {
-      bracketDepth--;
-      if (bracketDepth < 0) return false;
+  // Parse with css-what, the grammar used below Cheerio's selector engine.
+  // Admit only the documented structural subset so decoded escapes cannot
+  // turn a raw-text allow decision into a nested-content selector.
+  if (value.length === 0) return true;
+  try {
+    const groups = parse(value);
+    let combinators = Math.max(0, groups.length - 1);
+    for (const group of groups) {
+      for (const token of group) {
+        switch (token.type) {
+          case SelectorType.Tag:
+          case SelectorType.Universal:
+          case SelectorType.Attribute:
+            break;
+          case SelectorType.Child:
+          case SelectorType.Adjacent:
+          case SelectorType.Sibling:
+          case SelectorType.Descendant:
+            combinators++;
+            break;
+          default:
+            return false;
+        }
+        if (combinators > TRIGGER_BUDGETS.maxSelectorCombinators) return false;
+      }
     }
-    if (character === '>' || character === '+' || character === '~' || character === ',') combinators++;
-    if (combinators > TRIGGER_BUDGETS.maxSelectorCombinators) return false;
+    return true;
+  } catch {
+    return false;
   }
-  if (bracketDepth !== 0) return false;
-  return !/[{};]/u.test(value);
 }
 
 function assertSqliteBindBudget(binds: unknown): void {
@@ -252,7 +264,7 @@ const BoundedRegex = boundedText(z.string(), TRIGGER_BUDGETS.maxRegexBytes, 'reg
   message: 'regex must compile with RE2 and fit the trigger regex budget',
 });
 const BoundedSelector = boundedText(z.string(), TRIGGER_BUDGETS.maxSelectorBytes, 'selector').refine(isBoundedSelector, {
-  message: 'selector must be a bounded structural CSS selector without nested content pseudos',
+  message: 'selector must be a bounded structural CSS selector',
 });
 const CronSpec    = z.object({
   expr: boundedText(z.string().min(1), TRIGGER_BUDGETS.maxCronBytes, 'cron.expr'),
