@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { buildHandoffDistill, HandoffSummarizerInertError } from '../../../src/runtimes/agent/handoff-summarizer.ts';
+import { HandoffDistillUsageError, runHandoffDistill } from '../../../src/runtimes/agent/handoff-distiller.ts';
+import { initialDistillState } from '../../../src/runtimes/agent/handoff-distill-gate.ts';
+
+// The strict check's limit (handoff-summarizer.ts MAX_SUMMARY_WORDS); not exported, so pinned here.
+const MAX_SUMMARY_WORDS = 120;
 
 const acceptReservation = (_tokens: number): void => {};
 
@@ -289,6 +294,68 @@ describe('buildHandoffDistill', () => {
     const fetchImpl = vi.fn(async () => new Response('private provider reasoning is not JSON'));
     const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(distill(acceptReservation)).rejects.toThrow(/^handoff summarizer returned invalid JSON$/);
+  });
+
+  // #3833: the prompt asked for "<=120 words", the same number the strict check
+  // enforces, so ordinary model overshoot was rejected and nothing persisted.
+  it('asks the model for a word target below the hard summary word limit', async () => {
+    let sentBody = '';
+    const fetchImpl = vi.fn(async (_url: string, init: { body: string }) => {
+      sentBody = init.body;
+      return response();
+    });
+    const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
+    await distill(acceptReservation);
+    const request = JSON.parse(sentBody) as { max_tokens: number; messages: Array<{ role: string; content: string }> };
+    const system = request.messages.find((m) => m.role === 'system')?.content ?? '';
+    const targets = [...system.matchAll(/(\d+)\s*words/gu)].map((m) => Number(m[1]));
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) expect(target).toBeLessThan(MAX_SUMMARY_WORDS);
+    // The output cap and its reservation are unchanged by the repair.
+    expect(request.max_tokens).toBe(512);
+  });
+
+  it.each([
+    ['within the limits', 'User wants the invoice sent; open task: confirm the'],
+    ['over the word limit', Array.from({ length: 121 }, () => 'word').join(' ')],
+  ])('rejects a reply that stopped on finish_reason length %s and never trims it', async (_label, content) => {
+    const fetchImpl = vi.fn(async () => response(content, {
+      choices: [{ message: { content }, finish_reason: 'length' }],
+    }));
+    const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
+    const failure = await distill(acceptReservation).then(() => null, (err: unknown) => err);
+    expect(failure).toBeInstanceOf(HandoffDistillUsageError);
+    expect((failure as HandoffDistillUsageError).tokensUsed).toBe(42);
+  });
+
+  it('still accepts a complete reply that stopped on finish_reason stop', async () => {
+    const fetchImpl = vi.fn(async () => response('summary', {
+      choices: [{ message: { content: 'summary' }, finish_reason: 'stop' }],
+    }));
+    const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(distill(acceptReservation)).resolves.toEqual({ summary: 'summary', seededArtifacts: null, tokensUsed: 42 });
+  });
+
+  it('folds a length-stopped reply as one failed call: nothing persisted, spend charged, breaker advanced', async () => {
+    const content = 'User wants the invoice sent; open task: confirm the';
+    const fetchImpl = vi.fn(async () => response(content, {
+      choices: [{ message: { content }, finish_reason: 'length' }],
+    }));
+    const distill = buildHandoffDistill({ ...baseDeps(), fetchImpl: fetchImpl as unknown as typeof fetch });
+    const persisted: unknown[] = [];
+    const degraded: string[] = [];
+    const now = 1_781_000_000_000;
+    const result = await runHandoffDistill({
+      state: initialDistillState(now),
+      config: { maxTokensPerWindow: 100_000, maxCallsPerWindow: 3, windowMs: 60_000, failureThreshold: 2, breakerCooldownMs: 30_000, globalConcurrency: 2 },
+      now, globalInFlight: 0, conversationKey: 'c1', sourceProvider: 'claude-cli', sourceModel: null, tokenBaseline: 0,
+      distill, persist: (a) => { persisted.push(a); }, onDegraded: (r) => { degraded.push(r); },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(persisted).toEqual([]);
+    expect(result).toMatchObject({ ran: false, failed: true, denied: null });
+    expect(result.nextState).toMatchObject({ callsThisWindow: 1, consecutiveFailures: 1, tokensThisWindow: 42, breaker: 'closed' });
+    expect(degraded).toHaveLength(1);
   });
 
 });
