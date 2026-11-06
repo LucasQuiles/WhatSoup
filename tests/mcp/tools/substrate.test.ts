@@ -15,6 +15,7 @@ import { ADMIN_REQUIRED_DENIAL, ToolRegistry } from '../../helpers/resolved-tool
 import { registerSubstrateTools } from '../../../src/mcp/tools/substrate.ts';
 import type { SessionContext } from '../../../src/mcp/types.ts';
 import { createBead, getBead } from '../../../src/core/substrate/beads.ts';
+import { TRIGGER_BUDGETS } from '../../../src/core/substrate/triggers.ts';
 import { captureObservation, upsertEntity } from '../../../src/core/substrate/entities.ts';
 import { fakeClock, type Clock } from '../../../src/lib/clock.ts';
 
@@ -531,6 +532,50 @@ describe('substrate MCP tools', () => {
       ttl_hours: 200,
     }, adminSession));
     expect(res.terminal_at - now).toBeLessThanOrEqual(72 * 3600 + 5);
+  });
+
+  it('admits exact UTF-8 trigger creation boundaries over MCP', async () => {
+    const metadata = { note: 'x'.repeat(TRIGGER_BUDGETS.maxMetadataBytes - Buffer.byteLength('{"note":""}', 'utf8')) };
+    expect(Buffer.byteLength(JSON.stringify(metadata), 'utf8')).toBe(TRIGGER_BUDGETS.maxMetadataBytes);
+    const result = parseResult(await registry.call('create_agent_job', {
+      prompt: '😀'.repeat(TRIGGER_BUDGETS.maxPromptBytes / 4),
+      title: '😀'.repeat(TRIGGER_BUDGETS.maxTitleBytes / 4),
+      schedule: { kind: 'schedule.cron', expr: '* * * * *' },
+      report_chat: '😀'.repeat(TRIGGER_BUDGETS.maxReportTargetBytes / 4),
+      metadata,
+    }, adminSession));
+    expect(result.trigger_id).toBeGreaterThan(0);
+  });
+
+  it('rejects MCP trigger fields one UTF-8 byte over their owned budgets before persistence', async () => {
+    const tooLargeMetadata = { note: 'x'.repeat(TRIGGER_BUDGETS.maxMetadataBytes - Buffer.byteLength('{"note":""}', 'utf8') + 1) };
+    const rejected = await Promise.all([
+      registry.call('create_agent_job', {
+        prompt: 'ok', title: 'x'.repeat(TRIGGER_BUDGETS.maxTitleBytes + 1),
+        schedule: { kind: 'schedule.cron', expr: '* * * * *' }, report_chat: 'r',
+      }, adminSession),
+      registry.call('create_agent_job', {
+        prompt: '😀'.repeat((TRIGGER_BUDGETS.maxPromptBytes / 4) + 1),
+        schedule: { kind: 'schedule.cron', expr: '* * * * *' }, report_chat: 'r',
+      }, adminSession),
+      registry.call('create_agent_job', {
+        prompt: 'ok', schedule: { kind: 'schedule.cron', expr: '* * * * *' }, report_chat: 'r', metadata: tooLargeMetadata,
+      }, adminSession),
+      registry.call('create_watch', {
+        source: 'poll.email', criteria: { source: 'gmail', label: 'x'.repeat(TRIGGER_BUDGETS.maxTextBytes + 1) },
+        report_chat: 'r',
+      }, adminSession),
+      registry.call('create_watch', {
+        source: 'poll.email', criteria: { source: 'gmail' },
+        report_chat: 'r', dedupe_key: 'x'.repeat(TRIGGER_BUDGETS.maxDedupeKeyBytes + 1),
+      }, adminSession),
+      registry.call('create_watch', {
+        source: 'poll.email', criteria: { source: 'gmail' }, report_chat: '😀'.repeat((TRIGGER_BUDGETS.maxReportTargetBytes / 4) + 1),
+      }, adminSession),
+    ]);
+    for (const result of rejected) expect(result.isError).toBe(true);
+    expect(parseResult(await registry.call('list_beads', { owner_jid: adminPhone }, adminSession)).beads).toEqual([]);
+    expect(parseResult(await registry.call('list_triggers', {}, adminSession)).triggers).toEqual([]);
   });
 
   it('create_watch derives terminal_at from the injected clock, not the wall clock (fails if reverted to free nowUnixSec)', async () => {

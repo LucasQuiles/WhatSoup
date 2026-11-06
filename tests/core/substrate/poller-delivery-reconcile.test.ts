@@ -54,18 +54,24 @@ describe('TriggerPoller — durable delivery handoff (#2566 slice 3)', () => {
     const t = makeFiringTrigger(db, 1_000_000_000);
     // Messenger whose send NEVER settles — the run commits with dispatch
     // intent, then the "process" dies mid-dispatch (we simply abandon it).
+    let signalDispatchStarted!: () => void;
+    const dispatchStarted = new Promise<void>((resolve) => {
+      signalDispatchStarted = resolve;
+    });
     const hungMessenger: Messenger = {
-      sendMessage: () => new Promise<SubmissionReceipt>(() => {}),
+      sendMessage: () => {
+        signalDispatchStarted();
+        return new Promise<SubmissionReceipt>(() => {});
+      },
       async sendMedia() { throw new Error('not used'); },
     };
     const crashed = new TriggerPoller(db.raw, hungMessenger, { now: () => 1_000_000_001 });
     void crashed.tickOnce(); // hangs post-commit in dispatch — do not await
 
-    // The finalize transaction must have committed durable dispatch intent.
-    let rows: RunRow[] = [];
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    rows = runRows(db, t.id);
+    // Entering the messenger proves the finalize transaction committed; avoid
+    // guessing how many event-loop turns the isolated SQLite worker needs.
+    await dispatchStarted;
+    const rows = runRows(db, t.id);
     expect(rows).toHaveLength(1);
     expect(rows[0].notify_pending).toBe(1);
     expect(rows[0].delivered_wa_id).toBeNull();
