@@ -3178,6 +3178,8 @@ Evidence limits. Read every classification against these:
   the row is `no_owner` with `provider_active_contradicts_completed_checkpoint`, never healthy. A
   terminal record on the row itself takes precedence over any capture (`terminal_record_inbound_open`).
 
+On Linux hosts, `release-drift` and `release-currency` run from `deploy/whatsoup-release-drift.service` and `.timer` through `deploy/scripts/whatsoup-release-drift-linux.sh`. Exit 1 (drift found, alert emitted) keeps the unit green; exit 2 (inconclusive, wrapper error or emit failure) fails the unit.
+
 Machine-local probes not present in this repository are an ownership gap, not an implicit
 WhatSoup alert. Record their deployed path, service/timer, version-control root, and test owner
 before relying on them. A process-growth probe must at minimum include observation span and
