@@ -13,6 +13,7 @@
 import type { PrimaryProbeServiceContext } from './providers/primary-model-usability.ts';
 import { probePrimaryModelUsability } from './providers/primary-model-usability.ts';
 import { homedir } from 'node:os';
+import { MODEL_USABILITY_FRESHNESS_MS } from './model-usability.ts';
 import type {
   PrimaryModelProbeAdapterDeps,
   PrimaryModelProbeTrigger,
@@ -111,6 +112,32 @@ export function expectedProbeDeadlineFromDueMs(nextProbeDueAt: number, checkedAt
     PERIODIC_PROBE_EVIDENCE_CEILING_MS,
     Math.max(nextProbeDueAt - checkedAt, 0) + PERIODIC_PROBE_EVIDENCE_GRACE_MS,
   );
+}
+
+/**
+ * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
+ * probe is armed the evidence can legitimately be as old as the scheduler's
+ * next fire (interval × backoff, plus the full jitter band and a grace), so the
+ * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
+ * window declared it stale for up to 3 minutes every cycle and for the back
+ * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
+ * flap). With no periodic probe armed the flat window is preserved unchanged.
+ * Pure + exported for direct unit testing.
+ */
+export function resolveModelUsabilityFreshnessMs(
+  periodicProbeExpected: boolean,
+  backoffMultiple: number,
+  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
+): number {
+  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
+  // The armed timer's due instant is the source of truth when known: cadence
+  // and window can then never diverge (a manual probe that resets the backoff
+  // re-arms the timer and moves this instant with it). The scheduler formula
+  // is the fallback only while no due instant has been recorded.
+  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
+    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
+  }
+  return expectedProbeDeadlineMs(backoffMultiple);
 }
 
 /**

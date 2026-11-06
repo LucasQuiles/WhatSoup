@@ -303,7 +303,7 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 | `docs/superpowers/specs/2026-08-21-anonymous-health-projection-ceiling-design.md` | spec | unknown | body-marker | anonymous-health-projection-ceiling-design | 2026-10-06 |  |
 | `docs/superpowers/specs/2026-08-26-fleet-lifecycle-observability-standard-design.md` | spec | unknown | body-marker | fleet-lifecycle-observability-standard-design | 2026-08-27 |  |
 | `docs/superpowers/specs/2026-08-27-fleet-lifecycle-observability-standard-implementation-plan.md` | spec | unknown | fallback | fleet-lifecycle-observability-standard-implementation-plan | 2026-08-27 |  |
-| `docs/superpowers/specs/2026-11-03-outbound-correlation-design.md` | spec | active | body-marker | outbound-correlation-design | 2026-11-03 |  |
+| `docs/superpowers/specs/2026-11-03-outbound-correlation-design.md` | spec | active | body-marker | outbound-correlation-design | 2026-11-04 |  |
 
 ### docs/superpowers/specs/kill-session-transactional-cancellation  _(3 entries)_
 
@@ -324,4 +324,4 @@ _Topics with entries in multiple canonical trees — candidates for canonical-ho
 ---
 
 - Derived from `docs/work-index.json`
-- Generated at 2026-11-03T04:05:32Z from commit `26e44cc8bd72e7c1b209edbada6291e07ed77f03`
+- Generated at 2026-11-06T00:11:48Z from commit `5c36e7c26e2fb196f3a90608d2594cc3b2405718`

@@ -358,7 +358,6 @@ import { InboundTurnCompletionTracker } from './inbound-turn-completion.ts';
 import { extractUsageLimitResetTime } from './usage-limit-reset-time.ts';
 import {
   deriveModelUsable,
-  MODEL_USABILITY_FRESHNESS_MS,
   type RuntimePrimaryModelUsability,
   type RuntimeTurnCapability,
 } from './model-usability.ts';
@@ -377,11 +376,11 @@ import { probePrimaryModelUsability, type PrimaryProbeServiceContext } from './p
 import {
   buildRuntimePrimaryProbeServiceContext,
   createRuntimePrimaryProbeAdapters,
-  expectedProbeDeadlineFromDueMs,
-  expectedProbeDeadlineMs,
+  resolveModelUsabilityFreshnessMs,
   periodicProbeBackoffMultiple,
   probeRuntimePrimaryProviderRecovered,
 } from './primary-readiness-probe.ts';
+export { resolveModelUsabilityFreshnessMs } from './primary-readiness-probe.ts';
 import {
   MessageHandlerDrainTimeoutError,
   drainMessageHandlersForShutdown,
@@ -462,31 +461,6 @@ class AgentCommandRuntimeError extends Error {
   }
 }
 
-/**
- * Freshness window for `deriveModelUsable`. While the periodic primary-readiness
- * probe is armed the evidence can legitimately be as old as the scheduler's
- * next fire (interval × backoff, plus the full jitter band and a grace), so the
- * window follows the scheduler via `expectedProbeDeadlineMs`; a flat 30min
- * window declared it stale for up to 3 minutes every cycle and for the back
- * half of every backoff>=2 cycle (the canary `turn_capability_evidence_stale`
- * flap). With no periodic probe armed the flat window is preserved unchanged.
- * Pure + exported for direct unit testing.
- */
-export function resolveModelUsabilityFreshnessMs(
-  periodicProbeExpected: boolean,
-  backoffMultiple: number,
-  schedule: { nextProbeDueAt: number | null; checkedAt: number | null } | null = null,
-): number {
-  if (!periodicProbeExpected) return MODEL_USABILITY_FRESHNESS_MS;
-  // The armed timer's due instant is the source of truth when known: cadence
-  // and window can then never diverge (a manual probe that resets the backoff
-  // re-arms the timer and moves this instant with it). The scheduler formula
-  // is the fallback only while no due instant has been recorded.
-  if (schedule !== null && schedule.nextProbeDueAt !== null && schedule.checkedAt !== null) {
-    return expectedProbeDeadlineFromDueMs(schedule.nextProbeDueAt, schedule.checkedAt);
-  }
-  return expectedProbeDeadlineMs(backoffMultiple);
-}
 // ---------------------------------------------------------------------------
 // AskUserQuestion → Poll formatting / resolution helpers
 //
@@ -4884,9 +4858,17 @@ export class AgentRuntime implements Runtime {
       log.warn({ err, messageId: msg.messageId }, 'inline extractor hook failed (continuing)');
     }
 
+    // Keep pre-admission work inside the ingest limit. Single scope has no
+    // TurnQueue, so its provider boundary releases admission separately from
+    // the exact queued work that still owns terminal completion.
+    const finishAdmission = this.inboundTurnCompletions.holdForAdmission(msg.messageId);
+    let onAdmitted: (() => void) | undefined;
+    const admitted = finishAdmission && this.sessionScope === 'single'
+      ? new Promise<void>((resolve) => { onAdmitted = resolve; })
+      : undefined;
     const queuedWork = this.turnChain
-      .then(() => this._handleMessageInner(msg))
-      .catch((err) => {
+      .then(() => this._handleMessageInner(msg, onAdmitted))
+      .catch(async (err) => {
         // #3374 ask 2 (single scope): a wedged-lane release is a DESIGNED
         // settlement of a turn the W2 sweep already terminalized, not a
         // processing failure. It reaches this catch because single mode has no
@@ -4910,8 +4892,15 @@ export class AgentRuntime implements Runtime {
         }
         // Admitted turns have one terminal owner; pre-admission failures retain
         // the legacy inbound owner so they cannot stay stuck in processing.
+        const failedTurnCompletion = this.currentRuntimeTurnCompletion;
         if (this.runtimeTurnCoordinator.finalizeMessageProcessingFailure(msg.inboundSeq)) {
-          // Coordinator owns terminal persistence and reply-guarantee disarm.
+          // A following single turn must not replace the context while the
+          // coordinator still owns terminal persistence and post-effects.
+          if (
+            this.sessionScope === 'single'
+            && failedTurnCompletion
+            && failedTurnCompletion.context.identity.inboundSeq === msg.inboundSeq
+          ) await failedTurnCompletion.promise;
         } else if (!wedgedReclaim && this.durability && msg.inboundSeq !== undefined) {
           this.markRuntimeFaultContinuityCandidate(msg.inboundSeq);
           this.replyGuarantee?.disarm(msg.inboundSeq);
@@ -4922,7 +4911,8 @@ export class AgentRuntime implements Runtime {
         if (!wedgedReclaim && msg.isSyntheticJob !== true) {
           this.sendDirect(msg.chatJid, 'Something went wrong processing that message. Try again?', 'status');
         }
-      });
+      })
+      .then(() => finishAdmission?.());
     const recycleScopeKey = this.sessionScope === 'per_chat'
       ? resolveAgentTurnMapKey(
           this.resolvePerChatMapKey(msg.chatJid),
@@ -4931,10 +4921,12 @@ export class AgentRuntime implements Runtime {
       : GLOBAL_TOOL_SCOPE_KEY;
     this.routeRecycleLifecycle.trackPublication(queuedWork, recycleScopeKey);
     this.turnChain = queuedWork;
-    if (awaitQueuedRouteCommand) await queuedWork;
+    if (awaitQueuedRouteCommand || finishAdmission) {
+      await (admitted && !awaitQueuedRouteCommand ? Promise.race([queuedWork, admitted]) : queuedWork);
+    }
   }
 
-  private async _handleMessageInner(msg: IncomingMessage): Promise<void> {
+  private async _handleMessageInner(msg: IncomingMessage, onAdmitted?: () => void): Promise<void> {
     let content = msg.content;
     const chatJid = msg.chatJid;
     // The key the inbound row was journaled under. A caller that journaled the
@@ -5564,7 +5556,7 @@ export class AgentRuntime implements Runtime {
         contentType: msg.contentType,
         isGroup: msg.isGroup,
         ...(msg.isGroup ? { groupName: chatJid } : {}),
-      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined);
+      }, msg.inboundSeq, msg.isSyntheticJob === true ? 'scheduled-agent-job' : undefined, onAdmitted);
     }
   }
 
@@ -6065,6 +6057,7 @@ export class AgentRuntime implements Runtime {
     source?: RuntimeTurnSourceSnapshot,
     inboundSeq?: number,
     purpose?: SessionContext['purpose'],
+    onAdmitted?: () => void,
   ): Promise<void> {
     // Clear post-turn gate for shared session scope
     this.postTurnGate.delete(GLOBAL_TOOL_SCOPE_KEY);
@@ -6111,6 +6104,18 @@ export class AgentRuntime implements Runtime {
       this.pendingSingletonRuntimeTurnContext = context;
     }
     let legacyOwner: LegacyProviderTurnOwner | null = null;
+    let retainUndispatchedContext = false;
+    const finalizeUndispatched = async (pending: RuntimeTurnContext): Promise<void> => {
+      const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+      retainUndispatchedContext = true;
+      if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(pending)) {
+        this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(pending);
+      }
+      await this.runtimeTurnCoordinator.waitForUndispatchedRuntimeCrash(pending);
+      this.runtimeTurnCoordinator.clearUndispatchedRuntimeTurnCancellation(pending);
+      retainUndispatchedContext = false;
+      settleInbound?.();
+    };
     try {
       await this.sendTurnToSession(this.session!, chatJid, text, undefined, actorJid, () => {
         if (!context) {
@@ -6119,31 +6124,50 @@ export class AgentRuntime implements Runtime {
             GLOBAL_TOOL_SCOPE_KEY,
             chatJid,
           );
+          onAdmitted?.();
           return;
         }
         this.runtimeTurnCoordinator.beginRuntimeTurnEvidence(this.queue!, context);
         this.currentRuntimeTurnContext = context;
         this.pendingSingletonRuntimeTurnContext = null;
-        completion.value = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const turnCompletion = this.runtimeTurnCoordinator.createRuntimeTurnCompletion(context);
+        const settleInbound = source && this.inboundTurnCompletions.bind(source.sourceMessageId);
+        completion.value = {
+          ...turnCompletion,
+          resolve: () => {
+            turnCompletion.resolve();
+            // The coordinator calls resolve only after terminal post-effects.
+            settleInbound?.();
+          },
+        };
         this.currentRuntimeTurnCompletion = completion.value;
+        onAdmitted?.();
       }, undefined, () => (
         !this.shutdownRequested
         && (context === null || !this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context))
       ), context ?? undefined, 'live', purpose);
       if (context && completion.value === null) {
-        if (!this.runtimeTurnCoordinator.isUndispatchedRuntimeTurnCancelled(context)) {
-          this.runtimeTurnCoordinator.terminalizeUndispatchedRuntimeCrash(context);
-        }
+        await finalizeUndispatched(context);
         return;
       }
       if (completion.value !== null) await completion.value.promise;
     } catch (err) {
+      if (context && completion.value === null && !retainUndispatchedContext) {
+        log.error({ err, chatJid, inboundSeq }, 'single turn failed before provider admission');
+        await finalizeUndispatched(context);
+        // This context now has a proven terminal owner; do not fall through to
+        // the outer handler's legacy failed-row write.
+        if (purpose !== 'scheduled-agent-job') {
+          this.sendDirect(chatJid, 'Something went wrong processing that message. Try again?', 'status');
+        }
+        return;
+      }
       if (legacyOwner) {
         this.clearLegacyProviderTurn(GLOBAL_TOOL_SCOPE_KEY, legacyOwner);
       }
       throw err;
     } finally {
-      if (this.pendingSingletonRuntimeTurnContext === context) {
+      if (!retainUndispatchedContext && this.pendingSingletonRuntimeTurnContext === context) {
         this.pendingSingletonRuntimeTurnContext = null;
       }
     }
